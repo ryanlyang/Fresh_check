@@ -10,17 +10,17 @@ The replication should avoid using the old project implementation. It may use th
 
 ## Available Local Resources
 
-The fresh-start working folder is:
+The fresh-start working folder on the independent Windows machine is:
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check`
 
 The Particle Transformer reference implementation is in:
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/particle_transformer`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\particle_transformer`
 
 The fixed HLT generator already written for this fresh-start check is:
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/jetclass_fixed_hlt.py`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\jetclass_fixed_hlt.py`
 
 The fixed HLT generator should be treated as frozen experiment infrastructure. Do not silently modify its corruption logic while developing models. The point of the check is that every model sees the exact same generated HLT view.
 
@@ -28,7 +28,7 @@ The JetClass data on the research compute is expected at:
 
 `/home/ryreu/atlas/PracticeTagging/data/jetclass_part0`
 
-On the local development machine, the folder may not exist. The training and analysis scripts should therefore accept a `--data_dir` argument and default to the research-compute path only in sbatch runners.
+On the Windows local machine, the research-compute data folder will not exist. The training and analysis scripts should therefore accept a `--data_dir` argument and default to the research-compute path only in research-compute runners.
 
 The usual research-compute working directory is:
 
@@ -36,17 +36,17 @@ The usual research-compute working directory is:
 
 ## Particle Transformer Code To Reuse
 
-The fresh implementation should use the Particle Transformer package as the tagger backbone instead of copying the previous project tagger code.
+The fresh implementation should use the Particle Transformer package in this Windows fresh-check folder as the tagger backbone instead of copying the previous project tagger code.
 
 Important files to inspect:
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/particle_transformer/README.md`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\particle_transformer\README.md`
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/particle_transformer/dataloader.py`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\particle_transformer\dataloader.py`
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/particle_transformer/networks/example_ParticleTransformer.py`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\particle_transformer\networks\example_ParticleTransformer.py`
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/particle_transformer/data/JetClass/JetClass_full.yaml`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\particle_transformer\data\JetClass\JetClass_full.yaml`
 
 The Particle Transformer expects per-particle inputs organized into four logical groups:
 
@@ -213,7 +213,7 @@ The safe mental model is: offline data can teach the reconstructor during traini
 
 Use the fixed HLT generator in:
 
-`/home/ryan/ComputerScience/ATLAS/fresh_start_check/jetclass_fixed_hlt.py`
+`C:\Users\22rya\ComputerScience\CERN\Fresh_check\jetclass_fixed_hlt.py`
 
 The intended public function is `build_fixed_hlt_view`.
 
