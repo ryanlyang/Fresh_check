@@ -3,7 +3,7 @@
 #SBATCH --output=fresh_check_logs/%x_%j.out
 #SBATCH --error=fresh_check_logs/%x_%j.err
 #SBATCH --partition=tier3
-#SBATCH --time=3-00:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
