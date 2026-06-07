@@ -734,3 +734,469 @@ State whether the 7+HLT stack is substantially better than the HLT-only seed sta
 
 Avoid overclaiming exact recovery of offline performance unless the clean-room result and audits support it.
 
+
+### Step 14: Write Research-Compute Sbatch Scripts
+
+After the Python implementation is complete and unit-tested on small local/debug samples, write sbatch scripts that run the full fresh-start experiment on the research compute. This step should create the complete orchestration needed for the final comparison: the single HLT baseline, the five-seed HLT control, the seven same-HLT reconstructor-diverse models, the fusion jobs, and the leakage audits.
+
+The sbatch scripts should be written for the research-compute Linux environment, not for the Windows local folder. The Windows folder is the clean development origin. The research-compute project directory should be a clean copied/synced version of that fresh folder, for example a path such as `/home/ryreu/atlas/Fresh_check` or another explicitly chosen fresh directory. Do not point the fresh sbatch scripts at the old project code directory except for the shared JetClass data path.
+
+The research-compute data path should remain:
+
+`/home/ryreu/atlas/PracticeTagging/data/jetclass_part0`
+
+#### General Sbatch Formatting Requirements
+
+Every sbatch script should have a clear job name, output log path, error log path, partition, time limit, memory request, and environment setup.
+
+Every script should start by printing the job ID, hostname, current date, working directory, command-line arguments, important environment variables, and resolved output directory.
+
+Every script should use strict shell behavior: fail on unset variables and failed commands.
+
+Every script should create a log directory before launching Python. Recommended log directory:
+
+`offline_reconstructor_logs`
+
+or, for a cleaner fresh run:
+
+`fresh_check_logs`
+
+Use log names that include the job name and SLURM job ID, such as:
+
+`fresh_reco7_m2_base_%j.out`
+
+`fresh_reco7_m2_base_%j.err`
+
+Every script should activate the intended conda environment before running Python. The exact environment name is machine-specific, so the script should make this configurable. For example, use an environment variable such as `CONDA_ENV`, defaulting to the known research environment if one exists.
+
+Every training script should write a run configuration JSON into its checkpoint directory. That configuration must include data split seeds, HLT seeds, HLT parameters, partition sizes, model variant name, training seed, and git commit or source snapshot hash if available.
+
+Every script should print the exact Python command before executing it.
+
+Every script should exit with a nonzero status if the expected checkpoint, report, or scores file is missing at the end.
+
+Do not use the debug partition for full training. Debug is appropriate only for smoke tests, tiny data checks, or short audit runs.
+
+#### Recommended Resource Requests
+
+These are starting recommendations. Adjust after observing actual runtime and memory usage on the target cluster.
+
+HLT-only tagger training, one seed:
+
+Partition: `tier3` or the normal GPU training partition.
+
+Time: `2-00:00:00`.
+
+Memory: `64G` to `96G`.
+
+GPU: one GPU if the cluster requires explicit GPU requests.
+
+Offline teacher reference:
+
+Partition: normal GPU training partition.
+
+Time: `2-00:00:00`.
+
+Memory: `64G` to `96G`.
+
+GPU: one GPU.
+
+One reconstructor-diverse dual-view model:
+
+Partition: normal GPU training partition.
+
+Time: `3-00:00:00` as the first safe setting.
+
+Memory: `128G` as the first safe setting.
+
+GPU: one GPU.
+
+If Stage A reconstruction loading/caching is memory-heavy, increase memory before changing the experiment. If jobs are comfortably below memory limits, reduce later.
+
+Seven-model fusion and stacked logistic regression:
+
+Partition: normal CPU or GPU partition. GPU is useful only if inference is repeated; if it consumes saved logits only, CPU is enough.
+
+Time: `1-00:00:00`.
+
+Memory: `96G` to `160G`, depending on whether logits are streamed or fully materialized.
+
+Use single-threaded or controlled-threaded sklearn settings to avoid memory blowups.
+
+Five-HLT-seed fusion:
+
+Partition: normal CPU or GPU partition.
+
+Time: `12:00:00` to `1-00:00:00`.
+
+Memory: `64G` to `128G`.
+
+Leakage audits:
+
+Partition: debug is acceptable for lightweight audits.
+
+Time: `12:00:00` to `1-00:00:00`.
+
+Memory: `64G` to `128G`.
+
+Use smaller input-control samples first, then increase if needed.
+
+#### Individual Scripts To Write
+
+Write a small set of reusable scripts instead of many nearly identical one-off scripts.
+
+1. HLT baseline training runner.
+
+Suggested name:
+
+`run_train_fresh_hlt_baseline.sh`
+
+Purpose:
+
+Train one HLT-only Particle Transformer on `model_train`, select checkpoint on `model_val`, and save frozen-model logits for later partitions only when explicitly requested.
+
+Required arguments or environment variables:
+
+Project directory.
+
+Data directory.
+
+Output root.
+
+Train seed.
+
+Partition sizes.
+
+HLT cache path or HLT generation settings.
+
+Expected outputs:
+
+HLT baseline checkpoint.
+
+Run configuration JSON.
+
+Training curves.
+
+`model_val` metrics.
+
+2. HLT seed training runner.
+
+Suggested name:
+
+`run_train_fresh_hlt_seed.sh`
+
+Purpose:
+
+Train one HLT-only model for the five-seed ensemble control.
+
+Required argument:
+
+Seed identifier, such as `101`, `202`, `303`, `404`, or `505`.
+
+Expected outputs:
+
+One checkpoint per seed.
+
+One run configuration JSON per seed.
+
+One metrics file per seed.
+
+3. HLT5 submitter.
+
+Suggested name:
+
+`submit_fresh_hlt5_seed_control.sh`
+
+Purpose:
+
+Queue five `run_train_fresh_hlt_seed.sh` jobs, one per training seed, then queue the HLT5 fusion job with an `afterok` dependency on all five seed jobs.
+
+Expected behavior:
+
+Print each submitted job ID.
+
+Print the final dependency string.
+
+Print the expected HLT5 fusion output directory.
+
+Queue no final-test reporting job until all five seeds finish successfully.
+
+4. Offline teacher runner.
+
+Suggested name:
+
+`run_train_fresh_offline_teacher.sh`
+
+Purpose:
+
+Train the offline-only Particle Transformer reference. This model is for upper-reference reporting only. It must not be included in fusion features.
+
+Expected outputs:
+
+Offline teacher checkpoint.
+
+Offline teacher `model_val` metrics.
+
+Optional locked final metrics only during final report generation.
+
+5. Reconstructor-diverse model runner.
+
+Suggested name:
+
+`run_train_fresh_reco7_variant.sh`
+
+Purpose:
+
+Train one of the seven HLT-to-offline reconstructor-diverse dual-view models.
+
+Required variant argument:
+
+`m2_base`
+
+`m2_consstrong`
+
+`m2_budgetlite`
+
+`m2_genlow`
+
+`m2_genhigh`
+
+`m2_topk60ish`
+
+`m2_antioverlap`
+
+This script should translate the variant name into reconstruction-loss settings, generation capacity, locality settings, and consistency settings. It must not alter the HLT generation profile or the data split.
+
+Expected outputs:
+
+Stage A reconstructor checkpoint.
+
+Stage2 dual-view classifier checkpoint.
+
+Run configuration JSON.
+
+Training curves.
+
+`model_val` metrics.
+
+Reconstruction diagnostics on `model_val`.
+
+6. Reco7 submitter.
+
+Suggested name:
+
+`submit_fresh_samehlt_reco7.sh`
+
+Purpose:
+
+Queue the seven variant jobs with the same HLT cache, same split metadata, and same base experiment seed. Queue the 7+HLT fusion job with an `afterok` dependency on all seven variant jobs and the HLT baseline job if the HLT baseline is not already complete.
+
+Expected behavior:
+
+Submit all seven jobs.
+
+Print all job IDs with their variant names.
+
+Submit one dependent fusion job.
+
+Submit one dependent leakage audit job after the fusion job.
+
+Never queue models with different HLT corruption settings.
+
+7. Reco7 plus HLT fusion runner.
+
+Suggested name:
+
+`run_fuse_fresh_samehlt7_plus_hlt.sh`
+
+Purpose:
+
+Load the frozen HLT baseline and the seven frozen Stage2 dual-view models. Evaluate all of them on `stack_train`, `stack_val`, and `final_test`. Fit stacked logistic regression on `stack_train`, choose stack settings on `stack_val`, and report `final_test` exactly once.
+
+Expected outputs:
+
+Fusion report JSON.
+
+Saved logits/probabilities NPZ for `stack_train`, `stack_val`, and `final_test`.
+
+Uniform average metrics.
+
+Weighted probability average metrics.
+
+Weighted logit average metrics.
+
+Stacked logistic regression metrics.
+
+Stacker coefficients.
+
+Model-source audit metadata proving no offline teacher outputs were used.
+
+8. HLT5 fusion runner.
+
+Suggested name:
+
+`run_fuse_fresh_hlt5_seed_control.sh`
+
+Purpose:
+
+Run the same fusion logic as the 7+HLT stack, but only on the five independently seeded HLT-only models.
+
+Expected outputs:
+
+HLT5 fusion report JSON.
+
+HLT5 saved logits/probabilities NPZ.
+
+HLT5 stacked logistic regression metrics.
+
+This control must use the same `stack_train`, `stack_val`, and `final_test` partitions as the 7+HLT fusion.
+
+9. Leakage audit runner.
+
+Suggested name:
+
+`run_audit_fresh_samehlt7_plus_hlt.sh`
+
+Purpose:
+
+Run all leakage and sanity checks after the 7+HLT fusion report exists.
+
+Required checks:
+
+File and jet-identity split audit.
+
+Partition-role audit.
+
+HLT sharing audit.
+
+Offline-input audit.
+
+Fusion-source audit.
+
+Permuted stack-label audit.
+
+Holdout-stack audit.
+
+Block-shuffle audit.
+
+Comparison against HLT5 seed control.
+
+Expected outputs:
+
+Audit report JSON.
+
+Human-readable audit summary.
+
+Pass/fail flags for each audit.
+
+10. Master submitter.
+
+Suggested name:
+
+`submit_fresh_full_samehlt_reco7_vs_hlt5.sh`
+
+Purpose:
+
+Queue the entire clean test. This is the script the user should run when ready for the final fresh-start replication.
+
+It should queue:
+
+The single HLT baseline if not already complete.
+
+The five HLT seed-control jobs.
+
+The seven same-HLT reconstructor-diverse jobs.
+
+The HLT5 fusion job dependent on the five HLT seed jobs.
+
+The 7+HLT fusion job dependent on the HLT baseline and seven reconstructor-diverse jobs.
+
+The leakage audit job dependent on the 7+HLT fusion and, if available, the HLT5 fusion.
+
+The final report job dependent on both fusion jobs and the audit job.
+
+The master submitter should print a final summary containing every job ID, dependency chain, output directory, and log directory.
+
+#### Dependency Structure
+
+Use `afterok` dependencies so downstream jobs only run if upstream jobs complete successfully.
+
+The intended dependency graph is:
+
+HLT seed jobs feed into HLT5 fusion.
+
+HLT baseline plus seven reco7 jobs feed into 7+HLT fusion.
+
+HLT5 fusion and 7+HLT fusion feed into leakage audit and final comparison.
+
+Do not make the seven reco7 jobs depend on each other. They should run independently and in parallel if resources allow.
+
+Do not make the HLT seed jobs depend on each other. They should run independently and in parallel if resources allow.
+
+If the cluster is busy or has job-count limits, add an optional submitter mode that queues a smaller number of concurrent jobs or uses job arrays.
+
+#### Sbatch Script Safety Checks
+
+Before submitting full jobs, each sbatch script should support a dry-run or print-only mode that prints the Python command without submitting or executing it.
+
+Every submitter should check whether the expected output directory already exists. If it exists, either refuse to overwrite or require an explicit `OVERWRITE=1` environment variable.
+
+Every training script should check that the data directory exists on the research compute.
+
+Every fusion script should check that all required checkpoints exist before starting expensive inference.
+
+Every audit script should check that required fusion reports and NPZ files exist.
+
+Every final report script should check that the audit report passed before presenting final results as credible.
+
+#### Smoke-Test Scripts
+
+Before launching the full run, write one smoke-test submitter:
+
+Suggested name:
+
+`submit_fresh_smoke_test.sh`
+
+Purpose:
+
+Run the HLT baseline and one reconstructor variant on tiny partition sizes, then run fusion and audits on that tiny output.
+
+Suggested smoke-test sizes:
+
+`model_train`: `10,000` jets.
+
+`model_val`: `3,000` jets.
+
+`stack_train`: `5,000` jets.
+
+`stack_val`: `2,000` jets.
+
+`final_test`: `10,000` jets.
+
+Suggested smoke-test resources:
+
+Partition: debug if available.
+
+Time: `4:00:00` to `12:00:00`.
+
+Memory: `32G` to `64G`.
+
+The smoke test is only for pipeline correctness. Do not interpret physics performance from it.
+
+#### What Counts As A Successful Sbatch-Orchestrated Run
+
+The final research-compute run is successful only if all of these exist:
+
+Single HLT baseline checkpoint and metrics.
+
+Five HLT seed checkpoints and HLT5 fusion report.
+
+Seven same-HLT reconstructor-diverse checkpoints and 7+HLT fusion report.
+
+Saved stack inputs for both HLT5 and 7+HLT fusion.
+
+Leakage audit report with pass/fail status for every required check.
+
+Final comparison report showing HLT baseline, HLT5 stack, 7+HLT stack, simple ensemble baselines, offline teacher reference, and audit status.
+
+The final report should make the central comparison explicit: if the 7+HLT stack is substantially stronger than the HLT5 seed stack while all leakage checks pass, the result supports the reconstruction-diversity hypothesis rather than a generic ensemble-only explanation.
