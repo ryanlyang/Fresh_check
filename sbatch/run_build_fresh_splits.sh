@@ -10,7 +10,8 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
@@ -48,4 +49,3 @@ fresh_run "${cmd[@]}"
 if ! fresh_is_dry_run; then
   fresh_require_file "${MANIFEST_PATH}"
 fi
-

@@ -98,6 +98,13 @@ class SbatchStep14Tests(unittest.TestCase):
             self.assertIn("fresh_split_words", self.read(name), name)
         self.assertIn("fresh_print_shell_command", self.read("common.sh"))
 
+    def test_scripts_source_common_from_project_dir_not_slurm_spool_copy(self):
+        for name in RUNNERS + SUBMITTERS:
+            text = self.read(name)
+            self.assertIn('SCRIPT_DIR="${PROJECT_DIR}/sbatch"', text, name)
+            self.assertIn('source "${SCRIPT_DIR}/common.sh"', text, name)
+            self.assertNotIn('dirname "${BASH_SOURCE[0]}"', text, name)
+
 
 if __name__ == "__main__":
     unittest.main()
