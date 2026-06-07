@@ -11,6 +11,7 @@ from jetclass_fresh.fusion import (
     evaluate_fusion_methods,
     load_prediction_block,
     run_reco7_fusion,
+    sanitize_prediction_logits,
     save_prediction_block,
     select_weighted_average_weights,
     softmax_np,
@@ -48,6 +49,29 @@ class FusionStep10Tests(unittest.TestCase):
         self.assertEqual(loaded.jet_ids, block.jet_ids)
         self.assertTrue(np.allclose(loaded.probs, block.probs))
         self.assertEqual(classification_metrics_from_logits(loaded.logits, loaded.labels)["accuracy"], 1.0)
+
+    def test_prediction_logits_repair_tiny_nonfinite_tail(self):
+        logits = np.zeros((20, 3), dtype=np.float32)
+        logits[3, 1] = np.nan
+        repaired, report = sanitize_prediction_logits(
+            logits,
+            model_name="model_a",
+            split="final_test",
+            max_bad_row_fraction=0.10,
+        )
+        self.assertTrue(np.isfinite(repaired).all())
+        self.assertTrue(report["repaired"])
+        self.assertEqual(report["nonfinite_row_count"], 1)
+        self.assertTrue(np.all(repaired[3] == 0.0))
+
+    def test_prediction_logits_reject_broken_model(self):
+        labels = np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int64)
+        block = make_block("broken", "stack_val", labels)
+        block.logits[:] = np.nan
+        block.probs[:] = np.nan
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FloatingPointError):
+                save_prediction_block(block, tmp)
 
     def test_stack_feature_matrix_and_weight_selection(self):
         labels = np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int64)

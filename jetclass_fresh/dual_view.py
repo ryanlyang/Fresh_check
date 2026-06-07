@@ -45,6 +45,7 @@ else:
 
 
 EPS = 1.0e-8
+ENERGY_EPS = 1.0e-4
 
 
 @dataclass
@@ -86,6 +87,38 @@ def _manual_transform_torch(value, *, subtract: float, multiply: float, clip_min
     return torch.clamp((value - float(subtract)) * float(multiply), float(clip_min), float(clip_max))
 
 
+def _nan_to_num_torch(value, *, nan: float = 0.0, posinf: float = 0.0, neginf: float = 0.0):
+    torch = require_torch()
+    if hasattr(torch, "nan_to_num"):
+        return torch.nan_to_num(value, nan=float(nan), posinf=float(posinf), neginf=float(neginf))
+    return torch.where(torch.isfinite(value), value, torch.zeros_like(value) + float(nan))
+
+
+def _physical_energy_floor(pt, eta, *, eps: float = ENERGY_EPS):
+    torch = require_torch()
+    return torch.clamp(pt, min=0.0) * torch.cosh(torch.clamp(eta, -5.0, 5.0)) + float(eps)
+
+
+def sanitize_tokens_for_part_inputs(tokens, mask):
+    """Clamp token kinematics to finite, physical values before ParT input building."""
+
+    torch = require_torch()
+    tokens = tokens.float()
+    mask = mask.bool()
+    finite_tokens = torch.isfinite(tokens).all(dim=-1)
+    tokens = _nan_to_num_torch(tokens)
+    cleaned = tokens.clone()
+    pt = torch.clamp(cleaned[:, :, 0], min=0.0)
+    eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
+    phi = wrap_phi_torch(cleaned[:, :, 2])
+    energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), _physical_energy_floor(pt, eta))
+    cleaned[:, :, 0] = pt
+    cleaned[:, :, 1] = eta
+    cleaned[:, :, 2] = phi
+    cleaned[:, :, 3] = energy
+    return cleaned, mask & finite_tokens
+
+
 def _select_topk(tokens, mask, weights=None, *, max_constits: int = 128):
     """Select the top candidates by weighted pT without using offline targets."""
 
@@ -117,16 +150,18 @@ def build_part_inputs_torch(
     """Build Particle Transformer tensors from a token view on device."""
 
     torch = require_torch()
-    tokens = tokens.float()
-    mask = mask.bool()
+    tokens, mask = sanitize_tokens_for_part_inputs(tokens, mask)
     if weights is not None:
-        weights = torch.clamp(weights.float(), min=0.0)
-        mask = mask & (weights > float(weight_threshold))
+        weights = weights.float()
+        finite_weights = torch.isfinite(weights)
+        weights = torch.clamp(_nan_to_num_torch(weights), min=0.0)
+        mask = mask & finite_weights & (weights > float(weight_threshold))
     tokens, mask, weights = _select_topk(tokens, mask, weights, max_constits=max_constits)
     prepared = tokens.clone()
     if weights is not None:
         prepared[:, :, 0] = prepared[:, :, 0] * weights
         prepared[:, :, 3] = prepared[:, :, 3] * weights
+        prepared[:, :, 3] = torch.maximum(prepared[:, :, 3], _physical_energy_floor(prepared[:, :, 0], prepared[:, :, 1]))
     prepared = prepared * mask[:, :, None].float()
 
     pt = torch.where(mask, prepared[:, :, 0], torch.zeros_like(prepared[:, :, 0]))
@@ -202,12 +237,15 @@ def build_part_inputs_torch(
     for key in feature_map:
         feature_map[key] = torch.where(mask, feature_map[key], torch.zeros_like(feature_map[key]))
 
-    return {
+    inputs = {
         "points": torch.stack([feature_map["part_deta"], feature_map["part_dphi"]], dim=1).float(),
         "features": torch.stack([feature_map[name] for name in feature_order], dim=1).float(),
         "lorentz_vectors": torch.stack([px, py, pz, energy], dim=1).float() * mask[:, None, :].float(),
         "mask": mask[:, None, :].bool(),
     }
+    for key in ("points", "features", "lorentz_vectors"):
+        inputs[key] = _nan_to_num_torch(inputs[key])
+    return inputs
 
 
 class HLTTokenDataset(_DatasetBase):
@@ -382,6 +420,12 @@ def run_dual_view_epoch(
                 )
                 logits = tagger(hlt_inputs, reco_inputs)
                 loss = criterion(logits, batch["labels"])
+                if not torch.isfinite(logits).all() or not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        f"Non-finite dual-view output in batch {batch_index}: "
+                        f"logits_finite={bool(torch.isfinite(logits).all())}, "
+                        f"loss_finite={bool(torch.isfinite(loss))}"
+                    )
 
             if is_train:
                 if scaler is not None and autocast_enabled:

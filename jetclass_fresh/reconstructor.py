@@ -35,6 +35,7 @@ else:
 
 RAW_DIM = 14
 KIN_DIM = 4
+ENERGY_EPS = 1.0e-4
 RECONSTRUCTOR_VARIANT_NAMES = [
     "m2_base",
     "m2_consstrong",
@@ -209,6 +210,13 @@ def wrap_phi_torch(phi):
     return torch.remainder(phi + torch.pi, 2.0 * torch.pi) - torch.pi
 
 
+def physical_energy_floor(pt, eta, *, eps: float = ENERGY_EPS):
+    """Massless-particle energy floor for stable downstream four-vectors."""
+
+    torch = require_torch()
+    return torch.clamp(pt, min=0.0) * torch.cosh(torch.clamp(eta, -5.0, 5.0)) + float(eps)
+
+
 def raw_token_features(tokens, mask):
     torch = require_torch()
     pt = torch.clamp(tokens[:, :, 0], min=1.0e-8)
@@ -283,7 +291,7 @@ class M2BaseReconstructor(_ModuleBase):
         out[:, :, 0] = pt
         out[:, :, 1] = eta
         out[:, :, 2] = phi
-        out[:, :, 3] = torch.maximum(energy, pt * torch.cosh(eta) * 0.5)
+        out[:, :, 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
         return out
 
     def forward(self, hlt_tokens, hlt_mask) -> ReconstructionOutput:
@@ -331,7 +339,7 @@ class M2BaseReconstructor(_ModuleBase):
         gen_pt = torch.nn.functional.softplus(generated_raw[:, :, 0]) + 1.0e-4
         gen_eta = torch.tanh(generated_raw[:, :, 1]) * float(self.config.max_generated_abs_eta)
         gen_phi = wrap_phi_torch(generated_raw[:, :, 2])
-        gen_energy = torch.nn.functional.softplus(generated_raw[:, :, 3]) + gen_pt * torch.cosh(gen_eta) * 0.5
+        gen_energy = physical_energy_floor(gen_pt, gen_eta) + torch.nn.functional.softplus(generated_raw[:, :, 3])
         generated_tokens[:, :, 0] = gen_pt
         generated_tokens[:, :, 1] = gen_eta
         generated_tokens[:, :, 2] = gen_phi

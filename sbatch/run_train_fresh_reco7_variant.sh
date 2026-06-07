@@ -3,7 +3,7 @@
 #SBATCH --output=fresh_check_logs/%x_%j.out
 #SBATCH --error=fresh_check_logs/%x_%j.err
 #SBATCH --partition=tier3
-#SBATCH --time=2-00:00:00
+#SBATCH --time=1-06:00:00
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -17,7 +17,7 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 source "${SCRIPT_DIR}/common.sh"
 
 : "${MODEL_SIZE:=base}"
-: "${NO_AMP:=0}"
+: "${NO_AMP:=1}"
 : "${MAX_TRAIN_BATCHES:=}"
 : "${MAX_VAL_BATCHES:=}"
 : "${MAX_TRAIN_JETS:=}"

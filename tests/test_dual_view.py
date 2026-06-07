@@ -114,6 +114,32 @@ class DualViewStep8TorchTests(unittest.TestCase):
         self.assertEqual(inputs["mask"].shape, (2, 1, 4))
         self.assertTrue(torch.all(inputs["mask"]))
 
+    def test_build_part_inputs_torch_sanitizes_reco_four_vectors(self):
+        tokens = torch.zeros(1, 3, 14)
+        mask = torch.ones(1, 3, dtype=torch.bool)
+        tokens[0, 0, 0] = 10.0
+        tokens[0, 0, 1] = 5.0
+        tokens[0, 0, 2] = 0.2
+        tokens[0, 0, 3] = 1.0
+        tokens[0, 0, 5] = 1.0
+        tokens[0, 1, 0] = float("nan")
+        tokens[0, 1, 3] = 4.0
+        tokens[0, 2, 0] = 3.0
+        tokens[0, 2, 1] = 0.1
+        tokens[0, 2, 2] = -0.2
+        tokens[0, 2, 3] = 3.0
+        weights = torch.tensor([[1.0, 1.0, float("nan")]])
+
+        inputs = build_part_inputs_torch(tokens, mask, weights=weights, max_constits=3)
+        vectors = inputs["lorentz_vectors"]
+        out_mask = inputs["mask"]
+        self.assertTrue(torch.isfinite(inputs["features"]).all())
+        self.assertTrue(torch.isfinite(vectors).all())
+        self.assertEqual(int(out_mask.sum().item()), 1)
+        px, py, pz, energy = vectors[0, :, 0]
+        momentum = torch.sqrt(px * px + py * py + pz * pz)
+        self.assertGreaterEqual(float(energy + 1.0e-6), float(momentum))
+
     def test_run_dual_view_epoch_with_frozen_dummy_reconstructor(self):
         dataset = HLTTokenDataset(make_hlt_view(n_jets=4))
         loader = make_hlt_token_loader(dataset, batch_size=2, shuffle=False, num_workers=0, seed=909)

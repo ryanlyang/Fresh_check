@@ -125,6 +125,11 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         self.assertEqual(output.tokens.shape, (2, 13, 14))
         self.assertEqual(output.weights.shape, (2, 13))
         self.assertEqual(output.generated_tokens.shape, (2, 3, 14))
+        for candidate_tokens in (output.edited_tokens, output.split_tokens, output.generated_tokens):
+            pt = torch.clamp(candidate_tokens[:, :, 0], min=0.0)
+            eta = candidate_tokens[:, :, 1]
+            energy = candidate_tokens[:, :, 3]
+            self.assertTrue(torch.all(energy + 1.0e-6 >= pt * torch.cosh(torch.clamp(eta, -5.0, 5.0))))
 
         loss, diagnostics = reconstruction_loss(
             output,

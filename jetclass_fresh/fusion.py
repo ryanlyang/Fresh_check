@@ -33,6 +33,7 @@ from .reconstructor import RECONSTRUCTOR_VARIANT_NAMES
 
 STACK_SPLITS = ["stack_train", "stack_val", "final_test"]
 DEFAULT_C_GRID = [0.03, 0.1, 0.3, 1.0, 3.0, 10.0]
+MAX_REPAIRED_PREDICTION_ROW_FRACTION = 1.0e-5
 
 
 @dataclass(frozen=True)
@@ -128,9 +129,48 @@ def softmax_np(logits: np.ndarray) -> np.ndarray:
     return (exp / np.sum(exp, axis=1, keepdims=True)).astype(np.float32)
 
 
+def sanitize_prediction_logits(
+    logits: np.ndarray,
+    *,
+    model_name: str,
+    split: str,
+    max_bad_row_fraction: float = MAX_REPAIRED_PREDICTION_ROW_FRACTION,
+) -> tuple[np.ndarray, Dict[str, Any]]:
+    """Repair tiny non-finite prediction tails and reject numerically broken models."""
+
+    logits = np.asarray(logits, dtype=np.float32)
+    if logits.ndim != 2:
+        raise ValueError(f"{model_name}/{split} logits must be 2D, got shape {logits.shape}")
+    finite = np.isfinite(logits)
+    bad_rows = ~np.all(finite, axis=1)
+    bad_row_count = int(np.sum(bad_rows))
+    bad_value_count = int(logits.size - np.sum(finite))
+    row_fraction = bad_row_count / float(max(logits.shape[0], 1))
+    report = {
+        "nonfinite_value_count": bad_value_count,
+        "nonfinite_row_count": bad_row_count,
+        "nonfinite_row_fraction": row_fraction,
+        "max_allowed_nonfinite_row_fraction": float(max_bad_row_fraction),
+        "repaired": bad_row_count > 0,
+    }
+    if bad_row_count == 0:
+        return logits, report
+    if row_fraction > float(max_bad_row_fraction):
+        raise FloatingPointError(
+            f"Non-finite predictions for {model_name}/{split}: "
+            f"{bad_row_count}/{logits.shape[0]} rows ({row_fraction:.6g}) exceed "
+            f"the repair limit {float(max_bad_row_fraction):.6g}"
+        )
+    repaired = logits.copy()
+    repaired[bad_rows, :] = 0.0
+    return repaired, report
+
+
 def classification_metrics_from_probs(probs: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
     probs = np.asarray(probs, dtype=np.float64)
     labels = np.asarray(labels, dtype=np.int64)
+    if not np.isfinite(probs).all():
+        raise FloatingPointError("Cannot compute classification metrics from non-finite probabilities")
     preds = np.argmax(probs, axis=1)
     accuracy = float(np.mean(preds == labels)) if len(labels) else 0.0
     picked = np.clip(probs[np.arange(len(labels)), labels], 1.0e-12, 1.0)
@@ -170,9 +210,15 @@ def save_prediction_block(block: PredictionBlock, prediction_dir: str | Path, *,
         raise FileExistsError(f"Prediction block already exists: {npz_path}")
     npz_path.parent.mkdir(parents=True, exist_ok=True)
     jet_files, file_indices, entries = _identity_arrays(block.jet_ids)
+    logits, finite_report = sanitize_prediction_logits(
+        block.logits,
+        model_name=block.model_name,
+        split=block.split,
+    )
+    probs = softmax_np(logits)
     arrays = {
-        "logits": block.logits.astype(np.float32, copy=False),
-        "probs": block.probs.astype(np.float32, copy=False),
+        "logits": logits.astype(np.float32, copy=False),
+        "probs": probs.astype(np.float32, copy=False),
         "labels": block.labels.astype(np.int64, copy=False),
         "jet_file_indices": file_indices,
         "jet_entries": entries,
@@ -189,8 +235,9 @@ def save_prediction_block(block: PredictionBlock, prediction_dir: str | Path, *,
         "jet_identity_hash": jet_identity_hash(block.jet_ids),
         "prediction_content_hash": content_hash,
         "n_jets": int(len(block.labels)),
-        "num_classes": int(block.logits.shape[1]),
-        "metrics": classification_metrics_from_logits(block.logits, block.labels),
+        "num_classes": int(logits.shape[1]),
+        "prediction_finite_check": finite_report,
+        "metrics": classification_metrics_from_logits(logits, block.labels),
     }
     save_json(meta_path, metadata)
     return metadata
@@ -223,6 +270,11 @@ def load_prediction_block(prediction_dir: str | Path, model_name: str, split: st
         )
         if actual != metadata.get("prediction_content_hash"):
             raise ValueError(f"Prediction hash mismatch for {model_name}/{split}: {actual}")
+    logits, finite_report = sanitize_prediction_logits(logits, model_name=model_name, split=split)
+    probs = softmax_np(logits)
+    if finite_report["repaired"]:
+        metadata = dict(metadata)
+        metadata["loaded_prediction_finite_check"] = finite_report
     return PredictionBlock(
         model_name=model_name,
         split=split,
@@ -259,7 +311,10 @@ def stack_feature_matrix(blocks: Sequence[PredictionBlock], *, feature_mode: str
             columns.append(block.probs)
     if not columns:
         raise ValueError(f"Unknown feature_mode {feature_mode!r}")
-    return np.concatenate(columns, axis=1).astype(np.float32)
+    features = np.concatenate(columns, axis=1).astype(np.float32)
+    if not np.isfinite(features).all():
+        raise FloatingPointError("Stacked fusion feature matrix contains non-finite values")
+    return features
 
 
 def load_hlt_model_from_checkpoint(path: str | Path, *, device):
