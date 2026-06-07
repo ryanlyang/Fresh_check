@@ -27,7 +27,7 @@ if [[ -d "${HLT_CACHE_DIR}" ]] && ! fresh_bool_enabled "${OVERWRITE}" && ! fresh
   exit 2
 fi
 
-read -r -a split_args <<< "${HLT_SPLITS}"
+fresh_split_words split_args "${HLT_SPLITS}"
 cmd=(
   "${PYTHON_BIN}" "scripts/build_fixed_hlt_cache.py"
   --manifest "${MANIFEST_PATH}"

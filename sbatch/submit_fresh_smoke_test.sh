@@ -39,8 +39,11 @@ submit_job() {
   shift
   submit_count=$((submit_count + 1))
   if fresh_is_dry_run; then
-    echo "DRY_RUN sbatch ${label}: sbatch $*" >&2
-    printf 'DRYRUN_%s_%03d\n' "${label}" "${submit_count}"
+    printf 'DRY_RUN sbatch %s: ' "${label}" >&2
+    fresh_print_shell_command sbatch "$@" >&2
+    printf '\n' >&2
+    local clean_label="${label//[^A-Za-z0-9_]/_}"
+    printf 'DRYRUN_%s\n' "${clean_label}"
     return 0
   fi
   local output

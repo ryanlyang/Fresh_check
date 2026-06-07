@@ -20,8 +20,11 @@ submit_job() {
   shift
   submit_count=$((submit_count + 1))
   if fresh_is_dry_run; then
-    echo "DRY_RUN sbatch ${label}: sbatch $*" >&2
-    printf 'DRYRUN_%s_%03d\n' "${label}" "${submit_count}"
+    printf 'DRY_RUN sbatch %s: ' "${label}" >&2
+    fresh_print_shell_command sbatch "$@" >&2
+    printf '\n' >&2
+    local clean_label="${label//[^A-Za-z0-9_]/_}"
+    printf 'DRYRUN_%s\n' "${clean_label}"
     return 0
   fi
   local output
@@ -61,7 +64,7 @@ fi
 variant_dependency="${variant_dependency#:}"
 variant_dependency="${variant_dependency%:}"
 
-read -r -a variant_args <<< "${RECO7_VARIANTS}"
+fresh_split_words variant_args "${RECO7_VARIANTS}"
 variant_job_ids=()
 for variant in "${variant_args[@]}"; do
   fresh_refuse_existing_dir "${RECO7_ROOT}/${variant}"
@@ -91,7 +94,7 @@ if [[ -z "${HLT5_FUSION_JOB_ID}" ]]; then
 fi
 audit_jid="$(submit_job "reco7_audit" --dependency="afterok:${audit_dependency}" --export="${audit_export}" "${SCRIPT_DIR}/run_audit_fresh_samehlt7_plus_hlt.sh")"
 
-echo "variant_job_ids=${variant_job_ids[*]}"
+echo "variant_job_ids=$(fresh_join_by_space "${variant_job_ids[@]}")"
 echo "reco7_fusion_job_id=${fusion_jid}"
 echo "audit_job_id=${audit_jid}"
 echo "expected_reco7_fusion_output=${RECO7_FUSION_DIR}"

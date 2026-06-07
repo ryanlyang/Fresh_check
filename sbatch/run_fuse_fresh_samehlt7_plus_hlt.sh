@@ -24,7 +24,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 fresh_setup "$@"
 fresh_require_file "${HLT_BASELINE_DIR}/best_model_val.pt"
-read -r -a variant_args <<< "${RECO7_VARIANTS}"
+fresh_split_words variant_args "${RECO7_VARIANTS}"
 for variant in "${variant_args[@]}"; do
   fresh_require_file "${RECO7_ROOT}/${variant}/stage2_dual_view/best_model_val.pt"
 done
@@ -54,4 +54,3 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${RECO7_FUSION_DIR}/fusion_report.json"
   fresh_require_file "${RECO7_FUSION_DIR}/stacked_logistic_regression.npz"
 fi
-

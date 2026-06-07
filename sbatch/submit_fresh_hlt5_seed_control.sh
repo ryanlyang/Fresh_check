@@ -18,8 +18,11 @@ submit_job() {
   shift
   submit_count=$((submit_count + 1))
   if fresh_is_dry_run; then
-    echo "DRY_RUN sbatch ${label}: sbatch $*" >&2
-    printf 'DRYRUN_%s_%03d\n' "${label}" "${submit_count}"
+    printf 'DRY_RUN sbatch %s: ' "${label}" >&2
+    fresh_print_shell_command sbatch "$@" >&2
+    printf '\n' >&2
+    local clean_label="${label//[^A-Za-z0-9_]/_}"
+    printf 'DRYRUN_%s\n' "${clean_label}"
     return 0
   fi
   local output
@@ -37,7 +40,7 @@ with_dependency() {
   printf '%s\n' "$@"
 }
 
-read -r -a seed_args <<< "${HLT5_SEEDS}"
+fresh_split_words seed_args "${HLT5_SEEDS}"
 seed_job_ids=()
 for seed in "${seed_args[@]}"; do
   fresh_refuse_existing_dir "${HLT5_ROOT}/seed${seed}"
@@ -51,7 +54,7 @@ fresh_refuse_existing_dir "${HLT5_FUSION_DIR}"
 dependency="$(fresh_join_by_colon "${seed_job_ids[@]}")"
 fusion_jid="$(submit_job "hlt5_fusion" --dependency="afterok:${dependency}" "${SCRIPT_DIR}/run_fuse_fresh_hlt5_seed_control.sh")"
 
-echo "hlt_seed_job_ids=${seed_job_ids[*]}"
+echo "hlt_seed_job_ids=$(fresh_join_by_space "${seed_job_ids[@]}")"
 echo "hlt5_dependency=afterok:${dependency}"
 echo "hlt5_fusion_job_id=${fusion_jid}"
 echo "expected_hlt5_fusion_output=${HLT5_FUSION_DIR}"

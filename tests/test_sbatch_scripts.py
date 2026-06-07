@@ -82,6 +82,22 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('RECO7_VARIANTS="m2_base"', text)
         self.assertIn("pipeline correctness only", text)
 
+    def test_space_separated_seed_and_variant_lists_use_helper(self):
+        combined = "\n".join((SBATCH_DIR / name).read_text(encoding="utf-8") for name in RUNNERS + SUBMITTERS)
+        self.assertNotIn('read -r -a seed_args <<< "${HLT5_SEEDS}"', combined)
+        self.assertNotIn('read -r -a variant_args <<< "${RECO7_VARIANTS}"', combined)
+        self.assertNotIn('read -r -a split_args <<< "${HLT_SPLITS}"', combined)
+        for name in [
+            "submit_fresh_full_samehlt_reco7_vs_hlt5.sh",
+            "submit_fresh_hlt5_seed_control.sh",
+            "submit_fresh_samehlt_reco7.sh",
+            "run_fuse_fresh_hlt5_seed_control.sh",
+            "run_fuse_fresh_samehlt7_plus_hlt.sh",
+            "run_build_fresh_hlt_cache.sh",
+        ]:
+            self.assertIn("fresh_split_words", self.read(name), name)
+        self.assertIn("fresh_print_shell_command", self.read("common.sh"))
+
 
 if __name__ == "__main__":
     unittest.main()

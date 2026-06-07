@@ -23,7 +23,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${CONFIRM_FINAL_TEST:=1}"
 
 fresh_setup "$@"
-read -r -a seed_args <<< "${HLT5_SEEDS}"
+fresh_split_words seed_args "${HLT5_SEEDS}"
 for seed in "${seed_args[@]}"; do
   fresh_require_file "${HLT5_ROOT}/seed${seed}/best_model_val.pt"
 done
@@ -52,4 +52,3 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${HLT5_FUSION_DIR}/fusion_report.json"
   fresh_require_file "${HLT5_FUSION_DIR}/stacked_logistic_regression.npz"
 fi
-

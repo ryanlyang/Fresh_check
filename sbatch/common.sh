@@ -216,6 +216,24 @@ fresh_append_flag_if_enabled() {
   fi
 }
 
+fresh_split_words() {
+  local -n _out_ref=$1
+  local value="${2:-}"
+  local old_ifs="${IFS}"
+  IFS=' '
+  read -r -a _out_ref <<< "${value}"
+  IFS="${old_ifs}"
+}
+
+fresh_print_shell_command() {
+  printf '%q' "$1"
+  shift || true
+  while (($#)); do
+    printf ' %q' "$1"
+    shift
+  done
+}
+
 fresh_write_run_config() {
   local output_dir="$1"
   local job_kind="$2"
@@ -341,5 +359,10 @@ PY
 
 fresh_join_by_colon() {
   local IFS=":"
+  echo "$*"
+}
+
+fresh_join_by_space() {
+  local IFS=" "
   echo "$*"
 }
