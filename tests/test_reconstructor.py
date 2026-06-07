@@ -20,6 +20,7 @@ if TORCH_AVAILABLE:
     import torch
 
     from jetclass_fresh.reconstructor import (
+        ReconstructionOutput,
         PairedReconstructionDataset,
         build_reconstructor,
         reconstruction_loss,
@@ -141,6 +142,47 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss))
         self.assertIn("set_loss", diagnostics)
+
+    def test_reconstruction_global_response_losses_are_bounded(self):
+        hlt_tokens = torch.zeros(1, 1, 14)
+        hlt_mask = torch.ones(1, 1, dtype=torch.bool)
+        offline_tokens = torch.zeros(1, 1, 14)
+        offline_mask = torch.ones(1, 1, dtype=torch.bool)
+        hlt_tokens[0, 0, 0] = 1.0
+        hlt_tokens[0, 0, 3] = 1.0
+        offline_tokens[0, 0, 0] = 1.0
+        offline_tokens[0, 0, 3] = 1.0
+
+        edited_tokens = hlt_tokens.clone()
+        split_tokens = hlt_tokens.clone()
+        edited_tokens[0, 0, 0] = 1.0e8
+        edited_tokens[0, 0, 3] = 1.0e8
+        split_tokens[0, 0, 0] = 1.0e8
+        split_tokens[0, 0, 2] = torch.pi
+        split_tokens[0, 0, 3] = 1.0e8
+        output = ReconstructionOutput(
+            tokens=torch.cat([edited_tokens, split_tokens], dim=1),
+            weights=torch.ones(1, 2),
+            candidate_mask=torch.ones(1, 2, dtype=torch.bool),
+            edited_tokens=edited_tokens,
+            split_tokens=split_tokens,
+            generated_tokens=torch.zeros(1, 0, 14),
+            edited_weights=torch.ones(1, 1),
+            split_weights=torch.ones(1, 1),
+            generated_weights=torch.zeros(1, 0),
+            total_count_pred=torch.ones(1),
+            added_count_pred=torch.ones(1),
+        )
+        loss, diagnostics = reconstruction_loss(
+            output,
+            hlt_tokens=hlt_tokens,
+            hlt_mask=hlt_mask,
+            offline_tokens=offline_tokens,
+            offline_mask=offline_mask,
+            config=self.tiny_config(),
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertLessEqual(float(diagnostics["mass_ratio_loss"]), 36.0)
 
     def test_paired_dataset_requires_matching_identities(self):
         hlt_view, offline_view = make_views()

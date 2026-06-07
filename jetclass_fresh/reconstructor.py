@@ -425,6 +425,15 @@ def jet_response(tokens, weights=None, mask=None):
     }
 
 
+def bounded_log_response_loss(pred, target, *, max_abs_log_diff: float = 6.0):
+    """Stable global-response loss that cannot explode on nearly massless jets."""
+
+    torch = require_torch()
+    diff = torch.log1p(torch.clamp(pred, min=0.0)) - torch.log1p(torch.clamp(target, min=0.0))
+    diff = torch.clamp(diff, -float(max_abs_log_diff), float(max_abs_log_diff))
+    return (diff * diff).mean()
+
+
 def matching_features(tokens):
     torch = require_torch()
     pt = torch.clamp(tokens[:, :, 0], min=1.0e-8)
@@ -478,9 +487,9 @@ def reconstruction_loss(
 
     pred_response = jet_response(pred_tokens, weights=pred_weights, mask=output.candidate_mask)
     target_response = jet_response(offline_tokens, mask=offline_mask)
-    pt_ratio_loss = ((pred_response["pt"] / torch.clamp(target_response["pt"], min=1.0e-6) - 1.0) ** 2).mean()
-    energy_ratio_loss = ((pred_response["energy"] / torch.clamp(target_response["energy"], min=1.0e-6) - 1.0) ** 2).mean()
-    mass_ratio_loss = ((pred_response["mass"] / torch.clamp(target_response["mass"], min=1.0e-6) - 1.0) ** 2).mean()
+    pt_ratio_loss = bounded_log_response_loss(pred_response["pt"], target_response["pt"])
+    energy_ratio_loss = bounded_log_response_loss(pred_response["energy"], target_response["energy"])
+    mass_ratio_loss = bounded_log_response_loss(pred_response["mass"], target_response["mass"])
 
     target_count = offline_mask.sum(dim=1).float()
     hlt_count = hlt_mask.sum(dim=1).float()
@@ -643,7 +652,7 @@ def summarize_loss_dict(losses: List[Dict[str, float]]) -> Dict[str, float]:
         if key == "n_jets":
             continue
         values = np.asarray([row.get(key, np.nan) for row in losses], dtype=np.float64)
-        valid = ~np.isnan(values)
+        valid = np.isfinite(values)
         summary[key] = float(np.average(values[valid], weights=weights[valid])) if np.any(valid) else float("nan")
     summary["n_jets"] = int(np.sum([row.get("n_jets", 0) for row in losses]))
     return summary
@@ -684,6 +693,15 @@ def run_reconstruction_epoch(
                     offline_mask=batch["offline_mask"],
                     config=variant_config,
                 )
+                if not torch.isfinite(loss):
+                    diag = {
+                        key: float(value.detach().item())
+                        for key, value in diagnostics.items()
+                        if hasattr(value, "detach") and value.numel() == 1
+                    }
+                    raise FloatingPointError(
+                        f"Non-finite Stage A reconstruction loss in batch {batch_index}: {diag}"
+                    )
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
@@ -859,7 +877,8 @@ def train_stage_a_reconstructor(
         curves.append(row)
         save_json(output_dir / "training_curves.json", {"epochs": curves})
 
-        improved = val_metrics["total_loss"] < best_val_loss
+        val_loss = float(val_metrics["total_loss"])
+        improved = np.isfinite(val_loss) and val_loss < best_val_loss
         torch.save(
             reconstructor_checkpoint_payload(
                 model,
@@ -872,7 +891,7 @@ def train_stage_a_reconstructor(
             output_dir / "last.pt",
         )
         if improved:
-            best_val_loss = float(val_metrics["total_loss"])
+            best_val_loss = val_loss
             best_epoch = int(epoch)
             epochs_without_improvement = 0
             torch.save(
@@ -890,6 +909,11 @@ def train_stage_a_reconstructor(
             epochs_without_improvement += 1
         if config.early_stop_patience >= 0 and epochs_without_improvement >= int(config.early_stop_patience):
             break
+
+    if best_epoch < 0 or not (output_dir / "best_model_val.pt").exists():
+        raise FloatingPointError(
+            "Stage A did not produce a finite model_val total_loss, so no best_model_val.pt was written"
+        )
 
     report = {
         "experiment_step": "step7_stage_a_reconstructor",
