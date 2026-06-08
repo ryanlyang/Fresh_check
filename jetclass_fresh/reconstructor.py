@@ -254,6 +254,22 @@ def safe_sqrt(value, *, eps: float = SQRT_EPS):
     return torch.sqrt(torch.clamp(value, min=float(eps)))
 
 
+def replace_kinematic_channels(tokens, pt, eta, phi, energy):
+    """Return tokens with updated kinematic channels without in-place writes."""
+
+    torch = require_torch()
+    return torch.cat(
+        [
+            pt.unsqueeze(-1),
+            eta.unsqueeze(-1),
+            phi.unsqueeze(-1),
+            energy.unsqueeze(-1),
+            tokens[..., 4:14],
+        ],
+        dim=-1,
+    )
+
+
 def raw_token_features(tokens, mask):
     torch = require_torch()
     pt = torch.clamp(tokens[:, :, 0], min=1.0e-8)
@@ -285,25 +301,31 @@ def sanitize_hlt_tokens(tokens, mask):
         cleaned = torch.nan_to_num(tokens, nan=0.0, posinf=0.0, neginf=0.0)
     else:  # pragma: no cover - compatibility with old torch
         cleaned = torch.where(torch.isfinite(tokens), tokens, torch.zeros_like(tokens))
-    cleaned = cleaned.clone()
     pt = torch.clamp(cleaned[:, :, 0], min=0.0)
     eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
     phi = wrap_phi_torch(cleaned[:, :, 2])
     energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), physical_energy_floor(pt, eta))
-    cleaned[:, :, 0] = pt
-    cleaned[:, :, 1] = eta
-    cleaned[:, :, 2] = phi
-    cleaned[:, :, 3] = energy
+    cleaned = replace_kinematic_channels(cleaned, pt, eta, phi, energy)
 
     safe_mask = mask & finite_tokens
     empty = safe_mask.sum(dim=1) == 0
     if bool(empty.any()):
-        safe_mask = safe_mask.clone()
-        cleaned = cleaned.clone()
-        safe_mask[empty, 0] = True
-        cleaned[empty, 0, :] = 0.0
-        cleaned[empty, 0, 0] = ENERGY_EPS
-        cleaned[empty, 0, 3] = ENERGY_EPS
+        token_indices = torch.arange(cleaned.shape[1], device=cleaned.device)
+        first_token = token_indices[None, :].eq(0).expand_as(safe_mask)
+        safe_mask = torch.where(empty[:, None], first_token, safe_mask)
+        fallback_scalar = torch.zeros_like(cleaned[:, :, 0])
+        fallback_pt = torch.where(first_token, torch.full_like(fallback_scalar, ENERGY_EPS), fallback_scalar)
+        fallback_tokens = torch.cat(
+            [
+                fallback_pt.unsqueeze(-1),
+                fallback_scalar.unsqueeze(-1),
+                fallback_scalar.unsqueeze(-1),
+                fallback_pt.unsqueeze(-1),
+                torch.zeros_like(cleaned[..., 4:14]),
+            ],
+            dim=-1,
+        )
+        cleaned = torch.where(empty[:, None, None], fallback_tokens, cleaned)
     diagnostics = {
         "nonfinite_input_token_count": (~finite_tokens & mask).sum(dim=1).float(),
         "forced_nonempty_mask": empty.float(),
@@ -533,27 +555,22 @@ class M2BaseReconstructor(_ModuleBase):
         phi_delta = torch.tanh(delta[..., 2]) * float(cfg.max_phi_shift)
         log_e_delta = torch.tanh(delta[..., 3]) * float(cfg.max_log_energy_shift)
 
-        out = base_tokens.clone()
         pt = torch.clamp(base_tokens[..., 0], min=1.0e-8) * torch.exp(log_pt_delta)
         eta = torch.clamp(base_tokens[..., 1] + eta_delta, -5.0, 5.0)
         phi = wrap_phi_torch(base_tokens[..., 2] + phi_delta)
         energy = torch.clamp(base_tokens[..., 3], min=1.0e-8) * torch.exp(log_e_delta)
-        out[..., 0] = pt
-        out[..., 1] = eta
-        out[..., 2] = phi
-        out[..., 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
-        return out
+        energy = torch.maximum(energy, physical_energy_floor(pt, eta))
+        return replace_kinematic_channels(base_tokens, pt, eta, phi, energy)
 
     def _uplift_parent_tokens(self, hlt_tokens, raw_uplift):
         torch = require_torch()
         uplift = torch.sigmoid(raw_uplift) * float(self.config.max_split_log_pt_shift)
-        out = hlt_tokens.clone()
         pt = torch.clamp(hlt_tokens[:, :, 0], min=1.0e-8) * torch.exp(uplift[:, :, 0])
         eta = hlt_tokens[:, :, 1]
+        phi = hlt_tokens[:, :, 2]
         energy = torch.clamp(hlt_tokens[:, :, 3], min=1.0e-8) * torch.exp(uplift[:, :, 1])
-        out[:, :, 0] = pt
-        out[:, :, 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
-        return out, uplift
+        energy = torch.maximum(energy, physical_energy_floor(pt, eta))
+        return replace_kinematic_channels(hlt_tokens, pt, eta, phi, energy), uplift
 
     @staticmethod
     def _budget_scale(raw_weights, budget, mask):
@@ -567,18 +584,21 @@ class M2BaseReconstructor(_ModuleBase):
 
     def _make_generated_tokens(self, generated_raw, *, dtype, device):
         torch = require_torch()
-        batch_size, n_generated, _ = generated_raw.shape
-        generated_tokens = torch.zeros(batch_size, n_generated, RAW_DIM, dtype=dtype, device=device)
         gen_pt = torch.nn.functional.softplus(generated_raw[:, :, 0]) + ENERGY_EPS
         gen_eta = torch.tanh(generated_raw[:, :, 1]) * float(self.config.max_generated_abs_eta)
         gen_phi = wrap_phi_torch(generated_raw[:, :, 2])
         gen_energy = physical_energy_floor(gen_pt, gen_eta) + torch.nn.functional.softplus(generated_raw[:, :, 3])
-        generated_tokens[:, :, 0] = gen_pt
-        generated_tokens[:, :, 1] = gen_eta
-        generated_tokens[:, :, 2] = gen_phi
-        generated_tokens[:, :, 3] = gen_energy
-        generated_tokens[:, :, 4:14] = torch.tanh(generated_raw[:, :, 4:14])
-        return generated_tokens
+        generated_tokens = torch.cat(
+            [
+                gen_pt.unsqueeze(-1),
+                gen_eta.unsqueeze(-1),
+                gen_phi.unsqueeze(-1),
+                gen_energy.unsqueeze(-1),
+                torch.tanh(generated_raw[:, :, 4:14]),
+            ],
+            dim=-1,
+        )
+        return generated_tokens.to(dtype=dtype, device=device)
 
     def forward(self, hlt_tokens, hlt_mask) -> ReconstructionOutput:
         torch = require_torch()
@@ -802,15 +822,11 @@ def sanitize_token_weight_view(tokens, weights, mask):
     mask = mask.bool()
     finite_tokens = torch.isfinite(tokens).all(dim=-1)
     cleaned = _nan_to_num_torch(tokens)
-    cleaned = cleaned.clone()
     pt = torch.clamp(cleaned[:, :, 0], min=0.0)
     eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
     phi = wrap_phi_torch(cleaned[:, :, 2])
     energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), physical_energy_floor(pt, eta))
-    cleaned[:, :, 0] = pt
-    cleaned[:, :, 1] = eta
-    cleaned[:, :, 2] = phi
-    cleaned[:, :, 3] = energy
+    cleaned = replace_kinematic_channels(cleaned, pt, eta, phi, energy)
 
     finite_weights = torch.ones_like(mask, dtype=torch.bool)
     if weights is None:
