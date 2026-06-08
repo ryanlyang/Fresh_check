@@ -1,3 +1,4 @@
+import inspect
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -5,7 +6,13 @@ import unittest
 
 import numpy as np
 
-from jetclass_fresh.dual_view import DualViewTaggerTrainConfig
+from jetclass_fresh.dual_view import (
+    CORRECTED_VIEW_FEATURE_NAMES,
+    DUAL_VIEW_EXPERIMENT_STEP,
+    DualViewTaggerTrainConfig,
+    build_dual_view_tagger,
+    build_soft_corrected_view_torch,
+)
 from jetclass_fresh.jetclass_data import JetIdentity, JetView
 from jetclass_fresh.reconstructor import RECONSTRUCTOR_VARIANT_NAMES
 
@@ -64,24 +71,54 @@ class DualViewStep8ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.max_constits, 128)
         self.assertIn("m2_antioverlap", RECONSTRUCTOR_VARIANT_NAMES)
 
+    def test_soft_corrected_view_builder_has_no_offline_arguments(self):
+        params = inspect.signature(build_soft_corrected_view_torch).parameters
+        self.assertNotIn("offline_tokens", params)
+        self.assertNotIn("offline_mask", params)
+        self.assertEqual(list(CORRECTED_VIEW_FEATURE_NAMES[-3:]), [
+            "token_weight",
+            "parent_added_support",
+            "budget_efficiency_share",
+        ])
+
 
 if TORCH_AVAILABLE:
+    def make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask, *, zero_weights=False):
+        corrected = hlt_tokens.clone()
+        corrected[:, :, 0] = torch.clamp(corrected[:, :, 0] + 0.25 * hlt_mask.float(), min=0.0)
+        corrected[:, :, 3] = corrected[:, :, 0] * torch.cosh(corrected[:, :, 1]) + 1.0e-4
+        weights = hlt_mask.float()
+        if zero_weights:
+            weights = torch.zeros_like(weights)
+        else:
+            weights = weights * torch.linspace(0.35, 0.95, steps=hlt_tokens.shape[1])[None, :]
+        split_support = 0.20 * hlt_mask.float()
+        generator_support = 0.15 * hlt_mask.float()
+        parent_added_support = split_support + generator_support
+        budget_efficiency_share = 0.40 * parent_added_support
+        return ReconstructionOutput(
+            tokens=corrected,
+            weights=weights,
+            candidate_mask=hlt_mask,
+            edited_tokens=corrected,
+            split_tokens=corrected,
+            generated_tokens=corrected[:, :0],
+            edited_weights=weights,
+            split_weights=weights,
+            generated_weights=weights[:, :0],
+            total_count_pred=weights.sum(dim=1),
+            added_count_pred=parent_added_support.sum(dim=1),
+            corrected_parent_tokens=corrected,
+            corrected_parent_weights=weights,
+            split_parent_added_support=split_support,
+            generator_parent_added_support=generator_support,
+            parent_added_support=parent_added_support,
+            budget_efficiency_share=budget_efficiency_share,
+        )
+
     class DummyReconstructor(torch.nn.Module):
         def forward(self, hlt_tokens, hlt_mask):
-            weights = hlt_mask.float()
-            return ReconstructionOutput(
-                tokens=hlt_tokens,
-                weights=weights,
-                candidate_mask=hlt_mask,
-                edited_tokens=hlt_tokens,
-                split_tokens=hlt_tokens,
-                generated_tokens=hlt_tokens[:, :0],
-                edited_weights=weights,
-                split_weights=weights,
-                generated_weights=weights[:, :0],
-                total_count_pred=weights.sum(dim=1),
-                added_count_pred=torch.zeros_like(weights.sum(dim=1)),
-            )
+            return make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
 
     class DummyDualTagger(torch.nn.Module):
         def __init__(self, num_classes=10):
@@ -91,12 +128,123 @@ if TORCH_AVAILABLE:
         def forward(self, hlt_inputs, reco_inputs):
             batch_size = hlt_inputs["features"].shape[0]
             self._last_hlt_shape = tuple(hlt_inputs["features"].shape)
-            self._last_reco_shape = tuple(reco_inputs["features"].shape)
+            self._last_reco_shape = tuple(reco_inputs.features.shape)
             return self.logits.unsqueeze(0).expand(batch_size, -1)
 
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
 class DualViewStep8TorchTests(unittest.TestCase):
+    def test_build_soft_corrected_view_parent_aligned_features(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
+
+        corrected_view = build_soft_corrected_view_torch(
+            hlt_tokens,
+            hlt_mask,
+            output,
+            weight_threshold=0.05,
+        )
+
+        self.assertEqual(corrected_view.features.shape, (2, len(CORRECTED_VIEW_FEATURE_NAMES), 5))
+        self.assertEqual(corrected_view.mask.shape, (2, 1, 5))
+        self.assertEqual(corrected_view.tokens.shape, (2, 5, 14))
+        self.assertEqual(corrected_view.feature_names, list(CORRECTED_VIEW_FEATURE_NAMES))
+        self.assertTrue(corrected_view.metadata["parent_aligned"])
+        self.assertFalse(corrected_view.metadata["uses_offline_constituents"])
+        self.assertTrue(torch.isfinite(corrected_view.features).all())
+
+        valid = corrected_view.mask.squeeze(1)
+        token_idx = CORRECTED_VIEW_FEATURE_NAMES.index("token_weight")
+        support_idx = CORRECTED_VIEW_FEATURE_NAMES.index("parent_added_support")
+        budget_idx = CORRECTED_VIEW_FEATURE_NAMES.index("budget_efficiency_share")
+        self.assertTrue(torch.allclose(corrected_view.features[:, token_idx, :][valid], output.corrected_parent_weights[valid]))
+        self.assertTrue(torch.allclose(corrected_view.token_weight[valid], output.corrected_parent_weights[valid]))
+        self.assertTrue(torch.allclose(corrected_view.features[:, support_idx, :][valid], output.parent_added_support[valid]))
+        self.assertTrue(torch.allclose(corrected_view.parent_added_support[valid], output.parent_added_support[valid]))
+        self.assertTrue(torch.allclose(corrected_view.features[:, budget_idx, :][valid], output.budget_efficiency_share[valid]))
+        self.assertTrue(torch.allclose(corrected_view.budget_efficiency_share[valid], output.budget_efficiency_share[valid]))
+
+    def test_build_soft_corrected_view_forces_nonempty_mask(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask, zero_weights=True)
+
+        corrected_view = build_soft_corrected_view_torch(
+            hlt_tokens,
+            hlt_mask,
+            output,
+            weight_threshold=0.05,
+        )
+
+        self.assertTrue(torch.equal(corrected_view.mask.sum(dim=2).squeeze(1), torch.ones(2, dtype=torch.long)))
+        self.assertEqual(corrected_view.metadata["forced_nonempty_count"], 2)
+
+    def test_build_soft_corrected_view_changes_when_hlt_zeroed(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
+        baseline = build_soft_corrected_view_torch(hlt_tokens, hlt_mask, output)
+
+        zero_hlt_tokens = torch.zeros_like(hlt_tokens)
+        zero_output = make_parent_aligned_reconstruction_output(zero_hlt_tokens, hlt_mask)
+        zero_view = build_soft_corrected_view_torch(zero_hlt_tokens, hlt_mask, zero_output)
+
+        self.assertFalse(torch.allclose(baseline.features, zero_view.features))
+
+    def test_cross_attention_tagger_forward_pass(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        hlt_inputs = build_part_inputs_torch(hlt_tokens, hlt_mask, max_constits=5)
+        reco_output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
+        corrected_inputs = build_soft_corrected_view_torch(hlt_tokens, hlt_mask, reco_output)
+
+        tagger = build_dual_view_tagger(model_size="tiny", num_classes=10)
+        logits = tagger(hlt_inputs, corrected_inputs)
+
+        self.assertEqual(logits.shape, (2, 10))
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertEqual(tagger.config["architecture"], "cross_attention_fusion")
+        self.assertEqual(tagger.config["corrected_view_feature_names"], list(CORRECTED_VIEW_FEATURE_NAMES))
+
+    def test_cross_attention_tagger_checkpoint_roundtrip(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        hlt_inputs = build_part_inputs_torch(hlt_tokens, hlt_mask, max_constits=5)
+        reco_output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
+        corrected_inputs = build_soft_corrected_view_torch(hlt_tokens, hlt_mask, reco_output)
+        tagger = build_dual_view_tagger(model_size="tiny", num_classes=10)
+        tagger.eval()
+        with torch.no_grad():
+            expected = tagger(hlt_inputs, corrected_inputs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tagger.pt"
+            torch.save({"model_state_dict": tagger.state_dict(), "model_config": tagger.config}, path)
+            payload = torch.load(path, map_location="cpu")
+        cfg = dict(payload["model_config"])
+        loaded = build_dual_view_tagger(
+            architecture=cfg["architecture"],
+            model_size=cfg["model_size"],
+            num_classes=cfg["num_classes"],
+            hidden_dim=cfg["hidden_dim"],
+            num_heads=cfg["num_heads"],
+            num_layers=cfg["num_layers"],
+            feedforward_dim=cfg["feedforward_dim"],
+            dropout=cfg["dropout"],
+        )
+        loaded.load_state_dict(payload["model_state_dict"], strict=True)
+        loaded.eval()
+        with torch.no_grad():
+            actual = loaded(hlt_inputs, corrected_inputs)
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1.0e-6))
+
     def test_build_part_inputs_torch_topk_reco_candidates(self):
         tokens = torch.zeros(2, 7, 14)
         mask = torch.ones(2, 7, dtype=torch.bool)
@@ -155,9 +303,9 @@ class DualViewStep8TorchTests(unittest.TestCase):
         self.assertEqual(metrics["n_jets"], 4)
         self.assertEqual(metrics["accuracy"], 1.0)
         self.assertEqual(tagger._last_hlt_shape, (2, 17, 5))
-        self.assertEqual(tagger._last_reco_shape, (2, 17, 5))
+        self.assertEqual(tagger._last_reco_shape, (2, len(CORRECTED_VIEW_FEATURE_NAMES), 5))
 
-    def test_train_dual_view_tagger_smoke_with_injected_models(self):
+    def test_train_cross_attention_tagger_tiny_subset_with_injected_reconstructor(self):
         train_view = make_hlt_view("model_train", n_jets=6)
         val_view = make_hlt_view("model_val", n_jets=4)
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,18 +322,19 @@ class DualViewStep8TorchTests(unittest.TestCase):
             )
             report = train_dual_view_tagger(
                 cfg,
-                tagger=DummyDualTagger(),
+                tagger=build_dual_view_tagger(model_size="tiny", num_classes=10),
                 reconstructor=DummyReconstructor(),
                 train_view=train_view,
                 val_view=val_view,
             )
             self.assertTrue((Path(tmp) / "best_model_val.pt").exists())
             self.assertTrue((Path(tmp) / "model_val_report.json").exists())
-        self.assertEqual(report["experiment_step"], "step8_dual_view_tagger")
+        self.assertEqual(report["experiment_step"], DUAL_VIEW_EXPERIMENT_STEP)
         self.assertEqual(report["variant"], "m2_base")
+        self.assertEqual(report["dual_view_architecture"], "cross_attention_fusion")
         self.assertTrue(report["no_final_test_evaluation"])
         self.assertTrue(report["reconstructor_frozen"])
-        self.assertEqual(report["best_model_val_accuracy"], 1.0)
+        self.assertGreaterEqual(report["best_model_val_accuracy"], 0.0)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from .dual_view import (
     HLTTokenDataset,
     build_dual_view_tagger,
     build_part_inputs_torch,
+    build_soft_corrected_view_torch,
     load_stage_a_reconstructor_checkpoint,
     make_hlt_token_loader,
 )
@@ -339,8 +340,17 @@ def load_dual_view_model_from_checkpoint(path: str | Path, *, device):
     payload = torch.load(path, map_location=device)
     cfg = payload.get("config", {})
     model_cfg = payload.get("model_config", {})
-    model_size = model_cfg.get("model_size", cfg.get("model_size", "base"))
-    tagger = build_dual_view_tagger(num_classes=len(LABEL_NAMES), model_size=model_size)
+    tagger_kwargs = {
+        "num_classes": int(model_cfg.get("num_classes", len(LABEL_NAMES))),
+        "model_size": model_cfg.get("model_size", cfg.get("model_size", "base")),
+        "hidden_dim": model_cfg.get("hidden_dim"),
+        "num_heads": model_cfg.get("num_heads"),
+        "num_layers": model_cfg.get("num_layers"),
+        "feedforward_dim": model_cfg.get("feedforward_dim"),
+        "dropout": model_cfg.get("dropout", 0.05),
+        "architecture": model_cfg.get("architecture", "cross_attention_fusion"),
+    }
+    tagger = build_dual_view_tagger(**tagger_kwargs)
     tagger.load_state_dict(payload["model_state_dict"], strict=True)
     tagger = tagger.to(device)
     tagger.eval()
@@ -441,13 +451,12 @@ def evaluate_dual_view_model(
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             reco = reconstructor(batch["hlt_tokens"], batch["hlt_mask"])
             hlt_inputs = build_part_inputs_torch(batch["hlt_tokens"], batch["hlt_mask"], max_constits=max_constits)
-            reco_inputs = build_part_inputs_torch(
-                reco.tokens,
-                reco.candidate_mask,
-                weights=reco.weights,
-                max_constits=max_constits,
+            corrected_inputs = build_soft_corrected_view_torch(
+                batch["hlt_tokens"],
+                batch["hlt_mask"],
+                reco,
             )
-            logits = tagger(hlt_inputs, reco_inputs)
+            logits = tagger(hlt_inputs, corrected_inputs)
             logits_rows.append(logits.detach().cpu().numpy().astype(np.float32))
             labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))
     logits_np = np.concatenate(logits_rows, axis=0)
@@ -461,8 +470,9 @@ def evaluate_dual_view_model(
         jet_ids=list(view.jet_ids),
         metadata={
             "model_kind": "dual_view",
+            "dual_view_architecture": "cross_attention_fusion",
             "hlt_content_hash": view.metadata.get("hlt_content_hash"),
-            "allowed_inputs": "cached_fixed_hlt_and_reconstruction_from_cached_fixed_hlt",
+            "allowed_inputs": "cached_fixed_hlt_and_parent_aligned_corrected_view_from_cached_fixed_hlt",
         },
     )
 

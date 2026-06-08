@@ -11,7 +11,6 @@ import numpy as np
 
 from .hlt_baseline import (
     accuracy_from_logits,
-    default_part_config,
     require_torch,
     resolve_device,
     save_json,
@@ -46,6 +45,37 @@ else:
 
 EPS = 1.0e-8
 ENERGY_EPS = 1.0e-4
+DUAL_VIEW_EXPERIMENT_STEP = "v2_step5_cross_attention_dual_view_tagger"
+CORRECTED_VIEW_BASE_FEATURE_NAMES = [
+    "part_pt_log",
+    "part_e_log",
+    "part_logptrel",
+    "part_logerel",
+    "part_deltaR",
+    "part_deta",
+    "part_dphi",
+]
+CORRECTED_VIEW_SUPPORT_FEATURE_NAMES = [
+    "token_weight",
+    "parent_added_support",
+    "budget_efficiency_share",
+]
+CORRECTED_VIEW_FEATURE_NAMES = CORRECTED_VIEW_BASE_FEATURE_NAMES + CORRECTED_VIEW_SUPPORT_FEATURE_NAMES
+
+
+@dataclass
+class CorrectedViewInputs:
+    """Parent-aligned soft corrected view for the original-mechanism Step 4 path."""
+
+    features: Any
+    mask: Any
+    tokens: Any
+    token_weight: Any
+    parent_added_support: Any
+    budget_efficiency_share: Any
+    support_channels: Dict[str, Any]
+    feature_names: List[str]
+    metadata: Dict[str, Any]
 
 
 @dataclass
@@ -137,6 +167,236 @@ def _select_topk(tokens, mask, weights=None, *, max_constits: int = 128):
     if weights is not None:
         weights = torch.gather(weights, dim=1, index=indices)
     return tokens, mask, weights
+
+
+def _force_nonempty_parent_mask(mask, fallback_mask, score):
+    torch = require_torch()
+    mask = mask.bool()
+    fallback_mask = fallback_mask.bool()
+    empty = mask.sum(dim=1) == 0
+    if not bool(empty.any()):
+        return mask, empty
+    forced = mask.clone()
+    safe_score = torch.where(fallback_mask, _nan_to_num_torch(score.float()), torch.full_like(score.float(), -1.0))
+    fallback_empty = fallback_mask.sum(dim=1) == 0
+    if bool(fallback_empty.any()):
+        safe_score = safe_score.clone()
+        safe_score[fallback_empty, 0] = 0.0
+    indices = safe_score.argmax(dim=1)
+    rows = torch.arange(mask.shape[0], device=mask.device)
+    forced[rows[empty], indices[empty]] = True
+    return forced, empty
+
+
+def _parent_channel_or_zeros(value, reference, mask, *, name: str, clamp_min: float | None = 0.0):
+    torch = require_torch()
+    if value is None:
+        channel = torch.zeros(reference.shape[:2], dtype=reference.dtype, device=reference.device)
+    else:
+        channel = value.float()
+        if channel.ndim == 3 and channel.shape[-1] == 1:
+            channel = channel.squeeze(-1)
+        if tuple(channel.shape) != tuple(reference.shape[:2]):
+            raise ValueError(
+                f"{name} must be parent-aligned with shape {tuple(reference.shape[:2])}, "
+                f"got {tuple(channel.shape)}"
+            )
+        channel = _nan_to_num_torch(channel)
+        if clamp_min is not None:
+            channel = torch.clamp(channel, min=float(clamp_min))
+    return channel * mask.float()
+
+
+def _corrected_parent_source(reconstruction, hlt_tokens):
+    parent_tokens = getattr(reconstruction, "corrected_parent_tokens", None)
+    source = "corrected_parent_tokens"
+    if parent_tokens is None:
+        parent_tokens = getattr(reconstruction, "edited_tokens", None)
+        source = "edited_tokens"
+    if parent_tokens is None:
+        parent_tokens = hlt_tokens
+        source = "hlt_tokens_fallback"
+    return parent_tokens, source
+
+
+def _corrected_parent_weight_source(reconstruction, hlt_mask):
+    parent_weights = getattr(reconstruction, "corrected_parent_weights", None)
+    source = "corrected_parent_weights"
+    if parent_weights is None:
+        parent_weights = getattr(reconstruction, "edited_weights", None)
+        source = "edited_weights"
+    if parent_weights is None:
+        parent_weights = hlt_mask.float()
+        source = "hlt_mask_fallback"
+    return parent_weights, source
+
+
+def build_soft_corrected_view_torch(
+    hlt_tokens,
+    hlt_mask,
+    reconstruction,
+    *,
+    weight_threshold: float = 0.0,
+    scale_features_by_weight: bool = True,
+    force_nonempty: bool = True,
+) -> CorrectedViewInputs:
+    """Build the Step 4 parent-token-aligned corrected view from HLT-only outputs.
+
+    The corrected view intentionally ignores split/generated candidates as extra
+    particles. Their soft support is folded back onto the corresponding HLT
+    parent as support channels, preserving one corrected token per HLT parent.
+    """
+
+    torch = require_torch()
+    hlt_tokens = hlt_tokens.float()
+    hlt_mask = hlt_mask.bool()
+    parent_tokens, token_source = _corrected_parent_source(reconstruction, hlt_tokens)
+    parent_tokens = parent_tokens.float()
+    if tuple(parent_tokens.shape[:2]) != tuple(hlt_tokens.shape[:2]):
+        raise ValueError(
+            "Corrected parent tokens must stay aligned to the fixed-HLT parents: "
+            f"expected leading shape {tuple(hlt_tokens.shape[:2])}, got {tuple(parent_tokens.shape[:2])}"
+        )
+    parent_tokens, finite_parent_mask = sanitize_tokens_for_part_inputs(parent_tokens, hlt_mask)
+
+    parent_weights, weight_source = _corrected_parent_weight_source(reconstruction, hlt_mask)
+    parent_weights = _parent_channel_or_zeros(
+        parent_weights,
+        parent_tokens,
+        finite_parent_mask,
+        name=weight_source,
+        clamp_min=0.0,
+    )
+    split_support = _parent_channel_or_zeros(
+        getattr(reconstruction, "split_parent_added_support", None),
+        parent_tokens,
+        finite_parent_mask,
+        name="split_parent_added_support",
+        clamp_min=0.0,
+    )
+    generator_support = _parent_channel_or_zeros(
+        getattr(reconstruction, "generator_parent_added_support", None),
+        parent_tokens,
+        finite_parent_mask,
+        name="generator_parent_added_support",
+        clamp_min=0.0,
+    )
+    parent_added_support = getattr(reconstruction, "parent_added_support", None)
+    if parent_added_support is None:
+        parent_added_support = split_support + generator_support
+    else:
+        parent_added_support = _parent_channel_or_zeros(
+            parent_added_support,
+            parent_tokens,
+            finite_parent_mask,
+            name="parent_added_support",
+            clamp_min=0.0,
+        )
+    budget_efficiency_share = getattr(reconstruction, "budget_efficiency_share", None)
+    if budget_efficiency_share is None:
+        added_count_pred = getattr(reconstruction, "added_count_pred", None)
+        if added_count_pred is None:
+            budget_efficiency_share = parent_added_support
+        else:
+            added_count_pred = _nan_to_num_torch(added_count_pred.float())
+            budget_efficiency_share = parent_added_support / torch.clamp(added_count_pred[:, None], min=1.0)
+    budget_efficiency_share = _parent_channel_or_zeros(
+        budget_efficiency_share,
+        parent_tokens,
+        finite_parent_mask,
+        name="budget_efficiency_share",
+        clamp_min=0.0,
+    )
+
+    view_mask = finite_parent_mask & (parent_weights > float(weight_threshold))
+    forced_empty = torch.zeros(hlt_tokens.shape[0], dtype=torch.bool, device=hlt_tokens.device)
+    if force_nonempty:
+        view_mask, forced_empty = _force_nonempty_parent_mask(view_mask, finite_parent_mask, parent_weights)
+
+    prepared = parent_tokens.clone()
+    if scale_features_by_weight:
+        prepared[:, :, 0] = prepared[:, :, 0] * parent_weights
+        prepared[:, :, 3] = prepared[:, :, 3] * parent_weights
+        prepared[:, :, 3] = torch.maximum(
+            prepared[:, :, 3],
+            _physical_energy_floor(prepared[:, :, 0], prepared[:, :, 1]),
+        )
+    prepared = prepared * view_mask[:, :, None].float()
+
+    pt = torch.where(view_mask, prepared[:, :, 0], torch.zeros_like(prepared[:, :, 0]))
+    eta = torch.where(view_mask, prepared[:, :, 1], torch.zeros_like(prepared[:, :, 1]))
+    phi = torch.where(view_mask, prepared[:, :, 2], torch.zeros_like(prepared[:, :, 2]))
+    energy = torch.where(view_mask, prepared[:, :, 3], torch.zeros_like(prepared[:, :, 3]))
+
+    px = pt * torch.cos(phi)
+    py = pt * torch.sin(phi)
+    pz = pt * torch.sinh(eta)
+    jet_px = px.sum(dim=1)
+    jet_py = py.sum(dim=1)
+    jet_pz = pz.sum(dim=1)
+    jet_energy = energy.sum(dim=1)
+    jet_pt = torch.sqrt(torch.clamp(jet_px * jet_px + jet_py * jet_py, min=0.0))
+    jet_phi = torch.atan2(jet_py, jet_px)
+    jet_eta = torch.asinh(jet_pz / torch.clamp(jet_pt, min=EPS))
+    jet_eta = torch.where(jet_pt > EPS, jet_eta, torch.zeros_like(jet_eta))
+    jet_phi = torch.where(jet_pt > EPS, jet_phi, torch.zeros_like(jet_phi))
+
+    eta_sign = torch.sign(jet_eta[:, None])
+    eta_sign = torch.where(eta_sign == 0.0, torch.ones_like(eta_sign), eta_sign)
+    part_deta = (eta - jet_eta[:, None]) * eta_sign
+    part_dphi = wrap_phi_torch(phi - jet_phi[:, None])
+    part_delta_r = torch.sqrt(torch.clamp(part_deta * part_deta + part_dphi * part_dphi, min=0.0))
+
+    feature_map = {
+        "part_pt_log": _manual_transform_torch(torch.log(torch.clamp(pt, min=EPS)), subtract=1.7, multiply=0.7),
+        "part_e_log": _manual_transform_torch(torch.log(torch.clamp(energy, min=EPS)), subtract=2.0, multiply=0.7),
+        "part_logptrel": _manual_transform_torch(
+            torch.log(torch.clamp(pt / torch.clamp(jet_pt[:, None], min=EPS), min=EPS)),
+            subtract=-4.7,
+            multiply=0.7,
+        ),
+        "part_logerel": _manual_transform_torch(
+            torch.log(torch.clamp(energy / torch.clamp(jet_energy[:, None], min=EPS), min=EPS)),
+            subtract=-4.7,
+            multiply=0.7,
+        ),
+        "part_deltaR": _manual_transform_torch(part_delta_r, subtract=0.2, multiply=4.0),
+        "part_deta": part_deta,
+        "part_dphi": part_dphi,
+        "token_weight": parent_weights,
+        "parent_added_support": parent_added_support,
+        "budget_efficiency_share": budget_efficiency_share,
+    }
+    for key, value in list(feature_map.items()):
+        feature_map[key] = torch.where(view_mask, _nan_to_num_torch(value), torch.zeros_like(value))
+    features = torch.stack([feature_map[name] for name in CORRECTED_VIEW_FEATURE_NAMES], dim=1).float()
+    features = _nan_to_num_torch(features)
+    out_mask = view_mask[:, None, :].bool()
+    support_channels = {
+        "token_weight": features[:, CORRECTED_VIEW_FEATURE_NAMES.index("token_weight"), :],
+        "parent_added_support": features[:, CORRECTED_VIEW_FEATURE_NAMES.index("parent_added_support"), :],
+        "budget_efficiency_share": features[:, CORRECTED_VIEW_FEATURE_NAMES.index("budget_efficiency_share"), :],
+    }
+    return CorrectedViewInputs(
+        features=features,
+        mask=out_mask,
+        tokens=parent_tokens,
+        token_weight=support_channels["token_weight"],
+        parent_added_support=support_channels["parent_added_support"],
+        budget_efficiency_share=support_channels["budget_efficiency_share"],
+        support_channels=support_channels,
+        feature_names=list(CORRECTED_VIEW_FEATURE_NAMES),
+        metadata={
+            "parent_aligned": True,
+            "uses_offline_constituents": False,
+            "token_source": token_source,
+            "weight_source": weight_source,
+            "scale_features_by_weight": bool(scale_features_by_weight),
+            "weight_threshold": float(weight_threshold),
+            "force_nonempty": bool(force_nonempty),
+            "forced_nonempty_count": int(forced_empty.sum().detach().cpu().item()),
+        },
+    )
 
 
 def build_part_inputs_torch(
@@ -292,65 +552,267 @@ def make_hlt_token_loader(dataset, *, batch_size: int, shuffle: bool, num_worker
     )
 
 
-class ParticleTransformerEncoderBranch(_ModuleBase):
-    """Particle Transformer branch returning the class-token embedding."""
-
-    def __init__(self, *, model_size: str = "base") -> None:
-        require_torch()
-        super().__init__()
-        try:
-            from weaver.nn.model.ParticleTransformer import ParticleTransformer
-        except ImportError as exc:  # pragma: no cover - depends on research env
-            raise ImportError(
-                "Dual-view tagger training requires weaver-core. "
-                "Install it on the research compute, e.g. pip install 'weaver-core>=0.4'."
-            ) from exc
-        cfg = default_part_config(num_classes=len(LABEL_NAMES), model_size=model_size)
-        cfg["num_classes"] = None
-        cfg["fc_params"] = None
-        self.output_dim = int(cfg["embed_dims"][-1])
-        self.config = cfg
-        self.mod = ParticleTransformer(**cfg)
-
-    def forward(self, inputs: Mapping[str, Any]):
-        return self.mod(inputs["features"], v=inputs["lorentz_vectors"], mask=inputs["mask"])
+def _dual_view_size_config(model_size: str) -> Dict[str, int]:
+    if model_size == "tiny":
+        return {"hidden_dim": 64, "num_heads": 4, "num_layers": 2, "feedforward_dim": 160}
+    if model_size == "base":
+        return {"hidden_dim": 128, "num_heads": 8, "num_layers": 3, "feedforward_dim": 384}
+    raise ValueError(f"Unknown dual-view model_size {model_size!r}; expected 'base' or 'tiny'")
 
 
-class DualViewParticleTransformerTagger(_ModuleBase):
-    """Two-branch HLT + reconstructed-view Particle Transformer classifier."""
+def _input_features_and_mask(inputs):
+    torch = require_torch()
+    features = inputs.features if isinstance(inputs, CorrectedViewInputs) else inputs["features"]
+    mask = inputs.mask if isinstance(inputs, CorrectedViewInputs) else inputs["mask"]
+    features = features.float()
+    mask = mask.bool()
+    if features.ndim != 3:
+        raise ValueError(f"Expected feature tensor [B, C, N], got shape {tuple(features.shape)}")
+    if mask.ndim == 3:
+        if mask.shape[1] != 1:
+            raise ValueError(f"Expected mask tensor [B, 1, N], got shape {tuple(mask.shape)}")
+        mask = mask[:, 0, :]
+    elif mask.ndim != 2:
+        raise ValueError(f"Expected mask tensor [B, N] or [B, 1, N], got shape {tuple(mask.shape)}")
+    if features.shape[0] != mask.shape[0] or features.shape[2] != mask.shape[1]:
+        raise ValueError(f"Feature/mask shape mismatch: features={tuple(features.shape)}, mask={tuple(mask.shape)}")
+    features = _nan_to_num_torch(features)
+    empty = mask.sum(dim=1) == 0
+    if bool(empty.any()):
+        mask = mask.clone()
+        mask[empty, 0] = True
+        features = features.clone()
+        features[empty, :, 0] = 0.0
+    return features.transpose(1, 2).contiguous(), mask
 
-    def __init__(self, *, num_classes: int = 10, model_size: str = "base", dropout: float = 0.05) -> None:
+
+class MaskedAttentionPool(_ModuleBase):
+    """Learned mask-aware attention pooling over encoded token sequences."""
+
+    def __init__(self, hidden_dim: int, *, dropout: float = 0.0) -> None:
         require_torch()
         super().__init__()
         torch = require_torch()
-        self.hlt_branch = ParticleTransformerEncoderBranch(model_size=model_size)
-        self.reco_branch = ParticleTransformerEncoderBranch(model_size=model_size)
-        branch_dim = self.hlt_branch.output_dim
-        self.classifier = torch.nn.Sequential(
-            torch.nn.LayerNorm(branch_dim * 2),
-            torch.nn.Linear(branch_dim * 2, branch_dim),
+        self.norm = torch.nn.LayerNorm(int(hidden_dim))
+        self.score = torch.nn.Linear(int(hidden_dim), 1)
+        self.dropout = torch.nn.Dropout(float(dropout))
+
+    def forward(self, tokens, mask):
+        torch = require_torch()
+        tokens = self.norm(tokens)
+        scores = self.score(tokens).squeeze(-1).masked_fill(~mask.bool(), -1.0e4)
+        weights = torch.softmax(scores, dim=1) * mask.float()
+        weights = weights / torch.clamp(weights.sum(dim=1, keepdim=True), min=1.0e-6)
+        pooled = torch.einsum("bn,bnd->bd", weights, self.dropout(tokens))
+        return pooled, weights
+
+
+class FeatureSequenceEncoder(_ModuleBase):
+    """Transformer encoder for an HLT or corrected-view feature sequence."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dim: int,
+        num_heads: int,
+        num_layers: int,
+        feedforward_dim: int,
+        dropout: float,
+    ) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.input_proj = torch.nn.Sequential(
+            torch.nn.Linear(self.input_dim, self.hidden_dim),
+            torch.nn.LayerNorm(self.hidden_dim),
             torch.nn.GELU(),
             torch.nn.Dropout(float(dropout)),
-            torch.nn.Linear(branch_dim, int(num_classes)),
+        )
+        layer = torch.nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,
+            nhead=int(num_heads),
+            dim_feedforward=int(feedforward_dim),
+            dropout=float(dropout),
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = torch.nn.TransformerEncoder(layer, num_layers=int(num_layers))
+        self.output_norm = torch.nn.LayerNorm(self.hidden_dim)
+
+    def forward(self, features, mask):
+        x = self.input_proj(features)
+        x = self.encoder(x, src_key_padding_mask=~mask.bool())
+        x = self.output_norm(x)
+        return x * mask.unsqueeze(-1).float()
+
+
+class DualViewCrossAttentionTagger(_ModuleBase):
+    """Original-mechanism HLT/corrected-view cross-attention fusion classifier."""
+
+    def __init__(
+        self,
+        *,
+        num_classes: int = 10,
+        model_size: str = "base",
+        hidden_dim: int | None = None,
+        num_heads: int | None = None,
+        num_layers: int | None = None,
+        feedforward_dim: int | None = None,
+        dropout: float = 0.05,
+    ) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        size_cfg = _dual_view_size_config(model_size)
+        hidden_dim = int(hidden_dim or size_cfg["hidden_dim"])
+        num_heads = int(num_heads or size_cfg["num_heads"])
+        num_layers = int(num_layers or size_cfg["num_layers"])
+        feedforward_dim = int(feedforward_dim or size_cfg["feedforward_dim"])
+        if hidden_dim % num_heads != 0:
+            raise ValueError(f"hidden_dim={hidden_dim} must be divisible by num_heads={num_heads}")
+
+        self.hlt_encoder = FeatureSequenceEncoder(
+            input_dim=len(PF_FEATURE_NAMES),
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            feedforward_dim=feedforward_dim,
+            dropout=dropout,
+        )
+        self.corrected_encoder = FeatureSequenceEncoder(
+            input_dim=len(CORRECTED_VIEW_FEATURE_NAMES),
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            feedforward_dim=feedforward_dim,
+            dropout=dropout,
+        )
+        self.hlt_pool = MaskedAttentionPool(hidden_dim, dropout=dropout)
+        self.corrected_pool = MaskedAttentionPool(hidden_dim, dropout=dropout)
+        self.hlt_to_corrected = torch.nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.corrected_to_hlt = torch.nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.hlt_cross_norm = torch.nn.LayerNorm(hidden_dim)
+        self.corrected_cross_norm = torch.nn.LayerNorm(hidden_dim)
+        self.cross_dropout = torch.nn.Dropout(float(dropout))
+        fused_dim = hidden_dim * 6
+        self.classifier = torch.nn.Sequential(
+            torch.nn.LayerNorm(fused_dim),
+            torch.nn.Linear(fused_dim, hidden_dim * 2),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(dropout)),
+            torch.nn.Linear(hidden_dim * 2, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(dropout)),
+            torch.nn.Linear(hidden_dim, int(num_classes)),
         )
         self.config = {
+            "architecture": "cross_attention_fusion",
             "num_classes": int(num_classes),
             "model_size": model_size,
+            "hidden_dim": int(hidden_dim),
+            "num_heads": int(num_heads),
+            "num_layers": int(num_layers),
+            "feedforward_dim": int(feedforward_dim),
             "dropout": float(dropout),
-            "branch_dim": int(branch_dim),
+            "hlt_feature_names": list(PF_FEATURE_NAMES),
+            "corrected_view_feature_names": list(CORRECTED_VIEW_FEATURE_NAMES),
         }
 
     def no_weight_decay(self) -> set[str]:
-        return {"hlt_branch.mod.cls_token", "reco_branch.mod.cls_token"}
+        return set()
 
-    def forward(self, hlt_inputs: Mapping[str, Any], reco_inputs: Mapping[str, Any]):
-        hlt_cls = self.hlt_branch(hlt_inputs)
-        reco_cls = self.reco_branch(reco_inputs)
-        return self.classifier(require_torch().cat([hlt_cls, reco_cls], dim=1))
+    def forward(self, hlt_inputs: Mapping[str, Any], corrected_inputs: Mapping[str, Any] | CorrectedViewInputs):
+        torch = require_torch()
+        hlt_features, hlt_mask = _input_features_and_mask(hlt_inputs)
+        corrected_features, corrected_mask = _input_features_and_mask(corrected_inputs)
+        if hlt_features.shape[-1] != len(PF_FEATURE_NAMES):
+            raise ValueError(f"HLT branch expected {len(PF_FEATURE_NAMES)} features, got {hlt_features.shape[-1]}")
+        if corrected_features.shape[-1] != len(CORRECTED_VIEW_FEATURE_NAMES):
+            raise ValueError(
+                f"Corrected branch expected {len(CORRECTED_VIEW_FEATURE_NAMES)} features, "
+                f"got {corrected_features.shape[-1]}"
+            )
+
+        hlt_tokens = self.hlt_encoder(hlt_features, hlt_mask)
+        corrected_tokens = self.corrected_encoder(corrected_features, corrected_mask)
+        hlt_pool, _ = self.hlt_pool(hlt_tokens, hlt_mask)
+        corrected_pool, _ = self.corrected_pool(corrected_tokens, corrected_mask)
+
+        hlt_attended, _ = self.hlt_to_corrected(
+            query=hlt_tokens,
+            key=corrected_tokens,
+            value=corrected_tokens,
+            key_padding_mask=~corrected_mask.bool(),
+            need_weights=False,
+        )
+        corrected_attended, _ = self.corrected_to_hlt(
+            query=corrected_tokens,
+            key=hlt_tokens,
+            value=hlt_tokens,
+            key_padding_mask=~hlt_mask.bool(),
+            need_weights=False,
+        )
+        hlt_cross = self.hlt_cross_norm(hlt_tokens + self.cross_dropout(hlt_attended)) * hlt_mask.unsqueeze(-1).float()
+        corrected_cross = (
+            self.corrected_cross_norm(corrected_tokens + self.cross_dropout(corrected_attended))
+            * corrected_mask.unsqueeze(-1).float()
+        )
+        hlt_cross_pool, _ = self.hlt_pool(hlt_cross, hlt_mask)
+        corrected_cross_pool, _ = self.corrected_pool(corrected_cross, corrected_mask)
+
+        fused = torch.cat(
+            [
+                hlt_pool,
+                corrected_pool,
+                hlt_cross_pool,
+                corrected_cross_pool,
+                torch.abs(hlt_cross_pool - corrected_cross_pool),
+                hlt_cross_pool * corrected_cross_pool,
+            ],
+            dim=1,
+        )
+        logits = self.classifier(fused)
+        return _nan_to_num_torch(logits)
 
 
-def build_dual_view_tagger(*, model_size: str = "base", num_classes: int = 10):
-    return DualViewParticleTransformerTagger(num_classes=num_classes, model_size=model_size)
+DualViewParticleTransformerTagger = DualViewCrossAttentionTagger
+
+
+def build_dual_view_tagger(
+    *,
+    model_size: str = "base",
+    num_classes: int = 10,
+    hidden_dim: int | None = None,
+    num_heads: int | None = None,
+    num_layers: int | None = None,
+    feedforward_dim: int | None = None,
+    dropout: float = 0.05,
+    architecture: str | None = None,
+):
+    if architecture not in (None, "cross_attention_fusion"):
+        raise ValueError(f"Unsupported dual-view architecture {architecture!r}")
+    return DualViewCrossAttentionTagger(
+        num_classes=num_classes,
+        model_size=model_size,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        feedforward_dim=feedforward_dim,
+        dropout=dropout,
+    )
 
 
 def load_stage_a_reconstructor_checkpoint(path: str | Path, *, device=None):
@@ -411,14 +873,13 @@ def run_dual_view_epoch(
                     batch["hlt_mask"],
                     max_constits=max_constits,
                 )
-                reco_inputs = build_part_inputs_torch(
-                    reco.tokens,
-                    reco.candidate_mask,
-                    weights=reco.weights,
-                    max_constits=max_constits,
+                corrected_inputs = build_soft_corrected_view_torch(
+                    batch["hlt_tokens"],
+                    batch["hlt_mask"],
+                    reco,
                     weight_threshold=reco_weight_threshold,
                 )
-                logits = tagger(hlt_inputs, reco_inputs)
+                logits = tagger(hlt_inputs, corrected_inputs)
                 loss = criterion(logits, batch["labels"])
                 if not torch.isfinite(logits).all() or not torch.isfinite(loss):
                     raise FloatingPointError(
@@ -472,10 +933,12 @@ def dual_view_checkpoint_payload(
         "metrics": dict(metrics),
         "label_names": list(LABEL_NAMES),
         "pf_feature_names": list(PF_FEATURE_NAMES),
+        "hlt_feature_names": list(PF_FEATURE_NAMES),
+        "corrected_view_feature_names": list(CORRECTED_VIEW_FEATURE_NAMES),
         "model_config": getattr(tagger, "config", {}),
         "reconstructor_checkpoint": config.reconstructor_checkpoint,
         "reconstructor_epoch": None if reconstructor_payload is None else reconstructor_payload.get("epoch"),
-        "experiment_step": "step8_dual_view_tagger",
+        "experiment_step": DUAL_VIEW_EXPERIMENT_STEP,
     }
 
 
@@ -566,9 +1029,11 @@ def train_dual_view_tagger(
         "reconstructor_checkpoint": config.reconstructor_checkpoint,
         "reconstructor_epoch": None if reconstructor_payload is None else reconstructor_payload.get("epoch"),
         "hlt_baseline_reference": baseline_report,
+        "dual_view_architecture": "cross_attention_fusion",
+        "corrected_view_feature_names": list(CORRECTED_VIEW_FEATURE_NAMES),
         "leakage_rule": (
-            "Dual-view tagger consumes cached fixed-HLT tokens and reconstructed tokens produced "
-            "from fixed-HLT tokens only. Offline constituents are not loaded by Step 8 training."
+            "Dual-view tagger consumes cached fixed-HLT tokens and a parent-aligned soft corrected view "
+            "built from the frozen reconstructor output. Offline constituents are not loaded by Stage B training."
         ),
         "no_stack_or_final_test_partitions_loaded": True,
     }
@@ -656,8 +1121,9 @@ def train_dual_view_tagger(
     if baseline_report:
         hlt_baseline_accuracy = baseline_report.get("best_model_val_accuracy")
     report = {
-        "experiment_step": "step8_dual_view_tagger",
+        "experiment_step": DUAL_VIEW_EXPERIMENT_STEP,
         "variant": config.variant,
+        "dual_view_architecture": "cross_attention_fusion",
         "best_epoch": int(best_epoch),
         "best_model_val_accuracy": float(best_val_accuracy),
         "best_model_val_loss": float(best_val_loss),

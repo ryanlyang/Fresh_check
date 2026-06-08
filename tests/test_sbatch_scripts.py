@@ -17,6 +17,9 @@ RUNNERS = [
     "run_fuse_fresh_hlt5_seed_control.sh",
     "run_audit_fresh_samehlt7_plus_hlt.sh",
     "run_write_fresh_final_report.sh",
+    "run_v2_step6_train_m2_base.sh",
+    "run_v2_step10_fuse_m2_base_plus_hlt.sh",
+    "run_v2_step11_audit_m2_base_plus_hlt.sh",
 ]
 
 SUBMITTERS = [
@@ -24,6 +27,7 @@ SUBMITTERS = [
     "submit_fresh_samehlt_reco7.sh",
     "submit_fresh_full_samehlt_reco7_vs_hlt5.sh",
     "submit_fresh_smoke_test.sh",
+    "submit_v2_step6_m2_base_end_to_end.sh",
 ]
 
 
@@ -104,6 +108,24 @@ class SbatchStep14Tests(unittest.TestCase):
             self.assertIn('SCRIPT_DIR="${PROJECT_DIR}/sbatch"', text, name)
             self.assertIn('source "${SCRIPT_DIR}/common.sh"', text, name)
             self.assertNotIn('dirname "${BASH_SOURCE[0]}"', text, name)
+
+    def test_v2_step6_submitter_queues_training_fusion_and_audits(self):
+        train = self.read("run_v2_step6_train_m2_base.sh")
+        fusion = self.read("run_v2_step10_fuse_m2_base_plus_hlt.sh")
+        audit = self.read("run_v2_step11_audit_m2_base_plus_hlt.sh")
+        submitter = self.read("submit_v2_step6_m2_base_end_to_end.sh")
+        self.assertIn("jetclass_v2_original_mechanism_step6", self.read("common.sh"))
+        self.assertIn("--stage both", train)
+        self.assertIn("--variants \"${V2_STEP6_VARIANT}\"", train)
+        self.assertIn("--splits stack_train stack_val final_test", fusion)
+        self.assertIn('CONFIRM_FINAL_TEST:=1', fusion)
+        self.assertIn("--fusion-dir \"${V2_STEP6_FUSION_DIR}\"", audit)
+        self.assertIn("run_v2_step6_train_m2_base.sh", submitter)
+        self.assertIn("run_v2_step10_fuse_m2_base_plus_hlt.sh", submitter)
+        self.assertIn("run_v2_step11_audit_m2_base_plus_hlt.sh", submitter)
+        self.assertIn('--dependency="afterok:${train_jid}"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
+        self.assertIn("hlt5_seed_control: true", submitter)
 
 
 if __name__ == "__main__":

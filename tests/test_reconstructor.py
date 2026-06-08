@@ -90,6 +90,8 @@ class ReconstructorStep7ConfigTests(unittest.TestCase):
         cfg = m2_base_variant_config()
         self.assertEqual(cfg.name, "m2_base")
         self.assertEqual(cfg.max_generated, 56)
+        self.assertEqual(cfg.max_split_children, 2)
+        self.assertEqual(cfg.matching_mode, "hungarian")
         self.assertAlmostEqual(cfg.set_matching_weight, 1.0)
         configs = all_reconstructor_variant_configs()
         self.assertLess(configs["m2_genlow"].max_generated, configs["m2_base"].max_generated)
@@ -108,8 +110,13 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         return ReconstructorVariantConfig(
             name="m2_base",
             max_generated=3,
+            max_split_children=2,
             hidden_dim=16,
             global_dim=16,
+            num_heads=4,
+            num_encoder_layers=2,
+            feedforward_dim=32,
+            dropout=0.0,
             max_hlt_constits=5,
         )
 
@@ -123,14 +130,34 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         offline_mask = torch.from_numpy(offline_view.mask).bool()
 
         output = model(hlt_tokens, hlt_mask)
-        self.assertEqual(output.tokens.shape, (2, 13, 14))
-        self.assertEqual(output.weights.shape, (2, 13))
+        self.assertEqual(output.tokens.shape, (2, 18, 14))
+        self.assertEqual(output.weights.shape, (2, 18))
+        self.assertEqual(output.candidate_mask.shape, (2, 18))
         self.assertEqual(output.generated_tokens.shape, (2, 3, 14))
-        for candidate_tokens in (output.edited_tokens, output.split_tokens, output.generated_tokens):
+        self.assertEqual(output.split_child_tokens.shape, (2, 5, 2, 14))
+        self.assertEqual(output.split_child_weights.shape, (2, 5, 2))
+        self.assertEqual(output.split_parent_added_support.shape, (2, 5))
+        self.assertEqual(output.generator_to_parent_assignment.shape, (2, 3, 5))
+        self.assertEqual(output.generator_parent_added_support.shape, (2, 5))
+        self.assertEqual(output.parent_added_support.shape, (2, 5))
+        self.assertEqual(output.budget_efficiency_share.shape, (2, 5))
+        self.assertEqual(output.corrected_parent_tokens.shape, (2, 5, 14))
+        self.assertEqual(output.corrected_parent_weights.shape, (2, 5))
+        self.assertTrue(torch.allclose(output.generator_to_parent_assignment.sum(dim=2), torch.ones(2, 3), atol=1.0e-5))
+        for candidate_tokens in (
+            output.edited_tokens,
+            output.split_tokens,
+            output.split_child_tokens.reshape(2, 10, 14),
+            output.generated_tokens,
+        ):
             pt = torch.clamp(candidate_tokens[:, :, 0], min=0.0)
             eta = candidate_tokens[:, :, 1]
             energy = candidate_tokens[:, :, 3]
             self.assertTrue(torch.all(energy + 1.0e-6 >= pt * torch.cosh(torch.clamp(eta, -5.0, 5.0))))
+            self.assertTrue(torch.isfinite(candidate_tokens).all())
+        self.assertTrue(torch.isfinite(output.weights).all())
+        self.assertTrue(torch.isfinite(output.total_count_pred).all())
+        self.assertTrue(torch.isfinite(output.added_count_pred).all())
 
         loss, diagnostics = reconstruction_loss(
             output,
@@ -142,6 +169,77 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss))
         self.assertIn("set_loss", diagnostics)
+        self.assertIn("hungarian_set_loss", diagnostics)
+        self.assertIn("matched_weight_loss", diagnostics)
+        self.assertIn("weighted_chamfer_loss", diagnostics)
+        self.assertIn("split_sparsity_loss", diagnostics)
+        self.assertIn("generated_sparsity_loss", diagnostics)
+        self.assertIn("nonfinite_penalty", diagnostics)
+        self.assertIn("matching_candidate_count", diagnostics)
+
+    def test_forward_sanitizes_nonfinite_or_empty_inputs(self):
+        cfg = self.tiny_config()
+        model = build_reconstructor(cfg)
+        hlt_tokens = torch.zeros(2, 5, 14)
+        hlt_mask = torch.zeros(2, 5, dtype=torch.bool)
+        hlt_mask[0, :2] = True
+        hlt_tokens[0, 0, 0] = float("nan")
+        hlt_tokens[0, 0, 3] = float("inf")
+        hlt_tokens[0, 1, 0] = 2.0
+        hlt_tokens[0, 1, 3] = 2.0
+
+        output = model(hlt_tokens, hlt_mask)
+        self.assertTrue(torch.isfinite(output.tokens).all())
+        self.assertTrue(torch.isfinite(output.weights).all())
+        self.assertEqual(output.sanitized_hlt_mask[0].sum().item(), 1)
+        self.assertEqual(output.sanitized_hlt_mask[1].sum().item(), 1)
+        self.assertEqual(output.diagnostics["forced_nonempty_mask"][1].item(), 1.0)
+
+    def test_loss_sanitizes_nonfinite_candidates_before_matching(self):
+        hlt_tokens = torch.zeros(1, 2, 14)
+        hlt_mask = torch.ones(1, 2, dtype=torch.bool)
+        offline_tokens = torch.zeros(1, 2, 14)
+        offline_mask = torch.ones(1, 2, dtype=torch.bool)
+        for idx in range(2):
+            pt = 2.0 + idx
+            hlt_tokens[0, idx, 0] = pt
+            hlt_tokens[0, idx, 2] = 0.1 * idx
+            hlt_tokens[0, idx, 3] = pt
+            offline_tokens[0, idx, 0] = pt
+            offline_tokens[0, idx, 2] = 0.1 * idx
+            offline_tokens[0, idx, 3] = pt
+
+        edited_tokens = hlt_tokens.clone()
+        split_tokens = hlt_tokens.clone()
+        generated_tokens = hlt_tokens[:, :1, :].clone()
+        edited_tokens[0, 0, 0] = float("nan")
+        split_tokens[0, 1, 3] = float("inf")
+        generated_tokens[0, 0, 1] = float("-inf")
+        output = ReconstructionOutput(
+            tokens=torch.cat([edited_tokens, split_tokens, generated_tokens], dim=1),
+            weights=torch.tensor([[1.0, float("nan"), 0.5, 0.5, float("inf")]]),
+            candidate_mask=torch.ones(1, 5, dtype=torch.bool),
+            edited_tokens=edited_tokens,
+            split_tokens=split_tokens,
+            generated_tokens=generated_tokens,
+            edited_weights=torch.tensor([[1.0, float("nan")]]),
+            split_weights=torch.tensor([[0.5, 0.5]]),
+            generated_weights=torch.tensor([[float("inf")]]),
+            total_count_pred=torch.ones(1) * 2.0,
+            added_count_pred=torch.ones(1),
+        )
+        loss, diagnostics = reconstruction_loss(
+            output,
+            hlt_tokens=hlt_tokens,
+            hlt_mask=hlt_mask,
+            offline_tokens=offline_tokens,
+            offline_mask=offline_mask,
+            config=self.tiny_config(),
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(diagnostics["nonfinite_candidate_count"]), 0.0)
+        self.assertGreaterEqual(float(diagnostics["nonfinite_penalty"]), 0.0)
+        self.assertTrue(torch.isfinite(diagnostics["hungarian_set_loss"]))
 
     def test_reconstruction_global_response_losses_are_bounded(self):
         hlt_tokens = torch.zeros(1, 1, 14)

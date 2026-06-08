@@ -33,6 +33,11 @@ IFS=$'\n\t'
 : "${RECO7_AUDIT_DIR:=${OUTPUT_ROOT}/jetclass_fresh_audits/reco7_plus_hlt}"
 : "${HLT5_AUDIT_DIR:=${OUTPUT_ROOT}/jetclass_fresh_audits/hlt5_seed_control}"
 : "${FINAL_REPORT_DIR:=${OUTPUT_ROOT}/jetclass_fresh_final_report}"
+: "${V2_STEP6_ROOT:=${OUTPUT_ROOT}/jetclass_v2_original_mechanism_step6}"
+: "${V2_STEP6_RECO_ROOT:=${V2_STEP6_ROOT}/reco}"
+: "${V2_STEP6_FUSION_DIR:=${V2_STEP6_ROOT}/fusion/m2_base_plus_hlt}"
+: "${V2_STEP6_AUDIT_DIR:=${V2_STEP6_ROOT}/audits/m2_base_plus_hlt}"
+: "${V2_STEP6_VARIANT:=m2_base}"
 : "${RECO7_VARIANTS:=m2_base m2_consstrong m2_budgetlite m2_genlow m2_genhigh m2_topk60ish m2_antioverlap}"
 : "${HLT5_SEEDS:=101 202 303 404 505}"
 : "${SPLIT_SEEDS:=model_train=153 model_val=254 stack_train=356 stack_val=457 final_test=558}"
@@ -267,11 +272,17 @@ keys = [
     "RECO7_AUDIT_DIR",
     "HLT5_AUDIT_DIR",
     "FINAL_REPORT_DIR",
+    "V2_STEP6_ROOT",
+    "V2_STEP6_RECO_ROOT",
+    "V2_STEP6_FUSION_DIR",
+    "V2_STEP6_AUDIT_DIR",
+    "V2_STEP6_VARIANT",
     "RECO7_VARIANTS",
     "HLT5_SEEDS",
     "SPLIT_SEEDS",
     "FIXED_HLT_SEEDS",
     "FIXED_HLT_PARAMS",
+    "HLT_BASELINE_REPORT",
     "TRAIN_SEED",
     "VARIANT",
     "OFFLINE_TEACHER_SEED",
@@ -282,12 +293,23 @@ keys = [
     "FINAL_TEST_SIZE",
     "CONDA_ENV",
     "DEVICE",
+    "MODEL_SIZE",
+    "NO_AMP",
     "BATCH_SIZE",
     "EPOCHS",
     "LR",
+    "STAGE_A_LR",
+    "STAGE2_LR",
     "WEIGHT_DECAY",
     "EARLY_STOP_PATIENCE",
     "GRAD_CLIP_NORM",
+    "FUSION_BATCH_SIZE",
+    "FUSION_NUM_WORKERS",
+    "FUSION_DEVICE",
+    "FUSION_MAX_JETS_PER_SPLIT",
+    "FUSION_FEATURE_MODE",
+    "FUSION_MAX_ITER",
+    "CONFIRM_FINAL_TEST",
 ]
 payload = {
     "job_kind": os.environ["RUN_CONFIG_JOB_KIND"],

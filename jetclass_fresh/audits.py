@@ -349,6 +349,7 @@ def audit_offline_leakage_interfaces() -> Dict[str, Any]:
             part_inputs.build_particle_transformer_inputs_from_tokens
         ),
         "dual_view.build_part_inputs_torch": inspect.signature(dual_view.build_part_inputs_torch),
+        "dual_view.build_soft_corrected_view_torch": inspect.signature(dual_view.build_soft_corrected_view_torch),
     }
     forbidden_names = {
         "offline_tokens",

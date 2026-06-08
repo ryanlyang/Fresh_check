@@ -8,6 +8,7 @@ leaving HLT generation and split definitions untouched.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -54,8 +55,13 @@ class ReconstructorVariantConfig:
 
     name: str = "m2_base"
     max_generated: int = 56
+    max_split_children: int = 2
     hidden_dim: int = 128
     global_dim: int = 128
+    num_heads: int = 8
+    num_encoder_layers: int = 6
+    feedforward_dim: int = 512
+    dropout: float = 0.10
     max_hlt_constits: int = 128
     set_matching_weight: float = 1.0
     budget_count_weight: float = 0.70
@@ -66,6 +72,13 @@ class ReconstructorVariantConfig:
     mass_ratio_weight: float = 0.02
     energy_ratio_weight: float = 0.02
     physics_weight: float = 0.0
+    split_sparsity_weight: float = 0.004
+    generated_sparsity_weight: float = 0.010
+    matched_weight_weight: float = 0.050
+    nonfinite_penalty_weight: float = 0.10
+    matching_mode: str = "hungarian"
+    max_matching_candidates: int = 160
+    matching_large_cost: float = 1.0e6
     target_added_particle_scale: float = 0.90
     split_locality_radius: float = 0.04
     generated_locality_radius: float = 0.20
@@ -204,6 +217,22 @@ class ReconstructionOutput:
     generated_weights: Any
     total_count_pred: Any
     added_count_pred: Any
+    corrected_parent_tokens: Any = None
+    corrected_parent_weights: Any = None
+    split_child_tokens: Any = None
+    split_child_weights: Any = None
+    split_parent_probability: Any = None
+    split_parent_uplift: Any = None
+    split_parent_added_support: Any = None
+    generator_to_parent_assignment: Any = None
+    generator_parent_added_support: Any = None
+    parent_added_support: Any = None
+    budget_efficiency_share: Any = None
+    budget_split_share: Any = None
+    candidate_branch_ids: Any = None
+    sanitized_hlt_tokens: Any = None
+    sanitized_hlt_mask: Any = None
+    diagnostics: Any = None
 
 
 def wrap_phi_torch(phi):
@@ -245,72 +274,322 @@ def raw_token_features(tokens, mask):
     return torch.cat([kin, nonkin, mask.unsqueeze(-1).float()], dim=-1)
 
 
+def sanitize_hlt_tokens(tokens, mask):
+    """Return finite, physical HLT tokens plus a non-empty valid mask."""
+
+    torch = require_torch()
+    tokens = tokens.float()
+    mask = mask.bool()
+    finite_tokens = torch.isfinite(tokens).all(dim=-1)
+    if hasattr(torch, "nan_to_num"):
+        cleaned = torch.nan_to_num(tokens, nan=0.0, posinf=0.0, neginf=0.0)
+    else:  # pragma: no cover - compatibility with old torch
+        cleaned = torch.where(torch.isfinite(tokens), tokens, torch.zeros_like(tokens))
+    cleaned = cleaned.clone()
+    pt = torch.clamp(cleaned[:, :, 0], min=0.0)
+    eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
+    phi = wrap_phi_torch(cleaned[:, :, 2])
+    energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), physical_energy_floor(pt, eta))
+    cleaned[:, :, 0] = pt
+    cleaned[:, :, 1] = eta
+    cleaned[:, :, 2] = phi
+    cleaned[:, :, 3] = energy
+
+    safe_mask = mask & finite_tokens
+    empty = safe_mask.sum(dim=1) == 0
+    if bool(empty.any()):
+        safe_mask = safe_mask.clone()
+        cleaned = cleaned.clone()
+        safe_mask[empty, 0] = True
+        cleaned[empty, 0, :] = 0.0
+        cleaned[empty, 0, 0] = ENERGY_EPS
+        cleaned[empty, 0, 3] = ENERGY_EPS
+    diagnostics = {
+        "nonfinite_input_token_count": (~finite_tokens & mask).sum(dim=1).float(),
+        "forced_nonempty_mask": empty.float(),
+    }
+    return cleaned, safe_mask, diagnostics
+
+
+class AttentionPooling(_ModuleBase):
+    """Mask-aware learned-query attention pooling."""
+
+    def __init__(self, dim: int) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        self.query = torch.nn.Parameter(torch.randn(int(dim)) * 0.02)
+        self.norm = torch.nn.LayerNorm(int(dim))
+
+    def forward(self, tokens, mask):
+        torch = require_torch()
+        tokens = self.norm(tokens)
+        scores = torch.einsum("bnd,d->bn", tokens, self.query) / math.sqrt(float(tokens.shape[-1]))
+        scores = scores.masked_fill(~mask.bool(), -1.0e4)
+        weights = torch.softmax(scores, dim=1) * mask.float()
+        weights = weights / torch.clamp(weights.sum(dim=1, keepdim=True), min=1.0e-6)
+        return torch.einsum("bn,bnd->bd", weights, tokens), weights
+
+
+class RelativePositionEncoderLayer(_ModuleBase):
+    """Transformer encoder layer with eta/phi/dR-aware additive attention bias."""
+
+    def __init__(self, *, dim: int, num_heads: int, feedforward_dim: int, dropout: float) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        dim = int(dim)
+        num_heads = int(num_heads)
+        if dim % num_heads != 0:
+            raise ValueError(f"hidden_dim={dim} must be divisible by num_heads={num_heads}")
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.qkv = torch.nn.Linear(dim, dim * 3)
+        self.out_proj = torch.nn.Linear(dim, dim)
+        self.rel_bias = torch.nn.Sequential(
+            torch.nn.Linear(4, max(16, num_heads * 2)),
+            torch.nn.GELU(),
+            torch.nn.Linear(max(16, num_heads * 2), num_heads),
+        )
+        self.norm1 = torch.nn.LayerNorm(dim)
+        self.norm2 = torch.nn.LayerNorm(dim)
+        self.ffn = torch.nn.Sequential(
+            torch.nn.Linear(dim, int(feedforward_dim)),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(dropout)),
+            torch.nn.Linear(int(feedforward_dim), dim),
+        )
+        self.dropout = torch.nn.Dropout(float(dropout))
+
+    def relative_features(self, raw_tokens):
+        torch = require_torch()
+        eta = raw_tokens[:, :, 1]
+        phi = raw_tokens[:, :, 2]
+        deta = torch.clamp(eta[:, :, None] - eta[:, None, :], -10.0, 10.0)
+        dphi = wrap_phi_torch(phi[:, :, None] - phi[:, None, :])
+        dr = safe_sqrt(deta * deta + dphi * dphi)
+        return torch.stack([deta / 5.0, torch.sin(dphi), torch.cos(dphi), torch.clamp(dr, 0.0, 10.0) / 5.0], dim=-1)
+
+    def forward(self, x, mask, raw_tokens):
+        torch = require_torch()
+        residual = x
+        x_norm = self.norm1(x)
+        batch_size, n_tokens, _ = x_norm.shape
+        qkv = self.qkv(x_norm).view(batch_size, n_tokens, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(float(self.head_dim))
+        rel_bias = self.rel_bias(self.relative_features(raw_tokens)).permute(0, 3, 1, 2)
+        scores = scores + rel_bias
+        scores = scores.masked_fill(~mask[:, None, None, :].bool(), -1.0e4)
+        attn = torch.softmax(scores, dim=-1)
+        attn = attn * mask[:, None, None, :].float()
+        attn = attn / torch.clamp(attn.sum(dim=-1, keepdim=True), min=1.0e-6)
+        context = torch.matmul(attn, v).transpose(1, 2).contiguous().view(batch_size, n_tokens, self.dim)
+        x = residual + self.dropout(self.out_proj(context))
+        x = x * mask.unsqueeze(-1).float()
+        x = x + self.dropout(self.ffn(self.norm2(x)))
+        return x * mask.unsqueeze(-1).float()
+
+
+class RelativePositionTokenEncoder(_ModuleBase):
+    """Stack of relative-position-aware transformer encoder layers."""
+
+    def __init__(self, config: ReconstructorVariantConfig) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        hidden = int(config.hidden_dim)
+        self.input_proj = torch.nn.Sequential(
+            torch.nn.Linear(16, hidden),
+            torch.nn.LayerNorm(hidden),
+            torch.nn.GELU(),
+        )
+        self.layers = torch.nn.ModuleList(
+            [
+                RelativePositionEncoderLayer(
+                    dim=hidden,
+                    num_heads=int(config.num_heads),
+                    feedforward_dim=int(config.feedforward_dim),
+                    dropout=float(config.dropout),
+                )
+                for _ in range(int(config.num_encoder_layers))
+            ]
+        )
+        self.final_norm = torch.nn.LayerNorm(hidden)
+
+    def forward(self, hlt_tokens, hlt_mask):
+        x = self.input_proj(raw_token_features(hlt_tokens, hlt_mask))
+        x = x * hlt_mask.unsqueeze(-1).float()
+        for layer in self.layers:
+            x = layer(x, hlt_mask, hlt_tokens)
+        return self.final_norm(x) * hlt_mask.unsqueeze(-1).float()
+
+
+class GeneratorCrossAttention(_ModuleBase):
+    """Learned generator queries cross-attending to encoded HLT tokens."""
+
+    def __init__(self, *, dim: int, num_heads: int, max_generated: int, dropout: float) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        self.queries = torch.nn.Parameter(torch.randn(int(max_generated), int(dim)) * 0.02)
+        self.global_to_query = torch.nn.Linear(int(dim), int(dim))
+        self.cross_attn = torch.nn.MultiheadAttention(
+            embed_dim=int(dim),
+            num_heads=int(num_heads),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.norm = torch.nn.LayerNorm(int(dim))
+
+    def forward(self, encoded_tokens, mask, global_context):
+        batch_size = encoded_tokens.shape[0]
+        if self.queries.shape[0] == 0:
+            empty_states = encoded_tokens.new_zeros(batch_size, 0, encoded_tokens.shape[-1])
+            empty_assignment = encoded_tokens.new_zeros(batch_size, 0, encoded_tokens.shape[1])
+            return empty_states, empty_assignment
+        queries = self.queries[None, :, :].expand(batch_size, -1, -1)
+        queries = queries + self.global_to_query(global_context)[:, None, :]
+        attended, weights = self.cross_attn(
+            query=queries,
+            key=encoded_tokens,
+            value=encoded_tokens,
+            key_padding_mask=~mask.bool(),
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        assignment = weights.mean(dim=1) * mask[:, None, :].float()
+        assignment = assignment / assignment.sum(dim=-1, keepdim=True).clamp(min=1.0e-6)
+        return self.norm(attended + queries), assignment
+
+
 class M2BaseReconstructor(_ModuleBase):
-    """Operation-aware HLT-to-offline reconstructor for the `m2_base` variant."""
+    """Original-mechanism m2-hybrid HLT-to-offline reconstructor.
+
+    The forward path is operation-aware: it edits existing HLT parents, proposes
+    split children local to each parent, generates missing-token candidates via
+    learned queries that cross-attend to HLT tokens, and calibrates all soft
+    supports with jet-level budget heads.
+    """
 
     def __init__(self, config: ReconstructorVariantConfig | None = None) -> None:
         require_torch()
         super().__init__()
         torch = require_torch()
         self.config = config or m2_base_variant_config()
-        input_dim = 16
         hidden = int(self.config.hidden_dim)
         global_dim = int(self.config.global_dim)
-        self.token_encoder = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden),
-            torch.nn.GELU(),
-            torch.nn.Linear(hidden, hidden),
-            torch.nn.GELU(),
-        )
+        if hidden % int(self.config.num_heads) != 0:
+            raise ValueError(
+                f"hidden_dim={hidden} must be divisible by num_heads={int(self.config.num_heads)}"
+            )
+        self.token_encoder = RelativePositionTokenEncoder(self.config)
+        self.pool = AttentionPooling(hidden)
         self.global_encoder = torch.nn.Sequential(
             torch.nn.Linear(hidden + 3, global_dim),
             torch.nn.GELU(),
+            torch.nn.Dropout(float(self.config.dropout)),
             torch.nn.Linear(global_dim, global_dim),
             torch.nn.GELU(),
         )
-        self.edit_head = torch.nn.Linear(hidden + global_dim, 5)
-        self.split_head = torch.nn.Linear(hidden + global_dim, 5)
-        self.generated_query = torch.nn.Parameter(torch.randn(self.config.max_generated, global_dim) * 0.02)
+        self.global_to_hidden = torch.nn.Linear(global_dim, hidden)
+        token_context_dim = hidden * 2
+
+        self.edit_delta_head = torch.nn.Linear(token_context_dim, 4)
+        self.edit_weight_head = torch.nn.Linear(token_context_dim, 1)
+
+        self.split_parent_head = torch.nn.Linear(token_context_dim, 1)
+        self.split_uplift_head = torch.nn.Linear(token_context_dim, 2)
+        self.split_child_head = torch.nn.Linear(token_context_dim, int(self.config.max_split_children) * 5)
+
+        self.generator_decoder = GeneratorCrossAttention(
+            dim=hidden,
+            num_heads=int(self.config.num_heads),
+            max_generated=int(self.config.max_generated),
+            dropout=float(self.config.dropout),
+        )
         self.generated_head = torch.nn.Sequential(
-            torch.nn.Linear(global_dim * 2, hidden),
+            torch.nn.Linear(hidden * 2, hidden),
             torch.nn.GELU(),
+            torch.nn.Dropout(float(self.config.dropout)),
             torch.nn.Linear(hidden, 15),
         )
-        self.count_head = torch.nn.Sequential(
+        self.budget_head = torch.nn.Sequential(
             torch.nn.Linear(global_dim, hidden),
             torch.nn.GELU(),
-            torch.nn.Linear(hidden, 2),
+            torch.nn.Linear(hidden, 4),
         )
 
     def _apply_kinematic_delta(self, base_tokens, delta, *, split: bool = False):
         torch = require_torch()
         cfg = self.config
         max_log_pt = cfg.max_split_log_pt_shift if split else cfg.max_log_pt_shift
-        log_pt_delta = torch.tanh(delta[:, :, 0]) * float(max_log_pt)
-        eta_delta = torch.tanh(delta[:, :, 1]) * float(cfg.max_eta_shift)
-        phi_delta = torch.tanh(delta[:, :, 2]) * float(cfg.max_phi_shift)
-        log_e_delta = torch.tanh(delta[:, :, 3]) * float(cfg.max_log_energy_shift)
+        log_pt_delta = torch.tanh(delta[..., 0]) * float(max_log_pt)
+        eta_delta = torch.tanh(delta[..., 1]) * float(cfg.max_eta_shift)
+        phi_delta = torch.tanh(delta[..., 2]) * float(cfg.max_phi_shift)
+        log_e_delta = torch.tanh(delta[..., 3]) * float(cfg.max_log_energy_shift)
 
         out = base_tokens.clone()
-        pt = torch.clamp(base_tokens[:, :, 0], min=1.0e-8) * torch.exp(log_pt_delta)
-        eta = torch.clamp(base_tokens[:, :, 1] + eta_delta, -5.0, 5.0)
-        phi = wrap_phi_torch(base_tokens[:, :, 2] + phi_delta)
-        energy = torch.clamp(base_tokens[:, :, 3], min=1.0e-8) * torch.exp(log_e_delta)
-        out[:, :, 0] = pt
-        out[:, :, 1] = eta
-        out[:, :, 2] = phi
-        out[:, :, 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
+        pt = torch.clamp(base_tokens[..., 0], min=1.0e-8) * torch.exp(log_pt_delta)
+        eta = torch.clamp(base_tokens[..., 1] + eta_delta, -5.0, 5.0)
+        phi = wrap_phi_torch(base_tokens[..., 2] + phi_delta)
+        energy = torch.clamp(base_tokens[..., 3], min=1.0e-8) * torch.exp(log_e_delta)
+        out[..., 0] = pt
+        out[..., 1] = eta
+        out[..., 2] = phi
+        out[..., 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
         return out
+
+    def _uplift_parent_tokens(self, hlt_tokens, raw_uplift):
+        torch = require_torch()
+        uplift = torch.sigmoid(raw_uplift) * float(self.config.max_split_log_pt_shift)
+        out = hlt_tokens.clone()
+        pt = torch.clamp(hlt_tokens[:, :, 0], min=1.0e-8) * torch.exp(uplift[:, :, 0])
+        eta = hlt_tokens[:, :, 1]
+        energy = torch.clamp(hlt_tokens[:, :, 3], min=1.0e-8) * torch.exp(uplift[:, :, 1])
+        out[:, :, 0] = pt
+        out[:, :, 3] = torch.maximum(energy, physical_energy_floor(pt, eta))
+        return out, uplift
+
+    @staticmethod
+    def _budget_scale(raw_weights, budget, mask):
+        torch = require_torch()
+        raw_weights = torch.clamp(raw_weights, min=0.0)
+        mask = mask.float()
+        raw_weights = raw_weights * mask
+        denom = torch.clamp(raw_weights.sum(dim=1, keepdim=True), min=1.0e-6)
+        scaled = raw_weights * (budget[:, None] / denom)
+        return torch.clamp(scaled, min=0.0, max=1.0) * mask
+
+    def _make_generated_tokens(self, generated_raw, *, dtype, device):
+        torch = require_torch()
+        batch_size, n_generated, _ = generated_raw.shape
+        generated_tokens = torch.zeros(batch_size, n_generated, RAW_DIM, dtype=dtype, device=device)
+        gen_pt = torch.nn.functional.softplus(generated_raw[:, :, 0]) + ENERGY_EPS
+        gen_eta = torch.tanh(generated_raw[:, :, 1]) * float(self.config.max_generated_abs_eta)
+        gen_phi = wrap_phi_torch(generated_raw[:, :, 2])
+        gen_energy = physical_energy_floor(gen_pt, gen_eta) + torch.nn.functional.softplus(generated_raw[:, :, 3])
+        generated_tokens[:, :, 0] = gen_pt
+        generated_tokens[:, :, 1] = gen_eta
+        generated_tokens[:, :, 2] = gen_phi
+        generated_tokens[:, :, 3] = gen_energy
+        generated_tokens[:, :, 4:14] = torch.tanh(generated_raw[:, :, 4:14])
+        return generated_tokens
 
     def forward(self, hlt_tokens, hlt_mask) -> ReconstructionOutput:
         torch = require_torch()
-        hlt_tokens = hlt_tokens.float()
-        hlt_mask = hlt_mask.bool()
-        features = raw_token_features(hlt_tokens, hlt_mask)
-        encoded = self.token_encoder(features) * hlt_mask.unsqueeze(-1).float()
-        denom = torch.clamp(hlt_mask.sum(dim=1, keepdim=True).float(), min=1.0)
-        pooled = encoded.sum(dim=1) / denom
-        hlt_count = hlt_mask.sum(dim=1, keepdim=False).float()
+        hlt_tokens, hlt_mask, input_diagnostics = sanitize_hlt_tokens(hlt_tokens, hlt_mask)
+        batch_size, n_parents, _ = hlt_tokens.shape
+        n_children = int(self.config.max_split_children)
+        n_generated = int(self.config.max_generated)
+
+        encoded = self.token_encoder(hlt_tokens, hlt_mask)
+        pooled, pool_weights = self.pool(encoded, hlt_mask)
+        hlt_count = hlt_mask.sum(dim=1).float()
         hlt_pt = (hlt_tokens[:, :, 0] * hlt_mask.float()).sum(dim=1)
         hlt_energy = (hlt_tokens[:, :, 3] * hlt_mask.float()).sum(dim=1)
         global_stats = torch.stack(
@@ -322,57 +601,87 @@ class M2BaseReconstructor(_ModuleBase):
             dim=1,
         )
         global_latent = self.global_encoder(torch.cat([pooled, global_stats], dim=1))
-        global_per_token = global_latent[:, None, :].expand(-1, hlt_tokens.shape[1], -1)
-        token_context = torch.cat([encoded, global_per_token], dim=-1)
-
-        edit_raw = self.edit_head(token_context)
-        split_raw = self.split_head(token_context)
-        edited_tokens = self._apply_kinematic_delta(hlt_tokens, edit_raw[:, :, :4], split=False)
-        edited_weights = torch.sigmoid(edit_raw[:, :, 4]) * hlt_mask.float()
-
-        split_tokens = self._apply_kinematic_delta(hlt_tokens, split_raw[:, :, :4], split=True)
-        split_weights = torch.sigmoid(split_raw[:, :, 4]) * hlt_mask.float()
-
-        batch_size = hlt_tokens.shape[0]
-        query = self.generated_query[None, :, :].expand(batch_size, -1, -1)
-        gen_global = global_latent[:, None, :].expand(-1, self.config.max_generated, -1)
-        generated_raw = self.generated_head(torch.cat([query, gen_global], dim=-1))
-        generated_tokens = torch.zeros(
-            batch_size,
-            self.config.max_generated,
-            RAW_DIM,
-            dtype=hlt_tokens.dtype,
-            device=hlt_tokens.device,
+        global_hidden = self.global_to_hidden(global_latent)
+        token_context = torch.cat(
+            [encoded, global_hidden[:, None, :].expand(-1, n_parents, -1)],
+            dim=-1,
         )
-        gen_pt = torch.nn.functional.softplus(generated_raw[:, :, 0]) + 1.0e-4
-        gen_eta = torch.tanh(generated_raw[:, :, 1]) * float(self.config.max_generated_abs_eta)
-        gen_phi = wrap_phi_torch(generated_raw[:, :, 2])
-        gen_energy = physical_energy_floor(gen_pt, gen_eta) + torch.nn.functional.softplus(generated_raw[:, :, 3])
-        generated_tokens[:, :, 0] = gen_pt
-        generated_tokens[:, :, 1] = gen_eta
-        generated_tokens[:, :, 2] = gen_phi
-        generated_tokens[:, :, 3] = gen_energy
-        generated_tokens[:, :, 4:14] = torch.tanh(generated_raw[:, :, 4:14])
-        generated_weights = torch.sigmoid(generated_raw[:, :, 14])
+
+        budget_raw = self.budget_head(global_latent)
+        added_count_pred = torch.nn.functional.softplus(budget_raw[:, 1])
+        total_count_pred = hlt_count + added_count_pred + 0.10 * torch.nn.functional.softplus(budget_raw[:, 0])
+        budget_split_share = torch.sigmoid(budget_raw[:, 2])
+        budget_efficiency_global = torch.sigmoid(budget_raw[:, 3])
+
+        edit_delta = self.edit_delta_head(token_context)
+        split_probability = torch.sigmoid(self.split_parent_head(token_context).squeeze(-1)) * hlt_mask.float()
+        edited_tokens = self._apply_kinematic_delta(hlt_tokens, edit_delta, split=False)
+        edit_raw_weights = torch.sigmoid(self.edit_weight_head(token_context).squeeze(-1))
+        edit_raw_weights = edit_raw_weights * (1.0 - split_probability) * hlt_mask.float()
+
+        uplifted_parent_tokens, split_parent_uplift = self._uplift_parent_tokens(
+            hlt_tokens,
+            self.split_uplift_head(token_context),
+        )
+        child_raw = self.split_child_head(token_context).view(batch_size, n_parents, n_children, 5)
+        parent_for_children = uplifted_parent_tokens[:, :, None, :].expand(-1, -1, n_children, -1)
+        split_child_tokens = self._apply_kinematic_delta(parent_for_children, child_raw[..., :4], split=True)
+        split_child_raw_weights = (
+            split_probability[:, :, None]
+            * torch.sigmoid(child_raw[..., 4])
+            * hlt_mask[:, :, None].float()
+        )
+
+        gen_states, generator_to_parent = self.generator_decoder(encoded, hlt_mask, global_hidden)
+        generated_raw = self.generated_head(
+            torch.cat([gen_states, global_hidden[:, None, :].expand(-1, n_generated, -1)], dim=-1)
+        )
+        generated_tokens = self._make_generated_tokens(generated_raw, dtype=hlt_tokens.dtype, device=hlt_tokens.device)
+        generated_raw_weights = torch.sigmoid(generated_raw[:, :, 14])
+
+        split_budget = added_count_pred * budget_split_share
+        gen_budget = added_count_pred * (1.0 - budget_split_share)
+        edit_budget = torch.clamp(total_count_pred - added_count_pred, min=1.0e-3)
+
+        split_mask = hlt_mask[:, :, None].expand(-1, -1, n_children).reshape(batch_size, n_parents * n_children)
+        split_weights = self._budget_scale(
+            split_child_raw_weights.reshape(batch_size, n_parents * n_children),
+            split_budget,
+            split_mask,
+        )
+        split_child_weights = split_weights.view(batch_size, n_parents, n_children)
+        generated_mask = torch.ones(batch_size, n_generated, dtype=torch.bool, device=hlt_tokens.device)
+        generated_weights = self._budget_scale(generated_raw_weights, gen_budget, generated_mask)
+        edited_weights = self._budget_scale(edit_raw_weights, edit_budget, hlt_mask)
+
+        split_tokens = split_child_tokens.reshape(batch_size, n_parents * n_children, RAW_DIM)
+        split_parent_added_support = split_child_weights.sum(dim=2)
+        generator_parent_added_support = torch.einsum("bgn,bg->bn", generator_to_parent, generated_weights)
+        parent_added_support = (split_parent_added_support + generator_parent_added_support) * hlt_mask.float()
+        budget_efficiency_share = (
+            parent_added_support / torch.clamp(added_count_pred[:, None], min=1.0)
+        ) * budget_efficiency_global[:, None]
 
         tokens = torch.cat([edited_tokens, split_tokens, generated_tokens], dim=1)
         weights = torch.cat([edited_weights, split_weights, generated_weights], dim=1)
-        candidate_mask = torch.cat(
+        candidate_mask = torch.cat([hlt_mask, split_mask, generated_mask], dim=1)
+        branch_ids = torch.cat(
             [
-                hlt_mask,
-                hlt_mask,
-                torch.ones(
-                    batch_size,
-                    self.config.max_generated,
-                    dtype=torch.bool,
-                    device=hlt_tokens.device,
-                ),
+                torch.zeros(batch_size, n_parents, dtype=torch.long, device=hlt_tokens.device),
+                torch.ones(batch_size, n_parents * n_children, dtype=torch.long, device=hlt_tokens.device),
+                torch.full((batch_size, n_generated), 2, dtype=torch.long, device=hlt_tokens.device),
             ],
             dim=1,
         )
-        count_raw = self.count_head(global_latent)
-        total_count_pred = torch.nn.functional.softplus(count_raw[:, 0])
-        added_count_pred = torch.nn.functional.softplus(count_raw[:, 1])
+
+        diagnostics = {
+            **input_diagnostics,
+            "attention_pool_weights": pool_weights,
+            "soft_total_weight": (weights * candidate_mask.float()).sum(dim=1),
+            "soft_added_weight": split_weights.sum(dim=1) + generated_weights.sum(dim=1),
+            "budget_split_share": budget_split_share,
+            "budget_efficiency_global": budget_efficiency_global,
+        }
 
         return ReconstructionOutput(
             tokens=tokens,
@@ -386,6 +695,22 @@ class M2BaseReconstructor(_ModuleBase):
             generated_weights=generated_weights,
             total_count_pred=total_count_pred,
             added_count_pred=added_count_pred,
+            corrected_parent_tokens=edited_tokens,
+            corrected_parent_weights=edited_weights,
+            split_child_tokens=split_child_tokens,
+            split_child_weights=split_child_weights,
+            split_parent_probability=split_probability,
+            split_parent_uplift=split_parent_uplift,
+            split_parent_added_support=split_parent_added_support,
+            generator_to_parent_assignment=generator_to_parent,
+            generator_parent_added_support=generator_parent_added_support,
+            parent_added_support=parent_added_support,
+            budget_efficiency_share=budget_efficiency_share,
+            budget_split_share=budget_split_share,
+            candidate_branch_ids=branch_ids,
+            sanitized_hlt_tokens=hlt_tokens,
+            sanitized_hlt_mask=hlt_mask,
+            diagnostics=diagnostics,
         )
 
 
@@ -462,6 +787,174 @@ def pairwise_delta_r(left_tokens, right_tokens):
     return safe_sqrt(deta * deta + dphi * dphi)
 
 
+def _nan_to_num_torch(value, *, nan: float = 0.0, posinf: float = 0.0, neginf: float = 0.0):
+    torch = require_torch()
+    if hasattr(torch, "nan_to_num"):
+        return torch.nan_to_num(value, nan=float(nan), posinf=float(posinf), neginf=float(neginf))
+    return torch.where(torch.isfinite(value), value, torch.zeros_like(value) + float(nan))
+
+
+def sanitize_token_weight_view(tokens, weights, mask):
+    """Sanitize candidate/target tokens before matching and auxiliary losses."""
+
+    torch = require_torch()
+    tokens = tokens.float()
+    mask = mask.bool()
+    finite_tokens = torch.isfinite(tokens).all(dim=-1)
+    cleaned = _nan_to_num_torch(tokens)
+    cleaned = cleaned.clone()
+    pt = torch.clamp(cleaned[:, :, 0], min=0.0)
+    eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
+    phi = wrap_phi_torch(cleaned[:, :, 2])
+    energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), physical_energy_floor(pt, eta))
+    cleaned[:, :, 0] = pt
+    cleaned[:, :, 1] = eta
+    cleaned[:, :, 2] = phi
+    cleaned[:, :, 3] = energy
+
+    finite_weights = torch.ones_like(mask, dtype=torch.bool)
+    if weights is None:
+        cleaned_weights = mask.float()
+    else:
+        weights = weights.float()
+        finite_weights = torch.isfinite(weights)
+        cleaned_weights = torch.clamp(_nan_to_num_torch(weights), min=0.0)
+    safe_mask = mask & finite_tokens & finite_weights
+    cleaned_weights = cleaned_weights * safe_mask.float()
+    diagnostics = {
+        "nonfinite_token_count": (~finite_tokens & mask).sum(dim=1).float(),
+        "nonfinite_weight_count": (~finite_weights & mask).sum(dim=1).float(),
+        "valid_token_count": safe_mask.sum(dim=1).float(),
+    }
+    return cleaned, cleaned_weights, safe_mask, diagnostics
+
+
+def _linear_sum_assignment_numpy(cost: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Use SciPy Hungarian assignment when available; otherwise deterministic greedy fallback."""
+
+    try:
+        from scipy.optimize import linear_sum_assignment  # type: ignore
+
+        rows, cols = linear_sum_assignment(cost)
+        return rows.astype(np.int64), cols.astype(np.int64), True
+    except Exception:  # pragma: no cover - depends on optional scipy
+        work = np.array(cost, copy=True)
+        rows: list[int] = []
+        cols: list[int] = []
+        n_matches = int(min(work.shape))
+        for _ in range(n_matches):
+            flat = int(np.argmin(work))
+            row, col = np.unravel_index(flat, work.shape)
+            if not np.isfinite(work[row, col]):
+                break
+            rows.append(int(row))
+            cols.append(int(col))
+            work[row, :] = np.inf
+            work[:, col] = np.inf
+        return np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64), False
+
+
+def select_matching_candidates(pred_tokens, pred_weights, pred_mask, *, max_candidates: int):
+    torch = require_torch()
+    n_candidates = int(pred_tokens.shape[1])
+    limit = int(max_candidates) if int(max_candidates) > 0 else n_candidates
+    limit = min(limit, n_candidates)
+    if limit == n_candidates:
+        return pred_tokens, pred_weights, pred_mask
+    score = pred_weights * torch.log1p(torch.clamp(pred_tokens[:, :, 0], min=0.0))
+    score = score.masked_fill(~pred_mask.bool(), -1.0e9)
+    _, indices = torch.topk(score, k=limit, dim=1, largest=True, sorted=False)
+    token_indices = indices[:, :, None].expand(-1, -1, pred_tokens.shape[2])
+    return (
+        torch.gather(pred_tokens, dim=1, index=token_indices),
+        torch.gather(pred_weights, dim=1, index=indices),
+        torch.gather(pred_mask, dim=1, index=indices),
+    )
+
+
+def assignment_set_matching_loss(
+    distances,
+    pred_weights,
+    pred_mask,
+    target_mask,
+    *,
+    mode: str,
+    large_cost: float,
+) -> tuple[Any, Dict[str, Any]]:
+    """Assignment-style set loss with Hungarian preferred and greedy fallback."""
+
+    torch = require_torch()
+    device = distances.device
+    batch_size = int(distances.shape[0])
+    row_losses = []
+    weight_losses = []
+    match_counts = []
+    used_hungarian = []
+    used_fallback = []
+    mode = str(mode).lower()
+    use_assignment = mode in {"hungarian", "assignment", "linear_sum_assignment"}
+
+    if not use_assignment:
+        zero = distances.sum() * 0.0
+        return zero, {
+            "hungarian_set_loss": zero,
+            "matched_weight_loss": zero,
+            "matched_count_mean": zero,
+            "matching_used_hungarian": zero,
+            "matching_used_greedy_fallback": zero,
+        }
+
+    for batch_index in range(batch_size):
+        pred_idx = torch.nonzero(pred_mask[batch_index], as_tuple=False).flatten()
+        target_idx = torch.nonzero(target_mask[batch_index], as_tuple=False).flatten()
+        if pred_idx.numel() == 0 or target_idx.numel() == 0:
+            row_losses.append(distances[batch_index].sum() * 0.0)
+            weight_losses.append(distances[batch_index].sum() * 0.0)
+            match_counts.append(0.0)
+            used_hungarian.append(0.0)
+            used_fallback.append(0.0)
+            continue
+
+        cost_tensor = distances[batch_index].index_select(0, pred_idx).index_select(1, target_idx)
+        cost_np = cost_tensor.detach().float().cpu().numpy()
+        cost_np = np.nan_to_num(
+            cost_np,
+            nan=float(large_cost),
+            posinf=float(large_cost),
+            neginf=float(large_cost),
+        )
+        cost_np = np.clip(cost_np, 0.0, float(large_cost))
+        rows_np, cols_np, scipy_used = _linear_sum_assignment_numpy(cost_np)
+        if rows_np.size == 0:
+            row_losses.append(distances[batch_index].sum() * 0.0)
+            weight_losses.append(distances[batch_index].sum() * 0.0)
+            match_counts.append(0.0)
+            used_hungarian.append(1.0 if scipy_used else 0.0)
+            used_fallback.append(0.0 if scipy_used else 1.0)
+            continue
+
+        rows = torch.as_tensor(rows_np, dtype=torch.long, device=device)
+        cols = torch.as_tensor(cols_np, dtype=torch.long, device=device)
+        selected_pred = pred_idx.index_select(0, rows)
+        selected_target = target_idx.index_select(0, cols)
+        matched_cost = distances[batch_index, selected_pred, selected_target]
+        matched_cost = torch.clamp(_nan_to_num_torch(matched_cost, posinf=large_cost, neginf=large_cost), 0.0, large_cost)
+        matched_weights = torch.clamp(pred_weights[batch_index, selected_pred], 0.0, 1.0)
+        row_losses.append(matched_cost.mean())
+        weight_losses.append(((1.0 - matched_weights) ** 2).mean())
+        match_counts.append(float(rows_np.size))
+        used_hungarian.append(1.0 if scipy_used else 0.0)
+        used_fallback.append(0.0 if scipy_used else 1.0)
+
+    return torch.stack(row_losses).mean(), {
+        "hungarian_set_loss": torch.stack(row_losses).mean(),
+        "matched_weight_loss": torch.stack(weight_losses).mean(),
+        "matched_count_mean": torch.tensor(float(np.mean(match_counts)), dtype=distances.dtype, device=device),
+        "matching_used_hungarian": torch.tensor(float(np.mean(used_hungarian)), dtype=distances.dtype, device=device),
+        "matching_used_greedy_fallback": torch.tensor(float(np.mean(used_fallback)), dtype=distances.dtype, device=device),
+    }
+
+
 def reconstruction_loss(
     output: ReconstructionOutput,
     *,
@@ -471,16 +964,37 @@ def reconstruction_loss(
     offline_mask,
     config: ReconstructorVariantConfig,
 ) -> tuple[Any, Dict[str, Any]]:
-    """Differentiable Stage A loss with Chamfer-style set matching."""
+    """Original-mechanism Stage A loss with assignment matching and branch diagnostics."""
 
     torch = require_torch()
-    pred_tokens = output.tokens
-    pred_weights = output.weights * output.candidate_mask.float()
-    target_mask = offline_mask.bool()
+    pred_tokens, pred_weights, pred_mask, pred_sanitize = sanitize_token_weight_view(
+        output.tokens,
+        output.weights,
+        output.candidate_mask,
+    )
+    target_tokens, _, target_mask, target_sanitize = sanitize_token_weight_view(
+        offline_tokens,
+        None,
+        offline_mask,
+    )
+    match_tokens, match_weights, match_mask = select_matching_candidates(
+        pred_tokens,
+        pred_weights,
+        pred_mask,
+        max_candidates=int(config.max_matching_candidates),
+    )
     pred_feat = matching_features(pred_tokens)
-    target_feat = matching_features(offline_tokens)
+    match_feat = matching_features(match_tokens)
+    target_feat = matching_features(target_tokens)
     distances = torch.cdist(pred_feat, target_feat, p=2) ** 2
-    distances = distances.masked_fill(~target_mask[:, None, :], 1.0e6)
+    match_distances = torch.cdist(match_feat, target_feat, p=2) ** 2
+    large_cost = float(config.matching_large_cost)
+    distances = _nan_to_num_torch(distances, nan=large_cost, posinf=large_cost, neginf=large_cost)
+    match_distances = _nan_to_num_torch(match_distances, nan=large_cost, posinf=large_cost, neginf=large_cost)
+    distances = distances.masked_fill(~target_mask[:, None, :], large_cost)
+    distances = distances.masked_fill(~pred_mask[:, :, None], large_cost)
+    match_distances = match_distances.masked_fill(~target_mask[:, None, :], large_cost)
+    match_distances = match_distances.masked_fill(~match_mask[:, :, None], large_cost)
 
     pred_min = distances.min(dim=2).values
     pred_norm = torch.clamp(pred_weights.sum(dim=1), min=1.0)
@@ -491,21 +1005,38 @@ def reconstruction_loss(
     target_min = target_distances.min(dim=1).values
     target_norm = torch.clamp(target_mask.sum(dim=1).float(), min=1.0)
     target_to_pred = (target_min * target_mask.float()).sum(dim=1) / target_norm
-    set_loss = (pred_to_target + target_to_pred).mean()
+    weighted_chamfer_loss = (pred_to_target + target_to_pred).mean()
+    assignment_loss, assignment_diag = assignment_set_matching_loss(
+        match_distances,
+        match_weights,
+        match_mask,
+        target_mask,
+        mode=config.matching_mode,
+        large_cost=large_cost,
+    )
+    matched_weight_loss = assignment_diag["matched_weight_loss"]
+    if str(config.matching_mode).lower() in {"hungarian", "assignment", "linear_sum_assignment"}:
+        set_loss = assignment_loss + 0.25 * weighted_chamfer_loss + float(config.matched_weight_weight) * matched_weight_loss
+    else:
+        set_loss = weighted_chamfer_loss
 
     pred_response = jet_response(pred_tokens, weights=pred_weights, mask=output.candidate_mask)
-    target_response = jet_response(offline_tokens, mask=offline_mask)
+    target_response = jet_response(target_tokens, mask=target_mask)
     pt_ratio_loss = bounded_log_response_loss(pred_response["pt"], target_response["pt"])
     energy_ratio_loss = bounded_log_response_loss(pred_response["energy"], target_response["energy"])
     mass_ratio_loss = bounded_log_response_loss(pred_response["mass"], target_response["mass"])
 
-    target_count = offline_mask.sum(dim=1).float()
+    target_count = target_mask.sum(dim=1).float()
     hlt_count = hlt_mask.sum(dim=1).float()
     target_added = torch.clamp((target_count - hlt_count) * float(config.target_added_particle_scale), min=0.0)
     predicted_total = output.total_count_pred + hlt_count * 0.0
     predicted_added = output.added_count_pred
     actual_total_weight = pred_weights.sum(dim=1)
-    actual_added_weight = output.split_weights.sum(dim=1) + output.generated_weights.sum(dim=1)
+    split_weight_count = output.split_weights.shape[1]
+    generated_weight_count = output.generated_weights.shape[1]
+    split_weights_safe = pred_weights[:, output.edited_weights.shape[1] : output.edited_weights.shape[1] + split_weight_count]
+    generated_weights_safe = pred_weights[:, -generated_weight_count:] if generated_weight_count else pred_weights[:, :0]
+    actual_added_weight = split_weights_safe.sum(dim=1) + generated_weights_safe.sum(dim=1)
     count_loss = (
         (torch.log1p(predicted_total) - torch.log1p(target_count)) ** 2
         + (torch.log1p(predicted_added) - torch.log1p(target_added)) ** 2
@@ -513,31 +1044,65 @@ def reconstruction_loss(
         + 0.25 * (torch.log1p(actual_added_weight) - torch.log1p(target_added)) ** 2
     ).mean()
 
-    sparsity_loss = output.generated_weights.mean()
+    split_sparsity_loss = split_weights_safe.mean() if split_weights_safe.numel() else actual_total_weight.mean() * 0.0
+    generated_sparsity_loss = generated_weights_safe.mean() if generated_weights_safe.numel() else actual_total_weight.mean() * 0.0
+    sparsity_loss = split_sparsity_loss + generated_sparsity_loss
 
+    if output.split_child_tokens is not None:
+        split_tokens_for_locality, _, _, split_sanitize = sanitize_token_weight_view(
+            output.split_child_tokens.reshape(output.split_tokens.shape),
+            split_weights_safe,
+            hlt_mask[:, :, None].expand_as(output.split_child_weights).reshape(output.split_weights.shape),
+        )
+        parent_tokens_for_split, _, _, _ = sanitize_token_weight_view(
+            hlt_tokens[:, :, None, :].expand_as(output.split_child_tokens).reshape(output.split_tokens.shape),
+            None,
+            hlt_mask[:, :, None].expand_as(output.split_child_weights).reshape(output.split_weights.shape),
+        )
+        split_mask_for_locality = hlt_mask[:, :, None].expand_as(output.split_child_weights).reshape(output.split_weights.shape)
+    else:
+        split_tokens_for_locality, _, _, split_sanitize = sanitize_token_weight_view(
+            output.split_tokens,
+            split_weights_safe,
+            hlt_mask,
+        )
+        parent_tokens_for_split, _, _, _ = sanitize_token_weight_view(hlt_tokens, None, hlt_mask)
+        split_mask_for_locality = hlt_mask
     split_dr = safe_sqrt(
-        (output.split_tokens[:, :, 1] - hlt_tokens[:, :, 1]) ** 2
-        + wrap_phi_torch(output.split_tokens[:, :, 2] - hlt_tokens[:, :, 2]) ** 2
+        (split_tokens_for_locality[:, :, 1] - parent_tokens_for_split[:, :, 1]) ** 2
+        + wrap_phi_torch(split_tokens_for_locality[:, :, 2] - parent_tokens_for_split[:, :, 2]) ** 2
     )
     split_excess = torch.relu(split_dr - float(config.split_locality_radius)) ** 2
-    split_local = (split_excess * output.split_weights * hlt_mask.float()).sum(dim=1) / torch.clamp(
-        (output.split_weights * hlt_mask.float()).sum(dim=1),
+    split_local = (split_excess * split_weights_safe * split_mask_for_locality.float()).sum(dim=1) / torch.clamp(
+        (split_weights_safe * split_mask_for_locality.float()).sum(dim=1),
         min=1.0,
     )
     if output.generated_tokens.shape[1] > 0:
-        gen_dr = pairwise_delta_r(output.generated_tokens, hlt_tokens).masked_fill(~hlt_mask[:, None, :], 1.0e3)
+        generated_tokens_safe, _, _, gen_sanitize = sanitize_token_weight_view(
+            output.generated_tokens,
+            generated_weights_safe,
+            torch.ones_like(output.generated_weights, dtype=torch.bool),
+        )
+        hlt_tokens_safe, _, hlt_mask_safe, _ = sanitize_token_weight_view(hlt_tokens, None, hlt_mask)
+        gen_dr = pairwise_delta_r(generated_tokens_safe, hlt_tokens_safe).masked_fill(~hlt_mask_safe[:, None, :], 1.0e3)
         gen_nearest = gen_dr.min(dim=2).values
         gen_excess = torch.relu(gen_nearest - float(config.generated_locality_radius)) ** 2
-        gen_local = (gen_excess * output.generated_weights).sum(dim=1) / torch.clamp(
-            output.generated_weights.sum(dim=1),
+        gen_local = (gen_excess * generated_weights_safe).sum(dim=1) / torch.clamp(
+            generated_weights_safe.sum(dim=1),
             min=1.0,
         )
         locality_loss = (split_local + gen_local).mean()
     else:
+        generated_tokens_safe = output.generated_tokens
+        gen_sanitize = {
+            "nonfinite_token_count": split_local * 0.0,
+            "nonfinite_weight_count": split_local * 0.0,
+            "valid_token_count": split_local * 0.0,
+        }
         locality_loss = split_local.mean()
 
-    added_tokens = torch.cat([output.split_tokens, output.generated_tokens], dim=1)
-    added_weights = torch.cat([output.split_weights, output.generated_weights], dim=1)
+    added_tokens = torch.cat([split_tokens_for_locality, generated_tokens_safe], dim=1)
+    added_weights = torch.cat([split_weights_safe, generated_weights_safe], dim=1)
     if added_tokens.shape[1] > 1:
         added_dr = pairwise_delta_r(added_tokens, added_tokens)
         eye = torch.eye(added_tokens.shape[1], dtype=torch.bool, device=added_tokens.device)[None, :, :]
@@ -553,24 +1118,58 @@ def reconstruction_loss(
     else:
         anti_overlap_loss = locality_loss * 0.0
 
+    nonfinite_candidate_fraction = (
+        pred_sanitize["nonfinite_token_count"] + pred_sanitize["nonfinite_weight_count"]
+    ) / torch.clamp(output.candidate_mask.sum(dim=1).float(), min=1.0)
+    nonfinite_target_fraction = target_sanitize["nonfinite_token_count"] / torch.clamp(offline_mask.sum(dim=1).float(), min=1.0)
+    nonfinite_branch_fraction = (
+        split_sanitize["nonfinite_token_count"] + split_sanitize["nonfinite_weight_count"]
+        + gen_sanitize["nonfinite_token_count"] + gen_sanitize["nonfinite_weight_count"]
+    ) / torch.clamp(
+        torch.tensor(
+            float(max(1, output.split_weights.shape[1] + output.generated_weights.shape[1])),
+            dtype=pred_weights.dtype,
+            device=pred_weights.device,
+        ),
+        min=1.0,
+    )
+    nonfinite_penalty = (
+        nonfinite_candidate_fraction.mean()
+        + nonfinite_target_fraction.mean()
+        + nonfinite_branch_fraction.mean()
+    )
+
     total = (
         float(config.set_matching_weight) * set_loss
         + float(config.budget_count_weight) * count_loss
         + float(config.sparsity_weight) * sparsity_loss
+        + float(config.split_sparsity_weight) * split_sparsity_loss
+        + float(config.generated_sparsity_weight) * generated_sparsity_loss
         + float(config.locality_weight) * locality_loss
         + float(config.anti_overlap_weight) * anti_overlap_loss
         + float(config.pt_ratio_weight) * pt_ratio_loss
         + float(config.energy_ratio_weight) * energy_ratio_loss
         + float(config.mass_ratio_weight) * mass_ratio_loss
+        + float(config.nonfinite_penalty_weight) * nonfinite_penalty
     )
 
     diagnostics = {
         "total_loss": total,
         "set_loss": set_loss,
+        "weighted_chamfer_loss": weighted_chamfer_loss,
+        **assignment_diag,
         "count_loss": count_loss,
         "sparsity_loss": sparsity_loss,
+        "split_sparsity_loss": split_sparsity_loss,
+        "generated_sparsity_loss": generated_sparsity_loss,
         "locality_loss": locality_loss,
         "anti_overlap_loss": anti_overlap_loss,
+        "nonfinite_penalty": nonfinite_penalty,
+        "nonfinite_candidate_count": pred_sanitize["nonfinite_token_count"].mean()
+        + pred_sanitize["nonfinite_weight_count"].mean(),
+        "nonfinite_target_count": target_sanitize["nonfinite_token_count"].mean(),
+        "matching_candidate_count": match_mask.sum(dim=1).float().mean(),
+        "matching_target_count": target_mask.sum(dim=1).float().mean(),
         "pt_ratio_loss": pt_ratio_loss,
         "energy_ratio_loss": energy_ratio_loss,
         "mass_ratio_loss": mass_ratio_loss,
