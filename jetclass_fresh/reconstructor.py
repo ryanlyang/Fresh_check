@@ -36,6 +36,7 @@ else:
 RAW_DIM = 14
 KIN_DIM = 4
 ENERGY_EPS = 1.0e-4
+SQRT_EPS = 1.0e-12
 RECONSTRUCTOR_VARIANT_NAMES = [
     "m2_base",
     "m2_consstrong",
@@ -174,7 +175,7 @@ class StageAReconstructorTrainConfig:
     seed: int = 808
     batch_size: int = 128
     epochs: int = 20
-    lr: float = 1.0e-3
+    lr: float = 3.0e-4
     weight_decay: float = 1.0e-4
     num_workers: int = 0
     device: str = "auto"
@@ -215,6 +216,13 @@ def physical_energy_floor(pt, eta, *, eps: float = ENERGY_EPS):
 
     torch = require_torch()
     return torch.clamp(pt, min=0.0) * torch.cosh(torch.clamp(eta, -5.0, 5.0)) + float(eps)
+
+
+def safe_sqrt(value, *, eps: float = SQRT_EPS):
+    """Sqrt with finite gradients at zero for reconstruction losses."""
+
+    torch = require_torch()
+    return torch.sqrt(torch.clamp(value, min=float(eps)))
 
 
 def raw_token_features(tokens, mask):
@@ -415,9 +423,9 @@ def jet_response(tokens, weights=None, mask=None):
     jet_py = py.sum(dim=1)
     jet_pz = pz.sum(dim=1)
     jet_energy = energy.sum(dim=1)
-    jet_pt = torch.sqrt(torch.clamp(jet_px * jet_px + jet_py * jet_py, min=0.0))
+    jet_pt = safe_sqrt(jet_px * jet_px + jet_py * jet_py)
     mass2 = jet_energy * jet_energy - jet_px * jet_px - jet_py * jet_py - jet_pz * jet_pz
-    jet_mass = torch.sqrt(torch.clamp(mass2, min=0.0))
+    jet_mass = safe_sqrt(mass2)
     return {
         "pt": jet_pt,
         "energy": jet_energy,
@@ -451,7 +459,7 @@ def pairwise_delta_r(left_tokens, right_tokens):
     torch = require_torch()
     deta = left_tokens[:, :, None, 1] - right_tokens[:, None, :, 1]
     dphi = wrap_phi_torch(left_tokens[:, :, None, 2] - right_tokens[:, None, :, 2])
-    return torch.sqrt(torch.clamp(deta * deta + dphi * dphi, min=0.0))
+    return safe_sqrt(deta * deta + dphi * dphi)
 
 
 def reconstruction_loss(
@@ -507,12 +515,9 @@ def reconstruction_loss(
 
     sparsity_loss = output.generated_weights.mean()
 
-    split_dr = torch.sqrt(
-        torch.clamp(
-            (output.split_tokens[:, :, 1] - hlt_tokens[:, :, 1]) ** 2
-            + wrap_phi_torch(output.split_tokens[:, :, 2] - hlt_tokens[:, :, 2]) ** 2,
-            min=0.0,
-        )
+    split_dr = safe_sqrt(
+        (output.split_tokens[:, :, 1] - hlt_tokens[:, :, 1]) ** 2
+        + wrap_phi_torch(output.split_tokens[:, :, 2] - hlt_tokens[:, :, 2]) ** 2
     )
     split_excess = torch.relu(split_dr - float(config.split_locality_radius)) ** 2
     split_local = (split_excess * output.split_weights * hlt_mask.float()).sum(dim=1) / torch.clamp(
@@ -707,13 +712,21 @@ def run_reconstruction_epoch(
                     scaler.scale(loss).backward()
                     if grad_clip_norm and grad_clip_norm > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            float(grad_clip_norm),
+                            error_if_nonfinite=True,
+                        )
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
                     if grad_clip_norm and grad_clip_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            float(grad_clip_norm),
+                            error_if_nonfinite=True,
+                        )
                     optimizer.step()
             row = {key: float(value.detach().item()) for key, value in diagnostics.items()}
             row["n_jets"] = int(batch["hlt_tokens"].shape[0])

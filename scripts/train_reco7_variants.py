@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1.0e-3)
+    parser.add_argument("--stage-a-lr", type=float, default=3.0e-4)
+    parser.add_argument("--stage2-lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--no-amp", action="store_true")
@@ -43,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def append_common_training_args(cmd: list[str], args: argparse.Namespace) -> list[str]:
+    lr = args.stage2_lr if args.stage2_lr is not None else args.lr
     cmd.extend(
         [
             "--batch-size",
@@ -50,7 +53,7 @@ def append_common_training_args(cmd: list[str], args: argparse.Namespace) -> lis
             "--epochs",
             str(args.epochs),
             "--lr",
-            str(args.lr),
+            str(lr),
             "--weight-decay",
             str(args.weight_decay),
             "--num-workers",
@@ -90,7 +93,10 @@ def stage_a_command(args: argparse.Namespace, variant: str) -> list[str]:
     ]
     if args.data_dir:
         cmd.extend(["--data-dir", args.data_dir])
-    return append_common_training_args(cmd, args)
+    cmd = append_common_training_args(cmd, args)
+    lr_index = cmd.index("--lr") + 1
+    cmd[lr_index] = str(args.stage_a_lr)
+    return cmd
 
 
 def stage2_command(args: argparse.Namespace, variant: str) -> list[str]:

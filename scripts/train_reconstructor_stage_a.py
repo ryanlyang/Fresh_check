@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=808)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1.0e-3)
+    parser.add_argument("--lr", type=float, default=3.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="auto")
