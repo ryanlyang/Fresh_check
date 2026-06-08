@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# V2 Step 6 training: original-mechanism m2_base Stage A + Stage B.
+# V2 Step 7: train one original-mechanism reco7 variant, Stage A + Stage B.
 
-#SBATCH --job-name=v2_step6_train_m2
+#SBATCH --job-name=v2_step7_reco
 #SBATCH --output=fresh_check_logs/%x_%j.out
 #SBATCH --error=fresh_check_logs/%x_%j.err
 #SBATCH --partition=tier3
@@ -28,12 +28,18 @@ source "${SCRIPT_DIR}/common.sh"
 : "${MAX_VAL_JETS:=}"
 : "${HLT_BASELINE_REPORT:=${HLT_BASELINE_DIR}/model_val_report.json}"
 
-if [[ "${V2_STEP6_VARIANT}" != "m2_base" ]]; then
-  echo "V2 Step 6 trains m2_base only; got V2_STEP6_VARIANT=${V2_STEP6_VARIANT}" >&2
-  exit 2
-fi
+VARIANT="${1:?Usage: sbatch/run_v2_step7_train_variant.sh VARIANT}"
+export VARIANT
 
-OUTPUT_DIR="${V2_STEP6_RECO_ROOT}/${V2_STEP6_VARIANT}"
+case " ${RECO7_VARIANTS} " in
+  *" ${VARIANT} "*) ;;
+  *)
+    echo "Unknown V2 Step 7 variant ${VARIANT}; expected one of: ${RECO7_VARIANTS}" >&2
+    exit 2
+    ;;
+esac
+
+OUTPUT_DIR="${V2_STEP7_RECO_ROOT}/${VARIANT}"
 
 fresh_setup "$@"
 fresh_require_data_dir
@@ -49,9 +55,9 @@ cmd=(
   --manifest "${MANIFEST_PATH}"
   --hlt-cache-dir "${HLT_CACHE_DIR}"
   --data-dir "${DATA_DIR}"
-  --output-root "${V2_STEP6_RECO_ROOT}"
+  --output-root "${V2_STEP7_RECO_ROOT}"
   --hlt-baseline-report "${HLT_BASELINE_REPORT}"
-  --variants "${V2_STEP6_VARIANT}"
+  --variants "${VARIANT}"
   --stage both
   --batch-size "${BATCH_SIZE}"
   --epochs "${EPOCHS}"
@@ -70,7 +76,7 @@ fresh_append_optional_arg cmd --max-val-batches "${MAX_VAL_BATCHES}"
 fresh_append_optional_arg cmd --max-train-jets "${MAX_TRAIN_JETS}"
 fresh_append_optional_arg cmd --max-val-jets "${MAX_VAL_JETS}"
 
-fresh_write_run_config "${OUTPUT_DIR}" "v2_step6_train_m2_base" "${cmd[@]}"
+fresh_write_run_config "${OUTPUT_DIR}" "v2_step7_train_${VARIANT}" "${cmd[@]}"
 fresh_run "${cmd[@]}"
 
 if ! fresh_is_dry_run; then

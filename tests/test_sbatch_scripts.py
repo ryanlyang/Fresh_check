@@ -20,6 +20,9 @@ RUNNERS = [
     "run_v2_step6_train_m2_base.sh",
     "run_v2_step10_fuse_m2_base_plus_hlt.sh",
     "run_v2_step11_audit_m2_base_plus_hlt.sh",
+    "run_v2_step7_train_variant.sh",
+    "run_v2_step10_fuse_reco7_plus_hlt.sh",
+    "run_v2_step11_audit_reco7_plus_hlt.sh",
 ]
 
 SUBMITTERS = [
@@ -28,6 +31,7 @@ SUBMITTERS = [
     "submit_fresh_full_samehlt_reco7_vs_hlt5.sh",
     "submit_fresh_smoke_test.sh",
     "submit_v2_step6_m2_base_end_to_end.sh",
+    "submit_v2_step7_reco7_plus_hlt.sh",
 ]
 
 
@@ -95,8 +99,10 @@ class SbatchStep14Tests(unittest.TestCase):
             "submit_fresh_full_samehlt_reco7_vs_hlt5.sh",
             "submit_fresh_hlt5_seed_control.sh",
             "submit_fresh_samehlt_reco7.sh",
+            "submit_v2_step7_reco7_plus_hlt.sh",
             "run_fuse_fresh_hlt5_seed_control.sh",
             "run_fuse_fresh_samehlt7_plus_hlt.sh",
+            "run_v2_step10_fuse_reco7_plus_hlt.sh",
             "run_build_fresh_hlt_cache.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
@@ -124,6 +130,27 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("run_v2_step10_fuse_m2_base_plus_hlt.sh", submitter)
         self.assertIn("run_v2_step11_audit_m2_base_plus_hlt.sh", submitter)
         self.assertIn('--dependency="afterok:${train_jid}"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
+        self.assertIn("hlt5_seed_control: true", submitter)
+
+    def test_v2_step7_submitter_queues_seven_variants_fusion_and_audits(self):
+        train = self.read("run_v2_step7_train_variant.sh")
+        fusion = self.read("run_v2_step10_fuse_reco7_plus_hlt.sh")
+        audit = self.read("run_v2_step11_audit_reco7_plus_hlt.sh")
+        submitter = self.read("submit_v2_step7_reco7_plus_hlt.sh")
+        self.assertIn("jetclass_v2_original_mechanism_step7", self.read("common.sh"))
+        self.assertIn("#SBATCH --time=12:00:00", train)
+        self.assertIn('VARIANT="${1:?Usage:', train)
+        self.assertIn("--stage both", train)
+        self.assertIn("--variants \"${VARIANT}\"", train)
+        self.assertIn('fresh_split_words variant_args "${V2_STEP7_VARIANTS}"', fusion)
+        self.assertIn("--variants \"${variant_args[@]}\"", fusion)
+        self.assertIn("--fusion-dir \"${V2_STEP7_FUSION_DIR}\"", audit)
+        self.assertIn("run_v2_step7_train_variant.sh", submitter)
+        self.assertIn("run_v2_step10_fuse_reco7_plus_hlt.sh", submitter)
+        self.assertIn("run_v2_step11_audit_reco7_plus_hlt.sh", submitter)
+        self.assertIn('fusion_dependency="$(fresh_join_by_colon "${variant_job_ids[@]}")"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
         self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
         self.assertIn("hlt5_seed_control: true", submitter)
 

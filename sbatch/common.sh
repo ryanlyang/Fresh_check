@@ -38,7 +38,12 @@ IFS=$'\n\t'
 : "${V2_STEP6_FUSION_DIR:=${V2_STEP6_ROOT}/fusion/m2_base_plus_hlt}"
 : "${V2_STEP6_AUDIT_DIR:=${V2_STEP6_ROOT}/audits/m2_base_plus_hlt}"
 : "${V2_STEP6_VARIANT:=m2_base}"
+: "${V2_STEP7_ROOT:=${OUTPUT_ROOT}/jetclass_v2_original_mechanism_step7}"
+: "${V2_STEP7_RECO_ROOT:=${V2_STEP7_ROOT}/reco7}"
+: "${V2_STEP7_FUSION_DIR:=${V2_STEP7_ROOT}/fusion/reco7_plus_hlt}"
+: "${V2_STEP7_AUDIT_DIR:=${V2_STEP7_ROOT}/audits/reco7_plus_hlt}"
 : "${RECO7_VARIANTS:=m2_base m2_consstrong m2_budgetlite m2_genlow m2_genhigh m2_topk60ish m2_antioverlap}"
+: "${V2_STEP7_VARIANTS:=${RECO7_VARIANTS}}"
 : "${HLT5_SEEDS:=101 202 303 404 505}"
 : "${SPLIT_SEEDS:=model_train=153 model_val=254 stack_train=356 stack_val=457 final_test=558}"
 : "${FIXED_HLT_SEEDS:=model_train=1053 model_val=1054 stack_train=1055 stack_val=1056 final_test=1057}"
@@ -277,6 +282,11 @@ keys = [
     "V2_STEP6_FUSION_DIR",
     "V2_STEP6_AUDIT_DIR",
     "V2_STEP6_VARIANT",
+    "V2_STEP7_ROOT",
+    "V2_STEP7_RECO_ROOT",
+    "V2_STEP7_FUSION_DIR",
+    "V2_STEP7_AUDIT_DIR",
+    "V2_STEP7_VARIANTS",
     "RECO7_VARIANTS",
     "HLT5_SEEDS",
     "SPLIT_SEEDS",
