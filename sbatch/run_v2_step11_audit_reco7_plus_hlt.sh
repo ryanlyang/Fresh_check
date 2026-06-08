@@ -5,7 +5,7 @@
 #SBATCH --output=fresh_check_logs/%x_%j.out
 #SBATCH --error=fresh_check_logs/%x_%j.err
 #SBATCH --partition=debug
-#SBATCH --time=06:00:00
+#SBATCH --time=02:00:00
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=8
 

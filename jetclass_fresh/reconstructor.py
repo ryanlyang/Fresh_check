@@ -1034,8 +1034,15 @@ def reconstruction_loss(
     actual_total_weight = pred_weights.sum(dim=1)
     split_weight_count = output.split_weights.shape[1]
     generated_weight_count = output.generated_weights.shape[1]
-    split_weights_safe = pred_weights[:, output.edited_weights.shape[1] : output.edited_weights.shape[1] + split_weight_count]
-    generated_weights_safe = pred_weights[:, -generated_weight_count:] if generated_weight_count else pred_weights[:, :0]
+    split_weights_safe = pred_weights[
+        :,
+        output.edited_weights.shape[1] : output.edited_weights.shape[1] + split_weight_count,
+    ].clone()
+    generated_weights_safe = (
+        pred_weights[:, -generated_weight_count:].clone()
+        if generated_weight_count
+        else pred_weights[:, :0].clone()
+    )
     actual_added_weight = split_weights_safe.sum(dim=1) + generated_weights_safe.sum(dim=1)
     count_loss = (
         (torch.log1p(predicted_total) - torch.log1p(target_count)) ** 2

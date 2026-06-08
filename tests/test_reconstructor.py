@@ -177,6 +177,35 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
         self.assertIn("nonfinite_penalty", diagnostics)
         self.assertIn("matching_candidate_count", diagnostics)
 
+    def test_reconstruction_loss_backward_with_generated_weight_views(self):
+        hlt_view, offline_view = make_views(n_jets=2, n_constits=5)
+        cfg = self.tiny_config()
+        model = build_reconstructor(cfg)
+        hlt_tokens = torch.from_numpy(hlt_view.tokens).float()
+        hlt_mask = torch.from_numpy(hlt_view.mask).bool()
+        offline_tokens = torch.from_numpy(offline_view.tokens).float()
+        offline_mask = torch.from_numpy(offline_view.mask).bool()
+
+        output = model(hlt_tokens, hlt_mask)
+        loss, diagnostics = reconstruction_loss(
+            output,
+            hlt_tokens=hlt_tokens,
+            hlt_mask=hlt_mask,
+            offline_tokens=offline_tokens,
+            offline_mask=offline_mask,
+            config=cfg,
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(output.generated_weights.shape[1], 0)
+        loss.backward()
+        finite_grad_count = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                finite_grad_count += 1
+                self.assertTrue(torch.isfinite(param.grad).all())
+        self.assertGreater(finite_grad_count, 0)
+        self.assertTrue(torch.isfinite(diagnostics["generated_sparsity_loss"]))
+
     def test_forward_sanitizes_nonfinite_or_empty_inputs(self):
         cfg = self.tiny_config()
         model = build_reconstructor(cfg)
