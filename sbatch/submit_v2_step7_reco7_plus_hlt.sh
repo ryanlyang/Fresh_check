@@ -54,6 +54,17 @@ if [[ ! -f "${HLT_BASELINE_REPORT}" ]] && ! fresh_is_dry_run; then
 fi
 
 fresh_split_words variant_args "${V2_STEP7_VARIANTS}"
+submitter_lock_dir="${V2_STEP7_ROOT}/.submission_lock"
+fresh_claim_new_dir "${submitter_lock_dir}"
+if ! fresh_is_dry_run; then
+  {
+    echo "created_at=$(date -Is)"
+    echo "project_dir=${PROJECT_DIR}"
+    echo "source_commit=$(fresh_source_commit)"
+    echo "variants=$(fresh_join_by_space "${variant_args[@]}")"
+  } > "${submitter_lock_dir}/metadata.txt"
+fi
+
 variant_job_ids=()
 for variant in "${variant_args[@]}"; do
   fresh_refuse_existing_dir "${V2_STEP7_RECO_ROOT}/${variant}"

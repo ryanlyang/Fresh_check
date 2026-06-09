@@ -23,6 +23,8 @@ RUNNERS = [
     "run_v2_step7_train_variant.sh",
     "run_v2_step10_fuse_reco7_plus_hlt.sh",
     "run_v2_step11_audit_reco7_plus_hlt.sh",
+    "run_independent_fusion_small.sh",
+    "run_independent_fusion_large.sh",
 ]
 
 SUBMITTERS = [
@@ -103,6 +105,8 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_fuse_fresh_hlt5_seed_control.sh",
             "run_fuse_fresh_samehlt7_plus_hlt.sh",
             "run_v2_step10_fuse_reco7_plus_hlt.sh",
+            "run_independent_fusion_small.sh",
+            "run_independent_fusion_large.sh",
             "run_build_fresh_hlt_cache.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
@@ -133,6 +137,30 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
         self.assertIn("hlt5_seed_control: true", submitter)
 
+    def test_independent_fusion_handoff_scripts_run_small_and_large_sizes(self):
+        small = self.read("run_independent_fusion_small.sh")
+        large = self.read("run_independent_fusion_large.sh")
+        for name, text in [
+            ("run_independent_fusion_small.sh", small),
+            ("run_independent_fusion_large.sh", large),
+        ]:
+            self.assertIn("#SBATCH --time=05:00:00", text, name)
+            self.assertIn("#SBATCH --gres=gpu:1", text, name)
+            self.assertIn("scripts/demo_load_and_score_models_no_fusion.py", text, name)
+            self.assertIn("scripts/run_independent_fusion_from_predictions.py", text, name)
+            self.assertIn("--confirm-final-test", text, name)
+            self.assertIn("--feature-modes", text, name)
+            self.assertIn('fresh_claim_new_dir "${RUN_OUTPUT_DIR}"', text, name)
+            self.assertIn('fresh_require_file "${RUN_OUTPUT_DIR}/fusion/fusion_report.json"', text, name)
+        self.assertIn('FUSION_STACK_TRAIN_SIZE:=50000', small)
+        self.assertIn('FUSION_STACK_VAL_SIZE:=20000', small)
+        self.assertIn('FUSION_FINAL_TEST_SIZE:=100000', small)
+        self.assertIn('FUSION_MODEL_LOADING_SMALL_DIR', small)
+        self.assertIn('FUSION_STACK_TRAIN_SIZE:=250000', large)
+        self.assertIn('FUSION_STACK_VAL_SIZE:=50000', large)
+        self.assertIn('FUSION_FINAL_TEST_SIZE:=500000', large)
+        self.assertIn('FUSION_MODEL_LOADING_LARGE_DIR', large)
+
     def test_v2_step7_submitter_queues_seven_variants_fusion_and_audits(self):
         train = self.read("run_v2_step7_train_variant.sh")
         fusion = self.read("run_v2_step10_fuse_reco7_plus_hlt.sh")
@@ -143,12 +171,15 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('VARIANT="${1:?Usage:', train)
         self.assertIn("--stage both", train)
         self.assertIn("--variants \"${VARIANT}\"", train)
+        self.assertIn('fresh_claim_new_dir "${OUTPUT_DIR}"', train)
         self.assertIn('fresh_split_words variant_args "${V2_STEP7_VARIANTS}"', fusion)
         self.assertIn("--variants \"${variant_args[@]}\"", fusion)
         self.assertIn("--fusion-dir \"${V2_STEP7_FUSION_DIR}\"", audit)
         self.assertIn("run_v2_step7_train_variant.sh", submitter)
         self.assertIn("run_v2_step10_fuse_reco7_plus_hlt.sh", submitter)
         self.assertIn("run_v2_step11_audit_reco7_plus_hlt.sh", submitter)
+        self.assertIn('submitter_lock_dir="${V2_STEP7_ROOT}/.submission_lock"', submitter)
+        self.assertIn('fresh_claim_new_dir "${submitter_lock_dir}"', submitter)
         self.assertIn('fusion_dependency="$(fresh_join_by_colon "${variant_job_ids[@]}")"', submitter)
         self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
         self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)

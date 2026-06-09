@@ -48,7 +48,7 @@ fresh_require_file "${HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_BASELINE_DIR}/best_model_val.pt"
 fresh_require_file "${HLT_BASELINE_REPORT}"
-fresh_refuse_existing_dir "${OUTPUT_DIR}"
+fresh_claim_new_dir "${OUTPUT_DIR}"
 
 cmd=(
   "${PYTHON_BIN}" "scripts/train_reco7_variants.py"

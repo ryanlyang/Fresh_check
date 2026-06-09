@@ -25,6 +25,7 @@ IFS=$'\n\t'
 : "${HLT_CACHE_DIR:=${OUTPUT_ROOT}/jetclass_fresh_hlt_cache}"
 : "${HLT_BASELINE_SEED:=101}"
 : "${HLT_BASELINE_DIR:=${OUTPUT_ROOT}/jetclass_fresh_hlt_baselines/single_hlt_seed${HLT_BASELINE_SEED}}"
+: "${HLT_CHECKPOINT:=${HLT_BASELINE_DIR}/best_model_val.pt}"
 : "${HLT5_ROOT:=${OUTPUT_ROOT}/jetclass_fresh_hlt_baselines/hlt5_seed_control}"
 : "${OFFLINE_TEACHER_DIR:=${OUTPUT_ROOT}/jetclass_fresh_offline_teacher/offline_teacher_seed707}"
 : "${RECO7_ROOT:=${OUTPUT_ROOT}/jetclass_fresh_reco7}"
@@ -44,6 +45,15 @@ IFS=$'\n\t'
 : "${V2_STEP7_AUDIT_DIR:=${V2_STEP7_ROOT}/audits/reco7_plus_hlt}"
 : "${RECO7_VARIANTS:=m2_base m2_consstrong m2_budgetlite m2_genlow m2_genhigh m2_topk60ish m2_antioverlap}"
 : "${V2_STEP7_VARIANTS:=${RECO7_VARIANTS}}"
+: "${FUSION_MODEL_LOADING_ROOT:=${OUTPUT_ROOT}/jetclass_fresh_independent_fusion_handoff}"
+: "${FUSION_MODEL_LOADING_SMALL_DIR:=${FUSION_MODEL_LOADING_ROOT}/small_50k_20k_100k}"
+: "${FUSION_MODEL_LOADING_LARGE_DIR:=${FUSION_MODEL_LOADING_ROOT}/large_250k_50k_500k}"
+: "${FUSION_MODEL_LOADING_VARIANTS:=${RECO7_VARIANTS}}"
+: "${FUSION_MODEL_LOADING_FEATURE_MODES:=logits probs logits_probs}"
+: "${FUSION_MODEL_LOADING_C_GRID:=}"
+: "${FUSION_MODEL_LOADING_MAX_ITER:=2000}"
+: "${FUSION_MODEL_LOADING_SKIP_CONTROLS:=0}"
+: "${FUSION_MODEL_LOADING_CONTROL_SEED:=12345}"
 : "${HLT5_SEEDS:=101 202 303 404 505}"
 : "${SPLIT_SEEDS:=model_train=153 model_val=254 stack_train=356 stack_val=457 final_test=558}"
 : "${FIXED_HLT_SEEDS:=model_train=1053 model_val=1054 stack_train=1055 stack_val=1056 final_test=1057}"
@@ -197,6 +207,22 @@ fresh_refuse_existing_dir() {
   fi
 }
 
+fresh_claim_new_dir() {
+  local path="$1"
+  if fresh_is_dry_run; then
+    return 0
+  fi
+  if fresh_bool_enabled "${OVERWRITE}"; then
+    mkdir -p "${path}"
+    return 0
+  fi
+  mkdir -p "$(dirname "${path}")"
+  if ! mkdir "${path}" 2>/dev/null; then
+    echo "Refusing to use existing directory without OVERWRITE=1: ${path}" >&2
+    return 2
+  fi
+}
+
 fresh_run() {
   echo "PYTHON_COMMAND:"
   printf '  %q' "$@"
@@ -269,6 +295,7 @@ keys = [
     "HLT_CACHE_DIR",
     "HLT_BASELINE_SEED",
     "HLT_BASELINE_DIR",
+    "HLT_CHECKPOINT",
     "HLT5_ROOT",
     "OFFLINE_TEACHER_DIR",
     "RECO7_ROOT",
@@ -288,6 +315,18 @@ keys = [
     "V2_STEP7_AUDIT_DIR",
     "V2_STEP7_VARIANTS",
     "RECO7_VARIANTS",
+    "FUSION_MODEL_LOADING_ROOT",
+    "FUSION_MODEL_LOADING_SMALL_DIR",
+    "FUSION_MODEL_LOADING_LARGE_DIR",
+    "FUSION_MODEL_LOADING_VARIANTS",
+    "FUSION_MODEL_LOADING_FEATURE_MODES",
+    "FUSION_MODEL_LOADING_C_GRID",
+    "FUSION_MODEL_LOADING_MAX_ITER",
+    "FUSION_MODEL_LOADING_SKIP_CONTROLS",
+    "FUSION_MODEL_LOADING_CONTROL_SEED",
+    "FUSION_STACK_TRAIN_SIZE",
+    "FUSION_STACK_VAL_SIZE",
+    "FUSION_FINAL_TEST_SIZE",
     "HLT5_SEEDS",
     "SPLIT_SEEDS",
     "FIXED_HLT_SEEDS",
