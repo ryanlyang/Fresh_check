@@ -11,6 +11,7 @@ import numpy as np
 
 from .hlt_baseline import (
     accuracy_from_logits,
+    default_part_config,
     require_torch,
     resolve_device,
     save_json,
@@ -788,7 +789,128 @@ class DualViewCrossAttentionTagger(_ModuleBase):
         return _nan_to_num_torch(logits)
 
 
-DualViewParticleTransformerTagger = DualViewCrossAttentionTagger
+class _ParticleTransformerEmbeddingBranch(_ModuleBase):
+    """ParticleTransformer branch that returns a CLS embedding, not class logits."""
+
+    def __init__(self, **kwargs) -> None:
+        require_torch()
+        super().__init__()
+        try:
+            from weaver.nn.model.ParticleTransformer import ParticleTransformer
+        except ImportError as exc:  # pragma: no cover - depends on research env
+            raise ImportError(
+                "Particle Transformer dual-view loading requires weaver-core on the research compute."
+            ) from exc
+
+        branch_cfg = dict(kwargs)
+        branch_cfg["num_classes"] = None
+        branch_cfg["fc_params"] = None
+        self.config = branch_cfg
+        self.mod = ParticleTransformer(**branch_cfg)
+
+    def no_weight_decay(self) -> set[str]:
+        return {"mod.cls_token"}
+
+    def forward(self, inputs: Mapping[str, Any]):
+        return self.mod(inputs["features"], v=inputs["lorentz_vectors"], mask=inputs["mask"])
+
+
+class DualViewParticleTransformerTagger(_ModuleBase):
+    """Legacy-compatible two-branch ParticleTransformer dual-view classifier."""
+
+    def __init__(
+        self,
+        *,
+        num_classes: int = 10,
+        model_size: str = "base",
+        branch_config: Mapping[str, Any] | None = None,
+        classifier_hidden_dim: int | None = None,
+        dropout: float = 0.05,
+        activation: str = "gelu",
+        max_constits: int = 128,
+        reco_weight_threshold: float = 0.0,
+        **_: Any,
+    ) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        cfg = default_part_config(num_classes=int(num_classes), model_size=model_size)
+        if branch_config:
+            cfg.update(dict(branch_config))
+        cfg["num_classes"] = None
+        cfg["fc_params"] = None
+        branch_dim = int(cfg["embed_dims"][-1])
+        hidden_dim = int(classifier_hidden_dim or branch_dim)
+        activation_layer = torch.nn.GELU() if str(activation).lower() == "gelu" else torch.nn.ReLU()
+
+        self.hlt_branch = _ParticleTransformerEmbeddingBranch(**cfg)
+        self.reco_branch = _ParticleTransformerEmbeddingBranch(**cfg)
+        self.classifier = torch.nn.Sequential(
+            torch.nn.LayerNorm(branch_dim * 2),
+            torch.nn.Linear(branch_dim * 2, hidden_dim),
+            activation_layer,
+            torch.nn.Dropout(float(dropout)),
+            torch.nn.Linear(hidden_dim, int(num_classes)),
+        )
+        self.max_constits = int(max_constits)
+        self.reco_weight_threshold = float(reco_weight_threshold)
+        self.config = {
+            "architecture": "particle_transformer_concat",
+            "num_classes": int(num_classes),
+            "model_size": model_size,
+            "branch_config": dict(cfg),
+            "branch_dim": int(branch_dim),
+            "classifier_hidden_dim": int(hidden_dim),
+            "dropout": float(dropout),
+            "activation": str(activation),
+            "max_constits": int(max_constits),
+            "reco_weight_threshold": float(reco_weight_threshold),
+            "hlt_feature_names": list(PF_FEATURE_NAMES),
+            "corrected_view_feature_names": list(PF_FEATURE_NAMES),
+        }
+
+    def no_weight_decay(self) -> set[str]:
+        return {"hlt_branch.mod.cls_token", "reco_branch.mod.cls_token"}
+
+    def _corrected_to_part_inputs(self, corrected_inputs):
+        if isinstance(corrected_inputs, CorrectedViewInputs):
+            mask = corrected_inputs.mask
+            if mask.ndim == 3:
+                mask = mask[:, 0, :]
+            return build_part_inputs_torch(
+                corrected_inputs.tokens,
+                mask,
+                weights=corrected_inputs.token_weight,
+                max_constits=self.max_constits,
+                weight_threshold=self.reco_weight_threshold,
+            )
+        return corrected_inputs
+
+    def forward(self, hlt_inputs: Mapping[str, Any], corrected_inputs: Mapping[str, Any] | CorrectedViewInputs):
+        torch = require_torch()
+        reco_inputs = self._corrected_to_part_inputs(corrected_inputs)
+        hlt_embedding = self.hlt_branch(hlt_inputs)
+        reco_embedding = self.reco_branch(reco_inputs)
+        fused = torch.cat([hlt_embedding, reco_embedding], dim=1)
+        return _nan_to_num_torch(self.classifier(fused))
+
+
+def detect_dual_view_architecture_from_state_dict(
+    state_dict: Mapping[str, Any],
+    model_config: Mapping[str, Any] | None = None,
+) -> str:
+    keys = tuple(state_dict.keys())
+    if any(key.startswith("hlt_branch.mod.") for key in keys) and any(
+        key.startswith("reco_branch.mod.") for key in keys
+    ):
+        return "particle_transformer_concat"
+    if any(key.startswith("hlt_encoder.") for key in keys) or any(
+        key.startswith("corrected_encoder.") for key in keys
+    ):
+        return "cross_attention_fusion"
+    if model_config and model_config.get("architecture"):
+        return str(model_config["architecture"])
+    return "cross_attention_fusion"
 
 
 def build_dual_view_tagger(
@@ -800,8 +922,24 @@ def build_dual_view_tagger(
     num_layers: int | None = None,
     feedforward_dim: int | None = None,
     dropout: float = 0.05,
+    branch_config: Mapping[str, Any] | None = None,
+    classifier_hidden_dim: int | None = None,
+    activation: str = "gelu",
+    max_constits: int = 128,
+    reco_weight_threshold: float = 0.0,
     architecture: str | None = None,
 ):
+    if architecture in ("particle_transformer_concat", "particle_transformer_dual_view"):
+        return DualViewParticleTransformerTagger(
+            num_classes=num_classes,
+            model_size=model_size,
+            branch_config=branch_config,
+            classifier_hidden_dim=classifier_hidden_dim,
+            dropout=dropout,
+            activation=activation,
+            max_constits=max_constits,
+            reco_weight_threshold=reco_weight_threshold,
+        )
     if architecture not in (None, "cross_attention_fusion"):
         raise ValueError(f"Unsupported dual-view architecture {architecture!r}")
     return DualViewCrossAttentionTagger(

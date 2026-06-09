@@ -16,6 +16,7 @@ from .dual_view import (
     build_dual_view_tagger,
     build_part_inputs_torch,
     build_soft_corrected_view_torch,
+    detect_dual_view_architecture_from_state_dict,
     load_stage_a_reconstructor_checkpoint,
     make_hlt_token_loader,
 )
@@ -340,18 +341,35 @@ def load_dual_view_model_from_checkpoint(path: str | Path, *, device):
     payload = torch.load(path, map_location=device)
     cfg = payload.get("config", {})
     model_cfg = payload.get("model_config", {})
+    state_dict = payload["model_state_dict"]
+    architecture = detect_dual_view_architecture_from_state_dict(state_dict, model_cfg)
+    class_weight_key = "classifier.4.weight" if architecture == "particle_transformer_concat" else "classifier.7.weight"
+    classifier_weight = state_dict.get(class_weight_key)
+    inferred_num_classes = int(classifier_weight.shape[0]) if classifier_weight is not None else len(LABEL_NAMES)
+    legacy_hidden = None
+    if "classifier.1.weight" in state_dict:
+        legacy_hidden = int(state_dict["classifier.1.weight"].shape[0])
+    model_size = model_cfg.get("model_size", cfg.get("model_size"))
+    if model_size is None:
+        fused = state_dict.get("classifier.0.weight")
+        model_size = "tiny" if fused is not None and int(fused.shape[0]) <= 64 else "base"
     tagger_kwargs = {
-        "num_classes": int(model_cfg.get("num_classes", len(LABEL_NAMES))),
-        "model_size": model_cfg.get("model_size", cfg.get("model_size", "base")),
+        "num_classes": int(model_cfg.get("num_classes", inferred_num_classes)),
+        "model_size": model_size,
         "hidden_dim": model_cfg.get("hidden_dim"),
         "num_heads": model_cfg.get("num_heads"),
         "num_layers": model_cfg.get("num_layers"),
         "feedforward_dim": model_cfg.get("feedforward_dim"),
         "dropout": model_cfg.get("dropout", 0.05),
-        "architecture": model_cfg.get("architecture", "cross_attention_fusion"),
+        "branch_config": model_cfg.get("branch_config"),
+        "classifier_hidden_dim": model_cfg.get("classifier_hidden_dim", legacy_hidden),
+        "activation": model_cfg.get("activation", "gelu"),
+        "max_constits": model_cfg.get("max_constits", 128),
+        "reco_weight_threshold": model_cfg.get("reco_weight_threshold", 0.0),
+        "architecture": architecture,
     }
     tagger = build_dual_view_tagger(**tagger_kwargs)
-    tagger.load_state_dict(payload["model_state_dict"], strict=True)
+    tagger.load_state_dict(state_dict, strict=True)
     tagger = tagger.to(device)
     tagger.eval()
     reco_path = payload.get("reconstructor_checkpoint") or cfg.get("reconstructor_checkpoint")
@@ -470,7 +488,7 @@ def evaluate_dual_view_model(
         jet_ids=list(view.jet_ids),
         metadata={
             "model_kind": "dual_view",
-            "dual_view_architecture": "cross_attention_fusion",
+            "dual_view_architecture": getattr(tagger, "config", {}).get("architecture", "unknown"),
             "hlt_content_hash": view.metadata.get("hlt_content_hash"),
             "allowed_inputs": "cached_fixed_hlt_and_parent_aligned_corrected_view_from_cached_fixed_hlt",
         },

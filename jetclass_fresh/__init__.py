@@ -75,6 +75,7 @@ from .dual_view import (
     build_dual_view_tagger,
     build_part_inputs_torch,
     build_soft_corrected_view_torch,
+    detect_dual_view_architecture_from_state_dict,
     load_stage_a_reconstructor_checkpoint,
     train_dual_view_tagger,
 )
@@ -195,6 +196,7 @@ __all__ = [
     "build_dual_view_tagger",
     "build_part_inputs_torch",
     "build_soft_corrected_view_torch",
+    "detect_dual_view_architecture_from_state_dict",
     "load_stage_a_reconstructor_checkpoint",
     "train_dual_view_tagger",
     "DEFAULT_C_GRID",

@@ -12,6 +12,7 @@ from jetclass_fresh.dual_view import (
     DualViewTaggerTrainConfig,
     build_dual_view_tagger,
     build_soft_corrected_view_torch,
+    detect_dual_view_architecture_from_state_dict,
 )
 from jetclass_fresh.jetclass_data import JetIdentity, JetView
 from jetclass_fresh.reconstructor import RECONSTRUCTOR_VARIANT_NAMES
@@ -59,6 +60,27 @@ def make_hlt_view(split="model_train", n_jets=6, n_constits=5):
 
 
 class DualViewStep8ConfigTests(unittest.TestCase):
+    def test_detects_legacy_particle_transformer_concat_checkpoint_keys(self):
+        state_dict = {
+            "hlt_branch.mod.cls_token": object(),
+            "reco_branch.mod.cls_token": object(),
+            "classifier.0.weight": object(),
+        }
+
+        architecture = detect_dual_view_architecture_from_state_dict(state_dict)
+
+        self.assertEqual(architecture, "particle_transformer_concat")
+
+    def test_detects_cross_attention_checkpoint_keys(self):
+        state_dict = {
+            "hlt_encoder.input_proj.0.weight": object(),
+            "corrected_encoder.input_proj.0.weight": object(),
+        }
+
+        architecture = detect_dual_view_architecture_from_state_dict(state_dict)
+
+        self.assertEqual(architecture, "cross_attention_fusion")
+
     def test_config_defaults_to_m2_base_and_model_val_only(self):
         cfg = DualViewTaggerTrainConfig(
             output_dir="/tmp/out",
