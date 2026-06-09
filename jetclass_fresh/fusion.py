@@ -469,11 +469,21 @@ def evaluate_dual_view_model(
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             reco = reconstructor(batch["hlt_tokens"], batch["hlt_mask"])
             hlt_inputs = build_part_inputs_torch(batch["hlt_tokens"], batch["hlt_mask"], max_constits=max_constits)
-            corrected_inputs = build_soft_corrected_view_torch(
-                batch["hlt_tokens"],
-                batch["hlt_mask"],
-                reco,
-            )
+            architecture = getattr(tagger, "config", {}).get("architecture")
+            if architecture in ("particle_transformer_concat", "particle_transformer_dual_view"):
+                corrected_inputs = build_part_inputs_torch(
+                    reco.tokens,
+                    reco.candidate_mask,
+                    weights=reco.weights,
+                    max_constits=max_constits,
+                    weight_threshold=float(getattr(tagger, "config", {}).get("reco_weight_threshold", 0.0)),
+                )
+            else:
+                corrected_inputs = build_soft_corrected_view_torch(
+                    batch["hlt_tokens"],
+                    batch["hlt_mask"],
+                    reco,
+                )
             logits = tagger(hlt_inputs, corrected_inputs)
             logits_rows.append(logits.detach().cpu().numpy().astype(np.float32))
             labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))

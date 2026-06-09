@@ -24,6 +24,7 @@ from .reconstructor import (
     M2BaseReconstructor,
     RECONSTRUCTOR_VARIANT_NAMES,
     ReconstructorVariantConfig,
+    build_reconstructor_for_state_dict,
     build_reconstructor,
     get_reconstructor_variant_config,
 )
@@ -958,8 +959,9 @@ def load_stage_a_reconstructor_checkpoint(path: str | Path, *, device=None):
     payload = torch.load(path, map_location=device or "cpu")
     variant_payload = payload.get("variant_config", {})
     variant_config = ReconstructorVariantConfig(**variant_payload) if variant_payload else get_reconstructor_variant_config("m2_base")
-    model = build_reconstructor(variant_config)
-    model.load_state_dict(payload["model_state_dict"], strict=True)
+    state_dict = payload["model_state_dict"]
+    model = build_reconstructor_for_state_dict(state_dict, variant_config)
+    model.load_state_dict(state_dict, strict=True)
     if device is not None:
         model = model.to(device)
     model.eval()

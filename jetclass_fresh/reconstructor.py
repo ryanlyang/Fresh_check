@@ -734,6 +734,184 @@ class M2BaseReconstructor(_ModuleBase):
         )
 
 
+class LegacyM2BaseReconstructor(_ModuleBase):
+    """Checkpoint-compatible pre-original-mechanism m2 reconstructor."""
+
+    def __init__(self, config: ReconstructorVariantConfig | None = None) -> None:
+        require_torch()
+        super().__init__()
+        torch = require_torch()
+        self.config = config or m2_base_variant_config()
+        input_dim = 16
+        hidden = int(self.config.hidden_dim)
+        global_dim = int(self.config.global_dim)
+        self.token_encoder = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden, hidden),
+            torch.nn.GELU(),
+        )
+        self.global_encoder = torch.nn.Sequential(
+            torch.nn.Linear(hidden + 3, global_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(global_dim, global_dim),
+            torch.nn.GELU(),
+        )
+        self.edit_head = torch.nn.Linear(hidden + global_dim, 5)
+        self.split_head = torch.nn.Linear(hidden + global_dim, 5)
+        self.generated_query = torch.nn.Parameter(torch.randn(self.config.max_generated, global_dim) * 0.02)
+        self.generated_head = torch.nn.Sequential(
+            torch.nn.Linear(global_dim * 2, hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden, 15),
+        )
+        self.count_head = torch.nn.Sequential(
+            torch.nn.Linear(global_dim, hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden, 2),
+        )
+
+    def _apply_kinematic_delta(self, base_tokens, delta, *, split: bool = False):
+        torch = require_torch()
+        cfg = self.config
+        max_log_pt = cfg.max_split_log_pt_shift if split else cfg.max_log_pt_shift
+        log_pt_delta = torch.tanh(delta[:, :, 0]) * float(max_log_pt)
+        eta_delta = torch.tanh(delta[:, :, 1]) * float(cfg.max_eta_shift)
+        phi_delta = torch.tanh(delta[:, :, 2]) * float(cfg.max_phi_shift)
+        log_e_delta = torch.tanh(delta[:, :, 3]) * float(cfg.max_log_energy_shift)
+
+        out = base_tokens.clone()
+        pt = torch.clamp(base_tokens[:, :, 0], min=1.0e-8) * torch.exp(log_pt_delta)
+        eta = torch.clamp(base_tokens[:, :, 1] + eta_delta, -5.0, 5.0)
+        phi = wrap_phi_torch(base_tokens[:, :, 2] + phi_delta)
+        energy = torch.clamp(base_tokens[:, :, 3], min=1.0e-8) * torch.exp(log_e_delta)
+        out[:, :, 0] = pt
+        out[:, :, 1] = eta
+        out[:, :, 2] = phi
+        out[:, :, 3] = torch.maximum(energy, pt * torch.cosh(eta) * 0.5)
+        return out
+
+    def forward(self, hlt_tokens, hlt_mask) -> ReconstructionOutput:
+        torch = require_torch()
+        hlt_tokens = hlt_tokens.float()
+        hlt_mask = hlt_mask.bool()
+        features = raw_token_features(hlt_tokens, hlt_mask)
+        encoded = self.token_encoder(features) * hlt_mask.unsqueeze(-1).float()
+        denom = torch.clamp(hlt_mask.sum(dim=1, keepdim=True).float(), min=1.0)
+        pooled = encoded.sum(dim=1) / denom
+        hlt_count = hlt_mask.sum(dim=1, keepdim=False).float()
+        hlt_pt = (hlt_tokens[:, :, 0] * hlt_mask.float()).sum(dim=1)
+        hlt_energy = (hlt_tokens[:, :, 3] * hlt_mask.float()).sum(dim=1)
+        global_stats = torch.stack(
+            [
+                torch.log1p(hlt_count) / 5.0,
+                torch.log1p(torch.clamp(hlt_pt, min=0.0)) / 8.0,
+                torch.log1p(torch.clamp(hlt_energy, min=0.0)) / 8.0,
+            ],
+            dim=1,
+        )
+        global_latent = self.global_encoder(torch.cat([pooled, global_stats], dim=1))
+        global_per_token = global_latent[:, None, :].expand(-1, hlt_tokens.shape[1], -1)
+        token_context = torch.cat([encoded, global_per_token], dim=-1)
+
+        edit_raw = self.edit_head(token_context)
+        split_raw = self.split_head(token_context)
+        edited_tokens = self._apply_kinematic_delta(hlt_tokens, edit_raw[:, :, :4], split=False)
+        edited_weights = torch.sigmoid(edit_raw[:, :, 4]) * hlt_mask.float()
+
+        split_tokens = self._apply_kinematic_delta(hlt_tokens, split_raw[:, :, :4], split=True)
+        split_weights = torch.sigmoid(split_raw[:, :, 4]) * hlt_mask.float()
+
+        batch_size = hlt_tokens.shape[0]
+        query = self.generated_query[None, :, :].expand(batch_size, -1, -1)
+        gen_global = global_latent[:, None, :].expand(-1, self.config.max_generated, -1)
+        generated_raw = self.generated_head(torch.cat([query, gen_global], dim=-1))
+        generated_tokens = torch.zeros(
+            batch_size,
+            self.config.max_generated,
+            RAW_DIM,
+            dtype=hlt_tokens.dtype,
+            device=hlt_tokens.device,
+        )
+        gen_pt = torch.nn.functional.softplus(generated_raw[:, :, 0]) + ENERGY_EPS
+        gen_eta = torch.tanh(generated_raw[:, :, 1]) * float(self.config.max_generated_abs_eta)
+        gen_phi = wrap_phi_torch(generated_raw[:, :, 2])
+        gen_energy = torch.nn.functional.softplus(generated_raw[:, :, 3]) + gen_pt * torch.cosh(gen_eta) * 0.5
+        generated_tokens[:, :, 0] = gen_pt
+        generated_tokens[:, :, 1] = gen_eta
+        generated_tokens[:, :, 2] = gen_phi
+        generated_tokens[:, :, 3] = gen_energy
+        generated_tokens[:, :, 4:14] = torch.tanh(generated_raw[:, :, 4:14])
+        generated_weights = torch.sigmoid(generated_raw[:, :, 14])
+
+        tokens = torch.cat([edited_tokens, split_tokens, generated_tokens], dim=1)
+        weights = torch.cat([edited_weights, split_weights, generated_weights], dim=1)
+        candidate_mask = torch.cat(
+            [
+                hlt_mask,
+                hlt_mask,
+                torch.ones(
+                    batch_size,
+                    self.config.max_generated,
+                    dtype=torch.bool,
+                    device=hlt_tokens.device,
+                ),
+            ],
+            dim=1,
+        )
+        count_raw = self.count_head(global_latent)
+        total_count_pred = torch.nn.functional.softplus(count_raw[:, 0])
+        added_count_pred = torch.nn.functional.softplus(count_raw[:, 1])
+
+        return ReconstructionOutput(
+            tokens=tokens,
+            weights=weights,
+            candidate_mask=candidate_mask,
+            edited_tokens=edited_tokens,
+            split_tokens=split_tokens,
+            generated_tokens=generated_tokens,
+            edited_weights=edited_weights,
+            split_weights=split_weights,
+            generated_weights=generated_weights,
+            total_count_pred=total_count_pred,
+            added_count_pred=added_count_pred,
+        )
+
+
+def detect_reconstructor_family_from_state_dict(state_dict: Mapping[str, Any]) -> str:
+    keys = tuple(state_dict.keys())
+    if "generated_query" in state_dict or any(key.startswith("edit_head.") for key in keys):
+        return "legacy_m2_simple"
+    if any(key.startswith("token_encoder.layers.") for key in keys) or "generator_decoder.queries" in state_dict:
+        return "m2_hybrid_original_mechanism"
+    return "unknown"
+
+
+def _config_with_state_dict_dimensions(
+    config: ReconstructorVariantConfig,
+    state_dict: Mapping[str, Any],
+) -> ReconstructorVariantConfig:
+    values = asdict(config)
+    if "token_encoder.0.weight" in state_dict:
+        values["hidden_dim"] = int(state_dict["token_encoder.0.weight"].shape[0])
+    if "global_encoder.0.weight" in state_dict:
+        values["global_dim"] = int(state_dict["global_encoder.0.weight"].shape[0])
+    if "generated_query" in state_dict:
+        values["max_generated"] = int(state_dict["generated_query"].shape[0])
+    return ReconstructorVariantConfig(**values)
+
+
+def build_reconstructor_for_state_dict(
+    state_dict: Mapping[str, Any],
+    config: ReconstructorVariantConfig | None = None,
+):
+    config = config or m2_base_variant_config()
+    family = detect_reconstructor_family_from_state_dict(state_dict)
+    if family == "legacy_m2_simple":
+        return LegacyM2BaseReconstructor(_config_with_state_dict_dimensions(config, state_dict))
+    return build_reconstructor(config)
+
+
 def build_reconstructor(config: ReconstructorVariantConfig | None = None):
     config = config or m2_base_variant_config()
     if config.name not in RECONSTRUCTOR_VARIANT_NAMES:

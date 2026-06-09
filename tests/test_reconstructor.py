@@ -11,6 +11,7 @@ from jetclass_fresh.reconstructor import (
     ReconstructorVariantConfig,
     StageAReconstructorTrainConfig,
     all_reconstructor_variant_configs,
+    detect_reconstructor_family_from_state_dict,
     get_reconstructor_variant_config,
     m2_base_variant_config,
 )
@@ -20,8 +21,10 @@ if TORCH_AVAILABLE:
     import torch
 
     from jetclass_fresh.reconstructor import (
+        LegacyM2BaseReconstructor,
         ReconstructionOutput,
         PairedReconstructionDataset,
+        build_reconstructor_for_state_dict,
         build_reconstructor,
         reconstruction_loss,
         train_stage_a_reconstructor,
@@ -79,6 +82,27 @@ def make_views(n_jets=4, n_constits=5):
 
 
 class ReconstructorStep7ConfigTests(unittest.TestCase):
+    def test_detects_legacy_m2_simple_checkpoint_keys(self):
+        state_dict = {
+            "generated_query": object(),
+            "edit_head.weight": object(),
+            "token_encoder.0.weight": object(),
+        }
+
+        family = detect_reconstructor_family_from_state_dict(state_dict)
+
+        self.assertEqual(family, "legacy_m2_simple")
+
+    def test_detects_original_mechanism_checkpoint_keys(self):
+        state_dict = {
+            "token_encoder.layers.0.qkv.weight": object(),
+            "generator_decoder.queries": object(),
+        }
+
+        family = detect_reconstructor_family_from_state_dict(state_dict)
+
+        self.assertEqual(family, "m2_hybrid_original_mechanism")
+
     def test_step9_registers_all_seven_variants(self):
         configs = all_reconstructor_variant_configs()
         self.assertEqual(list(configs), RECONSTRUCTOR_VARIANT_NAMES)
@@ -119,6 +143,27 @@ class ReconstructorStep7TorchTests(unittest.TestCase):
             dropout=0.0,
             max_hlt_constits=5,
         )
+
+    def test_build_reconstructor_for_legacy_state_dict_roundtrip(self):
+        hlt_view, _ = make_views(n_jets=2, n_constits=5)
+        cfg = self.tiny_config()
+        legacy = LegacyM2BaseReconstructor(cfg)
+        state_dict = legacy.state_dict()
+        loaded = build_reconstructor_for_state_dict(state_dict, cfg)
+        loaded.load_state_dict(state_dict, strict=True)
+
+        hlt_tokens = torch.from_numpy(hlt_view.tokens).float()
+        hlt_mask = torch.from_numpy(hlt_view.mask).bool()
+        output = loaded(hlt_tokens, hlt_mask)
+
+        self.assertEqual(output.tokens.shape, (2, 13, 14))
+        self.assertEqual(output.weights.shape, (2, 13))
+        self.assertEqual(output.candidate_mask.shape, (2, 13))
+        self.assertEqual(output.edited_tokens.shape, (2, 5, 14))
+        self.assertEqual(output.split_tokens.shape, (2, 5, 14))
+        self.assertEqual(output.generated_tokens.shape, (2, 3, 14))
+        self.assertTrue(torch.isfinite(output.tokens).all())
+        self.assertTrue(torch.isfinite(output.weights).all())
 
     def test_forward_shapes_and_finite_loss(self):
         hlt_view, offline_view = make_views(n_jets=2, n_constits=5)
