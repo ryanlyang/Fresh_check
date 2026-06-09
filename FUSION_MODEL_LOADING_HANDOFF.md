@@ -446,3 +446,243 @@ checkpoint output dimension
 
 If raw HLT is low but singleton stacker is high, one possible explanation is class-index/mapping mismatch or a systematic remapping that logistic regression learns. That must be ruled out directly.
 
+
+## Fresh-Check Loader Demo Script
+
+A concrete non-fusion loader/evaluation script has been added here:
+
+```text
+/home/ryan/ComputerScience/ATLAS/fresh_start_check/scripts/demo_load_and_score_models_no_fusion.py
+```
+
+This script is intentionally not a fusion script. It does everything needed before fusion:
+
+1. Builds model specs for the fresh-check HLT baseline and selected fresh-check dual-view reconstructor variants.
+2. Loads frozen checkpoints through the `jetclass_fresh` library.
+3. Runs inference on cached fixed-HLT splits.
+4. Saves one prediction block per model per split.
+5. Reloads those blocks to verify label and jet-identity alignment.
+6. Builds candidate fusion feature matrices from logits/probs.
+7. Saves raw model metrics and feature-matrix shape reports.
+8. Does not train logistic regression, does not fit weighted averages, and does not combine model outputs.
+
+### Script Commands
+
+Small smoke/demo run, no final test:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+python -u scripts/demo_load_and_score_models_no_fusion.py \
+  --hlt-cache-dir checkpoints/jetclass_fresh_hlt_cache \
+  --hlt-checkpoint checkpoints/jetclass_fresh_hlt_baselines/single_hlt_seed101/best_model_val.pt \
+  --reco-root checkpoints/jetclass_fresh_reco7 \
+  --output-dir checkpoints/jetclass_fresh_model_loading_demo \
+  --splits stack_train stack_val \
+  --max-jets-per-split 2000 \
+  --batch-size 128 \
+  --device cuda
+```
+
+If you deliberately want to generate final-test prediction blocks too, you must explicitly confirm it:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+python -u scripts/demo_load_and_score_models_no_fusion.py \
+  --hlt-cache-dir checkpoints/jetclass_fresh_hlt_cache \
+  --hlt-checkpoint checkpoints/jetclass_fresh_hlt_baselines/single_hlt_seed101/best_model_val.pt \
+  --reco-root checkpoints/jetclass_fresh_reco7 \
+  --output-dir checkpoints/jetclass_fresh_model_loading_demo_with_final_test \
+  --splits stack_train stack_val final_test \
+  --confirm-final-test \
+  --max-jets-per-split 2000 \
+  --batch-size 128 \
+  --device cuda
+```
+
+To only run a subset of variants:
+
+```bash
+python -u scripts/demo_load_and_score_models_no_fusion.py \
+  --variants m2_base m2_budgetlite m2_topk60ish m2_antioverlap \
+  --splits stack_train stack_val \
+  --max-jets-per-split 2000
+```
+
+To validate that the external PracticeTagging fixed-HLT paths exist without trying to load those old architectures:
+
+```bash
+python -u scripts/demo_load_and_score_models_no_fusion.py \
+  --splits stack_train stack_val \
+  --max-jets-per-split 100 \
+  --validate-practicetagging-paths
+```
+
+### What The Script Saves
+
+Main report:
+
+```text
+<output-dir>/model_loading_demo_report.json
+```
+
+Prediction blocks:
+
+```text
+<output-dir>/predictions/<model_name>/<split>_predictions.npz
+<output-dir>/predictions/<model_name>/<split>_predictions_metadata.json
+```
+
+Each `.npz` prediction block contains:
+
+```text
+logits                float32 [n_jets, 10]
+probs                 float32 [n_jets, 10]
+labels                int64   [n_jets]
+jet_file_indices      int32   [n_jets]
+jet_entries           int64   [n_jets]
+```
+
+The metadata contains:
+
+```text
+model_name
+split
+jet_identity_hash
+prediction_content_hash
+n_jets
+num_classes
+raw accuracy / cross entropy
+checkpoint path
+allowed input description
+```
+
+### How It Loads Fresh-Check Models
+
+The script uses these functions from `jetclass_fresh.fusion`:
+
+```python
+from jetclass_fresh.fusion import (
+    FusionModelSpec,
+    collect_frozen_predictions,
+    load_blocks_for_split,
+    validate_prediction_alignment,
+    stack_feature_matrix,
+)
+```
+
+The HLT baseline spec is:
+
+```python
+FusionModelSpec(
+    name="hlt_baseline",
+    kind="hlt",
+    checkpoint="checkpoints/jetclass_fresh_hlt_baselines/single_hlt_seed101/best_model_val.pt",
+)
+```
+
+Each dual-view reconstructor/tagger spec is:
+
+```python
+FusionModelSpec(
+    name="m2_base",
+    kind="dual_view",
+    checkpoint="checkpoints/jetclass_fresh_reco7/m2_base/stage2_dual_view/best_model_val.pt",
+)
+```
+
+The helper that builds the default HLT + reco7 list is:
+
+```python
+from jetclass_fresh.fusion import default_reco7_plus_hlt_specs
+
+specs = default_reco7_plus_hlt_specs(
+    hlt_checkpoint="checkpoints/jetclass_fresh_hlt_baselines/single_hlt_seed101/best_model_val.pt",
+    reco_root="checkpoints/jetclass_fresh_reco7",
+    variants=["m2_base", "m2_budgetlite", "m2_topk60ish"],
+)
+```
+
+Internally, the fresh-check library loads HLT checkpoints with:
+
+```python
+load_hlt_model_from_checkpoint(path, device=device)
+```
+
+and dual-view checkpoints with:
+
+```python
+load_dual_view_model_from_checkpoint(path, device=device)
+```
+
+The dual-view checkpoint records its reconstructor checkpoint, so loading the dual-view model also loads the matching Stage-A reconstructor:
+
+```python
+tagger, reconstructor, dual_payload, reco_payload = load_dual_view_model_from_checkpoint(path, device=device)
+```
+
+### How It Runs Inference
+
+For HLT-only models, the fresh library calls:
+
+```python
+evaluate_hlt_model(
+    model,
+    fixed_hlt_view,
+    model_name="hlt_baseline",
+    batch_size=batch_size,
+    num_workers=num_workers,
+    device=device,
+)
+```
+
+For dual-view models, the fresh library calls:
+
+```python
+evaluate_dual_view_model(
+    model_name,
+    tagger,
+    reconstructor,
+    fixed_hlt_view,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    device=device,
+)
+```
+
+The dual-view inference path is:
+
+```python
+reco = reconstructor(batch["hlt_tokens"], batch["hlt_mask"])
+hlt_inputs = build_part_inputs_torch(batch["hlt_tokens"], batch["hlt_mask"])
+corrected_inputs = build_soft_corrected_view_torch(batch["hlt_tokens"], batch["hlt_mask"], reco)
+logits = tagger(hlt_inputs, corrected_inputs)
+```
+
+This is the exact place where a future independent fusion script should obtain raw logits. Do not modify labels, row order, or split membership after this point.
+
+### How It Prepares Candidate Fusion Features Without Fusing
+
+After prediction blocks are saved, the script reloads them and verifies alignment:
+
+```python
+blocks = load_blocks_for_split(prediction_dir, model_names, split)
+validate_prediction_alignment(blocks)
+```
+
+Then it prepares the matrix that a fusion method would consume:
+
+```python
+X = stack_feature_matrix(blocks, feature_mode="logits_probs")
+y = blocks[0].labels
+```
+
+At this point the demo stops. A separate independent fusion script can take `X_train`, `y_train`, `X_val`, `y_val`, `X_test`, and `y_test`, but it should not be written by copying old fusion behavior blindly.
+
+### Why This Script Exists
+
+Use this script to decouple two questions:
+
+1. Can we load the models and reproduce raw logits correctly?
+2. Does a fusion/meta-classifier actually improve performance in a fair way?
+
+This script answers only question 1. It intentionally provides all model loading and raw prediction machinery while leaving question 2 to a fresh independent fusion implementation.
