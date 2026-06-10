@@ -25,6 +25,7 @@ RUNNERS = [
     "run_v2_step11_audit_reco7_plus_hlt.sh",
     "run_independent_fusion_small.sh",
     "run_independent_fusion_large.sh",
+    "run_independent_fusion_ensemble_analysis.sh",
 ]
 
 SUBMITTERS = [
@@ -107,6 +108,7 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_v2_step10_fuse_reco7_plus_hlt.sh",
             "run_independent_fusion_small.sh",
             "run_independent_fusion_large.sh",
+            "run_independent_fusion_ensemble_analysis.sh",
             "run_build_fresh_hlt_cache.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
