@@ -9,6 +9,7 @@ from typing import Any, Dict
 from jetclass_fresh.hlt_baseline import require_torch
 
 from .global_transformer import GlobalTransformerReconstructor, GlobalTransformerReconstructorConfig
+from .particle_net_reconstructor import ParticleNetReconstructor, ParticleNetReconstructorConfig
 
 
 GLOBAL_TRANSFORMER_RECONSTRUCTOR = "global_transformer"
@@ -110,7 +111,7 @@ def infer_reconstructor_architecture_from_payload(
 
 def build_teacher_logit_reconstructor(
     architecture: str | None,
-    config: Mapping[str, Any] | GlobalTransformerReconstructorConfig | None = None,
+    config: Mapping[str, Any] | GlobalTransformerReconstructorConfig | ParticleNetReconstructorConfig | None = None,
 ):
     """Construct a teacher-logit reconstructor from an architecture/config pair."""
 
@@ -118,7 +119,7 @@ def build_teacher_logit_reconstructor(
     if arch == GLOBAL_TRANSFORMER_RECONSTRUCTOR:
         return GlobalTransformerReconstructor(GlobalTransformerReconstructorConfig.from_mapping(config or {}))
     if arch == PARTICLE_NET_RECONSTRUCTOR:
-        raise NotImplementedError("particle_net teacher-logit reconstructor is planned but not implemented yet")
+        return ParticleNetReconstructor(ParticleNetReconstructorConfig.from_mapping(config or {}))
     raise AssertionError(f"Unhandled reconstructor architecture after normalization: {arch}")
 
 

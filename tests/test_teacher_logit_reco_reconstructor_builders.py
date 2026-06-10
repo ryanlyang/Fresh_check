@@ -19,6 +19,7 @@ if TORCH_AVAILABLE:
         GlobalTransformerReconstructor,
         GlobalTransformerReconstructorConfig,
     )
+    from teacher_logit_reco.particle_net_reconstructor import ParticleNetReconstructor
 
 
 class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
@@ -59,10 +60,6 @@ class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
             infer_reconstructor_architecture_from_payload({}, architecture="bad_architecture")
         with self.assertRaises(ValueError):
             infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "bad_architecture"})
-
-    def test_particle_net_build_is_reserved_for_later_step(self):
-        with self.assertRaises(NotImplementedError):
-            build_teacher_logit_reconstructor("particle_net", {})
 
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
@@ -115,6 +112,14 @@ class TeacherLogitReconstructorCheckpointTests(unittest.TestCase):
             )
             self.assertIsInstance(loaded, GlobalTransformerReconstructor)
             self.assertEqual(payload["reconstructor_architecture"], "global_transformer")
+
+    def test_builds_particle_net_reconstructor_after_step4(self):
+        model = build_teacher_logit_reconstructor(
+            "particle_net",
+            {"edgeconv_dims": [16, 16], "k": 4, "num_extra_candidates": 2, "dropout": 0.0},
+        )
+        self.assertIsInstance(model, ParticleNetReconstructor)
+        self.assertEqual(model.config.edgeconv_dims, (16, 16))
 
     def test_expected_architecture_mismatch_raises_before_model_build(self):
         with tempfile.TemporaryDirectory() as tmp:

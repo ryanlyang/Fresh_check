@@ -262,6 +262,24 @@ Current status:
 - Step 1 complete: shared reconstructor builder/checkpoint loading exists,
   legacy Global Transformer checkpoints still load, and new Global Transformer
   checkpoints record `reconstructor_architecture: global_transformer`.
+- Step 2 complete: PN input features, physical kNN coordinates, masked kNN
+  indices, and neighbor feature gathering are implemented and exported.
+- Step 3 complete: `EdgeConvBlock` and `ParticleNetEncoder` are implemented
+  with fixed-coordinate masked kNN recomputed at each block.
+- Step 4 complete: `ParticleNetReconstructorConfig`,
+  `ParticleNetReconstructor`, and `build_particle_net_reconstructor` produce
+  the shared soft-view/aux contract using PN graph encoding.
+- Step 5 complete: PN-specific training config/module/CLI reuse the existing
+  paired-view loader, teacher-logit loss, epoch runner, checkpoint artifacts,
+  and leakage rules.
+- Step 6 complete: PN-specific prediction config/module/CLI load trained PN
+  checkpoints, consume cached fixed-HLT views only, and write fusion-compatible
+  prediction blocks with PN architecture metadata.
+- Step 7 complete: first PN -> ParT experiment harness trains a modest PN
+  run, collects saved prediction blocks, and writes comparison-ready metrics
+  without using final_test unless explicitly confirmed.
+- Step 8 complete: Slurm train/predict/fuse runners and the PN submitter
+  queue the teacher-logit PN experiment end to end.
 
 ### Step 1: Shared Reconstructor Builder Interface
 
@@ -499,6 +517,8 @@ Does PN reco help particular classes more than GT reco?
 
 ### Step 8: Slurm Runners
 
+Status: complete.
+
 Add Slurm scripts only after the local smoke path works.
 
 Recommended scripts:
@@ -532,6 +552,15 @@ Later, when PN/PFN/PCNN offline teachers exist:
 ```text
 TEACHER_LOGIT_PN_TEACHERS="part pn pfn pcnn"
 ```
+
+Implemented notes:
+
+- `sbatch/common.sh` now has `TEACHER_LOGIT_PN_*` output, teacher-checkpoint, architecture, prediction, and fusion defaults.
+- `sbatch/run_train_teacher_logit_pn_reco.sh` trains one PN reconstructor against one selected offline teacher.
+- `sbatch/run_predict_teacher_logit_pn_reco.sh` writes stack/final-test prediction blocks from a trained PN reconstructor.
+- `sbatch/run_fuse_teacher_logit_pn_reco.sh` runs the independent fusion script on those saved PN prediction blocks.
+- `sbatch/submit_teacher_logit_pn_reco_experiment.sh` queues train -> predict for each selected teacher architecture, then fuses after all predictions finish.
+- `tests/test_sbatch_scripts.py` now pins the PN Step 8 runner names, walltimes, GPU requests, output roots, and dependency wiring.
 
 ## What Not To Do Yet
 

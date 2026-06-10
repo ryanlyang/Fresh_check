@@ -31,6 +31,9 @@ RUNNERS = [
     "run_train_teacher_logit_gt_reco.sh",
     "run_predict_teacher_logit_gt_reco.sh",
     "run_fuse_teacher_logit_gt_reco.sh",
+    "run_train_teacher_logit_pn_reco.sh",
+    "run_predict_teacher_logit_pn_reco.sh",
+    "run_fuse_teacher_logit_pn_reco.sh",
 ]
 
 SUBMITTERS = [
@@ -42,6 +45,7 @@ SUBMITTERS = [
     "submit_v2_step7_reco7_plus_hlt.sh",
     "submit_heterogeneous_hlt4_fusion.sh",
     "submit_teacher_logit_gt_reco_experiment.sh",
+    "submit_teacher_logit_pn_reco_experiment.sh",
 ]
 
 
@@ -120,6 +124,9 @@ class SbatchStep14Tests(unittest.TestCase):
             "submit_heterogeneous_hlt4_fusion.sh",
             "run_fuse_teacher_logit_gt_reco.sh",
             "submit_teacher_logit_gt_reco_experiment.sh",
+            "run_train_teacher_logit_pn_reco.sh",
+            "run_fuse_teacher_logit_pn_reco.sh",
+            "submit_teacher_logit_pn_reco_experiment.sh",
             "run_build_fresh_hlt_cache.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
@@ -212,7 +219,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--max-train-jets \"${HETERO_HLT4_TRAIN_SIZE}\"", train)
         self.assertIn("--max-val-jets \"${HETERO_HLT4_VAL_SIZE}\"", train)
         self.assertIn("scripts/train_heterogeneous_hlt.py", train)
-        self.assertIn("#SBATCH --time=05:00:00", fusion)
+        self.assertIn("#SBATCH --time=23:00:00", fusion)
         self.assertIn("scripts/run_heterogeneous_hlt_fusion.py", fusion)
         self.assertIn("--stack-train-size \"${HETERO_HLT4_STACK_TRAIN_SIZE}\"", fusion)
         self.assertIn("--stack-val-size \"${HETERO_HLT4_STACK_VAL_SIZE}\"", fusion)
@@ -256,6 +263,43 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('fresh_refuse_existing_dir "${TEACHER_LOGIT_GT_PREDICTION_DIR}/${model_name}"', submitter)
         self.assertIn('--dependency="afterok:${train_jid}"', submitter)
         self.assertIn('fusion_dependency="$(fresh_join_by_colon "${predict_job_ids[@]}")"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
+
+    def test_teacher_logit_pn_submitter_queues_training_prediction_and_fusion(self):
+        train = self.read("run_train_teacher_logit_pn_reco.sh")
+        predict = self.read("run_predict_teacher_logit_pn_reco.sh")
+        fusion = self.read("run_fuse_teacher_logit_pn_reco.sh")
+        submitter = self.read("submit_teacher_logit_pn_reco_experiment.sh")
+        common = self.read("common.sh")
+        self.assertIn("teacher_logit_reco_pn", common)
+        self.assertIn("TEACHER_LOGIT_PN_TEACHERS:=part", common)
+        self.assertIn("TEACHER_LOGIT_PN_PART_TEACHER_CHECKPOINT", common)
+        self.assertIn("fresh_teacher_logit_pn_teacher_checkpoint", common)
+        self.assertIn("fresh_teacher_logit_pn_model_name", common)
+        self.assertIn("#SBATCH --time=12:00:00", train)
+        self.assertIn("#SBATCH --gres=gpu:1", train)
+        self.assertIn("scripts/train_teacher_logit_particle_net_reco.py", train)
+        self.assertIn("--teacher-architecture \"${ARCHITECTURE}\"", train)
+        self.assertIn("--edgeconv-dims \"${edgeconv_dim_args[@]}\"", train)
+        self.assertIn("--k \"${TEACHER_LOGIT_PN_K}\"", train)
+        self.assertIn("--max-train-jets", train)
+        self.assertIn('fresh_claim_new_dir "${OUTPUT_DIR}"', train)
+        self.assertIn("#SBATCH --time=05:00:00", predict)
+        self.assertIn("#SBATCH --gres=gpu:1", predict)
+        self.assertIn("scripts/predict_teacher_logit_particle_net_reco.py", predict)
+        self.assertIn("--prediction-dir \"${TEACHER_LOGIT_PN_PREDICTION_DIR}\"", predict)
+        self.assertIn("--splits stack_train stack_val final_test", predict)
+        self.assertIn("--confirm-final-test", predict)
+        self.assertIn("scripts/run_independent_fusion_from_predictions.py", fusion)
+        self.assertIn("--group \"teacher_logit_pn:${group_models}\"", fusion)
+        self.assertIn("--confirm-final-test", fusion)
+        self.assertIn("run_train_teacher_logit_pn_reco.sh", submitter)
+        self.assertIn("run_predict_teacher_logit_pn_reco.sh", submitter)
+        self.assertIn("run_fuse_teacher_logit_pn_reco.sh", submitter)
+        self.assertIn('fresh_split_words teacher_args "${TEACHER_LOGIT_PN_TEACHERS}"', submitter)
+        self.assertIn('fresh_refuse_existing_dir "${TEACHER_LOGIT_PN_PREDICTION_DIR}/${model_name}"', submitter)
+        self.assertIn('--dependency="afterok:${train_jid}"', submitter)
+        self.assertIn('fusion_dependency="$(fresh_join_by_colon "${predict_job_ids[@]}")', submitter)
         self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
 
 

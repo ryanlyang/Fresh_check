@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
-from .fusion import PredictionBlock, prediction_paths, save_prediction_block, softmax_np
+from .fusion import PredictionBlock, STACK_SPLITS, prediction_paths, save_prediction_block, softmax_np
 from .hlt_baseline import (
     HLTBaselineTrainConfig,
     JetViewTorchDataset,
@@ -319,6 +319,100 @@ def default_model_name_for_architecture(architecture: str) -> str:
     return HETERO_HLT_MODEL_NAMES[normalize_architecture_name(architecture)]
 
 
+def _label_count_dict(labels: np.ndarray) -> Dict[str, int]:
+    counts = np.bincount(np.asarray(labels, dtype=np.int64), minlength=len(LABEL_NAMES))
+    return {str(index): int(counts[index]) for index in range(len(LABEL_NAMES))}
+
+
+def select_balanced_subset_indices(
+    labels: np.ndarray,
+    max_jets: int | None,
+    *,
+    seed: int,
+) -> np.ndarray:
+    """Select a deterministic class-balanced subset instead of a class-ordered prefix."""
+
+    labels = np.asarray(labels, dtype=np.int64)
+    if max_jets is None or int(max_jets) >= len(labels):
+        return np.arange(len(labels), dtype=np.int64)
+    target = max(0, int(max_jets))
+    if target == 0:
+        return np.zeros((0,), dtype=np.int64)
+
+    class_to_indices = {
+        class_index: np.flatnonzero(labels == class_index)
+        for class_index in range(len(LABEL_NAMES))
+    }
+    available_classes = [
+        class_index
+        for class_index, indices in class_to_indices.items()
+        if len(indices) > 0
+    ]
+    if not available_classes:
+        return np.zeros((0,), dtype=np.int64)
+
+    rng = np.random.default_rng(int(seed))
+    quotas = {class_index: 0 for class_index in available_classes}
+    order = list(rng.permutation(np.asarray(available_classes, dtype=np.int64)).astype(int))
+    while sum(quotas.values()) < target:
+        progressed = False
+        for class_index in order:
+            if quotas[class_index] >= len(class_to_indices[class_index]):
+                continue
+            quotas[class_index] += 1
+            progressed = True
+            if sum(quotas.values()) >= target:
+                break
+        if not progressed:
+            break
+
+    selected: list[np.ndarray] = []
+    for class_index in sorted(quotas):
+        quota = quotas[class_index]
+        if quota <= 0:
+            continue
+        indices = class_to_indices[class_index]
+        class_rng = np.random.default_rng(int(seed) + 7919 * (class_index + 1))
+        chosen = class_rng.choice(indices, size=quota, replace=False)
+        selected.append(np.asarray(chosen, dtype=np.int64))
+    if not selected:
+        return np.zeros((0,), dtype=np.int64)
+    return np.sort(np.concatenate(selected).astype(np.int64, copy=False))
+
+
+def balanced_limit_jet_view(
+    view: JetView,
+    max_jets: int | None,
+    *,
+    seed: int,
+) -> tuple[JetView, Dict[str, Any]]:
+    indices = select_balanced_subset_indices(view.labels, max_jets, seed=seed)
+    selection_report = {
+        "strategy": "deterministic_balanced_by_label",
+        "seed": int(seed),
+        "requested_max_jets": None if max_jets is None else int(max_jets),
+        "source_n_jets": int(len(view.labels)),
+        "selected_n_jets": int(len(indices)),
+        "source_label_counts": _label_count_dict(view.labels),
+        "selected_label_counts": _label_count_dict(np.asarray(view.labels)[indices]),
+    }
+    if max_jets is None or len(indices) == len(view.labels):
+        return view, selection_report
+    metadata = dict(view.metadata)
+    metadata["subset_selection"] = selection_report
+    return (
+        JetView(
+            tokens=view.tokens[indices],
+            mask=view.mask[indices],
+            labels=view.labels[indices],
+            jet_ids=[view.jet_ids[int(index)] for index in indices],
+            split=view.split,
+            metadata=metadata,
+        ),
+        selection_report,
+    )
+
+
 def build_heterogeneous_hlt_classifier(
     architecture: str,
     *,
@@ -381,11 +475,23 @@ def train_heterogeneous_hlt_model(
         model_size=config.model_size,
     )
     arch = normalize_architecture_name(architecture)
+    train_view = load_cached_hlt_view(config.cache_dir, config.train_split)
+    val_view = load_cached_hlt_view(config.cache_dir, config.val_split)
+    train_view, train_selection = balanced_limit_jet_view(
+        train_view,
+        max_train_jets,
+        seed=int(config.seed),
+    )
+    val_view, val_selection = balanced_limit_jet_view(
+        val_view,
+        max_val_jets,
+        seed=int(config.seed) + 1,
+    )
     report = train_hlt_baseline(
         config,
         model=model,
-        max_train_jets=max_train_jets,
-        max_val_jets=max_val_jets,
+        train_view=train_view,
+        val_view=val_view,
     )
     report = dict(report)
     report.update(
@@ -395,6 +501,10 @@ def train_heterogeneous_hlt_model(
             "model_name": default_model_name_for_architecture(arch),
             "max_train_jets": max_train_jets,
             "max_val_jets": max_val_jets,
+            "subset_selection": {
+                "model_train": train_selection,
+                "model_val": val_selection,
+            },
         }
     )
     save_json(Path(config.output_dir) / "heterogeneous_hlt_report.json", report)
@@ -420,20 +530,6 @@ def load_heterogeneous_hlt_model_from_checkpoint(path: str | Path, *, device):
     return model, payload
 
 
-def _maybe_limit_view(view: JetView, max_jets: int | None) -> JetView:
-    if max_jets is None:
-        return view
-    limit = min(int(max_jets), len(view.labels))
-    return JetView(
-        tokens=view.tokens[:limit],
-        mask=view.mask[:limit],
-        labels=view.labels[:limit],
-        jet_ids=view.jet_ids[:limit],
-        split=view.split,
-        metadata=dict(view.metadata),
-    )
-
-
 def evaluate_heterogeneous_hlt_model(
     model,
     view: JetView,
@@ -444,9 +540,14 @@ def evaluate_heterogeneous_hlt_model(
     num_workers: int,
     device,
     max_jets: int | None = None,
+    selection_seed: int = 12345,
 ) -> PredictionBlock:
     torch = require_torch()
-    view = _maybe_limit_view(view, max_jets)
+    view, selection_report = balanced_limit_jet_view(
+        view,
+        max_jets,
+        seed=int(selection_seed),
+    )
     dataset = JetViewTorchDataset(view)
     loader = make_data_loader(
         dataset,
@@ -477,6 +578,7 @@ def evaluate_heterogeneous_hlt_model(
             "hlt_architecture": normalize_architecture_name(architecture),
             "hlt_content_hash": view.metadata.get("hlt_content_hash"),
             "allowed_inputs": "cached_fixed_hlt_only",
+            "subset_selection": selection_report,
         },
     )
 
@@ -522,6 +624,7 @@ def collect_heterogeneous_hlt_predictions(config: HeterogeneousHLTFusionConfig) 
                 num_workers=config.num_workers,
                 device=device,
                 max_jets=split_size_for_config(config, split),
+                selection_seed=int(config.control_seed) + 1009 * (list(STACK_SPLITS).index(split) + 1),
             )
             block.metadata.update(
                 {
