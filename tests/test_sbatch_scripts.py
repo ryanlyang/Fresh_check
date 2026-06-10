@@ -26,6 +26,8 @@ RUNNERS = [
     "run_independent_fusion_small.sh",
     "run_independent_fusion_large.sh",
     "run_independent_fusion_ensemble_analysis.sh",
+    "run_train_heterogeneous_hlt_arch.sh",
+    "run_fuse_heterogeneous_hlt4.sh",
 ]
 
 SUBMITTERS = [
@@ -35,6 +37,7 @@ SUBMITTERS = [
     "submit_fresh_smoke_test.sh",
     "submit_v2_step6_m2_base_end_to_end.sh",
     "submit_v2_step7_reco7_plus_hlt.sh",
+    "submit_heterogeneous_hlt4_fusion.sh",
 ]
 
 
@@ -109,6 +112,8 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_independent_fusion_small.sh",
             "run_independent_fusion_large.sh",
             "run_independent_fusion_ensemble_analysis.sh",
+            "run_fuse_heterogeneous_hlt4.sh",
+            "submit_heterogeneous_hlt4_fusion.sh",
             "run_build_fresh_hlt_cache.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
@@ -186,6 +191,31 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
         self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
         self.assertIn("hlt5_seed_control: true", submitter)
+
+    def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
+        train = self.read("run_train_heterogeneous_hlt_arch.sh")
+        fusion = self.read("run_fuse_heterogeneous_hlt4.sh")
+        submitter = self.read("submit_heterogeneous_hlt4_fusion.sh")
+        common = self.read("common.sh")
+        self.assertIn("jetclass_hetero_hlt4_150k_50k_300k", common)
+        self.assertIn("HETERO_HLT4_ARCHITECTURES:=part pn pfn pcnn", common)
+        self.assertIn("HETERO_HLT4_TRAIN_SIZE:=150000", common)
+        self.assertIn("HETERO_HLT4_VAL_SIZE:=50000", common)
+        self.assertIn("HETERO_HLT4_FINAL_TEST_SIZE:=300000", common)
+        self.assertIn("#SBATCH --time=12:00:00", train)
+        self.assertIn("--max-train-jets \"${HETERO_HLT4_TRAIN_SIZE}\"", train)
+        self.assertIn("--max-val-jets \"${HETERO_HLT4_VAL_SIZE}\"", train)
+        self.assertIn("scripts/train_heterogeneous_hlt.py", train)
+        self.assertIn("#SBATCH --time=05:00:00", fusion)
+        self.assertIn("scripts/run_heterogeneous_hlt_fusion.py", fusion)
+        self.assertIn("--stack-train-size \"${HETERO_HLT4_STACK_TRAIN_SIZE}\"", fusion)
+        self.assertIn("--stack-val-size \"${HETERO_HLT4_STACK_VAL_SIZE}\"", fusion)
+        self.assertIn("--final-test-size \"${HETERO_HLT4_FINAL_TEST_SIZE}\"", fusion)
+        self.assertIn("--confirm-final-test", fusion)
+        self.assertIn("run_train_heterogeneous_hlt_arch.sh", submitter)
+        self.assertIn("run_fuse_heterogeneous_hlt4.sh", submitter)
+        self.assertIn('fusion_dependency="$(fresh_join_by_colon "${train_job_ids[@]}")"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
 
 
 if __name__ == "__main__":

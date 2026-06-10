@@ -111,6 +111,16 @@ from .hlt_control import (
     hlt_seed_model_name,
     run_hlt5_fusion,
 )
+from .heterogeneous_hlt import (
+    HETERO_HLT_ARCHITECTURES,
+    HETERO_HLT_MODEL_NAMES,
+    HeterogeneousHLTFusionConfig,
+    build_heterogeneous_hlt_classifier,
+    collect_heterogeneous_hlt_predictions,
+    default_model_name_for_architecture,
+    normalize_architecture_name,
+    train_heterogeneous_hlt_model,
+)
 from .audits import (
     AuditRunConfig,
     audit_file_split,
@@ -230,6 +240,14 @@ __all__ = [
     "hlt_seed_checkpoint_path",
     "hlt_seed_model_name",
     "run_hlt5_fusion",
+    "HETERO_HLT_ARCHITECTURES",
+    "HETERO_HLT_MODEL_NAMES",
+    "HeterogeneousHLTFusionConfig",
+    "build_heterogeneous_hlt_classifier",
+    "collect_heterogeneous_hlt_predictions",
+    "default_model_name_for_architecture",
+    "normalize_architecture_name",
+    "train_heterogeneous_hlt_model",
     "AuditRunConfig",
     "audit_file_split",
     "audit_fusion_report_roles",
