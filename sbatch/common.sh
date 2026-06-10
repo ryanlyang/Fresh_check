@@ -68,6 +68,39 @@ IFS=$'\n\t'
 : "${HETERO_HLT4_MAX_ITER:=2000}"
 : "${HETERO_HLT4_SKIP_CONTROLS:=0}"
 : "${HETERO_HLT4_CONTROL_SEED:=12345}"
+: "${TEACHER_LOGIT_GT_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_gt}"
+: "${TEACHER_LOGIT_GT_RECO_ROOT:=${TEACHER_LOGIT_GT_ROOT}/reco}"
+: "${TEACHER_LOGIT_GT_PREDICTION_RUN_ROOT:=${TEACHER_LOGIT_GT_ROOT}/prediction_runs}"
+: "${TEACHER_LOGIT_GT_PREDICTION_DIR:=${TEACHER_LOGIT_GT_ROOT}/predictions}"
+: "${TEACHER_LOGIT_GT_FUSION_DIR:=${TEACHER_LOGIT_GT_ROOT}/fusion}"
+: "${TEACHER_LOGIT_GT_TEACHERS:=part}"
+: "${TEACHER_LOGIT_GT_PART_TEACHER_CHECKPOINT:=${OFFLINE_TEACHER_DIR}/best_model_val.pt}"
+: "${TEACHER_LOGIT_GT_PN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pn/best_model_val.pt}"
+: "${TEACHER_LOGIT_GT_PFN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pfn/best_model_val.pt}"
+: "${TEACHER_LOGIT_GT_PCNN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pcnn/best_model_val.pt}"
+: "${TEACHER_LOGIT_GT_BATCH_SIZE:=64}"
+: "${TEACHER_LOGIT_GT_EPOCHS:=20}"
+: "${TEACHER_LOGIT_GT_LR:=0.0003}"
+: "${TEACHER_LOGIT_GT_WEIGHT_DECAY:=0.0001}"
+: "${TEACHER_LOGIT_GT_EARLY_STOP_PATIENCE:=5}"
+: "${TEACHER_LOGIT_GT_HIDDEN_DIM:=128}"
+: "${TEACHER_LOGIT_GT_NUM_LAYERS:=4}"
+: "${TEACHER_LOGIT_GT_NUM_HEADS:=4}"
+: "${TEACHER_LOGIT_GT_NUM_EXTRA_CANDIDATES:=32}"
+: "${TEACHER_LOGIT_GT_DROPOUT:=0.05}"
+: "${TEACHER_LOGIT_GT_MAX_TRAIN_JETS:=}"
+: "${TEACHER_LOGIT_GT_MAX_VAL_JETS:=}"
+: "${TEACHER_LOGIT_GT_MAX_TRAIN_BATCHES:=}"
+: "${TEACHER_LOGIT_GT_MAX_VAL_BATCHES:=}"
+: "${TEACHER_LOGIT_GT_PREDICT_BATCH_SIZE:=128}"
+: "${TEACHER_LOGIT_GT_PREDICT_NUM_WORKERS:=4}"
+: "${TEACHER_LOGIT_GT_PREDICT_DEVICE:=${DEVICE}}"
+: "${TEACHER_LOGIT_GT_MAX_JETS_PER_SPLIT:=}"
+: "${TEACHER_LOGIT_GT_FEATURE_MODES:=logits probs logits_probs}"
+: "${TEACHER_LOGIT_GT_C_GRID:=}"
+: "${TEACHER_LOGIT_GT_MAX_ITER:=2000}"
+: "${TEACHER_LOGIT_GT_SKIP_CONTROLS:=0}"
+: "${TEACHER_LOGIT_GT_CONTROL_SEED:=12345}"
 : "${HLT5_SEEDS:=101 202 303 404 505}"
 : "${SPLIT_SEEDS:=model_train=153 model_val=254 stack_train=356 stack_val=457 final_test=558}"
 : "${FIXED_HLT_SEEDS:=model_train=1053 model_val=1054 stack_train=1055 stack_val=1056 final_test=1057}"
@@ -352,6 +385,39 @@ keys = [
     "HETERO_HLT4_MAX_ITER",
     "HETERO_HLT4_SKIP_CONTROLS",
     "HETERO_HLT4_CONTROL_SEED",
+    "TEACHER_LOGIT_GT_ROOT",
+    "TEACHER_LOGIT_GT_RECO_ROOT",
+    "TEACHER_LOGIT_GT_PREDICTION_RUN_ROOT",
+    "TEACHER_LOGIT_GT_PREDICTION_DIR",
+    "TEACHER_LOGIT_GT_FUSION_DIR",
+    "TEACHER_LOGIT_GT_TEACHERS",
+    "TEACHER_LOGIT_GT_PART_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_GT_PN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_GT_PFN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_GT_PCNN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_GT_BATCH_SIZE",
+    "TEACHER_LOGIT_GT_EPOCHS",
+    "TEACHER_LOGIT_GT_LR",
+    "TEACHER_LOGIT_GT_WEIGHT_DECAY",
+    "TEACHER_LOGIT_GT_EARLY_STOP_PATIENCE",
+    "TEACHER_LOGIT_GT_HIDDEN_DIM",
+    "TEACHER_LOGIT_GT_NUM_LAYERS",
+    "TEACHER_LOGIT_GT_NUM_HEADS",
+    "TEACHER_LOGIT_GT_NUM_EXTRA_CANDIDATES",
+    "TEACHER_LOGIT_GT_DROPOUT",
+    "TEACHER_LOGIT_GT_MAX_TRAIN_JETS",
+    "TEACHER_LOGIT_GT_MAX_VAL_JETS",
+    "TEACHER_LOGIT_GT_MAX_TRAIN_BATCHES",
+    "TEACHER_LOGIT_GT_MAX_VAL_BATCHES",
+    "TEACHER_LOGIT_GT_PREDICT_BATCH_SIZE",
+    "TEACHER_LOGIT_GT_PREDICT_NUM_WORKERS",
+    "TEACHER_LOGIT_GT_PREDICT_DEVICE",
+    "TEACHER_LOGIT_GT_MAX_JETS_PER_SPLIT",
+    "TEACHER_LOGIT_GT_FEATURE_MODES",
+    "TEACHER_LOGIT_GT_C_GRID",
+    "TEACHER_LOGIT_GT_MAX_ITER",
+    "TEACHER_LOGIT_GT_SKIP_CONTROLS",
+    "TEACHER_LOGIT_GT_CONTROL_SEED",
     "FUSION_STACK_TRAIN_SIZE",
     "FUSION_STACK_VAL_SIZE",
     "FUSION_FINAL_TEST_SIZE",
@@ -464,4 +530,34 @@ fresh_join_by_colon() {
 fresh_join_by_space() {
   local IFS=" "
   echo "$*"
+}
+
+fresh_join_by_comma() {
+  local IFS=","
+  echo "$*"
+}
+
+fresh_teacher_logit_gt_teacher_checkpoint() {
+  local architecture="$1"
+  case "${architecture}" in
+    part) echo "${TEACHER_LOGIT_GT_PART_TEACHER_CHECKPOINT}" ;;
+    pn) echo "${TEACHER_LOGIT_GT_PN_TEACHER_CHECKPOINT}" ;;
+    pfn) echo "${TEACHER_LOGIT_GT_PFN_TEACHER_CHECKPOINT}" ;;
+    pcnn) echo "${TEACHER_LOGIT_GT_PCNN_TEACHER_CHECKPOINT}" ;;
+    *)
+      echo "Unknown teacher-logit GT teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_teacher_logit_gt_model_name() {
+  local architecture="$1"
+  case "${architecture}" in
+    part|pn|pfn|pcnn) echo "gt_reco_to_${architecture}_teacher" ;;
+    *)
+      echo "Unknown teacher-logit GT teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
 }

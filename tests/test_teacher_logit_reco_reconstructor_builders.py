@@ -1,0 +1,132 @@
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+from teacher_logit_reco.reconstructor_builders import (
+    TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES,
+    build_teacher_logit_reconstructor,
+    infer_reconstructor_architecture_from_payload,
+    load_teacher_logit_reconstructor_checkpoint,
+    normalize_reconstructor_architecture,
+)
+
+TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+if TORCH_AVAILABLE:
+    import torch
+
+    from teacher_logit_reco.global_transformer import (
+        GlobalTransformerReconstructor,
+        GlobalTransformerReconstructorConfig,
+    )
+
+
+class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
+    def test_normalizes_architecture_aliases(self):
+        self.assertIn("global_transformer", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertIn("particle_net", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertEqual(normalize_reconstructor_architecture(None), "global_transformer")
+        self.assertEqual(normalize_reconstructor_architecture("gt"), "global_transformer")
+        self.assertEqual(normalize_reconstructor_architecture("global-transformer"), "global_transformer")
+        self.assertEqual(normalize_reconstructor_architecture("ParticleNet"), "particle_net")
+        self.assertEqual(normalize_reconstructor_architecture("pn"), "particle_net")
+        with self.assertRaises(ValueError):
+            normalize_reconstructor_architecture("unknown_reco")
+
+    def test_infers_architecture_from_payload(self):
+        self.assertEqual(infer_reconstructor_architecture_from_payload({}), "global_transformer")
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "pn"}),
+            "particle_net",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload(
+                {"model_config": {"reconstructor_architecture": "global_transformer"}}
+            ),
+            "global_transformer",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload(
+                {"config": {"teacher_architecture": "pn", "reconstructor_architecture": "gt"}}
+            ),
+            "global_transformer",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload({}, architecture="particle-net"),
+            "particle_net",
+        )
+        with self.assertRaises(ValueError):
+            infer_reconstructor_architecture_from_payload({}, architecture="bad_architecture")
+        with self.assertRaises(ValueError):
+            infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "bad_architecture"})
+
+    def test_particle_net_build_is_reserved_for_later_step(self):
+        with self.assertRaises(NotImplementedError):
+            build_teacher_logit_reconstructor("particle_net", {})
+
+
+@unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
+class TeacherLogitReconstructorCheckpointTests(unittest.TestCase):
+    def make_model(self):
+        torch.manual_seed(11)
+        return GlobalTransformerReconstructor(
+            GlobalTransformerReconstructorConfig(
+                hidden_dim=32,
+                num_heads=4,
+                num_layers=1,
+                num_extra_candidates=2,
+                dropout=0.0,
+            )
+        )
+
+    def test_loads_legacy_global_transformer_checkpoint_without_architecture_field(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy_best_model_val.pt"
+            torch.save(
+                {
+                    "epoch": 3,
+                    "model_state_dict": model.state_dict(),
+                    "model_config": model.config.to_dict(),
+                },
+                path,
+            )
+            loaded, payload = load_teacher_logit_reconstructor_checkpoint(path, device=torch.device("cpu"))
+            self.assertIsInstance(loaded, GlobalTransformerReconstructor)
+            self.assertEqual(payload["epoch"], 3)
+
+    def test_loads_new_global_transformer_checkpoint_with_architecture_field(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "best_model_val.pt"
+            torch.save(
+                {
+                    "epoch": 4,
+                    "reconstructor_architecture": "global_transformer",
+                    "model_state_dict": model.state_dict(),
+                    "model_config": model.config.to_dict(),
+                },
+                path,
+            )
+            loaded, payload = load_teacher_logit_reconstructor_checkpoint(
+                path,
+                device=torch.device("cpu"),
+                expected_architecture="gt",
+            )
+            self.assertIsInstance(loaded, GlobalTransformerReconstructor)
+            self.assertEqual(payload["reconstructor_architecture"], "global_transformer")
+
+    def test_expected_architecture_mismatch_raises_before_model_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pn_checkpoint.pt"
+            torch.save({"reconstructor_architecture": "particle_net", "model_state_dict": {}}, path)
+            with self.assertRaises(ValueError):
+                load_teacher_logit_reconstructor_checkpoint(
+                    path,
+                    device=torch.device("cpu"),
+                    expected_architecture="global_transformer",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
