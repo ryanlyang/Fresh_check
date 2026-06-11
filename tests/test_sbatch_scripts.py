@@ -28,6 +28,7 @@ RUNNERS = [
     "run_independent_fusion_ensemble_analysis.sh",
     "run_train_heterogeneous_hlt_arch.sh",
     "run_fuse_heterogeneous_hlt4.sh",
+    "run_evaluate_offline_teacher_reference.sh",
     "run_train_teacher_logit_gt_reco.sh",
     "run_predict_teacher_logit_gt_reco.sh",
     "run_fuse_teacher_logit_gt_reco.sh",
@@ -229,6 +230,18 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("run_fuse_heterogeneous_hlt4.sh", submitter)
         self.assertIn('fusion_dependency="$(fresh_join_by_colon "${train_job_ids[@]}")"', submitter)
         self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
+
+    def test_offline_teacher_reference_runner_scores_balanced_heldout_splits(self):
+        runner = self.read("run_evaluate_offline_teacher_reference.sh")
+        self.assertIn("#SBATCH --time=08:00:00", runner)
+        self.assertIn("#SBATCH --gres=gpu:1", runner)
+        self.assertIn("scripts/evaluate_offline_teacher_reference.py", runner)
+        self.assertIn("--splits stack_val final_test", runner)
+        self.assertIn("--stack-val-size \"${OFFLINE_REFERENCE_STACK_VAL_SIZE}\"", runner)
+        self.assertIn("--final-test-size \"${OFFLINE_REFERENCE_FINAL_TEST_SIZE}\"", runner)
+        self.assertIn("--control-seed \"${HETERO_HLT4_CONTROL_SEED}\"", runner)
+        self.assertIn("--confirm-final-test", runner)
+        self.assertIn('fresh_claim_new_dir "${OFFLINE_REFERENCE_EVAL_DIR}"', runner)
 
     def test_teacher_logit_gt_submitter_queues_training_prediction_and_fusion(self):
         train = self.read("run_train_teacher_logit_gt_reco.sh")
