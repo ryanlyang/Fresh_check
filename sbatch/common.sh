@@ -68,6 +68,78 @@ IFS=$'\n\t'
 : "${HETERO_HLT4_MAX_ITER:=2000}"
 : "${HETERO_HLT4_SKIP_CONTROLS:=0}"
 : "${HETERO_HLT4_CONTROL_SEED:=12345}"
+: "${CROSSARCH_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_crossarch_500k}"
+: "${CROSSARCH_SPLIT_MANIFEST_DIR:=${CROSSARCH_ROOT}/split_manifest}"
+: "${CROSSARCH_MANIFEST_PATH:=${CROSSARCH_SPLIT_MANIFEST_DIR}/split_manifest.json.gz}"
+: "${CROSSARCH_HLT_CACHE_DIR:=${CROSSARCH_ROOT}/hlt_cache}"
+: "${CROSSARCH_AUDIT_DIR:=${CROSSARCH_ROOT}/audits}"
+: "${CROSSARCH_STEP2_AUDIT_DIR:=${CROSSARCH_AUDIT_DIR}/step2_splits_hlt_cache}"
+: "${CROSSARCH_MODEL_TRAIN_SIZE:=500000}"
+: "${CROSSARCH_MODEL_VAL_SIZE:=150000}"
+: "${CROSSARCH_STACK_TRAIN_SIZE:=500000}"
+: "${CROSSARCH_STACK_VAL_SIZE:=150000}"
+: "${CROSSARCH_FINAL_TEST_SIZE:=500000}"
+: "${CROSSARCH_HLT_SPLITS:=model_train model_val stack_train stack_val final_test}"
+: "${CROSSARCH_OFFLINE_TEACHER_DIR:=${CROSSARCH_ROOT}/offline_teachers}"
+: "${CROSSARCH_OFFLINE_TEACHER_ARCHITECTURES:=part pn pfn pcnn}"
+: "${CROSSARCH_OFFLINE_TEACHER_SEED:=707}"
+: "${CROSSARCH_OFFLINE_TEACHER_MODEL_SIZE:=base}"
+: "${CROSSARCH_PART_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${CROSSARCH_PN_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${CROSSARCH_PFN_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${CROSSARCH_PCNN_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${CROSSARCH_PART_TEACHER_SOURCE_REPORT:=}"
+: "${CROSSARCH_PN_TEACHER_SOURCE_REPORT:=}"
+: "${CROSSARCH_PFN_TEACHER_SOURCE_REPORT:=}"
+: "${CROSSARCH_PCNN_TEACHER_SOURCE_REPORT:=}"
+: "${CROSSARCH_HLT_BASELINE_DIR:=${CROSSARCH_ROOT}/hlt_baselines}"
+: "${CROSSARCH_HLT_BASELINE_ARCHITECTURES:=part pn pfn pcnn}"
+: "${CROSSARCH_HLT_BASELINE_SEED:=101}"
+: "${CROSSARCH_HLT_BASELINE_MODEL_SIZE:=base}"
+: "${CROSSARCH_PREDICTION_DIR:=${CROSSARCH_ROOT}/predictions}"
+: "${CROSSARCH_PREDICTION_RUN_DIR:=${CROSSARCH_ROOT}/prediction_runs}"
+: "${CROSSARCH_HLT_PREDICTION_RUN_DIR:=${CROSSARCH_PREDICTION_RUN_DIR}/hlt}"
+: "${CROSSARCH_HLT_PREDICT_SPLITS:=stack_train stack_val final_test}"
+: "${CROSSARCH_HLT_PREDICT_BATCH_SIZE:=128}"
+: "${CROSSARCH_HLT_PREDICT_NUM_WORKERS:=4}"
+: "${CROSSARCH_HLT_PREDICT_DEVICE:=${DEVICE}}"
+: "${CROSSARCH_HLT_PREDICT_CONTROL_SEED:=12345}"
+: "${CROSSARCH_RECO_MODEL_DIR:=${CROSSARCH_ROOT}/reco_models}"
+: "${CROSSARCH_RECO_ARCHITECTURES:=gt pn pfn pcnn}"
+: "${CROSSARCH_RECO_TEACHERS:=part pn pfn pcnn}"
+: "${CROSSARCH_RECO_SEED:=1205}"
+: "${CROSSARCH_RECO_BATCH_SIZE:=64}"
+: "${CROSSARCH_RECO_EPOCHS:=20}"
+: "${CROSSARCH_RECO_LR:=0.0003}"
+: "${CROSSARCH_RECO_WEIGHT_DECAY:=0.0001}"
+: "${CROSSARCH_RECO_EARLY_STOP_PATIENCE:=5}"
+: "${CROSSARCH_RECO_MAX_TRAIN_JETS:=${CROSSARCH_MODEL_TRAIN_SIZE}}"
+: "${CROSSARCH_RECO_MAX_VAL_JETS:=${CROSSARCH_MODEL_VAL_SIZE}}"
+: "${CROSSARCH_RECO_MAX_TRAIN_BATCHES:=}"
+: "${CROSSARCH_RECO_MAX_VAL_BATCHES:=}"
+: "${CROSSARCH_RECO_NUM_WORKERS:=${NUM_WORKERS}}"
+: "${CROSSARCH_RECO_DEVICE:=${DEVICE}}"
+: "${CROSSARCH_RECO_PREDICTION_RUN_DIR:=${CROSSARCH_PREDICTION_RUN_DIR}/reco}"
+: "${CROSSARCH_RECO_PREDICT_SPLITS:=stack_train stack_val final_test}"
+: "${CROSSARCH_RECO_PREDICT_BATCH_SIZE:=128}"
+: "${CROSSARCH_RECO_PREDICT_NUM_WORKERS:=4}"
+: "${CROSSARCH_RECO_PREDICT_DEVICE:=${DEVICE}}"
+: "${CROSSARCH_RECO_PREDICT_MAX_JETS_PER_SPLIT:=}"
+: "${CROSSARCH_STEP6_SUBMIT_HLT_PREDICTIONS:=1}"
+: "${CROSSARCH_STEP6_SKIP_EXISTING_PREDICTIONS:=0}"
+: "${CROSSARCH_FUSION_DIR:=${CROSSARCH_ROOT}/fusion}"
+: "${CROSSARCH_FUSION_INCLUDE_OPTIONAL_GROUPS:=1}"
+: "${CROSSARCH_FUSION_FEATURE_MODES:=logits probs logits_probs logits_probs_uncertainty}"
+: "${CROSSARCH_FUSERS:=mean_logits mean_probs logistic_logits logistic_probs logistic_logits_probs uncertainty_logistic_logits_probs entropy_bin_gated_logistic margin_bin_gated_logistic multiplicity_bin_gated_logistic disagreement_bin_gated_logistic predicted_class_bin_gated_logistic}"
+: "${CROSSARCH_FUSION_C_GRID:=}"
+: "${CROSSARCH_FUSION_MAX_ITER:=2000}"
+: "${CROSSARCH_FUSION_MIN_BIN_TRAIN_ROWS:=2}"
+: "${CROSSARCH_FUSION_SKIP_CONTROLS:=0}"
+: "${CROSSARCH_FUSION_CONTROL_SEED:=12345}"
+: "${CROSSARCH_FUSION_CONTROL_FEATURE_MODES:=logits probs logits_probs logits_probs_uncertainty}"
+: "${CROSSARCH_FUSION_CONTROL_WARNING_MIN_ACCURACY:=0.20}"
+: "${CROSSARCH_FUSION_CONTROL_WARNING_CHANCE_MARGIN:=0.10}"
+: "${CROSSARCH_FINAL_REPORT_DIR:=${CROSSARCH_ROOT}/final_report}"
 : "${TEACHER_LOGIT_GT_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_gt}"
 : "${TEACHER_LOGIT_GT_RECO_ROOT:=${TEACHER_LOGIT_GT_ROOT}/reco}"
 : "${TEACHER_LOGIT_GT_PREDICTION_RUN_ROOT:=${TEACHER_LOGIT_GT_ROOT}/prediction_runs}"
@@ -133,6 +205,79 @@ IFS=$'\n\t'
 : "${TEACHER_LOGIT_PN_MAX_ITER:=2000}"
 : "${TEACHER_LOGIT_PN_SKIP_CONTROLS:=0}"
 : "${TEACHER_LOGIT_PN_CONTROL_SEED:=12345}"
+: "${TEACHER_LOGIT_PFN_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_pfn}"
+: "${TEACHER_LOGIT_PFN_RECO_ROOT:=${TEACHER_LOGIT_PFN_ROOT}/reco}"
+: "${TEACHER_LOGIT_PFN_PREDICTION_RUN_ROOT:=${TEACHER_LOGIT_PFN_ROOT}/prediction_runs}"
+: "${TEACHER_LOGIT_PFN_PREDICTION_DIR:=${TEACHER_LOGIT_PFN_ROOT}/predictions}"
+: "${TEACHER_LOGIT_PFN_FUSION_DIR:=${TEACHER_LOGIT_PFN_ROOT}/fusion}"
+: "${TEACHER_LOGIT_PFN_TEACHERS:=part}"
+: "${TEACHER_LOGIT_PFN_PART_TEACHER_CHECKPOINT:=${OFFLINE_TEACHER_DIR}/best_model_val.pt}"
+: "${TEACHER_LOGIT_PFN_PN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PFN_PFN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pfn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PFN_PCNN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pcnn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PFN_BATCH_SIZE:=64}"
+: "${TEACHER_LOGIT_PFN_EPOCHS:=20}"
+: "${TEACHER_LOGIT_PFN_LR:=0.0003}"
+: "${TEACHER_LOGIT_PFN_WEIGHT_DECAY:=0.0001}"
+: "${TEACHER_LOGIT_PFN_EARLY_STOP_PATIENCE:=5}"
+: "${TEACHER_LOGIT_PFN_PHI_DIMS:=128 128 128}"
+: "${TEACHER_LOGIT_PFN_CONTEXT_DIM:=256}"
+: "${TEACHER_LOGIT_PFN_CONTEXT_DIMS:=256 256}"
+: "${TEACHER_LOGIT_PFN_DECODER_DIMS:=256 128}"
+: "${TEACHER_LOGIT_PFN_SLOT_DIM:=}"
+: "${TEACHER_LOGIT_PFN_NUM_EXTRA_CANDIDATES:=32}"
+: "${TEACHER_LOGIT_PFN_DROPOUT:=0.05}"
+: "${TEACHER_LOGIT_PFN_MAX_TRAIN_JETS:=50000}"
+: "${TEACHER_LOGIT_PFN_MAX_VAL_JETS:=10000}"
+: "${TEACHER_LOGIT_PFN_MAX_TRAIN_BATCHES:=}"
+: "${TEACHER_LOGIT_PFN_MAX_VAL_BATCHES:=}"
+: "${TEACHER_LOGIT_PFN_PREDICT_BATCH_SIZE:=128}"
+: "${TEACHER_LOGIT_PFN_PREDICT_NUM_WORKERS:=4}"
+: "${TEACHER_LOGIT_PFN_PREDICT_DEVICE:=${DEVICE}}"
+: "${TEACHER_LOGIT_PFN_MAX_JETS_PER_SPLIT:=50000}"
+: "${TEACHER_LOGIT_PFN_FEATURE_MODES:=logits probs logits_probs}"
+: "${TEACHER_LOGIT_PFN_C_GRID:=}"
+: "${TEACHER_LOGIT_PFN_MAX_ITER:=2000}"
+: "${TEACHER_LOGIT_PFN_SKIP_CONTROLS:=0}"
+: "${TEACHER_LOGIT_PFN_CONTROL_SEED:=12345}"
+: "${TEACHER_LOGIT_PCNN_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_pcnn}"
+: "${TEACHER_LOGIT_PCNN_RECO_ROOT:=${TEACHER_LOGIT_PCNN_ROOT}/reco}"
+: "${TEACHER_LOGIT_PCNN_PREDICTION_RUN_ROOT:=${TEACHER_LOGIT_PCNN_ROOT}/prediction_runs}"
+: "${TEACHER_LOGIT_PCNN_PREDICTION_DIR:=${TEACHER_LOGIT_PCNN_ROOT}/predictions}"
+: "${TEACHER_LOGIT_PCNN_FUSION_DIR:=${TEACHER_LOGIT_PCNN_ROOT}/fusion}"
+: "${TEACHER_LOGIT_PCNN_TEACHERS:=part}"
+: "${TEACHER_LOGIT_PCNN_PART_TEACHER_CHECKPOINT:=${OFFLINE_TEACHER_DIR}/best_model_val.pt}"
+: "${TEACHER_LOGIT_PCNN_PN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PCNN_PFN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pfn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PCNN_PCNN_TEACHER_CHECKPOINT:=${OUTPUT_ROOT}/teacher_logit_reco_offline_teachers/pcnn/best_model_val.pt}"
+: "${TEACHER_LOGIT_PCNN_BATCH_SIZE:=64}"
+: "${TEACHER_LOGIT_PCNN_EPOCHS:=20}"
+: "${TEACHER_LOGIT_PCNN_LR:=0.0003}"
+: "${TEACHER_LOGIT_PCNN_WEIGHT_DECAY:=0.0001}"
+: "${TEACHER_LOGIT_PCNN_EARLY_STOP_PATIENCE:=5}"
+: "${TEACHER_LOGIT_PCNN_HIDDEN_CHANNELS:=128}"
+: "${TEACHER_LOGIT_PCNN_NUM_BLOCKS:=6}"
+: "${TEACHER_LOGIT_PCNN_KERNEL_SIZES:=5 5 3 3 3 3}"
+: "${TEACHER_LOGIT_PCNN_DILATIONS:=1 2 4 1 2 4}"
+: "${TEACHER_LOGIT_PCNN_CONTEXT_DIM:=256}"
+: "${TEACHER_LOGIT_PCNN_CONTEXT_DIMS:=256 256}"
+: "${TEACHER_LOGIT_PCNN_DECODER_DIMS:=256 128}"
+: "${TEACHER_LOGIT_PCNN_SLOT_DIM:=}"
+: "${TEACHER_LOGIT_PCNN_NUM_EXTRA_CANDIDATES:=32}"
+: "${TEACHER_LOGIT_PCNN_DROPOUT:=0.05}"
+: "${TEACHER_LOGIT_PCNN_MAX_TRAIN_JETS:=50000}"
+: "${TEACHER_LOGIT_PCNN_MAX_VAL_JETS:=10000}"
+: "${TEACHER_LOGIT_PCNN_MAX_TRAIN_BATCHES:=}"
+: "${TEACHER_LOGIT_PCNN_MAX_VAL_BATCHES:=}"
+: "${TEACHER_LOGIT_PCNN_PREDICT_BATCH_SIZE:=128}"
+: "${TEACHER_LOGIT_PCNN_PREDICT_NUM_WORKERS:=4}"
+: "${TEACHER_LOGIT_PCNN_PREDICT_DEVICE:=${DEVICE}}"
+: "${TEACHER_LOGIT_PCNN_MAX_JETS_PER_SPLIT:=50000}"
+: "${TEACHER_LOGIT_PCNN_FEATURE_MODES:=logits probs logits_probs}"
+: "${TEACHER_LOGIT_PCNN_C_GRID:=}"
+: "${TEACHER_LOGIT_PCNN_MAX_ITER:=2000}"
+: "${TEACHER_LOGIT_PCNN_SKIP_CONTROLS:=0}"
+: "${TEACHER_LOGIT_PCNN_CONTROL_SEED:=12345}"
 : "${HLT5_SEEDS:=101 202 303 404 505}"
 : "${SPLIT_SEEDS:=model_train=153 model_val=254 stack_train=356 stack_val=457 final_test=558}"
 : "${FIXED_HLT_SEEDS:=model_train=1053 model_val=1054 stack_train=1055 stack_val=1056 final_test=1057}"
@@ -417,6 +562,78 @@ keys = [
     "HETERO_HLT4_MAX_ITER",
     "HETERO_HLT4_SKIP_CONTROLS",
     "HETERO_HLT4_CONTROL_SEED",
+    "CROSSARCH_ROOT",
+    "CROSSARCH_SPLIT_MANIFEST_DIR",
+    "CROSSARCH_MANIFEST_PATH",
+    "CROSSARCH_HLT_CACHE_DIR",
+    "CROSSARCH_AUDIT_DIR",
+    "CROSSARCH_STEP2_AUDIT_DIR",
+    "CROSSARCH_MODEL_TRAIN_SIZE",
+    "CROSSARCH_MODEL_VAL_SIZE",
+    "CROSSARCH_STACK_TRAIN_SIZE",
+    "CROSSARCH_STACK_VAL_SIZE",
+    "CROSSARCH_FINAL_TEST_SIZE",
+    "CROSSARCH_HLT_SPLITS",
+    "CROSSARCH_OFFLINE_TEACHER_DIR",
+    "CROSSARCH_OFFLINE_TEACHER_ARCHITECTURES",
+    "CROSSARCH_OFFLINE_TEACHER_SEED",
+    "CROSSARCH_OFFLINE_TEACHER_MODEL_SIZE",
+    "CROSSARCH_PART_TEACHER_SOURCE_CHECKPOINT",
+    "CROSSARCH_PN_TEACHER_SOURCE_CHECKPOINT",
+    "CROSSARCH_PFN_TEACHER_SOURCE_CHECKPOINT",
+    "CROSSARCH_PCNN_TEACHER_SOURCE_CHECKPOINT",
+    "CROSSARCH_PART_TEACHER_SOURCE_REPORT",
+    "CROSSARCH_PN_TEACHER_SOURCE_REPORT",
+    "CROSSARCH_PFN_TEACHER_SOURCE_REPORT",
+    "CROSSARCH_PCNN_TEACHER_SOURCE_REPORT",
+    "CROSSARCH_HLT_BASELINE_DIR",
+    "CROSSARCH_HLT_BASELINE_ARCHITECTURES",
+    "CROSSARCH_HLT_BASELINE_SEED",
+    "CROSSARCH_HLT_BASELINE_MODEL_SIZE",
+    "CROSSARCH_PREDICTION_DIR",
+    "CROSSARCH_PREDICTION_RUN_DIR",
+    "CROSSARCH_HLT_PREDICTION_RUN_DIR",
+    "CROSSARCH_HLT_PREDICT_SPLITS",
+    "CROSSARCH_HLT_PREDICT_BATCH_SIZE",
+    "CROSSARCH_HLT_PREDICT_NUM_WORKERS",
+    "CROSSARCH_HLT_PREDICT_DEVICE",
+    "CROSSARCH_HLT_PREDICT_CONTROL_SEED",
+    "CROSSARCH_RECO_MODEL_DIR",
+    "CROSSARCH_RECO_ARCHITECTURES",
+    "CROSSARCH_RECO_TEACHERS",
+    "CROSSARCH_RECO_SEED",
+    "CROSSARCH_RECO_BATCH_SIZE",
+    "CROSSARCH_RECO_EPOCHS",
+    "CROSSARCH_RECO_LR",
+    "CROSSARCH_RECO_WEIGHT_DECAY",
+    "CROSSARCH_RECO_EARLY_STOP_PATIENCE",
+    "CROSSARCH_RECO_MAX_TRAIN_JETS",
+    "CROSSARCH_RECO_MAX_VAL_JETS",
+    "CROSSARCH_RECO_MAX_TRAIN_BATCHES",
+    "CROSSARCH_RECO_MAX_VAL_BATCHES",
+    "CROSSARCH_RECO_NUM_WORKERS",
+    "CROSSARCH_RECO_DEVICE",
+    "CROSSARCH_RECO_PREDICTION_RUN_DIR",
+    "CROSSARCH_RECO_PREDICT_SPLITS",
+    "CROSSARCH_RECO_PREDICT_BATCH_SIZE",
+    "CROSSARCH_RECO_PREDICT_NUM_WORKERS",
+    "CROSSARCH_RECO_PREDICT_DEVICE",
+    "CROSSARCH_RECO_PREDICT_MAX_JETS_PER_SPLIT",
+    "CROSSARCH_STEP6_SUBMIT_HLT_PREDICTIONS",
+    "CROSSARCH_STEP6_SKIP_EXISTING_PREDICTIONS",
+    "CROSSARCH_FUSION_DIR",
+    "CROSSARCH_FUSION_INCLUDE_OPTIONAL_GROUPS",
+    "CROSSARCH_FUSION_FEATURE_MODES",
+    "CROSSARCH_FUSERS",
+    "CROSSARCH_FUSION_C_GRID",
+    "CROSSARCH_FUSION_MAX_ITER",
+    "CROSSARCH_FUSION_MIN_BIN_TRAIN_ROWS",
+    "CROSSARCH_FUSION_SKIP_CONTROLS",
+    "CROSSARCH_FUSION_CONTROL_SEED",
+    "CROSSARCH_FUSION_CONTROL_FEATURE_MODES",
+    "CROSSARCH_FUSION_CONTROL_WARNING_MIN_ACCURACY",
+    "CROSSARCH_FUSION_CONTROL_WARNING_CHANCE_MARGIN",
+    "CROSSARCH_FINAL_REPORT_DIR",
     "TEACHER_LOGIT_GT_ROOT",
     "TEACHER_LOGIT_GT_RECO_ROOT",
     "TEACHER_LOGIT_GT_PREDICTION_RUN_ROOT",
@@ -482,6 +699,79 @@ keys = [
     "TEACHER_LOGIT_PN_MAX_ITER",
     "TEACHER_LOGIT_PN_SKIP_CONTROLS",
     "TEACHER_LOGIT_PN_CONTROL_SEED",
+    "TEACHER_LOGIT_PFN_ROOT",
+    "TEACHER_LOGIT_PFN_RECO_ROOT",
+    "TEACHER_LOGIT_PFN_PREDICTION_RUN_ROOT",
+    "TEACHER_LOGIT_PFN_PREDICTION_DIR",
+    "TEACHER_LOGIT_PFN_FUSION_DIR",
+    "TEACHER_LOGIT_PFN_TEACHERS",
+    "TEACHER_LOGIT_PFN_PART_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PFN_PN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PFN_PFN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PFN_PCNN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PFN_BATCH_SIZE",
+    "TEACHER_LOGIT_PFN_EPOCHS",
+    "TEACHER_LOGIT_PFN_LR",
+    "TEACHER_LOGIT_PFN_WEIGHT_DECAY",
+    "TEACHER_LOGIT_PFN_EARLY_STOP_PATIENCE",
+    "TEACHER_LOGIT_PFN_PHI_DIMS",
+    "TEACHER_LOGIT_PFN_CONTEXT_DIM",
+    "TEACHER_LOGIT_PFN_CONTEXT_DIMS",
+    "TEACHER_LOGIT_PFN_DECODER_DIMS",
+    "TEACHER_LOGIT_PFN_SLOT_DIM",
+    "TEACHER_LOGIT_PFN_NUM_EXTRA_CANDIDATES",
+    "TEACHER_LOGIT_PFN_DROPOUT",
+    "TEACHER_LOGIT_PFN_MAX_TRAIN_JETS",
+    "TEACHER_LOGIT_PFN_MAX_VAL_JETS",
+    "TEACHER_LOGIT_PFN_MAX_TRAIN_BATCHES",
+    "TEACHER_LOGIT_PFN_MAX_VAL_BATCHES",
+    "TEACHER_LOGIT_PFN_PREDICT_BATCH_SIZE",
+    "TEACHER_LOGIT_PFN_PREDICT_NUM_WORKERS",
+    "TEACHER_LOGIT_PFN_PREDICT_DEVICE",
+    "TEACHER_LOGIT_PFN_MAX_JETS_PER_SPLIT",
+    "TEACHER_LOGIT_PFN_FEATURE_MODES",
+    "TEACHER_LOGIT_PFN_C_GRID",
+    "TEACHER_LOGIT_PFN_MAX_ITER",
+    "TEACHER_LOGIT_PFN_SKIP_CONTROLS",
+    "TEACHER_LOGIT_PFN_CONTROL_SEED",
+    "TEACHER_LOGIT_PCNN_ROOT",
+    "TEACHER_LOGIT_PCNN_RECO_ROOT",
+    "TEACHER_LOGIT_PCNN_PREDICTION_RUN_ROOT",
+    "TEACHER_LOGIT_PCNN_PREDICTION_DIR",
+    "TEACHER_LOGIT_PCNN_FUSION_DIR",
+    "TEACHER_LOGIT_PCNN_TEACHERS",
+    "TEACHER_LOGIT_PCNN_PART_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PCNN_PN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PCNN_PFN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PCNN_PCNN_TEACHER_CHECKPOINT",
+    "TEACHER_LOGIT_PCNN_BATCH_SIZE",
+    "TEACHER_LOGIT_PCNN_EPOCHS",
+    "TEACHER_LOGIT_PCNN_LR",
+    "TEACHER_LOGIT_PCNN_WEIGHT_DECAY",
+    "TEACHER_LOGIT_PCNN_EARLY_STOP_PATIENCE",
+    "TEACHER_LOGIT_PCNN_HIDDEN_CHANNELS",
+    "TEACHER_LOGIT_PCNN_NUM_BLOCKS",
+    "TEACHER_LOGIT_PCNN_KERNEL_SIZES",
+    "TEACHER_LOGIT_PCNN_DILATIONS",
+    "TEACHER_LOGIT_PCNN_CONTEXT_DIM",
+    "TEACHER_LOGIT_PCNN_CONTEXT_DIMS",
+    "TEACHER_LOGIT_PCNN_DECODER_DIMS",
+    "TEACHER_LOGIT_PCNN_SLOT_DIM",
+    "TEACHER_LOGIT_PCNN_NUM_EXTRA_CANDIDATES",
+    "TEACHER_LOGIT_PCNN_DROPOUT",
+    "TEACHER_LOGIT_PCNN_MAX_TRAIN_JETS",
+    "TEACHER_LOGIT_PCNN_MAX_VAL_JETS",
+    "TEACHER_LOGIT_PCNN_MAX_TRAIN_BATCHES",
+    "TEACHER_LOGIT_PCNN_MAX_VAL_BATCHES",
+    "TEACHER_LOGIT_PCNN_PREDICT_BATCH_SIZE",
+    "TEACHER_LOGIT_PCNN_PREDICT_NUM_WORKERS",
+    "TEACHER_LOGIT_PCNN_PREDICT_DEVICE",
+    "TEACHER_LOGIT_PCNN_MAX_JETS_PER_SPLIT",
+    "TEACHER_LOGIT_PCNN_FEATURE_MODES",
+    "TEACHER_LOGIT_PCNN_C_GRID",
+    "TEACHER_LOGIT_PCNN_MAX_ITER",
+    "TEACHER_LOGIT_PCNN_SKIP_CONTROLS",
+    "TEACHER_LOGIT_PCNN_CONTROL_SEED",
     "FUSION_STACK_TRAIN_SIZE",
     "FUSION_STACK_VAL_SIZE",
     "FUSION_FINAL_TEST_SIZE",
@@ -646,6 +936,143 @@ fresh_teacher_logit_pn_model_name() {
     part|pn|pfn|pcnn) echo "pn_reco_to_${architecture}_teacher" ;;
     *)
       echo "Unknown teacher-logit PN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_teacher_logit_pfn_teacher_checkpoint() {
+  local architecture="$1"
+  case "${architecture}" in
+    part) echo "${TEACHER_LOGIT_PFN_PART_TEACHER_CHECKPOINT}" ;;
+    pn) echo "${TEACHER_LOGIT_PFN_PN_TEACHER_CHECKPOINT}" ;;
+    pfn) echo "${TEACHER_LOGIT_PFN_PFN_TEACHER_CHECKPOINT}" ;;
+    pcnn) echo "${TEACHER_LOGIT_PFN_PCNN_TEACHER_CHECKPOINT}" ;;
+    *)
+      echo "Unknown teacher-logit PFN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_teacher_logit_pfn_model_name() {
+  local architecture="$1"
+  case "${architecture}" in
+    part|pn|pfn|pcnn) echo "pfn_reco_to_${architecture}_teacher" ;;
+    *)
+      echo "Unknown teacher-logit PFN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_teacher_logit_pcnn_teacher_checkpoint() {
+  local architecture="$1"
+  case "${architecture}" in
+    part) echo "${TEACHER_LOGIT_PCNN_PART_TEACHER_CHECKPOINT}" ;;
+    pn) echo "${TEACHER_LOGIT_PCNN_PN_TEACHER_CHECKPOINT}" ;;
+    pfn) echo "${TEACHER_LOGIT_PCNN_PFN_TEACHER_CHECKPOINT}" ;;
+    pcnn) echo "${TEACHER_LOGIT_PCNN_PCNN_TEACHER_CHECKPOINT}" ;;
+    *)
+      echo "Unknown teacher-logit PCNN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_teacher_logit_pcnn_model_name() {
+  local architecture="$1"
+  case "${architecture}" in
+    part|pn|pfn|pcnn) echo "pcnn_reco_to_${architecture}_teacher" ;;
+    *)
+      echo "Unknown teacher-logit PCNN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_crossarch_offline_teacher_source_checkpoint() {
+  local architecture="$1"
+  case "${architecture}" in
+    part) echo "${CROSSARCH_PART_TEACHER_SOURCE_CHECKPOINT}" ;;
+    pn) echo "${CROSSARCH_PN_TEACHER_SOURCE_CHECKPOINT}" ;;
+    pfn) echo "${CROSSARCH_PFN_TEACHER_SOURCE_CHECKPOINT}" ;;
+    pcnn) echo "${CROSSARCH_PCNN_TEACHER_SOURCE_CHECKPOINT}" ;;
+    *)
+      echo "Unknown crossarch offline teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_crossarch_offline_teacher_source_report() {
+  local architecture="$1"
+  case "${architecture}" in
+    part) echo "${CROSSARCH_PART_TEACHER_SOURCE_REPORT}" ;;
+    pn) echo "${CROSSARCH_PN_TEACHER_SOURCE_REPORT}" ;;
+    pfn) echo "${CROSSARCH_PFN_TEACHER_SOURCE_REPORT}" ;;
+    pcnn) echo "${CROSSARCH_PCNN_TEACHER_SOURCE_REPORT}" ;;
+    *)
+      echo "Unknown crossarch offline teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_crossarch_hlt_model_name() {
+  local architecture="$1"
+  case "${architecture}" in
+    part|pn|pfn|pcnn) echo "hlt_${architecture}" ;;
+    *)
+      echo "Unknown crossarch HLT architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_crossarch_reco_model_name() {
+  local reco_architecture="$1"
+  local teacher_architecture="$2"
+  case "${reco_architecture}" in
+    gt|pn|pfn|pcnn) ;;
+    *)
+      echo "Unknown crossarch reconstructor architecture: ${reco_architecture}" >&2
+      return 2
+      ;;
+  esac
+  case "${teacher_architecture}" in
+    part|pn|pfn|pcnn) ;;
+    *)
+      echo "Unknown crossarch teacher architecture: ${teacher_architecture}" >&2
+      return 2
+      ;;
+  esac
+  echo "${reco_architecture}_reco_to_${teacher_architecture}_teacher"
+}
+
+fresh_crossarch_reco_train_script() {
+  local reco_architecture="$1"
+  case "${reco_architecture}" in
+    gt) echo "scripts/train_teacher_logit_global_transformer_reco.py" ;;
+    pn) echo "scripts/train_teacher_logit_particle_net_reco.py" ;;
+    pfn) echo "scripts/train_teacher_logit_particle_flow_reco.py" ;;
+    pcnn) echo "scripts/train_teacher_logit_particle_cnn_reco.py" ;;
+    *)
+      echo "Unknown crossarch reconstructor architecture: ${reco_architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_crossarch_reco_predict_script() {
+  local reco_architecture="$1"
+  case "${reco_architecture}" in
+    gt) echo "scripts/predict_teacher_logit_global_transformer_reco.py" ;;
+    pn) echo "scripts/predict_teacher_logit_particle_net_reco.py" ;;
+    pfn) echo "scripts/predict_teacher_logit_particle_flow_reco.py" ;;
+    pcnn) echo "scripts/predict_teacher_logit_particle_cnn_reco.py" ;;
+    *)
+      echo "Unknown crossarch reconstructor architecture: ${reco_architecture}" >&2
       return 2
       ;;
   esac

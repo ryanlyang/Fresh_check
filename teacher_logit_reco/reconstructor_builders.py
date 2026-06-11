@@ -9,14 +9,20 @@ from typing import Any, Dict
 from jetclass_fresh.hlt_baseline import require_torch
 
 from .global_transformer import GlobalTransformerReconstructor, GlobalTransformerReconstructorConfig
+from .particle_cnn_reconstructor import ParticleCnnReconstructor, ParticleCnnReconstructorConfig
+from .particle_flow_reconstructor import ParticleFlowReconstructor, ParticleFlowReconstructorConfig
 from .particle_net_reconstructor import ParticleNetReconstructor, ParticleNetReconstructorConfig
 
 
 GLOBAL_TRANSFORMER_RECONSTRUCTOR = "global_transformer"
 PARTICLE_NET_RECONSTRUCTOR = "particle_net"
+PARTICLE_FLOW_RECONSTRUCTOR = "particle_flow"
+PARTICLE_CNN_RECONSTRUCTOR = "particle_cnn"
 TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES = (
     GLOBAL_TRANSFORMER_RECONSTRUCTOR,
     PARTICLE_NET_RECONSTRUCTOR,
+    PARTICLE_FLOW_RECONSTRUCTOR,
+    PARTICLE_CNN_RECONSTRUCTOR,
 )
 
 _ARCHITECTURE_ALIASES = {
@@ -28,6 +34,18 @@ _ARCHITECTURE_ALIASES = {
     "particlenet": PARTICLE_NET_RECONSTRUCTOR,
     "pn": PARTICLE_NET_RECONSTRUCTOR,
     "edgeconv": PARTICLE_NET_RECONSTRUCTOR,
+    "particle_flow": PARTICLE_FLOW_RECONSTRUCTOR,
+    "particleflow": PARTICLE_FLOW_RECONSTRUCTOR,
+    "pfn": PARTICLE_FLOW_RECONSTRUCTOR,
+    "pf": PARTICLE_FLOW_RECONSTRUCTOR,
+    "deep_sets": PARTICLE_FLOW_RECONSTRUCTOR,
+    "deepsets": PARTICLE_FLOW_RECONSTRUCTOR,
+    "particle_cnn": PARTICLE_CNN_RECONSTRUCTOR,
+    "particlecnn": PARTICLE_CNN_RECONSTRUCTOR,
+    "pcnn": PARTICLE_CNN_RECONSTRUCTOR,
+    "p_cnn": PARTICLE_CNN_RECONSTRUCTOR,
+    "particle_conv": PARTICLE_CNN_RECONSTRUCTOR,
+    "particleconv": PARTICLE_CNN_RECONSTRUCTOR,
 }
 
 _LEGACY_GLOBAL_TRANSFORMER_CONFIG_KEYS = (
@@ -111,7 +129,14 @@ def infer_reconstructor_architecture_from_payload(
 
 def build_teacher_logit_reconstructor(
     architecture: str | None,
-    config: Mapping[str, Any] | GlobalTransformerReconstructorConfig | ParticleNetReconstructorConfig | None = None,
+    config: (
+        Mapping[str, Any]
+        | GlobalTransformerReconstructorConfig
+        | ParticleNetReconstructorConfig
+        | ParticleFlowReconstructorConfig
+        | ParticleCnnReconstructorConfig
+        | None
+    ) = None,
 ):
     """Construct a teacher-logit reconstructor from an architecture/config pair."""
 
@@ -120,7 +145,30 @@ def build_teacher_logit_reconstructor(
         return GlobalTransformerReconstructor(GlobalTransformerReconstructorConfig.from_mapping(config or {}))
     if arch == PARTICLE_NET_RECONSTRUCTOR:
         return ParticleNetReconstructor(ParticleNetReconstructorConfig.from_mapping(config or {}))
+    if arch == PARTICLE_FLOW_RECONSTRUCTOR:
+        return ParticleFlowReconstructor(ParticleFlowReconstructorConfig.from_mapping(config or {}))
+    if arch == PARTICLE_CNN_RECONSTRUCTOR:
+        return ParticleCnnReconstructor(ParticleCnnReconstructorConfig.from_mapping(config or {}))
     raise AssertionError(f"Unhandled reconstructor architecture after normalization: {arch}")
+
+
+def build_reconstructor_from_config(config: Mapping[str, Any]):
+    """Construct a reconstructor from a config mapping containing its architecture.
+
+    This is intentionally a thin convenience wrapper around
+    :func:`build_teacher_logit_reconstructor`.  It expects a model config, not a
+    full training config.
+    """
+
+    if not isinstance(config, Mapping):
+        raise TypeError("config must be a mapping")
+    payload = dict(config)
+    architecture = payload.pop("reconstructor_architecture", None)
+    if architecture is None:
+        architecture = payload.pop("architecture", None)
+    else:
+        payload.pop("architecture", None)
+    return build_teacher_logit_reconstructor(architecture, payload)
 
 
 def strip_compile_prefix_from_state_dict(state_dict: Mapping[str, Any]) -> Dict[str, Any]:
