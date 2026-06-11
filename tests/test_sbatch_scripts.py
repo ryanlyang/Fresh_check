@@ -568,7 +568,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("fresh_crossarch_reco_model_name", common)
         self.assertIn("fresh_crossarch_reco_train_script", common)
 
-        self.assertIn("#SBATCH --time=1-00:00:00", runner)
+        self.assertIn("#SBATCH --time=2-00:00:00", runner)
         self.assertIn("#SBATCH --gres=gpu:1", runner)
         self.assertIn('RECO_ARCHITECTURE="${1:?Usage:', runner)
         self.assertIn('TEACHER_ARCHITECTURE="${2:?Usage:', runner)
@@ -662,7 +662,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("CROSSARCH_FUSION_INCLUDE_OPTIONAL_GROUPS:=1", common)
         self.assertIn("CROSSARCH_FUSERS:=mean_logits mean_probs", common)
 
-        self.assertIn("#SBATCH --time=12:00:00", fusion)
+        self.assertIn("#SBATCH --time=1-00:00:00", fusion)
         self.assertIn("scripts/run_crossarch_fusion.py", fusion)
         self.assertIn("--fit-fusers", fusion)
         self.assertIn("--include-optional-groups", fusion)
