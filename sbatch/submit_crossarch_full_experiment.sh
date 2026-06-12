@@ -114,6 +114,7 @@ done
 
 reco_train_job_ids=()
 reco_model_names=()
+declare -A reco_train_job_id_by_model=()
 for reco_architecture in "${reco_args[@]}"; do
   for teacher_architecture in "${teacher_args[@]}"; do
     model_name="$(fresh_crossarch_reco_model_name "${reco_architecture}" "${teacher_architecture}")"
@@ -126,6 +127,7 @@ for reco_architecture in "${reco_args[@]}"; do
       "${teacher_architecture}")"
     reco_train_job_ids+=("${reco_train_jid}")
     reco_model_names+=("${model_name}")
+    reco_train_job_id_by_model["${model_name}"]="${reco_train_jid}"
     echo "submitted crossarch_reco_train_${model_name}=${reco_train_jid}"
   done
 done
@@ -137,8 +139,9 @@ for reco_architecture in "${reco_args[@]}"; do
     model_name="$(fresh_crossarch_reco_model_name "${reco_architecture}" "${teacher_architecture}")"
     source_dir="${CROSSARCH_PREDICTION_DIR}/${model_name}"
     fresh_refuse_existing_dir "${source_dir}"
+    model_train_jid="${reco_train_job_id_by_model[${model_name}]}"
     reco_predict_jid="$(submit_job "crossarch_reco_predict_${model_name}" \
-      --dependency="afterok:${reco_train_dep}" \
+      --dependency="afterok:${model_train_jid}" \
       "${SCRIPT_DIR}/run_crossarch_predict_reconstructor.sh" \
       "${reco_architecture}" \
       "${teacher_architecture}")"
@@ -179,7 +182,8 @@ crossarch_full_experiment_submission:
     hlt_train_afterok: ${audit_jid}
     each_hlt_predict_after_its_train: true
     reco_train_afterok: ${teacher_dep}
-    reco_predict_afterok: ${reco_train_dep}
+    each_reco_predict_after_its_train: true
+    reco_train_block: ${reco_train_dep}
     fusion_afterok: ${prediction_dep}
     final_report_afterok: ${fusion_jid}
   expected_jobs:

@@ -119,7 +119,7 @@ def sanitize_hlt_tokens(tokens, mask, *, config: GlobalTransformerReconstructorC
     tokens = tokens.float()
     mask = mask.bool()
     finite = torch.isfinite(tokens).all(dim=-1)
-    cleaned = _nan_to_num_torch(tokens).clone()
+    cleaned = _nan_to_num_torch(tokens)
     safe_mask = mask & finite
 
     pt = torch.clamp(cleaned[:, :, 0], min=float(config.min_pt))
@@ -129,21 +129,41 @@ def sanitize_hlt_tokens(tokens, mask, *, config: GlobalTransformerReconstructorC
         torch.clamp(cleaned[:, :, 3], min=float(config.energy_eps)),
         physical_energy_floor(pt, eta, eps=float(config.energy_eps)),
     )
-    cleaned[:, :, 0] = pt
-    cleaned[:, :, 1] = eta
-    cleaned[:, :, 2] = phi
-    cleaned[:, :, 3] = energy
+    cleaned = torch.cat(
+        [
+            pt[:, :, None],
+            eta[:, :, None],
+            phi[:, :, None],
+            energy[:, :, None],
+            cleaned[:, :, 4:],
+        ],
+        dim=-1,
+    )
     cleaned = cleaned * safe_mask[:, :, None].float()
 
     empty = safe_mask.sum(dim=1) == 0
     if bool(empty.any()):
-        fallback = torch.zeros_like(cleaned)
-        fallback[:, 0, 0] = float(config.min_pt)
-        fallback[:, 0, 1] = 0.0
-        fallback[:, 0, 2] = 0.0
-        fallback[:, 0, 3] = float(config.min_pt) + float(config.energy_eps)
-        fallback_mask = torch.zeros_like(safe_mask)
-        fallback_mask[:, 0] = True
+        slot0 = torch.arange(cleaned.shape[1], device=cleaned.device)[None, :] == 0
+        fallback_head = cleaned.new_tensor(
+            [
+                float(config.min_pt),
+                0.0,
+                0.0,
+                float(config.min_pt) + float(config.energy_eps),
+            ]
+        ).view(1, 1, 4)
+        fallback = torch.cat(
+            [
+                torch.where(
+                    slot0[:, :, None],
+                    fallback_head.expand(cleaned.shape[0], cleaned.shape[1], -1),
+                    cleaned.new_zeros(cleaned.shape[0], cleaned.shape[1], 4),
+                ),
+                cleaned.new_zeros(cleaned.shape[0], cleaned.shape[1], cleaned.shape[2] - 4),
+            ],
+            dim=-1,
+        )
+        fallback_mask = slot0.expand(cleaned.shape[0], -1)
         cleaned = torch.where(empty[:, None, None], fallback, cleaned)
         safe_mask = torch.where(empty[:, None], fallback_mask, safe_mask)
 
@@ -300,16 +320,21 @@ class GlobalTransformerReconstructor(_ModuleBase):
 
     def _apply_parent_corrections(self, tokens, mask, deltas):
         torch = require_torch()
-        out = tokens.clone()
         pt = torch.clamp(tokens[:, :, 0], min=float(self.config.min_pt)) * torch.exp(deltas[:, :, 0])
         eta = torch.clamp(tokens[:, :, 1] + deltas[:, :, 1], -float(self.config.eta_limit), float(self.config.eta_limit))
         phi = wrap_phi_torch(tokens[:, :, 2] + deltas[:, :, 2])
         energy = torch.clamp(tokens[:, :, 3], min=float(self.config.energy_eps)) * torch.exp(deltas[:, :, 3])
         energy = torch.maximum(energy, physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)))
-        out[:, :, 0] = pt
-        out[:, :, 1] = eta
-        out[:, :, 2] = phi
-        out[:, :, 3] = energy
+        out = torch.cat(
+            [
+                pt[:, :, None],
+                eta[:, :, None],
+                phi[:, :, None],
+                energy[:, :, None],
+                tokens[:, :, 4:],
+            ],
+            dim=-1,
+        )
         return torch.where(mask[:, :, None], out, torch.zeros_like(out))
 
     def _make_extra_candidates(self, encoded, mask, jet_axes):
@@ -347,17 +372,21 @@ class GlobalTransformerReconstructor(_ModuleBase):
         energy = physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)) * energy_scale
         energy = torch.maximum(energy, physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)))
 
-        tokens = raw.new_zeros(batch_size, self.num_extra_candidates, RAW_TOKEN_DIM)
-        tokens[:, :, 0] = pt
-        tokens[:, :, 1] = eta
-        tokens[:, :, 2] = phi
-        tokens[:, :, 3] = energy
-        tokens[:, :, 4] = torch.tanh(raw[:, :, 4])
-        tokens[:, :, 5:10] = torch.softmax(raw[:, :, 5:10], dim=-1)
-        tokens[:, :, 10] = torch.tanh(raw[:, :, 10])
-        tokens[:, :, 11] = torch.sigmoid(raw[:, :, 11])
-        tokens[:, :, 12] = torch.tanh(raw[:, :, 12])
-        tokens[:, :, 13] = torch.sigmoid(raw[:, :, 13])
+        tokens = torch.cat(
+            [
+                pt[:, :, None],
+                eta[:, :, None],
+                phi[:, :, None],
+                energy[:, :, None],
+                torch.tanh(raw[:, :, 4])[:, :, None],
+                torch.softmax(raw[:, :, 5:10], dim=-1),
+                torch.tanh(raw[:, :, 10])[:, :, None],
+                torch.sigmoid(raw[:, :, 11])[:, :, None],
+                torch.tanh(raw[:, :, 12])[:, :, None],
+                torch.sigmoid(raw[:, :, 13])[:, :, None],
+            ],
+            dim=-1,
+        )
         weights = torch.sigmoid(raw[:, :, 14] + float(self.config.extra_weight_bias))
         extra_mask = torch.ones(batch_size, self.num_extra_candidates, dtype=torch.bool, device=encoded.device)
         return tokens, weights, extra_mask
