@@ -174,6 +174,39 @@ def sanitize_hlt_tokens(tokens, mask, *, config: GlobalTransformerReconstructorC
     return cleaned, safe_mask, diagnostics
 
 
+def sanitize_reconstructed_view_tensors(tokens, mask, weights, *, config: GlobalTransformerReconstructorConfig):
+    """Return finite physical reconstructed tokens, mask, weights, and diagnostics.
+
+    Reconstructors can emit learned extra candidates.  A single non-finite slot
+    should not crash a long Slurm run after the model has already produced many
+    usable candidates, so invalid reconstructed candidates are masked before the
+    shared soft-view validator sees them.
+    """
+
+    torch = require_torch()
+    tokens = tokens.float()
+    mask = mask.bool()
+    weights = weights.float()
+
+    finite_tokens = torch.isfinite(tokens).all(dim=-1)
+    finite_weights = torch.isfinite(weights)
+    nonnegative_weights = weights >= 0.0
+    safe_mask = mask & finite_tokens & finite_weights & nonnegative_weights
+
+    cleaned_tokens, cleaned_mask, token_diagnostics = sanitize_hlt_tokens(tokens, safe_mask, config=config)
+    cleaned_weights = _nan_to_num_torch(weights, nan=0.0, posinf=0.0, neginf=0.0)
+    cleaned_weights = torch.clamp(cleaned_weights, min=0.0)
+    cleaned_weights = torch.where(cleaned_mask, cleaned_weights, torch.zeros_like(cleaned_weights))
+
+    diagnostics = {
+        "nonfinite_reco_token_count": int((mask & ~finite_tokens).sum().detach().cpu().item()),
+        "nonfinite_reco_weight_count": int((mask & ~finite_weights).sum().detach().cpu().item()),
+        "negative_reco_weight_count": int((mask & finite_weights & ~nonnegative_weights).sum().detach().cpu().item()),
+        "empty_reco_jet_count": int(token_diagnostics["empty_input_jet_count"]),
+    }
+    return cleaned_tokens, cleaned_mask, cleaned_weights, diagnostics
+
+
 def token_embedding_features(tokens, mask):
     """Build stable per-particle features for the reconstructor encoder."""
 
@@ -417,6 +450,19 @@ class GlobalTransformerReconstructor(_ModuleBase):
         tokens = torch.cat([parent_tokens, extra_tokens], dim=1)
         mask = torch.cat([hlt_mask, extra_mask], dim=1)
         weights = torch.cat([parent_weights, extra_weights], dim=1)
+        tokens, mask, weights, reco_diagnostics = sanitize_reconstructed_view_tensors(
+            tokens,
+            mask,
+            weights,
+            config=self.config,
+        )
+        diagnostics = {**diagnostics, **reco_diagnostics}
+        n_parent_candidates = int(parent_tokens.shape[1])
+        parent_tokens = tokens[:, :n_parent_candidates, :]
+        parent_weights = weights[:, :n_parent_candidates]
+        extra_tokens = tokens[:, n_parent_candidates:, :]
+        extra_weights = weights[:, n_parent_candidates:]
+        extra_mask = mask[:, n_parent_candidates:]
 
         batch_size = int(tokens.shape[0])
         if labels is None:

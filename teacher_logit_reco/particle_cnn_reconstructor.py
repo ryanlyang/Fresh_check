@@ -23,6 +23,7 @@ from .global_transformer import (
     physical_energy_floor,
     placeholder_jet_ids,
     sanitize_hlt_tokens,
+    sanitize_reconstructed_view_tensors,
     wrap_phi_torch,
 )
 from .views import SoftReconstructedView
@@ -830,6 +831,19 @@ class ParticleCnnReconstructor(_ModuleBase):
         tokens = torch.cat([parent_tokens, extra_tokens], dim=1)
         mask = torch.cat([hlt_mask, extra_mask], dim=1)
         weights = torch.cat([parent_weights, extra_weights], dim=1)
+        tokens, mask, weights, reco_diagnostics = sanitize_reconstructed_view_tensors(
+            tokens,
+            mask,
+            weights,
+            config=self.config,
+        )
+        diagnostics = {**diagnostics, **reco_diagnostics}
+        n_parent_candidates = int(parent_tokens.shape[1])
+        parent_tokens = tokens[:, :n_parent_candidates, :]
+        parent_weights = weights[:, :n_parent_candidates]
+        extra_tokens = tokens[:, n_parent_candidates:, :]
+        extra_weights = weights[:, n_parent_candidates:]
+        extra_mask = mask[:, n_parent_candidates:]
 
         batch_size = int(tokens.shape[0])
         if labels is None:

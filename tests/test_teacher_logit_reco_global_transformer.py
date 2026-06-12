@@ -9,6 +9,7 @@ from teacher_logit_reco.global_transformer import (
     GlobalTransformerReconstructor,
     GlobalTransformerReconstructorConfig,
     physical_energy_floor,
+    sanitize_reconstructed_view_tensors,
 )
 from teacher_logit_reco.views import SoftReconstructedView
 
@@ -111,6 +112,30 @@ class GlobalTransformerForwardTests(unittest.TestCase):
         self.assertTrue(bool(view.mask[0, 0]))
         self.assertEqual(view.aux["diagnostics"]["empty_input_jet_count"], 1)
         self.assertTrue(bool(torch.isfinite(view.tokens).all()))
+
+    def test_reconstructed_view_sanitizer_masks_nonfinite_candidates(self):
+        cfg = GlobalTransformerReconstructorConfig()
+        tokens = torch.zeros((1, 3, RAW_TOKEN_DIM), dtype=torch.float32)
+        tokens[:, :, 0] = 1.0
+        tokens[:, :, 3] = 2.0
+        tokens[0, 1, 0] = float("nan")
+        mask = torch.ones((1, 3), dtype=torch.bool)
+        weights = torch.tensor([[1.0, 0.5, float("inf")]], dtype=torch.float32)
+
+        clean_tokens, clean_mask, clean_weights, diagnostics = sanitize_reconstructed_view_tensors(
+            tokens,
+            mask,
+            weights,
+            config=cfg,
+        )
+
+        self.assertTrue(bool(torch.isfinite(clean_tokens).all()))
+        self.assertTrue(bool(torch.isfinite(clean_weights).all()))
+        self.assertTrue(bool(clean_mask[0, 0]))
+        self.assertFalse(bool(clean_mask[0, 1]))
+        self.assertFalse(bool(clean_mask[0, 2]))
+        self.assertEqual(diagnostics["nonfinite_reco_token_count"], 1)
+        self.assertEqual(diagnostics["nonfinite_reco_weight_count"], 1)
 
 
 if __name__ == "__main__":
