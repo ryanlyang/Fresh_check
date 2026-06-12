@@ -51,6 +51,9 @@ RUNNERS = [
     "run_crossarch_predict_reconstructor.sh",
     "run_crossarch_fusion.sh",
     "run_crossarch_write_final_report.sh",
+    "run_crossarch_train_reco_domain_tagger.sh",
+    "run_crossarch_predict_reco_domain_tagger.sh",
+    "run_crossarch_fusion_reco_domain_taggers.sh",
 ]
 
 SUBMITTERS = [
@@ -70,6 +73,7 @@ SUBMITTERS = [
     "submit_crossarch_step5_reconstructors.sh",
     "submit_crossarch_step6_predictions.sh",
     "submit_crossarch_full_experiment.sh",
+    "submit_crossarch_reco_domain_taggers.sh",
 ]
 
 
@@ -168,6 +172,9 @@ class SbatchStep14Tests(unittest.TestCase):
             "submit_crossarch_step6_predictions.sh",
             "run_crossarch_fusion.sh",
             "submit_crossarch_full_experiment.sh",
+            "run_crossarch_predict_reco_domain_tagger.sh",
+            "run_crossarch_fusion_reco_domain_taggers.sh",
+            "submit_crossarch_reco_domain_taggers.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
         self.assertIn("fresh_print_shell_command", self.read("common.sh"))
