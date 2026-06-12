@@ -605,16 +605,21 @@ class ParticleFlowReconstructor(_ModuleBase):
 
     def _apply_parent_corrections(self, tokens, mask, deltas):
         torch = require_torch()
-        out = tokens.clone()
         pt = torch.clamp(tokens[:, :, 0], min=float(self.config.min_pt)) * torch.exp(deltas[:, :, 0])
         eta = torch.clamp(tokens[:, :, 1] + deltas[:, :, 1], -float(self.config.eta_limit), float(self.config.eta_limit))
         phi = wrap_phi_torch(tokens[:, :, 2] + deltas[:, :, 2])
         energy = torch.clamp(tokens[:, :, 3], min=float(self.config.energy_eps)) * torch.exp(deltas[:, :, 3])
         energy = torch.maximum(energy, physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)))
-        out[:, :, 0] = pt
-        out[:, :, 1] = eta
-        out[:, :, 2] = phi
-        out[:, :, 3] = energy
+        out = torch.cat(
+            [
+                pt[:, :, None],
+                eta[:, :, None],
+                phi[:, :, None],
+                energy[:, :, None],
+                tokens[:, :, 4:],
+            ],
+            dim=-1,
+        )
         return torch.where(mask[:, :, None], out, torch.zeros_like(out))
 
     def _make_extra_candidates(self, jet_context, jet_axes):
@@ -645,17 +650,21 @@ class ParticleFlowReconstructor(_ModuleBase):
         energy = physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)) * energy_scale
         energy = torch.maximum(energy, physical_energy_floor(pt, eta, eps=float(self.config.energy_eps)))
 
-        tokens = raw.new_zeros(batch_size, self.num_extra_candidates, RAW_TOKEN_DIM)
-        tokens[:, :, 0] = pt
-        tokens[:, :, 1] = eta
-        tokens[:, :, 2] = phi
-        tokens[:, :, 3] = energy
-        tokens[:, :, 4] = torch.tanh(raw[:, :, 4])
-        tokens[:, :, 5:10] = torch.softmax(raw[:, :, 5:10], dim=-1)
-        tokens[:, :, 10] = torch.tanh(raw[:, :, 10])
-        tokens[:, :, 11] = torch.sigmoid(raw[:, :, 11])
-        tokens[:, :, 12] = torch.tanh(raw[:, :, 12])
-        tokens[:, :, 13] = torch.sigmoid(raw[:, :, 13])
+        tokens = torch.cat(
+            [
+                pt[:, :, None],
+                eta[:, :, None],
+                phi[:, :, None],
+                energy[:, :, None],
+                torch.tanh(raw[:, :, 4])[:, :, None],
+                torch.softmax(raw[:, :, 5:10], dim=-1),
+                torch.tanh(raw[:, :, 10])[:, :, None],
+                torch.sigmoid(raw[:, :, 11])[:, :, None],
+                torch.tanh(raw[:, :, 12])[:, :, None],
+                torch.sigmoid(raw[:, :, 13])[:, :, None],
+            ],
+            dim=-1,
+        )
         weights = torch.sigmoid(raw[:, :, RAW_TOKEN_DIM] + float(self.config.extra_weight_bias))
         extra_mask = torch.ones(batch_size, self.num_extra_candidates, dtype=torch.bool, device=jet_context.device)
         return tokens, weights, extra_mask

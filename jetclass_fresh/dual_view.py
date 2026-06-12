@@ -139,15 +139,20 @@ def sanitize_tokens_for_part_inputs(tokens, mask):
     mask = mask.bool()
     finite_tokens = torch.isfinite(tokens).all(dim=-1)
     tokens = _nan_to_num_torch(tokens)
-    cleaned = tokens.clone()
-    pt = torch.clamp(cleaned[:, :, 0], min=0.0)
-    eta = torch.clamp(cleaned[:, :, 1], -5.0, 5.0)
-    phi = wrap_phi_torch(cleaned[:, :, 2])
-    energy = torch.maximum(torch.clamp(cleaned[:, :, 3], min=ENERGY_EPS), _physical_energy_floor(pt, eta))
-    cleaned[:, :, 0] = pt
-    cleaned[:, :, 1] = eta
-    cleaned[:, :, 2] = phi
-    cleaned[:, :, 3] = energy
+    pt = torch.clamp(tokens[:, :, 0], min=0.0)
+    eta = torch.clamp(tokens[:, :, 1], -5.0, 5.0)
+    phi = wrap_phi_torch(tokens[:, :, 2])
+    energy = torch.maximum(torch.clamp(tokens[:, :, 3], min=ENERGY_EPS), _physical_energy_floor(pt, eta))
+    cleaned = torch.cat(
+        [
+            pt[:, :, None],
+            eta[:, :, None],
+            phi[:, :, None],
+            energy[:, :, None],
+            tokens[:, :, 4:],
+        ],
+        dim=-1,
+    )
     return cleaned, mask & finite_tokens
 
 
@@ -178,15 +183,13 @@ def _force_nonempty_parent_mask(mask, fallback_mask, score):
     empty = mask.sum(dim=1) == 0
     if not bool(empty.any()):
         return mask, empty
-    forced = mask.clone()
     safe_score = torch.where(fallback_mask, _nan_to_num_torch(score.float()), torch.full_like(score.float(), -1.0))
     fallback_empty = fallback_mask.sum(dim=1) == 0
     if bool(fallback_empty.any()):
-        safe_score = safe_score.clone()
-        safe_score[fallback_empty, 0] = 0.0
+        slot0 = torch.arange(mask.shape[1], device=mask.device)[None, :] == 0
+        safe_score = torch.where(fallback_empty[:, None] & slot0, torch.zeros_like(safe_score), safe_score)
     indices = safe_score.argmax(dim=1)
-    rows = torch.arange(mask.shape[0], device=mask.device)
-    forced[rows[empty], indices[empty]] = True
+    forced = mask | (empty[:, None] & torch.nn.functional.one_hot(indices, num_classes=mask.shape[1]).bool())
     return forced, empty
 
 
@@ -315,14 +318,26 @@ def build_soft_corrected_view_torch(
     if force_nonempty:
         view_mask, forced_empty = _force_nonempty_parent_mask(view_mask, finite_parent_mask, parent_weights)
 
-    prepared = parent_tokens.clone()
     if scale_features_by_weight:
-        prepared[:, :, 0] = prepared[:, :, 0] * parent_weights
-        prepared[:, :, 3] = prepared[:, :, 3] * parent_weights
-        prepared[:, :, 3] = torch.maximum(
-            prepared[:, :, 3],
-            _physical_energy_floor(prepared[:, :, 0], prepared[:, :, 1]),
+        prepared_pt = parent_tokens[:, :, 0] * parent_weights
+        prepared_eta = parent_tokens[:, :, 1]
+        prepared_phi = parent_tokens[:, :, 2]
+        prepared_energy = torch.maximum(
+            parent_tokens[:, :, 3] * parent_weights,
+            _physical_energy_floor(prepared_pt, prepared_eta),
         )
+        prepared = torch.cat(
+            [
+                prepared_pt[:, :, None],
+                prepared_eta[:, :, None],
+                prepared_phi[:, :, None],
+                prepared_energy[:, :, None],
+                parent_tokens[:, :, 4:],
+            ],
+            dim=-1,
+        )
+    else:
+        prepared = parent_tokens
     prepared = prepared * view_mask[:, :, None].float()
 
     pt = torch.where(view_mask, prepared[:, :, 0], torch.zeros_like(prepared[:, :, 0]))
@@ -419,11 +434,26 @@ def build_part_inputs_torch(
         weights = torch.clamp(_nan_to_num_torch(weights), min=0.0)
         mask = mask & finite_weights & (weights > float(weight_threshold))
     tokens, mask, weights = _select_topk(tokens, mask, weights, max_constits=max_constits)
-    prepared = tokens.clone()
     if weights is not None:
-        prepared[:, :, 0] = prepared[:, :, 0] * weights
-        prepared[:, :, 3] = prepared[:, :, 3] * weights
-        prepared[:, :, 3] = torch.maximum(prepared[:, :, 3], _physical_energy_floor(prepared[:, :, 0], prepared[:, :, 1]))
+        prepared_pt = tokens[:, :, 0] * weights
+        prepared_eta = tokens[:, :, 1]
+        prepared_phi = tokens[:, :, 2]
+        prepared_energy = torch.maximum(
+            tokens[:, :, 3] * weights,
+            _physical_energy_floor(prepared_pt, prepared_eta),
+        )
+        prepared = torch.cat(
+            [
+                prepared_pt[:, :, None],
+                prepared_eta[:, :, None],
+                prepared_phi[:, :, None],
+                prepared_energy[:, :, None],
+                tokens[:, :, 4:],
+            ],
+            dim=-1,
+        )
+    else:
+        prepared = tokens
     prepared = prepared * mask[:, :, None].float()
 
     pt = torch.where(mask, prepared[:, :, 0], torch.zeros_like(prepared[:, :, 0]))
