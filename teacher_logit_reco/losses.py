@@ -35,6 +35,13 @@ class TeacherLogitRecoLossConfig:
     extra_pt_fraction_budget_weight: float = 0.25
     jet_summary_huber_beta: float = 0.2
     summary_log_scale: bool = True
+    aggressive_extra_budget_weight: float = 0.0
+    aggressive_parent_weight_budget_weight: float = 0.0
+    aggressive_global_calibration_budget_weight: float = 0.0
+    max_total_extra_pt_fraction: float = 0.50
+    extra_count_budget_weight: float = 0.05
+    min_parent_weight_fraction: float = 0.25
+    parent_prune_budget_weight: float = 0.05
 
     def __post_init__(self) -> None:
         if float(self.temperature) <= 0.0:
@@ -49,9 +56,18 @@ class TeacherLogitRecoLossConfig:
             "extra_weight_budget_weight",
             "extra_pt_fraction_budget_weight",
             "jet_summary_huber_beta",
+            "aggressive_extra_budget_weight",
+            "aggressive_parent_weight_budget_weight",
+            "aggressive_global_calibration_budget_weight",
+            "max_total_extra_pt_fraction",
+            "extra_count_budget_weight",
+            "min_parent_weight_fraction",
+            "parent_prune_budget_weight",
         ):
             if float(getattr(self, name)) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
+        if float(self.min_parent_weight_fraction) > 1.0:
+            raise ValueError("min_parent_weight_fraction must be in [0, 1]")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -63,6 +79,28 @@ class TeacherLogitRecoLossConfig:
         if isinstance(value, cls):
             return value
         return cls(**dict(value))
+
+    @classmethod
+    def aggressive_defaults(cls, **overrides: Any) -> "TeacherLogitRecoLossConfig":
+        """Return first-pass opt-in weights for aggressive reconstructors.
+
+        The base dataclass keeps the new losses disabled to preserve existing
+        conservative training behavior.  Aggressive training CLIs can use this
+        constructor, or pass equivalent explicit weights, once the aggressive
+        reconstructor architectures are wired in.
+        """
+
+        payload = {
+            "teacher_kl_weight": 1.0,
+            "ce_weight": 0.5,
+            "correction_budget_weight": 0.02,
+            "jet_summary_weight": 0.05,
+            "aggressive_extra_budget_weight": 0.05,
+            "aggressive_parent_weight_budget_weight": 0.02,
+            "aggressive_global_calibration_budget_weight": 0.02,
+        }
+        payload.update(overrides)
+        return cls(**payload)
 
 
 @dataclass
@@ -267,6 +305,135 @@ def correction_budget_loss(
     return total, components
 
 
+def extra_budget_loss(
+    reco_view: SoftReconstructedView,
+    *,
+    config: TeacherLogitRecoLossConfig | Mapping[str, Any] | None = None,
+) -> tuple[Any, Dict[str, Any]]:
+    """Budget aggressive generated-particle capacity.
+
+    This is intentionally separate from the legacy correction budget.  It uses
+    the explicit per-jet tensors produced by ``AggressiveSoftViewHead`` when
+    available, and falls back to recomputing from extra tokens/weights for older
+    soft views.  Missing extra candidates produce a differentiable zero.
+    """
+
+    torch = require_torch()
+    cfg = TeacherLogitRecoLossConfig.from_mapping(config)
+    aux = dict(reco_view.aux)
+    zero = reco_view.tokens.new_zeros(())
+
+    extra_weights = aux.get("extra_weights")
+    extra_tokens = aux.get("extra_tokens")
+    hlt_tokens = aux.get("sanitized_hlt_tokens")
+    hlt_mask = aux.get("sanitized_hlt_mask")
+
+    extra_weight_sum = aux.get("extra_weight_sum")
+    if extra_weight_sum is None:
+        if extra_weights is None:
+            extra_weight_sum = reco_view.tokens.new_zeros((int(reco_view.tokens.shape[0]),))
+        else:
+            extra_weight_sum = torch.clamp(extra_weights, min=0.0, max=1.0).sum(dim=1)
+
+    extra_pt_fraction = aux.get("extra_pt_fraction")
+    if extra_pt_fraction is None:
+        if extra_tokens is None or extra_weights is None or hlt_tokens is None or hlt_mask is None:
+            extra_pt_fraction = reco_view.tokens.new_zeros((int(reco_view.tokens.shape[0]),))
+        else:
+            extra_pt = (torch.clamp(extra_tokens[:, :, 0], min=0.0) * torch.clamp(extra_weights, min=0.0, max=1.0)).sum(dim=1)
+            parent_pt = (torch.clamp(hlt_tokens[:, :, 0], min=0.0) * hlt_mask.float()).sum(dim=1)
+            extra_pt_fraction = extra_pt / torch.clamp(parent_pt, min=EPS)
+
+    if int(extra_pt_fraction.numel()) == 0:
+        excess = zero
+        count_term = zero
+        mean_fraction = zero
+    else:
+        excess = torch.mean(torch.relu(extra_pt_fraction - float(cfg.max_total_extra_pt_fraction)) ** 2)
+        count_term = _safe_mean(extra_weight_sum)
+        mean_fraction = _safe_mean(extra_pt_fraction)
+
+    components = {
+        "extra_pt_fraction_excess": excess,
+        "extra_weight_sum": count_term,
+        "extra_pt_fraction_mean": mean_fraction,
+    }
+    total = excess + float(cfg.extra_count_budget_weight) * count_term
+    return total, components
+
+
+def parent_weight_budget_loss(
+    reco_view: SoftReconstructedView,
+    *,
+    config: TeacherLogitRecoLossConfig | Mapping[str, Any] | None = None,
+) -> tuple[Any, Dict[str, Any]]:
+    """Budget aggressive parent pruning/reweighting.
+
+    The keep term prevents collapse to all-zero parent weights.  The prune term
+    is intentionally mild and records how far the model moves from preserving
+    the original HLT constituents.
+    """
+
+    torch = require_torch()
+    cfg = TeacherLogitRecoLossConfig.from_mapping(config)
+    aux = dict(reco_view.aux)
+    parent_weights = aux.get("parent_weights")
+    parent_mask = aux.get("sanitized_hlt_mask")
+    zero = reco_view.tokens.new_zeros(())
+    if parent_weights is None or parent_mask is None:
+        return zero, {"parent_keep": zero, "parent_prune": zero, "parent_weight_fraction_mean": zero}
+
+    parent_mask = parent_mask.bool()
+    valid = parent_mask.float()
+    parent_count = valid.sum(dim=1)
+    parent_weight_sum = (torch.clamp(parent_weights, min=0.0, max=1.0) * valid).sum(dim=1)
+    parent_weight_fraction = parent_weight_sum / torch.clamp(parent_count, min=1.0)
+    keep = torch.mean(torch.relu(float(cfg.min_parent_weight_fraction) - parent_weight_fraction) ** 2)
+    prune = masked_mean((parent_weights - 1.0) ** 2, parent_mask)
+    components = {
+        "parent_keep": keep,
+        "parent_prune": prune,
+        "parent_weight_fraction_mean": _safe_mean(parent_weight_fraction),
+    }
+    total = keep + float(cfg.parent_prune_budget_weight) * prune
+    return total, components
+
+
+def global_calibration_budget_loss(
+    reco_view: SoftReconstructedView,
+    *,
+    config: TeacherLogitRecoLossConfig | Mapping[str, Any] | None = None,
+) -> tuple[Any, Dict[str, Any]]:
+    """Budget aggressive jet-level global calibration parameters."""
+
+    del config
+    aux = dict(reco_view.aux)
+    global_correction = aux.get("global_correction") or aux.get("global_calibration")
+    zero = reco_view.tokens.new_zeros(())
+    if not global_correction:
+        return zero, {
+            "global_logpt_scale_abs": zero,
+            "global_loge_scale_abs": zero,
+            "global_eta_shift_abs": zero,
+            "global_phi_shift_abs": zero,
+        }
+
+    def component(name: str):
+        value = global_correction.get(name)
+        if value is None:
+            return zero
+        return _safe_mean(value.abs())
+
+    components = {
+        "global_logpt_scale_abs": component("logpt_scale"),
+        "global_loge_scale_abs": component("loge_scale"),
+        "global_eta_shift_abs": component("eta_shift"),
+        "global_phi_shift_abs": component("phi_shift"),
+    }
+    total = sum(components.values(), zero)
+    return total, components
+
+
 def compute_teacher_logit_reco_loss(
     *,
     offline_logits,
@@ -284,19 +451,31 @@ def compute_teacher_logit_reco_loss(
     ce = teacher_cross_entropy_loss(reco_logits, labels)
     budget, budget_terms = correction_budget_loss(reco_view, config=cfg)
     summary = weak_jet_summary_loss(reco_view, offline_tokens, offline_mask, config=cfg)
+    extra_budget, extra_budget_terms = extra_budget_loss(reco_view, config=cfg)
+    parent_weight_budget, parent_weight_budget_terms = parent_weight_budget_loss(reco_view, config=cfg)
+    global_budget, global_budget_terms = global_calibration_budget_loss(reco_view, config=cfg)
 
     components = {
         "teacher_kl": kl,
         "ce": ce,
         "correction_budget": budget,
         "jet_summary": summary,
+        "extra_budget": extra_budget,
+        "parent_weight_budget": parent_weight_budget,
+        "global_calibration_budget": global_budget,
         **{f"budget_{name}": value for name, value in budget_terms.items()},
+        **{f"extra_budget_{name}": value for name, value in extra_budget_terms.items()},
+        **{f"parent_weight_budget_{name}": value for name, value in parent_weight_budget_terms.items()},
+        **{f"global_calibration_budget_{name}": value for name, value in global_budget_terms.items()},
     }
     weighted_components = {
         "teacher_kl": float(cfg.teacher_kl_weight) * kl,
         "ce": float(cfg.ce_weight) * ce,
         "correction_budget": float(cfg.correction_budget_weight) * budget,
         "jet_summary": float(cfg.jet_summary_weight) * summary,
+        "extra_budget": float(cfg.aggressive_extra_budget_weight) * extra_budget,
+        "parent_weight_budget": float(cfg.aggressive_parent_weight_budget_weight) * parent_weight_budget,
+        "global_calibration_budget": float(cfg.aggressive_global_calibration_budget_weight) * global_budget,
     }
     total = sum(weighted_components.values())
     metrics = {

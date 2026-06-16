@@ -22,6 +22,7 @@ from jetclass_fresh.hlt_cache import load_cached_hlt_view
 from jetclass_fresh.jetclass_data import JetIdentity, JetView
 
 from .global_transformer import GlobalTransformerReconstructor
+from .aggressive_audits import AggressiveReconstructionDiagnosticsAccumulator
 from .reconstructor_builders import (
     infer_reconstructor_architecture_from_payload,
     load_teacher_logit_reconstructor_checkpoint,
@@ -201,6 +202,7 @@ def evaluate_teacher_logit_reco_model(
     logits_rows: list[np.ndarray] = []
     labels_rows: list[np.ndarray] = []
     jet_ids: list[JetIdentity] = []
+    diagnostics_accumulator = AggressiveReconstructionDiagnosticsAccumulator()
 
     with torch.no_grad():
         for batch in loader:
@@ -215,6 +217,7 @@ def evaluate_teacher_logit_reco_model(
                     jet_ids=batch["jet_ids"],
                     split=dataset.split,
                 )
+                diagnostics_accumulator.update_from_soft_view(reco_view)
                 logits = teacher.forward_soft_view(reco_view)
             logits_rows.append(logits.detach().cpu().numpy().astype(np.float32))
             labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))
@@ -234,6 +237,9 @@ def evaluate_teacher_logit_reco_model(
         "training_step": TRAIN_EXPERIMENT_STEP,
         "max_jets": None if max_jets is None else int(max_jets),
     }
+    diagnostics = diagnostics_accumulator.to_dict()
+    if int(diagnostics.get("batch_count", 0)) > 0:
+        metadata["reconstruction_diagnostics"] = diagnostics
     metadata.update(dict(checkpoint_metadata or {}))
     return PredictionBlock(
         model_name=model_name,

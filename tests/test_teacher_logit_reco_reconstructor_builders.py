@@ -18,6 +18,12 @@ TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 if TORCH_AVAILABLE:
     import torch
 
+    from teacher_logit_reco.aggressive_global_transformer import AggressiveGlobalTransformerReconstructor
+    from teacher_logit_reco.aggressive_particle_reconstructors import (
+        AggressiveParticleCnnReconstructor,
+        AggressiveParticleFlowReconstructor,
+        AggressiveParticleNetReconstructor,
+    )
     from teacher_logit_reco.global_transformer import (
         GlobalTransformerReconstructor,
         GlobalTransformerReconstructorConfig,
@@ -33,6 +39,10 @@ class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
         self.assertIn("particle_net", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
         self.assertIn("particle_flow", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
         self.assertIn("particle_cnn", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertIn("aggressive_global_transformer", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertIn("aggressive_particle_net", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertIn("aggressive_particle_flow", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
+        self.assertIn("aggressive_particle_cnn", TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES)
         self.assertEqual(normalize_reconstructor_architecture(None), "global_transformer")
         self.assertEqual(normalize_reconstructor_architecture("gt"), "global_transformer")
         self.assertEqual(normalize_reconstructor_architecture("global-transformer"), "global_transformer")
@@ -43,6 +53,17 @@ class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
         self.assertEqual(normalize_reconstructor_architecture("deep sets"), "particle_flow")
         self.assertEqual(normalize_reconstructor_architecture("P-CNN"), "particle_cnn")
         self.assertEqual(normalize_reconstructor_architecture("particle cnn"), "particle_cnn")
+        self.assertEqual(normalize_reconstructor_architecture("aggressive-gt"), "aggressive_global_transformer")
+        self.assertEqual(normalize_reconstructor_architecture("aggt"), "aggressive_global_transformer")
+        self.assertEqual(normalize_reconstructor_architecture("aggressive-pn"), "aggressive_particle_net")
+        self.assertEqual(normalize_reconstructor_architecture("agpn"), "aggressive_particle_net")
+        self.assertEqual(normalize_reconstructor_architecture("aggressive-pfn"), "aggressive_particle_flow")
+        self.assertEqual(normalize_reconstructor_architecture("agpfn"), "aggressive_particle_flow")
+        self.assertEqual(normalize_reconstructor_architecture("aggressive-pcnn"), "aggressive_particle_cnn")
+        self.assertEqual(normalize_reconstructor_architecture("agpcnn"), "aggressive_particle_cnn")
+        self.assertEqual(normalize_reconstructor_architecture("pn"), "particle_net")
+        self.assertEqual(normalize_reconstructor_architecture("pfn"), "particle_flow")
+        self.assertEqual(normalize_reconstructor_architecture("pcnn"), "particle_cnn")
         with self.assertRaises(ValueError):
             normalize_reconstructor_architecture("unknown_reco")
 
@@ -59,6 +80,20 @@ class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
         self.assertEqual(
             infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "pcnn"}),
             "particle_cnn",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "aggressive_particle_net"}),
+            "aggressive_particle_net",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload({"reconstructor_architecture": "agpfn"}),
+            "aggressive_particle_flow",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload(
+                {"model_config": {"reconstructor_architecture": "aggressive_particle_cnn"}}
+            ),
+            "aggressive_particle_cnn",
         )
         self.assertEqual(
             infer_reconstructor_architecture_from_payload(
@@ -83,6 +118,10 @@ class TeacherLogitReconstructorBuilderTests(unittest.TestCase):
         self.assertEqual(
             infer_reconstructor_architecture_from_payload({}, architecture="particle-cnn"),
             "particle_cnn",
+        )
+        self.assertEqual(
+            infer_reconstructor_architecture_from_payload({}, architecture="aggressive-particle-net"),
+            "aggressive_particle_net",
         )
         with self.assertRaises(ValueError):
             infer_reconstructor_architecture_from_payload({}, architecture="bad_architecture")
@@ -292,6 +331,96 @@ class TeacherLogitReconstructorCheckpointTests(unittest.TestCase):
             )
             self.assertIsInstance(loaded, ParticleCnnReconstructor)
             self.assertEqual(payload["epoch"], 1)
+
+    def test_builds_aggressive_reconstructors_after_step7(self):
+        gt = build_teacher_logit_reconstructor(
+            "aggressive_gt",
+            {
+                "hidden_dim": 32,
+                "num_heads": 4,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "num_extra_candidates": 2,
+            },
+        )
+        self.assertIsInstance(gt, AggressiveGlobalTransformerReconstructor)
+        self.assertEqual(gt.config.reconstructor_architecture, "aggressive_global_transformer")
+
+        pn = build_teacher_logit_reconstructor(
+            "agpn",
+            {
+                "edgeconv_dims": [16],
+                "embedding_dim": 20,
+                "k": 4,
+                "dropout": 0.0,
+                "num_extra_candidates": 2,
+            },
+        )
+        self.assertIsInstance(pn, AggressiveParticleNetReconstructor)
+        self.assertEqual(pn.config.reconstructor_architecture, "aggressive_particle_net")
+
+        pfn = build_teacher_logit_reconstructor(
+            "aggressive_particle_flow",
+            {
+                "phi_dims": [16],
+                "context_dim": 20,
+                "context_mlp_dims": [20],
+                "embedding_dim": 20,
+                "dropout": 0.0,
+                "num_extra_candidates": 2,
+            },
+        )
+        self.assertIsInstance(pfn, AggressiveParticleFlowReconstructor)
+        self.assertEqual(pfn.config.reconstructor_architecture, "aggressive_particle_flow")
+
+        pcnn = build_teacher_logit_reconstructor(
+            "agpcnn",
+            {
+                "hidden_channels": 16,
+                "num_blocks": 1,
+                "kernel_sizes": [3],
+                "dilations": [1],
+                "context_dim": 20,
+                "context_mlp_dims": [20],
+                "embedding_dim": 20,
+                "dropout": 0.0,
+                "num_extra_candidates": 2,
+            },
+        )
+        self.assertIsInstance(pcnn, AggressiveParticleCnnReconstructor)
+        self.assertEqual(pcnn.config.reconstructor_architecture, "aggressive_particle_cnn")
+
+    def test_loads_aggressive_particle_net_checkpoint_through_shared_loader(self):
+        model = build_teacher_logit_reconstructor(
+            "aggressive_particle_net",
+            {
+                "edgeconv_dims": [16],
+                "embedding_dim": 20,
+                "k": 4,
+                "dropout": 0.0,
+                "num_extra_candidates": 1,
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agpn_best_model_val.pt"
+            torch.save(
+                {
+                    "epoch": 2,
+                    "reconstructor_architecture": "aggressive_particle_net",
+                    "aggression_level": "aggressive_v1",
+                    "model_state_dict": model.state_dict(),
+                    "model_config": model.config.to_dict(),
+                },
+                path,
+            )
+            loaded, payload = load_teacher_logit_reconstructor_checkpoint(
+                path,
+                device=torch.device("cpu"),
+                expected_architecture="agpn",
+            )
+            self.assertIsInstance(loaded, AggressiveParticleNetReconstructor)
+            self.assertEqual(payload["epoch"], 2)
+            self.assertEqual(payload["aggression_level"], "aggressive_v1")
 
     def test_expected_architecture_mismatch_raises_before_model_build(self):
         with tempfile.TemporaryDirectory() as tmp:

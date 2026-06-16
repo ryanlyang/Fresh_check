@@ -2,6 +2,9 @@ import unittest
 from pathlib import Path
 
 from teacher_logit_reco.crossarch_experiment import (
+    AGGRESSIVE_MIXED4_RECO_TEACHER_PAIRS,
+    AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES,
+    AGGRESSIVE_SAME_FAMILY_RECO_TEACHER_PAIRS,
     DEFAULT_FUSERS,
     EXPERIMENT_NAME,
     MIXED4_RECO_TEACHER_PAIRS,
@@ -13,13 +16,20 @@ from teacher_logit_reco.crossarch_experiment import (
     CrossArchExperimentConfig,
     CrossArchExperimentLayout,
     CrossArchSourceSpec,
+    aggressive_reco_domain_tagger_model_name,
+    aggressive_reco_model_name,
+    build_aggressive_reco_domain_tagger_model_names,
+    build_aggressive_reco_model_names,
     build_fusion_groups,
     build_hlt_source_specs,
+    build_reco_domain_tagger_model_names,
     build_reco_source_specs,
     default_crossarch_experiment_config,
     hlt_model_name,
+    normalize_aggressive_reconstructor_architecture,
     normalize_reconstructor_architecture,
     normalize_teacher_architecture,
+    reco_domain_tagger_model_name,
     reco_model_name,
     validate_fusion_groups,
 )
@@ -31,8 +41,15 @@ class CrossArchExperimentNamingTests(unittest.TestCase):
         self.assertEqual(normalize_reconstructor_architecture("PFC"), "pfn")
         self.assertEqual(normalize_teacher_architecture("ParticleTransformer"), "part")
         self.assertEqual(normalize_teacher_architecture("particle_flow"), "pfn")
+        self.assertEqual(normalize_aggressive_reconstructor_architecture("aggressive-pn"), "agpn")
         self.assertEqual(reco_model_name("gt", "part"), "gt_reco_to_part_teacher")
         self.assertEqual(reco_model_name("particle_net", "PFN"), "pn_reco_to_pfn_teacher")
+        self.assertEqual(aggressive_reco_model_name("aggressive_pn", "PFN"), "agpn_reco_to_pfn_teacher")
+        self.assertEqual(reco_domain_tagger_model_name("particle_net", "PFN"), "pn_reco_to_pfn_adapted_tagger")
+        self.assertEqual(
+            aggressive_reco_domain_tagger_model_name("aggressive_pn", "PFN"),
+            "agpn_reco_to_pfn_adapted_tagger",
+        )
         self.assertEqual(hlt_model_name("ParticleTransformer"), "hlt_part")
         self.assertEqual(hlt_model_name("pcnn"), "hlt_pcnn")
         with self.assertRaises(ValueError):
@@ -87,6 +104,11 @@ class CrossArchExperimentGridTests(unittest.TestCase):
         self.assertEqual(reco_sources[0].name, "gt_reco_to_part_teacher")
         self.assertEqual(reco_sources[-1].name, "pcnn_reco_to_pcnn_teacher")
         self.assertEqual([source.name for source in hlt_sources], ["hlt_part", "hlt_pn", "hlt_pfn", "hlt_pcnn"])
+        self.assertEqual(len(build_aggressive_reco_model_names()), 16)
+        self.assertEqual(len(build_reco_domain_tagger_model_names()), 16)
+        self.assertEqual(len(build_aggressive_reco_domain_tagger_model_names()), 16)
+        self.assertEqual(build_aggressive_reco_model_names()[0], "aggt_reco_to_part_teacher")
+        self.assertEqual(build_aggressive_reco_model_names()[-1], "agpcnn_reco_to_pcnn_teacher")
 
     def test_fusion_groups_have_expected_counts_and_members(self):
         groups = build_fusion_groups()
@@ -116,6 +138,40 @@ class CrossArchExperimentGridTests(unittest.TestCase):
         self.assertEqual(len(groups["all16_plus_hlt4"].model_names), 20)
         self.assertIn("hlt_part", groups["part_teacher4_plus_hlt_part"].model_names)
         self.assertEqual(len(groups["cross12_plus_hlt4"].model_names), 16)
+        self.assertIn("aggressive_all16", groups)
+        self.assertEqual(len(groups["aggressive_all16"].model_names), 16)
+        self.assertEqual(len(groups["aggressive_all16_plus_hlt4"].model_names), 20)
+        self.assertEqual(len(groups["aggressive_cross12_plus_hlt4"].model_names), 16)
+        self.assertEqual(len(groups["aggressive_part_teacher4_plus_hlt4"].model_names), 8)
+        self.assertEqual(len(groups["aggressive_pn_teacher4_plus_hlt4"].model_names), 8)
+        self.assertEqual(len(groups["aggressive_mixed4_plus_hlt4"].model_names), 8)
+        self.assertEqual(len(groups["conservative_adapted_all16_plus_hlt4"].model_names), 20)
+        self.assertEqual(len(groups["aggressive_adapted_all16_plus_hlt4"].model_names), 20)
+        self.assertEqual(len(groups["conservative_plus_aggressive_adapted_all32_plus_hlt4"].model_names), 36)
+        self.assertIn("agpn_reco_to_pfn_teacher", groups["aggressive_all16"].model_names)
+        self.assertIn("agpn_reco_to_pfn_adapted_tagger", groups["aggressive_adapted_all16_plus_hlt4"].model_names)
+        self.assertIn(
+            "pn_reco_to_pfn_adapted_tagger",
+            groups["conservative_plus_aggressive_adapted_all32_plus_hlt4"].model_names,
+        )
+        self.assertIn(
+            "agpn_reco_to_pfn_adapted_tagger",
+            groups["conservative_plus_aggressive_adapted_all32_plus_hlt4"].model_names,
+        )
+        self.assertIn("hlt_pcnn", groups["aggressive_mixed4_plus_hlt4"].model_names)
+        aggressive_same_family = {
+            aggressive_reco_model_name(reco, teacher)
+            for reco, teacher in AGGRESSIVE_SAME_FAMILY_RECO_TEACHER_PAIRS
+        }
+        self.assertTrue(aggressive_same_family.isdisjoint(groups["aggressive_cross12_plus_hlt4"].model_names))
+        self.assertEqual(
+            groups["aggressive_mixed4_plus_hlt4"].model_names[:4],
+            tuple(aggressive_reco_model_name(reco, teacher) for reco, teacher in AGGRESSIVE_MIXED4_RECO_TEACHER_PAIRS),
+        )
+        self.assertEqual(
+            set(groups["aggressive_part_teacher4_plus_hlt4"].model_names[:4]),
+            {aggressive_reco_model_name(reco, "part") for reco in AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES},
+        )
 
 
 class CrossArchExperimentConfigTests(unittest.TestCase):

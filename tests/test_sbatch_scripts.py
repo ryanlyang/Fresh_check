@@ -54,6 +54,14 @@ RUNNERS = [
     "run_crossarch_train_reco_domain_tagger.sh",
     "run_crossarch_predict_reco_domain_tagger.sh",
     "run_crossarch_fusion_reco_domain_taggers.sh",
+    "run_crossarch_split_fusion.sh",
+    "run_crossarch_split_fusion_summary.sh",
+    "run_crossarch_aggressive_train_reconstructor.sh",
+    "run_crossarch_aggressive_predict_reconstructor.sh",
+    "run_crossarch_aggressive_train_reco_domain_tagger.sh",
+    "run_crossarch_aggressive_predict_reco_domain_tagger.sh",
+    "run_crossarch_aggressive_fusion.sh",
+    "run_crossarch_aggressive_audit.sh",
 ]
 
 SUBMITTERS = [
@@ -74,6 +82,9 @@ SUBMITTERS = [
     "submit_crossarch_step6_predictions.sh",
     "submit_crossarch_full_experiment.sh",
     "submit_crossarch_reco_domain_taggers.sh",
+    "submit_crossarch_split_fusions.sh",
+    "submit_crossarch_aggressive_experiment.sh",
+    "submit_crossarch_aggressive_smoke_test.sh",
 ]
 
 
@@ -175,6 +186,9 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_crossarch_predict_reco_domain_tagger.sh",
             "run_crossarch_fusion_reco_domain_taggers.sh",
             "submit_crossarch_reco_domain_taggers.sh",
+            "run_crossarch_split_fusion.sh",
+            "run_crossarch_split_fusion_summary.sh",
+            "submit_crossarch_split_fusions.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
         self.assertIn("fresh_print_shell_command", self.read("common.sh"))
@@ -712,6 +726,166 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("reco_train: 16", submitter)
         self.assertIn("reco_predict: 16", submitter)
         self.assertIn("total: 20", submitter)
+
+    def test_crossarch_split_fusion_submitter_queues_forty_two_small_fusions(self):
+        common = self.read("common.sh")
+        runner = self.read("run_crossarch_split_fusion.sh")
+        summary_runner = self.read("run_crossarch_split_fusion_summary.sh")
+        submitter = self.read("submit_crossarch_split_fusions.sh")
+
+        self.assertIn("CROSSARCH_SPLIT_FUSION_ROOT", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_FAMILIES:=frozen adapted", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_GROUPS:=hlt4 all16 all16_plus_hlt4 cross12_plus_hlt4 part_teacher4_plus_hlt4 pn_teacher4_plus_hlt4 mixed4_plus_hlt4", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_BUNDLES:=main gated controls", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_MAIN_FUSERS:=mean_logits mean_probs logistic_logits logistic_probs logistic_logits_probs uncertainty_logistic_logits_probs", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_GATED_FUSERS:=entropy_bin_gated_logistic margin_bin_gated_logistic multiplicity_bin_gated_logistic disagreement_bin_gated_logistic predicted_class_bin_gated_logistic", common)
+        self.assertIn("CROSSARCH_SPLIT_FUSION_CONTROL_FUSERS:=logistic_logits_probs", common)
+
+        self.assertIn("#SBATCH --time=12:00:00", runner)
+        self.assertIn("scripts/run_crossarch_fusion.py", runner)
+        self.assertIn('FAMILY="${1:?Usage:', runner)
+        self.assertIn('GROUP="${2:?Usage:', runner)
+        self.assertIn('BUNDLE="${3:?Usage:', runner)
+        self.assertIn('fresh_crossarch_reco_model_name "${reco_architecture}" "${teacher_architecture}"', runner)
+        self.assertIn('fresh_crossarch_reco_domain_tagger_model_name "${reco_architecture}" "${teacher_architecture}"', runner)
+        self.assertIn("part_teacher4_plus_hlt4", runner)
+        self.assertIn("pn_teacher4_plus_hlt4", runner)
+        self.assertIn("mixed4_plus_hlt4", runner)
+        self.assertIn('OUTPUT_DIR="${CROSSARCH_SPLIT_FUSION_ROOT}/${FAMILY}/${GROUP}/${BUNDLE}"', runner)
+        self.assertIn("--group \"${FAMILY}_${GROUP}:$(fresh_join_by_comma \"${group_models[@]}\")\"", runner)
+        self.assertIn('if [[ "${skip_controls}" == "1" ]]; then', runner)
+        self.assertIn('fresh_require_file "${OUTPUT_DIR}/fusion_report.json"', runner)
+
+        self.assertIn("#SBATCH --partition=debug", summary_runner)
+        self.assertIn("scripts/summarize_crossarch_split_fusions.py", summary_runner)
+        self.assertIn("--split-root \"${CROSSARCH_SPLIT_FUSION_ROOT}\"", summary_runner)
+        self.assertIn("--families \"${family_args[@]}\"", summary_runner)
+        self.assertIn("--groups \"${group_args[@]}\"", summary_runner)
+        self.assertIn("--bundles \"${bundle_args[@]}\"", summary_runner)
+
+        self.assertIn("run_crossarch_split_fusion.sh", submitter)
+        self.assertIn("run_crossarch_split_fusion_summary.sh", submitter)
+        self.assertIn('fresh_split_words family_args "${CROSSARCH_SPLIT_FUSION_FAMILIES}"', submitter)
+        self.assertIn('fresh_split_words group_args "${CROSSARCH_SPLIT_FUSION_GROUPS}"', submitter)
+        self.assertIn('fresh_split_words bundle_args "${CROSSARCH_SPLIT_FUSION_BUNDLES}"', submitter)
+        self.assertIn('for family in "${family_args[@]}"; do', submitter)
+        self.assertIn('for group in "${group_args[@]}"; do', submitter)
+        self.assertIn('for bundle in "${bundle_args[@]}"; do', submitter)
+        self.assertIn('--dependency="afterok:${CROSSARCH_SPLIT_FUSION_DEPENDENCY}"', submitter)
+        self.assertIn('fusion_dep="$(fresh_join_by_colon "${fusion_job_ids[@]}")"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_dep}"', submitter)
+        self.assertIn("split_fusions: ${#fusion_job_ids[@]}", submitter)
+
+    def test_crossarch_aggressive_step12_submitter_queues_full_aggressive_graph(self):
+        common = self.read("common.sh")
+        train = self.read("run_crossarch_aggressive_train_reconstructor.sh")
+        predict = self.read("run_crossarch_aggressive_predict_reconstructor.sh")
+        adapt_train = self.read("run_crossarch_aggressive_train_reco_domain_tagger.sh")
+        adapt_predict = self.read("run_crossarch_aggressive_predict_reco_domain_tagger.sh")
+        fusion = self.read("run_crossarch_aggressive_fusion.sh")
+        audit = self.read("run_crossarch_aggressive_audit.sh")
+        submitter = self.read("submit_crossarch_aggressive_experiment.sh")
+
+        self.assertIn("CROSSARCH_AGGRESSIVE_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_crossarch_aggressive_v1_500k", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_RECO_ARCHITECTURES:=aggt agpn agpfn agpcnn", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_RECO_TEACHERS:=part pn pfn pcnn", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_RECO_NUM_EXTRA_CANDIDATES:=64", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_AUDIT_DIR", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_AUDIT_GROUPS", common)
+        self.assertIn("fresh_crossarch_aggressive_reco_model_name", common)
+        self.assertIn("fresh_crossarch_aggressive_reco_domain_tagger_model_name", common)
+        self.assertIn('echo "scripts/train_teacher_logit_aggressive_reco.py"', common)
+        self.assertIn('echo "scripts/predict_teacher_logit_aggressive_reco.py"', common)
+
+        self.assertIn("#SBATCH --time=2-00:00:00", train)
+        self.assertIn("#SBATCH --gres=gpu:1", train)
+        self.assertIn('TRAIN_SCRIPT="$(fresh_crossarch_aggressive_reco_train_script "${RECO_ARCHITECTURE}")"', train)
+        self.assertIn("--num-extra-candidates \"${CROSSARCH_AGGRESSIVE_RECO_NUM_EXTRA_CANDIDATES}\"", train)
+        self.assertIn("--max-global-logpt-scale \"${CROSSARCH_AGGRESSIVE_RECO_MAX_GLOBAL_LOGPT_SCALE}\"", train)
+        self.assertIn('OUTPUT_DIR="${CROSSARCH_AGGRESSIVE_RECO_MODEL_DIR}/${RECO_ARCHITECTURE}/${TEACHER_ARCHITECTURE}"', train)
+
+        self.assertIn("#SBATCH --time=08:00:00", predict)
+        self.assertIn("#SBATCH --gres=gpu:1", predict)
+        self.assertIn('PREDICT_SCRIPT="$(fresh_crossarch_aggressive_reco_predict_script "${RECO_ARCHITECTURE}")"', predict)
+        self.assertIn('SOURCE_PREDICTION_DIR="${CROSSARCH_AGGRESSIVE_PREDICTION_DIR}/${MODEL_NAME}"', predict)
+        self.assertIn("--prediction-dir \"${CROSSARCH_AGGRESSIVE_PREDICTION_DIR}\"", predict)
+
+        self.assertIn("#SBATCH --time=2-00:00:00", adapt_train)
+        self.assertIn("#SBATCH --gres=gpu:1", adapt_train)
+        self.assertIn("scripts/train_crossarch_reco_domain_tagger.py", adapt_train)
+        self.assertIn('RECONSTRUCTOR_CHECKPOINT="${CROSSARCH_AGGRESSIVE_RECO_MODEL_DIR}/${RECO_ARCHITECTURE}/${TEACHER_ARCHITECTURE}/best_model_val.pt"', adapt_train)
+
+        self.assertIn("#SBATCH --time=08:00:00", adapt_predict)
+        self.assertIn("#SBATCH --gres=gpu:1", adapt_predict)
+        self.assertIn("scripts/predict_crossarch_reco_domain_tagger.py", adapt_predict)
+        self.assertIn('TAGGER_CHECKPOINT="${CROSSARCH_AGGRESSIVE_RECO_DOMAIN_TAGGER_DIR}/${RECO_ARCHITECTURE}/${TEACHER_ARCHITECTURE}/best_model_val.pt"', adapt_predict)
+
+        self.assertIn("#SBATCH --time=1-00:00:00", fusion)
+        self.assertNotIn("#SBATCH --gres=gpu:1", fusion)
+        self.assertIn("--include-optional-groups", fusion)
+        self.assertIn("--groups \"${fusion_group_args[@]}\"", fusion)
+        self.assertIn("--prediction-dir \"${CROSSARCH_AGGRESSIVE_PREDICTION_DIR}\"", fusion)
+        self.assertIn("--output-dir \"${CROSSARCH_AGGRESSIVE_FUSION_DIR}\"", fusion)
+
+        self.assertIn("#SBATCH --time=02:00:00", audit)
+        self.assertIn("#SBATCH --partition=debug", audit)
+        self.assertIn("scripts/audit_crossarch_aggressive_experiment.py", audit)
+        self.assertIn("--prediction-dir \"${CROSSARCH_AGGRESSIVE_PREDICTION_DIR}\"", audit)
+        self.assertIn("--reco-model-dir \"${CROSSARCH_AGGRESSIVE_RECO_MODEL_DIR}\"", audit)
+        self.assertIn("--adapted-tagger-dir \"${CROSSARCH_AGGRESSIVE_RECO_DOMAIN_TAGGER_DIR}\"", audit)
+        self.assertIn("--fusion-report \"${CROSSARCH_AGGRESSIVE_FUSION_DIR}/fusion_report.json\"", audit)
+        self.assertIn("--fusion-groups \"${fusion_group_args[@]}\"", audit)
+
+        self.assertIn('fresh_split_words reco_args "${CROSSARCH_AGGRESSIVE_RECO_ARCHITECTURES}"', submitter)
+        self.assertIn('fresh_split_words teacher_args "${CROSSARCH_AGGRESSIVE_RECO_TEACHERS}"', submitter)
+        self.assertIn("run_crossarch_aggressive_train_reconstructor.sh", submitter)
+        self.assertIn("run_crossarch_aggressive_predict_reconstructor.sh", submitter)
+        self.assertIn("run_crossarch_aggressive_train_reco_domain_tagger.sh", submitter)
+        self.assertIn("run_crossarch_aggressive_predict_reco_domain_tagger.sh", submitter)
+        self.assertIn("run_crossarch_aggressive_fusion.sh", submitter)
+        self.assertIn("run_crossarch_aggressive_audit.sh", submitter)
+        self.assertIn('--dependency="afterok:${train_jid}"', submitter)
+        self.assertIn('--dependency="afterok:${adapt_train_jid}"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_dep}"', submitter)
+        self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
+        self.assertIn("crossarch_aggressive_experiment_submission", submitter)
+        self.assertIn("aggressive_reco_train: 16", submitter)
+        self.assertIn("aggressive_frozen_teacher_predict: 16", submitter)
+        self.assertIn("aggressive_adapted_tagger_train: 16", submitter)
+        self.assertIn("aggressive_adapted_tagger_predict: 16", submitter)
+        self.assertIn("audit: 1", submitter)
+
+    def test_crossarch_aggressive_step14_smoke_submitter_uses_tiny_isolated_outputs(self):
+        smoke = self.read("submit_crossarch_aggressive_smoke_test.sh")
+        common = self.read("common.sh")
+        aggressive_submitter = self.read("submit_crossarch_aggressive_experiment.sh")
+        audit = self.read("run_crossarch_aggressive_audit.sh")
+
+        self.assertIn("CROSSARCH_AGGRESSIVE_REQUIRE_HLT_PREDICTIONS_AT_SUBMIT", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_AUDIT_CHECK_PREDICTION_ARRAYS", common)
+        self.assertIn("CROSSARCH_AGGRESSIVE_REQUIRE_HLT_PREDICTIONS_AT_SUBMIT", aggressive_submitter)
+        self.assertIn("Skipping submit-time HLT prediction preflight", aggressive_submitter)
+        self.assertIn("--check-prediction-arrays", audit)
+
+        self.assertIn("teacher_logit_reco_crossarch_aggressive_v1_smoke_", smoke)
+        self.assertIn('CROSSARCH_MODEL_TRAIN_SIZE="${CROSSARCH_AGGRESSIVE_SMOKE_MODEL_TRAIN_SIZE:-10000}"', smoke)
+        self.assertIn('CROSSARCH_MODEL_VAL_SIZE="${CROSSARCH_AGGRESSIVE_SMOKE_MODEL_VAL_SIZE:-2000}"', smoke)
+        self.assertIn('CROSSARCH_STACK_TRAIN_SIZE="${CROSSARCH_AGGRESSIVE_SMOKE_STACK_TRAIN_SIZE:-5000}"', smoke)
+        self.assertIn('CROSSARCH_STACK_VAL_SIZE="${CROSSARCH_AGGRESSIVE_SMOKE_STACK_VAL_SIZE:-2000}"', smoke)
+        self.assertIn('CROSSARCH_FINAL_TEST_SIZE="${CROSSARCH_AGGRESSIVE_SMOKE_FINAL_TEST_SIZE:-10000}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_EPOCHS="${CROSSARCH_AGGRESSIVE_SMOKE_RECO_EPOCHS:-2}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_MAX_TRAIN_JETS="${CROSSARCH_MODEL_TRAIN_SIZE}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_MAX_VAL_JETS="${CROSSARCH_MODEL_VAL_SIZE}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_DOMAIN_TAGGER_EPOCHS="${CROSSARCH_AGGRESSIVE_SMOKE_ADAPTED_EPOCHS:-2}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_DOMAIN_TAGGER_MAX_TRAIN_JETS="${CROSSARCH_MODEL_TRAIN_SIZE}"', smoke)
+        self.assertIn('CROSSARCH_AGGRESSIVE_RECO_DOMAIN_TAGGER_MAX_VAL_JETS="${CROSSARCH_MODEL_VAL_SIZE}"', smoke)
+        self.assertIn("CROSSARCH_AGGRESSIVE_AUDIT_REQUIRE_OK=1", smoke)
+        self.assertIn("CROSSARCH_AGGRESSIVE_AUDIT_CHECK_PREDICTION_ARRAYS=1", smoke)
+        self.assertIn("CROSSARCH_AGGRESSIVE_REQUIRE_HLT_PREDICTIONS_AT_SUBMIT=0", smoke)
+        self.assertIn("run_crossarch_predict_hlt_baseline.sh", smoke)
+        self.assertIn("submit_crossarch_aggressive_experiment.sh", smoke)
+        self.assertIn('export FUSION_UPSTREAM_DEPENDENCY="$(fresh_join_by_colon "${fusion_dependencies[@]}")"', smoke)
+        self.assertIn("smoke metrics are for pipeline correctness only", smoke)
 
 
 if __name__ == "__main__":

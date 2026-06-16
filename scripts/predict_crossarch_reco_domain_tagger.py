@@ -14,12 +14,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from jetclass_fresh.fusion import STACK_SPLITS  # noqa: E402
 from teacher_logit_reco.crossarch_experiment import (  # noqa: E402
-    RECONSTRUCTOR_ARCHITECTURES,
     TEACHER_ARCHITECTURES,
     CrossArchExperimentLayout,
 )
 from teacher_logit_reco.crossarch_reco_domain_taggers import (  # noqa: E402
     CrossArchRecoDomainTaggerPredictionConfig,
+    RECO_DOMAIN_RECONSTRUCTOR_ARCHITECTURES,
     collect_crossarch_reco_domain_tagger_predictions,
 )
 
@@ -27,7 +27,14 @@ from teacher_logit_reco.crossarch_reco_domain_taggers import (  # noqa: E402
 def parse_args() -> argparse.Namespace:
     layout = CrossArchExperimentLayout(output_root="checkpoints")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reco-architecture", choices=RECONSTRUCTOR_ARCHITECTURES, required=True)
+    parser.add_argument(
+        "--reco-architecture",
+        required=True,
+        help=(
+            "Conservative or aggressive reco architecture. Canonical values: "
+            + ", ".join(RECO_DOMAIN_RECONSTRUCTOR_ARCHITECTURES)
+        ),
+    )
     parser.add_argument("--teacher-architecture", choices=TEACHER_ARCHITECTURES, required=True)
     parser.add_argument("--reconstructor-checkpoint", required=True)
     parser.add_argument("--tagger-checkpoint", required=True)

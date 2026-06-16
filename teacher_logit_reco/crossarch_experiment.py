@@ -32,6 +32,39 @@ RECONSTRUCTOR_IMPLEMENTATIONS: dict[str, str] = {
     "pfn": "particle_flow",
     "pcnn": "particle_cnn",
 }
+AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES: tuple[str, ...] = ("aggt", "agpn", "agpfn", "agpcnn")
+AGGRESSIVE_RECONSTRUCTOR_IMPLEMENTATIONS: dict[str, str] = {
+    "aggt": "aggressive_global_transformer",
+    "agpn": "aggressive_particle_net",
+    "agpfn": "aggressive_particle_flow",
+    "agpcnn": "aggressive_particle_cnn",
+}
+AGGRESSIVE_RECONSTRUCTOR_ALIASES: dict[str, str] = {
+    "aggressive_global_transformer": "aggt",
+    "aggressiveglobaltransformer": "aggt",
+    "aggressive_transformer": "aggt",
+    "aggressivetransformer": "aggt",
+    "aggressive_gt": "aggt",
+    "aggressivegt": "aggt",
+    "aggressive_particle_net": "agpn",
+    "aggressiveparticlenet": "agpn",
+    "aggressive_pn": "agpn",
+    "aggressivepn": "agpn",
+    "aggressive_edgeconv": "agpn",
+    "aggressive_particle_flow": "agpfn",
+    "aggressiveparticleflow": "agpfn",
+    "aggressive_pfn": "agpfn",
+    "aggressivepfn": "agpfn",
+    "aggressive_pf": "agpfn",
+    "aggressive_deepsets": "agpfn",
+    "aggressive_deep_sets": "agpfn",
+    "aggressive_particle_cnn": "agpcnn",
+    "aggressiveparticlecnn": "agpcnn",
+    "aggressive_pcnn": "agpcnn",
+    "aggressivepcnn": "agpcnn",
+    "aggressive_p_cnn": "agpcnn",
+    "aggressive_particle_conv": "agpcnn",
+}
 RECONSTRUCTOR_ALIASES: dict[str, str] = {
     "global_transformer": "gt",
     "global": "gt",
@@ -81,12 +114,33 @@ MIXED4_RECO_TEACHER_PAIRS: tuple[tuple[str, str], ...] = (
     ("pfn", "pcnn"),
     ("pcnn", "part"),
 )
+AGGRESSIVE_SAME_FAMILY_RECO_TEACHER_PAIRS: tuple[tuple[str, str], ...] = (
+    ("aggt", "part"),
+    ("agpn", "pn"),
+    ("agpfn", "pfn"),
+    ("agpcnn", "pcnn"),
+)
+AGGRESSIVE_MIXED4_RECO_TEACHER_PAIRS: tuple[tuple[str, str], ...] = (
+    ("aggt", "pn"),
+    ("agpn", "pfn"),
+    ("agpfn", "pcnn"),
+    ("agpcnn", "part"),
+)
 
 REQUIRED_FUSION_GROUPS: tuple[str, ...] = ("all16", "cross12", "part_teacher4", "mixed4", "hlt4")
 OPTIONAL_FUSION_GROUPS: tuple[str, ...] = (
     "all16_plus_hlt4",
     "cross12_plus_hlt4",
     "part_teacher4_plus_hlt_part",
+    "aggressive_all16",
+    "aggressive_all16_plus_hlt4",
+    "aggressive_cross12_plus_hlt4",
+    "aggressive_part_teacher4_plus_hlt4",
+    "aggressive_pn_teacher4_plus_hlt4",
+    "aggressive_mixed4_plus_hlt4",
+    "conservative_adapted_all16_plus_hlt4",
+    "aggressive_adapted_all16_plus_hlt4",
+    "conservative_plus_aggressive_adapted_all32_plus_hlt4",
 )
 
 DEFAULT_FUSERS: tuple[str, ...] = (
@@ -122,6 +176,21 @@ def normalize_reconstructor_architecture(value: str) -> str:
     )
 
 
+def normalize_aggressive_reconstructor_architecture(value: str) -> str:
+    text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = AGGRESSIVE_RECONSTRUCTOR_ALIASES.get(text)
+    if normalized is None:
+        normalized = AGGRESSIVE_RECONSTRUCTOR_ALIASES.get(text.replace("_", ""))
+    if normalized is None and text in AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES:
+        normalized = text
+    if normalized not in AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES:
+        raise ValueError(
+            f"Unknown aggressive reconstructor architecture {value!r}; "
+            f"expected one of {AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES}"
+        )
+    return normalized
+
+
 def normalize_teacher_architecture(value: str) -> str:
     return _normalize(
         value,
@@ -135,6 +204,24 @@ def reco_model_name(reco_architecture: str, teacher_architecture: str) -> str:
     reco = normalize_reconstructor_architecture(reco_architecture)
     teacher = normalize_teacher_architecture(teacher_architecture)
     return f"{reco}_reco_to_{teacher}_teacher"
+
+
+def aggressive_reco_model_name(reco_architecture: str, teacher_architecture: str) -> str:
+    reco = normalize_aggressive_reconstructor_architecture(reco_architecture)
+    teacher = normalize_teacher_architecture(teacher_architecture)
+    return f"{reco}_reco_to_{teacher}_teacher"
+
+
+def reco_domain_tagger_model_name(reco_architecture: str, teacher_architecture: str) -> str:
+    reco = normalize_reconstructor_architecture(reco_architecture)
+    teacher = normalize_teacher_architecture(teacher_architecture)
+    return f"{reco}_reco_to_{teacher}_adapted_tagger"
+
+
+def aggressive_reco_domain_tagger_model_name(reco_architecture: str, teacher_architecture: str) -> str:
+    reco = normalize_aggressive_reconstructor_architecture(reco_architecture)
+    teacher = normalize_teacher_architecture(teacher_architecture)
+    return f"{reco}_reco_to_{teacher}_adapted_tagger"
 
 
 def hlt_model_name(architecture: str) -> str:
@@ -419,6 +506,45 @@ def build_hlt_source_specs(
     )
 
 
+def build_aggressive_reco_model_names(
+    reconstructors: Iterable[str] = AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES,
+    teachers: Iterable[str] = TEACHER_ARCHITECTURES,
+) -> tuple[str, ...]:
+    names = []
+    for reco_architecture in reconstructors:
+        reco = normalize_aggressive_reconstructor_architecture(reco_architecture)
+        for teacher_architecture in teachers:
+            teacher = normalize_teacher_architecture(teacher_architecture)
+            names.append(aggressive_reco_model_name(reco, teacher))
+    return tuple(names)
+
+
+def build_reco_domain_tagger_model_names(
+    reconstructors: Iterable[str] = RECONSTRUCTOR_ARCHITECTURES,
+    teachers: Iterable[str] = TEACHER_ARCHITECTURES,
+) -> tuple[str, ...]:
+    names = []
+    for reco_architecture in reconstructors:
+        reco = normalize_reconstructor_architecture(reco_architecture)
+        for teacher_architecture in teachers:
+            teacher = normalize_teacher_architecture(teacher_architecture)
+            names.append(reco_domain_tagger_model_name(reco, teacher))
+    return tuple(names)
+
+
+def build_aggressive_reco_domain_tagger_model_names(
+    reconstructors: Iterable[str] = AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES,
+    teachers: Iterable[str] = TEACHER_ARCHITECTURES,
+) -> tuple[str, ...]:
+    names = []
+    for reco_architecture in reconstructors:
+        reco = normalize_aggressive_reconstructor_architecture(reco_architecture)
+        for teacher_architecture in teachers:
+            teacher = normalize_teacher_architecture(teacher_architecture)
+            names.append(aggressive_reco_domain_tagger_model_name(reco, teacher))
+    return tuple(names)
+
+
 def build_fusion_groups(*, include_optional: bool = False) -> dict[str, FusionGroupSpec]:
     reco_names = tuple(source.name for source in build_reco_source_specs())
     hlt_names = tuple(source.name for source in build_hlt_source_specs())
@@ -426,6 +552,22 @@ def build_fusion_groups(*, include_optional: bool = False) -> dict[str, FusionGr
     cross12 = tuple(name for name in reco_names if name not in same_family)
     part_teacher4 = tuple(reco_model_name(reco, "part") for reco in RECONSTRUCTOR_ARCHITECTURES)
     mixed4 = tuple(reco_model_name(reco, teacher) for reco, teacher in MIXED4_RECO_TEACHER_PAIRS)
+    aggressive_reco_names = build_aggressive_reco_model_names()
+    aggressive_same_family = {
+        aggressive_reco_model_name(reco, teacher) for reco, teacher in AGGRESSIVE_SAME_FAMILY_RECO_TEACHER_PAIRS
+    }
+    aggressive_cross12 = tuple(name for name in aggressive_reco_names if name not in aggressive_same_family)
+    aggressive_part_teacher4 = tuple(
+        aggressive_reco_model_name(reco, "part") for reco in AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES
+    )
+    aggressive_pn_teacher4 = tuple(
+        aggressive_reco_model_name(reco, "pn") for reco in AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES
+    )
+    aggressive_mixed4 = tuple(
+        aggressive_reco_model_name(reco, teacher) for reco, teacher in AGGRESSIVE_MIXED4_RECO_TEACHER_PAIRS
+    )
+    conservative_adapted_names = build_reco_domain_tagger_model_names()
+    aggressive_adapted_names = build_aggressive_reco_domain_tagger_model_names()
 
     groups = {
         "all16": FusionGroupSpec(
@@ -472,6 +614,51 @@ def build_fusion_groups(*, include_optional: bool = False) -> dict[str, FusionGr
                     model_names=part_teacher4 + (hlt_model_name("part"),),
                     description="ParT-teacher reconstructor quartet plus direct HLT ParT.",
                 ),
+                "aggressive_all16": FusionGroupSpec(
+                    name="aggressive_all16",
+                    model_names=aggressive_reco_names,
+                    description="All sixteen aggressive frozen-teacher reco/teacher combinations.",
+                ),
+                "aggressive_all16_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_all16_plus_hlt4",
+                    model_names=aggressive_reco_names + hlt_names,
+                    description="All aggressive frozen-teacher reco sources plus direct HLT baselines.",
+                ),
+                "aggressive_cross12_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_cross12_plus_hlt4",
+                    model_names=aggressive_cross12 + hlt_names,
+                    description="Aggressive off-diagonal reco/teacher sources plus direct HLT baselines.",
+                ),
+                "aggressive_part_teacher4_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_part_teacher4_plus_hlt4",
+                    model_names=aggressive_part_teacher4 + hlt_names,
+                    description="Aggressive ParT-teacher quartet plus all four direct HLT baselines.",
+                ),
+                "aggressive_pn_teacher4_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_pn_teacher4_plus_hlt4",
+                    model_names=aggressive_pn_teacher4 + hlt_names,
+                    description="Aggressive ParticleNet-teacher quartet plus all four direct HLT baselines.",
+                ),
+                "aggressive_mixed4_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_mixed4_plus_hlt4",
+                    model_names=aggressive_mixed4 + hlt_names,
+                    description="Aggressive cyclic mixed-bias quartet plus all four direct HLT baselines.",
+                ),
+                "conservative_adapted_all16_plus_hlt4": FusionGroupSpec(
+                    name="conservative_adapted_all16_plus_hlt4",
+                    model_names=conservative_adapted_names + hlt_names,
+                    description="All conservative reco-domain adapted taggers plus direct HLT baselines.",
+                ),
+                "aggressive_adapted_all16_plus_hlt4": FusionGroupSpec(
+                    name="aggressive_adapted_all16_plus_hlt4",
+                    model_names=aggressive_adapted_names + hlt_names,
+                    description="All aggressive reco-domain adapted taggers plus direct HLT baselines.",
+                ),
+                "conservative_plus_aggressive_adapted_all32_plus_hlt4": FusionGroupSpec(
+                    name="conservative_plus_aggressive_adapted_all32_plus_hlt4",
+                    model_names=conservative_adapted_names + aggressive_adapted_names + hlt_names,
+                    description="All conservative and aggressive reco-domain adapted taggers plus direct HLT baselines.",
+                ),
             }
         )
     validate_fusion_groups(groups)
@@ -493,9 +680,38 @@ def validate_fusion_groups(groups: Mapping[str, FusionGroupSpec]) -> None:
         if actual_count != expected_count:
             raise ValueError(f"Fusion group {name!r} has {actual_count} models; expected {expected_count}")
 
+    optional_counts = {
+        "all16_plus_hlt4": 20,
+        "cross12_plus_hlt4": 16,
+        "part_teacher4_plus_hlt_part": 5,
+        "aggressive_all16": 16,
+        "aggressive_all16_plus_hlt4": 20,
+        "aggressive_cross12_plus_hlt4": 16,
+        "aggressive_part_teacher4_plus_hlt4": 8,
+        "aggressive_pn_teacher4_plus_hlt4": 8,
+        "aggressive_mixed4_plus_hlt4": 8,
+        "conservative_adapted_all16_plus_hlt4": 20,
+        "aggressive_adapted_all16_plus_hlt4": 20,
+        "conservative_plus_aggressive_adapted_all32_plus_hlt4": 36,
+    }
+    for name, expected_count in optional_counts.items():
+        if name in groups:
+            actual_count = len(groups[name].model_names)
+            if actual_count != expected_count:
+                raise ValueError(f"Fusion group {name!r} has {actual_count} models; expected {expected_count}")
+
     all_reco_names = {source.name for source in build_reco_source_specs()}
     all_hlt_names = {source.name for source in build_hlt_source_specs()}
-    known_names = all_reco_names | all_hlt_names
+    all_aggressive_reco_names = set(build_aggressive_reco_model_names())
+    all_conservative_adapted_names = set(build_reco_domain_tagger_model_names())
+    all_aggressive_adapted_names = set(build_aggressive_reco_domain_tagger_model_names())
+    known_names = (
+        all_reco_names
+        | all_hlt_names
+        | all_aggressive_reco_names
+        | all_conservative_adapted_names
+        | all_aggressive_adapted_names
+    )
     for group in groups.values():
         unknown = sorted(set(group.model_names) - known_names)
         if unknown:
@@ -507,6 +723,11 @@ def default_crossarch_experiment_config() -> CrossArchExperimentConfig:
 
 
 __all__ = [
+    "AGGRESSIVE_MIXED4_RECO_TEACHER_PAIRS",
+    "AGGRESSIVE_RECONSTRUCTOR_ALIASES",
+    "AGGRESSIVE_RECONSTRUCTOR_ARCHITECTURES",
+    "AGGRESSIVE_RECONSTRUCTOR_IMPLEMENTATIONS",
+    "AGGRESSIVE_SAME_FAMILY_RECO_TEACHER_PAIRS",
     "DEFAULT_FUSERS",
     "DIRECT_HLT_ARCHITECTURES",
     "EXPERIMENT_NAME",
@@ -524,13 +745,20 @@ __all__ = [
     "CrossArchExperimentLayout",
     "CrossArchSourceSpec",
     "FusionGroupSpec",
+    "aggressive_reco_domain_tagger_model_name",
+    "aggressive_reco_model_name",
+    "build_aggressive_reco_domain_tagger_model_names",
+    "build_aggressive_reco_model_names",
     "build_fusion_groups",
     "build_hlt_source_specs",
     "build_reco_source_specs",
+    "build_reco_domain_tagger_model_names",
     "default_crossarch_experiment_config",
     "hlt_model_name",
+    "normalize_aggressive_reconstructor_architecture",
     "normalize_reconstructor_architecture",
     "normalize_teacher_architecture",
+    "reco_domain_tagger_model_name",
     "reco_model_name",
     "validate_fusion_groups",
 ]

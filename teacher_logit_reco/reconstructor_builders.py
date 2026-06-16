@@ -8,6 +8,22 @@ from typing import Any, Dict
 
 from jetclass_fresh.hlt_baseline import require_torch
 
+from .aggressive_global_transformer import (
+    AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    AggressiveGlobalTransformerReconstructor,
+    AggressiveGlobalTransformerReconstructorConfig,
+)
+from .aggressive_particle_reconstructors import (
+    AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    AggressiveParticleCnnReconstructor,
+    AggressiveParticleCnnReconstructorConfig,
+    AggressiveParticleFlowReconstructor,
+    AggressiveParticleFlowReconstructorConfig,
+    AggressiveParticleNetReconstructor,
+    AggressiveParticleNetReconstructorConfig,
+)
 from .global_transformer import GlobalTransformerReconstructor, GlobalTransformerReconstructorConfig
 from .particle_cnn_reconstructor import ParticleCnnReconstructor, ParticleCnnReconstructorConfig
 from .particle_flow_reconstructor import ParticleFlowReconstructor, ParticleFlowReconstructorConfig
@@ -23,6 +39,10 @@ TEACHER_LOGIT_RECONSTRUCTOR_ARCHITECTURES = (
     PARTICLE_NET_RECONSTRUCTOR,
     PARTICLE_FLOW_RECONSTRUCTOR,
     PARTICLE_CNN_RECONSTRUCTOR,
+    AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
 )
 
 _ARCHITECTURE_ALIASES = {
@@ -46,6 +66,34 @@ _ARCHITECTURE_ALIASES = {
     "p_cnn": PARTICLE_CNN_RECONSTRUCTOR,
     "particle_conv": PARTICLE_CNN_RECONSTRUCTOR,
     "particleconv": PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressive_global_transformer": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressiveglobaltransformer": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressive_transformer": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressivetransformer": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressive_gt": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressivegt": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggt": AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR,
+    "aggressive_particle_net": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "aggressiveparticlenet": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "aggressive_pn": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "aggressivepn": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "agpn": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "aggressive_edgeconv": AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
+    "aggressive_particle_flow": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressiveparticleflow": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressive_pfn": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressivepfn": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "agpfn": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressive_pf": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressive_deepsets": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressive_deep_sets": AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
+    "aggressive_particle_cnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressiveparticlecnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressive_pcnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressivepcnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "agpcnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressive_p_cnn": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
+    "aggressive_particle_conv": AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR,
 }
 
 _LEGACY_GLOBAL_TRANSFORMER_CONFIG_KEYS = (
@@ -135,6 +183,10 @@ def build_teacher_logit_reconstructor(
         | ParticleNetReconstructorConfig
         | ParticleFlowReconstructorConfig
         | ParticleCnnReconstructorConfig
+        | AggressiveGlobalTransformerReconstructorConfig
+        | AggressiveParticleNetReconstructorConfig
+        | AggressiveParticleFlowReconstructorConfig
+        | AggressiveParticleCnnReconstructorConfig
         | None
     ) = None,
 ):
@@ -149,6 +201,18 @@ def build_teacher_logit_reconstructor(
         return ParticleFlowReconstructor(ParticleFlowReconstructorConfig.from_mapping(config or {}))
     if arch == PARTICLE_CNN_RECONSTRUCTOR:
         return ParticleCnnReconstructor(ParticleCnnReconstructorConfig.from_mapping(config or {}))
+    if arch == AGGRESSIVE_GLOBAL_TRANSFORMER_RECONSTRUCTOR:
+        return AggressiveGlobalTransformerReconstructor(
+            AggressiveGlobalTransformerReconstructorConfig.from_mapping(config or {})
+        )
+    if arch == AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR:
+        return AggressiveParticleNetReconstructor(AggressiveParticleNetReconstructorConfig.from_mapping(config or {}))
+    if arch == AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR:
+        return AggressiveParticleFlowReconstructor(
+            AggressiveParticleFlowReconstructorConfig.from_mapping(config or {})
+        )
+    if arch == AGGRESSIVE_PARTICLE_CNN_RECONSTRUCTOR:
+        return AggressiveParticleCnnReconstructor(AggressiveParticleCnnReconstructorConfig.from_mapping(config or {}))
     raise AssertionError(f"Unhandled reconstructor architecture after normalization: {arch}")
 
 

@@ -32,12 +32,14 @@ from jetclass_fresh.jetclass_data import LABEL_NAMES, JetIdentity, JetView
 from .crossarch_experiment import (
     EXPERIMENT_NAME,
     RECONSTRUCTOR_IMPLEMENTATIONS,
+    RECONSTRUCTOR_ARCHITECTURES,
     SPLIT_SIZES,
     TEACHER_ARCHITECTURES,
-    normalize_reconstructor_architecture,
+    normalize_reconstructor_architecture as normalize_crossarch_reconstructor_architecture,
     normalize_teacher_architecture,
     reco_model_name,
 )
+from .aggressive_audits import AggressiveReconstructionDiagnosticsAccumulator
 from .crossarch_offline_teachers import sha256_file
 from .reconstructor_builders import load_teacher_logit_reconstructor_checkpoint
 
@@ -46,12 +48,86 @@ EXPERIMENT_STEP = "crossarch_reco_domain_taggers"
 TRAIN_EXPERIMENT_STEP = f"{EXPERIMENT_STEP}:train"
 PREDICT_EXPERIMENT_STEP = f"{EXPERIMENT_STEP}:predict"
 PREDICTION_SPLITS = tuple(STACK_SPLITS)
+AGGRESSIVE_RECO_DOMAIN_ARCHITECTURES = ("aggt", "agpn", "agpfn", "agpcnn")
+RECO_DOMAIN_RECONSTRUCTOR_ARCHITECTURES = tuple(RECONSTRUCTOR_ARCHITECTURES) + AGGRESSIVE_RECO_DOMAIN_ARCHITECTURES
+AGGRESSIVE_RECONSTRUCTOR_IMPLEMENTATIONS = {
+    "aggt": "aggressive_global_transformer",
+    "agpn": "aggressive_particle_net",
+    "agpfn": "aggressive_particle_flow",
+    "agpcnn": "aggressive_particle_cnn",
+}
+RECO_DOMAIN_RECONSTRUCTOR_IMPLEMENTATIONS = {
+    **RECONSTRUCTOR_IMPLEMENTATIONS,
+    **AGGRESSIVE_RECONSTRUCTOR_IMPLEMENTATIONS,
+}
+_AGGRESSIVE_RECO_DOMAIN_ALIASES = {
+    "aggt": "aggt",
+    "aggressive_gt": "aggt",
+    "aggressivegt": "aggt",
+    "aggressive_global_transformer": "aggt",
+    "aggressiveglobaltransformer": "aggt",
+    "aggressive_transformer": "aggt",
+    "aggressivetransformer": "aggt",
+    "agpn": "agpn",
+    "aggressive_pn": "agpn",
+    "aggressivepn": "agpn",
+    "aggressive_particle_net": "agpn",
+    "aggressiveparticlenet": "agpn",
+    "aggressive_edgeconv": "agpn",
+    "agpfn": "agpfn",
+    "aggressive_pfn": "agpfn",
+    "aggressivepfn": "agpfn",
+    "aggressive_particle_flow": "agpfn",
+    "aggressiveparticleflow": "agpfn",
+    "aggressive_pf": "agpfn",
+    "aggressive_deepsets": "agpfn",
+    "aggressive_deep_sets": "agpfn",
+    "agpcnn": "agpcnn",
+    "aggressive_pcnn": "agpcnn",
+    "aggressivepcnn": "agpcnn",
+    "aggressive_particle_cnn": "agpcnn",
+    "aggressiveparticlecnn": "agpcnn",
+    "aggressive_p_cnn": "agpcnn",
+    "aggressive_particle_conv": "agpcnn",
+}
+
+
+def normalize_reco_domain_reconstructor_architecture(value: str) -> str:
+    """Normalize conservative or aggressive reco-domain reconstructor names."""
+
+    try:
+        return normalize_crossarch_reconstructor_architecture(value)
+    except ValueError:
+        pass
+    text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = _AGGRESSIVE_RECO_DOMAIN_ALIASES.get(text)
+    if normalized is None:
+        normalized = _AGGRESSIVE_RECO_DOMAIN_ALIASES.get(text.replace("_", ""))
+    if normalized is None:
+        expected = ", ".join(RECO_DOMAIN_RECONSTRUCTOR_ARCHITECTURES)
+        raise ValueError(f"Unknown reco-domain reconstructor architecture {value!r}; expected one of: {expected}")
+    return normalized
+
+
+def reco_domain_reconstructor_implementation(reco_architecture: str) -> str:
+    reco = normalize_reco_domain_reconstructor_architecture(reco_architecture)
+    return RECO_DOMAIN_RECONSTRUCTOR_IMPLEMENTATIONS[reco]
+
+
+def reco_domain_teacher_source_model_name(reco_architecture: str, teacher_architecture: str) -> str:
+    """Name of the frozen-reco teacher source feeding this adapted tagger."""
+
+    reco = normalize_reco_domain_reconstructor_architecture(reco_architecture)
+    teacher = normalize_teacher_architecture(teacher_architecture)
+    if reco in RECONSTRUCTOR_IMPLEMENTATIONS:
+        return reco_model_name(reco, teacher)
+    return f"{reco}_reco_to_{teacher}_teacher"
 
 
 def reco_domain_tagger_model_name(reco_architecture: str, teacher_architecture: str) -> str:
     """Distinct fusion source name for an adapted tagger behind a frozen reco."""
 
-    reco = normalize_reconstructor_architecture(reco_architecture)
+    reco = normalize_reco_domain_reconstructor_architecture(reco_architecture)
     teacher = normalize_teacher_architecture(teacher_architecture)
     return f"{reco}_reco_to_{teacher}_adapted_tagger"
 
@@ -88,7 +164,7 @@ class CrossArchRecoDomainTaggerTrainConfig:
     strict_reconstructor_checkpoint: bool = True
 
     def __post_init__(self) -> None:
-        self.reco_architecture = normalize_reconstructor_architecture(self.reco_architecture)
+        self.reco_architecture = normalize_reco_domain_reconstructor_architecture(self.reco_architecture)
         self.teacher_architecture = normalize_teacher_architecture(self.teacher_architecture)
         if self.train_split != "model_train" or self.val_split != "model_val":
             raise ValueError("Reco-domain taggers may train only on model_train and select only on model_val")
@@ -138,7 +214,7 @@ class CrossArchRecoDomainTaggerPredictionConfig:
     strict_reconstructor_checkpoint: bool = True
 
     def __post_init__(self) -> None:
-        self.reco_architecture = normalize_reconstructor_architecture(self.reco_architecture)
+        self.reco_architecture = normalize_reco_domain_reconstructor_architecture(self.reco_architecture)
         self.teacher_architecture = normalize_teacher_architecture(self.teacher_architecture)
         unknown = sorted(set(self.splits) - set(PREDICTION_SPLITS))
         if unknown:
@@ -221,6 +297,7 @@ def _build_reco_domain_inputs(
     amp: bool,
     max_constits: int,
     teacher_weight_threshold: float,
+    diagnostics_accumulator: AggressiveReconstructionDiagnosticsAccumulator | None = None,
 ):
     torch = require_torch()
     hlt_tokens = batch["hlt_tokens"].to(device=device, non_blocking=True)
@@ -235,6 +312,8 @@ def _build_reco_domain_inputs(
             jet_ids=batch["jet_ids"],
             split=split,
         )
+    if diagnostics_accumulator is not None:
+        diagnostics_accumulator.update_from_soft_view(reco_view)
     return build_part_inputs_torch(
         reco_view.tokens,
         reco_view.mask,
@@ -332,9 +411,13 @@ def _source_metadata(
         "source_kind": "reco_domain_tagger",
         "tagger_architecture": config.teacher_architecture,
         "reco_architecture": config.reco_architecture,
-        "source_reco_model_name": reco_model_name(config.reco_architecture, config.teacher_architecture),
+        "source_reco_model_name": reco_domain_teacher_source_model_name(
+            config.reco_architecture,
+            config.teacher_architecture,
+        ),
         "source_reconstructor_checkpoint": config.reconstructor_checkpoint,
         "source_reconstructor_checkpoint_sha256": sha256_file(config.reconstructor_checkpoint),
+        "source_reconstructor_implementation": reco_domain_reconstructor_implementation(config.reco_architecture),
         "source_reconstructor_epoch": reconstructor_payload.get("epoch"),
         "source_reconstructor_experiment_step": reconstructor_payload.get("experiment_step"),
         "cache_dir": config.cache_dir,
@@ -393,7 +476,7 @@ def train_crossarch_reco_domain_tagger(
             config.reconstructor_checkpoint,
             device=device,
             strict=bool(config.strict_reconstructor_checkpoint),
-            expected_architecture=RECONSTRUCTOR_IMPLEMENTATIONS[config.reco_architecture],
+            expected_architecture=reco_domain_reconstructor_implementation(config.reco_architecture),
         )
     else:
         reconstructor_payload = {}
@@ -506,7 +589,11 @@ def train_crossarch_reco_domain_tagger(
         "model_name": config.model_name,
         "reco_architecture": config.reco_architecture,
         "tagger_architecture": config.teacher_architecture,
-        "source_reco_model_name": reco_model_name(config.reco_architecture, config.teacher_architecture),
+        "source_reco_model_name": reco_domain_teacher_source_model_name(
+            config.reco_architecture,
+            config.teacher_architecture,
+        ),
+        "source_reconstructor_implementation": reco_domain_reconstructor_implementation(config.reco_architecture),
         "best_epoch": int(best_epoch),
         "best_model_val_accuracy": float(best_val_accuracy),
         "best_model_val_loss": float(best_val_loss),
@@ -571,6 +658,7 @@ def evaluate_reco_domain_tagger_model(
     logits_rows: list[np.ndarray] = []
     labels_rows: list[np.ndarray] = []
     jet_ids: list[JetIdentity] = []
+    diagnostics_accumulator = AggressiveReconstructionDiagnosticsAccumulator()
     autocast_enabled = bool(amp and getattr(device, "type", None) == "cuda")
     with torch.no_grad():
         for batch in loader:
@@ -582,6 +670,7 @@ def evaluate_reco_domain_tagger_model(
                 amp=amp,
                 max_constits=max_constits,
                 teacher_weight_threshold=teacher_weight_threshold,
+                diagnostics_accumulator=diagnostics_accumulator,
             )
             with torch.cuda.amp.autocast(enabled=autocast_enabled):
                 logits = model(inputs["points"], inputs["features"], inputs["lorentz_vectors"], inputs["mask"])
@@ -599,13 +688,17 @@ def evaluate_reco_domain_tagger_model(
         "source_kind": "reco_domain_tagger",
         "model_kind": "frozen_reco_then_adapted_tagger",
         "model_name": model_name,
-        "reco_architecture": normalize_reconstructor_architecture(reco_architecture),
+        "reco_architecture": normalize_reco_domain_reconstructor_architecture(reco_architecture),
         "tagger_architecture": normalize_teacher_architecture(tagger_architecture),
-        "source_reco_model_name": reco_model_name(reco_architecture, tagger_architecture),
+        "source_reco_model_name": reco_domain_teacher_source_model_name(reco_architecture, tagger_architecture),
+        "source_reconstructor_implementation": reco_domain_reconstructor_implementation(reco_architecture),
         "hlt_content_hash": view.metadata.get("hlt_content_hash"),
         "allowed_inputs": "cached_fixed_hlt_to_frozen_reconstructor_to_reco_domain_tagger",
         "subset_selection": selection_report,
     }
+    diagnostics = diagnostics_accumulator.to_dict()
+    if int(diagnostics.get("batch_count", 0)) > 0:
+        metadata["reconstruction_diagnostics"] = diagnostics
     metadata.update(dict(checkpoint_metadata or {}))
     return PredictionBlock(
         model_name=model_name,
@@ -635,7 +728,7 @@ def collect_crossarch_reco_domain_tagger_predictions(
         config.reconstructor_checkpoint,
         device=device,
         strict=bool(config.strict_reconstructor_checkpoint),
-        expected_architecture=RECONSTRUCTOR_IMPLEMENTATIONS[config.reco_architecture],
+        expected_architecture=reco_domain_reconstructor_implementation(config.reco_architecture),
     )
     _freeze_module(reconstructor)
     model, tagger_payload = load_heterogeneous_hlt_model_from_checkpoint(config.tagger_checkpoint, device=device)
@@ -667,6 +760,7 @@ def collect_crossarch_reco_domain_tagger_predictions(
             checkpoint_metadata={
                 "reconstructor_checkpoint": config.reconstructor_checkpoint,
                 "reconstructor_checkpoint_sha256": sha256_file(config.reconstructor_checkpoint),
+                "reconstructor_implementation": reco_domain_reconstructor_implementation(config.reco_architecture),
                 "reconstructor_checkpoint_epoch": reconstructor_payload.get("epoch"),
                 "tagger_checkpoint": config.tagger_checkpoint,
                 "tagger_checkpoint_sha256": sha256_file(config.tagger_checkpoint),
@@ -686,7 +780,11 @@ def collect_crossarch_reco_domain_tagger_predictions(
         "model_name": model_name,
         "reco_architecture": config.reco_architecture,
         "tagger_architecture": config.teacher_architecture,
-        "source_reco_model_name": reco_model_name(config.reco_architecture, config.teacher_architecture),
+        "source_reco_model_name": reco_domain_teacher_source_model_name(
+            config.reco_architecture,
+            config.teacher_architecture,
+        ),
+        "source_reconstructor_implementation": reco_domain_reconstructor_implementation(config.reco_architecture),
         "reconstructor_checkpoint": config.reconstructor_checkpoint,
         "tagger_checkpoint": config.tagger_checkpoint,
         "prediction_dir": str(prediction_dir / model_name),
@@ -698,14 +796,20 @@ def collect_crossarch_reco_domain_tagger_predictions(
 
 
 __all__ = [
+    "AGGRESSIVE_RECO_DOMAIN_ARCHITECTURES",
     "CrossArchRecoDomainTaggerPredictionConfig",
     "CrossArchRecoDomainTaggerTrainConfig",
     "PREDICT_EXPERIMENT_STEP",
     "PREDICTION_SPLITS",
+    "RECO_DOMAIN_RECONSTRUCTOR_ARCHITECTURES",
+    "RECO_DOMAIN_RECONSTRUCTOR_IMPLEMENTATIONS",
     "TRAIN_EXPERIMENT_STEP",
     "collect_crossarch_reco_domain_tagger_predictions",
     "evaluate_reco_domain_tagger_model",
+    "normalize_reco_domain_reconstructor_architecture",
+    "reco_domain_reconstructor_implementation",
     "reco_domain_tagger_model_name",
+    "reco_domain_teacher_source_model_name",
     "run_reco_domain_tagger_epoch",
     "split_size_for_reco_domain_prediction",
     "train_crossarch_reco_domain_tagger",
