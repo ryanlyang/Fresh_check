@@ -23,6 +23,7 @@ RUNNERS = [
     "run_v2_step7_train_variant.sh",
     "run_v2_step10_fuse_reco7_plus_hlt.sh",
     "run_v2_step11_audit_reco7_plus_hlt.sh",
+    "run_v2_teacher_logit_dualview_debug.sh",
     "run_independent_fusion_small.sh",
     "run_independent_fusion_large.sh",
     "run_independent_fusion_ensemble_analysis.sh",
@@ -277,6 +278,21 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${fusion_dependency}"', submitter)
         self.assertIn('--dependency="afterok:${fusion_jid}"', submitter)
         self.assertIn("hlt5_seed_control: true", submitter)
+
+    def test_v2_teacher_logit_dualview_debug_runner_is_small_debug_probe(self):
+        text = self.read("run_v2_teacher_logit_dualview_debug.sh")
+        self.assertIn("#SBATCH --partition=debug", text)
+        self.assertIn("#SBATCH --time=24:00:00", text)
+        self.assertIn("#SBATCH --gres=gpu:1", text)
+        self.assertIn("scripts/run_v2_teacher_logit_dualview_debug.py", text)
+        self.assertIn('V2_TLOG_DUALVIEW_DEBUG_TRAIN_SIZE:=20000', text)
+        self.assertIn('V2_TLOG_DUALVIEW_DEBUG_VAL_SIZE:=5000', text)
+        self.assertIn('V2_TLOG_DUALVIEW_DEBUG_TEST_SIZE:=20000', text)
+        self.assertIn("--teacher-checkpoint", text)
+        self.assertIn("--reco-epochs", text)
+        self.assertIn("--dual-epochs", text)
+        self.assertIn('fresh_claim_new_dir "${V2_TLOG_DUALVIEW_DEBUG_ROOT}"', text)
+        self.assertIn('fresh_require_file "${V2_TLOG_DUALVIEW_DEBUG_ROOT}/evaluation_report.json"', text)
 
     def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
         train = self.read("run_train_heterogeneous_hlt_arch.sh")
