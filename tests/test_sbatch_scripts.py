@@ -56,6 +56,8 @@ RUNNERS = [
     "run_crossarch_fusion_reco_domain_taggers.sh",
     "run_crossarch_split_fusion.sh",
     "run_crossarch_split_fusion_summary.sh",
+    "run_crossarch_conditional_fusers_linear.sh",
+    "run_crossarch_conditional_fusers_neural.sh",
     "run_crossarch_aggressive_train_reconstructor.sh",
     "run_crossarch_aggressive_predict_reconstructor.sh",
     "run_crossarch_aggressive_train_reco_domain_tagger.sh",
@@ -775,6 +777,29 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('fusion_dep="$(fresh_join_by_colon "${fusion_job_ids[@]}")"', submitter)
         self.assertIn('--dependency="afterok:${fusion_dep}"', submitter)
         self.assertIn("split_fusions: ${#fusion_job_ids[@]}", submitter)
+
+    def test_crossarch_conditional_fuser_runners_are_debug_jobs(self):
+        common = self.read("common.sh")
+        linear = self.read("run_crossarch_conditional_fusers_linear.sh")
+        neural = self.read("run_crossarch_conditional_fusers_neural.sh")
+
+        self.assertIn("CROSSARCH_CONDITIONAL_FUSER_DIR", common)
+        self.assertIn("CROSSARCH_CONDITIONAL_FUSER_RESIDUAL_PENALTIES", common)
+        self.assertIn("CROSSARCH_CONDITIONAL_FUSER_NEURAL_EPOCHS", common)
+        for name, text, suite in [
+            ("run_crossarch_conditional_fusers_linear.sh", linear, "linear"),
+            ("run_crossarch_conditional_fusers_neural.sh", neural, "neural"),
+        ]:
+            self.assertIn("#SBATCH --partition=debug", text, name)
+            self.assertIn("scripts/run_crossarch_conditional_evidence_fusers.py", text, name)
+            self.assertIn(f"--suite {suite}", text, name)
+            self.assertIn('fresh_split_words reco_args "${CROSSARCH_RECO_ARCHITECTURES}"', text, name)
+            self.assertIn('fresh_crossarch_reco_domain_tagger_model_name "${reco_architecture}" "${teacher_architecture}"', text, name)
+            self.assertIn("--hlt-models \"${hlt_model_args[@]}\"", text, name)
+            self.assertIn("--adapted-models \"${adapted_model_args[@]}\"", text, name)
+            self.assertIn("--confirm-final-test", text, name)
+            self.assertIn('fresh_require_file "${OUTPUT_DIR}/conditional_fuser_report.json"', text, name)
+        self.assertIn("--skip-controls", neural)
 
     def test_crossarch_aggressive_step12_submitter_queues_full_aggressive_graph(self):
         common = self.read("common.sh")
