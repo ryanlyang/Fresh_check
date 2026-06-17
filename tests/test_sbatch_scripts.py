@@ -64,6 +64,11 @@ RUNNERS = [
     "run_crossarch_aggressive_predict_reco_domain_tagger.sh",
     "run_crossarch_aggressive_fusion.sh",
     "run_crossarch_aggressive_audit.sh",
+    "run_train_set_matching_reconstructor.sh",
+    "run_cache_set_matching_multiview.sh",
+    "run_train_five_view_tagger.sh",
+    "run_audit_five_view_tagger.sh",
+    "run_write_set_matching_multiview_final_report.sh",
 ]
 
 SUBMITTERS = [
@@ -87,6 +92,8 @@ SUBMITTERS = [
     "submit_crossarch_split_fusions.sh",
     "submit_crossarch_aggressive_experiment.sh",
     "submit_crossarch_aggressive_smoke_test.sh",
+    "submit_set_matching_multiview_experiment.sh",
+    "submit_set_matching_multiview_smoke_test.sh",
 ]
 
 
@@ -191,6 +198,9 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_crossarch_split_fusion.sh",
             "run_crossarch_split_fusion_summary.sh",
             "submit_crossarch_split_fusions.sh",
+            "run_train_set_matching_reconstructor.sh",
+            "run_cache_set_matching_multiview.sh",
+            "submit_set_matching_multiview_experiment.sh",
         ]:
             self.assertIn("fresh_split_words", self.read(name), name)
         self.assertIn("fresh_print_shell_command", self.read("common.sh"))
@@ -911,6 +921,102 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("submit_crossarch_aggressive_experiment.sh", smoke)
         self.assertIn('export FUSION_UPSTREAM_DEPENDENCY="$(fresh_join_by_colon "${fusion_dependencies[@]}")"', smoke)
         self.assertIn("smoke metrics are for pipeline correctness only", smoke)
+
+    def test_set_matching_step12_submitter_queues_multiview_graph(self):
+        common = self.read("common.sh")
+        train = self.read("run_train_set_matching_reconstructor.sh")
+        cache = self.read("run_cache_set_matching_multiview.sh")
+        tagger = self.read("run_train_five_view_tagger.sh")
+        audit = self.read("run_audit_five_view_tagger.sh")
+        final_report = self.read("run_write_set_matching_multiview_final_report.sh")
+        submitter = self.read("submit_set_matching_multiview_experiment.sh")
+
+        self.assertIn("SET_MATCHING_ROOT:=${OUTPUT_ROOT}/set_matching_multiview_500k", common)
+        self.assertIn("SET_MATCHING_RECO_ARCHITECTURES:=gt pn pfn pcnn", common)
+        self.assertIn("SET_MATCHING_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control", common)
+        self.assertIn("SET_MATCHING_MODEL_TRAIN_SIZE:=500000", common)
+        self.assertIn("SET_MATCHING_FINAL_TEST_SIZE:=500000", common)
+
+        self.assertIn("#SBATCH --time=2-00:00:00", train)
+        self.assertIn("#SBATCH --gres=gpu:1", train)
+        self.assertIn("scripts/train_set_matching_reconstructor.py", train)
+        self.assertIn('--architecture "${ARCHITECTURE}"', train)
+        self.assertIn("--confirm-split-settings", train)
+        self.assertIn("--max-train-jets \"${SET_MATCHING_MODEL_TRAIN_SIZE}\"", train)
+        self.assertIn("--max-val-jets \"${SET_MATCHING_MODEL_VAL_SIZE}\"", train)
+
+        self.assertIn("#SBATCH --time=12:00:00", cache)
+        self.assertIn("#SBATCH --gres=gpu:1", cache)
+        self.assertIn("scripts/cache_set_matching_reco_views.py", cache)
+        self.assertIn('--output-dir "${SET_MATCHING_ROOT}"', cache)
+        self.assertIn('--splits "${split_args[@]}"', cache)
+        self.assertIn('fresh_append_flag_if_enabled cmd --confirm-final-test "${SET_MATCHING_CONFIRM_FINAL_TEST}"', cache)
+        self.assertIn('fresh_require_file "${RUN_OUTPUT_DIR}/${split}_reconstructed_view.npz"', cache)
+
+        self.assertIn("#SBATCH --time=2-00:00:00", tagger)
+        self.assertIn("#SBATCH --gres=gpu:1", tagger)
+        self.assertIn("scripts/train_five_view_tagger.py", tagger)
+        self.assertIn('VARIANT="${1:?Usage:', tagger)
+        self.assertIn("hlt_plus_pn", tagger)
+        self.assertIn('cmd+=(--drop-views "${drop_views[@]}")', tagger)
+        self.assertIn("five_view_geometry", tagger)
+        self.assertIn("view_label_shuffle_control", tagger)
+        self.assertIn('fresh_append_flag_if_enabled cmd --use-geometry-attention "${use_geometry_attention}"', tagger)
+        self.assertIn('fresh_append_flag_if_enabled cmd --disable-confidence "${disable_confidence}"', tagger)
+        self.assertIn('fresh_append_flag_if_enabled cmd --shuffle-view-labels "${shuffle_view_labels}"', tagger)
+
+        self.assertIn("#SBATCH --time=08:00:00", audit)
+        self.assertIn("#SBATCH --gres=gpu:1", audit)
+        self.assertIn("scripts/evaluate_five_view_ablation.py", audit)
+        self.assertIn("--require-all-canonical", audit)
+        self.assertIn('fresh_require_file "${SET_MATCHING_ABLATION_DIR}/summary.csv"', audit)
+
+        self.assertIn("#SBATCH --partition=debug", final_report)
+        self.assertIn("#SBATCH --time=01:00:00", final_report)
+        self.assertIn("scripts/write_set_matching_multiview_final_report.py", final_report)
+        self.assertIn("--experiment-dir \"${SET_MATCHING_ROOT}\"", final_report)
+        self.assertIn('fresh_require_file "${SET_MATCHING_FINAL_REPORT_DIR}/final_report.json"', final_report)
+
+        self.assertIn("run_train_set_matching_reconstructor.sh", submitter)
+        self.assertIn("run_cache_set_matching_multiview.sh", submitter)
+        self.assertIn("run_train_five_view_tagger.sh", submitter)
+        self.assertIn("run_audit_five_view_tagger.sh", submitter)
+        self.assertIn("run_write_set_matching_multiview_final_report.sh", submitter)
+        self.assertIn('submitter_lock_dir="${SET_MATCHING_ROOT}/.submission_lock"', submitter)
+        self.assertIn('fresh_claim_new_dir "${submitter_lock_dir}"', submitter)
+        self.assertIn('fresh_split_words reco_args "${SET_MATCHING_RECO_ARCHITECTURES}"', submitter)
+        self.assertIn('fresh_split_words tagger_variant_args "${SET_MATCHING_TAGGER_VARIANTS}"', submitter)
+        self.assertIn('cache_dep="$(fresh_join_by_colon "${cache_job_ids[@]}")', submitter)
+        self.assertIn('--dependency="afterok:${cache_dep}"', submitter)
+        self.assertIn('audit_dep="$(fresh_join_by_colon "${tagger_job_ids[@]}")', submitter)
+        self.assertIn('--dependency="afterok:${audit_dep}"', submitter)
+        self.assertIn('--dependency="afterok:${audit_jid}"', submitter)
+        self.assertIn("reco_train: 4", submitter)
+        self.assertIn("cache_reconstructed_views: 4", submitter)
+        self.assertIn("tagger_train: ${#tagger_job_ids[@]}", submitter)
+        self.assertIn("audit: 1", submitter)
+        self.assertIn("final_report: 1", submitter)
+
+    def test_set_matching_step13_smoke_submitter_uses_tiny_isolated_outputs(self):
+        smoke = self.read("submit_set_matching_multiview_smoke_test.sh")
+
+        self.assertIn("set_matching_multiview_smoke_", smoke)
+        self.assertIn('SET_MATCHING_MODEL_TRAIN_SIZE="${SET_MATCHING_SMOKE_MODEL_TRAIN_SIZE:-10000}"', smoke)
+        self.assertIn('SET_MATCHING_MODEL_VAL_SIZE="${SET_MATCHING_SMOKE_MODEL_VAL_SIZE:-2000}"', smoke)
+        self.assertIn('SET_MATCHING_STACK_TRAIN_SIZE="${SET_MATCHING_SMOKE_STACK_TRAIN_SIZE:-5000}"', smoke)
+        self.assertIn('SET_MATCHING_STACK_VAL_SIZE="${SET_MATCHING_SMOKE_STACK_VAL_SIZE:-2000}"', smoke)
+        self.assertIn('SET_MATCHING_FINAL_TEST_SIZE="${SET_MATCHING_SMOKE_FINAL_TEST_SIZE:-10000}"', smoke)
+        self.assertIn('SET_MATCHING_RECO_EPOCHS="${SET_MATCHING_SMOKE_RECO_EPOCHS:-2}"', smoke)
+        self.assertIn('SET_MATCHING_RECO_EARLY_STOP_PATIENCE="${SET_MATCHING_SMOKE_RECO_EARLY_STOP_PATIENCE:-1}"', smoke)
+        self.assertIn('SET_MATCHING_TAGGER_EPOCHS="${SET_MATCHING_SMOKE_TAGGER_EPOCHS:-2}"', smoke)
+        self.assertIn('SET_MATCHING_TAGGER_EARLY_STOP_PATIENCE="${SET_MATCHING_SMOKE_TAGGER_EARLY_STOP_PATIENCE:-1}"', smoke)
+        self.assertIn('SET_MATCHING_CACHE_MAX_JETS_PER_SPLIT="${SET_MATCHING_SMOKE_CACHE_MAX_JETS_PER_SPLIT:-${SET_MATCHING_FINAL_TEST_SIZE}}"', smoke)
+        self.assertIn("SET_MATCHING_CONFIRM_FINAL_TEST=1", smoke)
+        self.assertIn("SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1", smoke)
+        self.assertIn('fresh_refuse_existing_dir "${SET_MATCHING_SMOKE_ROOT}"', smoke)
+        self.assertIn('fresh_claim_new_dir "${SET_MATCHING_SMOKE_ROOT}/.smoke_submission_lock"', smoke)
+        self.assertIn("smoke metrics are for pipeline correctness only", smoke)
+        self.assertIn('bash "${SCRIPT_DIR}/submit_set_matching_multiview_experiment.sh"', smoke)
 
 
 if __name__ == "__main__":
