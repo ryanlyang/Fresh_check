@@ -109,6 +109,42 @@ def _stable_unique(values: np.ndarray) -> np.ndarray:
     return np.array(list(dict.fromkeys(int(value) for value in values.tolist())), dtype=np.int64)
 
 
+def _normalize_label_filter(label_filter: Sequence[int] | None) -> tuple[int, ...]:
+    if label_filter is None:
+        return ()
+    labels = tuple(int(label) for label in label_filter)
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"label_filter contains duplicates: {labels}")
+    return labels
+
+
+def _filter_cache_arrays_by_labels(view: "FiveViewCacheArrays", label_filter: Sequence[int]) -> "FiveViewCacheArrays":
+    labels = _normalize_label_filter(label_filter)
+    if not labels:
+        return view
+    keep_labels = set(labels)
+    keep = np.asarray([int(label) in keep_labels for label in view.labels], dtype=bool)
+    metadata = dict(view.metadata)
+    metadata.update(
+        {
+            "label_filter_applied": True,
+            "label_filter": list(labels),
+            "n_jets_before_label_filter": int(view.labels.shape[0]),
+            "n_jets_after_label_filter": int(np.sum(keep)),
+        }
+    )
+    return FiveViewCacheArrays(
+        name=view.name,
+        tokens=view.tokens[keep].copy(),
+        mask=view.mask[keep].copy(),
+        confidence=view.confidence[keep].copy(),
+        labels=view.labels[keep].copy(),
+        jet_ids=[identity for identity, keep_row in zip(view.jet_ids, keep) if bool(keep_row)],
+        source_type=view.source_type,
+        metadata=metadata,
+    )
+
+
 def _confidence_order(indices: np.ndarray, confidence: np.ndarray) -> np.ndarray:
     if indices.size <= 1:
         return indices.astype(np.int64, copy=False)
@@ -255,6 +291,7 @@ class FiveViewDatasetConfig:
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     selection_mode: str = "topk_or_threshold"
     drop_views: tuple[str, ...] = ()
+    label_filter: tuple[int, ...] = ()
     shuffle_view_labels: bool = False
     view_label_shuffle_seed: int = 1205
     keep_hlt_label_anchor: bool = True
@@ -277,6 +314,7 @@ class FiveViewDatasetConfig:
         self.drop_views = tuple(normalize_view_name(view) for view in self.drop_views)
         if len(set(self.drop_views)) != len(self.drop_views):
             raise ValueError(f"drop_views contains duplicates: {self.drop_views}")
+        self.label_filter = _normalize_label_filter(self.label_filter)
 
     @property
     def layout(self) -> SetMatchingMultiViewLayout:
@@ -382,6 +420,8 @@ class FiveViewJetDataset:
             arrays = load_reconstructed_view_cache(path, expected_architecture=architecture, expected_split=config.split)
             views.append(arrays)
             reco_metadata[view_name] = dict(arrays.metadata)
+        if config.label_filter:
+            views = [_filter_cache_arrays_by_labels(view, config.label_filter) for view in views]
         report = audit_five_view_alignment(views)
         if not report.get("ok", False):
             raise ValueError(f"Five-view alignment audit failed: {report['problems']}")
@@ -545,6 +585,8 @@ def build_five_view_dataset_from_arrays(
 ) -> FiveViewJetDataset:
     """Build a filtered/stacked five-view dataset from loaded view arrays."""
 
+    if config.label_filter:
+        views = tuple(_filter_cache_arrays_by_labels(view, config.label_filter) for view in views)
     view_names = tuple(view.name for view in views)
     if view_names != VIEW_NAMES:
         raise ValueError(f"views must be ordered as {VIEW_NAMES}, got {view_names}")
@@ -619,6 +661,8 @@ def build_five_view_dataset_from_arrays(
         "confidence_threshold": float(config.confidence_threshold),
         "min_tokens_per_view": int(config.min_tokens_per_view),
         "drop_views": list(config.drop_views),
+        "label_filter": list(config.label_filter),
+        "label_filter_applied": bool(config.label_filter),
         "shuffle_view_labels": bool(config.shuffle_view_labels),
         "view_ids": view_ids.astype(int).tolist(),
         "source_type_ids": source_type_ids.astype(int).tolist(),

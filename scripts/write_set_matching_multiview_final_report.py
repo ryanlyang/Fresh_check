@@ -120,7 +120,33 @@ def main() -> int:
                 "exists": payload is not None,
                 "best_epoch": metric(payload, ("best_epoch",)),
                 "stack_val_accuracy": metric(payload, ("best_stack_val_metrics", "accuracy")),
+                "stack_val_auc": metric(payload, ("best_stack_val_metrics", "binary_metrics", "auc")),
+                "stack_val_fpr_at_signal_eff_0p30": metric(
+                    payload,
+                    ("best_stack_val_metrics", "binary_metrics", "fpr_at_signal_eff_0p30"),
+                ),
+                "stack_val_fpr_at_signal_eff_0p50": metric(
+                    payload,
+                    ("best_stack_val_metrics", "binary_metrics", "fpr_at_signal_eff_0p50"),
+                ),
                 "final_test_accuracy": final_test_metrics.get("accuracy") if isinstance(final_test_metrics, dict) else None,
+                "final_test_auc": metric(payload, ("final_test_metrics", "binary_metrics", "auc")),
+                "final_test_fpr_at_signal_eff_0p30": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "fpr_at_signal_eff_0p30"),
+                ),
+                "final_test_fpr_at_signal_eff_0p50": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "fpr_at_signal_eff_0p50"),
+                ),
+                "final_test_background_rejection_at_signal_eff_0p30": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "background_rejection_at_signal_eff_0p30"),
+                ),
+                "final_test_background_rejection_at_signal_eff_0p50": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "background_rejection_at_signal_eff_0p50"),
+                ),
                 "final_test_evaluated": bool(metric(payload, ("final_test_evaluated",))),
             }
         )
@@ -161,12 +187,14 @@ def main() -> int:
         "",
         "## Taggers",
         "",
-        "| variant | stack_val_accuracy | final_test_accuracy |",
-        "| --- | ---: | ---: |",
+        "| variant | stack_val_accuracy | stack_val_auc | final_test_accuracy | final_test_auc | final_fpr@30 | final_fpr@50 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in taggers:
         lines.append(
-            f"| {row['variant']} | {row['stack_val_accuracy']} | {row['final_test_accuracy']} |"
+            f"| {row['variant']} | {row['stack_val_accuracy']} | {row['stack_val_auc']} | "
+            f"{row['final_test_accuracy']} | {row['final_test_auc']} | "
+            f"{row['final_test_fpr_at_signal_eff_0p30']} | {row['final_test_fpr_at_signal_eff_0p50']} |"
         )
     if problems:
         lines += ["", "## Problems", ""]

@@ -87,6 +87,7 @@ fresh_split_words phi_dim_args "${SET_MATCHING_RECO_PHI_DIMS}"
 fresh_split_words context_mlp_dim_args "${SET_MATCHING_RECO_CONTEXT_MLP_DIMS}"
 fresh_split_words kernel_size_args "${SET_MATCHING_RECO_KERNEL_SIZES}"
 fresh_split_words dilation_args "${SET_MATCHING_RECO_DILATIONS}"
+fresh_split_words label_filter_args "${SET_MATCHING_LABEL_FILTER_NAMES}"
 cmd+=(
   --edgeconv-dims "${edgeconv_dim_args[@]}"
   --phi-dims "${phi_dim_args[@]}"
@@ -94,6 +95,9 @@ cmd+=(
   --kernel-sizes "${kernel_size_args[@]}"
   --dilations "${dilation_args[@]}"
 )
+if ((${#label_filter_args[@]})); then
+  cmd+=(--label-filter-names "${label_filter_args[@]}")
+fi
 fresh_append_flag_if_enabled cmd --no-amp "${NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --skip-hlt-hash-check "${SKIP_HLT_HASH_CHECK}"

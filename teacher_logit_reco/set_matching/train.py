@@ -110,6 +110,7 @@ class SetMatchingReconstructorTrainConfig:
     max_val_batches: int | None = None
     max_train_jets: int | None = None
     max_val_jets: int | None = None
+    label_filter: tuple[int, ...] = ()
     trim_to_valid: bool = True
     verify_hlt_hash: bool = True
     verify_label_branches: bool = False
@@ -226,6 +227,9 @@ class SetMatchingReconstructorTrainConfig:
             setattr(self, field_name, _optional_nonnegative_int(getattr(self, field_name), field_name=field_name))
         if self.max_slots == 0:
             raise ValueError("max_slots must be positive when provided")
+        self.label_filter = tuple(int(label) for label in self.label_filter)
+        if len(set(self.label_filter)) != len(self.label_filter):
+            raise ValueError(f"label_filter contains duplicates: {self.label_filter}")
         if int(self.brute_force_fallback_limit) < 1:
             raise ValueError("brute_force_fallback_limit must be at least 1")
         self.edgeconv_dims = _positive_int_tuple(self.edgeconv_dims, field_name="edgeconv_dims")
@@ -515,6 +519,7 @@ def _load_train_val_datasets(config: SetMatchingReconstructorTrainConfig) -> tup
         split=config.train_split,
         data_dir=config.data_dir,
         max_jets=config.max_train_jets,
+        label_filter=config.label_filter,
         trim_to_valid=bool(config.trim_to_valid),
         verify_hlt_hash=bool(config.verify_hlt_hash),
         verify_label_branches=bool(config.verify_label_branches),
@@ -526,6 +531,7 @@ def _load_train_val_datasets(config: SetMatchingReconstructorTrainConfig) -> tup
         split=config.val_split,
         data_dir=config.data_dir,
         max_jets=config.max_val_jets,
+        label_filter=config.label_filter,
         trim_to_valid=bool(config.trim_to_valid),
         verify_hlt_hash=bool(config.verify_hlt_hash),
         verify_label_branches=bool(config.verify_label_branches),

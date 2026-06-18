@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json
+from jetclass_fresh.jetclass_data import LABEL_NAMES
 
 from .experiment import (
     HLT_VIEW_NAME,
@@ -110,6 +111,7 @@ class FiveViewAblationEvalConfig:
     max_final_test_jets: int | None = None
     max_val_batches: int | None = None
     max_final_test_batches: int | None = None
+    label_filter: tuple[int, ...] = ()
     max_tokens_per_view: int = 128
     min_tokens_per_view: int = 8
     confidence_threshold: float = 0.05
@@ -139,6 +141,9 @@ class FiveViewAblationEvalConfig:
         self.max_final_test_jets = _optional_positive_int(self.max_final_test_jets, field_name="max_final_test_jets")
         self.max_val_batches = _optional_nonnegative_int(self.max_val_batches, field_name="max_val_batches")
         self.max_final_test_batches = _optional_nonnegative_int(self.max_final_test_batches, field_name="max_final_test_batches")
+        self.label_filter = tuple(int(label) for label in self.label_filter)
+        if len(set(self.label_filter)) != len(self.label_filter):
+            raise ValueError(f"label_filter contains duplicates: {self.label_filter}")
         self.checkpoint_specs = tuple(self.checkpoint_specs)
         self.only = tuple(str(value) for value in self.only)
 
@@ -287,6 +292,8 @@ def _dataset_config_for_spec(
     checkpoint_payload: Mapping[str, Any],
 ) -> FiveViewDatasetConfig:
     checkpoint_config = _checkpoint_config(checkpoint_payload)
+    checkpoint_label_filter = checkpoint_config.get("label_filter")
+    label_filter = tuple(checkpoint_label_filter) if checkpoint_label_filter is not None else tuple(config.label_filter)
     drop_views = tuple(spec.drop_views)
     shuffle_view_labels = bool(spec.shuffle_view_labels)
     if bool(spec.use_checkpoint_dataset_config):
@@ -304,6 +311,7 @@ def _dataset_config_for_spec(
         confidence_threshold=float(checkpoint_config.get("confidence_threshold") if checkpoint_config.get("confidence_threshold") is not None else config.confidence_threshold),
         selection_mode=str(checkpoint_config.get("selection_mode") or config.selection_mode),
         drop_views=drop_views,
+        label_filter=tuple(int(label) for label in label_filter),
         shuffle_view_labels=shuffle_view_labels,
         view_label_shuffle_seed=int(checkpoint_config.get("view_label_shuffle_seed") or config.seed),
         verify_hlt_hash=bool(config.verify_hlt_hash),
@@ -421,6 +429,11 @@ def _write_summary_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         "accuracy",
         "loss",
         "macro_per_class_accuracy",
+        "auc",
+        "fpr_at_signal_eff_0p30",
+        "fpr_at_signal_eff_0p50",
+        "background_rejection_at_signal_eff_0p30",
+        "background_rejection_at_signal_eff_0p50",
         "n_jets",
         "checkpoint",
         "contract",
@@ -475,6 +488,8 @@ def evaluate_five_view_ablation_suite(
             continue
         model, payload = load_five_view_tagger_checkpoint(checkpoint, device=device)
         model_config = model.to_config_dict()
+        checkpoint_config = _checkpoint_config(payload)
+        label_names = tuple(checkpoint_config.get("label_names") or LABEL_NAMES[: int(model_config.get("num_classes", len(LABEL_NAMES)))])
         split_results: dict[str, Any] = {}
         for split in config.evaluation_splits():
             max_batches = config.max_final_test_batches if split == "final_test" else config.max_val_batches
@@ -500,7 +515,9 @@ def evaluate_five_view_ablation_suite(
                 amp=False,
                 max_batches=max_batches,
                 collect_predictions=True,
+                label_names=label_names,
             )
+            binary_metrics = metrics.get("binary_metrics", {})
             split_results[split] = {
                 "metrics": metrics,
                 "dataset_metadata": dict(dataset.metadata),
@@ -512,6 +529,11 @@ def evaluate_five_view_ablation_suite(
                     "accuracy": metrics.get("accuracy"),
                     "loss": metrics.get("loss"),
                     "macro_per_class_accuracy": metrics.get("macro_per_class_accuracy"),
+                    "auc": binary_metrics.get("auc"),
+                    "fpr_at_signal_eff_0p30": binary_metrics.get("fpr_at_signal_eff_0p30"),
+                    "fpr_at_signal_eff_0p50": binary_metrics.get("fpr_at_signal_eff_0p50"),
+                    "background_rejection_at_signal_eff_0p30": binary_metrics.get("background_rejection_at_signal_eff_0p30"),
+                    "background_rejection_at_signal_eff_0p50": binary_metrics.get("background_rejection_at_signal_eff_0p50"),
                     "n_jets": metrics.get("n_jets"),
                     "checkpoint": str(checkpoint),
                     "contract": payload.get("output_contract") or model.output_contract,

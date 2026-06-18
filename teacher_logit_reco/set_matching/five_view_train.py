@@ -84,6 +84,9 @@ class FiveViewTaggerTrainConfig:
     max_val_jets: int | None = None
     max_final_test_jets: int | None = None
     compile_model: bool = False
+    num_classes: int | None = None
+    label_names: tuple[str, ...] = ()
+    label_filter: tuple[int, ...] = ()
 
     max_tokens_per_view: int = 128
     min_tokens_per_view: int = 8
@@ -165,6 +168,19 @@ class FiveViewTaggerTrainConfig:
         self.max_train_jets = _optional_positive_int(self.max_train_jets, field_name="max_train_jets")
         self.max_val_jets = _optional_positive_int(self.max_val_jets, field_name="max_val_jets")
         self.max_final_test_jets = _optional_positive_int(self.max_final_test_jets, field_name="max_final_test_jets")
+        if self.num_classes is None:
+            self.num_classes = len(LABEL_NAMES)
+        else:
+            self.num_classes = _optional_positive_int(self.num_classes, field_name="num_classes")
+        if not self.label_names:
+            self.label_names = tuple(LABEL_NAMES[: int(self.num_classes)])
+        else:
+            self.label_names = tuple(str(name) for name in self.label_names)
+        if len(self.label_names) != int(self.num_classes):
+            raise ValueError("label_names length must match num_classes")
+        self.label_filter = tuple(int(label) for label in self.label_filter)
+        if len(set(self.label_filter)) != len(self.label_filter):
+            raise ValueError(f"label_filter contains duplicates: {self.label_filter}")
         self.drop_views = tuple(self.drop_views)
 
     def dataset_config(self, split: str) -> FiveViewDatasetConfig:
@@ -178,6 +194,7 @@ class FiveViewTaggerTrainConfig:
             confidence_threshold=float(self.confidence_threshold),
             selection_mode=self.selection_mode,
             drop_views=tuple(self.drop_views),
+            label_filter=tuple(self.label_filter),
             shuffle_view_labels=bool(self.shuffle_view_labels),
             view_label_shuffle_seed=int(self.view_label_shuffle_seed),
             verify_hlt_hash=bool(self.verify_hlt_hash),
@@ -192,7 +209,7 @@ class FiveViewTaggerTrainConfig:
     def model_config(self, *, particle_feature_dim: int) -> FiveViewParticleTransformerConfig:
         return FiveViewParticleTransformerConfig(
             particle_feature_dim=int(particle_feature_dim),
-            num_classes=len(LABEL_NAMES),
+            num_classes=int(self.num_classes or len(LABEL_NAMES)),
             embed_dim=int(self.embed_dim),
             stage1_layers=int(self.stage1_layers),
             stage1_heads=int(self.stage1_heads),
@@ -250,18 +267,118 @@ def _move_five_view_batch_to_device(batch: Mapping[str, Any], device) -> dict[st
     return moved
 
 
-def classification_metrics_from_predictions(*, preds: np.ndarray, labels: np.ndarray, loss_sum: float | None = None) -> dict[str, Any]:
+def _softmax_numpy(logits: np.ndarray) -> np.ndarray:
+    logits = np.asarray(logits, dtype=np.float64)
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / np.sum(exp, axis=1, keepdims=True)
+
+
+def _binary_auc(labels: np.ndarray, scores: np.ndarray) -> float:
+    labels = np.asarray(labels, dtype=np.int64)
+    scores = np.asarray(scores, dtype=np.float64)
+    positives = labels == 1
+    negatives = labels == 0
+    n_pos = int(np.sum(positives))
+    n_neg = int(np.sum(negatives))
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    ranks = np.empty_like(scores, dtype=np.float64)
+    start = 0
+    while start < scores.size:
+        end = start + 1
+        while end < scores.size and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        average_rank = 0.5 * (start + 1 + end)
+        ranks[order[start:end]] = average_rank
+        start = end
+    rank_sum_pos = float(np.sum(ranks[positives]))
+    return float((rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / float(n_pos * n_neg))
+
+
+def _fpr_at_signal_efficiency(labels: np.ndarray, scores: np.ndarray, target_efficiency: float) -> dict[str, float]:
+    labels = np.asarray(labels, dtype=np.int64)
+    scores = np.asarray(scores, dtype=np.float64)
+    positives = labels == 1
+    negatives = labels == 0
+    n_pos = int(np.sum(positives))
+    n_neg = int(np.sum(negatives))
+    if n_pos == 0 or n_neg == 0:
+        return {
+            "target_signal_efficiency": float(target_efficiency),
+            "threshold": float("nan"),
+            "signal_efficiency": float("nan"),
+            "false_positive_rate": float("nan"),
+            "background_rejection": float("nan"),
+        }
+    positive_scores = np.sort(scores[positives])[::-1]
+    threshold_index = min(max(int(np.ceil(float(target_efficiency) * n_pos)) - 1, 0), n_pos - 1)
+    threshold = float(positive_scores[threshold_index])
+    signal_efficiency = float(np.mean(scores[positives] >= threshold))
+    false_positive_rate = float(np.mean(scores[negatives] >= threshold))
+    return {
+        "target_signal_efficiency": float(target_efficiency),
+        "threshold": threshold,
+        "signal_efficiency": signal_efficiency,
+        "false_positive_rate": false_positive_rate,
+        "background_rejection": float("inf") if false_positive_rate == 0.0 else float(1.0 / false_positive_rate),
+    }
+
+
+def binary_classification_metrics_from_logits(
+    *,
+    logits: np.ndarray,
+    labels: np.ndarray,
+    signal_class_index: int = 1,
+    label_names: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    logits = np.asarray(logits, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    if logits.ndim != 2 or logits.shape[1] != 2:
+        raise ValueError("binary metrics require logits with shape [N, 2]")
+    if not np.isin(labels, [0, 1]).all():
+        raise ValueError("binary metrics require labels encoded as 0/1")
+    names = tuple(label_names or ("background", "signal"))
+    probs = _softmax_numpy(logits)
+    signal_scores = probs[:, int(signal_class_index)]
+    by_eff = {
+        "signal_eff_0p30": _fpr_at_signal_efficiency(labels, signal_scores, 0.30),
+        "signal_eff_0p50": _fpr_at_signal_efficiency(labels, signal_scores, 0.50),
+    }
+    return {
+        "positive_class_index": int(signal_class_index),
+        "positive_class_name": names[int(signal_class_index)] if int(signal_class_index) < len(names) else str(signal_class_index),
+        "auc": _binary_auc(labels, signal_scores),
+        "fpr_at_signal_efficiency": by_eff,
+        "fpr_at_signal_eff_0p30": by_eff["signal_eff_0p30"]["false_positive_rate"],
+        "fpr_at_signal_eff_0p50": by_eff["signal_eff_0p50"]["false_positive_rate"],
+        "background_rejection_at_signal_eff_0p30": by_eff["signal_eff_0p30"]["background_rejection"],
+        "background_rejection_at_signal_eff_0p50": by_eff["signal_eff_0p50"]["background_rejection"],
+    }
+
+
+def classification_metrics_from_predictions(
+    *,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    loss_sum: float | None = None,
+    logits: np.ndarray | None = None,
+    label_names: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     labels = np.asarray(labels, dtype=np.int64)
     preds = np.asarray(preds, dtype=np.int64)
     if labels.shape != preds.shape:
         raise ValueError("preds and labels must have matching shapes")
-    n_classes = len(LABEL_NAMES)
+    names = tuple(label_names or LABEL_NAMES)
+    n_classes = len(names)
     confusion = np.zeros((n_classes, n_classes), dtype=np.int64)
     for true_label, pred_label in zip(labels, preds):
         if 0 <= int(true_label) < n_classes and 0 <= int(pred_label) < n_classes:
             confusion[int(true_label), int(pred_label)] += 1
     per_class = []
-    for index, name in enumerate(LABEL_NAMES):
+    for index, name in enumerate(names):
         support = int(confusion[index].sum())
         correct = int(confusion[index, index])
         accuracy = correct / float(support) if support else 0.0
@@ -276,6 +393,8 @@ def classification_metrics_from_predictions(*, preds: np.ndarray, labels: np.nda
     }
     if loss_sum is not None:
         metrics["loss"] = float(loss_sum) / float(n_jets) if n_jets else float("nan")
+    if logits is not None and n_classes == 2:
+        metrics["binary_metrics"] = binary_classification_metrics_from_logits(logits=logits, labels=labels, label_names=names)
     return metrics
 
 
@@ -305,6 +424,7 @@ def run_five_view_tagger_epoch(
     grad_clip_norm: float | None = 1.0,
     max_batches: int | None = None,
     collect_predictions: bool = False,
+    label_names: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Run one train/eval epoch for the five-view tagger."""
 
@@ -317,6 +437,7 @@ def run_five_view_tagger_epoch(
     total_seen = 0
     collected_preds: list[np.ndarray] = []
     collected_labels: list[np.ndarray] = []
+    collected_logits: list[np.ndarray] = []
 
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
@@ -360,6 +481,7 @@ def run_five_view_tagger_epoch(
             if collect_predictions:
                 collected_preds.append(preds.detach().cpu().numpy().astype(np.int64))
                 collected_labels.append(labels.detach().cpu().numpy().astype(np.int64))
+                collected_logits.append(logits.detach().cpu().numpy().astype(np.float32))
 
     if total_seen == 0:
         return {"loss": float("nan"), "accuracy": 0.0, "n_jets": 0}
@@ -371,7 +493,16 @@ def run_five_view_tagger_epoch(
     if collect_predictions:
         preds_np = np.concatenate(collected_preds, axis=0) if collected_preds else np.asarray([], dtype=np.int64)
         labels_np = np.concatenate(collected_labels, axis=0) if collected_labels else np.asarray([], dtype=np.int64)
-        metrics.update(classification_metrics_from_predictions(preds=preds_np, labels=labels_np, loss_sum=total_loss))
+        logits_np = np.concatenate(collected_logits, axis=0) if collected_logits else None
+        metrics.update(
+            classification_metrics_from_predictions(
+                preds=preds_np,
+                labels=labels_np,
+                loss_sum=total_loss,
+                logits=logits_np,
+                label_names=label_names,
+            )
+        )
     return metrics
 
 
@@ -558,6 +689,9 @@ def train_five_view_tagger(
         "train_dataset": dict(train_dataset.metadata),
         "val_dataset": dict(val_dataset.metadata),
         "view_names": list(train_dataset.view_names),
+        "label_names": list(config.label_names),
+        "num_classes": int(config.num_classes or len(config.label_names)),
+        "label_filter": list(config.label_filter),
         "leakage_rule": (
             "Step 10 trains the five-view tagger only on stack_train and selects only on stack_val. "
             "The five input views are fixed-HLT-derived cached views. final_test is loaded only with "
@@ -635,6 +769,7 @@ def train_five_view_tagger(
         amp=False,
         max_batches=config.max_val_batches,
         collect_predictions=True,
+        label_names=tuple(config.label_names),
     )
     metrics_by_split = {"stack_val": best_val_metrics}
     view_ablation = {
@@ -671,6 +806,7 @@ def train_five_view_tagger(
             amp=False,
             max_batches=config.max_final_test_batches,
             collect_predictions=True,
+            label_names=tuple(config.label_names),
         )
         metrics_by_split["final_test"] = final_test_metrics
         final_test_metadata = dict(final_test_dataset.metadata)
@@ -704,6 +840,9 @@ def train_five_view_tagger(
         "view_ablation_metrics": str(diagnostics_dir / "view_ablation_metrics.json"),
         "config": asdict(config),
         "model_config": best_model.to_config_dict(),
+        "label_names": list(config.label_names),
+        "num_classes": int(config.num_classes or len(config.label_names)),
+        "label_filter": list(config.label_filter),
         "source": source,
         "train_dataset": dict(train_dataset.metadata),
         "val_dataset": dict(val_dataset.metadata),

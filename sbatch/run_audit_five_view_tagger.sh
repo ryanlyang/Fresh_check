@@ -23,6 +23,7 @@ source "${SCRIPT_DIR}/common.sh"
 fresh_setup "$@"
 fresh_require_file "scripts/evaluate_five_view_ablation.py"
 fresh_split_words variant_args "${SET_MATCHING_TAGGER_VARIANTS}"
+fresh_split_words label_filter_args "${SET_MATCHING_LABEL_FILTER_NAMES}"
 if fresh_bool_enabled "${SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL}"; then
   for variant in "${variant_args[@]}"; do
     fresh_require_file "${SET_MATCHING_TAGGER_ROOT}/${variant}/best_model_val.pt"
@@ -51,6 +52,9 @@ cmd=(
   --selection-mode topk_or_threshold
   --seed "${SET_MATCHING_TAGGER_SEED}"
 )
+if ((${#label_filter_args[@]})); then
+  cmd+=(--label-filter-names "${label_filter_args[@]}")
+fi
 fresh_append_flag_if_enabled cmd --confirm-final-test "${SET_MATCHING_CONFIRM_FINAL_TEST}"
 fresh_append_flag_if_enabled cmd --require-all-canonical "${SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL}"
 fresh_append_flag_if_enabled cmd --skip-hlt-hash-check "${SKIP_HLT_HASH_CHECK}"

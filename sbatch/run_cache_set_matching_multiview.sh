@@ -36,6 +36,7 @@ fresh_require_file "scripts/cache_set_matching_reco_views.py"
 fresh_require_file "${SET_MATCHING_MANIFEST_PATH}"
 fresh_require_file "${RECONSTRUCTOR_CHECKPOINT}"
 fresh_split_words split_args "${SET_MATCHING_CACHE_SPLITS}"
+fresh_split_words label_filter_args "${SET_MATCHING_LABEL_FILTER_NAMES}"
 for split in "${split_args[@]}"; do
   fresh_require_file "${SET_MATCHING_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
 done
@@ -56,6 +57,9 @@ cmd=(
   --read-chunk-size "${READ_CHUNK_SIZE}"
   --seed "${SET_MATCHING_RECO_SEED}"
 )
+if ((${#label_filter_args[@]})); then
+  cmd+=(--label-filter-names "${label_filter_args[@]}")
+fi
 fresh_append_flag_if_enabled cmd --no-amp "${NO_AMP}"
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --confirm-final-test "${SET_MATCHING_CONFIRM_FINAL_TEST}"

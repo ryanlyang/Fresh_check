@@ -96,6 +96,7 @@ SUBMITTERS = [
     "submit_crossarch_aggressive_smoke_test.sh",
     "submit_set_matching_multiview_experiment.sh",
     "submit_set_matching_multiview_smoke_test.sh",
+    "submit_set_matching_hbb_qcd_binary_experiment.sh",
 ]
 
 
@@ -1046,6 +1047,30 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('fresh_claim_new_dir "${SET_MATCHING_SMOKE_ROOT}/.smoke_submission_lock"', smoke)
         self.assertIn("smoke metrics are for pipeline correctness only", smoke)
         self.assertIn('bash "${SCRIPT_DIR}/submit_set_matching_multiview_experiment.sh"', smoke)
+
+    def test_set_matching_hbb_qcd_binary_submitter_sets_two_class_task(self):
+        submitter = self.read("submit_set_matching_hbb_qcd_binary_experiment.sh")
+        tagger = self.read("run_train_five_view_tagger.sh")
+        train = self.read("run_train_set_matching_reconstructor.sh")
+        cache = self.read("run_cache_set_matching_multiview.sh")
+        audit = self.read("run_audit_five_view_tagger.sh")
+
+        self.assertIn('SET_MATCHING_LABEL_FILTER_NAMES="QCD Hbb"', submitter)
+        self.assertIn('SET_MATCHING_LABEL_NAMES="QCD Hbb"', submitter)
+        self.assertIn("SET_MATCHING_NUM_CLASSES=2", submitter)
+        self.assertIn('HBB_QCD_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control', submitter)
+        self.assertIn("SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1", submitter)
+        self.assertIn("scripts/train_five_view_tagger.py", tagger)
+        self.assertIn("--num-classes", tagger)
+        self.assertIn("--label-names", tagger)
+        self.assertIn("--label-filter-names", tagger)
+        self.assertIn("--label-filter-names", train)
+        self.assertIn("--label-filter-names", cache)
+        self.assertIn("--label-filter-names", audit)
+        metrics_code = (REPO_ROOT / "teacher_logit_reco" / "set_matching" / "five_view_train.py").read_text(encoding="utf-8")
+        self.assertIn("fpr_at_signal_eff_0p30", metrics_code)
+        self.assertIn("run_write_set_matching_multiview_final_report.sh", submitter)
+        self.assertIn("final_report_job_id", submitter)
 
 
 if __name__ == "__main__":

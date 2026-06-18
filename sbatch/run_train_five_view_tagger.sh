@@ -64,6 +64,8 @@ esac
 
 fresh_setup "$@"
 fresh_require_file "scripts/train_five_view_tagger.py"
+fresh_split_words label_filter_args "${SET_MATCHING_LABEL_FILTER_NAMES}"
+fresh_split_words label_name_args "${SET_MATCHING_LABEL_NAMES}"
 for split in stack_train stack_val final_test; do
   fresh_require_file "${SET_MATCHING_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
 done
@@ -114,6 +116,15 @@ cmd=(
   --geometry-hidden-dim "${SET_MATCHING_TAGGER_GEOMETRY_HIDDEN_DIM}"
   --geometry-dropout "${SET_MATCHING_TAGGER_GEOMETRY_DROPOUT}"
 )
+if [[ -n "${SET_MATCHING_NUM_CLASSES}" ]]; then
+  cmd+=(--num-classes "${SET_MATCHING_NUM_CLASSES}")
+fi
+if ((${#label_name_args[@]})); then
+  cmd+=(--label-names "${label_name_args[@]}")
+fi
+if ((${#label_filter_args[@]})); then
+  cmd+=(--label-filter-names "${label_filter_args[@]}")
+fi
 if ((${#drop_views[@]})); then
   cmd+=(--drop-views "${drop_views[@]}")
 fi

@@ -79,6 +79,57 @@ def _identity_key(identity: JetIdentity) -> str:
     return identity.key()
 
 
+def _normalize_label_filter(label_filter: Sequence[int] | None) -> tuple[int, ...] | None:
+    if label_filter is None:
+        return None
+    normalized = tuple(int(label) for label in label_filter)
+    if not normalized:
+        return None
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"label_filter contains duplicates: {normalized}")
+    return normalized
+
+
+def _filter_jet_view_by_labels(view: JetView, label_filter: Sequence[int]) -> JetView:
+    keep_labels = set(int(label) for label in label_filter)
+    keep = np.asarray([int(label) in keep_labels for label in view.labels], dtype=bool)
+    metadata = dict(view.metadata)
+    metadata.update(
+        {
+            "label_filter_applied": True,
+            "label_filter": [int(label) for label in label_filter],
+            "n_jets_before_label_filter": int(view.labels.shape[0]),
+            "n_jets_after_label_filter": int(np.sum(keep)),
+        }
+    )
+    return JetView(
+        tokens=view.tokens[keep].copy(),
+        mask=view.mask[keep].copy(),
+        labels=view.labels[keep].copy(),
+        jet_ids=[identity for identity, keep_row in zip(view.jet_ids, keep) if bool(keep_row)],
+        split=view.split,
+        metadata=metadata,
+    )
+
+
+def _filter_pair_by_labels(pair: PairedJetViews, label_filter: Sequence[int] | None) -> PairedJetViews:
+    normalized = _normalize_label_filter(label_filter)
+    if normalized is None:
+        return pair
+    hlt = _filter_jet_view_by_labels(pair.hlt, normalized)
+    offline = _filter_jet_view_by_labels(pair.offline, normalized)
+    metadata = dict(pair.metadata)
+    metadata.update(
+        {
+            "label_filter_applied": True,
+            "label_filter": [int(label) for label in normalized],
+            "n_jets_before_label_filter": int(pair.labels.shape[0]),
+            "n_jets_after_label_filter": int(hlt.labels.shape[0]),
+        }
+    )
+    return PairedJetViews(hlt=hlt, offline=offline, metadata=metadata)
+
+
 @dataclass(frozen=True)
 class SetMatchingJetSample:
     """One aligned fixed-HLT/offline jet pair."""
@@ -179,10 +230,11 @@ class SetMatchingJetDataset:
         pair: PairedJetViews,
         *,
         max_jets: int | None = None,
+        label_filter: Sequence[int] | None = None,
         trim_to_valid: bool = False,
         copy_arrays: bool = False,
     ) -> None:
-        pair = pair.slice(max_jets)
+        pair = _filter_pair_by_labels(pair, label_filter).slice(max_jets)
         validate_view_alignment(pair.hlt, pair.offline, left_name="hlt", right_name="offline")
         self.hlt_tokens = _as_float32_tokens("hlt_tokens", pair.hlt.tokens)
         self.hlt_mask = _as_bool_mask("hlt_mask", pair.hlt.mask, self.hlt_tokens.shape)
@@ -205,6 +257,8 @@ class SetMatchingJetDataset:
                 "feature_dim": int(self.hlt_tokens.shape[-1]),
                 "trim_to_valid": bool(trim_to_valid),
                 "jet_identity_hash": jet_identity_hash(self.jet_ids),
+                "label_filter": None if _normalize_label_filter(label_filter) is None else list(_normalize_label_filter(label_filter) or ()),
+                "label_filter_applied": _normalize_label_filter(label_filter) is not None,
             }
         )
         self.metadata = metadata
@@ -224,22 +278,27 @@ class SetMatchingJetDataset:
         split: str,
         data_dir: str | Path | None = None,
         max_jets: int | None = None,
+        label_filter: Sequence[int] | None = None,
         trim_to_valid: bool = False,
         verify_hlt_hash: bool = True,
         verify_label_branches: bool = False,
         read_chunk_size: int = 50_000,
     ) -> "SetMatchingJetDataset":
+        # When a label filter is active, apply the row limit after filtering so
+        # ``max_jets`` means "binary-task jets", not "prefix rows of the
+        # original 10-class split".
+        paired_view_max_jets = None if _normalize_label_filter(label_filter) is not None else max_jets
         pair = load_paired_jet_views(
             manifest_path=manifest_path,
             hlt_cache_dir=hlt_cache_dir,
             split=split,
             data_dir=data_dir,
-            max_jets=max_jets,
+            max_jets=paired_view_max_jets,
             verify_hlt_hash=verify_hlt_hash,
             verify_label_branches=verify_label_branches,
             read_chunk_size=read_chunk_size,
         )
-        return cls(pair, trim_to_valid=trim_to_valid)
+        return cls(pair, max_jets=max_jets, label_filter=label_filter, trim_to_valid=trim_to_valid)
 
     @property
     def feature_dim(self) -> int:
@@ -545,6 +604,7 @@ def load_set_matching_dataset(
     split: str,
     data_dir: str | Path | None = None,
     max_jets: int | None = None,
+    label_filter: Sequence[int] | None = None,
     trim_to_valid: bool = False,
     verify_hlt_hash: bool = True,
     verify_label_branches: bool = False,
@@ -558,6 +618,7 @@ def load_set_matching_dataset(
         split=split,
         data_dir=data_dir,
         max_jets=max_jets,
+        label_filter=label_filter,
         trim_to_valid=trim_to_valid,
         verify_hlt_hash=verify_hlt_hash,
         verify_label_branches=verify_label_branches,

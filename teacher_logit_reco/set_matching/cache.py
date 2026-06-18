@@ -200,6 +200,7 @@ class SetMatchingRecoViewCacheConfig:
     device: str = "auto"
     amp: bool = True
     max_jets_per_split: int | None = None
+    label_filter: tuple[int, ...] = ()
     overwrite: bool = False
     skip_existing: bool = True
     confirm_final_test: bool = False
@@ -235,6 +236,9 @@ class SetMatchingRecoViewCacheConfig:
         self.max_jets_per_split = _optional_nonnegative_int(self.max_jets_per_split, field_name="max_jets_per_split")
         if self.max_jets_per_split == 0:
             raise ValueError("max_jets_per_split must be positive when provided")
+        self.label_filter = tuple(int(label) for label in self.label_filter)
+        if len(set(self.label_filter)) != len(self.label_filter):
+            raise ValueError(f"label_filter contains duplicates: {self.label_filter}")
         self.read_chunk_size = _positive_int(self.read_chunk_size, field_name="read_chunk_size")
 
     @property
@@ -259,6 +263,7 @@ def _load_dataset_for_split(config: SetMatchingRecoViewCacheConfig, split: str) 
         split=split,
         data_dir=config.data_dir,
         max_jets=config.max_jets_per_split,
+        label_filter=config.label_filter,
         trim_to_valid=bool(config.trim_to_valid),
         verify_hlt_hash=bool(config.verify_hlt_hash),
         verify_label_branches=bool(config.verify_label_branches),
