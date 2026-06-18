@@ -9,6 +9,8 @@ SBATCH_DIR = REPO_ROOT / "sbatch"
 RUNNERS = [
     "run_build_fresh_splits.sh",
     "run_build_fresh_hlt_cache.sh",
+    "run_build_label_filtered_split_manifest.sh",
+    "run_build_label_filtered_hlt_cache.sh",
     "run_train_fresh_hlt_baseline.sh",
     "run_train_fresh_hlt_seed.sh",
     "run_train_fresh_offline_teacher.sh",
@@ -187,6 +189,8 @@ class SbatchStep14Tests(unittest.TestCase):
             "run_fuse_teacher_logit_pcnn_reco.sh",
             "submit_teacher_logit_pcnn_reco_experiment.sh",
             "run_build_fresh_hlt_cache.sh",
+            "run_build_label_filtered_split_manifest.sh",
+            "run_build_label_filtered_hlt_cache.sh",
             "run_crossarch_build_hlt_cache.sh",
             "submit_crossarch_step3_offline_teachers.sh",
             "submit_crossarch_step4_hlt_baselines.sh",
@@ -1081,6 +1085,8 @@ class SbatchStep14Tests(unittest.TestCase):
 
     def test_set_matching_hbb_qcd_binary_submitter_sets_two_class_task(self):
         submitter = self.read("submit_set_matching_hbb_qcd_binary_experiment.sh")
+        manifest_runner = self.read("run_build_label_filtered_split_manifest.sh")
+        binary_cache_runner = self.read("run_build_label_filtered_hlt_cache.sh")
         tagger = self.read("run_train_five_view_tagger.sh")
         train = self.read("run_train_set_matching_reconstructor.sh")
         cache = self.read("run_cache_set_matching_multiview.sh")
@@ -1089,8 +1095,28 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('SET_MATCHING_LABEL_FILTER_NAMES="QCD Hbb"', submitter)
         self.assertIn('SET_MATCHING_LABEL_NAMES="QCD Hbb"', submitter)
         self.assertIn("SET_MATCHING_NUM_CLASSES=2", submitter)
+        self.assertIn("HBB_QCD_BUILD_BINARY_INPUTS:=1", submitter)
+        self.assertIn("HBB_QCD_BINARY_MANIFEST_PATH", submitter)
+        self.assertIn("HBB_QCD_BINARY_HLT_CACHE_DIR", submitter)
+        self.assertIn('export SET_MATCHING_MANIFEST_PATH="${HBB_QCD_BINARY_MANIFEST_PATH}"', submitter)
+        self.assertIn('export SET_MATCHING_HLT_CACHE_DIR="${HBB_QCD_BINARY_HLT_CACHE_DIR}"', submitter)
+        self.assertIn("run_build_label_filtered_split_manifest.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn('input_dependency="${binary_hlt_cache_jid}"', submitter)
+        self.assertIn("scripts/build_label_filtered_split_manifest.py", manifest_runner)
+        self.assertIn("scripts/build_fixed_hlt_cache.py", binary_cache_runner)
         self.assertIn('HBB_QCD_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control', submitter)
         self.assertIn("SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1", submitter)
+        self.assertIn("HBB_QCD_BINARY_MANIFEST_MEM:=8G", submitter)
+        self.assertIn("HBB_QCD_BINARY_HLT_CACHE_MEM:=64G", submitter)
+        self.assertIn("HBB_QCD_RECO_MEM:=64G", submitter)
+        self.assertIn("HBB_QCD_CACHE_MEM:=64G", submitter)
+        self.assertIn("HBB_QCD_TAGGER_MEM:=64G", submitter)
+        self.assertIn("HBB_QCD_AUDIT_MEM:=48G", submitter)
+        self.assertIn("HBB_QCD_REPORT_MEM:=8G", submitter)
+        self.assertIn('--mem="${HBB_QCD_RECO_MEM}"', submitter)
+        self.assertIn('--mem="${HBB_QCD_CACHE_MEM}"', submitter)
+        self.assertIn('--mem="${HBB_QCD_TAGGER_MEM}"', submitter)
         self.assertIn("scripts/train_five_view_tagger.py", tagger)
         self.assertIn("--num-classes", tagger)
         self.assertIn("--label-names", tagger)

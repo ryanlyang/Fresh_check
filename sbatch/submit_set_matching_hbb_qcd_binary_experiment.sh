@@ -14,6 +14,18 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HBB_QCD_TAG:=$(date +%Y%m%d_%H%M%S)}"
 : "${HBB_QCD_ROOT:=${OUTPUT_ROOT}/set_matching_hbb_qcd_binary_${HBB_QCD_TAG}}"
 : "${HBB_QCD_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control}"
+: "${HBB_QCD_BUILD_BINARY_INPUTS:=1}"
+: "${HBB_QCD_BINARY_INPUT_ROOT:=${HBB_QCD_ROOT}/binary_inputs}"
+: "${HBB_QCD_SOURCE_MANIFEST_PATH:=${MANIFEST_PATH}}"
+: "${HBB_QCD_BINARY_MANIFEST_PATH:=${HBB_QCD_BINARY_INPUT_ROOT}/split_manifest.json.gz}"
+: "${HBB_QCD_BINARY_HLT_CACHE_DIR:=${HBB_QCD_BINARY_INPUT_ROOT}/hlt_cache}"
+: "${HBB_QCD_BINARY_MANIFEST_MEM:=8G}"
+: "${HBB_QCD_BINARY_HLT_CACHE_MEM:=64G}"
+: "${HBB_QCD_RECO_MEM:=64G}"
+: "${HBB_QCD_CACHE_MEM:=64G}"
+: "${HBB_QCD_TAGGER_MEM:=64G}"
+: "${HBB_QCD_AUDIT_MEM:=48G}"
+: "${HBB_QCD_REPORT_MEM:=8G}"
 
 export SET_MATCHING_ROOT="${HBB_QCD_ROOT}"
 export SET_MATCHING_RECONSTRUCTOR_DIR="${SET_MATCHING_ROOT}/reconstructors"
@@ -28,10 +40,15 @@ export SET_MATCHING_NUM_CLASSES=2
 export SET_MATCHING_TAGGER_VARIANTS="${HBB_QCD_TAGGER_VARIANTS}"
 export SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1
 
+if fresh_bool_enabled "${HBB_QCD_BUILD_BINARY_INPUTS}"; then
+  export SET_MATCHING_MANIFEST_PATH="${HBB_QCD_BINARY_MANIFEST_PATH}"
+  export SET_MATCHING_HLT_CACHE_DIR="${HBB_QCD_BINARY_HLT_CACHE_DIR}"
+fi
+
 export SET_MATCHING_MODEL_TRAIN_SIZE="${HBB_QCD_MODEL_TRAIN_SIZE:-100000}"
 export SET_MATCHING_MODEL_VAL_SIZE="${HBB_QCD_MODEL_VAL_SIZE:-30000}"
-export SET_MATCHING_STACK_TRAIN_SIZE="${HBB_QCD_STACK_TRAIN_SIZE:-100000}"
-export SET_MATCHING_STACK_VAL_SIZE="${HBB_QCD_STACK_VAL_SIZE:-30000}"
+export SET_MATCHING_STACK_TRAIN_SIZE="${HBB_QCD_STACK_TRAIN_SIZE:-50000}"
+export SET_MATCHING_STACK_VAL_SIZE="${HBB_QCD_STACK_VAL_SIZE:-10000}"
 export SET_MATCHING_FINAL_TEST_SIZE="${HBB_QCD_FINAL_TEST_SIZE:-100000}"
 export SET_MATCHING_CACHE_MAX_JETS_PER_SPLIT="${HBB_QCD_CACHE_MAX_JETS_PER_SPLIT:-${SET_MATCHING_FINAL_TEST_SIZE}}"
 
@@ -87,19 +104,59 @@ if ! fresh_is_dry_run; then
     echo "label_names=${SET_MATCHING_LABEL_NAMES}"
     echo "num_classes=${SET_MATCHING_NUM_CLASSES}"
     echo "root=${SET_MATCHING_ROOT}"
+    echo "build_binary_inputs=${HBB_QCD_BUILD_BINARY_INPUTS}"
+    echo "source_manifest=${HBB_QCD_SOURCE_MANIFEST_PATH}"
+    echo "binary_manifest=${SET_MATCHING_MANIFEST_PATH}"
+    echo "binary_hlt_cache=${SET_MATCHING_HLT_CACHE_DIR}"
     echo "tagger_variants=$(fresh_join_by_space "${tagger_args[@]}")"
+    echo "binary_manifest_mem=${HBB_QCD_BINARY_MANIFEST_MEM}"
+    echo "binary_hlt_cache_mem=${HBB_QCD_BINARY_HLT_CACHE_MEM}"
+    echo "reco_mem=${HBB_QCD_RECO_MEM}"
+    echo "cache_mem=${HBB_QCD_CACHE_MEM}"
+    echo "tagger_mem=${HBB_QCD_TAGGER_MEM}"
+    echo "audit_mem=${HBB_QCD_AUDIT_MEM}"
+    echo "report_mem=${HBB_QCD_REPORT_MEM}"
   } > "${submitter_lock_dir}/metadata.txt"
 fi
 
 reco_train_job_ids=()
 cache_job_ids=()
 tagger_job_ids=()
+binary_manifest_jid=""
+binary_hlt_cache_jid=""
+input_dependency="${UPSTREAM_DEPENDENCY}"
 declare -A reco_train_job_id_by_arch=()
+
+if fresh_bool_enabled "${HBB_QCD_BUILD_BINARY_INPUTS}"; then
+  export LABEL_FILTER_SOURCE_MANIFEST_PATH="${HBB_QCD_SOURCE_MANIFEST_PATH}"
+  export LABEL_FILTER_OUTPUT_MANIFEST_PATH="${HBB_QCD_BINARY_MANIFEST_PATH}"
+  export LABEL_FILTER_NAMES="${SET_MATCHING_LABEL_FILTER_NAMES}"
+  export LABEL_FILTER_MANIFEST_PATH="${HBB_QCD_BINARY_MANIFEST_PATH}"
+  export LABEL_FILTER_HLT_CACHE_DIR="${HBB_QCD_BINARY_HLT_CACHE_DIR}"
+  export LABEL_FILTER_HLT_SPLITS="model_train model_val stack_train stack_val final_test"
+
+  mapfile -t manifest_args < <(
+    afterok_args \
+      "${UPSTREAM_DEPENDENCY}" \
+      --mem="${HBB_QCD_BINARY_MANIFEST_MEM}" \
+      "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
+  )
+  binary_manifest_jid="$(submit_job "hbbqcd_binary_manifest" "${manifest_args[@]}")"
+  echo "submitted hbbqcd_binary_manifest=${binary_manifest_jid}"
+
+  binary_hlt_cache_jid="$(submit_job "hbbqcd_binary_hlt_cache" \
+    --mem="${HBB_QCD_BINARY_HLT_CACHE_MEM}" \
+    --dependency="afterok:${binary_manifest_jid}" \
+    "${SCRIPT_DIR}/run_build_label_filtered_hlt_cache.sh")"
+  echo "submitted hbbqcd_binary_hlt_cache=${binary_hlt_cache_jid}"
+  input_dependency="${binary_hlt_cache_jid}"
+fi
 
 for architecture in "${reco_args[@]}"; do
   mapfile -t train_args < <(
     afterok_args \
-      "${UPSTREAM_DEPENDENCY}" \
+      "${input_dependency}" \
+      --mem="${HBB_QCD_RECO_MEM}" \
       "${SCRIPT_DIR}/run_train_set_matching_reconstructor.sh" \
       "${architecture}"
   )
@@ -112,6 +169,7 @@ done
 for architecture in "${reco_args[@]}"; do
   train_jid="${reco_train_job_id_by_arch[$architecture]}"
   cache_jid="$(submit_job "hbbqcd_setmatch_cache_${architecture}" \
+    --mem="${HBB_QCD_CACHE_MEM}" \
     --dependency="afterok:${train_jid}" \
     "${SCRIPT_DIR}/run_cache_set_matching_multiview.sh" \
     "${architecture}")"
@@ -125,6 +183,7 @@ if [[ -n "${TAGGER_UPSTREAM_DEPENDENCY}" ]]; then
 fi
 for variant in "${tagger_args[@]}"; do
   tagger_jid="$(submit_job "hbbqcd_setmatch_tagger_${variant}" \
+    --mem="${HBB_QCD_TAGGER_MEM}" \
     --dependency="afterok:${cache_dep}" \
     "${SCRIPT_DIR}/run_train_five_view_tagger.sh" \
     "${variant}")"
@@ -134,9 +193,11 @@ done
 
 audit_dep="$(fresh_join_by_colon "${tagger_job_ids[@]}")"
 audit_jid="$(submit_job "hbbqcd_setmatch_audit" \
+  --mem="${HBB_QCD_AUDIT_MEM}" \
   --dependency="afterok:${audit_dep}" \
   "${SCRIPT_DIR}/run_audit_five_view_tagger.sh")"
 final_report_jid="$(submit_job "hbbqcd_setmatch_final_report" \
+  --mem="${HBB_QCD_REPORT_MEM}" \
   --dependency="afterok:${audit_jid}" \
   "${SCRIPT_DIR}/run_write_set_matching_multiview_final_report.sh")"
 
@@ -145,12 +206,21 @@ hbb_qcd_binary_set_matching_submission:
   task: Hbb_vs_QCD
   label_filter: ${SET_MATCHING_LABEL_FILTER_NAMES}
   num_classes: ${SET_MATCHING_NUM_CLASSES}
+  binary_inputs:
+    build_enabled: ${HBB_QCD_BUILD_BINARY_INPUTS}
+    source_manifest: ${HBB_QCD_SOURCE_MANIFEST_PATH}
+    filtered_manifest: ${SET_MATCHING_MANIFEST_PATH}
+    filtered_hlt_cache: ${SET_MATCHING_HLT_CACHE_DIR}
+    manifest_job_id: ${binary_manifest_jid:-none}
+    hlt_cache_job_id: ${binary_hlt_cache_jid:-none}
   reco_train_job_ids: $(fresh_join_by_space "${reco_train_job_ids[@]}")
   cache_job_ids: $(fresh_join_by_space "${cache_job_ids[@]}")
   tagger_job_ids: $(fresh_join_by_space "${tagger_job_ids[@]}")
   audit_job_id: ${audit_jid}
   final_report_job_id: ${final_report_jid}
   expected_jobs:
+    binary_manifest: $([[ -n "${binary_manifest_jid}" ]] && echo 1 || echo 0)
+    binary_hlt_cache: $([[ -n "${binary_hlt_cache_jid}" ]] && echo 1 || echo 0)
     reco_train: ${#reco_train_job_ids[@]}
     cache_reconstructed_views: ${#cache_job_ids[@]}
     tagger_train: ${#tagger_job_ids[@]}
@@ -163,6 +233,14 @@ hbb_qcd_binary_set_matching_submission:
     stack_train: ${SET_MATCHING_STACK_TRAIN_SIZE}
     stack_val: ${SET_MATCHING_STACK_VAL_SIZE}
     final_test: ${SET_MATCHING_FINAL_TEST_SIZE}
+  memory_overrides:
+    binary_manifest: ${HBB_QCD_BINARY_MANIFEST_MEM}
+    binary_hlt_cache: ${HBB_QCD_BINARY_HLT_CACHE_MEM}
+    reco_train: ${HBB_QCD_RECO_MEM}
+    cache_reconstructed_views: ${HBB_QCD_CACHE_MEM}
+    tagger_train: ${HBB_QCD_TAGGER_MEM}
+    audit: ${HBB_QCD_AUDIT_MEM}
+    final_report: ${HBB_QCD_REPORT_MEM}
   output_dirs:
     root: ${SET_MATCHING_ROOT}
     taggers: ${SET_MATCHING_TAGGER_ROOT}
