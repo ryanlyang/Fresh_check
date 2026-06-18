@@ -24,6 +24,7 @@ RUNNERS = [
     "run_v2_step10_fuse_reco7_plus_hlt.sh",
     "run_v2_step11_audit_reco7_plus_hlt.sh",
     "run_v2_teacher_logit_dualview_debug.sh",
+    "run_v2_teacher_logit_dualview_hbb_qcd.sh",
     "run_independent_fusion_small.sh",
     "run_independent_fusion_large.sh",
     "run_independent_fusion_ensemble_analysis.sh",
@@ -295,6 +296,19 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--dual-epochs", text)
         self.assertIn('fresh_claim_new_dir "${V2_TLOG_DUALVIEW_DEBUG_ROOT}"', text)
         self.assertIn('fresh_require_file "${V2_TLOG_DUALVIEW_DEBUG_ROOT}/evaluation_report.json"', text)
+
+    def test_v2_teacher_logit_dualview_hbb_qcd_runner_uses_binary_normal_split(self):
+        text = self.read("run_v2_teacher_logit_dualview_hbb_qcd.sh")
+        self.assertIn("#SBATCH --partition=debug", text)
+        self.assertIn("#SBATCH --time=24:00:00", text)
+        self.assertIn("#SBATCH --gres=gpu:1", text)
+        self.assertIn("scripts/run_v2_teacher_logit_dualview_debug.py", text)
+        self.assertIn("--label-filter-names QCD Hbb", text)
+        self.assertIn("V2_TLOG_HBB_QCD_TRAIN_SIZE:=100000", text)
+        self.assertIn("V2_TLOG_HBB_QCD_VAL_SIZE:=30000", text)
+        self.assertIn("V2_TLOG_HBB_QCD_TEST_SIZE:=100000", text)
+        self.assertIn('fresh_claim_new_dir "${V2_TLOG_HBB_QCD_ROOT}"', text)
+        self.assertIn('fresh_require_file "${V2_TLOG_HBB_QCD_ROOT}/evaluation_report.json"', text)
 
     def test_hlt_offline_disagreement_diagnostic_is_short_debug_runner(self):
         text = self.read("run_diagnose_hlt_offline_disagreement.sh")

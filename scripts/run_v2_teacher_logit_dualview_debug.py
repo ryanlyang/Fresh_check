@@ -7,7 +7,7 @@ import argparse
 from dataclasses import asdict
 from pathlib import Path
 import sys
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Sequence
 
 import numpy as np
 
@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jetclass_fresh.dual_view import DualViewTaggerTrainConfig, train_dual_view_tagger  # noqa: E402
+from jetclass_fresh.dual_view import DualViewTaggerTrainConfig, build_dual_view_tagger, train_dual_view_tagger  # noqa: E402
 from jetclass_fresh.fusion import (  # noqa: E402
     classification_metrics_from_logits,
     evaluate_dual_view_model,
@@ -37,6 +37,7 @@ from teacher_logit_reco.train_global_transformer import (  # noqa: E402
     make_teacher_logit_loader,
     source_metadata,
 )
+from teacher_logit_reco.set_matching.five_view_train import binary_classification_metrics_from_logits  # noqa: E402
 from teacher_logit_reco.views import (  # noqa: E402
     SoftReconstructedView,
     load_paired_jet_views,
@@ -86,12 +87,148 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-constits", type=int, default=128)
     parser.add_argument("--teacher-weight-threshold", type=float, default=0.0)
     parser.add_argument("--reco-weight-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--label-filter-names",
+        nargs="*",
+        default=(),
+        help="Optional class-name filter applied before split row limits, e.g. QCD Hbb.",
+    )
     parser.add_argument("--teacher-kl-weight", type=float, default=1.0)
     parser.add_argument("--ce-weight", type=float, default=0.5)
     parser.add_argument("--correction-budget-weight", type=float, default=0.02)
     parser.add_argument("--jet-summary-weight", type=float, default=0.05)
     parser.add_argument("--temperature", type=float, default=2.0)
     return parser.parse_args()
+
+
+def _resolve_label_filter(label_filter_names: Sequence[str] | None) -> tuple[int, ...]:
+    if not label_filter_names:
+        return ()
+    name_to_index = {name.lower(): index for index, name in enumerate(LABEL_NAMES)}
+    indices: list[int] = []
+    for name in label_filter_names:
+        key = str(name).strip().lower()
+        if key not in name_to_index:
+            raise ValueError(f"Unknown label-filter name {name!r}; expected one of {LABEL_NAMES}")
+        indices.append(int(name_to_index[key]))
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"Duplicate label-filter names: {label_filter_names}")
+    return tuple(indices)
+
+
+def _filter_jet_view_by_labels(view, label_filter: Sequence[int], *, max_jets: int | None = None):
+    if not label_filter:
+        return slice_jet_view(view, max_jets)
+    keep_labels = set(int(label) for label in label_filter)
+    keep = np.asarray([int(label) in keep_labels for label in view.labels], dtype=bool)
+    indices = np.flatnonzero(keep)
+    if max_jets is not None:
+        indices = indices[: int(max_jets)]
+    metadata = dict(view.metadata)
+    metadata.update(
+        {
+            "label_filter_applied": True,
+            "label_filter": [int(label) for label in label_filter],
+            "label_filter_names": [LABEL_NAMES[int(label)] for label in label_filter],
+            "n_jets_before_label_filter": int(view.labels.shape[0]),
+            "n_jets_after_label_filter": int(np.sum(keep)),
+            "row_limit_after_label_filter": None if max_jets is None else int(max_jets),
+        }
+    )
+    return type(view)(
+        tokens=view.tokens[indices].copy(),
+        mask=view.mask[indices].copy(),
+        labels=view.labels[indices].copy(),
+        jet_ids=[view.jet_ids[int(index)] for index in indices],
+        split=view.split,
+        metadata=metadata,
+    )
+
+
+def _filter_pair_by_labels(pair: Any, label_filter: Sequence[int], *, max_jets: int | None = None):
+    if not label_filter:
+        return pair.slice(max_jets)
+    hlt = _filter_jet_view_by_labels(pair.hlt, label_filter, max_jets=max_jets)
+    offline = _filter_jet_view_by_labels(pair.offline, label_filter, max_jets=max_jets)
+    metadata = dict(pair.metadata)
+    metadata.update(
+        {
+            "label_filter_applied": True,
+            "label_filter": [int(label) for label in label_filter],
+            "label_filter_names": [LABEL_NAMES[int(label)] for label in label_filter],
+            "n_jets_before_label_filter": int(pair.labels.shape[0]),
+            "n_jets_after_label_filter": int(hlt.labels.shape[0]),
+        }
+    )
+    return type(pair)(hlt=hlt, offline=offline, metadata=metadata)
+
+
+def _load_paired_jet_views_for_args(args: argparse.Namespace, *, split: str, max_jets: int | None):
+    label_filter = tuple(getattr(args, "label_filter_indices", ()))
+    pair = load_paired_jet_views(
+        manifest_path=args.manifest_path,
+        hlt_cache_dir=args.hlt_cache_dir,
+        split=split,
+        data_dir=args.data_dir,
+        max_jets=None if label_filter else max_jets,
+        read_chunk_size=args.read_chunk_size,
+    )
+    return _filter_pair_by_labels(pair, label_filter, max_jets=max_jets)
+
+
+def _load_hlt_view_for_args(args: argparse.Namespace, *, split: str, max_jets: int | None):
+    label_filter = tuple(getattr(args, "label_filter_indices", ()))
+    view = load_cached_hlt_view(args.hlt_cache_dir, split)
+    return _filter_jet_view_by_labels(view, label_filter, max_jets=max_jets)
+
+
+def _binary_logits_and_labels(
+    *,
+    logits: np.ndarray,
+    labels: np.ndarray,
+    label_filter: Sequence[int],
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]] | None:
+    if len(label_filter) != 2:
+        return None
+    logits = np.asarray(logits)
+    labels = np.asarray(labels, dtype=np.int64)
+    label_filter = tuple(int(label) for label in label_filter)
+    if logits.ndim != 2:
+        return None
+    if logits.shape[1] == 2 and set(label_filter) == {0, 1}:
+        selected_logits = logits
+    elif max(label_filter) < logits.shape[1]:
+        selected_logits = logits[:, list(label_filter)]
+    else:
+        return None
+    remap = {label: index for index, label in enumerate(label_filter)}
+    if not all(int(label) in remap for label in labels):
+        return None
+    binary_labels = np.asarray([remap[int(label)] for label in labels], dtype=np.int64)
+    names = tuple(LABEL_NAMES[int(label)] for label in label_filter)
+    return selected_logits, binary_labels, names
+
+
+def _attach_binary_metrics(
+    metrics: Dict[str, Any],
+    *,
+    logits: np.ndarray,
+    labels: np.ndarray,
+    label_filter: Sequence[int],
+) -> Dict[str, Any]:
+    payload = _binary_logits_and_labels(logits=logits, labels=labels, label_filter=label_filter)
+    if payload is None:
+        return metrics
+    selected_logits, binary_labels, names = payload
+    binary_metrics = binary_classification_metrics_from_logits(
+        logits=selected_logits,
+        labels=binary_labels,
+        label_names=names,
+    )
+    binary_metrics["accuracy"] = float(np.mean(np.argmax(selected_logits, axis=1) == binary_labels))
+    metrics = dict(metrics)
+    metrics["binary_metrics"] = binary_metrics
+    return metrics
 
 
 def _average_metric_rows(rows: list[Mapping[str, float]]) -> Dict[str, float]:
@@ -273,22 +410,8 @@ def train_v2_teacher_logit_reconstructor(args: argparse.Namespace, *, output_dir
         jet_summary_weight=args.jet_summary_weight,
         temperature=args.temperature,
     )
-    train_pair = load_paired_jet_views(
-        manifest_path=args.manifest_path,
-        hlt_cache_dir=args.hlt_cache_dir,
-        split=args.train_split,
-        data_dir=args.data_dir,
-        max_jets=args.train_size,
-        read_chunk_size=args.read_chunk_size,
-    )
-    val_pair = load_paired_jet_views(
-        manifest_path=args.manifest_path,
-        hlt_cache_dir=args.hlt_cache_dir,
-        split=args.val_split,
-        data_dir=args.data_dir,
-        max_jets=args.val_size,
-        read_chunk_size=args.read_chunk_size,
-    )
+    train_pair = _load_paired_jet_views_for_args(args, split=args.train_split, max_jets=args.train_size)
+    val_pair = _load_paired_jet_views_for_args(args, split=args.val_split, max_jets=args.val_size)
     train_dataset = PairedTeacherLogitDataset(train_pair)
     val_dataset = PairedTeacherLogitDataset(val_pair)
     train_loader = make_teacher_logit_loader(
@@ -333,6 +456,8 @@ def train_v2_teacher_logit_reconstructor(args: argparse.Namespace, *, output_dir
         "teacher": dict(teacher.metadata),
         "source": source,
         "manifest_hash": manifest_sha,
+        "label_filter": [int(label) for label in getattr(args, "label_filter_indices", ())],
+        "label_filter_names": list(args.label_filter_names or ()),
         "train_pair": summarize_paired_jet_views(train_pair),
         "val_pair": summarize_paired_jet_views(val_pair),
         "train_n_jets": len(train_dataset),
@@ -433,14 +558,7 @@ def train_v2_teacher_logit_reconstructor(args: argparse.Namespace, *, output_dir
 
 def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, reconstructor, teacher, device):
     torch = require_torch()
-    test_pair = load_paired_jet_views(
-        manifest_path=args.manifest_path,
-        hlt_cache_dir=args.hlt_cache_dir,
-        split=args.test_split,
-        data_dir=args.data_dir,
-        max_jets=args.test_size,
-        read_chunk_size=args.read_chunk_size,
-    )
+    test_pair = _load_paired_jet_views_for_args(args, split=args.test_split, max_jets=args.test_size)
     dataset = PairedTeacherLogitDataset(test_pair)
     loader = make_teacher_logit_loader(
         dataset,
@@ -484,7 +602,12 @@ def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, recons
     metrics = {}
     for name, rows in logits_by_name.items():
         logits = np.concatenate(rows, axis=0).astype(np.float32)
-        metrics[name] = classification_metrics_from_logits(logits, labels)
+        metrics[name] = _attach_binary_metrics(
+            classification_metrics_from_logits(logits, labels),
+            logits=logits,
+            labels=labels,
+            label_filter=getattr(args, "label_filter_indices", ()),
+        )
     np.savez_compressed(
         output_dir / "teacher_path_test_logits.npz",
         labels=labels.astype(np.int64),
@@ -495,6 +618,7 @@ def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, recons
 
 def main() -> int:
     args = parse_args()
+    args.label_filter_indices = _resolve_label_filter(args.label_filter_names)
     if args.train_split != "model_train" or args.val_split != "model_val":
         raise ValueError("This debug runner may train only on model_train and select only on model_val")
     for name in ("train_size", "val_size", "test_size", "reco_epochs", "dual_epochs"):
@@ -512,6 +636,8 @@ def main() -> int:
             "experiment_step": EXPERIMENT_STEP,
             "args": vars(args),
             "label_names": list(LABEL_NAMES),
+            "label_filter": [int(label) for label in args.label_filter_indices],
+            "label_filter_names": list(args.label_filter_names or ()),
             "source": source_metadata(),
         },
     )
@@ -519,8 +645,8 @@ def main() -> int:
     stage_a_report, teacher = train_v2_teacher_logit_reconstructor(args, output_dir=output_dir, device=device)
 
     stage2_dir = output_dir / "stage2_dual_view"
-    train_hlt_view = slice_jet_view(load_cached_hlt_view(args.hlt_cache_dir, args.train_split), args.train_size)
-    val_hlt_view = slice_jet_view(load_cached_hlt_view(args.hlt_cache_dir, args.val_split), args.val_size)
+    train_hlt_view = _load_hlt_view_for_args(args, split=args.train_split, max_jets=args.train_size)
+    val_hlt_view = _load_hlt_view_for_args(args, split=args.val_split, max_jets=args.val_size)
     dual_config = DualViewTaggerTrainConfig(
         output_dir=str(stage2_dir),
         hlt_cache_dir=args.hlt_cache_dir,
@@ -544,11 +670,18 @@ def main() -> int:
         max_constits=args.max_constits,
         reco_weight_threshold=args.reco_weight_threshold,
     )
+    binary_dual_tagger = None
+    if tuple(args.label_filter_indices) == (0, 1):
+        binary_dual_tagger = build_dual_view_tagger(num_classes=2, model_size=args.model_size)
     dual_report = train_dual_view_tagger(
         dual_config,
+        tagger=binary_dual_tagger,
         train_view=train_hlt_view,
         val_view=val_hlt_view,
     )
+    dual_report["label_filter"] = [int(label) for label in args.label_filter_indices]
+    dual_report["label_filter_names"] = list(args.label_filter_names or ())
+    dual_report["num_classes"] = 2 if binary_dual_tagger is not None else len(LABEL_NAMES)
     save_json(stage2_dir / "run_report.json", dual_report)
 
     reconstructor = build_reconstructor(get_reconstructor_variant_config(args.variant)).to(device)
@@ -577,11 +710,18 @@ def main() -> int:
         device=device,
         max_constits=args.max_constits,
     )
-    dual_metrics = classification_metrics_from_logits(dual_block.logits, dual_block.labels)
+    dual_metrics = _attach_binary_metrics(
+        classification_metrics_from_logits(dual_block.logits, dual_block.labels),
+        logits=dual_block.logits,
+        labels=dual_block.labels,
+        label_filter=getattr(args, "label_filter_indices", ()),
+    )
     evaluation_report = {
         "experiment_step": f"{EXPERIMENT_STEP}_evaluation",
         "test_split": args.test_split,
         "test_n_jets": int(len(dual_block.labels)),
+        "label_filter": [int(label) for label in args.label_filter_indices],
+        "label_filter_names": list(args.label_filter_names or ()),
         "test_pair": summarize_paired_jet_views(test_pair),
         "teacher_paths": teacher_metrics,
         "fresh_dual_view_tagger": {
