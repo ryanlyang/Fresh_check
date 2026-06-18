@@ -32,6 +32,7 @@ RUNNERS = [
     "run_fuse_heterogeneous_hlt4.sh",
     "run_evaluate_offline_teacher_reference.sh",
     "run_diagnose_hlt_offline_disagreement.sh",
+    "run_hlt_offline_router_specialists.sh",
     "run_train_teacher_logit_gt_reco.sh",
     "run_predict_teacher_logit_gt_reco.sh",
     "run_fuse_teacher_logit_gt_reco.sh",
@@ -321,6 +322,22 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--hlt-checkpoint", text)
         self.assertIn("--offline-checkpoint", text)
         self.assertIn('fresh_require_file "${DISAGREE_DIAG_DIR}/disagreement_diagnostic_report.json"', text)
+
+    def test_hlt_offline_router_specialists_runner_trains_two_specialists(self):
+        text = self.read("run_hlt_offline_router_specialists.sh")
+        self.assertIn("#SBATCH --partition=debug", text)
+        self.assertIn("#SBATCH --time=12:00:00", text)
+        self.assertIn("#SBATCH --gres=gpu:1", text)
+        self.assertIn("scripts/run_hlt_offline_router_specialists.py", text)
+        self.assertIn("ROUTER_SPECIALIST_MAX_TRAIN_JETS:=150000", text)
+        self.assertIn("ROUTER_SPECIALIST_MAX_VAL_JETS:=50000", text)
+        self.assertIn("ROUTER_SPECIALIST_MAX_TEST_JETS:=100000", text)
+        self.assertIn('fresh_require_file "${ROUTER_SPECIALIST_ROOT}/specialists/agreement/best_model_val.pt"', text)
+        self.assertIn('fresh_require_file "${ROUTER_SPECIALIST_ROOT}/specialists/disagreement/best_model_val.pt"', text)
+        script = (REPO_ROOT / "scripts" / "run_hlt_offline_router_specialists.py").read_text(encoding="utf-8")
+        self.assertIn("agreement", script)
+        self.assertIn("disagreement", script)
+        self.assertIn("delta_vs_hlt_probe_accuracy", script)
 
     def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
         train = self.read("run_train_heterogeneous_hlt_arch.sh")
