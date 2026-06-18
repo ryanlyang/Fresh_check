@@ -30,6 +30,7 @@ RUNNERS = [
     "run_train_heterogeneous_hlt_arch.sh",
     "run_fuse_heterogeneous_hlt4.sh",
     "run_evaluate_offline_teacher_reference.sh",
+    "run_diagnose_hlt_offline_disagreement.sh",
     "run_train_teacher_logit_gt_reco.sh",
     "run_predict_teacher_logit_gt_reco.sh",
     "run_fuse_teacher_logit_gt_reco.sh",
@@ -293,6 +294,18 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--dual-epochs", text)
         self.assertIn('fresh_claim_new_dir "${V2_TLOG_DUALVIEW_DEBUG_ROOT}"', text)
         self.assertIn('fresh_require_file "${V2_TLOG_DUALVIEW_DEBUG_ROOT}/evaluation_report.json"', text)
+
+    def test_hlt_offline_disagreement_diagnostic_is_short_debug_runner(self):
+        text = self.read("run_diagnose_hlt_offline_disagreement.sh")
+        self.assertIn("#SBATCH --partition=debug", text)
+        self.assertIn("#SBATCH --time=02:00:00", text)
+        self.assertIn("#SBATCH --gres=gpu:1", text)
+        self.assertIn("scripts/diagnose_hlt_offline_disagreement.py", text)
+        self.assertIn('DISAGREE_DIAG_SPLIT:=stack_val', text)
+        self.assertIn('DISAGREE_DIAG_MAX_JETS:=50000', text)
+        self.assertIn("--hlt-checkpoint", text)
+        self.assertIn("--offline-checkpoint", text)
+        self.assertIn('fresh_require_file "${DISAGREE_DIAG_DIR}/disagreement_diagnostic_report.json"', text)
 
     def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
         train = self.read("run_train_heterogeneous_hlt_arch.sh")
