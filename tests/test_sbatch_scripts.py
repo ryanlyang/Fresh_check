@@ -289,6 +289,7 @@ class SbatchStep14Tests(unittest.TestCase):
 
     def test_v2_teacher_logit_dualview_debug_runner_is_small_debug_probe(self):
         text = self.read("run_v2_teacher_logit_dualview_debug.sh")
+        script = (REPO_ROOT / "scripts" / "run_v2_teacher_logit_dualview_debug.py").read_text(encoding="utf-8")
         self.assertIn("#SBATCH --partition=debug", text)
         self.assertIn("#SBATCH --time=24:00:00", text)
         self.assertIn("#SBATCH --gres=gpu:1", text)
@@ -301,6 +302,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--dual-epochs", text)
         self.assertIn('fresh_claim_new_dir "${V2_TLOG_DUALVIEW_DEBUG_ROOT}"', text)
         self.assertIn('fresh_require_file "${V2_TLOG_DUALVIEW_DEBUG_ROOT}/evaluation_report.json"', text)
+        self.assertIn("_balanced_indices_for_labels", script)
+        self.assertIn("_limit_manifest_split_by_indices", script)
+        self.assertIn("balanced_row_selection", script)
+        self.assertNotIn("load_paired_jet_views(", script)
 
     def test_v2_teacher_logit_dualview_hbb_qcd_runner_uses_binary_normal_split(self):
         text = self.read("run_v2_teacher_logit_dualview_hbb_qcd.sh")

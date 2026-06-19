@@ -23,7 +23,15 @@ from jetclass_fresh.fusion import (  # noqa: E402
 )
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json, set_training_seed  # noqa: E402
 from jetclass_fresh.hlt_cache import load_cached_hlt_view  # noqa: E402
-from jetclass_fresh.jetclass_data import LABEL_NAMES, load_split_manifest, manifest_hash  # noqa: E402
+from jetclass_fresh.jetclass_data import (  # noqa: E402
+    LABEL_NAMES,
+    JetView,
+    SPLIT_ORDER,
+    SplitManifest,
+    load_offline_view,
+    load_split_manifest,
+    manifest_hash,
+)
 from jetclass_fresh.reconstructor import (  # noqa: E402
     StageAReconstructorTrainConfig,
     build_reconstructor,
@@ -39,9 +47,8 @@ from teacher_logit_reco.train_global_transformer import (  # noqa: E402
 )
 from teacher_logit_reco.set_matching.five_view_train import binary_classification_metrics_from_logits  # noqa: E402
 from teacher_logit_reco.views import (  # noqa: E402
+    PairedJetViews,
     SoftReconstructedView,
-    load_paired_jet_views,
-    slice_jet_view,
     summarize_paired_jet_views,
 )
 
@@ -116,32 +123,155 @@ def _resolve_label_filter(label_filter_names: Sequence[str] | None) -> tuple[int
     return tuple(indices)
 
 
-def _filter_jet_view_by_labels(view, label_filter: Sequence[int], *, max_jets: int | None = None):
-    if not label_filter:
-        return slice_jet_view(view, max_jets)
-    keep_labels = set(int(label) for label in label_filter)
-    keep = np.asarray([int(label) in keep_labels for label in view.labels], dtype=bool)
-    indices = np.flatnonzero(keep)
-    if max_jets is not None:
-        indices = indices[: int(max_jets)]
-    metadata = dict(view.metadata)
-    metadata.update(
+def _label_count_dict(labels: np.ndarray) -> dict[str, int]:
+    labels = np.asarray(labels, dtype=np.int64)
+    counts: dict[str, int] = {}
+    for label in sorted(np.unique(labels).tolist()):
+        name = LABEL_NAMES[int(label)] if 0 <= int(label) < len(LABEL_NAMES) else f"label_{int(label)}"
+        counts[name] = int(np.sum(labels == int(label)))
+    return counts
+
+
+def _balanced_indices_for_labels(
+    labels: np.ndarray,
+    *,
+    max_jets: int | None,
+    label_filter: Sequence[int] = (),
+) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.int64)
+    if max_jets is None:
+        if label_filter:
+            keep = np.isin(labels, np.asarray(label_filter, dtype=np.int64))
+            return np.flatnonzero(keep).astype(np.int64)
+        return np.arange(labels.shape[0], dtype=np.int64)
+    limit = int(max_jets)
+    if limit < 0:
+        raise ValueError("max_jets must be non-negative")
+    if limit == 0 or labels.shape[0] == 0:
+        return np.zeros((0,), dtype=np.int64)
+
+    class_ids = [int(label) for label in label_filter] if label_filter else sorted(np.unique(labels).tolist())
+    if not class_ids:
+        return np.zeros((0,), dtype=np.int64)
+
+    per_class = limit // len(class_ids)
+    remainder = limit % len(class_ids)
+    selected_chunks: list[np.ndarray] = []
+    selected_mask = np.zeros(labels.shape[0], dtype=bool)
+    for class_index, label in enumerate(class_ids):
+        candidates = np.flatnonzero(labels == int(label))
+        take = min(candidates.shape[0], per_class + (1 if class_index < remainder else 0))
+        if take > 0:
+            chunk = candidates[:take]
+            selected_chunks.append(chunk)
+            selected_mask[chunk] = True
+
+    if selected_chunks:
+        selected = np.concatenate(selected_chunks).astype(np.int64)
+    else:
+        selected = np.zeros((0,), dtype=np.int64)
+
+    if selected.shape[0] < limit:
+        allowed = np.isin(labels, np.asarray(class_ids, dtype=np.int64))
+        fill = np.flatnonzero(allowed & ~selected_mask)
+        if fill.shape[0] > 0:
+            selected = np.concatenate([selected, fill[: limit - selected.shape[0]]]).astype(np.int64)
+    return selected[:limit].astype(np.int64)
+
+
+def _take_jet_view_indices(
+    view: JetView,
+    indices: np.ndarray,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> JetView:
+    indices = np.asarray(indices, dtype=np.int64)
+    payload = dict(view.metadata)
+    payload.update(
         {
+            "balanced_row_selection_applied": True,
+            "source_n_jets_before_selection": int(view.labels.shape[0]),
+            "selected_n_jets": int(indices.shape[0]),
+            "selected_label_counts": _label_count_dict(view.labels[indices]),
+            **dict(metadata or {}),
+        }
+    )
+    return JetView(
+        tokens=view.tokens[indices].copy(),
+        mask=view.mask[indices].copy(),
+        labels=view.labels[indices].copy(),
+        jet_ids=[view.jet_ids[int(index)] for index in indices],
+        split=view.split,
+        metadata=payload,
+    )
+
+
+def _limit_manifest_split_by_indices(
+    manifest: SplitManifest,
+    split: str,
+    indices: np.ndarray,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> SplitManifest:
+    if split not in SPLIT_ORDER:
+        raise ValueError(f"Unknown split {split!r}; expected one of {SPLIT_ORDER}")
+    indices = np.asarray(indices, dtype=np.int64)
+    splits = {name: list(rows) for name, rows in manifest.splits.items()}
+    source_rows = splits[split]
+    splits[split] = [source_rows[int(index)] for index in indices]
+    split_sizes = dict(manifest.split_sizes)
+    split_sizes[split] = int(indices.shape[0])
+    payload = dict(manifest.metadata)
+    payload.update(
+        {
+            "balanced_for_v2_teacher_logit_dualview_debug": True,
+            "balanced_split": split,
+            "balanced_split_selected_n_jets": int(indices.shape[0]),
+            "balanced_split_original_n_jets": int(len(source_rows)),
+            "source_manifest_hash_before_balance": manifest_hash(manifest),
+            **dict(metadata or {}),
+        }
+    )
+    return SplitManifest(
+        data_dir=manifest.data_dir,
+        max_constits=manifest.max_constits,
+        class_names=list(manifest.class_names),
+        file_prefix_to_label=dict(manifest.file_prefix_to_label),
+        split_sizes=split_sizes,
+        split_seeds=dict(manifest.split_seeds),
+        file_records=list(manifest.file_records),
+        splits=splits,
+        metadata=payload,
+    )
+
+
+def _filter_jet_view_by_labels(view, label_filter: Sequence[int], *, max_jets: int | None = None):
+    indices = _balanced_indices_for_labels(view.labels, max_jets=max_jets, label_filter=label_filter)
+    if not label_filter and max_jets is None:
+        return view
+    if not label_filter:
+        return _take_jet_view_indices(
+            view,
+            indices,
+            metadata={
+                "balanced_row_limit": None if max_jets is None else int(max_jets),
+                "balanced_label_filter": [],
+                "balanced_label_filter_names": [],
+            },
+        )
+    keep = np.isin(view.labels, np.asarray(label_filter, dtype=np.int64))
+    return _take_jet_view_indices(
+        view,
+        indices,
+        metadata={
             "label_filter_applied": True,
             "label_filter": [int(label) for label in label_filter],
             "label_filter_names": [LABEL_NAMES[int(label)] for label in label_filter],
             "n_jets_before_label_filter": int(view.labels.shape[0]),
             "n_jets_after_label_filter": int(np.sum(keep)),
             "row_limit_after_label_filter": None if max_jets is None else int(max_jets),
-        }
-    )
-    return type(view)(
-        tokens=view.tokens[indices].copy(),
-        mask=view.mask[indices].copy(),
-        labels=view.labels[indices].copy(),
-        jet_ids=[view.jet_ids[int(index)] for index in indices],
-        split=view.split,
-        metadata=metadata,
+            "balanced_label_filter": [int(label) for label in label_filter],
+        },
     )
 
 
@@ -165,15 +295,39 @@ def _filter_pair_by_labels(pair: Any, label_filter: Sequence[int], *, max_jets: 
 
 def _load_paired_jet_views_for_args(args: argparse.Namespace, *, split: str, max_jets: int | None):
     label_filter = tuple(getattr(args, "label_filter_indices", ()))
-    pair = load_paired_jet_views(
-        manifest_path=args.manifest_path,
-        hlt_cache_dir=args.hlt_cache_dir,
-        split=split,
+    manifest = load_split_manifest(args.manifest_path)
+    if split not in SPLIT_ORDER:
+        raise ValueError(f"Unknown split {split!r}; expected one of {SPLIT_ORDER}")
+    split_labels = np.asarray([int(identity.label) for identity in manifest.splits[split]], dtype=np.int64)
+    indices = _balanced_indices_for_labels(split_labels, max_jets=max_jets, label_filter=label_filter)
+    selection_metadata = {
+        "balanced_row_selection": True,
+        "row_limit": None if max_jets is None else int(max_jets),
+        "label_filter": [int(label) for label in label_filter],
+        "label_filter_names": [LABEL_NAMES[int(label)] for label in label_filter],
+        "selected_label_counts": _label_count_dict(split_labels[indices]),
+    }
+    hlt_full = load_cached_hlt_view(args.hlt_cache_dir, split)
+    hlt = _take_jet_view_indices(hlt_full, indices, metadata=selection_metadata)
+    offline_manifest = _limit_manifest_split_by_indices(manifest, split, indices, metadata=selection_metadata)
+    offline = load_offline_view(
+        offline_manifest,
+        split,
         data_dir=args.data_dir,
-        max_jets=None if label_filter else max_jets,
         read_chunk_size=args.read_chunk_size,
     )
-    return _filter_pair_by_labels(pair, label_filter, max_jets=max_jets)
+    return PairedJetViews(
+        hlt=hlt,
+        offline=offline,
+        metadata={
+            "manifest_path": str(args.manifest_path),
+            "hlt_cache_dir": str(args.hlt_cache_dir),
+            "data_dir": str(args.data_dir) if args.data_dir is not None else manifest.data_dir,
+            "max_jets": None if max_jets is None else int(max_jets),
+            "source_manifest_hash": manifest_hash(manifest),
+            **selection_metadata,
+        },
+    )
 
 
 def _load_hlt_view_for_args(args: argparse.Namespace, *, split: str, max_jets: int | None):
