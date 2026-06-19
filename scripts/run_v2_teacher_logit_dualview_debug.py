@@ -385,6 +385,88 @@ def _attach_binary_metrics(
     return metrics
 
 
+def _teacher_amp_state_targets(teacher) -> list[Any]:
+    targets: list[Any] = []
+    for obj in (getattr(teacher, "model", None), getattr(getattr(teacher, "model", None), "mod", None)):
+        if obj is not None and hasattr(obj, "use_amp"):
+            targets.append(obj)
+    return targets
+
+
+def _repair_nonfinite_logits_for_eval(logits):
+    torch = require_torch()
+    finite = torch.isfinite(logits)
+    bad_rows = ~torch.all(finite, dim=1)
+    stats = {
+        "n_jets": int(logits.shape[0]),
+        "nonfinite_value_count": int((~finite).sum().item()),
+        "nonfinite_row_count": int(bad_rows.sum().item()),
+        "repaired": bool(bad_rows.any().item()),
+    }
+    if not stats["repaired"]:
+        return logits, stats
+    repaired = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+    repaired = torch.where(bad_rows[:, None], torch.zeros_like(repaired), repaired)
+    return repaired, stats
+
+
+def _safe_teacher_eval_logits(teacher, tokens, mask, *, weights=None):
+    """Forward teacher in eval diagnostics without letting OOD HLT NaNs kill the run."""
+
+    torch = require_torch()
+    amp_targets = _teacher_amp_state_targets(teacher)
+    previous_amp_states = [(target, getattr(target, "use_amp")) for target in amp_targets]
+    stats = {
+        "amp_disabled_for_eval": bool(previous_amp_states),
+        "forward_error": None,
+        "fallback_direct_model_used": False,
+    }
+    with torch.no_grad():
+        try:
+            for target, _state in previous_amp_states:
+                setattr(target, "use_amp", False)
+            try:
+                logits = teacher.forward_view(tokens, mask, weights=weights)
+            except FloatingPointError as exc:
+                stats["forward_error"] = str(exc)
+                stats["fallback_direct_model_used"] = True
+                inputs = teacher.build_inputs(tokens, mask, weights=weights)
+                logits = teacher.model(
+                    inputs["points"],
+                    inputs["features"],
+                    inputs["lorentz_vectors"],
+                    inputs["mask"],
+                )
+        finally:
+            for target, state in previous_amp_states:
+                setattr(target, "use_amp", state)
+    logits, repair_stats = _repair_nonfinite_logits_for_eval(logits)
+    stats.update(repair_stats)
+    return logits, stats
+
+
+def _accumulate_teacher_eval_stats(total: Dict[str, Any], row: Mapping[str, Any]) -> None:
+    total["n_batches"] = int(total.get("n_batches", 0)) + 1
+    total["n_jets"] = int(total.get("n_jets", 0)) + int(row.get("n_jets", 0))
+    total["nonfinite_value_count"] = int(total.get("nonfinite_value_count", 0)) + int(
+        row.get("nonfinite_value_count", 0)
+    )
+    total["nonfinite_row_count"] = int(total.get("nonfinite_row_count", 0)) + int(
+        row.get("nonfinite_row_count", 0)
+    )
+    total["repaired_batch_count"] = int(total.get("repaired_batch_count", 0)) + int(bool(row.get("repaired", False)))
+    total["fallback_direct_model_batch_count"] = int(total.get("fallback_direct_model_batch_count", 0)) + int(
+        bool(row.get("fallback_direct_model_used", False))
+    )
+    total["amp_disabled_for_eval_batch_count"] = int(total.get("amp_disabled_for_eval_batch_count", 0)) + int(
+        bool(row.get("amp_disabled_for_eval", False))
+    )
+    if row.get("forward_error"):
+        errors = total.setdefault("forward_errors", [])
+        if len(errors) < 5:
+            errors.append(str(row["forward_error"]))
+
+
 def _average_metric_rows(rows: list[Mapping[str, float]]) -> Dict[str, float]:
     if not rows:
         return {"n_jets": 0, "n_batches": 0, "total_loss": float("nan")}
@@ -729,6 +811,7 @@ def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, recons
         "offline_teacher_on_hlt": [],
         "offline_teacher_on_reconstructed": [],
     }
+    sanitization_by_name: Dict[str, Dict[str, Any]] = {name: {} for name in logits_by_name}
     with torch.no_grad():
         for batch_index, raw_batch in enumerate(loader):
             if args.max_eval_batches is not None and batch_index >= int(args.max_eval_batches):
@@ -741,15 +824,15 @@ def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, recons
                 split=loader.dataset.split,
                 jet_ids=batch["jet_ids"],
             )
-            logits_by_name["offline_teacher_on_offline"].append(
-                teacher.forward_view_no_grad(batch["offline_tokens"], batch["offline_mask"]).detach().cpu().numpy()
-            )
-            logits_by_name["offline_teacher_on_hlt"].append(
-                teacher.forward_view_no_grad(batch["hlt_tokens"], batch["hlt_mask"]).detach().cpu().numpy()
-            )
-            logits_by_name["offline_teacher_on_reconstructed"].append(
-                teacher.forward_soft_view_no_grad(reco_view).detach().cpu().numpy()
-            )
+            path_payloads = {
+                "offline_teacher_on_offline": (batch["offline_tokens"], batch["offline_mask"], None),
+                "offline_teacher_on_hlt": (batch["hlt_tokens"], batch["hlt_mask"], None),
+                "offline_teacher_on_reconstructed": (reco_view.tokens, reco_view.mask, reco_view.weights),
+            }
+            for name, (tokens, mask, weights) in path_payloads.items():
+                logits, stats = _safe_teacher_eval_logits(teacher, tokens, mask, weights=weights)
+                _accumulate_teacher_eval_stats(sanitization_by_name[name], stats)
+                logits_by_name[name].append(logits.detach().cpu().numpy())
             labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))
 
     labels = np.concatenate(labels_rows, axis=0)
@@ -762,6 +845,7 @@ def evaluate_teacher_paths(args: argparse.Namespace, *, output_dir: Path, recons
             labels=labels,
             label_filter=getattr(args, "label_filter_indices", ()),
         )
+        metrics[name]["logit_sanitization"] = dict(sanitization_by_name[name])
     np.savez_compressed(
         output_dir / "teacher_path_test_logits.npz",
         labels=labels.astype(np.int64),

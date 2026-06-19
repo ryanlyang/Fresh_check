@@ -305,6 +305,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("_balanced_indices_for_labels", script)
         self.assertIn("_limit_manifest_split_by_indices", script)
         self.assertIn("balanced_row_selection", script)
+        self.assertIn("_safe_teacher_eval_logits", script)
+        self.assertIn("logit_sanitization", script)
         self.assertNotIn("load_paired_jet_views(", script)
 
     def test_v2_teacher_logit_dualview_hbb_qcd_runner_uses_binary_normal_split(self):
