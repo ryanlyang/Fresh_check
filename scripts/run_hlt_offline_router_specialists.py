@@ -61,10 +61,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-size", choices=("tiny", "base"), default="base")
     parser.add_argument("--max-constits", type=int, default=128)
     parser.add_argument("--weight-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--label-filter-names",
+        nargs="*",
+        default=(),
+        help="Optional label names to keep before balanced row selection, e.g. QCD Hbb.",
+    )
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--max-train-batches", type=int, default=None)
     parser.add_argument("--max-val-batches", type=int, default=None)
     return parser.parse_args()
+
+
+def resolve_label_filter(label_filter_names: list[str] | tuple[str, ...] | None) -> tuple[int, ...]:
+    if not label_filter_names:
+        return ()
+    name_to_index = {name.lower(): index for index, name in enumerate(LABEL_NAMES)}
+    indices: list[int] = []
+    for name in label_filter_names:
+        key = str(name).strip().lower()
+        if key not in name_to_index:
+            raise ValueError(f"Unknown label-filter name {name!r}; expected one of {LABEL_NAMES}")
+        indices.append(int(name_to_index[key]))
+    if len(set(indices)) != len(indices):
+        raise ValueError(f"Duplicate label-filter names: {label_filter_names}")
+    return tuple(indices)
 
 
 def class_counts(labels: np.ndarray) -> dict[str, int]:
@@ -95,16 +116,25 @@ def subset_view(view: JetView, indices: np.ndarray, *, route_name: str) -> JetVi
     )
 
 
-def balanced_indices_for_labels(labels: np.ndarray, max_jets: int | None) -> np.ndarray:
+def balanced_indices_for_labels(
+    labels: np.ndarray,
+    max_jets: int | None,
+    *,
+    label_filter: tuple[int, ...] = (),
+) -> np.ndarray:
     labels = np.asarray(labels, dtype=np.int64)
     if max_jets is None:
+        if label_filter:
+            return np.flatnonzero(np.isin(labels, np.asarray(label_filter, dtype=np.int64))).astype(np.int64)
         return np.arange(labels.shape[0], dtype=np.int64)
     limit = int(max_jets)
     if limit < 0:
         raise ValueError("max_jets must be non-negative")
     if limit == 0 or labels.shape[0] == 0:
         return np.zeros((0,), dtype=np.int64)
-    class_ids = sorted(np.unique(labels).tolist())
+    class_ids = [int(label) for label in label_filter] if label_filter else sorted(np.unique(labels).tolist())
+    if not class_ids:
+        return np.zeros((0,), dtype=np.int64)
     per_class = limit // len(class_ids)
     remainder = limit % len(class_ids)
     selected_chunks: list[np.ndarray] = []
@@ -118,7 +148,8 @@ def balanced_indices_for_labels(labels: np.ndarray, max_jets: int | None) -> np.
             selected_mask[chunk] = True
     selected = np.concatenate(selected_chunks).astype(np.int64) if selected_chunks else np.zeros((0,), dtype=np.int64)
     if selected.shape[0] < limit:
-        fill = np.flatnonzero(~selected_mask)
+        allowed = np.isin(labels, np.asarray(class_ids, dtype=np.int64))
+        fill = np.flatnonzero(allowed & ~selected_mask)
         if fill.shape[0] > 0:
             selected = np.concatenate([selected, fill[: limit - selected.shape[0]]]).astype(np.int64)
     return selected[:limit].astype(np.int64)
@@ -197,10 +228,23 @@ def route_summary(labels: np.ndarray, hlt_logits: np.ndarray, offline_hlt_logits
 
 def load_hlt_view(args: argparse.Namespace, split: str, max_jets: int | None) -> JetView:
     full_view = load_cached_hlt_view(args.hlt_cache_dir, split, verify_hash=True)
-    if max_jets is None:
+    label_filter = tuple(getattr(args, "label_filter_indices", ()))
+    if max_jets is None and not label_filter:
         return full_view
-    indices = balanced_indices_for_labels(full_view.labels, max_jets=max_jets)
-    return take_view_indices(full_view, indices, selection_name=f"{split}_balanced_router_limit")
+    indices = balanced_indices_for_labels(full_view.labels, max_jets=max_jets, label_filter=label_filter)
+    selection_name = f"{split}_balanced_router_limit"
+    if label_filter:
+        selection_name += "_label_filtered"
+    view = take_view_indices(full_view, indices, selection_name=selection_name)
+    if label_filter:
+        view.metadata.update(
+            {
+                "label_filter_applied": True,
+                "label_filter": [int(label) for label in label_filter],
+                "label_filter_names": [LABEL_NAMES[int(label)] for label in label_filter],
+            }
+        )
+    return view
 
 
 def teacher_amp_state_targets(teacher) -> list[Any]:
@@ -497,6 +541,7 @@ def evaluate_routed_specialists(
 
 def main() -> int:
     args = parse_args()
+    args.label_filter_indices = resolve_label_filter(args.label_filter_names)
     if args.train_split != "model_train" or args.val_split != "model_val":
         raise ValueError("Specialists must train on model_train and select on model_val")
     for name in ("max_train_jets", "max_val_jets", "max_test_jets", "epochs"):
@@ -531,6 +576,8 @@ def main() -> int:
         "experiment_step": EXPERIMENT_STEP,
         "args": vars(args),
         "label_names": list(LABEL_NAMES),
+        "label_filter": [int(label) for label in args.label_filter_indices],
+        "label_filter_names": list(args.label_filter_names or ()),
         "hlt_probe": dict(hlt_probe.metadata),
         "offline_probe": dict(offline_probe.metadata),
         "source": source_metadata(),

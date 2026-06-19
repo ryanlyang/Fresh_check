@@ -35,6 +35,7 @@ RUNNERS = [
     "run_evaluate_offline_teacher_reference.sh",
     "run_diagnose_hlt_offline_disagreement.sh",
     "run_hlt_offline_router_specialists.sh",
+    "run_hlt_offline_router_specialists_hbb_qcd.sh",
     "run_train_teacher_logit_gt_reco.sh",
     "run_predict_teacher_logit_gt_reco.sh",
     "run_fuse_teacher_logit_gt_reco.sh",
@@ -336,6 +337,7 @@ class SbatchStep14Tests(unittest.TestCase):
 
     def test_hlt_offline_router_specialists_runner_trains_two_specialists(self):
         text = self.read("run_hlt_offline_router_specialists.sh")
+        hbb_qcd = self.read("run_hlt_offline_router_specialists_hbb_qcd.sh")
         self.assertIn("#SBATCH --partition=debug", text)
         self.assertIn("#SBATCH --time=12:00:00", text)
         self.assertIn("#SBATCH --gres=gpu:1", text)
@@ -353,6 +355,12 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("balanced_row_selection_applied", script)
         self.assertIn("logit_sanitization", script)
         self.assertIn("repair_nonfinite_logits_for_eval", script)
+        self.assertIn("#SBATCH --job-name=hlt_route_hbbqcd", hbb_qcd)
+        self.assertIn("scripts/run_hlt_offline_router_specialists.py", hbb_qcd)
+        self.assertIn("--label-filter-names QCD Hbb", hbb_qcd)
+        self.assertIn("ROUTER_SPECIALIST_HBB_QCD_MAX_TRAIN_JETS:=150000", hbb_qcd)
+        self.assertIn("ROUTER_SPECIALIST_HBB_QCD_MAX_VAL_JETS:=50000", hbb_qcd)
+        self.assertIn("ROUTER_SPECIALIST_HBB_QCD_MAX_TEST_JETS:=100000", hbb_qcd)
 
     def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
         train = self.read("run_train_heterogeneous_hlt_arch.sh")
