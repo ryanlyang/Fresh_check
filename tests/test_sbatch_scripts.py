@@ -349,6 +349,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("agreement", script)
         self.assertIn("disagreement", script)
         self.assertIn("delta_vs_hlt_probe_accuracy", script)
+        self.assertIn("balanced_indices_for_labels", script)
+        self.assertIn("balanced_row_selection_applied", script)
+        self.assertIn("logit_sanitization", script)
+        self.assertIn("repair_nonfinite_logits_for_eval", script)
 
     def test_heterogeneous_hlt4_submitter_queues_four_architectures_then_fusion(self):
         train = self.read("run_train_heterogeneous_hlt_arch.sh")

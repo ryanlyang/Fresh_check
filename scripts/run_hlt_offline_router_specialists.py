@@ -29,7 +29,6 @@ from jetclass_fresh.hlt_cache import load_cached_hlt_view  # noqa: E402
 from jetclass_fresh.jetclass_data import LABEL_NAMES, JetView  # noqa: E402
 from teacher_logit_reco.teachers import TEACHER_ARCHITECTURES, load_frozen_teacher  # noqa: E402
 from teacher_logit_reco.train_global_transformer import source_metadata  # noqa: E402
-from teacher_logit_reco.views import slice_jet_view  # noqa: E402
 
 
 EXPERIMENT_STEP = "hlt_offline_agreement_router_specialists"
@@ -96,6 +95,57 @@ def subset_view(view: JetView, indices: np.ndarray, *, route_name: str) -> JetVi
     )
 
 
+def balanced_indices_for_labels(labels: np.ndarray, max_jets: int | None) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.int64)
+    if max_jets is None:
+        return np.arange(labels.shape[0], dtype=np.int64)
+    limit = int(max_jets)
+    if limit < 0:
+        raise ValueError("max_jets must be non-negative")
+    if limit == 0 or labels.shape[0] == 0:
+        return np.zeros((0,), dtype=np.int64)
+    class_ids = sorted(np.unique(labels).tolist())
+    per_class = limit // len(class_ids)
+    remainder = limit % len(class_ids)
+    selected_chunks: list[np.ndarray] = []
+    selected_mask = np.zeros(labels.shape[0], dtype=bool)
+    for class_index, label in enumerate(class_ids):
+        candidates = np.flatnonzero(labels == int(label))
+        take = min(candidates.shape[0], per_class + (1 if class_index < remainder else 0))
+        if take > 0:
+            chunk = candidates[:take]
+            selected_chunks.append(chunk)
+            selected_mask[chunk] = True
+    selected = np.concatenate(selected_chunks).astype(np.int64) if selected_chunks else np.zeros((0,), dtype=np.int64)
+    if selected.shape[0] < limit:
+        fill = np.flatnonzero(~selected_mask)
+        if fill.shape[0] > 0:
+            selected = np.concatenate([selected, fill[: limit - selected.shape[0]]]).astype(np.int64)
+    return selected[:limit].astype(np.int64)
+
+
+def take_view_indices(view: JetView, indices: np.ndarray, *, selection_name: str) -> JetView:
+    indices = np.asarray(indices, dtype=np.int64)
+    metadata = dict(view.metadata)
+    metadata.update(
+        {
+            "balanced_row_selection_applied": True,
+            "balanced_row_selection_name": selection_name,
+            "source_n_jets_before_selection": int(view.labels.shape[0]),
+            "selected_n_jets": int(indices.shape[0]),
+            "selected_class_counts": class_counts(view.labels[indices]),
+        }
+    )
+    return JetView(
+        tokens=view.tokens[indices].copy(),
+        mask=view.mask[indices].copy(),
+        labels=view.labels[indices].copy(),
+        jet_ids=[view.jet_ids[int(index)] for index in indices],
+        split=view.split,
+        metadata=metadata,
+    )
+
+
 def softmax_np(logits: np.ndarray) -> np.ndarray:
     logits = np.asarray(logits, dtype=np.float64)
     shifted = logits - np.max(logits, axis=1, keepdims=True)
@@ -146,10 +196,68 @@ def route_summary(labels: np.ndarray, hlt_logits: np.ndarray, offline_hlt_logits
 
 
 def load_hlt_view(args: argparse.Namespace, split: str, max_jets: int | None) -> JetView:
-    return slice_jet_view(load_cached_hlt_view(args.hlt_cache_dir, split, verify_hash=True), max_jets)
+    full_view = load_cached_hlt_view(args.hlt_cache_dir, split, verify_hash=True)
+    if max_jets is None:
+        return full_view
+    indices = balanced_indices_for_labels(full_view.labels, max_jets=max_jets)
+    return take_view_indices(full_view, indices, selection_name=f"{split}_balanced_router_limit")
 
 
-def predict_teacher_on_view(teacher, view: JetView, *, batch_size: int, num_workers: int, seed: int) -> np.ndarray:
+def teacher_amp_state_targets(teacher) -> list[Any]:
+    targets: list[Any] = []
+    for obj in (getattr(teacher, "model", None), getattr(getattr(teacher, "model", None), "mod", None)):
+        if obj is not None and hasattr(obj, "use_amp"):
+            targets.append(obj)
+    return targets
+
+
+def repair_nonfinite_logits_for_eval(logits):
+    torch = require_torch()
+    finite = torch.isfinite(logits)
+    bad_rows = ~torch.all(finite, dim=1)
+    stats = {
+        "n_jets": int(logits.shape[0]),
+        "nonfinite_value_count": int((~finite).sum().item()),
+        "nonfinite_row_count": int(bad_rows.sum().item()),
+        "repaired": bool(bad_rows.any().item()),
+    }
+    if not stats["repaired"]:
+        return logits, stats
+    repaired = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+    repaired = torch.where(bad_rows[:, None], torch.zeros_like(repaired), repaired)
+    return repaired, stats
+
+
+def accumulate_prediction_stats(total: dict[str, Any], row: Mapping[str, Any]) -> None:
+    total["n_batches"] = int(total.get("n_batches", 0)) + 1
+    total["n_jets"] = int(total.get("n_jets", 0)) + int(row.get("n_jets", 0))
+    total["nonfinite_value_count"] = int(total.get("nonfinite_value_count", 0)) + int(
+        row.get("nonfinite_value_count", 0)
+    )
+    total["nonfinite_row_count"] = int(total.get("nonfinite_row_count", 0)) + int(
+        row.get("nonfinite_row_count", 0)
+    )
+    total["repaired_batch_count"] = int(total.get("repaired_batch_count", 0)) + int(bool(row.get("repaired", False)))
+    total["fallback_direct_model_batch_count"] = int(total.get("fallback_direct_model_batch_count", 0)) + int(
+        bool(row.get("fallback_direct_model_used", False))
+    )
+    total["amp_disabled_for_eval_batch_count"] = int(total.get("amp_disabled_for_eval_batch_count", 0)) + int(
+        bool(row.get("amp_disabled_for_eval", False))
+    )
+    if row.get("forward_error"):
+        errors = total.setdefault("forward_errors", [])
+        if len(errors) < 5:
+            errors.append(str(row["forward_error"]))
+
+
+def predict_teacher_on_view(
+    teacher,
+    view: JetView,
+    *,
+    batch_size: int,
+    num_workers: int,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
     torch = require_torch()
     dataset = JetViewTorchDataset(view)
     loader = make_data_loader(
@@ -160,16 +268,45 @@ def predict_teacher_on_view(teacher, view: JetView, *, batch_size: int, num_work
         seed=seed,
     )
     rows: list[np.ndarray] = []
+    stats: dict[str, Any] = {}
+    amp_targets = teacher_amp_state_targets(teacher)
+    previous_amp_states = [(target, getattr(target, "use_amp")) for target in amp_targets]
     teacher.model.eval()
     with torch.no_grad():
-        for batch in loader:
-            inputs = {
-                key: value.to(teacher.device, non_blocking=True)
-                for key, value in batch.items()
-                if key != "labels"
-            }
-            rows.append(teacher.forward_inputs(inputs).detach().cpu().numpy().astype(np.float32))
-    return np.concatenate(rows, axis=0) if rows else np.zeros((0, len(LABEL_NAMES)), dtype=np.float32)
+        try:
+            for target, _state in previous_amp_states:
+                setattr(target, "use_amp", False)
+            for batch in loader:
+                inputs = {
+                    key: value.to(teacher.device, non_blocking=True)
+                    for key, value in batch.items()
+                    if key != "labels"
+                }
+                row_stats = {
+                    "amp_disabled_for_eval": bool(previous_amp_states),
+                    "forward_error": None,
+                    "fallback_direct_model_used": False,
+                }
+                try:
+                    logits = teacher.forward_inputs(inputs)
+                except FloatingPointError as exc:
+                    row_stats["forward_error"] = str(exc)
+                    row_stats["fallback_direct_model_used"] = True
+                    logits = teacher.model(
+                        inputs["points"],
+                        inputs["features"],
+                        inputs["lorentz_vectors"],
+                        inputs["mask"],
+                    )
+                logits, repair_stats = repair_nonfinite_logits_for_eval(logits)
+                row_stats.update(repair_stats)
+                accumulate_prediction_stats(stats, row_stats)
+                rows.append(logits.detach().cpu().numpy().astype(np.float32))
+        finally:
+            for target, state in previous_amp_states:
+                setattr(target, "use_amp", state)
+    logits = np.concatenate(rows, axis=0) if rows else np.zeros((0, len(LABEL_NAMES)), dtype=np.float32)
+    return logits, stats
 
 
 def compute_router(
@@ -181,14 +318,14 @@ def compute_router(
     offline_probe,
     output_dir: Path,
 ) -> dict[str, Any]:
-    hlt_logits = predict_teacher_on_view(
+    hlt_logits, hlt_sanitization = predict_teacher_on_view(
         hlt_probe,
         view,
         batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
         seed=args.seed + 10,
     )
-    offline_hlt_logits = predict_teacher_on_view(
+    offline_hlt_logits, offline_hlt_sanitization = predict_teacher_on_view(
         offline_probe,
         view,
         batch_size=args.eval_batch_size,
@@ -209,6 +346,11 @@ def compute_router(
         offline_on_hlt_logits=offline_hlt_logits.astype(np.float32),
     )
     summary = route_summary(labels, hlt_logits, offline_hlt_logits)
+    summary["logit_sanitization"] = {
+        "hlt_probe": hlt_sanitization,
+        "offline_on_hlt_probe": offline_hlt_sanitization,
+    }
+    summary["view_selection"] = dict(view.metadata)
     save_json(router_dir / f"{split}_router_report.json", summary)
     return {
         "labels": labels,
@@ -216,6 +358,7 @@ def compute_router(
         "offline_on_hlt_logits": offline_hlt_logits,
         "agree": agree,
         "summary": summary,
+        "logit_sanitization": summary["logit_sanitization"],
     }
 
 
