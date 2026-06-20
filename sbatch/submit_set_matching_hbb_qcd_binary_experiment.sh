@@ -26,6 +26,24 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HBB_QCD_TAGGER_MEM:=64G}"
 : "${HBB_QCD_AUDIT_MEM:=48G}"
 : "${HBB_QCD_REPORT_MEM:=8G}"
+: "${HBB_QCD_OFFLINE_TEACHER_MEM:=64G}"
+: "${HBB_QCD_BINARY_MANIFEST_TIME:=01:00:00}"
+: "${HBB_QCD_BINARY_HLT_CACHE_TIME:=12:00:00}"
+: "${HBB_QCD_RECO_TIME:=2-00:00:00}"
+: "${HBB_QCD_CACHE_TIME:=12:00:00}"
+: "${HBB_QCD_TAGGER_TIME:=2-00:00:00}"
+: "${HBB_QCD_AUDIT_TIME:=08:00:00}"
+: "${HBB_QCD_REPORT_TIME:=01:00:00}"
+: "${HBB_QCD_OFFLINE_TEACHER_TIME:=1-00:00:00}"
+: "${HBB_QCD_BINARY_MANIFEST_CPUS:=2}"
+: "${HBB_QCD_BINARY_HLT_CACHE_CPUS:=4}"
+: "${HBB_QCD_RECO_CPUS:=4}"
+: "${HBB_QCD_CACHE_CPUS:=4}"
+: "${HBB_QCD_TAGGER_CPUS:=4}"
+: "${HBB_QCD_AUDIT_CPUS:=4}"
+: "${HBB_QCD_REPORT_CPUS:=2}"
+: "${HBB_QCD_OFFLINE_TEACHER_CPUS:=4}"
+: "${HBB_QCD_SUBMIT_OFFLINE_TEACHER_REFERENCE:=1}"
 
 export SET_MATCHING_ROOT="${HBB_QCD_ROOT}"
 export SET_MATCHING_RECONSTRUCTOR_DIR="${SET_MATCHING_ROOT}/reconstructors"
@@ -116,6 +134,16 @@ if ! fresh_is_dry_run; then
     echo "tagger_mem=${HBB_QCD_TAGGER_MEM}"
     echo "audit_mem=${HBB_QCD_AUDIT_MEM}"
     echo "report_mem=${HBB_QCD_REPORT_MEM}"
+    echo "offline_teacher_mem=${HBB_QCD_OFFLINE_TEACHER_MEM}"
+    echo "binary_manifest_time=${HBB_QCD_BINARY_MANIFEST_TIME}"
+    echo "binary_hlt_cache_time=${HBB_QCD_BINARY_HLT_CACHE_TIME}"
+    echo "reco_time=${HBB_QCD_RECO_TIME}"
+    echo "cache_time=${HBB_QCD_CACHE_TIME}"
+    echo "tagger_time=${HBB_QCD_TAGGER_TIME}"
+    echo "audit_time=${HBB_QCD_AUDIT_TIME}"
+    echo "report_time=${HBB_QCD_REPORT_TIME}"
+    echo "offline_teacher_time=${HBB_QCD_OFFLINE_TEACHER_TIME}"
+    echo "submit_offline_teacher_reference=${HBB_QCD_SUBMIT_OFFLINE_TEACHER_REFERENCE}"
   } > "${submitter_lock_dir}/metadata.txt"
 fi
 
@@ -124,6 +152,7 @@ cache_job_ids=()
 tagger_job_ids=()
 binary_manifest_jid=""
 binary_hlt_cache_jid=""
+offline_teacher_jid=""
 input_dependency="${UPSTREAM_DEPENDENCY}"
 declare -A reco_train_job_id_by_arch=()
 
@@ -138,6 +167,8 @@ if fresh_bool_enabled "${HBB_QCD_BUILD_BINARY_INPUTS}"; then
   mapfile -t manifest_args < <(
     afterok_args \
       "${UPSTREAM_DEPENDENCY}" \
+      --time="${HBB_QCD_BINARY_MANIFEST_TIME}" \
+      --cpus-per-task="${HBB_QCD_BINARY_MANIFEST_CPUS}" \
       --mem="${HBB_QCD_BINARY_MANIFEST_MEM}" \
       "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
   )
@@ -145,6 +176,8 @@ if fresh_bool_enabled "${HBB_QCD_BUILD_BINARY_INPUTS}"; then
   echo "submitted hbbqcd_binary_manifest=${binary_manifest_jid}"
 
   binary_hlt_cache_jid="$(submit_job "hbbqcd_binary_hlt_cache" \
+    --time="${HBB_QCD_BINARY_HLT_CACHE_TIME}" \
+    --cpus-per-task="${HBB_QCD_BINARY_HLT_CACHE_CPUS}" \
     --mem="${HBB_QCD_BINARY_HLT_CACHE_MEM}" \
     --dependency="afterok:${binary_manifest_jid}" \
     "${SCRIPT_DIR}/run_build_label_filtered_hlt_cache.sh")"
@@ -152,10 +185,29 @@ if fresh_bool_enabled "${HBB_QCD_BUILD_BINARY_INPUTS}"; then
   input_dependency="${binary_hlt_cache_jid}"
 fi
 
+if fresh_bool_enabled "${HBB_QCD_SUBMIT_OFFLINE_TEACHER_REFERENCE}"; then
+  offline_dependency="${UPSTREAM_DEPENDENCY}"
+  if [[ -n "${binary_manifest_jid}" ]]; then
+    offline_dependency="${binary_manifest_jid}"
+  fi
+  mapfile -t offline_args < <(
+    afterok_args \
+      "${offline_dependency}" \
+      --time="${HBB_QCD_OFFLINE_TEACHER_TIME}" \
+      --cpus-per-task="${HBB_QCD_OFFLINE_TEACHER_CPUS}" \
+      --mem="${HBB_QCD_OFFLINE_TEACHER_MEM}" \
+      "${SCRIPT_DIR}/run_train_eval_set_matching_binary_offline_teacher.sh"
+  )
+  offline_teacher_jid="$(submit_job "hbbqcd_offline_teacher_reference" "${offline_args[@]}")"
+  echo "submitted hbbqcd_offline_teacher_reference=${offline_teacher_jid}"
+fi
+
 for architecture in "${reco_args[@]}"; do
   mapfile -t train_args < <(
     afterok_args \
       "${input_dependency}" \
+      --time="${HBB_QCD_RECO_TIME}" \
+      --cpus-per-task="${HBB_QCD_RECO_CPUS}" \
       --mem="${HBB_QCD_RECO_MEM}" \
       "${SCRIPT_DIR}/run_train_set_matching_reconstructor.sh" \
       "${architecture}"
@@ -169,6 +221,8 @@ done
 for architecture in "${reco_args[@]}"; do
   train_jid="${reco_train_job_id_by_arch[$architecture]}"
   cache_jid="$(submit_job "hbbqcd_setmatch_cache_${architecture}" \
+    --time="${HBB_QCD_CACHE_TIME}" \
+    --cpus-per-task="${HBB_QCD_CACHE_CPUS}" \
     --mem="${HBB_QCD_CACHE_MEM}" \
     --dependency="afterok:${train_jid}" \
     "${SCRIPT_DIR}/run_cache_set_matching_multiview.sh" \
@@ -183,6 +237,8 @@ if [[ -n "${TAGGER_UPSTREAM_DEPENDENCY}" ]]; then
 fi
 for variant in "${tagger_args[@]}"; do
   tagger_jid="$(submit_job "hbbqcd_setmatch_tagger_${variant}" \
+    --time="${HBB_QCD_TAGGER_TIME}" \
+    --cpus-per-task="${HBB_QCD_TAGGER_CPUS}" \
     --mem="${HBB_QCD_TAGGER_MEM}" \
     --dependency="afterok:${cache_dep}" \
     "${SCRIPT_DIR}/run_train_five_view_tagger.sh" \
@@ -193,10 +249,14 @@ done
 
 audit_dep="$(fresh_join_by_colon "${tagger_job_ids[@]}")"
 audit_jid="$(submit_job "hbbqcd_setmatch_audit" \
+  --time="${HBB_QCD_AUDIT_TIME}" \
+  --cpus-per-task="${HBB_QCD_AUDIT_CPUS}" \
   --mem="${HBB_QCD_AUDIT_MEM}" \
   --dependency="afterok:${audit_dep}" \
   "${SCRIPT_DIR}/run_audit_five_view_tagger.sh")"
 final_report_jid="$(submit_job "hbbqcd_setmatch_final_report" \
+  --time="${HBB_QCD_REPORT_TIME}" \
+  --cpus-per-task="${HBB_QCD_REPORT_CPUS}" \
   --mem="${HBB_QCD_REPORT_MEM}" \
   --dependency="afterok:${audit_jid}" \
   "${SCRIPT_DIR}/run_write_set_matching_multiview_final_report.sh")"
@@ -213,6 +273,7 @@ hbb_qcd_binary_set_matching_submission:
     filtered_hlt_cache: ${SET_MATCHING_HLT_CACHE_DIR}
     manifest_job_id: ${binary_manifest_jid:-none}
     hlt_cache_job_id: ${binary_hlt_cache_jid:-none}
+  offline_teacher_reference_job_id: ${offline_teacher_jid:-none}
   reco_train_job_ids: $(fresh_join_by_space "${reco_train_job_ids[@]}")
   cache_job_ids: $(fresh_join_by_space "${cache_job_ids[@]}")
   tagger_job_ids: $(fresh_join_by_space "${tagger_job_ids[@]}")
@@ -221,6 +282,7 @@ hbb_qcd_binary_set_matching_submission:
   expected_jobs:
     binary_manifest: $([[ -n "${binary_manifest_jid}" ]] && echo 1 || echo 0)
     binary_hlt_cache: $([[ -n "${binary_hlt_cache_jid}" ]] && echo 1 || echo 0)
+    offline_teacher_reference: $([[ -n "${offline_teacher_jid}" ]] && echo 1 || echo 0)
     reco_train: ${#reco_train_job_ids[@]}
     cache_reconstructed_views: ${#cache_job_ids[@]}
     tagger_train: ${#tagger_job_ids[@]}
@@ -241,14 +303,35 @@ hbb_qcd_binary_set_matching_submission:
     tagger_train: ${HBB_QCD_TAGGER_MEM}
     audit: ${HBB_QCD_AUDIT_MEM}
     final_report: ${HBB_QCD_REPORT_MEM}
+    offline_teacher_reference: ${HBB_QCD_OFFLINE_TEACHER_MEM}
+  time_overrides:
+    binary_manifest: ${HBB_QCD_BINARY_MANIFEST_TIME}
+    binary_hlt_cache: ${HBB_QCD_BINARY_HLT_CACHE_TIME}
+    reco_train: ${HBB_QCD_RECO_TIME}
+    cache_reconstructed_views: ${HBB_QCD_CACHE_TIME}
+    tagger_train: ${HBB_QCD_TAGGER_TIME}
+    audit: ${HBB_QCD_AUDIT_TIME}
+    final_report: ${HBB_QCD_REPORT_TIME}
+    offline_teacher_reference: ${HBB_QCD_OFFLINE_TEACHER_TIME}
+  cpu_overrides:
+    binary_manifest: ${HBB_QCD_BINARY_MANIFEST_CPUS}
+    binary_hlt_cache: ${HBB_QCD_BINARY_HLT_CACHE_CPUS}
+    reco_train: ${HBB_QCD_RECO_CPUS}
+    cache_reconstructed_views: ${HBB_QCD_CACHE_CPUS}
+    tagger_train: ${HBB_QCD_TAGGER_CPUS}
+    audit: ${HBB_QCD_AUDIT_CPUS}
+    final_report: ${HBB_QCD_REPORT_CPUS}
+    offline_teacher_reference: ${HBB_QCD_OFFLINE_TEACHER_CPUS}
   output_dirs:
     root: ${SET_MATCHING_ROOT}
     taggers: ${SET_MATCHING_TAGGER_ROOT}
     audit: ${SET_MATCHING_ABLATION_DIR}
     final_report: ${SET_MATCHING_FINAL_REPORT_DIR}
+    offline_teacher_reference: ${SET_MATCHING_ROOT}/offline_teacher_reference
     logs: ${PROJECT_DIR}/fresh_check_logs
   key_metrics:
     tagger_run_reports: ${SET_MATCHING_TAGGER_ROOT}/<variant>/run_report.json
     audit_summary: ${SET_MATCHING_ABLATION_DIR}/summary.csv
     final_report: ${SET_MATCHING_FINAL_REPORT_DIR}/final_report.json
+    offline_teacher_reference: ${SET_MATCHING_ROOT}/offline_teacher_reference/<run>/run_report.json
 SUMMARY
