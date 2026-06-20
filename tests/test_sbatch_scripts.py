@@ -150,6 +150,25 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertNotIn("/home/ryreu/atlas/PracticeTagging/old", combined)
         self.assertNotIn("old_project", combined)
 
+    def test_common_mirrors_lightweight_diagnostics_outside_checkpoints(self):
+        common = self.read("common.sh")
+        gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn('DIAGNOSTICS_ROOT:=${PROJECT_DIR}/fresh_check_diagnostics', common)
+        self.assertIn("MIRROR_DIAGNOSTICS:=1", common)
+        self.assertIn("DIAGNOSTICS_MAX_FILE_MB:=25", common)
+        self.assertIn("fresh_register_diagnostics_dir", common)
+        self.assertIn("fresh_mirror_run_diagnostics", common)
+        self.assertIn("fresh_mirror_current_slurm_logs", common)
+        self.assertIn("fresh_on_exit", common)
+        self.assertIn("RUN_CONFIG_DIAGNOSTICS_DIR", common)
+        self.assertIn('"diagnostics_dir": os.environ.get("RUN_CONFIG_DIAGNOSTICS_DIR")', common)
+        self.assertIn(".json", common)
+        self.assertIn(".csv", common)
+        self.assertIn(".pt", common)
+        self.assertIn(".npz", common)
+        self.assertIn("fresh_check_diagnostics/", gitignore)
+
     def test_smoke_submitter_sets_protocol_tiny_sizes(self):
         text = self.read("submit_fresh_smoke_test.sh")
         self.assertIn('MODEL_TRAIN_SIZE="${MODEL_TRAIN_SIZE:-10000}"', text)

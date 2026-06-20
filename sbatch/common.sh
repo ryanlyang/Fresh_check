@@ -7,7 +7,10 @@ IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 : "${DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data/jetclass_part0}"
 : "${OUTPUT_ROOT:=${PROJECT_DIR}/checkpoints}"
+: "${DIAGNOSTICS_ROOT:=${PROJECT_DIR}/fresh_check_diagnostics}"
 : "${LOG_DIR:=${PROJECT_DIR}/fresh_check_logs}"
+: "${MIRROR_DIAGNOSTICS:=1}"
+: "${DIAGNOSTICS_MAX_FILE_MB:=25}"
 : "${CONDA_ENV:=weaver}"
 : "${PYTHON_BIN:=python}"
 : "${DRY_RUN:=0}"
@@ -519,6 +522,9 @@ IFS=$'\n\t'
 : "${FIXED_HLT_SEEDS:=model_train=1053 model_val=1054 stack_train=1055 stack_val=1056 final_test=1057}"
 : "${FIXED_HLT_PARAMS:=jetclass_fixed_hlt.FixedHLTParams defaults}"
 
+FRESH_DIAGNOSTIC_SOURCES=()
+FRESH_DIAGNOSTICS_TRAP_INSTALLED=0
+
 fresh_bool_enabled() {
   local value="${1:-0}"
   [[ "${value}" == "1" || "${value}" == "true" || "${value}" == "TRUE" || "${value}" == "yes" || "${value}" == "YES" ]]
@@ -540,6 +546,187 @@ fresh_source_status_hash() {
   fi
 }
 
+fresh_diagnostics_dir_for() {
+  local source_dir="$1"
+  local rel="${source_dir}"
+  case "${rel}" in
+    "${OUTPUT_ROOT}"/*) rel="${rel#"${OUTPUT_ROOT}/"}" ;;
+    "${PROJECT_DIR}"/*) rel="${rel#"${PROJECT_DIR}/"}" ;;
+    /*) rel="$(basename "${rel}")" ;;
+  esac
+  echo "${DIAGNOSTICS_ROOT}/${rel}"
+}
+
+fresh_write_diagnostics_status() {
+  local source_dir="$1"
+  local dest_dir="$2"
+  local job_kind="$3"
+  local exit_status="$4"
+  if fresh_is_dry_run || ! fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    return 0
+  fi
+  mkdir -p "${dest_dir}"
+  DIAGNOSTIC_STATUS_DEST="${dest_dir}/job_status.json" \
+  DIAGNOSTIC_STATUS_SOURCE="${source_dir}" \
+  DIAGNOSTIC_STATUS_KIND="${job_kind}" \
+  DIAGNOSTIC_STATUS_EXIT="${exit_status}" \
+  DIAGNOSTIC_STATUS_SOURCE_COMMIT="$(fresh_source_commit)" \
+  DIAGNOSTIC_STATUS_SOURCE_STATUS_HASH="$(fresh_source_status_hash)" \
+  "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+import platform
+from datetime import datetime, timezone
+from pathlib import Path
+
+payload = {
+    "job_kind": os.environ.get("DIAGNOSTIC_STATUS_KIND"),
+    "exit_status": int(os.environ.get("DIAGNOSTIC_STATUS_EXIT", "0")),
+    "source_dir": os.environ.get("DIAGNOSTIC_STATUS_SOURCE"),
+    "diagnostics_dir": str(Path(os.environ["DIAGNOSTIC_STATUS_DEST"]).parent),
+    "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+    "slurm_job_name": os.environ.get("SLURM_JOB_NAME"),
+    "hostname": platform.node(),
+    "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+    "source_commit": os.environ.get("DIAGNOSTIC_STATUS_SOURCE_COMMIT"),
+    "source_status_hash": os.environ.get("DIAGNOSTIC_STATUS_SOURCE_STATUS_HASH"),
+}
+Path(os.environ["DIAGNOSTIC_STATUS_DEST"]).write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+fresh_mirror_run_diagnostics() {
+  local source_dir="$1"
+  local dest_dir="$2"
+  if fresh_is_dry_run || ! fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    return 0
+  fi
+  if [[ ! -d "${source_dir}" ]]; then
+    return 0
+  fi
+  mkdir -p "${dest_dir}"
+  DIAGNOSTIC_SOURCE_DIR="${source_dir}" \
+  DIAGNOSTIC_DEST_DIR="${dest_dir}" \
+  DIAGNOSTIC_MAX_FILE_MB="${DIAGNOSTICS_MAX_FILE_MB}" \
+  "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+import shutil
+from pathlib import Path
+
+source = Path(os.environ["DIAGNOSTIC_SOURCE_DIR"]).resolve()
+dest = Path(os.environ["DIAGNOSTIC_DEST_DIR"]).resolve()
+max_bytes = int(float(os.environ.get("DIAGNOSTIC_MAX_FILE_MB", "25")) * 1024 * 1024)
+allowed_suffixes = {".json", ".csv", ".txt", ".log", ".md", ".yaml", ".yml"}
+excluded_suffixes = {
+    ".pt",
+    ".pth",
+    ".npz",
+    ".npy",
+    ".h5",
+    ".hdf5",
+    ".root",
+    ".parquet",
+    ".gz",
+    ".zip",
+    ".tar",
+    ".tgz",
+    ".pkl",
+    ".pickle",
+}
+copied = []
+skipped = []
+for path in source.rglob("*"):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(source)
+    suffix = path.suffix.lower()
+    size = path.stat().st_size
+    if suffix in excluded_suffixes or suffix not in allowed_suffixes or size > max_bytes:
+        skipped.append({"path": str(rel), "size_bytes": size, "suffix": suffix})
+        continue
+    out = dest / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, out)
+    copied.append({"path": str(rel), "size_bytes": size})
+
+manifest = {
+    "source_dir": str(source),
+    "diagnostics_dir": str(dest),
+    "max_file_mb": float(os.environ.get("DIAGNOSTIC_MAX_FILE_MB", "25")),
+    "copied_count": len(copied),
+    "skipped_count": len(skipped),
+    "copied": copied,
+    "skipped": skipped,
+}
+(dest / "diagnostics_mirror_manifest.json").write_text(
+    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+fresh_mirror_current_slurm_logs() {
+  local dest_dir="$1"
+  if fresh_is_dry_run || ! fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    return 0
+  fi
+  local job_name="${SLURM_JOB_NAME:-}"
+  local job_id="${SLURM_JOB_ID:-}"
+  if [[ -z "${job_name}" || -z "${job_id}" ]]; then
+    return 0
+  fi
+  mkdir -p "${dest_dir}/slurm_logs"
+  local suffix
+  for suffix in out err; do
+    local log_path="${LOG_DIR}/${job_name}_${job_id}.${suffix}"
+    if [[ -f "${log_path}" ]]; then
+      cp -f "${log_path}" "${dest_dir}/slurm_logs/$(basename "${log_path}")" 2>/dev/null || true
+    fi
+  done
+}
+
+fresh_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  set +e
+  if fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    local record source_dir job_kind dest_dir
+    for record in "${FRESH_DIAGNOSTIC_SOURCES[@]}"; do
+      source_dir="${record%%|*}"
+      job_kind="${record#*|}"
+      dest_dir="$(fresh_diagnostics_dir_for "${source_dir}")"
+      fresh_write_diagnostics_status "${source_dir}" "${dest_dir}" "${job_kind}" "${exit_status}" || true
+      fresh_mirror_run_diagnostics "${source_dir}" "${dest_dir}" || true
+      fresh_mirror_current_slurm_logs "${dest_dir}" || true
+    done
+  fi
+  exit "${exit_status}"
+}
+
+fresh_install_diagnostics_trap() {
+  if fresh_is_dry_run || ! fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    return 0
+  fi
+  if [[ "${FRESH_DIAGNOSTICS_TRAP_INSTALLED}" != "1" ]]; then
+    trap fresh_on_exit EXIT
+    FRESH_DIAGNOSTICS_TRAP_INSTALLED=1
+  fi
+}
+
+fresh_register_diagnostics_dir() {
+  local source_dir="$1"
+  local job_kind="${2:-run}"
+  if fresh_is_dry_run || ! fresh_bool_enabled "${MIRROR_DIAGNOSTICS}"; then
+    return 0
+  fi
+  FRESH_DIAGNOSTIC_SOURCES+=("${source_dir}|${job_kind}")
+  fresh_install_diagnostics_trap
+}
+
 fresh_print_context() {
   echo "job_name=${SLURM_JOB_NAME:-local}"
   echo "job_id=${SLURM_JOB_ID:-local}"
@@ -550,7 +737,10 @@ fresh_print_context() {
   echo "PROJECT_DIR=${PROJECT_DIR}"
   echo "DATA_DIR=${DATA_DIR}"
   echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
+  echo "DIAGNOSTICS_ROOT=${DIAGNOSTICS_ROOT}"
   echo "LOG_DIR=${LOG_DIR}"
+  echo "MIRROR_DIAGNOSTICS=${MIRROR_DIAGNOSTICS}"
+  echo "DIAGNOSTICS_MAX_FILE_MB=${DIAGNOSTICS_MAX_FILE_MB}"
   echo "CONDA_ENV=${CONDA_ENV}"
   echo "PYTHON_BIN=${PYTHON_BIN}"
   echo "DRY_RUN=${DRY_RUN}"
@@ -590,11 +780,12 @@ fresh_setup() {
     echo "PROJECT_DIR does not exist: ${PROJECT_DIR}" >&2
     return 2
   fi
-  mkdir -p "${LOG_DIR}" "${OUTPUT_ROOT}"
+  mkdir -p "${LOG_DIR}" "${OUTPUT_ROOT}" "${DIAGNOSTICS_ROOT}"
   cd "${PROJECT_DIR}"
   fresh_print_context "$@"
   fresh_activate_env
   "${PYTHON_BIN}" --version
+  fresh_install_diagnostics_trap
 }
 
 fresh_prepare_submitter() {
@@ -602,10 +793,11 @@ fresh_prepare_submitter() {
     echo "PROJECT_DIR does not exist: ${PROJECT_DIR}" >&2
     return 2
   fi
-  mkdir -p "${PROJECT_DIR}/fresh_check_logs"
+  mkdir -p "${PROJECT_DIR}/fresh_check_logs" "${DIAGNOSTICS_ROOT}"
   cd "${PROJECT_DIR}"
   echo "submitter_project_dir=${PROJECT_DIR}"
   echo "submitter_log_dir=${PROJECT_DIR}/fresh_check_logs"
+  echo "submitter_diagnostics_root=${DIAGNOSTICS_ROOT}"
   echo "submitter_dry_run=${DRY_RUN}"
 }
 
@@ -735,8 +927,12 @@ fresh_write_run_config() {
   local job_kind="$2"
   shift 2
   mkdir -p "${output_dir}"
+  local diagnostics_dir
+  diagnostics_dir="$(fresh_diagnostics_dir_for "${output_dir}")"
+  fresh_register_diagnostics_dir "${output_dir}" "${job_kind}"
   local command_text="$*"
   RUN_CONFIG_OUTPUT_DIR="${output_dir}" \
+  RUN_CONFIG_DIAGNOSTICS_DIR="${diagnostics_dir}" \
   RUN_CONFIG_JOB_KIND="${job_kind}" \
   RUN_CONFIG_COMMAND="${command_text}" \
   RUN_CONFIG_SOURCE_COMMIT="$(fresh_source_commit)" \
@@ -751,6 +947,9 @@ keys = [
     "PROJECT_DIR",
     "DATA_DIR",
     "OUTPUT_ROOT",
+    "DIAGNOSTICS_ROOT",
+    "MIRROR_DIAGNOSTICS",
+    "DIAGNOSTICS_MAX_FILE_MB",
     "MANIFEST_PATH",
     "HLT_CACHE_DIR",
     "HLT_BASELINE_SEED",
@@ -1280,6 +1479,8 @@ keys = [
 payload = {
     "job_kind": os.environ["RUN_CONFIG_JOB_KIND"],
     "python_command": os.environ["RUN_CONFIG_COMMAND"],
+    "output_dir": os.environ.get("RUN_CONFIG_OUTPUT_DIR"),
+    "diagnostics_dir": os.environ.get("RUN_CONFIG_DIAGNOSTICS_DIR"),
     "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
     "slurm_job_name": os.environ.get("SLURM_JOB_NAME"),
     "hostname": platform.node(),

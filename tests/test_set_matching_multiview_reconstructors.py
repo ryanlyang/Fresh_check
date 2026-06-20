@@ -20,6 +20,34 @@ if TORCH_AVAILABLE:
     import torch
 
 
+class SetMatchingReconstructorConfigTests(unittest.TestCase):
+    def test_from_mapping_ignores_derived_aggressive_architecture_when_architecture_is_explicit(self):
+        config = SetMatchingReconstructorConfig.from_mapping(
+            {
+                "aggressive_architecture": "aggressive_gt",
+                "set_matching_architecture": "gt",
+                "weight_logit_epsilon": 1.0e-5,
+                "model_config": {"hidden_dim": 32},
+            },
+            architecture="gt",
+        )
+
+        self.assertEqual(config.architecture, "gt")
+        self.assertEqual(config.aggressive_architecture, "aggressive_global_transformer")
+        self.assertEqual(config.model_config, {"hidden_dim": 32})
+
+    def test_from_mapping_can_infer_architecture_from_legacy_aggressive_alias(self):
+        config = SetMatchingReconstructorConfig.from_mapping(
+            {
+                "aggressive_architecture": "agpn",
+                "model_config": {"edgeconv_dims": [16]},
+            }
+        )
+
+        self.assertEqual(config.architecture, "pn")
+        self.assertEqual(config.aggressive_architecture, "aggressive_particle_net")
+
+
 def tiny_model_config(architecture):
     head = {"num_extra_candidates": 2, "dropout": 0.0}
     if architecture == "gt":
@@ -139,4 +167,3 @@ class SetMatchingReconstructorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

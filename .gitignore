@@ -1,3 +1,6 @@
 downloads/
+checkpoints/
+fresh_check_logs/
+fresh_check_diagnostics/
 __pycache__/
 *.pyc

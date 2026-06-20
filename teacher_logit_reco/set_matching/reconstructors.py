@@ -24,6 +24,7 @@ from teacher_logit_reco.reconstructor_builders import (
     AGGRESSIVE_PARTICLE_FLOW_RECONSTRUCTOR,
     AGGRESSIVE_PARTICLE_NET_RECONSTRUCTOR,
     build_teacher_logit_reconstructor,
+    normalize_reconstructor_architecture,
     strip_compile_prefix_from_state_dict,
 )
 from teacher_logit_reco.views import SoftReconstructedView
@@ -168,22 +169,24 @@ class SetMatchingReconstructorConfig:
             if aggressive is None:
                 aggressive = payload.get("reconstructor_architecture")
             if aggressive is not None:
-                arch = AGGRESSIVE_TO_SET_MATCHING_ARCHITECTURE.get(str(aggressive))
+                try:
+                    normalized_aggressive = normalize_reconstructor_architecture(str(aggressive))
+                except ValueError:
+                    normalized_aggressive = str(aggressive)
+                arch = AGGRESSIVE_TO_SET_MATCHING_ARCHITECTURE.get(normalized_aggressive)
         if arch is None:
             arch = "gt"
         payload.pop("set_matching_architecture", None)
         payload.pop("architecture", None)
+        payload.pop("aggressive_architecture", None)
+        payload.pop("reconstructor_architecture", None)
 
         model_config = payload.pop("model_config", None)
         wrapper_keys = {
-            "set_matching_architecture",
-            "architecture",
             "weight_logit_epsilon",
             "output_weight_threshold",
             "output_contract",
             "experiment_step",
-            "aggressive_architecture",
-            "reconstructor_architecture",
         }
         wrapper_values = {key: payload.pop(key) for key in list(payload) if key in wrapper_keys}
         if model_config is None:
