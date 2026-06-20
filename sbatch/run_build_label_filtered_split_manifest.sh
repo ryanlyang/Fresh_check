@@ -19,6 +19,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LABEL_FILTER_OUTPUT_MANIFEST_PATH:?Set LABEL_FILTER_OUTPUT_MANIFEST_PATH}"
 : "${LABEL_FILTER_NAMES:?Set LABEL_FILTER_NAMES, e.g. 'QCD Hbb'}"
 : "${LABEL_FILTER_PRETTY:=0}"
+: "${LABEL_FILTER_REMAP_LABELS:=0}"
 
 fresh_setup "$@"
 fresh_require_file "${LABEL_FILTER_SOURCE_MANIFEST_PATH}"
@@ -35,6 +36,7 @@ cmd=(
   --output-report "${REPORT_PATH}"
 )
 fresh_append_flag_if_enabled cmd --pretty "${LABEL_FILTER_PRETTY}"
+fresh_append_flag_if_enabled cmd --remap-labels "${LABEL_FILTER_REMAP_LABELS}"
 
 fresh_write_run_config "${OUTPUT_DIR}" "build_label_filtered_split_manifest" "${cmd[@]}"
 fresh_run "${cmd[@]}"

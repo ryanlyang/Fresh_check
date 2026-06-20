@@ -103,6 +103,7 @@ SUBMITTERS = [
     "submit_set_matching_multiview_experiment.sh",
     "submit_set_matching_multiview_smoke_test.sh",
     "submit_set_matching_hbb_qcd_binary_experiment.sh",
+    "submit_offline_binary_qcd_tbqq_reference.sh",
 ]
 
 
@@ -1164,6 +1165,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
         self.assertIn('input_dependency="${binary_hlt_cache_jid}"', submitter)
         self.assertIn("scripts/build_label_filtered_split_manifest.py", manifest_runner)
+        self.assertIn("LABEL_FILTER_REMAP_LABELS", manifest_runner)
+        self.assertIn("--remap-labels", manifest_runner)
         self.assertIn("scripts/build_fixed_hlt_cache.py", binary_cache_runner)
         self.assertIn('HBB_QCD_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control', submitter)
         self.assertIn("SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1", submitter)
@@ -1198,6 +1201,40 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("fpr_at_signal_eff_0p30", metrics_code)
         self.assertIn("run_write_set_matching_multiview_final_report.sh", submitter)
         self.assertIn("final_report_job_id", submitter)
+
+    def test_label_filtered_manifest_builder_can_remap_noncontiguous_labels(self):
+        script = (REPO_ROOT / "scripts" / "build_label_filtered_split_manifest.py").read_text(encoding="utf-8")
+
+        self.assertIn("--remap-labels", script)
+        self.assertIn("label_filter_remap_labels", script)
+        self.assertIn("label_filter_source_to_filtered_label", script)
+        self.assertIn("label_filter_filtered_to_source_label", script)
+        self.assertIn("source_to_filtered_label", script)
+        self.assertIn("Pass --remap-labels for labels like QCD Tbqq", script)
+
+    def test_qcd_tbqq_offline_reference_submitter_queues_manifest_and_offline_part(self):
+        submitter = self.read("submit_offline_binary_qcd_tbqq_reference.sh")
+        trainer = (REPO_ROOT / "scripts" / "train_eval_set_matching_binary_offline_teacher.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("QCD_vs_Tbqq", submitter)
+        self.assertIn("QCD_TBQQ_ROOT", submitter)
+        self.assertIn("offline_binary_qcd_tbqq_", submitter)
+        self.assertIn("QCD_TBQQ_LABEL_NAMES:=QCD Tbqq", submitter)
+        self.assertIn("QCD_TBQQ_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("QCD_TBQQ_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("QCD_TBQQ_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("QCD_TBQQ_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("LABEL_FILTER_REMAP_LABELS=1", submitter)
+        self.assertIn("run_build_label_filtered_split_manifest.sh", submitter)
+        self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
+        self.assertIn('--dependency="afterok:${manifest_jid}"', submitter)
+        self.assertIn("binary_manifest: 1", submitter)
+        self.assertIn("offline_part_reference: 1", submitter)
+        self.assertIn("offline_run_report", submitter)
+        self.assertIn("load_split_manifest(args.manifest_path)", trainer)
+        self.assertIn("class_names=manifest.class_names", trainer)
 
 
 if __name__ == "__main__":

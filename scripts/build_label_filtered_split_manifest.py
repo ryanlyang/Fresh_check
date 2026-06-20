@@ -34,14 +34,27 @@ def parse_args() -> argparse.Namespace:
         "--label-names",
         nargs="+",
         required=True,
-        help="Class names to keep, e.g. QCD Hbb. Labels must already be zero-based/contiguous.",
+        help=(
+            "Class names to keep, e.g. QCD Hbb. By default labels are preserved and must already be "
+            "zero-based/contiguous; pass --remap-labels to make a compact binary/multiclass manifest."
+        ),
+    )
+    parser.add_argument(
+        "--remap-labels",
+        action="store_true",
+        help="Rewrite selected source labels to 0..N-1 in the order given by --label-names.",
     )
     parser.add_argument("--output-report", default=None, help="Optional JSON report path")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print the output manifest JSON")
     return parser.parse_args()
 
 
-def _label_ids_for_names(class_names: Sequence[str], label_names: Sequence[str]) -> list[int]:
+def _label_ids_for_names(
+    class_names: Sequence[str],
+    label_names: Sequence[str],
+    *,
+    require_contiguous: bool,
+) -> list[int]:
     by_name = {name: idx for idx, name in enumerate(class_names)}
     missing = [name for name in label_names if name not in by_name]
     if missing:
@@ -50,10 +63,11 @@ def _label_ids_for_names(class_names: Sequence[str], label_names: Sequence[str])
     if len(set(ids)) != len(ids):
         raise ValueError(f"Duplicate label names are not allowed: {label_names}")
     expected = list(range(len(ids)))
-    if ids != expected:
+    if require_contiguous and ids != expected:
         raise ValueError(
             "This filtered-manifest builder preserves source label ids, so selected labels must "
-            f"already be zero-based/contiguous and in source-label order. Got ids={ids}, expected {expected}."
+            f"already be zero-based/contiguous and in source-label order. Got ids={ids}, expected {expected}. "
+            "Pass --remap-labels for labels like QCD Tbqq."
         )
     return ids
 
@@ -62,11 +76,20 @@ def build_filtered_manifest(
     source_path: str | Path,
     *,
     label_names: Sequence[str],
+    remap_labels: bool = False,
 ) -> tuple[SplitManifest, dict]:
     source = load_split_manifest(source_path)
     source_hash = manifest_hash(source)
-    label_ids = _label_ids_for_names(source.class_names, label_names)
+    label_ids = _label_ids_for_names(source.class_names, label_names, require_contiguous=not remap_labels)
     keep = set(label_ids)
+    source_to_filtered_label = {
+        int(source_label): (int(index) if remap_labels else int(source_label))
+        for index, source_label in enumerate(label_ids)
+    }
+    filtered_to_source_label = {
+        int(filtered_label): int(source_label)
+        for source_label, filtered_label in source_to_filtered_label.items()
+    }
 
     filtered_splits: dict[str, list[JetIdentity]] = {}
     before_counts: dict[str, int] = {}
@@ -85,11 +108,12 @@ def build_filtered_manifest(
             if 0 <= source_label < len(source.class_names):
                 before_by_class[source.class_names[source_label]] += 1
             if source_label in keep:
+                filtered_label = source_to_filtered_label[source_label]
                 filtered.append(
                     JetIdentity(
                         file=identity.file,
                         entry=int(identity.entry),
-                        label=source_label,
+                        label=filtered_label,
                     )
                 )
                 after_by_class[source.class_names[source_label]] += 1
@@ -99,12 +123,16 @@ def build_filtered_manifest(
         after_class_counts[split] = after_by_class
 
     filtered_records = [
-        FileRecord(path=record.path, label=int(record.label), num_entries=int(record.num_entries))
+        FileRecord(
+            path=record.path,
+            label=source_to_filtered_label[int(record.label)],
+            num_entries=int(record.num_entries),
+        )
         for record in source.file_records
         if int(record.label) in keep
     ]
     filtered_prefix_map = {
-        prefix: int(label)
+        prefix: source_to_filtered_label[int(label)]
         for prefix, label in source.file_prefix_to_label.items()
         if int(label) in keep
     }
@@ -116,10 +144,20 @@ def build_filtered_manifest(
             "label_filter_source_manifest_hash": source_hash,
             "label_filter_names": list(label_names),
             "label_filter_ids": label_ids,
+            "label_filter_remap_labels": bool(remap_labels),
+            "label_filter_source_to_filtered_label": {
+                str(source_label): int(filtered_label)
+                for source_label, filtered_label in source_to_filtered_label.items()
+            },
+            "label_filter_filtered_to_source_label": {
+                str(filtered_label): int(source_label)
+                for filtered_label, source_label in filtered_to_source_label.items()
+            },
             "label_filter_before_counts": before_counts,
             "label_filter_after_counts": after_counts,
             "label_filter_note": (
-                "This manifest preserves source label ids and keeps only selected one-to-one jet identities."
+                "This manifest keeps only selected one-to-one jet identities. Labels are compact-remapped "
+                "to the selected class order when label_filter_remap_labels=true."
             ),
         }
     )
@@ -146,6 +184,9 @@ def build_filtered_manifest(
         "filtered_manifest_hash": manifest_hash(filtered_manifest),
         "label_names": list(label_names),
         "label_ids": label_ids,
+        "remap_labels": bool(remap_labels),
+        "source_to_filtered_label": source_to_filtered_label,
+        "filtered_to_source_label": filtered_to_source_label,
         "before_counts": before_counts,
         "after_counts": after_counts,
         "before_class_counts": before_class_counts,
@@ -158,7 +199,11 @@ def build_filtered_manifest(
 
 def main() -> int:
     args = parse_args()
-    manifest, report = build_filtered_manifest(args.source_manifest, label_names=args.label_names)
+    manifest, report = build_filtered_manifest(
+        args.source_manifest,
+        label_names=args.label_names,
+        remap_labels=bool(args.remap_labels),
+    )
     save_split_manifest(manifest, args.output_manifest, pretty=args.pretty)
     if args.output_report:
         report_path = Path(args.output_report)

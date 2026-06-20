@@ -14,7 +14,7 @@ import csv
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import sys
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -32,15 +32,15 @@ from jetclass_fresh.hlt_baseline import (  # noqa: E402
     save_json,
     set_training_seed,
 )
-from jetclass_fresh.jetclass_data import LABEL_NAMES, JetView, load_offline_view, load_split_manifest, manifest_hash  # noqa: E402
+from jetclass_fresh.jetclass_data import JetView, load_offline_view, load_split_manifest, manifest_hash  # noqa: E402
 from teacher_logit_reco.set_matching.five_view_train import classification_metrics_from_predictions  # noqa: E402
 
 
 EXPERIMENT_STEP = "set_matching_hbb_qcd_binary_fresh_offline_teacher"
 
 
-def _label_names_to_indices(values: list[str]) -> tuple[int, ...]:
-    by_name = {name: index for index, name in enumerate(LABEL_NAMES)}
+def _label_names_to_indices(values: Sequence[str], *, class_names: Sequence[str]) -> tuple[int, ...]:
+    by_name = {name: index for index, name in enumerate(class_names)}
     output: list[int] = []
     for value in values:
         text = str(value).strip()
@@ -51,7 +51,7 @@ def _label_names_to_indices(values: list[str]) -> tuple[int, ...]:
         elif text in by_name:
             output.append(by_name[text])
         else:
-            raise ValueError(f"Unknown JetClass label {text!r}; expected one of {list(LABEL_NAMES)}")
+            raise ValueError(f"Unknown manifest label {text!r}; expected one of {list(class_names)}")
     if len(set(output)) != len(output):
         raise ValueError(f"Duplicate labels in filter: {values!r}")
     return tuple(output)
@@ -453,11 +453,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    manifest = load_split_manifest(args.manifest_path)
     config = BinaryOfflineTeacherConfig(
         output_dir=args.output_dir,
         manifest_path=args.manifest_path,
         data_dir=args.data_dir,
-        label_filter=_label_names_to_indices(list(args.label_filter_names)),
+        label_filter=_label_names_to_indices(list(args.label_filter_names), class_names=manifest.class_names),
         label_names=tuple(args.label_names),
         seed=args.seed,
         batch_size=args.batch_size,
