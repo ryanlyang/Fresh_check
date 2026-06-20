@@ -14,6 +14,7 @@ RUNNERS = [
     "run_train_fresh_hlt_baseline.sh",
     "run_train_fresh_hlt_seed.sh",
     "run_train_fresh_offline_teacher.sh",
+    "run_train_eval_set_matching_binary_offline_teacher.sh",
     "run_train_fresh_reco7_variant.sh",
     "run_fuse_fresh_samehlt7_plus_hlt.sh",
     "run_fuse_fresh_hlt5_seed_control.sh",
@@ -417,6 +418,27 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--control-seed \"${HETERO_HLT4_CONTROL_SEED}\"", runner)
         self.assertIn("--confirm-final-test", runner)
         self.assertIn('fresh_claim_new_dir "${OFFLINE_REFERENCE_EVAL_DIR}"', runner)
+
+    def test_set_matching_binary_offline_teacher_runner_trains_fresh_two_class_reference(self):
+        runner = self.read("run_train_eval_set_matching_binary_offline_teacher.sh")
+        script = (REPO_ROOT / "scripts" / "train_eval_set_matching_binary_offline_teacher.py").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/train_eval_set_matching_binary_offline_teacher.py", runner)
+        self.assertIn("offline_teacher_reference/fresh_binary_part_", runner)
+        self.assertIn("--manifest-path \"${SET_MATCHING_MANIFEST_PATH}\"", runner)
+        self.assertIn("--data-dir \"${DATA_DIR}\"", runner)
+        self.assertIn("--label-filter-names \"${label_filter_args[@]}\"", runner)
+        self.assertIn("--label-names \"${label_name_args[@]}\"", runner)
+        self.assertIn("--max-train-jets \"${BINARY_OFFLINE_TEACHER_MAX_TRAIN_JETS}\"", runner)
+        self.assertIn("--max-val-jets \"${BINARY_OFFLINE_TEACHER_MAX_VAL_JETS}\"", runner)
+        self.assertIn("--max-stack-val-jets \"${BINARY_OFFLINE_TEACHER_MAX_STACK_VAL_JETS}\"", runner)
+        self.assertIn("--max-final-test-jets \"${BINARY_OFFLINE_TEACHER_MAX_FINAL_TEST_JETS}\"", runner)
+        self.assertIn("--confirm-final-test", runner)
+        self.assertIn("diagnostics/summary.csv", runner)
+        self.assertIn("build_particle_transformer_classifier(num_classes=2", script)
+        self.assertIn("classification_metrics_from_predictions", script)
+        self.assertIn("fpr_at_signal_eff_0p30", script)
+        self.assertIn("fresh_binary_offline_upper_reference", script)
 
     def test_teacher_logit_gt_submitter_queues_training_prediction_and_fusion(self):
         train = self.read("run_train_teacher_logit_gt_reco.sh")
