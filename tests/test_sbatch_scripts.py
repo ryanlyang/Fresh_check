@@ -104,6 +104,7 @@ SUBMITTERS = [
     "submit_set_matching_multiview_smoke_test.sh",
     "submit_set_matching_hbb_qcd_binary_experiment.sh",
     "submit_offline_binary_qcd_tbqq_reference.sh",
+    "submit_set_matching_qcd_tbqq_binary_experiment.sh",
 ]
 
 
@@ -1235,6 +1236,37 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("offline_run_report", submitter)
         self.assertIn("load_split_manifest(args.manifest_path)", trainer)
         self.assertIn("class_names=manifest.class_names", trainer)
+
+    def test_qcd_tbqq_set_matching_submitter_queues_full_binary_graph(self):
+        submitter = self.read("submit_set_matching_qcd_tbqq_binary_experiment.sh")
+
+        self.assertIn("QCD_vs_Tbqq", submitter)
+        self.assertIn("set_matching_qcd_tbqq_binary_", submitter)
+        self.assertIn("QCD_TBQQ_SOURCE_LABEL_NAMES:=QCD Tbqq", submitter)
+        self.assertIn("QCD_TBQQ_BINARY_LABEL_FILTER:=0 1", submitter)
+        self.assertIn('export SET_MATCHING_LABEL_FILTER_NAMES="${QCD_TBQQ_BINARY_LABEL_FILTER}"', submitter)
+        self.assertIn('export SET_MATCHING_LABEL_NAMES="${QCD_TBQQ_SOURCE_LABEL_NAMES}"', submitter)
+        self.assertIn("SET_MATCHING_NUM_CLASSES=2", submitter)
+        self.assertIn("LABEL_FILTER_REMAP_LABELS=1", submitter)
+        self.assertIn('export LABEL_FILTER_NAMES="${QCD_TBQQ_SOURCE_LABEL_NAMES}"', submitter)
+        self.assertIn("QCD_TBQQ_MODEL_TRAIN_SIZE:-500000", submitter)
+        self.assertIn("QCD_TBQQ_MODEL_VAL_SIZE:-150000", submitter)
+        self.assertIn("QCD_TBQQ_STACK_TRAIN_SIZE:-500000", submitter)
+        self.assertIn("QCD_TBQQ_STACK_VAL_SIZE:-150000", submitter)
+        self.assertIn("QCD_TBQQ_FINAL_TEST_SIZE:-500000", submitter)
+        self.assertIn("run_build_label_filtered_split_manifest.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
+        self.assertIn("run_train_set_matching_reconstructor.sh", submitter)
+        self.assertIn("run_cache_set_matching_multiview.sh", submitter)
+        self.assertIn("run_train_five_view_tagger.sh", submitter)
+        self.assertIn("run_audit_five_view_tagger.sh", submitter)
+        self.assertIn("run_write_set_matching_multiview_final_report.sh", submitter)
+        self.assertIn("qcdtbqq_binary_manifest", submitter)
+        self.assertIn("qcdtbqq_binary_hlt_cache", submitter)
+        self.assertIn("qcdtbqq_offline_teacher_reference", submitter)
+        self.assertIn("tagger_train: ${#tagger_job_ids[@]}", submitter)
+        self.assertIn("filtered_manifest_report", submitter)
 
 
 if __name__ == "__main__":
