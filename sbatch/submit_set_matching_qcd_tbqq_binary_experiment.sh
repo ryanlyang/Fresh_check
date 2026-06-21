@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${QCD_TBQQ_ROOT:=${OUTPUT_ROOT}/set_matching_qcd_tbqq_binary_${QCD_TBQQ_TAG}}"
 : "${QCD_TBQQ_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control}"
 : "${QCD_TBQQ_BUILD_BINARY_INPUTS:=1}"
+: "${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS:=1}"
 : "${QCD_TBQQ_BINARY_INPUT_ROOT:=${QCD_TBQQ_ROOT}/binary_inputs}"
 : "${QCD_TBQQ_SOURCE_MANIFEST_PATH:=${MANIFEST_PATH}}"
 : "${QCD_TBQQ_BINARY_MANIFEST_PATH:=${QCD_TBQQ_BINARY_INPUT_ROOT}/split_manifest.json.gz}"
@@ -46,6 +47,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${QCD_TBQQ_REPORT_CPUS:=2}"
 : "${QCD_TBQQ_OFFLINE_TEACHER_CPUS:=4}"
 : "${QCD_TBQQ_SUBMIT_OFFLINE_TEACHER_REFERENCE:=1}"
+: "${QCD_TBQQ_OFFLINE_TEACHER_EPOCHS:=45}"
 
 export SET_MATCHING_ROOT="${QCD_TBQQ_ROOT}"
 export SET_MATCHING_RECONSTRUCTOR_DIR="${SET_MATCHING_ROOT}/reconstructors"
@@ -74,11 +76,13 @@ export SET_MATCHING_STACK_VAL_SIZE="${QCD_TBQQ_STACK_VAL_SIZE:-150000}"
 export SET_MATCHING_FINAL_TEST_SIZE="${QCD_TBQQ_FINAL_TEST_SIZE:-500000}"
 export SET_MATCHING_CACHE_MAX_JETS_PER_SPLIT="${QCD_TBQQ_CACHE_MAX_JETS_PER_SPLIT:-${SET_MATCHING_FINAL_TEST_SIZE}}"
 
-export SET_MATCHING_RECO_EPOCHS="${QCD_TBQQ_RECO_EPOCHS:-8}"
-export SET_MATCHING_RECO_EARLY_STOP_PATIENCE="${QCD_TBQQ_RECO_EARLY_STOP_PATIENCE:-3}"
-export SET_MATCHING_TAGGER_EPOCHS="${QCD_TBQQ_TAGGER_EPOCHS:-12}"
+export SET_MATCHING_RECO_EPOCHS="${QCD_TBQQ_RECO_EPOCHS:-20}"
+export SET_MATCHING_RECO_EARLY_STOP_PATIENCE="${QCD_TBQQ_RECO_EARLY_STOP_PATIENCE:-5}"
+export SET_MATCHING_TAGGER_EPOCHS="${QCD_TBQQ_TAGGER_EPOCHS:-45}"
 export SET_MATCHING_TAGGER_EARLY_STOP_PATIENCE="${QCD_TBQQ_TAGGER_EARLY_STOP_PATIENCE:-4}"
+export SET_MATCHING_TAGGER_SELECTION_METRIC="${QCD_TBQQ_TAGGER_SELECTION_METRIC:-fpr_at_signal_eff_0p50}"
 export SET_MATCHING_CONFIRM_FINAL_TEST=1
+export BINARY_OFFLINE_TEACHER_EPOCHS="${QCD_TBQQ_OFFLINE_TEACHER_EPOCHS}"
 
 fresh_prepare_submitter
 
@@ -128,6 +132,7 @@ if ! fresh_is_dry_run; then
     echo "num_classes=${SET_MATCHING_NUM_CLASSES}"
     echo "root=${SET_MATCHING_ROOT}"
     echo "build_binary_inputs=${QCD_TBQQ_BUILD_BINARY_INPUTS}"
+    echo "build_direct_binary_splits=${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}"
     echo "source_manifest=${QCD_TBQQ_SOURCE_MANIFEST_PATH}"
     echo "binary_manifest=${SET_MATCHING_MANIFEST_PATH}"
     echo "binary_hlt_cache=${SET_MATCHING_HLT_CACHE_DIR}"
@@ -149,6 +154,7 @@ if ! fresh_is_dry_run; then
     echo "report_time=${QCD_TBQQ_REPORT_TIME}"
     echo "offline_teacher_time=${QCD_TBQQ_OFFLINE_TEACHER_TIME}"
     echo "submit_offline_teacher_reference=${QCD_TBQQ_SUBMIT_OFFLINE_TEACHER_REFERENCE}"
+    echo "tagger_selection_metric=${SET_MATCHING_TAGGER_SELECTION_METRIC}"
   } > "${submitter_lock_dir}/metadata.txt"
 fi
 
@@ -162,22 +168,38 @@ input_dependency="${UPSTREAM_DEPENDENCY}"
 declare -A reco_train_job_id_by_arch=()
 
 if fresh_bool_enabled "${QCD_TBQQ_BUILD_BINARY_INPUTS}"; then
-  export LABEL_FILTER_SOURCE_MANIFEST_PATH="${QCD_TBQQ_SOURCE_MANIFEST_PATH}"
   export LABEL_FILTER_OUTPUT_MANIFEST_PATH="${QCD_TBQQ_BINARY_MANIFEST_PATH}"
   export LABEL_FILTER_NAMES="${QCD_TBQQ_SOURCE_LABEL_NAMES}"
-  export LABEL_FILTER_REMAP_LABELS=1
   export LABEL_FILTER_MANIFEST_PATH="${QCD_TBQQ_BINARY_MANIFEST_PATH}"
   export LABEL_FILTER_HLT_CACHE_DIR="${QCD_TBQQ_BINARY_HLT_CACHE_DIR}"
   export LABEL_FILTER_HLT_SPLITS="model_train model_val stack_train stack_val final_test"
+  export LABEL_FILTER_MODEL_TRAIN_SIZE="${SET_MATCHING_MODEL_TRAIN_SIZE}"
+  export LABEL_FILTER_MODEL_VAL_SIZE="${SET_MATCHING_MODEL_VAL_SIZE}"
+  export LABEL_FILTER_STACK_TRAIN_SIZE="${SET_MATCHING_STACK_TRAIN_SIZE}"
+  export LABEL_FILTER_STACK_VAL_SIZE="${SET_MATCHING_STACK_VAL_SIZE}"
+  export LABEL_FILTER_FINAL_TEST_SIZE="${SET_MATCHING_FINAL_TEST_SIZE}"
 
-  mapfile -t manifest_args < <(
-    afterok_args \
-      "${UPSTREAM_DEPENDENCY}" \
-      --time="${QCD_TBQQ_BINARY_MANIFEST_TIME}" \
-      --cpus-per-task="${QCD_TBQQ_BINARY_MANIFEST_CPUS}" \
-      --mem="${QCD_TBQQ_BINARY_MANIFEST_MEM}" \
-      "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
-  )
+  if fresh_bool_enabled "${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}"; then
+    mapfile -t manifest_args < <(
+      afterok_args \
+        "${UPSTREAM_DEPENDENCY}" \
+        --time="${QCD_TBQQ_BINARY_MANIFEST_TIME}" \
+        --cpus-per-task="${QCD_TBQQ_BINARY_MANIFEST_CPUS}" \
+        --mem="${QCD_TBQQ_BINARY_MANIFEST_MEM}" \
+        "${SCRIPT_DIR}/run_build_label_filtered_fresh_splits.sh"
+    )
+  else
+    export LABEL_FILTER_SOURCE_MANIFEST_PATH="${QCD_TBQQ_SOURCE_MANIFEST_PATH}"
+    export LABEL_FILTER_REMAP_LABELS=1
+    mapfile -t manifest_args < <(
+      afterok_args \
+        "${UPSTREAM_DEPENDENCY}" \
+        --time="${QCD_TBQQ_BINARY_MANIFEST_TIME}" \
+        --cpus-per-task="${QCD_TBQQ_BINARY_MANIFEST_CPUS}" \
+        --mem="${QCD_TBQQ_BINARY_MANIFEST_MEM}" \
+        "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
+    )
+  fi
   binary_manifest_jid="$(submit_job "qcdtbqq_binary_manifest" "${manifest_args[@]}")"
   echo "submitted qcdtbqq_binary_manifest=${binary_manifest_jid}"
 
@@ -275,6 +297,7 @@ qcd_tbqq_binary_set_matching_submission:
   num_classes: ${SET_MATCHING_NUM_CLASSES}
   binary_inputs:
     build_enabled: ${QCD_TBQQ_BUILD_BINARY_INPUTS}
+    direct_binary_splits: ${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}
     source_manifest: ${QCD_TBQQ_SOURCE_MANIFEST_PATH}
     filtered_manifest: ${SET_MATCHING_MANIFEST_PATH}
     filtered_hlt_cache: ${SET_MATCHING_HLT_CACHE_DIR}
@@ -303,6 +326,7 @@ qcd_tbqq_binary_set_matching_submission:
     stack_train: ${SET_MATCHING_STACK_TRAIN_SIZE}
     stack_val: ${SET_MATCHING_STACK_VAL_SIZE}
     final_test: ${SET_MATCHING_FINAL_TEST_SIZE}
+  tagger_selection_metric: ${SET_MATCHING_TAGGER_SELECTION_METRIC}
   memory_overrides:
     binary_manifest: ${QCD_TBQQ_BINARY_MANIFEST_MEM}
     binary_hlt_cache: ${QCD_TBQQ_BINARY_HLT_CACHE_MEM}

@@ -561,19 +561,92 @@ def audit_five_view_alignment(views: Sequence[FiveViewCacheArrays]) -> dict[str,
     }
 
 
-def _view_ids_for_dataset(view_names: Sequence[str], *, shuffle: bool, seed: int, keep_hlt_anchor: bool) -> np.ndarray:
-    base = np.arange(len(view_names), dtype=np.int64)
-    if not shuffle:
-        return base
-    rng = np.random.RandomState(int(seed))
-    output = base.copy()
-    if keep_hlt_anchor and view_names and normalize_view_name(view_names[0]) == HLT_VIEW_NAME:
-        tail = output[1:].copy()
-        rng.shuffle(tail)
-        output[1:] = tail
-        return output
-    rng.shuffle(output)
-    return output
+def _view_ids_for_dataset(view_names: Sequence[str]) -> np.ndarray:
+    return np.arange(len(view_names), dtype=np.int64)
+
+
+def _stable_split_seed_offset(split: str) -> int:
+    text = normalize_split_name(split)
+    value = 0
+    for char in text:
+        value = (value * 131 + ord(char)) % 1_000_003
+    return int(value)
+
+
+def _shuffle_reconstructed_view_contents_per_jet(
+    *,
+    view_features: np.ndarray,
+    view_masks: np.ndarray,
+    view_confidence: np.ndarray,
+    source_indices: np.ndarray,
+    view_names: Sequence[str],
+    seed: int,
+    split: str,
+    keep_hlt_anchor: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Mismatch reconstructed view contents against stable semantic view ids.
+
+    The first version of the shuffle control only permuted ``view_ids`` once
+    for the whole dataset.  A transformer can simply relearn that stable
+    relabeling.  This control instead keeps the semantic view labels fixed and
+    independently shuffles the reconstructed-view contents for each jet.  HLT is
+    anchored by default, so the control asks whether stable labels for the four
+    reconstructed sources carry usable information.
+    """
+
+    if len(view_names) < 2:
+        return view_features, view_masks, view_confidence, source_indices, {
+            "applied": False,
+            "reason": "fewer_than_two_views",
+        }
+    if keep_hlt_anchor and normalize_view_name(view_names[0]) == HLT_VIEW_NAME:
+        semantic_positions = np.arange(1, len(view_names), dtype=np.int64)
+    else:
+        semantic_positions = np.arange(len(view_names), dtype=np.int64)
+    if semantic_positions.size <= 1:
+        return view_features, view_masks, view_confidence, source_indices, {
+            "applied": False,
+            "reason": "fewer_than_two_shuffleable_views",
+        }
+
+    rng = np.random.RandomState(int(seed) + _stable_split_seed_offset(split))
+    shuffled_features = view_features.copy()
+    shuffled_masks = view_masks.copy()
+    shuffled_confidence = view_confidence.copy()
+    shuffled_indices = source_indices.copy()
+    examples: list[dict[str, Any]] = []
+    unchanged_count = 0
+
+    for jet_index in range(int(view_features.shape[0])):
+        source_positions = semantic_positions.copy()
+        rng.shuffle(source_positions)
+        if np.array_equal(source_positions, semantic_positions):
+            unchanged_count += 1
+            source_positions = np.roll(source_positions, 1)
+        shuffled_features[jet_index, semantic_positions] = view_features[jet_index, source_positions]
+        shuffled_masks[jet_index, semantic_positions] = view_masks[jet_index, source_positions]
+        shuffled_confidence[jet_index, semantic_positions] = view_confidence[jet_index, source_positions]
+        shuffled_indices[jet_index, semantic_positions] = source_indices[jet_index, source_positions]
+        if len(examples) < 5:
+            examples.append(
+                {
+                    "jet_index": int(jet_index),
+                    "semantic_view_names": [str(view_names[int(index)]) for index in semantic_positions],
+                    "content_source_view_names": [str(view_names[int(index)]) for index in source_positions],
+                }
+            )
+
+    return shuffled_features, shuffled_masks, shuffled_confidence, shuffled_indices, {
+        "applied": True,
+        "mode": "per_jet_reconstructed_content_shuffle_with_fixed_view_ids",
+        "seed": int(seed),
+        "effective_seed": int(seed) + _stable_split_seed_offset(split),
+        "keep_hlt_anchor": bool(keep_hlt_anchor),
+        "shuffleable_view_names": [str(view_names[int(index)]) for index in semantic_positions],
+        "n_jets": int(view_features.shape[0]),
+        "unchanged_random_permutation_count_before_forced_roll": int(unchanged_count),
+        "examples": examples,
+    }
 
 
 def build_five_view_dataset_from_arrays(
@@ -621,6 +694,25 @@ def build_five_view_dataset_from_arrays(
     view_confidence = np.stack(filtered_confidences, axis=1).astype(np.float32, copy=False)
     source_indices = np.stack(filtered_indices, axis=1).astype(np.int32, copy=False)
 
+    shuffle_control_diagnostics = {"applied": False}
+    if bool(config.shuffle_view_labels):
+        (
+            view_features,
+            view_masks,
+            view_confidence,
+            source_indices,
+            shuffle_control_diagnostics,
+        ) = _shuffle_reconstructed_view_contents_per_jet(
+            view_features=view_features,
+            view_masks=view_masks,
+            view_confidence=view_confidence,
+            source_indices=source_indices,
+            view_names=view_names,
+            seed=int(config.view_label_shuffle_seed),
+            split=config.split,
+            keep_hlt_anchor=bool(config.keep_hlt_label_anchor),
+        )
+
     dropped = set(config.drop_views)
     for view_index, view_name in enumerate(view_names):
         if view_name not in dropped:
@@ -630,12 +722,7 @@ def build_five_view_dataset_from_arrays(
         view_confidence[:, view_index] = 0.0
         source_indices[:, view_index] = -1
 
-    view_ids = _view_ids_for_dataset(
-        view_names,
-        shuffle=bool(config.shuffle_view_labels),
-        seed=int(config.view_label_shuffle_seed),
-        keep_hlt_anchor=bool(config.keep_hlt_label_anchor),
-    )
+    view_ids = _view_ids_for_dataset(view_names)
     source_type_ids = np.asarray([FIVE_VIEW_SOURCE_TYPE_IDS[source_type] for source_type in source_types], dtype=np.int64)
     labels = views[0].labels
     content_hash = hash_arrays(
@@ -643,6 +730,7 @@ def build_five_view_dataset_from_arrays(
             "view_features": view_features,
             "view_masks": view_masks,
             "view_confidence": view_confidence,
+            "source_indices": source_indices,
             "labels": labels,
             "view_ids": view_ids,
             "source_type_ids": source_type_ids,
@@ -664,6 +752,7 @@ def build_five_view_dataset_from_arrays(
         "label_filter": list(config.label_filter),
         "label_filter_applied": bool(config.label_filter),
         "shuffle_view_labels": bool(config.shuffle_view_labels),
+        "view_label_shuffle_control": shuffle_control_diagnostics,
         "view_ids": view_ids.astype(int).tolist(),
         "source_type_ids": source_type_ids.astype(int).tolist(),
         "jet_identity_hash": jet_identity_hash(views[0].jet_ids),

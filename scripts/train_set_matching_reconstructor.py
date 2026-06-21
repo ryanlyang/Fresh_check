@@ -112,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jet-summary-weight", type=float, default=0.05)
     parser.add_argument("--correction-budget-weight", type=float, default=0.02)
     parser.add_argument("--chamfer-weight", type=float, default=0.0)
+    parser.add_argument("--missing-target-weight", type=float, default=0.25)
     parser.add_argument("--huber-beta", type=float, default=1.0)
     parser.add_argument("--max-abs-eta", type=float, default=5.0)
     parser.add_argument("--hlt-support-budget-weight", type=float, default=0.0)
@@ -193,6 +194,7 @@ def main() -> int:
         jet_summary_weight=args.jet_summary_weight,
         correction_budget_weight=args.correction_budget_weight,
         chamfer_weight=args.chamfer_weight,
+        missing_target_weight=args.missing_target_weight,
         huber_beta=args.huber_beta,
         max_slots=args.max_slots,
         max_abs_eta=args.max_abs_eta,

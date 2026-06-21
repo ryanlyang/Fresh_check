@@ -109,6 +109,7 @@ class SetMatchingLossConfig:
     jet_summary_weight: float = 0.05
     correction_budget_weight: float = 0.02
     chamfer_weight: float = 0.0
+    missing_target_weight: float = 0.25
     huber_beta: float = 1.0
     eps: float = EPS
     max_abs_eta: float = 5.0
@@ -177,6 +178,7 @@ class SetMatchingLossConfig:
             "jet_summary_weight": float(self.jet_summary_weight),
             "correction_budget_weight": float(self.correction_budget_weight),
             "chamfer_weight": float(self.chamfer_weight),
+            "missing_target_weight": float(self.missing_target_weight),
             "huber_beta": float(self.huber_beta),
             "max_abs_eta": float(self.max_abs_eta),
             "max_active_slots": self.max_active_slots,
@@ -451,6 +453,22 @@ def chamfer_loss(pred_features, existence_logits, candidate_mask, target_feature
     return pred_to_target + target_to_pred
 
 
+def missing_target_loss(pred_features, candidate_mask, target_features, target_mask, matched_target_indices, config: SetMatchingLossConfig):
+    """Pull unmatched offline targets toward the nearest available predicted candidate."""
+
+    if not bool(target_mask.any()) or not bool(candidate_mask.any()):
+        return _zero_like(pred_features)
+    unmatched_mask = target_mask.clone()
+    if int(matched_target_indices.numel()) > 0:
+        unmatched_mask[matched_target_indices] = False
+    if not bool(unmatched_mask.any()):
+        return _zero_like(pred_features)
+    pred = pred_features[candidate_mask]
+    target = target_features[unmatched_mask]
+    costs = pairwise_core_cost(pred, target, config)
+    return costs.min(dim=0).values.mean()
+
+
 def torch_clamp_min(value, minimum: float):
     torch = require_torch()
     return torch.clamp(value, min=float(minimum))
@@ -513,10 +531,14 @@ def compute_set_matching_loss(
     row_jet_losses = []
     row_budget_losses = []
     row_chamfer_losses = []
+    row_missing_target_losses = []
     assignments: list[SetMatchingAssignment] = []
     matched_counts: list[float] = []
     candidate_counts: list[float] = []
     target_counts: list[float] = []
+    missing_target_counts: list[float] = []
+    missing_target_fractions: list[float] = []
+    target_count_gt_candidate_count_flags: list[float] = []
     pred_counts: list[Any] = []
     existence_target_means: list[float] = []
     method_counts = {"scipy": 0, "bruteforce": 0, "none": 0}
@@ -534,6 +556,7 @@ def compute_set_matching_loss(
         target_count = int(target_valid_indices.numel())
         candidate_counts.append(float(candidate_count))
         target_counts.append(float(target_count))
+        target_count_gt_candidate_count_flags.append(float(target_count > candidate_count))
         pred_counts.append((row_logits.sigmoid() * row_candidate_mask.float()).sum())
 
         if candidate_count > 0 and target_count > 0:
@@ -576,9 +599,22 @@ def compute_set_matching_loss(
             )
         )
         row_chamfer_losses.append(chamfer_loss(row_pred, row_logits, row_candidate_mask, row_target, row_target_mask, config))
+        row_missing_target_losses.append(
+            missing_target_loss(
+                row_pred,
+                row_candidate_mask,
+                row_target,
+                row_target_mask,
+                target_match_indices,
+                config,
+            )
+        )
 
         matched_count = int(pred_match_indices.numel())
         matched_counts.append(float(matched_count))
+        missing_count = max(int(target_count) - int(matched_count), 0)
+        missing_target_counts.append(float(missing_count))
+        missing_target_fractions.append(float(missing_count) / float(target_count) if target_count else 0.0)
         existence_target_means.append(float(existence_targets[row_candidate_mask].detach().float().mean().cpu().item()) if candidate_count else 0.0)
         assignments.append(
             SetMatchingAssignment(
@@ -600,6 +636,7 @@ def compute_set_matching_loss(
         "jet_summary_loss": _safe_mean(row_jet_losses, predicted_features),
         "correction_budget_loss": _safe_mean(row_budget_losses, predicted_features),
         "chamfer_loss": _safe_mean(row_chamfer_losses, predicted_features),
+        "missing_target_loss": _safe_mean(row_missing_target_losses, predicted_features),
     }
     total = (
         float(config.matched_core_weight) * components["matched_core_loss"]
@@ -609,6 +646,7 @@ def compute_set_matching_loss(
         + float(config.jet_summary_weight) * components["jet_summary_loss"]
         + float(config.correction_budget_weight) * components["correction_budget_loss"]
         + float(config.chamfer_weight) * components["chamfer_loss"]
+        + float(config.missing_target_weight) * components["missing_target_loss"]
     )
 
     denom = max(float(batch_size), 1.0)
@@ -616,6 +654,15 @@ def compute_set_matching_loss(
         "matched_count_mean": predicted_features.new_tensor(float(np.mean(matched_counts)) if matched_counts else 0.0),
         "candidate_count_mean": predicted_features.new_tensor(float(np.mean(candidate_counts)) if candidate_counts else 0.0),
         "target_count_mean": predicted_features.new_tensor(float(np.mean(target_counts)) if target_counts else 0.0),
+        "missing_target_count_mean": predicted_features.new_tensor(
+            float(np.mean(missing_target_counts)) if missing_target_counts else 0.0
+        ),
+        "missing_target_fraction_mean": predicted_features.new_tensor(
+            float(np.mean(missing_target_fractions)) if missing_target_fractions else 0.0
+        ),
+        "target_count_gt_candidate_count_fraction": predicted_features.new_tensor(
+            float(np.mean(target_count_gt_candidate_count_flags)) if target_count_gt_candidate_count_flags else 0.0
+        ),
         "predicted_count_mean": _safe_mean(pred_counts, predicted_features),
         "existence_target_mean": predicted_features.new_tensor(
             float(np.mean(existence_target_means)) if existence_target_means else 0.0
@@ -645,6 +692,7 @@ __all__ = [
     "jet_summary_loss",
     "matched_aux_loss",
     "matched_core_loss",
+    "missing_target_loss",
     "pairwise_core_cost",
     "require_torch",
     "wrapped_delta_phi",

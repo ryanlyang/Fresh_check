@@ -13,11 +13,13 @@ source "${SCRIPT_DIR}/common.sh"
 : "${QCD_TBQQ_TAG:=$(date +%Y%m%d_%H%M%S)}"
 : "${QCD_TBQQ_ROOT:=${OUTPUT_ROOT}/offline_binary_qcd_tbqq_${QCD_TBQQ_TAG}}"
 : "${QCD_TBQQ_SOURCE_MANIFEST_PATH:=${MANIFEST_PATH}}"
+: "${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS:=1}"
 : "${QCD_TBQQ_BINARY_INPUT_ROOT:=${QCD_TBQQ_ROOT}/binary_inputs}"
 : "${QCD_TBQQ_MANIFEST_PATH:=${QCD_TBQQ_BINARY_INPUT_ROOT}/split_manifest.json.gz}"
 : "${QCD_TBQQ_LABEL_NAMES:=QCD Tbqq}"
 : "${QCD_TBQQ_MODEL_TRAIN_SIZE:=500000}"
 : "${QCD_TBQQ_MODEL_VAL_SIZE:=150000}"
+: "${QCD_TBQQ_STACK_TRAIN_SIZE:=500000}"
 : "${QCD_TBQQ_STACK_VAL_SIZE:=150000}"
 : "${QCD_TBQQ_FINAL_TEST_SIZE:=500000}"
 : "${QCD_TBQQ_MANIFEST_TIME:=02:00:00}"
@@ -26,7 +28,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${QCD_TBQQ_OFFLINE_TIME:=1-00:00:00}"
 : "${QCD_TBQQ_OFFLINE_MEM:=128G}"
 : "${QCD_TBQQ_OFFLINE_CPUS:=4}"
-: "${QCD_TBQQ_OFFLINE_EPOCHS:=30}"
+: "${QCD_TBQQ_OFFLINE_EPOCHS:=45}"
 : "${QCD_TBQQ_OFFLINE_BATCH_SIZE:=64}"
 : "${QCD_TBQQ_OFFLINE_EVAL_BATCH_SIZE:=128}"
 : "${QCD_TBQQ_OFFLINE_NUM_WORKERS:=2}"
@@ -39,6 +41,7 @@ export SET_MATCHING_LABEL_NAMES="${QCD_TBQQ_LABEL_NAMES}"
 export SET_MATCHING_NUM_CLASSES=2
 export SET_MATCHING_MODEL_TRAIN_SIZE="${QCD_TBQQ_MODEL_TRAIN_SIZE}"
 export SET_MATCHING_MODEL_VAL_SIZE="${QCD_TBQQ_MODEL_VAL_SIZE}"
+export SET_MATCHING_STACK_TRAIN_SIZE="${QCD_TBQQ_STACK_TRAIN_SIZE}"
 export SET_MATCHING_STACK_VAL_SIZE="${QCD_TBQQ_STACK_VAL_SIZE}"
 export SET_MATCHING_FINAL_TEST_SIZE="${QCD_TBQQ_FINAL_TEST_SIZE}"
 export BINARY_OFFLINE_TEACHER_EPOCHS="${QCD_TBQQ_OFFLINE_EPOCHS}"
@@ -87,11 +90,13 @@ if ! fresh_is_dry_run; then
     echo "source_commit=$(fresh_source_commit)"
     echo "task=QCD_vs_Tbqq_binary_offline_part_reference"
     echo "root=${QCD_TBQQ_ROOT}"
+    echo "build_direct_binary_splits=${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}"
     echo "source_manifest=${QCD_TBQQ_SOURCE_MANIFEST_PATH}"
     echo "binary_manifest=${QCD_TBQQ_MANIFEST_PATH}"
     echo "label_names=${QCD_TBQQ_LABEL_NAMES}"
     echo "model_train_size=${QCD_TBQQ_MODEL_TRAIN_SIZE}"
     echo "model_val_size=${QCD_TBQQ_MODEL_VAL_SIZE}"
+    echo "stack_train_size=${QCD_TBQQ_STACK_TRAIN_SIZE}"
     echo "stack_val_size=${QCD_TBQQ_STACK_VAL_SIZE}"
     echo "final_test_size=${QCD_TBQQ_FINAL_TEST_SIZE}"
     echo "manifest_time=${QCD_TBQQ_MANIFEST_TIME}"
@@ -106,16 +111,32 @@ fi
 export LABEL_FILTER_SOURCE_MANIFEST_PATH="${QCD_TBQQ_SOURCE_MANIFEST_PATH}"
 export LABEL_FILTER_OUTPUT_MANIFEST_PATH="${QCD_TBQQ_MANIFEST_PATH}"
 export LABEL_FILTER_NAMES="${QCD_TBQQ_LABEL_NAMES}"
-export LABEL_FILTER_REMAP_LABELS=1
+export LABEL_FILTER_MODEL_TRAIN_SIZE="${QCD_TBQQ_MODEL_TRAIN_SIZE}"
+export LABEL_FILTER_MODEL_VAL_SIZE="${QCD_TBQQ_MODEL_VAL_SIZE}"
+export LABEL_FILTER_STACK_TRAIN_SIZE="${QCD_TBQQ_STACK_TRAIN_SIZE}"
+export LABEL_FILTER_STACK_VAL_SIZE="${QCD_TBQQ_STACK_VAL_SIZE}"
+export LABEL_FILTER_FINAL_TEST_SIZE="${QCD_TBQQ_FINAL_TEST_SIZE}"
 
-mapfile -t manifest_args < <(
-  afterok_args \
-    "${UPSTREAM_DEPENDENCY}" \
-    --time="${QCD_TBQQ_MANIFEST_TIME}" \
-    --cpus-per-task="${QCD_TBQQ_MANIFEST_CPUS}" \
-    --mem="${QCD_TBQQ_MANIFEST_MEM}" \
-    "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
-)
+if fresh_bool_enabled "${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}"; then
+  mapfile -t manifest_args < <(
+    afterok_args \
+      "${UPSTREAM_DEPENDENCY}" \
+      --time="${QCD_TBQQ_MANIFEST_TIME}" \
+      --cpus-per-task="${QCD_TBQQ_MANIFEST_CPUS}" \
+      --mem="${QCD_TBQQ_MANIFEST_MEM}" \
+      "${SCRIPT_DIR}/run_build_label_filtered_fresh_splits.sh"
+  )
+else
+  export LABEL_FILTER_REMAP_LABELS=1
+  mapfile -t manifest_args < <(
+    afterok_args \
+      "${UPSTREAM_DEPENDENCY}" \
+      --time="${QCD_TBQQ_MANIFEST_TIME}" \
+      --cpus-per-task="${QCD_TBQQ_MANIFEST_CPUS}" \
+      --mem="${QCD_TBQQ_MANIFEST_MEM}" \
+      "${SCRIPT_DIR}/run_build_label_filtered_split_manifest.sh"
+  )
+fi
 manifest_jid="$(submit_job "qcd_tbqq_binary_manifest" "${manifest_args[@]}")"
 echo "submitted qcd_tbqq_binary_manifest=${manifest_jid}"
 
@@ -132,6 +153,7 @@ qcd_tbqq_offline_binary_reference_submission:
   task: QCD_vs_Tbqq
   label_names: ${QCD_TBQQ_LABEL_NAMES}
   source_manifest: ${QCD_TBQQ_SOURCE_MANIFEST_PATH}
+  direct_binary_splits: ${QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS}
   binary_manifest: ${QCD_TBQQ_MANIFEST_PATH}
   root: ${QCD_TBQQ_ROOT}
   job_ids:
@@ -144,6 +166,7 @@ qcd_tbqq_offline_binary_reference_submission:
   requested_split_caps:
     model_train: ${QCD_TBQQ_MODEL_TRAIN_SIZE}
     model_val: ${QCD_TBQQ_MODEL_VAL_SIZE}
+    stack_train: ${QCD_TBQQ_STACK_TRAIN_SIZE}
     stack_val: ${QCD_TBQQ_STACK_VAL_SIZE}
     final_test: ${QCD_TBQQ_FINAL_TEST_SIZE}
   resources:

@@ -39,6 +39,7 @@ def isolated_assignment_config():
         jet_summary_weight=0.0,
         correction_budget_weight=0.0,
         chamfer_weight=0.0,
+        missing_target_weight=0.0,
     )
 
 
@@ -154,6 +155,42 @@ class SetMatchingLossTests(unittest.TestCase):
         self.assertIn("loss_matched_core_loss", report)
         self.assertIn("metric_matched_count_mean", report)
         self.assertTrue(np.isfinite(list(report.values())).all())
+
+    def test_missing_target_loss_penalizes_unmatched_offline_particles(self):
+        pred = make_feature_tensor([(10.0, 0.0, 0.0, 10.0)]).unsqueeze(0)
+        target = make_feature_tensor([(10.0, 0.0, 0.0, 10.0), (30.0, 0.5, 0.4, 31.0)]).unsqueeze(0)
+        candidate_mask = torch.ones((1, 1), dtype=torch.bool)
+        target_mask = torch.ones((1, 2), dtype=torch.bool)
+        logits = torch.ones((1, 1), dtype=torch.float32)
+        cfg = SetMatchingLossConfig(
+            matched_core_weight=0.0,
+            matched_aux_weight=0.0,
+            existence_weight=0.0,
+            count_weight=0.0,
+            jet_summary_weight=0.0,
+            correction_budget_weight=0.0,
+            chamfer_weight=0.0,
+            missing_target_weight=1.0,
+        )
+
+        out = compute_set_matching_loss(
+            predicted_features=pred,
+            existence_logits=logits,
+            candidate_mask=candidate_mask,
+            offline_features=target,
+            offline_mask=target_mask,
+            config=cfg,
+        )
+
+        self.assertGreater(float(out.components["missing_target_loss"].detach()), 0.0)
+        self.assertAlmostEqual(
+            float(out.total_loss.detach()),
+            float(out.components["missing_target_loss"].detach()),
+            places=6,
+        )
+        self.assertEqual(out.assignments[0].matched_count, 1)
+        self.assertAlmostEqual(float(out.diagnostics["missing_target_count_mean"].detach()), 1.0)
+        self.assertAlmostEqual(float(out.diagnostics["target_count_gt_candidate_count_fraction"].detach()), 1.0)
 
 
 if __name__ == "__main__":

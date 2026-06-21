@@ -28,14 +28,14 @@ if TORCH_AVAILABLE:
     import torch
 
 
-def make_five_view_dataset(*, split="stack_train", n_jets=4, n_tokens=5):
+def make_five_view_dataset(*, split="stack_train", n_jets=4, n_tokens=5, n_classes=3):
     rng = np.random.default_rng(17 if split == "stack_train" else 23)
     features = rng.normal(size=(n_jets, 5, n_tokens, RAW_TOKEN_DIM)).astype(np.float32)
     masks = np.ones((n_jets, 5, n_tokens), dtype=bool)
     masks[:, :, -1] = False
     confidence = np.where(masks, 0.8, 0.0).astype(np.float32)
     confidence[:, 0] = np.where(masks[:, 0], 1.0, 0.0)
-    labels = (np.arange(n_jets, dtype=np.int64) % 3).astype(np.int64)
+    labels = (np.arange(n_jets, dtype=np.int64) % int(n_classes)).astype(np.int64)
     for jet_index, label in enumerate(labels):
         features[jet_index, :, :, int(label)] += 1.0
     jet_ids = [
@@ -162,6 +162,24 @@ class FiveViewTaggerTrainingLoopTests(unittest.TestCase):
             self.assertFalse(report["final_test_evaluated"])
             self.assertTrue(report["no_final_test_evaluation"])
             self.assertEqual(report["best_stack_val_metrics"]["n_jets"], len(val_dataset))
+
+    def test_train_five_view_tagger_can_select_binary_operating_point_metric(self):
+        train_dataset = make_five_view_dataset(split="stack_train", n_jets=6, n_classes=2)
+        val_dataset = make_five_view_dataset(split="stack_val", n_jets=6, n_classes=2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "experiment" / "taggers" / "five_view_binary"
+            config = tiny_train_config(
+                output_dir,
+                num_classes=2,
+                label_names=("QCD", "Hbb"),
+                selection_metric="fpr_at_signal_eff_0p50",
+            )
+            report = train_five_view_tagger(config, train_dataset=train_dataset, val_dataset=val_dataset)
+
+            self.assertEqual(report["selection_metric"], "fpr_at_signal_eff_0p50")
+            self.assertEqual(report["selection_metric_direction"], "minimize")
+            self.assertIn("binary_metrics", report["best_stack_val_metrics"])
+            self.assertTrue(np.isfinite(report["best_model_selection_metric_value"]))
 
 
 if __name__ == "__main__":

@@ -41,6 +41,48 @@ def read_summary_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def read_offline_teacher_references(experiment_dir: Path) -> list[dict[str, Any]]:
+    reference_root = experiment_dir / "offline_teacher_reference"
+    if not reference_root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for report_path in sorted(reference_root.glob("*/run_report.json")):
+        payload = read_json(report_path)
+        if payload is None:
+            continue
+        rows.append(
+            {
+                "report_path": str(report_path),
+                "output_dir": str(report_path.parent),
+                "best_epoch": metric(payload, ("best_epoch",)),
+                "model_val_accuracy": metric(payload, ("model_val_metrics", "accuracy")),
+                "stack_val_accuracy": metric(payload, ("stack_val_metrics", "accuracy")),
+                "stack_val_auc": metric(payload, ("stack_val_metrics", "binary_metrics", "auc")),
+                "stack_val_fpr_at_signal_eff_0p30": metric(
+                    payload,
+                    ("stack_val_metrics", "binary_metrics", "fpr_at_signal_eff_0p30"),
+                ),
+                "stack_val_fpr_at_signal_eff_0p50": metric(
+                    payload,
+                    ("stack_val_metrics", "binary_metrics", "fpr_at_signal_eff_0p50"),
+                ),
+                "final_test_accuracy": metric(payload, ("final_test_metrics", "accuracy")),
+                "final_test_auc": metric(payload, ("final_test_metrics", "binary_metrics", "auc")),
+                "final_test_fpr_at_signal_eff_0p30": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "fpr_at_signal_eff_0p30"),
+                ),
+                "final_test_fpr_at_signal_eff_0p50": metric(
+                    payload,
+                    ("final_test_metrics", "binary_metrics", "fpr_at_signal_eff_0p50"),
+                ),
+                "label_names": metric(payload, ("label_names",)),
+                "config": metric(payload, ("config",)),
+            }
+        )
+    return rows
+
+
 def metric(payload: dict[str, Any] | None, path: tuple[str, ...]) -> Any:
     value: Any = payload
     for key in path:
@@ -119,6 +161,9 @@ def main() -> int:
                 "report_path": str(report_path),
                 "exists": payload is not None,
                 "best_epoch": metric(payload, ("best_epoch",)),
+                "selection_metric": metric(payload, ("selection_metric",)),
+                "selection_metric_direction": metric(payload, ("selection_metric_direction",)),
+                "best_model_selection_metric_value": metric(payload, ("best_model_selection_metric_value",)),
                 "stack_val_accuracy": metric(payload, ("best_stack_val_metrics", "accuracy")),
                 "stack_val_auc": metric(payload, ("best_stack_val_metrics", "binary_metrics", "auc")),
                 "stack_val_fpr_at_signal_eff_0p30": metric(
@@ -158,6 +203,9 @@ def main() -> int:
     elif bool(args.confirm_final_test) and not bool(ablation_report.get("final_test_evaluated")):
         problems.append("ablation report did not evaluate final_test despite --confirm-final-test")
     summary_rows = read_summary_csv(ablation_dir / "summary.csv")
+    filtered_manifest_report_path = experiment_dir / "binary_inputs" / "filtered_manifest_report.json"
+    filtered_manifest_report = read_json(filtered_manifest_report_path)
+    offline_teacher_references = read_offline_teacher_references(experiment_dir)
 
     ok = not problems
     report = {
@@ -173,6 +221,10 @@ def main() -> int:
         "ablation_report": str(ablation_report_path),
         "ablation_final_test_evaluated": bool((ablation_report or {}).get("final_test_evaluated")),
         "ablation_summary_rows": summary_rows,
+        "filtered_manifest_report_path": str(filtered_manifest_report_path),
+        "filtered_manifest_report_exists": filtered_manifest_report is not None,
+        "filtered_manifest_report": filtered_manifest_report,
+        "offline_teacher_references": offline_teacher_references,
     }
 
     json_path = output_dir / "final_report.json"
@@ -187,15 +239,29 @@ def main() -> int:
         "",
         "## Taggers",
         "",
-        "| variant | stack_val_accuracy | stack_val_auc | final_test_accuracy | final_test_auc | final_fpr@30 | final_fpr@50 |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| variant | selection_metric | selected_value | stack_val_accuracy | stack_val_auc | final_test_accuracy | final_test_auc | final_fpr@30 | final_fpr@50 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in taggers:
         lines.append(
-            f"| {row['variant']} | {row['stack_val_accuracy']} | {row['stack_val_auc']} | "
+            f"| {row['variant']} | {row['selection_metric']} | {row['best_model_selection_metric_value']} | "
+            f"{row['stack_val_accuracy']} | {row['stack_val_auc']} | "
             f"{row['final_test_accuracy']} | {row['final_test_auc']} | "
             f"{row['final_test_fpr_at_signal_eff_0p30']} | {row['final_test_fpr_at_signal_eff_0p50']} |"
         )
+    if offline_teacher_references:
+        lines += [
+            "",
+            "## Offline References",
+            "",
+            "| report | stack_val_auc | final_test_auc | final_fpr@30 | final_fpr@50 |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        for row in offline_teacher_references:
+            lines.append(
+                f"| {row['report_path']} | {row['stack_val_auc']} | {row['final_test_auc']} | "
+                f"{row['final_test_fpr_at_signal_eff_0p30']} | {row['final_test_fpr_at_signal_eff_0p50']} |"
+            )
     if problems:
         lines += ["", "## Problems", ""]
         lines.extend(f"- {problem}" for problem in problems)

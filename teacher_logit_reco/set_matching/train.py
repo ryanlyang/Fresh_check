@@ -171,6 +171,7 @@ class SetMatchingReconstructorTrainConfig:
     jet_summary_weight: float = 0.05
     correction_budget_weight: float = 0.02
     chamfer_weight: float = 0.0
+    missing_target_weight: float = 0.25
     huber_beta: float = 1.0
     max_slots: int | None = None
     max_abs_eta: float = 5.0
@@ -321,6 +322,7 @@ class SetMatchingReconstructorTrainConfig:
             jet_summary_weight=float(self.jet_summary_weight),
             correction_budget_weight=float(self.correction_budget_weight),
             chamfer_weight=float(self.chamfer_weight),
+            missing_target_weight=float(self.missing_target_weight),
             huber_beta=float(self.huber_beta),
             max_active_slots=self.max_slots,
             max_abs_eta=float(self.max_abs_eta),

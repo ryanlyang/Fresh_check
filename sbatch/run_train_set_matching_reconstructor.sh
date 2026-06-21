@@ -77,6 +77,7 @@ cmd=(
   --jet-summary-weight "${SET_MATCHING_JET_SUMMARY_WEIGHT}"
   --correction-budget-weight "${SET_MATCHING_CORRECTION_BUDGET_WEIGHT}"
   --chamfer-weight "${SET_MATCHING_CHAMFER_WEIGHT}"
+  --missing-target-weight "${SET_MATCHING_MISSING_TARGET_WEIGHT}"
   --huber-beta "${SET_MATCHING_HUBER_BETA}"
   --max-abs-eta "${SET_MATCHING_MAX_ABS_ETA}"
   --hlt-support-budget-weight "${SET_MATCHING_HLT_SUPPORT_BUDGET_WEIGHT}"

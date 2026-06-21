@@ -10,6 +10,7 @@ RUNNERS = [
     "run_build_fresh_splits.sh",
     "run_build_fresh_hlt_cache.sh",
     "run_build_label_filtered_split_manifest.sh",
+    "run_build_label_filtered_fresh_splits.sh",
     "run_build_label_filtered_hlt_cache.sh",
     "run_train_fresh_hlt_baseline.sh",
     "run_train_fresh_hlt_seed.sh",
@@ -1071,6 +1072,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--confirm-split-settings", train)
         self.assertIn("--max-train-jets \"${SET_MATCHING_MODEL_TRAIN_SIZE}\"", train)
         self.assertIn("--max-val-jets \"${SET_MATCHING_MODEL_VAL_SIZE}\"", train)
+        self.assertIn("--missing-target-weight \"${SET_MATCHING_MISSING_TARGET_WEIGHT}\"", train)
 
         self.assertIn("#SBATCH --time=12:00:00", cache)
         self.assertIn("#SBATCH --gres=gpu:1", cache)
@@ -1088,6 +1090,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('cmd+=(--drop-views "${drop_views[@]}")', tagger)
         self.assertIn("five_view_geometry", tagger)
         self.assertIn("view_label_shuffle_control", tagger)
+        self.assertIn('selection_mode="all_slots"', tagger)
+        self.assertIn("--selection-metric \"${SET_MATCHING_TAGGER_SELECTION_METRIC}\"", tagger)
         self.assertIn('fresh_append_flag_if_enabled cmd --use-geometry-attention "${use_geometry_attention}"', tagger)
         self.assertIn('fresh_append_flag_if_enabled cmd --disable-confidence "${disable_confidence}"', tagger)
         self.assertIn('fresh_append_flag_if_enabled cmd --shuffle-view-labels "${shuffle_view_labels}"', tagger)
@@ -1182,6 +1186,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("HBB_QCD_RECO_TIME:=2-00:00:00", submitter)
         self.assertIn("HBB_QCD_TAGGER_TIME:=2-00:00:00", submitter)
         self.assertIn("HBB_QCD_SUBMIT_OFFLINE_TEACHER_REFERENCE:=1", submitter)
+        self.assertIn("HBB_QCD_TAGGER_SELECTION_METRIC:-fpr_at_signal_eff_0p50", submitter)
         self.assertIn('--mem="${HBB_QCD_RECO_MEM}"', submitter)
         self.assertIn('--mem="${HBB_QCD_CACHE_MEM}"', submitter)
         self.assertIn('--mem="${HBB_QCD_TAGGER_MEM}"', submitter)
@@ -1200,6 +1205,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--label-filter-names", audit)
         metrics_code = (REPO_ROOT / "teacher_logit_reco" / "set_matching" / "five_view_train.py").read_text(encoding="utf-8")
         self.assertIn("fpr_at_signal_eff_0p30", metrics_code)
+        self.assertIn("selection_metric", metrics_code)
         self.assertIn("run_write_set_matching_multiview_final_report.sh", submitter)
         self.assertIn("final_report_job_id", submitter)
 
@@ -1213,6 +1219,22 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("source_to_filtered_label", script)
         self.assertIn("Pass --remap-labels for labels like QCD Tbqq", script)
 
+    def test_label_filtered_fresh_split_builder_samples_after_filtering(self):
+        script = (REPO_ROOT / "scripts" / "build_label_filtered_fresh_splits.py").read_text(encoding="utf-8")
+        runner = self.read("run_build_label_filtered_fresh_splits.sh")
+
+        self.assertIn("split size caps", script)
+        self.assertIn("after selecting QCD/Tbqq", script)
+        self.assertIn("split_size_semantics", script)
+        self.assertIn("after_label_filtering", script)
+        self.assertIn("discover_file_records", script)
+        self.assertIn("require_all_classes=False", script)
+        self.assertIn("source_to_filtered", script)
+        self.assertIn("requested_per_class_total", script)
+        self.assertIn("scripts/build_label_filtered_fresh_splits.py", runner)
+        self.assertIn("LABEL_FILTER_MODEL_TRAIN_SIZE", runner)
+        self.assertIn("--model-train", runner)
+
     def test_qcd_tbqq_offline_reference_submitter_queues_manifest_and_offline_part(self):
         submitter = self.read("submit_offline_binary_qcd_tbqq_reference.sh")
         trainer = (REPO_ROOT / "scripts" / "train_eval_set_matching_binary_offline_teacher.py").read_text(
@@ -1225,9 +1247,13 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("QCD_TBQQ_LABEL_NAMES:=QCD Tbqq", submitter)
         self.assertIn("QCD_TBQQ_MODEL_TRAIN_SIZE:=500000", submitter)
         self.assertIn("QCD_TBQQ_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("QCD_TBQQ_STACK_TRAIN_SIZE:=500000", submitter)
         self.assertIn("QCD_TBQQ_STACK_VAL_SIZE:=150000", submitter)
         self.assertIn("QCD_TBQQ_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS:=1", submitter)
+        self.assertIn("QCD_TBQQ_OFFLINE_EPOCHS:=45", submitter)
         self.assertIn("LABEL_FILTER_REMAP_LABELS=1", submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
         self.assertIn("run_build_label_filtered_split_manifest.sh", submitter)
         self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
         self.assertIn('--dependency="afterok:${manifest_jid}"', submitter)
@@ -1247,6 +1273,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('export SET_MATCHING_LABEL_FILTER_NAMES="${QCD_TBQQ_BINARY_LABEL_FILTER}"', submitter)
         self.assertIn('export SET_MATCHING_LABEL_NAMES="${QCD_TBQQ_SOURCE_LABEL_NAMES}"', submitter)
         self.assertIn("SET_MATCHING_NUM_CLASSES=2", submitter)
+        self.assertIn("QCD_TBQQ_BUILD_DIRECT_BINARY_SPLITS:=1", submitter)
+        self.assertIn("QCD_TBQQ_OFFLINE_TEACHER_EPOCHS:=45", submitter)
+        self.assertIn('export SET_MATCHING_TAGGER_EPOCHS="${QCD_TBQQ_TAGGER_EPOCHS:-45}"', submitter)
+        self.assertIn('export BINARY_OFFLINE_TEACHER_EPOCHS="${QCD_TBQQ_OFFLINE_TEACHER_EPOCHS}"', submitter)
         self.assertIn("LABEL_FILTER_REMAP_LABELS=1", submitter)
         self.assertIn('export LABEL_FILTER_NAMES="${QCD_TBQQ_SOURCE_LABEL_NAMES}"', submitter)
         self.assertIn("QCD_TBQQ_MODEL_TRAIN_SIZE:-500000", submitter)
@@ -1254,6 +1284,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("QCD_TBQQ_STACK_TRAIN_SIZE:-500000", submitter)
         self.assertIn("QCD_TBQQ_STACK_VAL_SIZE:-150000", submitter)
         self.assertIn("QCD_TBQQ_FINAL_TEST_SIZE:-500000", submitter)
+        self.assertIn("QCD_TBQQ_TAGGER_SELECTION_METRIC:-fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
         self.assertIn("run_build_label_filtered_split_manifest.sh", submitter)
         self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
         self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)

@@ -29,6 +29,7 @@ drop_views=()
 use_geometry_attention=0
 disable_confidence=0
 shuffle_view_labels=0
+selection_mode="topk_or_threshold"
 case "${VARIANT}" in
   hlt_only)
     drop_views=(gt_reco pn_reco pfn_reco pcnn_reco)
@@ -52,6 +53,7 @@ case "${VARIANT}" in
     ;;
   five_view_no_confidence)
     disable_confidence=1
+    selection_mode="all_slots"
     ;;
   view_label_shuffle_control)
     shuffle_view_labels=1
@@ -100,10 +102,11 @@ cmd=(
   --max-train-jets "${SET_MATCHING_STACK_TRAIN_SIZE}"
   --max-val-jets "${SET_MATCHING_STACK_VAL_SIZE}"
   --max-final-test-jets "${SET_MATCHING_FINAL_TEST_SIZE}"
+  --selection-metric "${SET_MATCHING_TAGGER_SELECTION_METRIC}"
   --max-tokens-per-view "${SET_MATCHING_MAX_TOKENS_PER_VIEW}"
   --min-tokens-per-view "${SET_MATCHING_MIN_TOKENS_PER_VIEW}"
   --confidence-threshold "${SET_MATCHING_CONFIDENCE_THRESHOLD}"
-  --selection-mode topk_or_threshold
+  --selection-mode "${selection_mode}"
   --view-label-shuffle-seed "${SET_MATCHING_TAGGER_SEED}"
   --embed-dim "${SET_MATCHING_TAGGER_EMBED_DIM}"
   --stage1-layers "${SET_MATCHING_TAGGER_STAGE1_LAYERS}"

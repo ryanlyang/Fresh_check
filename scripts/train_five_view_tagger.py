@@ -67,6 +67,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-jets", type=int, default=None)
     parser.add_argument("--max-val-jets", type=int, default=None)
     parser.add_argument("--max-final-test-jets", type=int, default=None)
+    parser.add_argument(
+        "--selection-metric",
+        choices=(
+            "accuracy",
+            "loss",
+            "macro_per_class_accuracy",
+            "auc",
+            "fpr_at_signal_eff_0p30",
+            "fpr_at_signal_eff_0p50",
+            "background_rejection_at_signal_eff_0p30",
+            "background_rejection_at_signal_eff_0p50",
+        ),
+        default="accuracy",
+    )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--label-names", nargs="*", default=())
@@ -128,6 +142,7 @@ def main() -> int:
         max_train_jets=args.max_train_jets,
         max_val_jets=args.max_val_jets,
         max_final_test_jets=args.max_final_test_jets,
+        selection_metric=args.selection_metric,
         compile_model=args.compile_model,
         num_classes=args.num_classes,
         label_names=tuple(args.label_names),
@@ -162,6 +177,8 @@ def main() -> int:
     print(f"  output_dir: {args.output_dir}")
     print(f"  experiment_dir: {config.experiment_root}")
     print(f"  best_epoch: {report['best_epoch']}")
+    print(f"  selection_metric: {report['selection_metric']}")
+    print(f"  best_model_selection_metric_value: {report['best_model_selection_metric_value']:.8g}")
     print(f"  best_model_val_accuracy: {report['best_model_val_accuracy']:.6f}")
     print(f"  final_test_evaluated: {report['final_test_evaluated']}")
     if report.get("final_test_metrics"):

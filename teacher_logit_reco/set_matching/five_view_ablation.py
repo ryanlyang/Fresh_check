@@ -7,20 +7,22 @@ import csv
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import numpy as np
-
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json
 from jetclass_fresh.jetclass_data import LABEL_NAMES
 
 from .experiment import (
-    HLT_VIEW_NAME,
     RECONSTRUCTED_VIEW_NAMES,
     SPLIT_SIZES,
     SetMatchingMultiViewLayout,
     normalize_split_name,
     normalize_view_name,
 )
-from .five_view_data import FiveViewDatasetConfig, FiveViewJetDataset, make_five_view_loader
+from .five_view_data import (
+    FiveViewDatasetConfig,
+    FiveViewJetDataset,
+    _shuffle_reconstructed_view_contents_per_jet,
+    make_five_view_loader,
+)
 from .five_view_model import load_five_view_tagger_checkpoint
 from .five_view_train import run_five_view_tagger_epoch
 
@@ -340,21 +342,25 @@ def _copy_dataset_with_ablations(
         view_confidence[:, index] = 0.0
         source_indices[:, index] = -1
 
-    view_ids = np.asarray(dataset.view_ids, dtype=np.int64).copy()
+    shuffle_control_diagnostics = {"applied": False}
     if bool(shuffle_view_labels):
-        rng = np.random.default_rng(int(seed))
-        if HLT_VIEW_NAME in view_names:
-            anchor = view_names.index(HLT_VIEW_NAME)
-            movable = [index for index in range(len(view_names)) if index != anchor]
-            shuffled = view_ids[movable].copy()
-            rng.shuffle(shuffled)
-            view_ids[movable] = shuffled
-        else:
-            rng.shuffle(view_ids)
+        view_features, view_masks, view_confidence, source_indices, shuffle_control_diagnostics = (
+            _shuffle_reconstructed_view_contents_per_jet(
+                view_features=view_features,
+                view_masks=view_masks,
+                view_confidence=view_confidence,
+                source_indices=source_indices,
+                view_names=view_names,
+                seed=int(seed),
+                split=dataset.split,
+                keep_hlt_anchor=True,
+            )
+        )
 
     metadata = dict(dataset.metadata)
     metadata["step11_drop_views"] = list(dropped)
     metadata["step11_shuffle_view_labels"] = bool(shuffle_view_labels)
+    metadata["step11_view_label_shuffle_control"] = shuffle_control_diagnostics
     return FiveViewJetDataset(
         view_features=view_features,
         view_masks=view_masks,
@@ -364,7 +370,7 @@ def _copy_dataset_with_ablations(
         split=dataset.split,
         view_names=dataset.view_names,
         source_types=dataset.source_types,
-        view_ids=view_ids,
+        view_ids=dataset.view_ids,
         source_type_ids=dataset.source_type_ids,
         source_indices=source_indices,
         metadata=metadata,

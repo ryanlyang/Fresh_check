@@ -137,9 +137,14 @@ class FiveViewArrayTests(unittest.TestCase):
         self.assertEqual(dataset.metadata["selection_mode"], "topk_or_threshold")
         self.assertFalse(dataset.view_masks[:, 3].any())
         self.assertTrue(np.all(dataset.view_confidence[:, 3] == 0.0))
-        self.assertEqual(dataset.view_ids[0], 0)
-        self.assertEqual(sorted(dataset.view_ids[1:].tolist()), [1, 2, 3, 4])
-        self.assertFalse(np.array_equal(dataset.view_ids, np.arange(5)))
+        self.assertEqual(dataset.view_ids.tolist(), [0, 1, 2, 3, 4])
+        control = dataset.metadata["view_label_shuffle_control"]
+        self.assertTrue(control["applied"])
+        self.assertEqual(control["mode"], "per_jet_reconstructed_content_shuffle_with_fixed_view_ids")
+        self.assertNotEqual(
+            control["examples"][0]["semantic_view_names"],
+            control["examples"][0]["content_source_view_names"],
+        )
         self.assertTrue(dataset.view_masks[:, 0].sum(axis=1).min() >= 3)
         self.assertTrue(dataset.view_masks[:, 1].sum(axis=1).min() >= 2)
 
@@ -147,6 +152,35 @@ class FiveViewArrayTests(unittest.TestCase):
         self.assertEqual(sample.view_features.shape, (5, 3, RAW_TOKEN_DIM))
         self.assertEqual(sample.source_indices.shape, (5, 3))
         self.assertEqual(sample.label, 0)
+
+    def test_all_slots_selection_does_not_use_confidence_threshold(self):
+        views = make_five_views()
+        topk_config = FiveViewDatasetConfig(
+            output_dir="out",
+            hlt_cache_dir="hlt_cache",
+            split="stack_val",
+            max_tokens_per_view=6,
+            min_tokens_per_view=0,
+            confidence_threshold=0.90,
+            selection_mode="topk_or_threshold",
+        )
+        all_slots_config = FiveViewDatasetConfig(
+            output_dir="out",
+            hlt_cache_dir="hlt_cache",
+            split="stack_val",
+            max_tokens_per_view=6,
+            min_tokens_per_view=0,
+            confidence_threshold=0.90,
+            selection_mode="all_slots",
+        )
+        topk_dataset = build_five_view_dataset_from_arrays(views, config=topk_config)
+        all_slots_dataset = build_five_view_dataset_from_arrays(views, config=all_slots_config)
+
+        self.assertLess(topk_dataset.view_masks[:, 1].sum(axis=1).max(), all_slots_dataset.view_masks[:, 1].sum(axis=1).max())
+        np.testing.assert_array_equal(
+            all_slots_dataset.view_masks[:, 1].sum(axis=1),
+            views[1].mask.sum(axis=1),
+        )
 
     def test_collate_returns_tagger_ready_shapes(self):
         config = FiveViewDatasetConfig(

@@ -26,6 +26,17 @@ from .train import source_metadata
 
 
 SET_MATCHING_FIVE_VIEW_TRAIN_STEP = "set_matching_multiview_step10_train_five_view_tagger"
+FIVE_VIEW_SELECTION_METRICS = (
+    "accuracy",
+    "loss",
+    "macro_per_class_accuracy",
+    "auc",
+    "fpr_at_signal_eff_0p30",
+    "fpr_at_signal_eff_0p50",
+    "background_rejection_at_signal_eff_0p30",
+    "background_rejection_at_signal_eff_0p50",
+)
+LOWER_IS_BETTER_SELECTION_METRICS = {"loss", "fpr_at_signal_eff_0p30", "fpr_at_signal_eff_0p50"}
 
 
 def _optional_nonnegative_int(value: int | None, *, field_name: str) -> int | None:
@@ -83,6 +94,7 @@ class FiveViewTaggerTrainConfig:
     max_train_jets: int | None = None
     max_val_jets: int | None = None
     max_final_test_jets: int | None = None
+    selection_metric: str = "accuracy"
     compile_model: bool = False
     num_classes: int | None = None
     label_names: tuple[str, ...] = ()
@@ -151,6 +163,9 @@ class FiveViewTaggerTrainConfig:
             raise ValueError("attention_dropout must be in [0, 1)")
         if not 0.0 <= float(self.geometry_dropout) < 1.0:
             raise ValueError("geometry_dropout must be in [0, 1)")
+        self.selection_metric = str(self.selection_metric)
+        if self.selection_metric not in FIVE_VIEW_SELECTION_METRICS:
+            raise ValueError(f"selection_metric must be one of {FIVE_VIEW_SELECTION_METRICS}")
         if self.classifier_hidden_dim is not None:
             self.classifier_hidden_dim = _optional_positive_int(
                 self.classifier_hidden_dim,
@@ -396,6 +411,34 @@ def classification_metrics_from_predictions(
     if logits is not None and n_classes == 2:
         metrics["binary_metrics"] = binary_classification_metrics_from_logits(logits=logits, labels=labels, label_names=names)
     return metrics
+
+
+def _lookup_selection_metric(metrics: Mapping[str, Any], metric_name: str) -> float:
+    if metric_name in metrics:
+        try:
+            return float(metrics[metric_name])
+        except (TypeError, ValueError):
+            return float("nan")
+    binary = metrics.get("binary_metrics")
+    if isinstance(binary, Mapping) and metric_name in binary:
+        try:
+            return float(binary[metric_name])
+        except (TypeError, ValueError):
+            return float("nan")
+    raise KeyError(f"validation metrics do not contain selection metric {metric_name!r}")
+
+
+def _selection_metric_requires_predictions(metric_name: str) -> bool:
+    return metric_name not in {"accuracy", "loss"}
+
+
+def _selection_score(metrics: Mapping[str, Any], metric_name: str) -> tuple[float, float]:
+    value = _lookup_selection_metric(metrics, metric_name)
+    if np.isnan(value):
+        return float("-inf"), value
+    if metric_name in LOWER_IS_BETTER_SELECTION_METRICS:
+        return -float(value), float(value)
+    return float(value), float(value)
 
 
 def _write_per_class_csv(path: Path, metrics_by_split: Mapping[str, Mapping[str, Any]]) -> None:
@@ -702,6 +745,8 @@ def train_five_view_tagger(
     save_json(output_dir / "config.json", run_metadata)
 
     curves: list[dict[str, Any]] = []
+    best_val_score = float("-inf")
+    best_selection_metric_value = float("nan")
     best_val_accuracy = -1.0
     best_val_loss = float("inf")
     best_epoch = -1
@@ -726,7 +771,8 @@ def train_five_view_tagger(
             criterion=criterion,
             amp=False,
             max_batches=config.max_val_batches,
-            collect_predictions=False,
+            collect_predictions=_selection_metric_requires_predictions(str(config.selection_metric)),
+            label_names=tuple(config.label_names),
         )
         row = {"epoch": int(epoch), "train": train_metrics, "stack_val": val_metrics}
         curves.append(row)
@@ -735,7 +781,8 @@ def train_five_view_tagger(
 
         val_accuracy = _finite_float(val_metrics.get("accuracy"), default=-1.0)
         val_loss = _finite_float(val_metrics.get("loss"), default=float("inf"))
-        improved = val_accuracy > best_val_accuracy or (np.isclose(val_accuracy, best_val_accuracy) and val_loss < best_val_loss)
+        val_score, selection_value = _selection_score(val_metrics, str(config.selection_metric))
+        improved = val_score > best_val_score or (np.isclose(val_score, best_val_score) and val_loss < best_val_loss)
         payload = five_view_tagger_training_checkpoint_payload(
             checkpoint_model,
             optimizer,
@@ -746,6 +793,8 @@ def train_five_view_tagger(
         )
         torch.save(payload, output_dir / "last.pt")
         if improved:
+            best_val_score = float(val_score)
+            best_selection_metric_value = float(selection_value)
             best_val_accuracy = float(val_accuracy)
             best_val_loss = float(val_loss)
             best_epoch = int(epoch)
@@ -827,6 +876,10 @@ def train_five_view_tagger(
         "tagger_model_step": SET_MATCHING_FIVE_VIEW_TAGGER_STEP,
         "output_contract": best_model.output_contract,
         "best_epoch": int(best_epoch),
+        "selection_metric": str(config.selection_metric),
+        "selection_metric_direction": "minimize" if str(config.selection_metric) in LOWER_IS_BETTER_SELECTION_METRICS else "maximize",
+        "best_model_selection_metric_value": float(best_selection_metric_value),
+        "best_model_selection_score": float(best_val_score),
         "best_model_val_accuracy": float(best_val_accuracy),
         "best_model_val_loss": float(best_val_loss),
         "best_stack_val_metrics": best_val_metrics,
