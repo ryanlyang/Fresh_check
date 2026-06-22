@@ -500,6 +500,7 @@ def detr_slot_particle_cnn_rank_features(mask):
 def detr_slot_particle_cnn_features(tokens, mask, *, max_abs_eta: float = 5.0):
     """Build ordered rank-convolution features for the DETR-slot P-CNN encoder."""
 
+    torch = require_torch()
     flow_features = detr_slot_particle_flow_features(tokens, mask, max_abs_eta=max_abs_eta)
     rank_features = detr_slot_particle_cnn_rank_features(mask).to(
         device=flow_features.device,
