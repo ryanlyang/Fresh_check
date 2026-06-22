@@ -382,6 +382,7 @@ def decode_slot_outputs_to_raw_tokens(
     core = _as_tensor(core_outputs)
     if core.ndim < 2 or int(core.shape[-1]) != 4:
         raise ValueError(f"core_outputs must have shape [..., 4], got {tuple(core.shape)}")
+    core = core.float()
     out_dim = int(feature_dim if feature_dim is not None else (config.feature_dim if config is not None else RAW_TOKEN_DIM))
     config = config or DetrSlotFeatureConfig(feature_dim=out_dim)
     if int(config.feature_dim) != out_dim:
@@ -445,8 +446,7 @@ def decode_slot_outputs_to_loss_features(
     core = _as_tensor(core_outputs)
     if core.ndim < 2 or int(core.shape[-1]) != 4:
         raise ValueError(f"core_outputs must have shape [..., 4], got {tuple(core.shape)}")
-    if not torch.is_floating_point(core):
-        core = core.float()
+    core = core.float()
     core = _require_finite(core, name="core_outputs")
     out_dim = int(feature_dim if feature_dim is not None else (config.feature_dim if config is not None else RAW_TOKEN_DIM))
     config = config or DetrSlotFeatureConfig(feature_dim=out_dim)

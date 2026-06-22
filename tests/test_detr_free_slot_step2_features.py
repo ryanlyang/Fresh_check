@@ -128,6 +128,23 @@ class DetrFreeSlotStep2FeatureTests(unittest.TestCase):
         self.assertIsNotNone(core.grad)
         self.assertTrue(torch.isfinite(core.grad).all())
 
+    def test_half_precision_decode_promotes_exp_math_to_float32(self):
+        config = default_detr_slot_feature_config(feature_dim=RAW_TOKEN_DIM)
+        core = torch.tensor([[[20.0, 5.0, 0.0, 20.0]]], dtype=torch.float16, requires_grad=True)
+        aux = torch.zeros((1, 1, config.aux_dim), dtype=torch.float16, requires_grad=True)
+
+        raw = decode_slot_outputs_to_raw_tokens(core, aux, config=config)
+        loss_features = decode_slot_outputs_to_loss_features(core, aux, config=config)
+        loss = raw[..., [0, 3]].sum() + loss_features[..., [0, 3]].sum()
+        loss.backward()
+
+        self.assertEqual(raw.dtype, torch.float32)
+        self.assertEqual(loss_features.dtype, torch.float32)
+        self.assertTrue(torch.isfinite(raw).all())
+        self.assertTrue(torch.isfinite(loss_features).all())
+        self.assertIsNotNone(core.grad)
+        self.assertTrue(torch.isfinite(core.grad).all())
+
     def test_safe_log_pt_energy_sanitizes_bad_inputs(self):
         pt = torch.tensor([4.0, -2.0, float("nan")], dtype=torch.float32)
         energy = torch.tensor([8.0, 0.0, float("inf")], dtype=torch.float32)
