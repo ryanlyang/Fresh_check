@@ -10,7 +10,12 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from jetclass_fixed_hlt import FixedHLTParams, build_fixed_hlt_view, summarize_hlt_diagnostics
+from jetclass_fixed_hlt import (
+    FixedHLTParams,
+    build_fixed_hlt_view,
+    scaled_fixed_hlt_params,
+    summarize_hlt_diagnostics,
+)
 
 from .jetclass_data import (
     JetIdentity,
@@ -38,6 +43,12 @@ def fixed_hlt_params_dict(params: FixedHLTParams | None = None) -> Dict[str, flo
     """Return the exact fixed HLT parameter profile as plain JSON values."""
 
     return {key: float(value) for key, value in asdict(params or FixedHLTParams()).items()}
+
+
+def fixed_hlt_params_from_strength(strength: float = 1.0) -> FixedHLTParams:
+    """Build the HLT parameter profile for an experimental degradation strength."""
+
+    return scaled_fixed_hlt_params(strength)
 
 
 def _hash_update_array(hasher: "hashlib._Hash", name: str, array: np.ndarray) -> None:
@@ -412,13 +423,17 @@ def audit_hlt_cache(
     cache_dir: str | Path,
     *,
     splits: Iterable[str] = SPLIT_ORDER,
+    expected_params: FixedHLTParams | Mapping[str, float] | None = None,
 ) -> Dict[str, Any]:
     """Verify cached HLT views match split identities and fixed profile metadata."""
 
     manifest_sha = manifest_hash(manifest)
     split_reports: Dict[str, Any] = {}
     ok = True
-    expected_params = fixed_hlt_params_dict()
+    if isinstance(expected_params, FixedHLTParams) or expected_params is None:
+        expected_param_dict = fixed_hlt_params_dict(expected_params)
+    else:
+        expected_param_dict = {key: float(value) for key, value in expected_params.items()}
 
     for split in splits:
         split_ok = True
@@ -445,9 +460,9 @@ def audit_hlt_cache(
         if metadata.get("source_manifest_hash") not in (None, manifest_sha):
             split_ok = False
             problems.append("source_manifest_hash does not match manifest")
-        if metadata.get("hlt_params") != expected_params:
+        if metadata.get("hlt_params") != expected_param_dict:
             split_ok = False
-            problems.append("HLT parameters do not match FixedHLTParams defaults")
+            problems.append("HLT parameters do not match expected FixedHLTParams profile")
         expected_seed = DEFAULT_HLT_SEEDS.get(split)
         if expected_seed is not None and int(metadata.get("seed", -1)) != int(expected_seed):
             split_ok = False
@@ -459,6 +474,8 @@ def audit_hlt_cache(
             "n_jets": int(metadata.get("n_jets", 0)),
             "seed": int(metadata.get("seed", -1)),
             "hlt_content_hash": metadata.get("hlt_content_hash"),
+            "hlt_params": metadata.get("hlt_params"),
+            "expected_hlt_params": expected_param_dict,
             "hlt_diagnostics_summary": metadata.get("hlt_diagnostics_summary"),
         }
         ok = ok and split_ok
@@ -467,6 +484,7 @@ def audit_hlt_cache(
     return {
         "ok": bool(ok),
         "manifest_hash": manifest_sha,
+        "expected_hlt_params": expected_param_dict,
         "split_reports": split_reports,
         "all_splits_have_distinct_content_hashes": len(hashes) == len(set(hashes)),
     }

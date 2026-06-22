@@ -7,6 +7,7 @@ import numpy as np
 from jetclass_fresh.hlt_cache import (
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
+    fixed_hlt_params_from_strength,
     fixed_hlt_params_dict,
     generate_and_cache_hlt_view,
     load_cached_hlt_view,
@@ -146,6 +147,26 @@ class HLTCacheStep3Tests(unittest.TestCase):
             metadata = load_hlt_metadata(Path(tmp), "model_train")
         self.assertEqual(metadata["view"], "fixed_hlt")
         self.assertEqual(metadata["n_jets"], 3)
+
+    def test_scaled_hlt_profile_is_auditable(self):
+        base_view = make_small_offline_view()
+        manifest = make_small_manifest(base_view.jet_ids)
+        offline_view = make_small_offline_view(source_manifest_hash=manifest_hash(manifest))
+        params = fixed_hlt_params_from_strength(0.6)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = generate_and_cache_hlt_view(
+                offline_view,
+                tmp,
+                seed=DEFAULT_HLT_SEEDS["model_train"],
+                params=params,
+            )
+            audit_default = audit_hlt_cache(manifest, tmp, splits=["model_train"])
+            audit_scaled = audit_hlt_cache(manifest, tmp, splits=["model_train"], expected_params=params)
+
+        self.assertEqual(metadata["hlt_params"], fixed_hlt_params_dict(params))
+        self.assertFalse(audit_default["ok"])
+        self.assertTrue(audit_scaled["ok"])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ if str(REPO_ROOT) not in sys.path:
 from jetclass_fresh.hlt_cache import (  # noqa: E402
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
+    fixed_hlt_params_dict,
+    fixed_hlt_params_from_strength,
     generate_and_cache_hlt_split,
 )
 from jetclass_fresh.jetclass_data import DEFAULT_DATA_DIR, SPLIT_ORDER, load_split_manifest  # noqa: E402
@@ -52,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         help="Verify ROOT label branches agree with filename labels while loading offline views",
     )
     parser.add_argument("--read-chunk-size", type=int, default=50_000)
+    parser.add_argument(
+        "--hlt-degradation-strength",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale the fixed HLT degradation profile. 1.0 is the original fixed HLT; "
+            "smaller values produce a less degraded HLT cache."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -59,6 +70,7 @@ def main() -> int:
     args = parse_args()
     manifest = load_split_manifest(args.manifest)
     data_dir = args.data_dir or manifest.data_dir or DEFAULT_DATA_DIR
+    hlt_params = fixed_hlt_params_from_strength(args.hlt_degradation_strength)
     reports = {}
 
     for split in args.splits:
@@ -68,6 +80,7 @@ def main() -> int:
             args.cache_dir,
             data_dir=data_dir,
             seed=DEFAULT_HLT_SEEDS[split],
+            params=hlt_params,
             overwrite=args.overwrite,
             show_progress=args.show_progress,
             verify_label_branches=args.verify_label_branches,
@@ -78,17 +91,21 @@ def main() -> int:
             "metadata_path": metadata["metadata_path"],
             "n_jets": metadata["n_jets"],
             "seed": metadata["seed"],
+            "hlt_degradation_strength": float(args.hlt_degradation_strength),
+            "hlt_params": metadata["hlt_params"],
             "hlt_content_hash": metadata["hlt_content_hash"],
             "offline_constit_count_summary": metadata["offline_constit_count_summary"],
             "hlt_constit_count_summary": metadata["hlt_constit_count_summary"],
             "hlt_diagnostics_summary": metadata["hlt_diagnostics_summary"],
         }
 
-    audit = audit_hlt_cache(manifest, args.cache_dir, splits=args.splits)
+    audit = audit_hlt_cache(manifest, args.cache_dir, splits=args.splits, expected_params=hlt_params)
     result = {
         "cache_dir": str(Path(args.cache_dir)),
         "data_dir": str(data_dir),
         "splits": list(args.splits),
+        "hlt_degradation_strength": float(args.hlt_degradation_strength),
+        "hlt_params": fixed_hlt_params_dict(hlt_params),
         "reports": reports,
         "audit": audit,
     }

@@ -55,6 +55,31 @@ class FixedHLTParams:
     eff_width_pt: float = 0.20
 
 
+def scaled_fixed_hlt_params(strength: float = 1.0) -> FixedHLTParams:
+    """Return a smoothly scaled version of the fixed HLT profile.
+
+    ``strength=1`` is exactly the original fixed profile. Smaller values make
+    the HLT view more offline-like while keeping the same degradation mechanism.
+    This is an experimental control knob, not a detector recalibration.
+    """
+
+    strength = float(strength)
+    if not np.isfinite(strength) or strength < 0.0:
+        raise ValueError("HLT degradation strength must be a finite nonnegative value")
+
+    base = FixedHLTParams()
+    return FixedHLTParams(
+        hlt_pt_threshold=base.hlt_pt_threshold * strength,
+        merge_prob_scale=base.merge_prob_scale * strength,
+        reassign_scale=base.reassign_scale * strength,
+        smear_scale=base.smear_scale * strength,
+        eff_plateau_barrel=1.0 - strength * (1.0 - base.eff_plateau_barrel),
+        eff_plateau_endcap=1.0 - strength * (1.0 - base.eff_plateau_endcap),
+        eff_turnon_pt=base.eff_turnon_pt * strength,
+        eff_width_pt=base.eff_width_pt * strength,
+    )
+
+
 def wrap_phi_np(phi: np.ndarray) -> np.ndarray:
     """Wrap angles to [-pi, pi)."""
     return (phi + np.pi) % (2.0 * np.pi) - np.pi

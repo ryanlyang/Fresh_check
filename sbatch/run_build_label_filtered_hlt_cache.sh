@@ -21,6 +21,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LABEL_FILTER_READ_CHUNK_SIZE:=50000}"
 : "${LABEL_FILTER_VERIFY_LABEL_BRANCHES:=0}"
 : "${LABEL_FILTER_SHOW_PROGRESS:=0}"
+: "${HLT_DEGRADATION_STRENGTH:=1.0}"
 
 fresh_setup "$@"
 fresh_require_data_dir
@@ -38,6 +39,7 @@ cmd=(
   --cache-dir "${LABEL_FILTER_HLT_CACHE_DIR}"
   --splits "${split_args[@]}"
   --read-chunk-size "${LABEL_FILTER_READ_CHUNK_SIZE}"
+  --hlt-degradation-strength "${HLT_DEGRADATION_STRENGTH}"
 )
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${LABEL_FILTER_VERIFY_LABEL_BRANCHES}"

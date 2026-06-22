@@ -78,6 +78,10 @@ RUNNERS = [
     "run_train_five_view_tagger.sh",
     "run_audit_five_view_tagger.sh",
     "run_write_set_matching_multiview_final_report.sh",
+    "run_train_detr_slot_reconstructor.sh",
+    "run_cache_detr_slot_reco_views.sh",
+    "run_train_detr_slot_five_view_tagger.sh",
+    "run_write_detr_slot_final_report.sh",
 ]
 
 SUBMITTERS = [
@@ -106,6 +110,9 @@ SUBMITTERS = [
     "submit_set_matching_hbb_qcd_binary_experiment.sh",
     "submit_offline_binary_qcd_tbqq_reference.sh",
     "submit_set_matching_qcd_tbqq_binary_experiment.sh",
+    "submit_detr_slot_qcd_tbqq_binary_experiment.sh",
+    "submit_detr_slot_qcd_hgg_binary_experiment.sh",
+    "submit_detr_slot_smoke_test.sh",
 ]
 
 
@@ -1173,6 +1180,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LABEL_FILTER_REMAP_LABELS", manifest_runner)
         self.assertIn("--remap-labels", manifest_runner)
         self.assertIn("scripts/build_fixed_hlt_cache.py", binary_cache_runner)
+        self.assertIn("HLT_DEGRADATION_STRENGTH:=1.0", binary_cache_runner)
+        self.assertIn("--hlt-degradation-strength", binary_cache_runner)
         self.assertIn('HBB_QCD_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control', submitter)
         self.assertIn("SET_MATCHING_EVAL_REQUIRE_ALL_CANONICAL=1", submitter)
         self.assertIn("HBB_QCD_BINARY_MANIFEST_MEM:=8G", submitter)
@@ -1299,6 +1308,74 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("qcdtbqq_offline_teacher_reference", submitter)
         self.assertIn("tagger_train: ${#tagger_job_ids[@]}", submitter)
         self.assertIn("filtered_manifest_report", submitter)
+
+    def test_detr_slot_runners_and_submitter_queue_full_binary_graph(self):
+        common = self.read("common.sh")
+        train = self.read("run_train_detr_slot_reconstructor.sh")
+        cache = self.read("run_cache_detr_slot_reco_views.sh")
+        tagger = self.read("run_train_detr_slot_five_view_tagger.sh")
+        report = self.read("run_write_detr_slot_final_report.sh")
+        submitter = self.read("submit_detr_slot_qcd_tbqq_binary_experiment.sh")
+        hgg = self.read("submit_detr_slot_qcd_hgg_binary_experiment.sh")
+        smoke = self.read("submit_detr_slot_smoke_test.sh")
+
+        self.assertIn("DETR_SLOT_ROOT:=${OUTPUT_ROOT}/detr_slot_qcd_tbqq_binary_500k", common)
+        self.assertIn("DETR_SLOT_ARCHITECTURES:=gt pn pfn pcnn", common)
+        self.assertIn("DETR_SLOT_TAGGER_VARIANTS:=hlt_only hlt_plus_gt hlt_plus_pn hlt_plus_pfn hlt_plus_pcnn five_view_plain five_view_geometry five_view_no_confidence view_label_shuffle_control", common)
+        self.assertIn("scripts/train_detr_slot_reconstructor.py", train)
+        self.assertIn("--allow-bruteforce-fallback", train)
+        self.assertIn("scripts/cache_detr_slot_reco_views.py", cache)
+        self.assertIn('--output-dir "${DETR_SLOT_RECONSTRUCTED_VIEW_DIR}"', cache)
+        self.assertIn("scripts/train_detr_slot_five_view_tagger.py", tagger)
+        self.assertIn("--selection-metric", tagger)
+        self.assertIn("scripts/write_detr_slot_final_report.py", report)
+        self.assertIn("--five-view-audit-dir", report)
+        self.assertIn("DETR_SLOT_REQUIRE_FIVE_VIEW_AUDIT", report)
+        self.assertIn("DETR_SLOT_REQUIRE_OFFLINE_REFERENCE", report)
+        self.assertIn("QCD_vs_Tbqq", submitter)
+        self.assertIn("detr_slot_qcd_tbqq_binary_", submitter)
+        self.assertIn("DETR_SLOT_BINARY_ROOT", submitter)
+        self.assertIn("DETR_SLOT_TASK_NAME", submitter)
+        self.assertIn("DETR_SLOT_SOURCE_LABEL_NAMES:=QCD Tbqq", submitter)
+        self.assertIn("DETR_SLOT_BINARY_LABEL_FILTER:=0 1", submitter)
+        self.assertIn("DETR_SLOT_HLT_DEGRADATION_STRENGTH", submitter)
+        self.assertIn('export HLT_DEGRADATION_STRENGTH="${DETR_SLOT_HLT_DEGRADATION_STRENGTH}"', submitter)
+        self.assertIn("DETR_SLOT_BINARY_RECO_EPOCHS", submitter)
+        self.assertIn('export DETR_SLOT_LABEL_FILTER_NAMES="${DETR_SLOT_BINARY_LABEL_FILTER}"', submitter)
+        self.assertIn('export DETR_SLOT_NUM_CLASSES=2', submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
+        self.assertIn("run_train_detr_slot_reconstructor.sh", submitter)
+        self.assertIn("run_cache_detr_slot_reco_views.sh", submitter)
+        self.assertIn("run_train_detr_slot_five_view_tagger.sh", submitter)
+        self.assertIn("run_audit_five_view_tagger.sh", submitter)
+        self.assertIn("run_write_detr_slot_final_report.sh", submitter)
+        self.assertIn("detrslot_binary_manifest", submitter)
+        self.assertIn("detrslot_binary_hlt_cache", submitter)
+        self.assertIn("detrslot_offline_teacher_reference", submitter)
+        self.assertIn("detrslot_final_report", submitter)
+        self.assertIn("detr_reco_train: ${#reco_train_job_ids[@]}", submitter)
+        self.assertIn("detr_cache_reconstructed_views: ${#cache_job_ids[@]}", submitter)
+        self.assertIn("detr_tagger_train: ${#tagger_job_ids[@]}", submitter)
+        self.assertIn("submit_offline_teacher_reference=${DETR_SLOT_SUBMIT_OFFLINE_TEACHER_REFERENCE}", submitter)
+        self.assertIn("QCD_vs_Hgg_DETR_free_slot", hgg)
+        self.assertIn("detr_slot_qcd_hgg_binary_hlt", hgg)
+        self.assertIn('export DETR_SLOT_SOURCE_LABEL_NAMES="QCD Hgg"', hgg)
+        self.assertIn('DETR_SLOT_QCD_HGG_HLT_DEGRADATION_STRENGTH:=0.6', hgg)
+        self.assertIn('export DETR_SLOT_HLT_DEGRADATION_STRENGTH="${DETR_SLOT_QCD_HGG_HLT_DEGRADATION_STRENGTH}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_RECO_EPOCHS="${DETR_SLOT_QCD_HGG_RECO_EPOCHS:-30}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_TAGGER_EPOCHS="${DETR_SLOT_QCD_HGG_TAGGER_EPOCHS:-45}"', hgg)
+        self.assertIn('export DETR_SLOT_NUM_SLOTS="${DETR_SLOT_QCD_HGG_NUM_SLOTS:-160}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_MODEL_TRAIN_SIZE="${DETR_SLOT_QCD_HGG_MODEL_TRAIN_SIZE:-500000}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_MODEL_VAL_SIZE="${DETR_SLOT_QCD_HGG_MODEL_VAL_SIZE:-150000}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_STACK_TRAIN_SIZE="${DETR_SLOT_QCD_HGG_STACK_TRAIN_SIZE:-500000}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_STACK_VAL_SIZE="${DETR_SLOT_QCD_HGG_STACK_VAL_SIZE:-150000}"', hgg)
+        self.assertIn('export DETR_SLOT_BINARY_FINAL_TEST_SIZE="${DETR_SLOT_QCD_HGG_FINAL_TEST_SIZE:-500000}"', hgg)
+        self.assertIn('bash "${SCRIPT_DIR}/submit_detr_slot_qcd_tbqq_binary_experiment.sh"', hgg)
+        self.assertIn("detr_slot_smoke_", smoke)
+        self.assertIn("smoke metrics are for pipeline correctness only", smoke)
+        self.assertIn('bash "${SCRIPT_DIR}/submit_detr_slot_qcd_tbqq_binary_experiment.sh"', smoke)
 
 
 if __name__ == "__main__":
