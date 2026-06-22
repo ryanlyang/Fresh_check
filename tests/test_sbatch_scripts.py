@@ -82,6 +82,9 @@ RUNNERS = [
     "run_cache_detr_slot_reco_views.sh",
     "run_train_detr_slot_five_view_tagger.sh",
     "run_write_detr_slot_final_report.sh",
+    "run_subtoken_part_compat.sh",
+    "run_subtoken_part_distill.sh",
+    "run_write_subtoken_part_report.sh",
 ]
 
 SUBMITTERS = [
@@ -113,6 +116,7 @@ SUBMITTERS = [
     "submit_detr_slot_qcd_tbqq_binary_experiment.sh",
     "submit_detr_slot_qcd_hgg_binary_experiment.sh",
     "submit_detr_slot_smoke_test.sh",
+    "submit_subtoken_part_qcd_hgg_binary_experiment.sh",
 ]
 
 
@@ -1378,6 +1382,43 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("detr_slot_smoke_", smoke)
         self.assertIn("smoke metrics are for pipeline correctness only", smoke)
         self.assertIn('bash "${SCRIPT_DIR}/submit_detr_slot_qcd_tbqq_binary_experiment.sh"', smoke)
+
+    def test_subtoken_part_qcd_hgg_submitter_can_queue_steps21_and22(self):
+        compat = self.read("run_subtoken_part_compat.sh")
+        distill = self.read("run_subtoken_part_distill.sh")
+        report = self.read("run_write_subtoken_part_report.sh")
+        submitter = self.read("submit_subtoken_part_qcd_hgg_binary_experiment.sh")
+
+        self.assertIn("scripts/run_subtoken_part_compat.py", compat)
+        self.assertIn("scripts/train_subtoken_part_distill.py", distill)
+        self.assertIn("--offline-teacher-checkpoint", distill)
+        self.assertIn("--distillation-weight", distill)
+        self.assertIn("--modality-residual-weight", distill)
+        self.assertIn("--gate-residual-regularization-weight", distill)
+        self.assertIn("--masked-subtoken-max-match-delta-r", distill)
+        self.assertIn("scripts/write_subtoken_part_report.py", report)
+        self.assertIn("QCD Hgg", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_EPOCHS:=45", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B:=0", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS:=subtoken_gate_context_distill subtoken_gate_context_residual subtoken_gate_context_distill_residual", submitter)
+        self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
+        self.assertIn("run_subtoken_part_distill.sh", submitter)
+        self.assertIn("run_write_subtoken_part_report.sh", submitter)
+        self.assertIn("subtoken_qcdhgg_version_a_compat", submitter)
+        self.assertIn("subtoken_qcdhgg_offline_teacher_reference", submitter)
+        self.assertIn("subtoken_qcdhgg_version_b_report", submitter)
+        self.assertIn('"subtoken_gate_context": "../version_a_comparison/subtoken_gate_context/run_report.json"', submitter)
+        self.assertIn('export SET_MATCHING_LABEL_FILTER_NAMES="${SUBTOKEN_PART_QCD_HGG_BINARY_LABEL_FILTER}"', submitter)
+        self.assertIn('export SUBTOKEN_PART_DISTILL_LABEL_FILTER_NAMES="${SUBTOKEN_PART_QCD_HGG_BINARY_LABEL_FILTER}"', submitter)
+        self.assertIn('version_b_report_dependency="${compat_jid}"', submitter)
+        self.assertIn('SUBTOKEN_PART_REPORT_VARIANTS="subtoken_gate_context ${SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS}"', submitter)
 
 
 if __name__ == "__main__":

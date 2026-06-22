@@ -102,9 +102,19 @@ def _resolve_report_path(experiment_dir: Path, value: Any) -> Path | None:
                 return _resolve_report_path(experiment_dir, value[key])
         return None
     path = Path(str(value))
-    if not path.is_absolute():
-        path = experiment_dir / path
-    return path
+    if path.is_absolute():
+        return path
+    candidate = experiment_dir / path
+    if candidate.exists():
+        return candidate
+    if path.parts and experiment_dir.name and path.parts[0] == experiment_dir.name:
+        sibling_candidate = experiment_dir.parent / path
+        if sibling_candidate.exists():
+            return sibling_candidate
+        return path
+    if path.exists():
+        return path
+    return candidate
 
 
 def _variant_from_report(report_path: Path, report: Mapping[str, Any] | None) -> str:
@@ -337,6 +347,7 @@ def _runtime_row(variant: str, report_path: Path, report: Mapping[str, Any]) -> 
     if not isinstance(run_config, Mapping):
         run_config = {}
     env = run_config.get("environment") if isinstance(run_config.get("environment"), Mapping) else run_config
+    runtime = report.get("runtime") if isinstance(report.get("runtime"), Mapping) else {}
     slurm_job_id = run_config.get("slurm_job_id") or run_config.get("job_id")
     slurm_job_name = run_config.get("slurm_job_name") or run_config.get("job_name")
     if isinstance(env, Mapping):
@@ -355,8 +366,14 @@ def _runtime_row(variant: str, report_path: Path, report: Mapping[str, Any]) -> 
         "requested_gpus": env.get("SLURM_GPUS") if isinstance(env, Mapping) else None,
         "epochs_completed": report.get("epochs_completed"),
         "best_epoch": report.get("best_epoch"),
-        "walltime_seconds": None,
-        "walltime_note": "Slurm elapsed time is not persisted in slurm_run_config.json; use sacct/squeue logs if needed.",
+        "walltime_seconds": report.get("walltime_seconds") or runtime.get("elapsed_seconds"),
+        "elapsed_seconds": runtime.get("elapsed_seconds"),
+        "elapsed_minutes": runtime.get("elapsed_minutes"),
+        "seconds_per_completed_epoch": runtime.get("seconds_per_completed_epoch"),
+        "walltime_note": (
+            "Elapsed time comes from the child Python report when available; Slurm queue/wait time "
+            "is not persisted in slurm_run_config.json."
+        ),
     }
 
 

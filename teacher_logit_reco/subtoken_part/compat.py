@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import csv
 from pathlib import Path
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -47,6 +48,7 @@ from .train import (
     _write_epoch_metrics_csv,
     _write_per_class_csv,
     _write_summary_csv,
+    normalize_subtoken_selection_metric,
     train_subtoken_tagger,
 )
 
@@ -105,7 +107,7 @@ class SubtokenPartCompatibilityConfig:
     max_val_jets: int | None = None
     max_stack_val_jets: int | None = None
     max_final_test_jets: int | None = None
-    selection_metric: str = "accuracy"
+    selection_metric: str | None = None
     compile_model: bool = False
     verify_hlt_hash: bool = True
     num_classes: int | None = None
@@ -187,8 +189,6 @@ class SubtokenPartCompatibilityConfig:
         self.max_val_jets = _optional_positive_int(self.max_val_jets, field_name="max_val_jets")
         self.max_stack_val_jets = _optional_positive_int(self.max_stack_val_jets, field_name="max_stack_val_jets")
         self.max_final_test_jets = _optional_positive_int(self.max_final_test_jets, field_name="max_final_test_jets")
-        if self.selection_metric not in SUBTOKEN_PART_SELECTION_METRICS:
-            raise ValueError(f"selection_metric must be one of {SUBTOKEN_PART_SELECTION_METRICS}")
         if self.baseline_model_size not in {"tiny", "base"}:
             raise ValueError("baseline_model_size must be 'tiny' or 'base'")
         self.label_filter = tuple(int(label) for label in self.label_filter)
@@ -202,6 +202,10 @@ class SubtokenPartCompatibilityConfig:
                     self.label_filter = tuple(by_name[name] for name in self.label_names)
         if self.num_classes is not None:
             self.num_classes = _optional_positive_int(self.num_classes, field_name="num_classes")
+        self.selection_metric = normalize_subtoken_selection_metric(
+            self.selection_metric,
+            num_classes=int(self.resolved_num_classes),
+        )
         self.validate_label_metadata()
 
     @property
@@ -531,6 +535,7 @@ def train_hlt_part_baseline_for_subtoken_comparison(
 ) -> dict[str, Any]:
     """Train the standard HLT ParT baseline on the Step 13 shared splits."""
 
+    run_start_time = time.perf_counter()
     config.validate_label_metadata()
     torch = require_torch()
     set_training_seed(int(config.seed))
@@ -731,6 +736,7 @@ def train_hlt_part_baseline_for_subtoken_comparison(
         metrics_by_split["final_test"] = final_test_metrics
         final_test_metadata = dict(final_test_dataset.metadata)
 
+    elapsed_seconds = float(time.perf_counter() - run_start_time)
     _write_per_class_csv(diagnostics_dir / "per_class_metrics.csv", metrics_by_split)
     _write_summary_csv(diagnostics_dir / "summary_metrics.csv", metrics_by_split)
 
@@ -770,6 +776,13 @@ def train_hlt_part_baseline_for_subtoken_comparison(
         "final_test_dataset": final_test_metadata,
         "final_test_evaluated": bool(config.confirm_final_test),
         "no_final_test_evaluation": not bool(config.confirm_final_test),
+        "runtime": {
+            "elapsed_seconds": elapsed_seconds,
+            "elapsed_minutes": elapsed_seconds / 60.0,
+            "epochs_completed": len(curves),
+            "seconds_per_completed_epoch": elapsed_seconds / float(len(curves)) if curves else None,
+        },
+        "walltime_seconds": elapsed_seconds,
         "inference_consumes_hlt_only": True,
     }
     save_json(output_dir / "model_val_report.json", report)
@@ -897,7 +910,7 @@ def build_subtoken_part_compat_report(
         "best_metric_value": best_metric_value,
         "comparison_rows": comparison_rows,
         "child_reports": {
-            variant: str(config.child_output_dir(variant) / "run_report.json")
+            variant: str(Path(normalize_subtoken_part_variant(variant)) / "run_report.json")
             for variant in config.variants
         },
         "shared_datasets": {split: _dataset_signature(dataset) for split, dataset in datasets.items()},
@@ -918,6 +931,7 @@ def build_subtoken_part_compat_report(
 def run_subtoken_part_compat_experiment(config: SubtokenPartCompatibilityConfig) -> dict[str, Any]:
     """Run Step 13 comparison over HLT ParT plus planned subtoken variants."""
 
+    run_start_time = time.perf_counter()
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     datasets = load_subtoken_compat_datasets(config)
@@ -953,6 +967,13 @@ def run_subtoken_part_compat_experiment(config: SubtokenPartCompatibilityConfig)
         child_reports[variant] = report
 
     report = build_subtoken_part_compat_report(config=config, child_reports=child_reports, datasets=datasets)
+    elapsed_seconds = float(time.perf_counter() - run_start_time)
+    report["runtime"] = {
+        "elapsed_seconds": elapsed_seconds,
+        "elapsed_minutes": elapsed_seconds / 60.0,
+        "variants_completed": list(child_reports),
+    }
+    report["walltime_seconds"] = elapsed_seconds
     save_json(output_dir / "run_report.json", report)
     save_json(output_dir / "model_val_report.json", report)
     _write_comparison_csv(output_dir / "diagnostics" / "comparison_metrics.csv", report["comparison_rows"])

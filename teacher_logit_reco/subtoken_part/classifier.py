@@ -11,6 +11,7 @@ from .config import (
     SUBTOKEN_PART_GATE_CONTEXT_SIGMOID,
     SUBTOKEN_PART_GATE_CONTEXT_SOFTMAX,
     SUBTOKEN_PART_GATE_NONE,
+    SUBTOKEN_PART_VARIANT_DUAL_CROSS_ATTENTION,
     SubtokenPartConfig,
 )
 from .context import ParticleContextOutput, ParticleContextTransformer
@@ -27,6 +28,7 @@ from .pairwise import (
     PairwiseFeatureOutput,
 )
 from .pooling import SubtokenAttentionPool, SubtokenPoolOutput
+from .dual_view import DualViewFusionModule, DualViewFusionOutput
 
 try:  # Keep imports lightweight on systems without torch.
     import torch as _torch
@@ -44,15 +46,21 @@ SUBTOKEN_PART_CLASSIFIER_STEP = "subtoken_part_step9_classifier"
 SUBTOKEN_PART_CLASSIFIER_CONTRACT = "subtoken_particle_transformer_classifier_v1"
 SUBTOKEN_PART_PAIRWISE_CLASSIFIER_STEP = "subtoken_part_step11_pairwise_classifier"
 SUBTOKEN_PART_PAIRWISE_CLASSIFIER_CONTRACT = "pairwise_biased_subtoken_particle_transformer_classifier_v1"
+SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_STEP = "subtoken_part_step19_dual_view_classifier"
+SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_CONTRACT = "dual_view_standard_particle_subtoken_classifier_v1"
 
 
 def _classifier_step(config: SubtokenPartConfig) -> str:
+    if config.variant == SUBTOKEN_PART_VARIANT_DUAL_CROSS_ATTENTION:
+        return SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_STEP
     if bool(config.use_pairwise_bias):
         return SUBTOKEN_PART_PAIRWISE_CLASSIFIER_STEP
     return SUBTOKEN_PART_CLASSIFIER_STEP
 
 
 def _classifier_contract(config: SubtokenPartConfig) -> str:
+    if config.variant == SUBTOKEN_PART_VARIANT_DUAL_CROSS_ATTENTION:
+        return SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_CONTRACT
     if bool(config.use_pairwise_bias):
         return SUBTOKEN_PART_PAIRWISE_CLASSIFIER_CONTRACT
     return SUBTOKEN_PART_CLASSIFIER_CONTRACT
@@ -74,6 +82,7 @@ class SubtokenClassifierOutput:
     context: ParticleContextOutput | None
     gates: ReliabilityGateOutput | None
     particles: ReliabilityAwareParticleOutput
+    dual_view: DualViewFusionOutput | None
     config: SubtokenPartConfig
 
     def summary(self) -> dict[str, Any]:
@@ -83,6 +92,7 @@ class SubtokenClassifierOutput:
             "variant": self.config.variant,
             "gate_mode": self.config.gate_mode,
             "use_pairwise_bias": bool(self.config.use_pairwise_bias),
+            "use_dual_view_fusion": self.dual_view is not None,
             "smoke_only_without_pairwise_bias": not bool(self.config.use_pairwise_bias),
             "serious_comparison_ready": bool(self.config.use_pairwise_bias),
             "logits_shape": list(self.logits.shape),
@@ -100,6 +110,8 @@ class SubtokenClassifierOutput:
             )
         if self.attention_bias is not None:
             payload["attention_bias_shape"] = list(self.attention_bias.shape)
+        if self.dual_view is not None:
+            payload["dual_view"] = self.dual_view.summary()
         return payload
 
     def diagnostics(self) -> dict[str, Any]:
@@ -116,6 +128,7 @@ class SubtokenClassifierOutput:
             "valid_particle_count_min": valid_counts.min(),
             "valid_particle_count_max": valid_counts.max(),
             "logit_abs_mean": self.logits.detach().abs().mean(),
+            "use_dual_view_fusion": self.dual_view is not None,
             "smoke_only_without_pairwise_bias": not bool(self.config.use_pairwise_bias),
             "serious_comparison_ready": bool(self.config.use_pairwise_bias),
         }
@@ -134,6 +147,8 @@ class SubtokenClassifierOutput:
             diagnostics.update({f"gate_{key}": value for key, value in self.gates.diagnostics().items()})
         else:
             diagnostics["gate_mean_gate_entropy"] = torch.zeros((), dtype=self.logits.dtype, device=self.logits.device)
+        if self.dual_view is not None:
+            diagnostics.update(self.dual_view.diagnostics())
         return diagnostics
 
 
@@ -276,6 +291,11 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
             torch.nn.Dropout(float(self.config.dropout)),
             torch.nn.Linear(2 * self.embed_dim, int(self.config.num_classes)),
         )
+        self.dual_view_fusion = (
+            DualViewFusionModule(self.config)
+            if self.config.variant == SUBTOKEN_PART_VARIANT_DUAL_CROSS_ATTENTION
+            else None
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -283,7 +303,10 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
         torch.nn.init.normal_(self.global_cls_token, mean=0.0, std=0.02)
 
     def no_weight_decay(self) -> set[str]:
-        return {"global_cls_token"}
+        names = {"global_cls_token"}
+        if self.dual_view_fusion is not None:
+            names.update({f"dual_view_fusion.{name}" for name in self.dual_view_fusion.no_weight_decay()})
+        return names
 
     def to_config_dict(self) -> dict[str, Any]:
         return self.config.to_dict()
@@ -339,9 +362,15 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
         logits = _nan_to_num_torch(self.classifier(cls_embedding))
         return logits, cls_embedding, encoded, global_mask, pairwise_features, attention_bias
 
-    def forward_outputs(self, tokens_or_batch: Any, mask: Any | None = None) -> SubtokenClassifierOutput:
+    def forward_outputs(
+        self,
+        tokens_or_batch: Any,
+        mask: Any | None = None,
+        *,
+        modality_mask_override: Any | None = None,
+    ) -> SubtokenClassifierOutput:
         tokens, mask = _coerce_tokens_and_mask(tokens_or_batch, mask)
-        encoded = self.encoder(tokens, mask)
+        encoded = self.encoder(tokens, mask, modality_mask_override=modality_mask_override)
         mixed = self.local_mixer(encoded)
         pooled = self.local_pool(mixed)
         contexted = self.context_transformer(pooled) if self._needs_context() else None
@@ -355,6 +384,18 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
             particles.mask,
             tokens,
         )
+        dual_view = None
+        if self.dual_view_fusion is not None:
+            dual_view = self.dual_view_fusion(
+                raw_tokens=tokens,
+                raw_mask=mask,
+                subtoken_logits=logits,
+                subtoken_cls_embedding=cls_embedding,
+                subtoken_sequence_tokens=global_tokens,
+                subtoken_sequence_mask=global_mask,
+            )
+            logits = dual_view.logits
+            cls_embedding = dual_view.fused_embedding
         return SubtokenClassifierOutput(
             logits=logits,
             cls_embedding=cls_embedding,
@@ -368,6 +409,7 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
             context=contexted,
             gates=gate_output,
             particles=particles,
+            dual_view=dual_view,
             config=self.config,
         )
 
@@ -378,8 +420,9 @@ class SubtokenParticleTransformerClassifier(_ModuleBase):
         *,
         return_outputs: bool = False,
         return_diagnostics: bool = False,
+        modality_mask_override: Any | None = None,
     ):
-        output = self.forward_outputs(tokens_or_batch, mask)
+        output = self.forward_outputs(tokens_or_batch, mask, modality_mask_override=modality_mask_override)
         if bool(return_outputs):
             return output
         if bool(return_diagnostics):
@@ -403,8 +446,10 @@ def build_subtoken_particle_transformer_classifier(
 __all__ = [
     "SUBTOKEN_PART_CLASSIFIER_CONTRACT",
     "SUBTOKEN_PART_PAIRWISE_CLASSIFIER_CONTRACT",
+    "SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_CONTRACT",
     "SUBTOKEN_PART_CLASSIFIER_STEP",
     "SUBTOKEN_PART_PAIRWISE_CLASSIFIER_STEP",
+    "SUBTOKEN_PART_DUAL_VIEW_CLASSIFIER_STEP",
     "SubtokenClassifierOutput",
     "SubtokenParticleTransformerClassifier",
     "build_subtoken_particle_transformer_classifier",

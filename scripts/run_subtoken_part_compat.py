@@ -71,7 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-jets", type=int, default=None)
     parser.add_argument("--max-stack-val-jets", type=int, default=None)
     parser.add_argument("--max-final-test-jets", type=int, default=None)
-    parser.add_argument("--selection-metric", choices=SUBTOKEN_PART_SELECTION_METRICS, default="accuracy")
+    parser.add_argument(
+        "--selection-metric",
+        choices=SUBTOKEN_PART_SELECTION_METRICS,
+        default=None,
+        help="Checkpoint-selection metric. Defaults to fpr_at_signal_eff_0p50 for binary runs, accuracy otherwise.",
+    )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")
     parser.add_argument("--num-classes", type=int, default=None)

@@ -42,6 +42,29 @@ SUBTOKEN_PART_QCD_HGG_HLT_TAG="${SUBTOKEN_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH/
 : "${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_CPUS:=4}"
 : "${SUBTOKEN_PART_QCD_HGG_COMPAT_CPUS:=8}"
 
+: "${SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B:=0}"
+: "${SUBTOKEN_PART_QCD_HGG_SUBMIT_OFFLINE_TEACHER_REFERENCE:=1}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_DIR:=${SUBTOKEN_PART_QCD_HGG_ROOT}/offline_teacher_reference/binary_part}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CHECKPOINT:=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_DIR}/best_model_val.pt}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_TIME:=1-00:00:00}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_MEM:=96G}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CPUS:=4}"
+: "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_EPOCHS:=45}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR:=${SUBTOKEN_PART_QCD_HGG_ROOT}/version_b_comparison}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS:=subtoken_gate_context_distill subtoken_gate_context_residual subtoken_gate_context_distill_residual}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_TIME:=2-12:00:00}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_MEM:=160G}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_CPUS:=8}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_EPOCHS:=${SUBTOKEN_PART_QCD_HGG_EPOCHS}}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_DISTILLATION_WEIGHT:=0.5}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_RESIDUAL_WEIGHT:=0.1}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_GATE_RESIDUAL_WEIGHT:=0.02}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_RESIDUAL_TARGET_MODE:=jet_plus_nearest}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_MASKED_SUBTOKEN_WEIGHT:=0.0}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_TIME:=02:00:00}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_MEM:=8G}"
+: "${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_CPUS:=2}"
+
 export SUBTOKEN_PART_ROOT="${SUBTOKEN_PART_QCD_HGG_ROOT}"
 export SUBTOKEN_PART_COMPAT_DIR="${SUBTOKEN_PART_ROOT}/version_a_comparison"
 export SUBTOKEN_PART_FINAL_REPORT_DIR="${SUBTOKEN_PART_COMPAT_DIR}/final_report"
@@ -91,6 +114,7 @@ afterok_args() {
 }
 
 fresh_split_words variant_args "${SUBTOKEN_PART_VARIANTS}"
+fresh_split_words version_b_variant_args "${SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS}"
 
 submitter_lock_dir="${SUBTOKEN_PART_ROOT}/.submission_lock"
 fresh_refuse_existing_dir "${SUBTOKEN_PART_ROOT}"
@@ -115,17 +139,27 @@ if ! fresh_is_dry_run; then
     echo "binary_hlt_cache=${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_DIR}"
     echo "hlt_degradation_strength=${SUBTOKEN_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH}"
     echo "variants=$(fresh_join_by_space "${variant_args[@]}")"
+    echo "submit_version_b=${SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B}"
+    echo "version_b_dir=${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}"
+    echo "version_b_variants=$(fresh_join_by_space "${version_b_variant_args[@]}")"
+    echo "offline_teacher_reference_dir=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_DIR}"
+    echo "offline_teacher_checkpoint=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CHECKPOINT}"
     echo "selection_metric=${SUBTOKEN_PART_SELECTION_METRIC}"
     echo "epochs=${SUBTOKEN_PART_EPOCHS}"
     echo "binary_manifest_time=${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_TIME}"
     echo "binary_hlt_cache_time=${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_TIME}"
     echo "compat_time=${SUBTOKEN_PART_QCD_HGG_COMPAT_TIME}"
+    echo "offline_teacher_time=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_TIME}"
+    echo "version_b_time=${SUBTOKEN_PART_QCD_HGG_VERSION_B_TIME}"
   } > "${submitter_lock_dir}/metadata.txt"
 fi
 
 binary_manifest_jid=""
 binary_hlt_cache_jid=""
 compat_jid=""
+offline_teacher_jid=""
+version_b_report_jid=""
+version_b_job_ids=()
 input_dependency="${UPSTREAM_DEPENDENCY}"
 
 if fresh_bool_enabled "${SUBTOKEN_PART_QCD_HGG_BUILD_BINARY_INPUTS}"; then
@@ -185,9 +219,148 @@ mapfile -t compat_args < <(
 compat_jid="$(submit_job "subtoken_qcdhgg_version_a_compat" "${compat_args[@]}")"
 echo "submitted subtoken_qcdhgg_version_a_compat=${compat_jid}"
 
+if fresh_bool_enabled "${SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B}"; then
+  export SET_MATCHING_ROOT="${SUBTOKEN_PART_QCD_HGG_ROOT}"
+  export SET_MATCHING_MANIFEST_PATH="${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_PATH}"
+  export SET_MATCHING_LABEL_FILTER_NAMES="${SUBTOKEN_PART_QCD_HGG_BINARY_LABEL_FILTER}"
+  export SET_MATCHING_LABEL_NAMES="${SUBTOKEN_PART_QCD_HGG_SOURCE_LABEL_NAMES}"
+  export SET_MATCHING_MODEL_TRAIN_SIZE="${SUBTOKEN_PART_QCD_HGG_MODEL_TRAIN_SIZE}"
+  export SET_MATCHING_MODEL_VAL_SIZE="${SUBTOKEN_PART_QCD_HGG_MODEL_VAL_SIZE}"
+  export SET_MATCHING_STACK_VAL_SIZE="${SUBTOKEN_PART_QCD_HGG_STACK_VAL_SIZE}"
+  export SET_MATCHING_FINAL_TEST_SIZE="${SUBTOKEN_PART_QCD_HGG_FINAL_TEST_SIZE}"
+  export BINARY_OFFLINE_TEACHER_DIR="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_DIR}"
+  export BINARY_OFFLINE_TEACHER_EPOCHS="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_EPOCHS}"
+
+  version_b_dependency="${input_dependency}"
+  if fresh_bool_enabled "${SUBTOKEN_PART_QCD_HGG_SUBMIT_OFFLINE_TEACHER_REFERENCE}"; then
+    offline_teacher_dependency="${binary_manifest_jid:-${UPSTREAM_DEPENDENCY}}"
+    mapfile -t offline_teacher_args < <(
+      afterok_args \
+        "${offline_teacher_dependency}" \
+        --time="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_TIME}" \
+        --cpus-per-task="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CPUS}" \
+        --mem="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_MEM}" \
+        "${SCRIPT_DIR}/run_train_eval_set_matching_binary_offline_teacher.sh"
+    )
+    offline_teacher_jid="$(submit_job "subtoken_qcdhgg_offline_teacher_reference" "${offline_teacher_args[@]}")"
+    echo "submitted subtoken_qcdhgg_offline_teacher_reference=${offline_teacher_jid}"
+    if [[ -n "${version_b_dependency}" ]]; then
+      version_b_dependency="${version_b_dependency}:${offline_teacher_jid}"
+    else
+      version_b_dependency="${offline_teacher_jid}"
+    fi
+  fi
+
+  if ! fresh_is_dry_run; then
+    mkdir -p "${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}"
+    cat > "${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/run_report.json" <<REPORT
+{
+  "experiment_step": "subtoken_part_step22_version_b_comparison",
+  "ok": true,
+  "task_name": "QCD_vs_Hgg_subtoken_part_version_b",
+  "root": "${SUBTOKEN_PART_QCD_HGG_ROOT}",
+  "num_classes": 2,
+  "label_names": ["QCD", "Hgg"],
+  "label_filter": [0, 1],
+  "comparison_split": "final_test",
+  "primary_metric": "${SUBTOKEN_PART_QCD_HGG_SELECTION_METRIC}",
+  "hlt_degradation_strength": ${SUBTOKEN_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH},
+  "offline_teacher_checkpoint": "${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CHECKPOINT}",
+  "child_reports": {
+    "subtoken_gate_context": "../version_a_comparison/subtoken_gate_context/run_report.json",
+    "subtoken_gate_context_distill": "subtoken_gate_context_distill/run_report.json",
+    "subtoken_gate_context_residual": "subtoken_gate_context_residual/run_report.json",
+    "subtoken_gate_context_distill_residual": "subtoken_gate_context_distill_residual/run_report.json"
+  }
+}
+REPORT
+  fi
+
+  version_b_index=0
+  for version_b_variant in "${version_b_variant_args[@]}"; do
+    distillation_weight="0.0"
+    residual_weight="0.0"
+    gate_residual_weight="0.0"
+    case "${version_b_variant}" in
+      subtoken_gate_context_distill)
+        distillation_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DISTILLATION_WEIGHT}"
+        ;;
+      subtoken_gate_context_residual)
+        residual_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_RESIDUAL_WEIGHT}"
+        gate_residual_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_GATE_RESIDUAL_WEIGHT}"
+        ;;
+      subtoken_gate_context_distill_residual)
+        distillation_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DISTILLATION_WEIGHT}"
+        residual_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_RESIDUAL_WEIGHT}"
+        gate_residual_weight="${SUBTOKEN_PART_QCD_HGG_VERSION_B_GATE_RESIDUAL_WEIGHT}"
+        ;;
+      *)
+        echo "Unknown Step 22 Version B variant: ${version_b_variant}" >&2
+        exit 2
+        ;;
+    esac
+
+    export SUBTOKEN_PART_DISTILL_ROOT="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}"
+    export SUBTOKEN_PART_DISTILL_NAME="${version_b_variant}"
+    export SUBTOKEN_PART_DISTILL_DIR="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/${version_b_variant}"
+    export SUBTOKEN_PART_DISTILL_HLT_CACHE_DIR="${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_DIR}"
+    export SUBTOKEN_PART_DISTILL_MANIFEST_PATH="${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_PATH}"
+    export SUBTOKEN_PART_DISTILL_OFFLINE_TEACHER_CHECKPOINT="${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CHECKPOINT}"
+    export SUBTOKEN_PART_DISTILL_LABEL_FILTER_NAMES="${SUBTOKEN_PART_QCD_HGG_BINARY_LABEL_FILTER}"
+    export SUBTOKEN_PART_DISTILL_LABEL_NAMES="${SUBTOKEN_PART_QCD_HGG_SOURCE_LABEL_NAMES}"
+    export SUBTOKEN_PART_DISTILL_NUM_CLASSES=2
+    export SUBTOKEN_PART_DISTILL_SEED="$((3607 + version_b_index))"
+    export SUBTOKEN_PART_DISTILL_MODEL_TRAIN_SIZE="${SUBTOKEN_PART_QCD_HGG_MODEL_TRAIN_SIZE}"
+    export SUBTOKEN_PART_DISTILL_MODEL_VAL_SIZE="${SUBTOKEN_PART_QCD_HGG_MODEL_VAL_SIZE}"
+    export SUBTOKEN_PART_DISTILL_STACK_VAL_SIZE="${SUBTOKEN_PART_QCD_HGG_STACK_VAL_SIZE}"
+    export SUBTOKEN_PART_DISTILL_FINAL_TEST_SIZE="${SUBTOKEN_PART_QCD_HGG_FINAL_TEST_SIZE}"
+    export SUBTOKEN_PART_DISTILL_EPOCHS="${SUBTOKEN_PART_QCD_HGG_VERSION_B_EPOCHS}"
+    export SUBTOKEN_PART_DISTILL_SELECTION_METRIC="${SUBTOKEN_PART_QCD_HGG_SELECTION_METRIC}"
+    export SUBTOKEN_PART_DISTILL_DISTILLATION_WEIGHT="${distillation_weight}"
+    export SUBTOKEN_PART_DISTILL_MODALITY_RESIDUAL_WEIGHT="${residual_weight}"
+    export SUBTOKEN_PART_DISTILL_GATE_RESIDUAL_REGULARIZATION_WEIGHT="${gate_residual_weight}"
+    export SUBTOKEN_PART_DISTILL_MODALITY_RESIDUAL_TARGET_MODE="${SUBTOKEN_PART_QCD_HGG_VERSION_B_RESIDUAL_TARGET_MODE}"
+    export SUBTOKEN_PART_DISTILL_MASKED_SUBTOKEN_WEIGHT="${SUBTOKEN_PART_QCD_HGG_VERSION_B_MASKED_SUBTOKEN_WEIGHT}"
+
+    mapfile -t version_b_args < <(
+      afterok_args \
+        "${version_b_dependency}" \
+        --time="${SUBTOKEN_PART_QCD_HGG_VERSION_B_TIME}" \
+        --cpus-per-task="${SUBTOKEN_PART_QCD_HGG_VERSION_B_CPUS}" \
+        --mem="${SUBTOKEN_PART_QCD_HGG_VERSION_B_MEM}" \
+        "${SCRIPT_DIR}/run_subtoken_part_distill.sh"
+    )
+    version_b_jid="$(submit_job "subtoken_qcdhgg_${version_b_variant}" "${version_b_args[@]}")"
+    version_b_job_ids+=("${version_b_jid}")
+    echo "submitted subtoken_qcdhgg_${version_b_variant}=${version_b_jid}"
+    version_b_index=$((version_b_index + 1))
+  done
+
+  version_b_report_dependency="${compat_jid}"
+  if [[ "${#version_b_job_ids[@]}" -gt 0 ]]; then
+    version_b_report_dependency="${version_b_report_dependency}:$(fresh_join_by_colon "${version_b_job_ids[@]}")"
+  fi
+  export SUBTOKEN_PART_REPORT_EXPERIMENT_DIR="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}"
+  export SUBTOKEN_PART_REPORT_OUTPUT_DIR="${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/final_report"
+  export SUBTOKEN_PART_REPORT_VARIANTS="subtoken_gate_context ${SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS}"
+  export SUBTOKEN_PART_REPORT_BASELINE_VARIANT="subtoken_gate_context"
+  export SUBTOKEN_PART_REPORT_PRIMARY_METRIC="${SUBTOKEN_PART_QCD_HGG_SELECTION_METRIC}"
+  export SUBTOKEN_PART_REPORT_COMPARISON_SPLIT="final_test"
+  mapfile -t version_b_report_args < <(
+    afterok_args \
+      "${version_b_report_dependency}" \
+      --time="${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_TIME}" \
+      --cpus-per-task="${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_CPUS}" \
+      --mem="${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_MEM}" \
+      "${SCRIPT_DIR}/run_write_subtoken_part_report.sh"
+  )
+  version_b_report_jid="$(submit_job "subtoken_qcdhgg_version_b_report" "${version_b_report_args[@]}")"
+  echo "submitted subtoken_qcdhgg_version_b_report=${version_b_report_jid}"
+fi
+
 cat <<SUMMARY
 subtoken_part_qcd_hgg_binary_submission:
-  task: QCD_vs_Hgg_subtoken_part_version_a
+  task: QCD_vs_Hgg_subtoken_part_version_a_and_optional_version_b
   source_label_names: ${SUBTOKEN_PART_QCD_HGG_SOURCE_LABEL_NAMES}
   downstream_label_filter: ${SUBTOKEN_PART_LABEL_FILTER_NAMES}
   label_names: ${SUBTOKEN_PART_LABEL_NAMES}
@@ -203,10 +376,21 @@ subtoken_part_qcd_hgg_binary_submission:
     manifest_job_id: ${binary_manifest_jid:-none}
     hlt_cache_job_id: ${binary_hlt_cache_jid:-none}
   comparison_job_id: ${compat_jid}
+  version_b:
+    enabled: ${SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B}
+    offline_teacher_reference_enabled: ${SUBTOKEN_PART_QCD_HGG_SUBMIT_OFFLINE_TEACHER_REFERENCE}
+    offline_teacher_job_id: ${offline_teacher_jid:-none}
+    version_b_job_ids: $(fresh_join_by_space "${version_b_job_ids[@]}")
+    version_b_report_job_id: ${version_b_report_jid:-none}
+    output_dir: ${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}
+    variants: $(fresh_join_by_space "${version_b_variant_args[@]}")
   expected_jobs:
     binary_manifest: $([[ -n "${binary_manifest_jid}" ]] && echo 1 || echo 0)
     binary_hlt_cache: $([[ -n "${binary_hlt_cache_jid}" ]] && echo 1 || echo 0)
     subtoken_part_compat: 1
+    offline_teacher_reference: $([[ -n "${offline_teacher_jid}" ]] && echo 1 || echo 0)
+    version_b_distill_runs: ${#version_b_job_ids[@]}
+    version_b_report: $([[ -n "${version_b_report_jid}" ]] && echo 1 || echo 0)
     total_submitted: ${submit_count}
   requested_split_caps:
     model_train: ${SUBTOKEN_PART_QCD_HGG_MODEL_TRAIN_SIZE}
@@ -222,11 +406,17 @@ subtoken_part_qcd_hgg_binary_submission:
     binary_manifest: time=${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_TIME} mem=${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_BINARY_MANIFEST_CPUS}
     binary_hlt_cache: time=${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_TIME} mem=${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_CPUS}
     compat: time=${SUBTOKEN_PART_QCD_HGG_COMPAT_TIME} mem=${SUBTOKEN_PART_QCD_HGG_COMPAT_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_COMPAT_CPUS}
+    offline_teacher: time=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_TIME} mem=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_CPUS}
+    version_b: time=${SUBTOKEN_PART_QCD_HGG_VERSION_B_TIME} mem=${SUBTOKEN_PART_QCD_HGG_VERSION_B_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_VERSION_B_CPUS}
+    version_b_report: time=${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_TIME} mem=${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_MEM} cpus=${SUBTOKEN_PART_QCD_HGG_VERSION_B_REPORT_CPUS}
   outputs:
     comparison_run_report: ${SUBTOKEN_PART_COMPAT_DIR}/run_report.json
     comparison_csv: ${SUBTOKEN_PART_COMPAT_DIR}/diagnostics/comparison_metrics.csv
     final_report_json: ${SUBTOKEN_PART_FINAL_REPORT_DIR}/subtoken_part_final_report.json
     final_report_md: ${SUBTOKEN_PART_FINAL_REPORT_DIR}/subtoken_part_final_report.md
     final_metric_table: ${SUBTOKEN_PART_FINAL_REPORT_DIR}/metric_table.csv
+    version_b_report_json: ${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/final_report/subtoken_part_final_report.json
+    version_b_report_md: ${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/final_report/subtoken_part_final_report.md
+    version_b_metric_table: ${SUBTOKEN_PART_QCD_HGG_VERSION_B_DIR}/final_report/metric_table.csv
     logs: ${PROJECT_DIR}/fresh_check_logs
 SUMMARY

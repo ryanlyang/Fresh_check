@@ -6,6 +6,8 @@ from jetclass_fresh.hlt_baseline import require_torch
 from jetclass_fresh.jetclass_data import JetIdentity, JetView, RAW_TOKEN_DIM
 
 from teacher_logit_reco.subtoken_part import (
+    SUBTOKEN_PART_DEFAULT_BINARY_SELECTION_METRIC,
+    SUBTOKEN_PART_DEFAULT_MULTICLASS_SELECTION_METRIC,
     SUBTOKEN_PART_TRAIN_STEP,
     SubtokenHLTJetDataset,
     SubtokenTaggerTrainConfig,
@@ -113,18 +115,29 @@ class SubtokenPartStep12TrainingTests(unittest.TestCase):
 
         self.assertEqual(config.resolved_label_filter, (0, 3))
         self.assertEqual(config.resolved_label_names, ("QCD", "Hgg"))
+        self.assertEqual(config.selection_metric, SUBTOKEN_PART_DEFAULT_BINARY_SELECTION_METRIC)
 
-    def test_binary_selection_metric_rejects_multiclass_setup(self):
+    def test_selection_metric_defaults_to_accuracy_for_multiclass(self):
         config = SubtokenTaggerTrainConfig(
             output_dir="unused",
             hlt_cache_dir="unused",
             confirm_split_settings=True,
-            selection_metric="fpr_at_signal_eff_0p50",
             num_classes=3,
+            label_filter=(0, 3, 4),
+            label_names=("QCD", "Hgg", "Hbb"),
         )
 
+        self.assertEqual(config.selection_metric, SUBTOKEN_PART_DEFAULT_MULTICLASS_SELECTION_METRIC)
+
+    def test_binary_selection_metric_rejects_multiclass_setup(self):
         with self.assertRaises(ValueError):
-            config.validate_label_metadata()
+            SubtokenTaggerTrainConfig(
+                output_dir="unused",
+                hlt_cache_dir="unused",
+                confirm_split_settings=True,
+                selection_metric="fpr_at_signal_eff_0p50",
+                num_classes=3,
+            )
 
     def test_collate_subtoken_hlt_batch_shapes(self):
         torch = require_torch()

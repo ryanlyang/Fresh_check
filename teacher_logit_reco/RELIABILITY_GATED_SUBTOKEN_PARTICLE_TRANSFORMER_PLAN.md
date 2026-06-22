@@ -820,6 +820,24 @@ FPR at 50% signal efficiency
 background rejection at fixed signal efficiency
 ```
 
+Checkpoint selection:
+
+```text
+default binary selection:
+  AUC when the goal is broad ranking quality
+
+operating-point selection:
+  FPR at 50% signal efficiency, lower is better
+  or FPR at 30% signal efficiency for very low-rate trigger studies
+
+do not default binary checkpoint selection to accuracy
+```
+
+Accuracy is still useful as a sanity metric, but it should not be the default
+model-selection target for binary trigger-style studies.  A run that reports
+FPR at fixed signal efficiency should either select checkpoints by that FPR
+operating point or explicitly state that selection was done by AUC.
+
 This is the fastest way to answer:
 
 ```text
@@ -1389,7 +1407,7 @@ binary/multiclass
 label filters
 HLT cache input
 model_train/model_val/stack_val/final_test
-selection metric
+checkpoint selection metric
 diagnostics root mirroring
 ```
 
@@ -1401,6 +1419,23 @@ AUC for binary
 FPR at 30/50 signal efficiency for binary
 per-class accuracy for multiclass
 ```
+
+Checkpoint selection policy:
+
+```text
+binary default:
+  AUC for broad ranking studies
+
+binary fixed-operating-point runs:
+  FPR at 50% signal efficiency when FPR50 is the headline metric
+  FPR at 30% signal efficiency when FPR30 is the headline metric
+
+multiclass default:
+  accuracy or macro accuracy, depending on class balance
+```
+
+Do not use accuracy as the implicit binary default.  Accuracy can move in the
+right direction while the trigger operating point gets worse.
 
 ### Step 13: Add HLT ParT Baseline Runner Compatibility
 
@@ -1451,7 +1486,7 @@ teacher_logit_reco/subtoken_part/reports.py
 Report:
 
 ```text
-best metric by selection target
+best metric by configured comparison target
 full metric table
 gate diagnostics
 parameter counts
@@ -1459,13 +1494,15 @@ runtime/walltime
 baseline comparison
 ```
 
-For binary, prefer:
+For binary report comparison, prefer:
 
 ```text
 FPR at 50% signal efficiency, lower is better
 ```
 
-unless explicitly configured otherwise.
+unless explicitly configured otherwise.  The report must also display the
+checkpoint-selection metric used by each child run, so AUC-selected and
+FPR-selected checkpoints are not confused.
 
 ### Step 16: Implement Version B Offline Teacher Distillation
 
@@ -1488,6 +1525,21 @@ inference artifacts do not require offline
 distillation loss finite
 ```
 
+Implemented surface:
+
+```text
+teacher_logit_reco/subtoken_part/distill.py
+scripts/train_subtoken_part_distill.py
+tests/test_subtoken_part_step16_distill.py
+```
+
+The Step 16 trainer uses a paired HLT/offline dataset only for `model_train`.
+The student forward path still receives cached HLT tokens, while the frozen
+offline teacher sees the matched offline tokens under `torch.no_grad()` to
+produce distillation targets.  Validation, stack-val/final-test evaluation, and
+saved inference checkpoints remain HLT-only.  Checkpoints store student weights
+plus teacher metadata, not offline teacher weights.
+
 ### Step 17: Implement Modality Residual Auxiliary Targets
 
 Add coarse HLT/offline residual targets:
@@ -1508,6 +1560,40 @@ residual_pred_by_modality
 
 and optionally regularize reliability gates.
 
+Implemented surface:
+
+```text
+teacher_logit_reco/subtoken_part/residuals.py
+teacher_logit_reco/subtoken_part/distill.py
+scripts/train_subtoken_part_distill.py
+tests/test_subtoken_part_step17_residuals.py
+```
+
+The first implementation supports three stable target modes:
+
+```text
+jet
+nearest
+jet_plus_nearest
+```
+
+`jet` compares HLT/offline modality summaries and broadcasts the residual to
+all valid HLT particles.  `nearest` uses simple angular nearest-neighbor
+matching from each HLT particle to the offline view.  `jet_plus_nearest`
+averages the two.  The auxiliary residual head predicts
+`residual_pred_by_modality` from local modality tokens plus particle context.
+
+This path is opt-in through:
+
+```text
+--modality-residual-weight
+--modality-residual-target-mode
+--gate-residual-regularization-weight
+```
+
+The residual head is trained/saved only as an auxiliary training module.  The
+main inference checkpoint remains a standard HLT-only subtoken classifier.
+
 ### Step 18: Implement Masked Subtoken Objective
 
 Add masked modality modeling:
@@ -1525,6 +1611,61 @@ offline target reconstruction for privileged training
 ```
 
 Keep it optional and off by default until stable.
+
+Implemented surface:
+
+```text
+teacher_logit_reco/subtoken_part/masked.py
+teacher_logit_reco/subtoken_part/distill.py
+scripts/train_subtoken_part_distill.py
+tests/test_subtoken_part_step18_masked.py
+```
+
+The first masked objective samples one held-out modality for a subset of valid
+HLT particles, runs a second auxiliary masked forward pass, and predicts the
+held-out modality values from the remaining particle/jet context.  The main
+classification/distillation forward remains unmasked.
+
+Supported target modes:
+
+```text
+hlt_self
+offline
+```
+
+`hlt_self` predicts the original HLT modality values.  `offline` predicts the
+paired offline modality values after nearest-neighbor matching from each HLT
+slot to the offline constituents in eta/phi.  This avoids assuming that HLT slot
+`i` and offline slot `i` refer to the same physical particle after HLT sorting,
+dropping, and merging.  The explicit `offline_slot` mode exists only as a legacy
+debug/control mode and should not be used for serious privileged training.
+
+The masked and residual auxiliary losses use a shared ParT-style feature
+calibration before SmoothL1 distances are computed.  Raw `pt`/`energy`, angles,
+PID, and track/displacement features are mapped to a bounded comparison space so
+the auxiliary objectives do not simply become raw-kinematics losses.
+Masked-target values use hard clipping only on the fixed data side.  Masked-head
+predictions use differentiable calibration instead: `softplus` for positive
+channels such as `pt`/`energy`, `sigmoid` for PID/error-like bounded channels,
+and `tanh` for signed bounded channels.  This avoids dead-gradient regions when
+an unconstrained auxiliary head initially predicts values outside the physical
+range.
+
+For `offline` target mode, the nearest-neighbor HLT-to-offline match radius is
+configurable through `--masked-subtoken-max-match-delta-r` and defaults to
+`0.4`.  Training diagnostics report the offline masked-target
+`target_matched_fraction` and `target_mean_nearest_delta_r` under
+`masked_subtoken_diagnostics`, so a run cannot silently lose most of the
+privileged masked targets.
+
+Enable through:
+
+```text
+--masked-subtoken-weight
+--masked-subtoken-target-mode
+--masked-subtoken-probability
+--masked-subtoken-max-match-delta-r
+```
 
 ### Step 19: Implement Dual-View Cross-Attention Variant
 
@@ -1545,6 +1686,35 @@ late logits average
 concat pooled embeddings
 cross-attention class-token fusion
 ```
+
+Implementation notes:
+
+```text
+teacher_logit_reco/subtoken_part/dual_view.py
+  StandardParticleTokenBranch:
+    builds canonical PF_FEATURE_NAMES from the same HLT raw tokens
+    encodes them as ordinary particle tokens
+    can use the same ParT-style pairwise bias as the subtoken global branch
+    defaults to 6 layers, matching the default subtoken global depth
+
+  DualViewFusionModule:
+    late_logits_average
+    concat_pooled_embeddings
+    cross_attention_class_token_fusion
+
+teacher_logit_reco/subtoken_part/classifier.py
+  variant=dual_part_subtoken_cross_attention runs the normal reliability-gated
+  subtoken path, then fuses it with the standard particle-token branch
+
+scripts/train_subtoken_part_tagger.py
+scripts/train_subtoken_part_distill.py
+  expose --dual-fusion-mode, --standard-branch-layers, and
+  --disable-standard-branch-pairwise-bias
+```
+
+The dual branch remains HLT-only at inference.  It does not load offline tokens;
+privileged supervision, if enabled, is still training-only through the Version B
+distillation/residual/masked objectives.
 
 ### Step 20: Run Smoke Tests
 
@@ -1596,6 +1766,15 @@ Primary metric:
 FPR at 50% signal efficiency
 ```
 
+Checkpoint selection for this concrete run should also use:
+
+```text
+FPR at 50% signal efficiency
+```
+
+because the goal is a fixed-signal-efficiency trigger operating point, not
+maximum average classification accuracy.
+
 ### Step 22: Run Version B Binary Test
 
 Use same splits and HLT cache.
@@ -1638,4 +1817,3 @@ can become:
 ```text
 context-aware modality reliability for trigger-level particle transformers
 ```
-

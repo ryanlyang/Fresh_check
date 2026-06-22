@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a Version A HLT-only reliability-gated subtoken Particle Transformer."""
+"""Train a Version B HLT-only subtoken tagger with offline-teacher distillation."""
 
 from __future__ import annotations
 
@@ -21,11 +21,12 @@ from teacher_logit_reco.subtoken_part.config import (  # noqa: E402
     SUBTOKEN_PART_VARIANT_LOCAL_GATE,
     SUBTOKEN_PART_VARIANT_NO_GATE,
 )
-from teacher_logit_reco.subtoken_part.train import (  # noqa: E402
-    SUBTOKEN_PART_SELECTION_METRICS,
-    SubtokenTaggerTrainConfig,
-    train_subtoken_tagger,
+from teacher_logit_reco.subtoken_part.distill import (  # noqa: E402
+    SubtokenDistillTrainConfig,
+    train_subtoken_distilled_tagger,
 )
+from teacher_logit_reco.subtoken_part.masked import SUBTOKEN_PART_MASKED_TARGET_MODES  # noqa: E402
+from teacher_logit_reco.subtoken_part.train import SUBTOKEN_PART_SELECTION_METRICS  # noqa: E402
 
 
 def label_names_to_indices(values: list[str]) -> tuple[int, ...]:
@@ -50,6 +51,37 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--hlt-cache-dir", default="checkpoints/jetclass_fresh_hlt_cache")
+    parser.add_argument("--manifest-path", required=True)
+    parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--offline-teacher-checkpoint", required=True)
+    parser.add_argument("--offline-teacher-architecture", default="part")
+    parser.add_argument("--teacher-device", default=None)
+    parser.add_argument("--teacher-max-constits", type=int, default=128)
+    parser.add_argument("--teacher-weight-threshold", type=float, default=0.0)
+    parser.add_argument("--non-strict-teacher-checkpoint", action="store_true")
+    parser.add_argument("--distillation-temperature", type=float, default=2.0)
+    parser.add_argument("--distillation-weight", type=float, default=0.5)
+    parser.add_argument("--classification-weight", type=float, default=1.0)
+    parser.add_argument("--modality-residual-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--modality-residual-target-mode",
+        choices=("jet", "nearest", "jet_plus_nearest"),
+        default="jet",
+    )
+    parser.add_argument("--modality-residual-huber-beta", type=float, default=1.0)
+    parser.add_argument("--gate-residual-regularization-weight", type=float, default=0.0)
+    parser.add_argument("--gate-residual-temperature", type=float, default=1.0)
+    parser.add_argument("--masked-subtoken-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--masked-subtoken-target-mode",
+        choices=SUBTOKEN_PART_MASKED_TARGET_MODES,
+        default="hlt_self",
+    )
+    parser.add_argument("--masked-subtoken-probability", type=float, default=0.15)
+    parser.add_argument("--masked-subtoken-huber-beta", type=float, default=1.0)
+    parser.add_argument("--masked-subtoken-max-match-delta-r", type=float, default=0.4)
+    parser.add_argument("--verify-offline-label-branches", action="store_true")
+    parser.add_argument("--read-chunk-size", type=int, default=50_000)
 
     parser.add_argument("--train-split", default="model_train")
     parser.add_argument("--val-split", default="model_val")
@@ -129,9 +161,32 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config = SubtokenTaggerTrainConfig(
+    config = SubtokenDistillTrainConfig(
         output_dir=args.output_dir,
         hlt_cache_dir=args.hlt_cache_dir,
+        manifest_path=args.manifest_path,
+        data_dir=args.data_dir,
+        offline_teacher_checkpoint=args.offline_teacher_checkpoint,
+        offline_teacher_architecture=args.offline_teacher_architecture,
+        teacher_device=args.teacher_device,
+        teacher_max_constits=args.teacher_max_constits,
+        teacher_weight_threshold=args.teacher_weight_threshold,
+        strict_teacher_checkpoint=not bool(args.non_strict_teacher_checkpoint),
+        distillation_temperature=args.distillation_temperature,
+        distillation_weight=args.distillation_weight,
+        classification_weight=args.classification_weight,
+        modality_residual_weight=args.modality_residual_weight,
+        modality_residual_target_mode=args.modality_residual_target_mode,
+        modality_residual_huber_beta=args.modality_residual_huber_beta,
+        gate_residual_regularization_weight=args.gate_residual_regularization_weight,
+        gate_residual_temperature=args.gate_residual_temperature,
+        masked_subtoken_weight=args.masked_subtoken_weight,
+        masked_subtoken_target_mode=args.masked_subtoken_target_mode,
+        masked_subtoken_probability=args.masked_subtoken_probability,
+        masked_subtoken_huber_beta=args.masked_subtoken_huber_beta,
+        masked_subtoken_max_match_delta_r=args.masked_subtoken_max_match_delta_r,
+        verify_offline_label_branches=bool(args.verify_offline_label_branches),
+        read_chunk_size=args.read_chunk_size,
         train_split=args.train_split,
         val_split=args.val_split,
         stack_val_split=args.stack_val_split,
@@ -186,10 +241,11 @@ def main() -> int:
         anchor_source=args.anchor_source,
         include_part_style_derived_features=not bool(args.disable_part_style_derived_features),
     )
-    report = train_subtoken_tagger(config)
-    print("subtoken_part_tagger_training_complete:")
+    report = train_subtoken_distilled_tagger(config)
+    print("subtoken_part_distilled_training_complete:")
     print(f"  output_dir: {args.output_dir}")
     print(f"  output_contract: {report['output_contract']}")
+    print(f"  distillation_contract: {report['distillation_contract']}")
     print(f"  best_epoch: {report['best_epoch']}")
     print(f"  selection_metric: {report['selection_metric']}")
     print(f"  best_model_selection_metric_value: {report['best_model_selection_metric_value']:.8g}")
@@ -213,6 +269,15 @@ def main() -> int:
             f"fpr30={final_binary.get('fpr_at_signal_eff_0p30')} "
             f"fpr50={final_binary.get('fpr_at_signal_eff_0p50')}"
         )
+    print(f"  offline_teacher_used_for_training_only: {report['offline_teacher_used_for_training_only']}")
+    residual = report.get("modality_residual_supervision", {})
+    print(f"  modality_residual_enabled: {residual.get('enabled')}")
+    print(f"  modality_residual_target_mode: {residual.get('target_mode')}")
+    masked = report.get("masked_subtoken_objective", {})
+    print(f"  masked_subtoken_enabled: {masked.get('enabled')}")
+    print(f"  masked_subtoken_target_mode: {masked.get('target_mode')}")
+    print(f"  masked_subtoken_max_match_delta_r: {masked.get('masked_subtoken_max_match_delta_r')}")
+    print(f"  inference_requires_offline: {report['inference_requires_offline']}")
     print(f"  checkpoint: {report['checkpoint']}")
     print(f"  run_report: {Path(args.output_dir) / 'run_report.json'}")
     return 0

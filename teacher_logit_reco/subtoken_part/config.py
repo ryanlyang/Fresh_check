@@ -91,6 +91,30 @@ SUBTOKEN_PART_POOL_MODES: tuple[str, ...] = (
     SUBTOKEN_PART_POOL_CLS_TOKEN,
 )
 
+SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS = "late_logits_average"
+SUBTOKEN_PART_DUAL_FUSION_CONCAT = "concat_pooled_embeddings"
+SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION = "cross_attention_class_token_fusion"
+SUBTOKEN_PART_DUAL_FUSION_MODES: tuple[str, ...] = (
+    SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    SUBTOKEN_PART_DUAL_FUSION_CONCAT,
+    SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+)
+SUBTOKEN_PART_DUAL_FUSION_ALIASES: dict[str, str] = {
+    "late": SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    "late_logits": SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    "logits_average": SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    "logit_average": SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    "avg_logits": SUBTOKEN_PART_DUAL_FUSION_LATE_LOGITS,
+    "concat": SUBTOKEN_PART_DUAL_FUSION_CONCAT,
+    "concat_embeddings": SUBTOKEN_PART_DUAL_FUSION_CONCAT,
+    "concat_pooled": SUBTOKEN_PART_DUAL_FUSION_CONCAT,
+    "cross": SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+    "cross_attention": SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+    "cross_attention_cls": SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+    "cross_attention_class_token": SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+    "crossvit": SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION,
+}
+
 SUBTOKEN_PART_VARIANT_HLT_PART_BASELINE = "hlt_part_baseline"
 SUBTOKEN_PART_VARIANT_NO_GATE = "subtoken_no_gate"
 SUBTOKEN_PART_VARIANT_LOCAL_GATE = "subtoken_gate_local_only"
@@ -173,6 +197,16 @@ def normalize_subtoken_pool_mode(value: str) -> str:
     if key not in SUBTOKEN_PART_POOL_MODES:
         raise ValueError(f"Unknown subtoken pool mode {value!r}; expected one of {SUBTOKEN_PART_POOL_MODES}")
     return key
+
+
+def normalize_subtoken_dual_fusion_mode(value: str) -> str:
+    key = _alias_key(value)
+    normalized = SUBTOKEN_PART_DUAL_FUSION_ALIASES.get(key, key)
+    if normalized not in SUBTOKEN_PART_DUAL_FUSION_MODES:
+        raise ValueError(
+            f"Unknown dual-view fusion mode {value!r}; expected one of {SUBTOKEN_PART_DUAL_FUSION_MODES}"
+        )
+    return normalized
 
 
 def normalize_subtoken_split_name(value: str) -> str:
@@ -355,6 +389,9 @@ class SubtokenPartConfig:
     modality_dropout: float = 0.0
     dropout: float = SUBTOKEN_PART_DEFAULT_DROPOUT
     attention_dropout: float = SUBTOKEN_PART_DEFAULT_ATTENTION_DROPOUT
+    dual_fusion_mode: str = SUBTOKEN_PART_DUAL_FUSION_CROSS_ATTENTION
+    standard_branch_layers: int = SUBTOKEN_PART_DEFAULT_GLOBAL_LAYERS
+    standard_branch_use_pairwise_bias: bool = True
 
     def __post_init__(self) -> None:
         if int(self.num_classes) <= 1:
@@ -368,11 +405,14 @@ class SubtokenPartConfig:
         version = normalize_subtoken_part_version(self.version)
         gate_mode = normalize_subtoken_gate_mode(self.gate_mode)
         local_pool_mode = normalize_subtoken_pool_mode(self.local_pool_mode)
+        dual_fusion_mode = normalize_subtoken_dual_fusion_mode(self.dual_fusion_mode)
         if int(self.embed_dim) <= 0:
             raise ValueError("embed_dim must be positive")
         for name in ("local_layers", "context_layers", "global_layers"):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if int(self.standard_branch_layers) <= 0:
+            raise ValueError("standard_branch_layers must be positive")
         _validate_attention_heads(self.embed_dim, self.local_heads, name="local_heads")
         _validate_attention_heads(self.embed_dim, self.context_heads, name="context_heads")
         _validate_attention_heads(self.embed_dim, self.global_heads, name="global_heads")
@@ -390,6 +430,9 @@ class SubtokenPartConfig:
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "gate_mode", gate_mode)
         object.__setattr__(self, "local_pool_mode", local_pool_mode)
+        object.__setattr__(self, "dual_fusion_mode", dual_fusion_mode)
+        object.__setattr__(self, "standard_branch_layers", int(self.standard_branch_layers))
+        object.__setattr__(self, "standard_branch_use_pairwise_bias", bool(self.standard_branch_use_pairwise_bias))
         object.__setattr__(self, "modality_dropout", modality_dropout)
         object.__setattr__(self, "dropout", dropout)
         object.__setattr__(self, "attention_dropout", attention_dropout)
@@ -417,6 +460,9 @@ class SubtokenPartConfig:
             "modality_dropout": float(self.modality_dropout),
             "dropout": float(self.dropout),
             "attention_dropout": float(self.attention_dropout),
+            "dual_fusion_mode": self.dual_fusion_mode,
+            "standard_branch_layers": int(self.standard_branch_layers),
+            "standard_branch_use_pairwise_bias": bool(self.standard_branch_use_pairwise_bias),
         }
 
 

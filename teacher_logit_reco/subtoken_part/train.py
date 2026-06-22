@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import csv
 from pathlib import Path
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -30,6 +31,7 @@ from .config import (
     SubtokenPartConfig,
     normalize_subtoken_part_variant,
     normalize_subtoken_gate_mode,
+    normalize_subtoken_dual_fusion_mode,
     normalize_subtoken_pool_mode,
     normalize_subtoken_split_name,
 )
@@ -47,6 +49,8 @@ SUBTOKEN_PART_SELECTION_METRICS = (
     "background_rejection_at_signal_eff_0p50",
 )
 SUBTOKEN_PART_LOWER_IS_BETTER_SELECTION_METRICS = {"loss", "fpr_at_signal_eff_0p30", "fpr_at_signal_eff_0p50"}
+SUBTOKEN_PART_DEFAULT_BINARY_SELECTION_METRIC = "fpr_at_signal_eff_0p50"
+SUBTOKEN_PART_DEFAULT_MULTICLASS_SELECTION_METRIC = "accuracy"
 
 
 def _optional_nonnegative_int(value: int | None, *, field_name: str) -> int | None:
@@ -73,6 +77,28 @@ def _finite_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
     return output if np.isfinite(output) else float(default)
+
+
+def default_subtoken_selection_metric(num_classes: int) -> str:
+    """Default checkpoint-selection metric for a subtoken tagging task."""
+
+    return (
+        SUBTOKEN_PART_DEFAULT_BINARY_SELECTION_METRIC
+        if int(num_classes) == 2
+        else SUBTOKEN_PART_DEFAULT_MULTICLASS_SELECTION_METRIC
+    )
+
+
+def normalize_subtoken_selection_metric(value: str | None, *, num_classes: int) -> str:
+    """Resolve optional/auto selection metrics after class metadata is known."""
+
+    if value is None or str(value).strip() == "":
+        metric = default_subtoken_selection_metric(int(num_classes))
+    else:
+        metric = str(value).strip()
+    if metric not in SUBTOKEN_PART_SELECTION_METRICS:
+        raise ValueError(f"selection_metric must be one of {SUBTOKEN_PART_SELECTION_METRICS}")
+    return metric
 
 
 def _feature_config_from_payload(payload: Mapping[str, Any]) -> SubtokenFeatureConfig:
@@ -122,7 +148,7 @@ class SubtokenTaggerTrainConfig:
     max_val_jets: int | None = None
     max_stack_val_jets: int | None = None
     max_final_test_jets: int | None = None
-    selection_metric: str = "accuracy"
+    selection_metric: str | None = None
     compile_model: bool = False
     verify_hlt_hash: bool = True
     num_classes: int | None = None
@@ -146,6 +172,9 @@ class SubtokenTaggerTrainConfig:
     modality_dropout: float = 0.0
     dropout: float = 0.05
     attention_dropout: float = 0.05
+    dual_fusion_mode: str = "cross_attention_class_token_fusion"
+    standard_branch_layers: int = 6
+    standard_branch_use_pairwise_bias: bool = True
     anchor_source: str = "raw"
     include_part_style_derived_features: bool = True
 
@@ -171,6 +200,7 @@ class SubtokenTaggerTrainConfig:
             "context_heads",
             "global_layers",
             "global_heads",
+            "standard_branch_layers",
         ):
             value = int(getattr(self, field_name))
             if value <= 0:
@@ -205,11 +235,9 @@ class SubtokenTaggerTrainConfig:
         self.max_val_jets = _optional_positive_int(self.max_val_jets, field_name="max_val_jets")
         self.max_stack_val_jets = _optional_positive_int(self.max_stack_val_jets, field_name="max_stack_val_jets")
         self.max_final_test_jets = _optional_positive_int(self.max_final_test_jets, field_name="max_final_test_jets")
-        self.selection_metric = str(self.selection_metric)
-        if self.selection_metric not in SUBTOKEN_PART_SELECTION_METRICS:
-            raise ValueError(f"selection_metric must be one of {SUBTOKEN_PART_SELECTION_METRICS}")
         self.gate_mode = normalize_subtoken_gate_mode(self.gate_mode)
         self.local_pool_mode = normalize_subtoken_pool_mode(self.local_pool_mode)
+        self.dual_fusion_mode = normalize_subtoken_dual_fusion_mode(self.dual_fusion_mode)
         self.label_filter = tuple(int(label) for label in self.label_filter)
         if len(set(self.label_filter)) != len(self.label_filter):
             raise ValueError(f"label_filter contains duplicates: {self.label_filter}")
@@ -221,7 +249,12 @@ class SubtokenTaggerTrainConfig:
                     self.label_filter = tuple(by_name[name] for name in self.label_names)
         if self.num_classes is not None:
             self.num_classes = _optional_positive_int(self.num_classes, field_name="num_classes")
+        self.selection_metric = normalize_subtoken_selection_metric(
+            self.selection_metric,
+            num_classes=int(self.resolved_num_classes),
+        )
         self.variant = normalize_subtoken_part_variant(self.variant)
+        self.validate_label_metadata()
 
     @property
     def resolved_label_filter(self) -> tuple[int, ...]:
@@ -289,6 +322,9 @@ class SubtokenTaggerTrainConfig:
             modality_dropout=float(self.modality_dropout),
             dropout=float(self.dropout),
             attention_dropout=float(self.attention_dropout),
+            dual_fusion_mode=str(self.dual_fusion_mode),
+            standard_branch_layers=int(self.standard_branch_layers),
+            standard_branch_use_pairwise_bias=bool(self.standard_branch_use_pairwise_bias),
         )
 
 
@@ -757,6 +793,7 @@ def train_subtoken_tagger(
 ) -> dict[str, Any]:
     """Train the Step 12 HLT-only subtoken classifier and evaluate guarded splits."""
 
+    run_start_time = time.perf_counter()
     config.validate_label_metadata()
     torch = require_torch()
     set_training_seed(int(config.seed))
@@ -962,6 +999,7 @@ def train_subtoken_tagger(
         metrics_by_split["final_test"] = final_test_metrics
         final_test_metadata = dict(final_test_dataset.metadata)
 
+    elapsed_seconds = float(time.perf_counter() - run_start_time)
     _write_per_class_csv(diagnostics_dir / "per_class_metrics.csv", metrics_by_split)
     _write_summary_csv(diagnostics_dir / "summary_metrics.csv", metrics_by_split)
 
@@ -1001,6 +1039,13 @@ def train_subtoken_tagger(
         "final_test_dataset": final_test_metadata,
         "final_test_evaluated": bool(config.confirm_final_test),
         "no_final_test_evaluation": not bool(config.confirm_final_test),
+        "runtime": {
+            "elapsed_seconds": elapsed_seconds,
+            "elapsed_minutes": elapsed_seconds / 60.0,
+            "epochs_completed": len(curves),
+            "seconds_per_completed_epoch": elapsed_seconds / float(len(curves)) if curves else None,
+        },
+        "walltime_seconds": elapsed_seconds,
         "inference_consumes_hlt_only": True,
     }
     save_json(output_dir / "model_val_report.json", report)
@@ -1010,14 +1055,18 @@ def train_subtoken_tagger(
 
 
 __all__ = [
+    "SUBTOKEN_PART_DEFAULT_BINARY_SELECTION_METRIC",
+    "SUBTOKEN_PART_DEFAULT_MULTICLASS_SELECTION_METRIC",
     "SUBTOKEN_PART_LOWER_IS_BETTER_SELECTION_METRICS",
     "SUBTOKEN_PART_SELECTION_METRICS",
     "SUBTOKEN_PART_TRAIN_STEP",
     "SubtokenHLTJetDataset",
     "SubtokenTaggerTrainConfig",
     "collate_subtoken_hlt_batch",
+    "default_subtoken_selection_metric",
     "load_subtoken_tagger_checkpoint",
     "make_subtoken_hlt_loader",
+    "normalize_subtoken_selection_metric",
     "run_subtoken_tagger_epoch",
     "subtoken_tagger_checkpoint_payload",
     "train_subtoken_tagger",

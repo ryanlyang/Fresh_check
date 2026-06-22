@@ -331,7 +331,32 @@ class SubtokenParticleEncoder(_ModuleBase):
         keep = keep | (missing_valid_particle[:, :, None] & fallback)
         return keep & base_mask
 
-    def forward(self, tokens_or_inputs: Any, mask: Any | None = None) -> SubtokenEncoderOutput:
+    def _apply_modality_mask_override(self, modality_mask: Any, override: Any | None, particle_mask: Any) -> Any:
+        if override is None:
+            return modality_mask
+        torch = require_torch()
+        override = torch.as_tensor(override, dtype=torch.bool, device=modality_mask.device)
+        if tuple(override.shape) != tuple(modality_mask.shape):
+            raise ValueError(
+                f"modality_mask_override shape {tuple(override.shape)} does not match {tuple(modality_mask.shape)}"
+            )
+        combined = modality_mask & override & particle_mask[:, :, None]
+        missing_valid_particle = particle_mask & ~combined.any(dim=2)
+        if bool(missing_valid_particle.any().detach().cpu().item()):
+            fallback = torch.nn.functional.one_hot(
+                torch.zeros_like(particle_mask, dtype=torch.long),
+                num_classes=int(combined.shape[2]),
+            ).bool()
+            combined = combined | (missing_valid_particle[:, :, None] & fallback)
+        return combined & particle_mask[:, :, None]
+
+    def forward(
+        self,
+        tokens_or_inputs: Any,
+        mask: Any | None = None,
+        *,
+        modality_mask_override: Any | None = None,
+    ) -> SubtokenEncoderOutput:
         torch = require_torch()
         if isinstance(tokens_or_inputs, SubtokenInputs):
             inputs = tokens_or_inputs
@@ -349,6 +374,7 @@ class SubtokenParticleEncoder(_ModuleBase):
             num_modalities=len(self.modality_names),
             device=modality_embeddings.device,
         )
+        modality_mask = self._apply_modality_mask_override(modality_mask, modality_mask_override, inputs.mask)
         modality_embeddings = torch.where(
             modality_mask[:, :, :, None],
             modality_embeddings,

@@ -96,8 +96,12 @@ class SubtokenPartStep15ReportTests(unittest.TestCase):
                     "comparison_split": "final_test",
                     "primary_metric": "accuracy",
                     "child_reports": {
-                        SUBTOKEN_PART_VARIANT_HLT_PART_BASELINE: str(baseline_path),
-                        SUBTOKEN_PART_VARIANT_CONTEXT_GATE: str(subtoken_path),
+                        SUBTOKEN_PART_VARIANT_HLT_PART_BASELINE: str(
+                            Path(root.name) / SUBTOKEN_PART_VARIANT_HLT_PART_BASELINE / "run_report.json"
+                        ),
+                        SUBTOKEN_PART_VARIANT_CONTEXT_GATE: str(
+                            Path(root.name) / SUBTOKEN_PART_VARIANT_CONTEXT_GATE / "run_report.json"
+                        ),
                     },
                 },
             )
