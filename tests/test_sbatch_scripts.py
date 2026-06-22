@@ -117,6 +117,7 @@ SUBMITTERS = [
     "submit_detr_slot_qcd_hgg_binary_experiment.sh",
     "submit_detr_slot_smoke_test.sh",
     "submit_subtoken_part_qcd_hgg_binary_experiment.sh",
+    "submit_subtoken_part_10class_experiment.sh",
 ]
 
 
@@ -1406,6 +1407,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("SUBTOKEN_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
         self.assertIn("SUBTOKEN_PART_QCD_HGG_EPOCHS:=45", submitter)
         self.assertIn("SUBTOKEN_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_BINARY_HLT_CACHE_TIME:=1-00:00:00", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_COMPAT_TIME:=3-00:00:00", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_OFFLINE_TEACHER_TIME:=2-00:00:00", submitter)
+        self.assertIn("SUBTOKEN_PART_QCD_HGG_VERSION_B_TIME:=3-00:00:00", submitter)
         self.assertIn("SUBTOKEN_PART_QCD_HGG_SUBMIT_VERSION_B:=0", submitter)
         self.assertIn("SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS:=subtoken_gate_context_distill subtoken_gate_context_residual subtoken_gate_context_distill_residual", submitter)
         self.assertIn("run_train_eval_set_matching_binary_offline_teacher.sh", submitter)
@@ -1419,6 +1424,35 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('export SUBTOKEN_PART_DISTILL_LABEL_FILTER_NAMES="${SUBTOKEN_PART_QCD_HGG_BINARY_LABEL_FILTER}"', submitter)
         self.assertIn('version_b_report_dependency="${compat_jid}"', submitter)
         self.assertIn('SUBTOKEN_PART_REPORT_VARIANTS="subtoken_gate_context ${SUBTOKEN_PART_QCD_HGG_VERSION_B_VARIANTS}"', submitter)
+
+    def test_subtoken_part_10class_submitter_builds_fresh_hlt06_cache(self):
+        submitter = self.read("submit_subtoken_part_10class_experiment.sh")
+
+        self.assertIn("10class_subtoken_part_version_a", submitter)
+        self.assertIn("subtoken_part_10class_hlt", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_LABEL_NAMES:=QCD Hbb Hcc Hgg H4q Hqql Zqq Wqq Tbqq Tbl", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_VARIANTS:=hlt_part_baseline subtoken_no_gate subtoken_gate_local_only subtoken_gate_context", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_EPOCHS:=45", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_SELECTION_METRIC:=accuracy", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_HLT_CACHE_TIME:=1-00:00:00", submitter)
+        self.assertIn("SUBTOKEN_PART_10CLASS_COMPAT_TIME:=4-00:00:00", submitter)
+        self.assertIn('export SUBTOKEN_PART_LABEL_FILTER_NAMES=""', submitter)
+        self.assertIn("export SUBTOKEN_PART_NUM_CLASSES=10", submitter)
+        self.assertIn('export SUBTOKEN_PART_REPORT_PRIMARY_METRIC="${SUBTOKEN_PART_10CLASS_SELECTION_METRIC}"', submitter)
+        self.assertIn("run_build_fresh_splits.sh", submitter)
+        self.assertIn("run_build_fresh_hlt_cache.sh", submitter)
+        self.assertIn("run_subtoken_part_compat.sh", submitter)
+        self.assertIn("subtoken_10class_splits", submitter)
+        self.assertIn("subtoken_10class_hlt_cache", submitter)
+        self.assertIn("subtoken_10class_version_a_compat", submitter)
+        self.assertIn('--dependency="afterok:${split_jid}"', submitter)
+        self.assertIn("afterok_args", submitter)
 
 
 if __name__ == "__main__":
