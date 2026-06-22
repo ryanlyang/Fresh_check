@@ -1366,6 +1366,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('export DETR_SLOT_HLT_DEGRADATION_STRENGTH="${DETR_SLOT_QCD_HGG_HLT_DEGRADATION_STRENGTH}"', hgg)
         self.assertIn('export DETR_SLOT_BINARY_RECO_EPOCHS="${DETR_SLOT_QCD_HGG_RECO_EPOCHS:-30}"', hgg)
         self.assertIn('export DETR_SLOT_BINARY_TAGGER_EPOCHS="${DETR_SLOT_QCD_HGG_TAGGER_EPOCHS:-45}"', hgg)
+        self.assertIn('export DETR_SLOT_RECO_TIME="${DETR_SLOT_QCD_HGG_RECO_TIME:-2-12:00:00}"', hgg)
+        self.assertIn('export DETR_SLOT_TAGGER_TIME="${DETR_SLOT_QCD_HGG_TAGGER_TIME:-2-12:00:00}"', hgg)
         self.assertIn('export DETR_SLOT_NUM_SLOTS="${DETR_SLOT_QCD_HGG_NUM_SLOTS:-160}"', hgg)
         self.assertIn('export DETR_SLOT_BINARY_MODEL_TRAIN_SIZE="${DETR_SLOT_QCD_HGG_MODEL_TRAIN_SIZE:-500000}"', hgg)
         self.assertIn('export DETR_SLOT_BINARY_MODEL_VAL_SIZE="${DETR_SLOT_QCD_HGG_MODEL_VAL_SIZE:-150000}"', hgg)
