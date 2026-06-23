@@ -168,7 +168,7 @@ class DetrPredictionHeadsConfig:
 
     def __post_init__(self) -> None:
         if isinstance(self.feature_config, Mapping):
-            object.__setattr__(self, "feature_config", DetrSlotFeatureConfig(**dict(self.feature_config)))
+            object.__setattr__(self, "feature_config", DetrSlotFeatureConfig.from_mapping(self.feature_config))
         if int(self.embed_dim) <= 0:
             raise ValueError("embed_dim must be positive")
         if int(self.hidden_dim) <= 0:
@@ -325,7 +325,7 @@ class DetrPredictionHeads(_ModuleBase):
             payload = dict(config or {})
             feature_config = payload.get("feature_config")
             if isinstance(feature_config, Mapping):
-                payload["feature_config"] = DetrSlotFeatureConfig(**dict(feature_config))
+                payload["feature_config"] = DetrSlotFeatureConfig.from_mapping(feature_config)
             self.config = DetrPredictionHeadsConfig(**payload)
         self.core_head = _make_mlp(
             torch,

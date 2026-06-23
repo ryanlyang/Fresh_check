@@ -8,7 +8,7 @@ tokens again.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import importlib.util
 from typing import Any
 
@@ -64,6 +64,13 @@ class DetrSlotFeatureConfig:
     min_log_value: float = -20.0
     max_log_value: float = 20.0
     enforce_energy_ge_pt_cosh_eta: bool = True
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any] | Any) -> "DetrSlotFeatureConfig":
+        """Build from a serialized config while ignoring derived report keys."""
+
+        allowed = {field.name for field in fields(cls)}
+        return cls(**{key: value for key, value in dict(payload).items() if key in allowed})
 
     def __post_init__(self) -> None:
         if int(self.feature_dim) <= 0:

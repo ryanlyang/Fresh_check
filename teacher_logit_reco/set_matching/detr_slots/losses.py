@@ -128,7 +128,7 @@ class DetrSlotHungarianLossConfig:
 
     def __post_init__(self) -> None:
         if isinstance(self.feature_config, Mapping):
-            object.__setattr__(self, "feature_config", DetrSlotFeatureConfig(**dict(self.feature_config)))
+            object.__setattr__(self, "feature_config", DetrSlotFeatureConfig.from_mapping(self.feature_config))
         if len(self.core_weights) != 4:
             raise ValueError("core_weights must contain four values: log_pt, eta, phi, log_energy")
         if any(float(value) < 0.0 for value in self.core_weights):

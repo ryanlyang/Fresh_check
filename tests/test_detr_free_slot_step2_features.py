@@ -70,6 +70,17 @@ class DetrFreeSlotStep2FeatureTests(unittest.TestCase):
         self.assertTrue(torch.equal(aux[..., 0], tokens[..., 5]))
         self.assertTrue(torch.equal(aux[..., 1], tokens[..., 7]))
 
+    def test_feature_config_from_mapping_ignores_report_only_keys(self):
+        config = DetrSlotFeatureConfig(feature_dim=RAW_TOKEN_DIM, aux_indices=(4, 5, 6))
+        payload = config.to_dict()
+
+        restored = DetrSlotFeatureConfig.from_mapping(payload)
+
+        self.assertEqual(restored.feature_dim, config.feature_dim)
+        self.assertEqual(restored.aux_indices, config.aux_indices)
+        self.assertIn("core_feature_names", payload)
+        self.assertIn("raw_kinematic_feature_names", payload)
+
     def test_decode_slot_outputs_to_raw_tokens_enforces_physical_kinematics(self):
         config = default_detr_slot_feature_config(feature_dim=RAW_TOKEN_DIM)
         core = torch.tensor(
