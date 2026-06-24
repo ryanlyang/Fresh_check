@@ -1442,7 +1442,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("SUBTOKEN_PART_10CLASS_SELECTION_METRIC:=accuracy", submitter)
         self.assertIn("SUBTOKEN_PART_10CLASS_HLT_CACHE_TIME:=1-00:00:00", submitter)
         self.assertIn("SUBTOKEN_PART_10CLASS_COMPAT_TIME:=4-00:00:00", submitter)
-        self.assertIn('export SUBTOKEN_PART_LABEL_FILTER_NAMES=""', submitter)
+        self.assertIn('export SUBTOKEN_PART_LABEL_FILTER_NAMES="${SUBTOKEN_PART_10CLASS_LABEL_NAMES}"', submitter)
         self.assertIn("export SUBTOKEN_PART_NUM_CLASSES=10", submitter)
         self.assertIn('export SUBTOKEN_PART_REPORT_PRIMARY_METRIC="${SUBTOKEN_PART_10CLASS_SELECTION_METRIC}"', submitter)
         self.assertIn("run_build_fresh_splits.sh", submitter)
