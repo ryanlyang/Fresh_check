@@ -87,6 +87,7 @@ RUNNERS = [
     "run_write_subtoken_part_report.sh",
     "run_train_local_graph_part_tagger.sh",
     "run_write_local_graph_part_report.sh",
+    "run_local_graph_score_fusion.sh",
     "run_train_dualview_part_residual.sh",
     "run_write_dualview_part_report.sh",
 ]
@@ -1524,6 +1525,23 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_TIME:-2-12:00:00", wrapper)
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_MEM:-160G", wrapper)
         self.assertIn('bash "${SCRIPT_DIR}/submit_local_graph_qcd_hgg_binary_experiment.sh"', wrapper)
+
+    def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
+        runner = self.read("run_local_graph_score_fusion.sh")
+
+        self.assertIn("scripts/run_local_graph_score_fusion.py", runner)
+        self.assertIn("LOCAL_GRAPH_PART_ROOT:=${OUTPUT_ROOT}/local_graph_part_step10_qcd_hgg_binary_hlt0p6", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_VARIANTS:=hlt_part_baseline local_edgeconv_adapter local_point_attention_adapter local_point_attention_adapter_warmstart", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_BASELINE_VARIANT:=hlt_part_baseline", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_PRIMARY_METRIC:=fpr_at_signal_eff_0p50", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_MAX_STACK_JETS:=150000", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_MAX_FINAL_TEST_JETS:=500000", runner)
+        self.assertIn("LOCAL_GRAPH_SCORE_FUSION_CONFIRM_FINAL_TEST:=1", runner)
+        self.assertIn("--confirm-final-test", runner)
+        self.assertIn("best_model_val.pt", runner)
+        self.assertIn("fusion_report.json", runner)
+        self.assertIn("fusion_metric_table.csv", runner)
+        self.assertIn("fusion_prediction_manifest.json", runner)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")
