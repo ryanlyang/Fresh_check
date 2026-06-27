@@ -85,6 +85,8 @@ RUNNERS = [
     "run_subtoken_part_compat.sh",
     "run_subtoken_part_distill.sh",
     "run_write_subtoken_part_report.sh",
+    "run_train_dualview_part_residual.sh",
+    "run_write_dualview_part_report.sh",
 ]
 
 SUBMITTERS = [
@@ -118,6 +120,8 @@ SUBMITTERS = [
     "submit_detr_slot_smoke_test.sh",
     "submit_subtoken_part_qcd_hgg_binary_experiment.sh",
     "submit_subtoken_part_10class_experiment.sh",
+    "submit_dualview_part_residual_smoke_test.sh",
+    "submit_dualview_part_residual_500k_qcd_hgg.sh",
 ]
 
 
@@ -1453,6 +1457,75 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("subtoken_10class_version_a_compat", submitter)
         self.assertIn('--dependency="afterok:${split_jid}"', submitter)
         self.assertIn("afterok_args", submitter)
+
+    def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
+        runner = self.read("run_train_dualview_part_residual.sh")
+        submitter = self.read("submit_dualview_part_residual_smoke_test.sh")
+        trainer = (REPO_ROOT / "scripts" / "train_dualview_part_residual.py").read_text(encoding="utf-8")
+        training = (REPO_ROOT / "teacher_logit_reco" / "dualview_part" / "training.py").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/train_dualview_part_residual.py", runner)
+        self.assertIn("frozen_anchor_pn_residual", runner)
+        self.assertIn("frozen_anchor_shuffled_pn_control", runner)
+        self.assertIn("--confirm-final-test", runner)
+        self.assertIn("--initialization-check-batches", runner)
+        self.assertIn("DUALVIEW_PART_STACK_TRAIN_SIZE", runner)
+        self.assertIn("DUALVIEW_PART_STACK_VAL_SIZE", runner)
+        self.assertIn("DUALVIEW_PART_FINAL_TEST_SIZE", runner)
+        self.assertIn("DUALVIEW_PART_HLT_ANCHOR_CHECKPOINT", runner)
+        self.assertIn("DUALVIEW_PART_HLT_CACHE_DIR", runner)
+        self.assertIn("DUALVIEW_PART_PN_RECONSTRUCTED_VIEW_DIR", runner)
+        self.assertIn("${split}_fixed_hlt.npz", runner)
+        self.assertIn("${split}_reconstructed_view.npz", runner)
+        self.assertIn("residual_diagnostics.json", runner)
+        self.assertIn("gate_by_hlt_correctness.csv", runner)
+        self.assertIn("fix_break_cases.csv", runner)
+        self.assertIn("fix_cases.csv", runner)
+        self.assertIn("break_cases.csv", runner)
+        self.assertIn("--max-case-rows-per-type", runner)
+        self.assertIn("--shuffle-pn-view", runner)
+
+        report_runner = self.read("run_write_dualview_part_report.sh")
+        self.assertIn("scripts/write_dualview_part_report.py", report_runner)
+        self.assertIn("DUALVIEW_PART_REPORT_REQUIRE_REAL_BEATS_SHUFFLED", report_runner)
+        self.assertIn("dualview_part_report.json", report_runner)
+        self.assertIn("metric_table.csv", report_runner)
+
+        self.assertIn("dualview_part_residual_smoke_", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_STACK_TRAIN_SIZE:-10000", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_STACK_VAL_SIZE:-5000", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_FINAL_TEST_SIZE:-10000", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_EPOCHS:-2", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_MAX_CASE_ROWS_PER_TYPE:-200", submitter)
+        self.assertIn("DUALVIEW_PART_SMOKE_VARIANTS:=frozen_anchor_pn_residual frozen_anchor_shuffled_pn_control", submitter)
+        self.assertIn("run_train_dualview_part_residual.sh", submitter)
+        self.assertIn("run_write_dualview_part_report.sh", submitter)
+        self.assertIn("shuffled_pn_control: submitted", submitter)
+        self.assertIn("require_real_beats_shuffled", submitter)
+        self.assertIn("afterok_args", submitter)
+
+        self.assertIn("--skip-initialization-check", trainer)
+        self.assertIn("--initialization-check-batches", trainer)
+        self.assertIn("--max-case-rows-per-type", trainer)
+        self.assertIn("run_initialization_check", training)
+        self.assertIn("prediction_change_fraction", training)
+        self.assertIn("initialization_check_passed", training)
+
+    def test_dualview_part_step11_500k_submitter(self):
+        submitter = self.read("submit_dualview_part_residual_500k_qcd_hgg.sh")
+
+        self.assertIn("dualview_part_qcd_hgg_binary_hlt0p6_true500k_", submitter)
+        self.assertIn("DUALVIEW_PART_500K_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("DUALVIEW_PART_500K_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("DUALVIEW_PART_500K_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("DUALVIEW_PART_500K_EPOCHS:=45", submitter)
+        self.assertIn("DUALVIEW_PART_500K_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("DUALVIEW_PART_500K_VARIANTS:=frozen_anchor_pn_residual frozen_anchor_shuffled_pn_control", submitter)
+        self.assertIn("DUALVIEW_PART_500K_REQUIRE_REAL_BEATS_SHUFFLED:-1", submitter)
+        self.assertIn("run_train_dualview_part_residual.sh", submitter)
+        self.assertIn("run_write_dualview_part_report.sh", submitter)
+        self.assertIn("afterok_args", submitter)
+        self.assertIn("expected_jobs:", submitter)
 
 
 if __name__ == "__main__":
