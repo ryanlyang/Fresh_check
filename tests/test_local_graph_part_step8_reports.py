@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from jetclass_fresh.hlt_baseline import require_torch
+from jetclass_fresh.hlt_cache import fixed_hlt_params_dict, fixed_hlt_params_from_strength
 
 from teacher_logit_reco.local_graph_part import (
     LOCAL_GRAPH_MODEL_VARIANT_EDGECONV,
@@ -42,7 +43,8 @@ class LocalGraphPartStep8ReportTests(unittest.TestCase):
             "hlt_content_hash": "toy-hlt-hash",
             "jet_identity_hash": "toy-jet-hash",
             "hlt_seed": 123,
-            "hlt_params": {"strength": 0.6, "drop_probability": 0.12},
+            "hlt_params": fixed_hlt_params_dict(fixed_hlt_params_from_strength(0.6)),
+            "hlt_diagnostics_summary": {"drop_total_fraction": 0.12, "mean_merges_per_jet": 0.3},
         }
         return {
             "experiment_step": "local_graph_part_step6_train_baseline_and_adapters",
@@ -93,6 +95,17 @@ class LocalGraphPartStep8ReportTests(unittest.TestCase):
                     "background_rejection_at_signal_eff_0p50": 1.0 / fpr50,
                 },
                 "diagnostics": diagnostics,
+                "hlt_degradation_slice_metrics": [
+                    {
+                        "diagnostic": "drop_total",
+                        "slice": "high_q75",
+                        "n_jets": 10,
+                        "accuracy": accuracy - 0.03,
+                        "auc": 0.90,
+                        "fpr_at_signal_eff_0p50": fpr50 + 0.04,
+                    }
+                ],
+                "hlt_degradation_slice_summary": {"available": True, "n_rows": 1},
             },
         }
 
@@ -187,9 +200,11 @@ class LocalGraphPartStep8ReportTests(unittest.TestCase):
             self.assertIn("local_graph", diagnostic_categories)
             self.assertIn("adapter", diagnostic_categories)
             self.assertTrue(any(row.get("parameter_count") == 8 for row in report["parameter_counts"]))
-            self.assertTrue(any(row.get("metadata_hlt_degradation_strength") == 0.6 for row in report["hlt_degradation_summary"]))
+            self.assertTrue(any(row.get("hlt_params_match_protocol") is True for row in report["hlt_degradation_summary"]))
+            self.assertTrue(any(row.get("row_type") == "behavioral_slice" for row in report["hlt_degradation_summary"]))
+            self.assertTrue(summary["behavioral_hlt_degradation_slices_available"])
 
-    def test_report_can_use_explicit_variant_and_metric(self):
+    def test_report_marks_explicit_non_protocol_variant_and_metric_not_ok_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "experiment"
             output = Path(tmp) / "report"
@@ -216,10 +231,43 @@ class LocalGraphPartStep8ReportTests(unittest.TestCase):
                 )
             )
 
-            self.assertTrue(report["ok"])
+            self.assertFalse(report["ok"])
             self.assertEqual(report["comparison_summary"]["primary_metric"], "accuracy")
             self.assertEqual(report["comparison_summary"]["best_variant"], "warm_point")
             self.assertEqual(report["metric_table"][0]["model_variant"], LOCAL_GRAPH_MODEL_VARIANT_EDGECONV)
+            self.assertTrue(report["comparison_summary"]["strict_protocol_problems"])
+
+    def test_report_can_use_explicit_variant_and_metric_when_marked_exploratory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "experiment"
+            output = Path(tmp) / "report"
+            adapter_path = root / "warm_point" / "run_report.json"
+            write_json(
+                adapter_path,
+                self.make_child_report(
+                    variant=LOCAL_GRAPH_MODEL_VARIANT_EDGECONV,
+                    fpr50=0.20,
+                    accuracy=0.88,
+                    local_diag=True,
+                ),
+            )
+
+            report = build_local_graph_part_report(
+                LocalGraphPartReportConfig(
+                    output_dir=str(output),
+                    experiment_dir=str(root),
+                    variants=("warm_point",),
+                    primary_metric="accuracy",
+                    comparison_split="final_test",
+                    baseline_variant="warm_point",
+                    include_parameter_counts=False,
+                    strict_protocol=False,
+                )
+            )
+
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["comparison_summary"]["primary_metric"], "accuracy")
+            self.assertFalse(report["comparison_summary"]["strict_protocol"])
 
 
 if __name__ == "__main__":

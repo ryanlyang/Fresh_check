@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")
+    parser.add_argument("--skip-hlt-params-check", action="store_true")
+    parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
     parser.add_argument("--model-size", choices=("base", "tiny"), default="base")
     parser.add_argument("--max-constits", type=int, default=128)
@@ -118,6 +120,8 @@ def main() -> int:
         selection_metric=args.selection_metric,
         compile_model=bool(args.compile_model),
         verify_hlt_hash=not bool(args.skip_hlt_hash_check),
+        verify_hlt_params=not bool(args.skip_hlt_params_check),
+        expected_hlt_degradation_strength=args.expected_hlt_degradation_strength,
         model_size=args.model_size,
         max_constits=args.max_constits,
         k=args.k,

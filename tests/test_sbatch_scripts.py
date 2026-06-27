@@ -123,6 +123,7 @@ SUBMITTERS = [
     "submit_subtoken_part_qcd_hgg_binary_experiment.sh",
     "submit_subtoken_part_10class_experiment.sh",
     "submit_local_graph_qcd_hgg_binary_experiment.sh",
+    "submit_local_graph_step10_first_serious_run.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
 ]
@@ -1472,6 +1473,9 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--require-warm-start", train)
         self.assertIn("--freeze-part-epochs", train)
         self.assertIn("--confirm-final-test", train)
+        self.assertIn("--expected-hlt-degradation-strength", train)
+        self.assertIn("LOCAL_GRAPH_PART_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6", train)
+        self.assertIn("--skip-hlt-params-check", train)
         self.assertIn("diagnostics/warm_start_report.json", train)
 
         self.assertIn("scripts/write_local_graph_part_report.py", report)
@@ -1488,6 +1492,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
         self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_EPOCHS:=45", submitter)
         self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn('export LOCAL_GRAPH_PART_EXPECTED_HLT_DEGRADATION_STRENGTH="${LOCAL_GRAPH_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH}"', submitter)
         self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_VARIANTS:=hlt_part_baseline local_edgeconv_adapter local_point_attention_adapter local_point_attention_adapter_warmstart", submitter)
         self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
         self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
@@ -1499,6 +1504,26 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${train_dep}"', submitter)
         self.assertIn("local_graph_train: ${#train_job_ids[@]}", submitter)
         self.assertIn("final_report_json", submitter)
+
+    def test_local_graph_part_step10_wrapper_sets_first_serious_run_defaults(self):
+        wrapper = self.read("submit_local_graph_step10_first_serious_run.sh")
+
+        self.assertIn("QCD_vs_Hgg_local_graph_part_step10", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_HLT_DEGRADATION_STRENGTH:=0.6", wrapper)
+        self.assertIn('export LOCAL_GRAPH_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH="${LOCAL_GRAPH_PART_STEP10_HLT_DEGRADATION_STRENGTH}"', wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_ROOT", wrapper)
+        self.assertIn("local_graph_part_step10_qcd_hgg_binary_hlt", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_VARIANTS:-hlt_part_baseline local_edgeconv_adapter local_point_attention_adapter local_point_attention_adapter_warmstart", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_MODEL_TRAIN_SIZE:-500000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_MODEL_VAL_SIZE:-150000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_STACK_TRAIN_SIZE:-500000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_STACK_VAL_SIZE:-150000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_FINAL_TEST_SIZE:-500000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_EPOCHS:-45", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_SELECTION_METRIC:-fpr_at_signal_eff_0p50", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_TIME:-2-12:00:00", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_MEM:-160G", wrapper)
+        self.assertIn('bash "${SCRIPT_DIR}/submit_local_graph_qcd_hgg_binary_experiment.sh"', wrapper)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")

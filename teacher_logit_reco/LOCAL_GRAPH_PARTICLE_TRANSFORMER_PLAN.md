@@ -676,6 +676,36 @@ local_point_attention_adapter
 local_point_attention_adapter_warmstart
 ```
 
+Implementation update:
+
+- `sbatch/submit_local_graph_step10_first_serious_run.sh` is the fixed Step 10 launcher.
+- It delegates to `sbatch/submit_local_graph_qcd_hgg_binary_experiment.sh`, but pins the intended first serious run defaults:
+  - QCD vs Hgg
+  - HLT degradation strength `0.6`
+  - `model_train=500000`, `model_val=150000`, `stack_train=500000`, `stack_val=150000`, `final_test=500000`
+  - 45 training epochs
+  - FPR at 50% signal efficiency checkpoint selection
+  - the four variants listed above
+  - generous first-run train resources: `2-12:00:00`, `160G`, 8 CPUs
+- The generic QCD/Hgg submitter remains configurable for later ablations; the Step 10 wrapper is intentionally narrow so this first serious comparison is reproducible.
+
+Research-compute command:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull
+chmod +x sbatch/*.sh
+
+export PROJECT_DIR=/home/ryreu/atlas/Fresh_check
+export DATA_DIR=/home/ryreu/atlas/PracticeTagging/data/jetclass_part0
+export CONDA_ENV=atlas_kd
+export DEVICE=cuda
+export DIAGNOSTICS_ROOT=/home/ryreu/atlas/Fresh_check/fresh_check_diagnostics
+export MIRROR_DIAGNOSTICS=1
+
+bash sbatch/submit_local_graph_step10_first_serious_run.sh
+```
+
 ### Step 11: Analyze Before Adding Auxiliary Losses
 
 Only after the architecture-only run:

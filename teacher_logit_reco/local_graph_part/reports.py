@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from jetclass_fresh.hlt_baseline import save_json
+from jetclass_fresh.hlt_cache import fixed_hlt_params_dict, fixed_hlt_params_from_strength
 
 from teacher_logit_reco.set_matching.train import source_metadata
 
@@ -35,6 +36,7 @@ LOCAL_GRAPH_PART_REPORT_BINARY_METRICS = (
     "background_rejection_at_signal_eff_0p30",
     "background_rejection_at_signal_eff_0p50",
 )
+LOCAL_GRAPH_HLT_PARAM_TOLERANCE = 1.0e-9
 
 
 def _read_json(path: Path) -> Any | None:
@@ -382,6 +384,26 @@ def _hlt_strength_from_metadata(metadata: Mapping[str, Any]) -> Any:
     return None
 
 
+def _expected_hlt_params() -> dict[str, float]:
+    return fixed_hlt_params_dict(fixed_hlt_params_from_strength(LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH))
+
+
+def _hlt_params_match_protocol(params: Any) -> bool | None:
+    if not isinstance(params, Mapping):
+        return None
+    expected = _expected_hlt_params()
+    for key, expected_value in expected.items():
+        if key not in params:
+            return False
+        try:
+            actual_value = float(params[key])
+        except (TypeError, ValueError):
+            return False
+        if abs(actual_value - float(expected_value)) > LOCAL_GRAPH_HLT_PARAM_TOLERANCE:
+            return False
+    return True
+
+
 def _degradation_rows(variant: str, report_path: Path, report: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for split, key in (
@@ -394,7 +416,9 @@ def _degradation_rows(variant: str, report_path: Path, report: Mapping[str, Any]
         if not isinstance(metadata, Mapping):
             continue
         params = metadata.get("hlt_params") if isinstance(metadata.get("hlt_params"), Mapping) else {}
+        audit = metadata.get("hlt_protocol_audit") if isinstance(metadata.get("hlt_protocol_audit"), Mapping) else {}
         row = {
+            "row_type": "metadata",
             "variant": variant,
             "split": split,
             "dataset_key": key,
@@ -407,6 +431,9 @@ def _degradation_rows(variant: str, report_path: Path, report: Mapping[str, Any]
             "source_view": metadata.get("source_view"),
             "protocol_hlt_degradation_strength": LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH,
             "metadata_hlt_degradation_strength": _hlt_strength_from_metadata(metadata),
+            "hlt_params_match_protocol": _hlt_params_match_protocol(params),
+            "hlt_protocol_audit_ok": audit.get("ok") if isinstance(audit, Mapping) else None,
+            "hlt_protocol_audit_problems": audit.get("problems") if isinstance(audit, Mapping) else None,
             "hlt_params": params,
             "hlt_diagnostics_summary": metadata.get("hlt_diagnostics_summary"),
             "slice_note": (
@@ -419,6 +446,32 @@ def _degradation_rows(variant: str, report_path: Path, report: Mapping[str, Any]
                 if isinstance(param_value, (int, float, str, bool)) or param_value is None:
                     row[f"hlt_param_{param_key}"] = param_value
         rows.append(row)
+    return rows
+
+
+def _degradation_slice_rows(variant: str, report_path: Path, report: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for split in ("model_val", "stack_val", "final_test"):
+        metrics = _metrics_for_split(report, split)
+        if not isinstance(metrics, Mapping):
+            continue
+        slice_metrics = metrics.get("hlt_degradation_slice_metrics")
+        if not isinstance(slice_metrics, Sequence) or isinstance(slice_metrics, (str, bytes, bytearray)):
+            continue
+        for item in slice_metrics:
+            if not isinstance(item, Mapping):
+                continue
+            row = {
+                "row_type": "behavioral_slice",
+                "variant": variant,
+                "split": split,
+                "dataset_key": f"{split}_metrics",
+                "report_path": str(report_path),
+                "protocol_hlt_degradation_strength": LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH,
+                "slice_note": "Behavioral metric slice computed from per-jet cached HLT degradation diagnostics.",
+            }
+            row.update(dict(item))
+            rows.append(row)
     return rows
 
 
@@ -458,6 +511,53 @@ def _best_row(rows: Sequence[Mapping[str, Any]], *, direction: str) -> Mapping[s
     if not scored:
         return None
     return max(scored, key=lambda item: item[0])[1]
+
+
+def _strict_protocol_problems(
+    *,
+    primary_metric: str,
+    comparison_split: str,
+    baseline_variant: str,
+    confirm_final_test: bool,
+    metric_rows: Sequence[Mapping[str, Any]],
+    degradation_rows: Sequence[Mapping[str, Any]],
+    require_hlt_degradation_slices: bool,
+) -> list[str]:
+    problems: list[str] = []
+    if primary_metric != LOCAL_GRAPH_PART_PRIMARY_METRIC:
+        problems.append(f"strict protocol requires primary_metric={LOCAL_GRAPH_PART_PRIMARY_METRIC}, got {primary_metric}")
+    if comparison_split != "final_test":
+        problems.append(f"strict protocol requires comparison_split=final_test, got {comparison_split}")
+    if baseline_variant != LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE:
+        problems.append(
+            f"strict protocol requires baseline_variant={LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE}, got {baseline_variant}"
+        )
+    if not bool(confirm_final_test):
+        problems.append("strict protocol requires confirm_final_test=True")
+    baseline_rows = [row for row in metric_rows if row.get("variant") == LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE]
+    if not baseline_rows:
+        problems.append(f"strict protocol requires {LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE} in metric rows")
+    metadata_rows = [row for row in degradation_rows if row.get("row_type") == "metadata"]
+    mismatched_hlt_rows = [
+        row
+        for row in metadata_rows
+        if row.get("hlt_params_match_protocol") is False or row.get("hlt_protocol_audit_ok") is False
+    ]
+    unknown_hlt_rows = [
+        row
+        for row in metadata_rows
+        if row.get("hlt_params_match_protocol") is None and row.get("hlt_protocol_audit_ok") is None
+    ]
+    if mismatched_hlt_rows:
+        variants = sorted({str(row.get("variant")) for row in mismatched_hlt_rows})
+        problems.append(f"strict protocol found HLT parameter rows that do not match degradation 0.6: {variants}")
+    if unknown_hlt_rows:
+        variants = sorted({str(row.get("variant")) for row in unknown_hlt_rows})
+        problems.append(f"strict protocol could not verify HLT degradation parameters for rows: {variants}")
+    behavioral_rows = [row for row in degradation_rows if row.get("row_type") == "behavioral_slice"]
+    if bool(require_hlt_degradation_slices) and not behavioral_rows:
+        problems.append("strict protocol requested behavioral HLT degradation slices, but no slice rows were found")
+    return problems
 
 
 def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
@@ -515,6 +615,8 @@ class LocalGraphPartReportConfig:
     baseline_variant: str = LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE
     include_parameter_counts: bool = True
     confirm_final_test: bool = False
+    strict_protocol: bool = True
+    require_hlt_degradation_slices: bool = False
 
     def __post_init__(self) -> None:
         if self.primary_metric is not None and self.primary_metric not in LOCAL_GRAPH_SELECTION_METRICS:
@@ -628,6 +730,7 @@ def build_local_graph_part_report(config: LocalGraphPartReportConfig) -> dict[st
         parameter_rows.append(parameter_row)
         runtime_rows.append(_runtime_row(variant, report_path, payload))
         degradation_rows.extend(_degradation_rows(variant, report_path, payload))
+        degradation_rows.extend(_degradation_slice_rows(variant, report_path, payload))
 
     _add_baseline_comparison(metric_rows, baseline_variant=str(config.baseline_variant), direction=direction)
     best = _best_row(metric_rows, direction=direction)
@@ -636,6 +739,18 @@ def build_local_graph_part_report(config: LocalGraphPartReportConfig) -> dict[st
     baseline = next((row for row in metric_rows if row.get("variant") == config.baseline_variant), None)
     if baseline is None:
         problems.append(f"baseline variant was not found: {config.baseline_variant}")
+    strict_protocol_problems = _strict_protocol_problems(
+        primary_metric=primary_metric,
+        comparison_split=comparison_split,
+        baseline_variant=str(config.baseline_variant),
+        confirm_final_test=bool(config.confirm_final_test),
+        metric_rows=metric_rows,
+        degradation_rows=degradation_rows,
+        require_hlt_degradation_slices=bool(config.require_hlt_degradation_slices),
+    )
+    if bool(config.strict_protocol):
+        problems.extend(strict_protocol_problems)
+    behavioral_slice_rows = [row for row in degradation_rows if row.get("row_type") == "behavioral_slice"]
 
     output_paths = {
         "report_json": str(output_dir / "local_graph_part_report.json"),
@@ -672,6 +787,10 @@ def build_local_graph_part_report(config: LocalGraphPartReportConfig) -> dict[st
             if best is not None
             else None,
             "hlt_degradation_strength": LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH,
+            "strict_protocol": bool(config.strict_protocol),
+            "strict_protocol_problems": strict_protocol_problems,
+            "behavioral_hlt_degradation_slices_available": bool(behavioral_slice_rows),
+            "behavioral_hlt_degradation_slice_rows": len(behavioral_slice_rows),
             "default_metric_rule": "Local-graph QCD/Hgg reports default to FPR@50 with lower-is-better semantics.",
         },
         "metric_table": metric_rows,

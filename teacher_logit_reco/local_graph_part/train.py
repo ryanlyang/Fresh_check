@@ -11,7 +11,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json, set_training_seed
-from jetclass_fresh.hlt_cache import load_cached_hlt_view
+from jetclass_fresh.hlt_cache import fixed_hlt_params_dict, fixed_hlt_params_from_strength, load_cached_hlt_view
 from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 
 from teacher_logit_reco.set_matching.five_view_train import classification_metrics_from_predictions
@@ -30,6 +30,7 @@ from .model import (
 from .protocol import (
     LOCAL_GRAPH_PART_BINARY_LABEL_FILTER,
     LOCAL_GRAPH_PART_CONTRACT,
+    LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH,
     LOCAL_GRAPH_PART_PRIMARY_METRIC,
     LOCAL_GRAPH_PART_PROTOCOL_STEP,
     LOCAL_GRAPH_PART_SOURCE_LABEL_NAMES,
@@ -52,6 +53,8 @@ LOCAL_GRAPH_SELECTION_METRICS = (
 )
 LOCAL_GRAPH_LOWER_IS_BETTER_SELECTION_METRICS = {"loss", "fpr_at_signal_eff_0p30", "fpr_at_signal_eff_0p50"}
 LOCAL_GRAPH_ALLOWED_STEP6_VARIANTS = LOCAL_GRAPH_COMPARISON_VARIANTS + (LOCAL_GRAPH_MODEL_VARIANT_NO_LOCAL,)
+LOCAL_GRAPH_HLT_PARAM_TOLERANCE = 1.0e-9
+LOCAL_GRAPH_DEGRADATION_SLICE_FEATURES = ("drop_total", "drop_merge", "drop_eff", "merge_count")
 
 
 def _optional_nonnegative_int(value: int | None, *, field_name: str) -> int | None:
@@ -130,6 +133,257 @@ def _flatten_scalar_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, flo
             numeric = float(value)
             if np.isfinite(numeric):
                 output[key] = numeric
+    return output
+
+
+def _expected_hlt_params_for_strength(strength: float) -> dict[str, float]:
+    return fixed_hlt_params_dict(fixed_hlt_params_from_strength(float(strength)))
+
+
+def _compare_hlt_params(
+    actual: Mapping[str, Any] | None,
+    *,
+    expected_strength: float,
+) -> dict[str, Any]:
+    expected = _expected_hlt_params_for_strength(float(expected_strength))
+    problems: list[str] = []
+    actual_payload = actual if isinstance(actual, Mapping) else {}
+    if not isinstance(actual, Mapping):
+        problems.append("metadata does not contain an hlt_params mapping")
+    for key, expected_value in expected.items():
+        if key not in actual_payload:
+            problems.append(f"missing hlt param {key}")
+            continue
+        try:
+            actual_value = float(actual_payload[key])
+        except (TypeError, ValueError):
+            problems.append(f"hlt param {key} is not numeric: {actual_payload[key]!r}")
+            continue
+        if abs(actual_value - float(expected_value)) > LOCAL_GRAPH_HLT_PARAM_TOLERANCE:
+            problems.append(f"hlt param {key}={actual_value} expected {float(expected_value)}")
+    return {
+        "ok": len(problems) == 0,
+        "expected_hlt_degradation_strength": float(expected_strength),
+        "expected_hlt_params": expected,
+        "actual_hlt_params": dict(actual_payload),
+        "problems": problems,
+    }
+
+
+def _verify_hlt_cache_protocol(
+    metadata: Mapping[str, Any],
+    *,
+    split: str,
+    expected_strength: float,
+    required: bool,
+) -> dict[str, Any]:
+    audit = _compare_hlt_params(
+        metadata.get("hlt_params") if isinstance(metadata.get("hlt_params"), Mapping) else None,
+        expected_strength=float(expected_strength),
+    )
+    audit["split"] = str(split)
+    audit["required"] = bool(required)
+    if bool(required) and not bool(audit["ok"]):
+        details = "; ".join(str(problem) for problem in audit["problems"])
+        raise ValueError(
+            f"HLT cache parameters for split {split!r} do not match local-graph protocol "
+            f"degradation strength {float(expected_strength):g}: {details}"
+        )
+    return audit
+
+
+def _filtered_hlt_diagnostics_for_dataset(
+    view,
+    dataset: SubtokenHLTJetDataset,
+    *,
+    max_jets: int | None,
+) -> dict[str, np.ndarray]:
+    diagnostics = view.metadata.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return {}
+    labels = np.asarray(view.labels, dtype=np.int64)
+    keep = np.isin(labels, np.asarray(tuple(dataset.label_filter), dtype=np.int64))
+    output: dict[str, np.ndarray] = {}
+    for key, values in diagnostics.items():
+        array = np.asarray(values)
+        if array.shape[:1] != labels.shape[:1]:
+            continue
+        if not np.all(keep):
+            array = array[keep]
+        if max_jets is not None:
+            array = array[: int(dataset.labels.shape[0])]
+        output[str(key)] = np.asarray(array)
+    return output
+
+
+def _metrics_without_prediction_arrays(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    clean = dict(metrics)
+    clean.pop("_prediction_arrays", None)
+    return clean
+
+
+def _slice_metrics_payload(
+    *,
+    diagnostic_name: str,
+    slice_name: str,
+    selector: np.ndarray,
+    values: np.ndarray,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    logits: np.ndarray | None,
+    label_names: tuple[str, ...],
+) -> dict[str, Any] | None:
+    selector = np.asarray(selector, dtype=bool)
+    if selector.shape != labels.shape or int(selector.sum()) == 0:
+        return None
+    selected_metrics = classification_metrics_from_predictions(
+        preds=preds[selector],
+        labels=labels[selector],
+        logits=logits[selector] if logits is not None else None,
+        label_names=label_names,
+    )
+    binary = selected_metrics.get("binary_metrics") if isinstance(selected_metrics.get("binary_metrics"), Mapping) else {}
+    return {
+        "diagnostic": diagnostic_name,
+        "slice": slice_name,
+        "n_jets": int(selector.sum()),
+        "value_min": float(np.min(values[selector])) if int(selector.sum()) else None,
+        "value_mean": float(np.mean(values[selector])) if int(selector.sum()) else None,
+        "value_max": float(np.max(values[selector])) if int(selector.sum()) else None,
+        "accuracy": selected_metrics.get("accuracy"),
+        "auc": binary.get("auc"),
+        "fpr_at_signal_eff_0p30": binary.get("fpr_at_signal_eff_0p30"),
+        "fpr_at_signal_eff_0p50": binary.get("fpr_at_signal_eff_0p50"),
+        "background_rejection_at_signal_eff_0p30": binary.get("background_rejection_at_signal_eff_0p30"),
+        "background_rejection_at_signal_eff_0p50": binary.get("background_rejection_at_signal_eff_0p50"),
+    }
+
+
+def attach_hlt_degradation_slice_metrics(
+    metrics: Mapping[str, Any],
+    dataset: SubtokenHLTJetDataset,
+    *,
+    split: str,
+    label_names: tuple[str, ...],
+) -> dict[str, Any]:
+    """Attach behavioral high/low HLT-degradation slice metrics when available."""
+
+    output = _metrics_without_prediction_arrays(metrics)
+    prediction_arrays = metrics.get("_prediction_arrays")
+    diagnostics = getattr(dataset, "hlt_diagnostics", None)
+    if not isinstance(prediction_arrays, Mapping) or not isinstance(diagnostics, Mapping) or not diagnostics:
+        output["hlt_degradation_slice_metrics"] = []
+        output["hlt_degradation_slice_summary"] = {
+            "available": False,
+            "split": str(split),
+            "reason": "per-jet prediction arrays or cached HLT diagnostics were unavailable",
+        }
+        return output
+
+    indices = np.asarray(prediction_arrays.get("indices"), dtype=np.int64)
+    preds = np.asarray(prediction_arrays.get("preds"), dtype=np.int64)
+    labels = np.asarray(prediction_arrays.get("labels"), dtype=np.int64)
+    logits_value = prediction_arrays.get("logits")
+    logits = np.asarray(logits_value, dtype=np.float32) if logits_value is not None else None
+    if indices.shape != labels.shape or preds.shape != labels.shape:
+        output["hlt_degradation_slice_metrics"] = []
+        output["hlt_degradation_slice_summary"] = {
+            "available": False,
+            "split": str(split),
+            "reason": "prediction array shapes did not match",
+        }
+        return output
+
+    rows: list[dict[str, Any]] = []
+    for diagnostic_name in LOCAL_GRAPH_DEGRADATION_SLICE_FEATURES:
+        raw_values = diagnostics.get(diagnostic_name)
+        if raw_values is None:
+            continue
+        values_all = np.asarray(raw_values, dtype=np.float64)
+        max_index = int(np.max(indices)) if indices.size else -1
+        if values_all.ndim != 1 or values_all.shape[0] < max_index + 1:
+            continue
+        values = values_all[indices]
+        finite = np.isfinite(values)
+        if not bool(np.any(finite)):
+            continue
+        rows.append(
+            _slice_metrics_payload(
+                diagnostic_name=diagnostic_name,
+                slice_name="all_finite",
+                selector=finite,
+                values=values,
+                preds=preds,
+                labels=labels,
+                logits=logits,
+                label_names=label_names,
+            )
+        )
+        positive = finite & (values > 0.0)
+        zero = finite & (values <= 0.0)
+        rows.append(
+            _slice_metrics_payload(
+                diagnostic_name=diagnostic_name,
+                slice_name="zero",
+                selector=zero,
+                values=values,
+                preds=preds,
+                labels=labels,
+                logits=logits,
+                label_names=label_names,
+            )
+        )
+        rows.append(
+            _slice_metrics_payload(
+                diagnostic_name=diagnostic_name,
+                slice_name="positive",
+                selector=positive,
+                values=values,
+                preds=preds,
+                labels=labels,
+                logits=logits,
+                label_names=label_names,
+            )
+        )
+        finite_values = values[finite]
+        if finite_values.size >= 4:
+            q25 = float(np.quantile(finite_values, 0.25))
+            q75 = float(np.quantile(finite_values, 0.75))
+            rows.append(
+                _slice_metrics_payload(
+                    diagnostic_name=diagnostic_name,
+                    slice_name="low_q25",
+                    selector=finite & (values <= q25),
+                    values=values,
+                    preds=preds,
+                    labels=labels,
+                    logits=logits,
+                    label_names=label_names,
+                )
+            )
+            rows.append(
+                _slice_metrics_payload(
+                    diagnostic_name=diagnostic_name,
+                    slice_name="high_q75",
+                    selector=finite & (values >= q75),
+                    values=values,
+                    preds=preds,
+                    labels=labels,
+                    logits=logits,
+                    label_names=label_names,
+                )
+            )
+    rows = [row for row in rows if row is not None]
+    output["hlt_degradation_slice_metrics"] = rows
+    output["hlt_degradation_slice_summary"] = {
+        "available": bool(rows),
+        "split": str(split),
+        "diagnostics": list(LOCAL_GRAPH_DEGRADATION_SLICE_FEATURES),
+        "n_rows": len(rows),
+        "note": (
+            "Rows are computed from cached per-jet fixed-HLT diagnostics and predictions from this evaluation split."
+        ),
+    }
     return output
 
 
@@ -374,6 +628,8 @@ class LocalGraphTaggerTrainConfig:
     selection_metric: str = LOCAL_GRAPH_PART_PRIMARY_METRIC
     compile_model: bool = False
     verify_hlt_hash: bool = True
+    verify_hlt_params: bool = True
+    expected_hlt_degradation_strength: float = LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH
 
     num_classes: int = 2
     label_names: tuple[str, ...] = LOCAL_GRAPH_PART_SOURCE_LABEL_NAMES
@@ -408,6 +664,13 @@ class LocalGraphTaggerTrainConfig:
         protocol = default_local_graph_part_protocol()
         if str(self.selection_metric) != str(protocol.selection_metric):
             raise ValueError(f"Step 6 protocol selects checkpoints with {protocol.selection_metric}")
+        self.expected_hlt_degradation_strength = float(self.expected_hlt_degradation_strength)
+        if not np.isfinite(self.expected_hlt_degradation_strength) or self.expected_hlt_degradation_strength < 0.0:
+            raise ValueError("expected_hlt_degradation_strength must be finite and nonnegative")
+        if abs(float(self.expected_hlt_degradation_strength) - float(protocol.hlt_degradation_strength)) > 1.0e-12:
+            raise ValueError(
+                f"Step 6 protocol requires HLT degradation strength {protocol.hlt_degradation_strength}"
+            )
         for field_name in (
             "batch_size",
             "eval_batch_size",
@@ -484,12 +747,24 @@ def _load_local_graph_dataset(
     max_jets: int | None,
 ) -> SubtokenHLTJetDataset:
     view = load_cached_hlt_view(config.hlt_cache_dir, split, verify_hash=bool(config.verify_hlt_hash))
-    return SubtokenHLTJetDataset(
+    view.metadata["hlt_protocol_audit"] = _verify_hlt_cache_protocol(
+        view.metadata,
+        split=split,
+        expected_strength=float(config.expected_hlt_degradation_strength),
+        required=bool(config.verify_hlt_params),
+    )
+    dataset = SubtokenHLTJetDataset(
         view,
         label_filter=tuple(config.label_filter),
         label_names=tuple(config.label_names),
         max_jets=max_jets,
     )
+    dataset.metadata["hlt_protocol_audit"] = view.metadata["hlt_protocol_audit"]
+    dataset.metadata["hlt_diagnostics_summary"] = view.metadata.get("hlt_diagnostics_summary")
+    dataset.metadata["offline_constit_count_summary"] = view.metadata.get("offline_constit_count_summary")
+    dataset.metadata["hlt_constit_count_summary"] = view.metadata.get("hlt_constit_count_summary")
+    dataset.hlt_diagnostics = _filtered_hlt_diagnostics_for_dataset(view, dataset, max_jets=max_jets)
+    return dataset
 
 
 def build_local_graph_tagger_for_config(
@@ -528,6 +803,7 @@ def run_local_graph_tagger_epoch(
     grad_clip_norm: float | None = 1.0,
     max_batches: int | None = None,
     collect_predictions: bool = False,
+    return_prediction_arrays: bool = False,
     collect_diagnostics: bool = False,
     label_names: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
@@ -542,6 +818,7 @@ def run_local_graph_tagger_epoch(
     collected_preds: list[np.ndarray] = []
     collected_labels: list[np.ndarray] = []
     collected_logits: list[np.ndarray] = []
+    collected_indices: list[np.ndarray] = []
     diagnostic_totals: dict[str, float] = {}
     diagnostic_weight_sum = 0.0
     autocast_enabled = bool(amp and device.type == "cuda")
@@ -588,6 +865,7 @@ def run_local_graph_tagger_epoch(
                 collected_preds.append(preds.detach().cpu().numpy().astype(np.int64))
                 collected_labels.append(labels.detach().cpu().numpy().astype(np.int64))
                 collected_logits.append(logits.detach().cpu().numpy().astype(np.float32))
+                collected_indices.append(batch["indices"].detach().cpu().numpy().astype(np.int64))
             if collect_diagnostics and output is not None:
                 diagnostics = _flatten_scalar_diagnostics(output.diagnostics())
                 for key, value in diagnostics.items():
@@ -614,6 +892,15 @@ def run_local_graph_tagger_epoch(
                 label_names=label_names,
             )
         )
+        if bool(return_prediction_arrays):
+            metrics["_prediction_arrays"] = {
+                "preds": preds_np,
+                "labels": labels_np,
+                "logits": logits_np,
+                "indices": np.concatenate(collected_indices, axis=0)
+                if collected_indices
+                else np.asarray([], dtype=np.int64),
+            }
     if diagnostic_weight_sum > 0.0:
         metrics["diagnostics"] = {
             key: value / diagnostic_weight_sum
@@ -862,7 +1149,14 @@ def train_local_graph_tagger(
         amp=False,
         max_batches=config.max_val_batches,
         collect_predictions=True,
+        return_prediction_arrays=True,
         collect_diagnostics=True,
+        label_names=tuple(config.label_names),
+    )
+    best_val_metrics = attach_hlt_degradation_slice_metrics(
+        best_val_metrics,
+        val_dataset,
+        split=config.val_split,
         label_names=tuple(config.label_names),
     )
     metrics_by_split: dict[str, Mapping[str, Any]] = {"model_val": best_val_metrics}
@@ -887,7 +1181,14 @@ def train_local_graph_tagger(
         amp=False,
         max_batches=config.max_stack_val_batches,
         collect_predictions=True,
+        return_prediction_arrays=True,
         collect_diagnostics=True,
+        label_names=tuple(config.label_names),
+    )
+    stack_val_metrics = attach_hlt_degradation_slice_metrics(
+        stack_val_metrics,
+        stack_val_dataset,
+        split=config.stack_val_split,
         label_names=tuple(config.label_names),
     )
     metrics_by_split["stack_val"] = stack_val_metrics
@@ -915,7 +1216,14 @@ def train_local_graph_tagger(
             amp=False,
             max_batches=config.max_final_test_batches,
             collect_predictions=True,
+            return_prediction_arrays=True,
             collect_diagnostics=True,
+            label_names=tuple(config.label_names),
+        )
+        final_test_metrics = attach_hlt_degradation_slice_metrics(
+            final_test_metrics,
+            final_test_dataset,
+            split=config.final_test_split,
             label_names=tuple(config.label_names),
         )
         metrics_by_split["final_test"] = final_test_metrics

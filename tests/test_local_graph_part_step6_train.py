@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,12 @@ from pathlib import Path
 import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch
+from jetclass_fresh.hlt_cache import (
+    fixed_hlt_params_dict,
+    fixed_hlt_params_from_strength,
+    hash_arrays,
+    jet_identity_hash,
+)
 from jetclass_fresh.jetclass_data import JetIdentity, JetView, RAW_TOKEN_DIM
 
 from teacher_logit_reco.local_graph_part import (
@@ -18,6 +25,7 @@ from teacher_logit_reco.local_graph_part import (
 from teacher_logit_reco.local_graph_part.train import (
     LOCAL_GRAPH_PART_TRAIN_STEP,
     LocalGraphTaggerTrainConfig,
+    _load_local_graph_dataset,
     train_local_graph_tagger,
     warm_start_local_graph_part_model,
 )
@@ -92,6 +100,55 @@ def make_toy_view(split: str, *, n_jets: int = 8) -> JetView:
         jet_ids=jet_ids,
         split=split,
         metadata={"view": "fixed_hlt", "hlt_content_hash": f"toy-{split}", "hlt_params": {"strength": 0.6}},
+    )
+
+
+def write_toy_hlt_cache_split(cache_dir: Path, split: str, *, strength: float, n_jets: int = 8) -> None:
+    view = make_toy_view(split, n_jets=n_jets)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    file_indices = np.zeros((n_jets,), dtype=np.int32)
+    entries = np.asarray([jet_id.entry for jet_id in view.jet_ids], dtype=np.int64)
+    hlt_content_hash = hash_arrays(
+        {
+            "tokens": view.tokens,
+            "mask": view.mask,
+            "labels": view.labels,
+            "jet_file_indices": file_indices,
+            "jet_entries": entries,
+        }
+    )
+    metadata = {
+        "version": 1,
+        "view": "fixed_hlt",
+        "split": split,
+        "seed": 1053,
+        "hlt_params": fixed_hlt_params_dict(fixed_hlt_params_from_strength(strength)),
+        "raw_token_dim": RAW_TOKEN_DIM,
+        "max_constits": int(view.tokens.shape[1]),
+        "n_jets": int(view.tokens.shape[0]),
+        "jet_files": ["toy.root"],
+        "jet_identity_hash": jet_identity_hash(view.jet_ids),
+        "hlt_content_hash": hlt_content_hash,
+        "hlt_diagnostics_summary": {"drop_total_fraction": 0.25, "mean_merges_per_jet": 0.5},
+    }
+    np.savez_compressed(
+        cache_dir / f"{split}_fixed_hlt.npz",
+        tokens=view.tokens,
+        mask=view.mask,
+        labels=view.labels,
+        jet_file_indices=file_indices,
+        jet_entries=entries,
+        diag_n_offline=np.full((n_jets,), 5.0, dtype=np.float32),
+        diag_n_after_merge=np.full((n_jets,), 4.0, dtype=np.float32),
+        diag_drop_eff=np.asarray([index % 2 for index in range(n_jets)], dtype=np.float32),
+        diag_drop_threshold=np.zeros((n_jets,), dtype=np.float32),
+        diag_drop_merge=np.asarray([(index + 1) % 2 for index in range(n_jets)], dtype=np.float32),
+        diag_drop_total=np.asarray([index % 3 for index in range(n_jets)], dtype=np.float32),
+        diag_merge_count=np.asarray([index % 2 for index in range(n_jets)], dtype=np.float32),
+    )
+    (cache_dir / f"{split}_fixed_hlt_metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
 
@@ -210,6 +267,29 @@ class LocalGraphPartStep6TrainTests(unittest.TestCase):
             self.assertEqual(report["variant"], LOCAL_GRAPH_MODEL_VARIANT_EDGECONV)
             self.assertEqual(report["selection_metric_direction"], "minimize")
             self.assertIn("diagnostics", report["stack_val_metrics"])
+
+    def test_loader_verifies_hlt_cache_degradation_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            write_toy_hlt_cache_split(cache_dir, "model_train", strength=0.6, n_jets=6)
+            config = self.base_config(str(Path(tmp) / "out"), variant=LOCAL_GRAPH_MODEL_VARIANT_EDGECONV)
+            config.hlt_cache_dir = str(cache_dir)
+
+            dataset = _load_local_graph_dataset(config, "model_train", max_jets=None)
+
+            self.assertTrue(dataset.metadata["hlt_protocol_audit"]["ok"])
+            self.assertEqual(dataset.metadata["hlt_protocol_audit"]["expected_hlt_degradation_strength"], 0.6)
+            self.assertIn("drop_total", dataset.hlt_diagnostics)
+
+    def test_loader_rejects_wrong_hlt_cache_degradation_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            write_toy_hlt_cache_split(cache_dir, "model_train", strength=1.0, n_jets=6)
+            config = self.base_config(str(Path(tmp) / "out"), variant=LOCAL_GRAPH_MODEL_VARIANT_EDGECONV)
+            config.hlt_cache_dir = str(cache_dir)
+
+            with self.assertRaisesRegex(ValueError, "do not match local-graph protocol degradation strength"):
+                _load_local_graph_dataset(config, "model_train", max_jets=None)
 
     def test_warm_start_loads_baseline_part_model_weights_into_adapter(self):
         torch = require_torch()

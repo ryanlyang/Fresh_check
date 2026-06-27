@@ -28,6 +28,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-variant", default="hlt_part_baseline")
     parser.add_argument("--skip-parameter-counts", action="store_true")
     parser.add_argument("--confirm-final-test", action="store_true")
+    parser.add_argument(
+        "--allow-non-protocol-report",
+        action="store_true",
+        help="Write exploratory ablation reports without failing ok=false for non-protocol comparison settings.",
+    )
+    parser.add_argument(
+        "--require-hlt-degradation-slices",
+        action="store_true",
+        help="Require behavioral drop/merge HLT degradation slice rows in the final report.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +53,8 @@ def main() -> int:
         baseline_variant=args.baseline_variant,
         include_parameter_counts=not bool(args.skip_parameter_counts),
         confirm_final_test=bool(args.confirm_final_test),
+        strict_protocol=not bool(args.allow_non_protocol_report),
+        require_hlt_degradation_slices=bool(args.require_hlt_degradation_slices),
     )
     report = build_local_graph_part_report(config)
     summary = report["comparison_summary"]

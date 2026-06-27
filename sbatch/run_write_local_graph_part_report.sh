@@ -26,6 +26,8 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LOCAL_GRAPH_PART_REPORT_COMPARISON_SPLIT:=final_test}"
 : "${LOCAL_GRAPH_PART_REPORT_SKIP_PARAMETER_COUNTS:=0}"
 : "${LOCAL_GRAPH_PART_REPORT_CONFIRM_FINAL_TEST:=1}"
+: "${LOCAL_GRAPH_PART_REPORT_ALLOW_NON_PROTOCOL:=0}"
+: "${LOCAL_GRAPH_PART_REPORT_REQUIRE_HLT_DEGRADATION_SLICES:=0}"
 
 fresh_setup "$@"
 fresh_require_file "scripts/write_local_graph_part_report.py"
@@ -46,6 +48,8 @@ fresh_append_optional_arg cmd --primary-metric "${LOCAL_GRAPH_PART_REPORT_PRIMAR
 fresh_append_optional_arg cmd --comparison-split "${LOCAL_GRAPH_PART_REPORT_COMPARISON_SPLIT}"
 fresh_append_flag_if_enabled cmd --skip-parameter-counts "${LOCAL_GRAPH_PART_REPORT_SKIP_PARAMETER_COUNTS}"
 fresh_append_flag_if_enabled cmd --confirm-final-test "${LOCAL_GRAPH_PART_REPORT_CONFIRM_FINAL_TEST}"
+fresh_append_flag_if_enabled cmd --allow-non-protocol-report "${LOCAL_GRAPH_PART_REPORT_ALLOW_NON_PROTOCOL}"
+fresh_append_flag_if_enabled cmd --require-hlt-degradation-slices "${LOCAL_GRAPH_PART_REPORT_REQUIRE_HLT_DEGRADATION_SLICES}"
 
 fresh_write_run_config "${LOCAL_GRAPH_PART_FINAL_REPORT_DIR}" "local_graph_part_final_report" "${cmd[@]}"
 fresh_run "${cmd[@]}"
