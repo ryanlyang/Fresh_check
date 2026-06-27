@@ -538,6 +538,8 @@ def _strict_protocol_problems(
     if not baseline_rows:
         problems.append(f"strict protocol requires {LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE} in metric rows")
     metadata_rows = [row for row in degradation_rows if row.get("row_type") == "metadata"]
+    if not metadata_rows:
+        problems.append("strict protocol could not verify any HLT cache metadata rows")
     mismatched_hlt_rows = [
         row
         for row in metadata_rows
