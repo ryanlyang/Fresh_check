@@ -387,6 +387,36 @@ class LocalGraphPartStep6TrainTests(unittest.TestCase):
             self.assertGreaterEqual(len(report["freeze_events"]), 2)
             self.assertTrue((tmp_path / "adapter" / "diagnostics" / "warm_start_report.json").exists())
 
+    def test_frozen_warm_start_requires_nonzero_residual_gamma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "baseline.pt"
+            checkpoint.write_bytes(b"not-used-by-config-validation")
+
+            with self.assertRaisesRegex(ValueError, "nonzero residual_gamma_init"):
+                LocalGraphTaggerTrainConfig(
+                    output_dir=str(Path(tmp) / "adapter"),
+                    hlt_cache_dir="unused",
+                    variant=LOCAL_GRAPH_MODEL_VARIANT_EDGECONV,
+                    confirm_split_settings=True,
+                    confirm_final_test=True,
+                    warm_start_checkpoint=str(checkpoint),
+                    freeze_part_epochs=1,
+                    residual_gamma_init=0.0,
+                )
+
+            config = LocalGraphTaggerTrainConfig(
+                output_dir=str(Path(tmp) / "adapter_ok"),
+                hlt_cache_dir="unused",
+                variant=LOCAL_GRAPH_MODEL_VARIANT_EDGECONV,
+                confirm_split_settings=True,
+                confirm_final_test=True,
+                warm_start_checkpoint=str(checkpoint),
+                freeze_part_epochs=1,
+                residual_gamma_init=0.01,
+            )
+            self.assertEqual(config.freeze_part_epochs, 1)
+            self.assertAlmostEqual(config.residual_gamma_init, 0.01)
+
 
 if __name__ == "__main__":
     unittest.main()

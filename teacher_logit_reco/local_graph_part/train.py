@@ -593,6 +593,23 @@ def _set_part_model_trainable(model, trainable: bool) -> dict[str, Any]:
     }
 
 
+def _trainable_parameter_summary(model, *, max_names: int = 12) -> dict[str, Any]:
+    names: list[str] = []
+    total = 0
+    trainable = 0
+    for name, param in model.named_parameters():
+        total += 1
+        if bool(param.requires_grad):
+            trainable += 1
+            if len(names) < int(max_names):
+                names.append(str(name))
+    return {
+        "parameter_tensors": int(total),
+        "trainable_parameter_tensors": int(trainable),
+        "trainable_parameter_names_sample": names,
+    }
+
+
 @dataclass
 class LocalGraphTaggerTrainConfig:
     """Configuration for one Step 6 baseline/local-adapter training run."""
@@ -705,6 +722,9 @@ class LocalGraphTaggerTrainConfig:
         if self.local_hidden_dim is not None:
             self.local_hidden_dim = _optional_positive_int(self.local_hidden_dim, field_name="local_hidden_dim")
         self.freeze_part_epochs = _optional_nonnegative_int(self.freeze_part_epochs, field_name="freeze_part_epochs") or 0
+        self.residual_gamma_init = float(self.residual_gamma_init)
+        if not np.isfinite(self.residual_gamma_init):
+            raise ValueError("residual_gamma_init must be finite")
         if self.warm_start_checkpoint is not None:
             self.warm_start_checkpoint = str(self.warm_start_checkpoint)
             if not self.warm_start_checkpoint:
@@ -714,6 +734,16 @@ class LocalGraphTaggerTrainConfig:
             raise ValueError("warm_start_checkpoint is for local adapter variants, not hlt_part_baseline")
         if int(self.freeze_part_epochs) > 0 and self.variant == LOCAL_GRAPH_MODEL_VARIANT_HLT_PART_BASELINE:
             raise ValueError("freeze_part_epochs is for local adapter warm-start variants, not hlt_part_baseline")
+        if (
+            self.warm_start_checkpoint
+            and int(self.freeze_part_epochs) > 0
+            and abs(float(self.residual_gamma_init)) <= 1.0e-12
+        ):
+            raise ValueError(
+                "warm-start runs with freeze_part_epochs > 0 need a nonzero residual_gamma_init. "
+                "Use freeze_part_epochs=0 for full warm-start fine-tuning, or set residual_gamma_init "
+                "to a small value such as 0.01 for an adapter-only frozen phase."
+            )
         self.max_train_batches = _optional_nonnegative_int(self.max_train_batches, field_name="max_train_batches")
         self.max_val_batches = _optional_nonnegative_int(self.max_val_batches, field_name="max_val_batches")
         self.max_stack_val_batches = _optional_nonnegative_int(
@@ -842,6 +872,14 @@ def run_local_graph_tagger_epoch(
                 loss = criterion(logits, batch["labels"])
 
             if training:
+                if not bool(getattr(loss, "requires_grad", False)):
+                    summary = _trainable_parameter_summary(model)
+                    raise RuntimeError(
+                        "local graph training loss does not require grad. This usually means the current "
+                        "freeze/warm-start schedule left no active trainable path into the logits. "
+                        "For warm-start runs, use freeze_part_epochs=0 or set residual_gamma_init to a "
+                        f"small nonzero value. Trainable summary: {summary}"
+                    )
                 if scaler is not None and scaler.is_enabled():
                     scaler.scale(loss).backward()
                     if grad_clip_norm is not None and float(grad_clip_norm) > 0.0:
