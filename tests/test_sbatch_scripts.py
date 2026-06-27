@@ -85,6 +85,8 @@ RUNNERS = [
     "run_subtoken_part_compat.sh",
     "run_subtoken_part_distill.sh",
     "run_write_subtoken_part_report.sh",
+    "run_train_local_graph_part_tagger.sh",
+    "run_write_local_graph_part_report.sh",
     "run_train_dualview_part_residual.sh",
     "run_write_dualview_part_report.sh",
 ]
@@ -120,6 +122,7 @@ SUBMITTERS = [
     "submit_detr_slot_smoke_test.sh",
     "submit_subtoken_part_qcd_hgg_binary_experiment.sh",
     "submit_subtoken_part_10class_experiment.sh",
+    "submit_local_graph_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
 ]
@@ -1457,6 +1460,45 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("subtoken_10class_version_a_compat", submitter)
         self.assertIn('--dependency="afterok:${split_jid}"', submitter)
         self.assertIn("afterok_args", submitter)
+
+    def test_local_graph_part_qcd_hgg_submitter_queues_baseline_adapters_and_report(self):
+        train = self.read("run_train_local_graph_part_tagger.sh")
+        report = self.read("run_write_local_graph_part_report.sh")
+        submitter = self.read("submit_local_graph_qcd_hgg_binary_experiment.sh")
+
+        self.assertIn("scripts/train_local_graph_part_tagger.py", train)
+        self.assertIn("local_point_attention_adapter_warmstart", train)
+        self.assertIn("--warm-start-checkpoint", train)
+        self.assertIn("--require-warm-start", train)
+        self.assertIn("--freeze-part-epochs", train)
+        self.assertIn("--confirm-final-test", train)
+        self.assertIn("diagnostics/warm_start_report.json", train)
+
+        self.assertIn("scripts/write_local_graph_part_report.py", report)
+        self.assertIn("local_graph_part_report.json", report)
+        self.assertIn("adapter_diagnostics.csv", report)
+        self.assertIn("hlt_degradation_summary.csv", report)
+
+        self.assertIn("QCD_vs_Hgg_local_graph_part", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_EPOCHS:=45", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_VARIANTS:=hlt_part_baseline local_edgeconv_adapter local_point_attention_adapter local_point_attention_adapter_warmstart", submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn("run_train_local_graph_part_tagger.sh", submitter)
+        self.assertIn("run_write_local_graph_part_report.sh", submitter)
+        self.assertIn("localgraph_part_baseline", submitter)
+        self.assertIn("localgraph_part_warmstart", submitter)
+        self.assertIn('warmstart_dependency="${baseline_jid}"', submitter)
+        self.assertIn('--dependency="afterok:${train_dep}"', submitter)
+        self.assertIn("local_graph_train: ${#train_job_ids[@]}", submitter)
+        self.assertIn("final_report_json", submitter)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")

@@ -650,6 +650,21 @@ HLT degradation 0.6
 FPR@50 selection
 ```
 
+Implementation update:
+
+- `sbatch/run_train_local_graph_part_tagger.sh` trains one variant per Slurm job.
+- `sbatch/run_write_local_graph_part_report.sh` writes the Step 8 report from the completed child reports.
+- `sbatch/submit_local_graph_qcd_hgg_binary_experiment.sh` submits the full QCD-vs-Hgg HLT 0.6 graph:
+  - optional/direct binary split manifest build for `QCD Hgg`
+  - binary fixed-HLT cache build with `HLT_DEGRADATION_STRENGTH=0.6`
+  - `hlt_part_baseline`
+  - `local_edgeconv_adapter`
+  - `local_point_attention_adapter`
+  - `local_point_attention_adapter_warmstart`
+  - final local-graph report
+- The warm-start variant is queued after `hlt_part_baseline` and loads `${LOCAL_GRAPH_PART_TAGGER_ROOT}/hlt_part_baseline/best_model_val.pt` with `--require-warm-start`.
+- The report job depends on all local-graph training jobs and writes `local_graph_part_report.json`, `metric_table.csv`, `adapter_diagnostics.csv`, `parameter_counts.csv`, `runtime_summary.csv`, and `hlt_degradation_summary.csv`.
+
 ### Step 10: First Serious Run
 
 Run:
