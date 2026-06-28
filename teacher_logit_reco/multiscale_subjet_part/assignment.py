@@ -174,6 +174,17 @@ def normalize_soft_assignment_config(
     return SoftSubjetAssignmentConfig(**dict(config))
 
 
+def _attention_mask_value(tensor: Any) -> float:
+    """Return a large negative value representable by ``tensor.dtype``."""
+
+    torch = require_torch()
+    if not isinstance(tensor, torch.Tensor):
+        return -1.0e4
+    if tensor.dtype.is_floating_point:
+        return max(float(torch.finfo(tensor.dtype).min), -1.0e4)
+    return -1.0e4
+
+
 class SoftSubjetAssignment(_ModuleBase):
     """Assign HLT particles softly to multi-scale subjet tokens.
 
@@ -228,13 +239,14 @@ class SoftSubjetAssignment(_ModuleBase):
         """Return membership-style weights normalized over subjets within each scale."""
 
         torch = require_torch()
+        logits = logits.float()
         cluster_weights = torch.zeros_like(logits)
         for scale_id in torch.unique(self.scale_index.to(device=logits.device)).tolist():
             scale_slots = self.scale_index.to(device=logits.device) == int(scale_id)
             scale_logits = logits[:, scale_slots, :]
             scale_subjet_mask = subjet_mask[:, scale_slots]
             has_valid_subjet = scale_subjet_mask.any(dim=1, keepdim=True)
-            scale_logits = scale_logits.masked_fill(~scale_subjet_mask[:, :, None], -1.0e9)
+            scale_logits = scale_logits.masked_fill(~scale_subjet_mask[:, :, None], _attention_mask_value(scale_logits))
             weights = torch.softmax(scale_logits, dim=1)
             weights = weights * scale_subjet_mask[:, :, None].to(dtype=logits.dtype)
             weights = weights * particle_mask[:, None, :].to(dtype=logits.dtype)
@@ -357,29 +369,33 @@ class SoftSubjetAssignment(_ModuleBase):
         any_assignable_particle = particle_mask.any(dim=1, keepdim=True)
         subjet_mask = subjet_mask & any_assignable_particle
 
-        keys = self.particle_key(particle_features)
+        queries = queries.float()
+        keys = self.particle_key(particle_features).float()
         logits = torch.einsum("bme,bne->bmn", queries, keys) / math.sqrt(float(self.config.embed_dim))
         logits = logits / float(self.config.temperature)
-        scale_radius = self.scale_radius.to(device=prepared.tokens.device, dtype=prepared.tokens.dtype)
+        scale_radius = self.scale_radius.to(device=prepared.tokens.device, dtype=torch.float32)
         if mode == MULTISCALE_SUBJET_ASSIGNMENT_QUERY_SEEDED and seed_output is not None:
-            delta_eta = seed_output.centers[:, :, None, 0] - prepared.coordinates[:, None, :, 0]
+            centers = seed_output.centers.float()
+            coordinates = prepared.coordinates.float()
+            delta_eta = centers[:, :, None, 0] - coordinates[:, None, :, 0]
             delta_phi = wrap_delta_phi(seed_output.centers[:, :, None, 1] - prepared.coordinates[:, None, :, 1])
             delta_r2 = delta_eta * delta_eta + delta_phi * delta_phi
-            radius_source = seed_output.scale_radius.to(device=prepared.tokens.device, dtype=prepared.tokens.dtype)
+            radius_source = seed_output.scale_radius.to(device=prepared.tokens.device, dtype=torch.float32)
             radius = torch.clamp(radius_source, min=float(self.config.radius_floor))[None, :, None]
             geometry_bias = -float(self.config.geometry_bias_strength) * delta_r2 / torch.clamp(radius * radius, min=1.0e-8)
             logits = logits + geometry_bias
 
-        logits = logits.masked_fill(~particle_mask[:, None, :], -1.0e9)
-        logits = logits.masked_fill(~subjet_mask[:, :, None], -1.0e9)
-        weights = torch.softmax(logits, dim=-1) * particle_mask[:, None, :].to(dtype=prepared.tokens.dtype)
-        weights = weights * subjet_mask[:, :, None].to(dtype=prepared.tokens.dtype)
+        logits = logits.float()
+        logits = logits.masked_fill(~particle_mask[:, None, :], _attention_mask_value(logits))
+        logits = logits.masked_fill(~subjet_mask[:, :, None], _attention_mask_value(logits))
+        weights = torch.softmax(logits, dim=-1) * particle_mask[:, None, :].to(dtype=logits.dtype)
+        weights = weights * subjet_mask[:, :, None].to(dtype=logits.dtype)
         weights = weights / torch.clamp(weights.sum(dim=-1, keepdim=True), min=1.0e-12)
         weights = torch.where(subjet_mask[:, :, None], weights, torch.zeros_like(weights))
         cluster_weights = self._cluster_membership_weights(logits, particle_mask, subjet_mask)
 
-        estimated_centers = torch.einsum("bmn,bnd->bmd", weights, prepared.coordinates)
-        estimated_pt_fraction = torch.einsum("bmn,bn->bm", weights, prepared.pt_fraction)
+        estimated_centers = torch.einsum("bmn,bnd->bmd", weights, prepared.coordinates.float())
+        estimated_pt_fraction = torch.einsum("bmn,bn->bm", weights, prepared.pt_fraction.float())
         valid_weights = weights.clamp_min(1.0e-12)
         entropy = -(weights * valid_weights.log()).sum(dim=-1)
         max_weight = weights.max(dim=-1).values

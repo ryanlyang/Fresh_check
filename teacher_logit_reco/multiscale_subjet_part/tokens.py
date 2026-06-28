@@ -8,6 +8,7 @@ transformer and particle readback stages.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import math
 from typing import Any, Mapping
@@ -166,6 +167,8 @@ def _masked_mean(value: Any, mask: Any) -> float:
 
 def _soft_four_vector_features(soft_four_vectors: Any, estimated_pt_fraction: Any, eps: float) -> Any:
     torch = require_torch()
+    soft_four_vectors = torch.nan_to_num(soft_four_vectors.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    estimated_pt_fraction = torch.nan_to_num(estimated_pt_fraction.float(), nan=0.0, posinf=0.0, neginf=0.0)
     px = soft_four_vectors[:, :, 0]
     py = soft_four_vectors[:, :, 1]
     pz = soft_four_vectors[:, :, 2]
@@ -317,14 +320,17 @@ class MultiScaleSubjetTokenBuilder(_ModuleBase):
             prepared_inputs=prepared,
             canonical_inputs=canonical,
         )
-        weights = assignment_output.assignment_weights
-        cluster_weights = assignment_output.cluster_weights
+        weights = assignment_output.assignment_weights.float()
+        cluster_weights = assignment_output.cluster_weights.float()
         subjet_mask = assignment_output.subjet_mask
-        raw_pool = torch.einsum("bmn,bnf->bmf", weights, prepared.tokens)
-        canonical_pool = torch.einsum("bmn,bnf->bmf", weights, canonical.feature_rows())
-        particle_four_vectors = torch.stack([prepared.px, prepared.py, prepared.pz, prepared.energy], dim=-1)
+        raw_pool = torch.einsum("bmn,bnf->bmf", weights, prepared.tokens.float())
+        canonical_pool = torch.einsum("bmn,bnf->bmf", weights, canonical.feature_rows().float())
+        particle_four_vectors = torch.stack(
+            [prepared.px.float(), prepared.py.float(), prepared.pz.float(), prepared.energy.float()],
+            dim=-1,
+        )
         soft_four_vectors = torch.einsum("bmn,bnf->bmf", cluster_weights, particle_four_vectors)
-        cluster_pt_fraction = torch.einsum("bmn,bn->bm", cluster_weights, prepared.pt_fraction)
+        cluster_pt_fraction = torch.einsum("bmn,bn->bm", cluster_weights, prepared.pt_fraction.float())
         attention_radius = _weighted_center_delta_r_rms(
             weights,
             assignment_output.estimated_centers,
@@ -345,7 +351,7 @@ class MultiScaleSubjetTokenBuilder(_ModuleBase):
             float(self.config.eps),
         )
         pair_summaries = _soft_pair_summaries(cluster_weights, prepared, subjet_mask, float(self.config.eps))
-        scale_radius = assignment_output.scale_radius.to(device=prepared.tokens.device, dtype=prepared.tokens.dtype)
+        scale_radius = assignment_output.scale_radius.to(device=prepared.tokens.device, dtype=torch.float32)
         token_inputs = torch.cat(
             [
                 raw_pool,
@@ -360,12 +366,16 @@ class MultiScaleSubjetTokenBuilder(_ModuleBase):
         )
         if int(token_inputs.shape[-1]) != self.input_dim:
             raise RuntimeError(f"token input dim {int(token_inputs.shape[-1])} does not match expected {self.input_dim}")
-        projected_tokens = self.token_projection(token_inputs)
-        if bool(self.config.use_scale_embedding):
-            scale_embedding = self.scale_embedding(assignment_output.scale_index.to(device=prepared.tokens.device))[None, :, :]
-        else:
-            scale_embedding = projected_tokens.new_zeros(projected_tokens.shape)
-        subjet_tokens = self.output_norm(projected_tokens + scale_embedding)
+        token_inputs = torch.nan_to_num(token_inputs.float(), nan=0.0, posinf=1.0e6, neginf=-1.0e6)
+        token_inputs = torch.clamp(token_inputs, min=-1.0e6, max=1.0e6)
+        autocast_context = torch.cuda.amp.autocast(enabled=False) if token_inputs.is_cuda else contextlib.nullcontext()
+        with autocast_context:
+            projected_tokens = self.token_projection(token_inputs.float())
+            if bool(self.config.use_scale_embedding):
+                scale_embedding = self.scale_embedding(assignment_output.scale_index.to(device=prepared.tokens.device))[None, :, :].float()
+            else:
+                scale_embedding = projected_tokens.new_zeros(projected_tokens.shape)
+            subjet_tokens = self.output_norm(projected_tokens + scale_embedding)
         subjet_tokens = torch.where(subjet_mask[:, :, None], subjet_tokens, torch.zeros_like(subjet_tokens))
         cluster_pt_fraction = torch.where(subjet_mask, cluster_pt_fraction, torch.zeros_like(cluster_pt_fraction))
         soft_four_vectors = torch.where(subjet_mask[:, :, None], soft_four_vectors, torch.zeros_like(soft_four_vectors))
