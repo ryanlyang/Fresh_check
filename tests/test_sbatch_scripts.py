@@ -87,6 +87,8 @@ RUNNERS = [
     "run_write_subtoken_part_report.sh",
     "run_train_local_graph_part_tagger.sh",
     "run_write_local_graph_part_report.sh",
+    "run_train_multiscale_subjet_part_tagger.sh",
+    "run_write_multiscale_subjet_part_report.sh",
     "run_local_graph_score_fusion.sh",
     "run_train_dualview_part_residual.sh",
     "run_write_dualview_part_report.sh",
@@ -125,6 +127,7 @@ SUBMITTERS = [
     "submit_subtoken_part_10class_experiment.sh",
     "submit_local_graph_qcd_hgg_binary_experiment.sh",
     "submit_local_graph_step10_first_serious_run.sh",
+    "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
 ]
@@ -1525,6 +1528,47 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_TIME:-2-12:00:00", wrapper)
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_MEM:-160G", wrapper)
         self.assertIn('bash "${SCRIPT_DIR}/submit_local_graph_qcd_hgg_binary_experiment.sh"', wrapper)
+
+    def test_multiscale_subjet_part_submitter_queues_step12_protocol(self):
+        train = self.read("run_train_multiscale_subjet_part_tagger.sh")
+        report = self.read("run_write_multiscale_subjet_part_report.sh")
+        submitter = self.read("submit_multiscale_subjet_qcd_hgg_binary_experiment.sh")
+        trainer = (REPO_ROOT / "scripts" / "train_multiscale_subjet_part_tagger.py").read_text(encoding="utf-8")
+        reporter = (REPO_ROOT / "scripts" / "write_multiscale_subjet_part_report.py").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/train_multiscale_subjet_part_tagger.py", train)
+        self.assertIn("--confirm-final-test", train)
+        self.assertIn("--expected-hlt-degradation-strength", train)
+        self.assertIn("MULTISCALE_SUBJET_PART_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6", train)
+        self.assertIn("--disable-subjet-pair-bias", train)
+        self.assertIn("diagnostics/training_curves.json", train)
+        self.assertIn("validation_threshold_final_test_fpr", trainer)
+
+        self.assertIn("scripts/write_multiscale_subjet_part_report.py", report)
+        self.assertIn("multiscale_subjet_part_report.json", report)
+        self.assertIn("diagnostics.csv", report)
+        self.assertIn("hlt_degradation.csv", report)
+        self.assertIn("--primary-variant", report)
+        self.assertIn("--allow-missing-default-controls", reporter)
+
+        self.assertIn("QCD_vs_Hgg_multiscale_subjet_part", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_EPOCHS:=45", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("MULTISCALE_SUBJET_PART_QCD_HGG_VARIANTS:=hlt_part_baseline multiscale_subjet_residual_part_adapter pure_perceiver_latent_control part_plus_random_subjet_control", submitter)
+        self.assertIn('export HLT_DEGRADATION_STRENGTH="${MULTISCALE_SUBJET_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH}"', submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn("run_train_multiscale_subjet_part_tagger.sh", submitter)
+        self.assertIn("run_write_multiscale_subjet_part_report.sh", submitter)
+        self.assertIn("multiscale_subjet_train: ${#train_job_ids[@]}", submitter)
+        self.assertIn('--dependency="afterok:${train_dep}"', submitter)
+        self.assertIn("final_report_json", submitter)
 
     def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
         runner = self.read("run_local_graph_score_fusion.sh")
