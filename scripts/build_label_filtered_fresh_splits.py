@@ -44,7 +44,15 @@ from jetclass_fresh.jetclass_data import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="JetClass ROOT data directory")
+    parser.add_argument(
+        "--data-dir",
+        nargs="+",
+        default=[DEFAULT_DATA_DIR],
+        help=(
+            "One or more JetClass ROOT data directories. With multiple directories, "
+            "the generated manifest stores absolute ROOT paths to avoid ambiguity."
+        ),
+    )
     parser.add_argument("--output-manifest", required=True, help="Output manifest path (.json or .json.gz)")
     parser.add_argument("--label-names", nargs="+", required=True, help="Source JetClass labels to keep")
     parser.add_argument("--output-report", default=None, help="Optional JSON report path")
@@ -90,9 +98,19 @@ def _require_split_sizes(split_sizes: Mapping[str, int], n_classes: int) -> dict
     return clean
 
 
+def _normalize_data_dirs(data_dir: str | Path | Sequence[str | Path]) -> list[str]:
+    if isinstance(data_dir, (str, Path)):
+        values: list[str | Path] = [data_dir]
+    else:
+        values = list(data_dir)
+    if not values:
+        raise ValueError("At least one data directory is required")
+    return [Path(value).as_posix() for value in values]
+
+
 def build_label_filtered_fresh_manifest(
     *,
-    data_dir: str | Path,
+    data_dir: str | Path | Sequence[str | Path],
     label_names: Sequence[str],
     split_sizes: Mapping[str, int],
     pattern: str = "*.root",
@@ -100,6 +118,9 @@ def build_label_filtered_fresh_manifest(
     max_constits: int = MAX_CONSTITUENTS,
     base_seed: int = 52,
 ) -> tuple[SplitManifest, dict]:
+    data_dirs = _normalize_data_dirs(data_dir)
+    manifest_data_dir = data_dirs[0]
+    multi_data_dir = len(data_dirs) > 1
     source_label_ids = _label_ids_for_names(label_names)
     n_classes = len(source_label_ids)
     clean_split_sizes = _require_split_sizes(split_sizes, n_classes)
@@ -107,7 +128,7 @@ def build_label_filtered_fresh_manifest(
     filtered_to_source = {int(index): int(source) for index, source in enumerate(source_label_ids)}
 
     all_records = discover_file_records(
-        data_dir,
+        data_dirs if multi_data_dir else manifest_data_dir,
         pattern=pattern,
         tree_name=tree_name,
         require_all_classes=False,
@@ -195,6 +216,9 @@ def build_label_filtered_fresh_manifest(
     }
     metadata = {
         "base_seed": int(base_seed),
+        "source_data_dirs": list(data_dirs),
+        "multi_data_dir": bool(multi_data_dir),
+        "multi_data_dir_record_paths_are_absolute": bool(multi_data_dir),
         "sampling": "label_filtered_balanced_classwise_sequential_without_replacement",
         "split_size_semantics": "requested split sizes are applied after label filtering/remapping",
         "source_label_names": list(label_names),
@@ -214,7 +238,7 @@ def build_label_filtered_fresh_manifest(
         ),
     }
     manifest = SplitManifest(
-        data_dir=str(data_dir),
+        data_dir=str(manifest_data_dir),
         max_constits=int(max_constits),
         class_names=list(label_names),
         file_prefix_to_label=filtered_prefix_map,
@@ -231,7 +255,10 @@ def build_label_filtered_fresh_manifest(
     report = {
         "ok": True,
         "mode": "fresh_label_filtered_splits",
-        "data_dir": str(data_dir),
+        "data_dir": str(manifest_data_dir),
+        "data_dirs": list(data_dirs),
+        "multi_data_dir": bool(multi_data_dir),
+        "multi_data_dir_record_paths_are_absolute": bool(multi_data_dir),
         "label_names": list(label_names),
         "source_label_ids": [int(x) for x in source_label_ids],
         "source_to_filtered_label": source_to_filtered,

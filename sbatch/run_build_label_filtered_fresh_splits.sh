@@ -29,9 +29,23 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LABEL_FILTER_MAX_CONSTITS:=128}"
 : "${LABEL_FILTER_PRETTY:=0}"
 : "${LABEL_FILTER_BASE_SEED:=52}"
+: "${DATA_DIRS:=}"
 
 fresh_setup "$@"
-fresh_require_data_dir
+data_dir_args=()
+if [[ -n "${DATA_DIRS}" ]]; then
+  fresh_split_words data_dir_args "${DATA_DIRS}"
+else
+  data_dir_args=("${DATA_DIR}")
+fi
+if ! fresh_is_dry_run; then
+  for data_dir_arg in "${data_dir_args[@]}"; do
+    if [[ ! -d "${data_dir_arg}" ]]; then
+      echo "JetClass data directory does not exist on this machine: ${data_dir_arg}" >&2
+      exit 2
+    fi
+  done
+fi
 fresh_refuse_existing_path "${LABEL_FILTER_OUTPUT_MANIFEST_PATH}"
 
 OUTPUT_DIR="$(dirname "${LABEL_FILTER_OUTPUT_MANIFEST_PATH}")"
@@ -40,7 +54,7 @@ fresh_split_words label_args "${LABEL_FILTER_NAMES}"
 
 cmd=(
   "${PYTHON_BIN}" "scripts/build_label_filtered_fresh_splits.py"
-  --data-dir "${DATA_DIR}"
+  --data-dir "${data_dir_args[@]}"
   --output-manifest "${LABEL_FILTER_OUTPUT_MANIFEST_PATH}"
   --label-names "${label_args[@]}"
   --output-report "${REPORT_PATH}"

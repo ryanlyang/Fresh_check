@@ -1111,6 +1111,7 @@ from pathlib import Path
 keys = [
     "PROJECT_DIR",
     "DATA_DIR",
+    "DATA_DIRS",
     "OUTPUT_ROOT",
     "DIAGNOSTICS_ROOT",
     "MIRROR_DIAGNOSTICS",

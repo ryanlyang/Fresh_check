@@ -269,6 +269,26 @@ def label_from_filename(path: str | Path) -> int:
     raise ValueError(f"Could not map JetClass filename to a label: {name}")
 
 
+DataDirLike = str | Path | Sequence[str | Path]
+
+
+def _normalize_data_dirs(data_dir: DataDirLike) -> list[Path]:
+    if isinstance(data_dir, (str, Path)):
+        values: list[str | Path] = [data_dir]
+    else:
+        values = list(data_dir)
+    if not values:
+        raise ValueError("At least one JetClass data directory is required")
+    return [Path(value) for value in values]
+
+
+def _data_dir_repr(data_dir: DataDirLike) -> str:
+    roots = _normalize_data_dirs(data_dir)
+    if len(roots) == 1:
+        return roots[0].as_posix()
+    return " ".join(root.as_posix() for root in roots)
+
+
 def _relative_path(path: Path, data_dir: Path) -> str:
     try:
         return path.relative_to(data_dir).as_posix()
@@ -276,11 +296,18 @@ def _relative_path(path: Path, data_dir: Path) -> str:
         return path.as_posix()
 
 
-def _resolve_data_file(data_dir: str | Path, file_name: str) -> Path:
+def _resolve_data_file(data_dir: DataDirLike, file_name: str) -> Path:
     path = Path(file_name)
     if path.is_absolute():
         return path
-    return Path(data_dir) / file_name
+    roots = _normalize_data_dirs(data_dir)
+    if len(roots) == 1:
+        return roots[0] / file_name
+    candidates = [root / file_name for root in roots]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _require_split_names(mapping: Mapping[str, Any], name: str) -> None:
@@ -291,7 +318,7 @@ def _require_split_names(mapping: Mapping[str, Any], name: str) -> None:
 
 
 def discover_file_records(
-    data_dir: str | Path,
+    data_dir: DataDirLike,
     *,
     pattern: str = "*.root",
     tree_name: str = "tree",
@@ -300,9 +327,10 @@ def discover_file_records(
 ) -> List[FileRecord]:
     """Find JetClass ROOT files and count entries without loading jet arrays."""
 
-    root = Path(data_dir)
-    if not root.exists():
-        raise FileNotFoundError(f"JetClass data_dir does not exist: {root}")
+    roots = _normalize_data_dirs(data_dir)
+    for root in roots:
+        if not root.exists():
+            raise FileNotFoundError(f"JetClass data_dir does not exist: {root}")
 
     try:
         import uproot
@@ -311,33 +339,38 @@ def discover_file_records(
 
     records: List[FileRecord] = []
     unknown_files: List[str] = []
-    for path in sorted(root.rglob(pattern)):
-        try:
-            label = label_from_filename(path)
-        except ValueError:
-            if ignore_unknown:
-                unknown_files.append(path.as_posix())
-                continue
-            raise
+    multi_root = len(roots) > 1
+    for root in roots:
+        for path in sorted(root.rglob(pattern)):
+            try:
+                label = label_from_filename(path)
+            except ValueError:
+                if ignore_unknown:
+                    unknown_files.append(path.as_posix())
+                    continue
+                raise
 
-        with uproot.open(path) as handle:
-            tree = handle[tree_name]
-            records.append(
-                FileRecord(
-                    path=_relative_path(path, root),
-                    label=label,
-                    num_entries=int(tree.num_entries),
+            with uproot.open(path) as handle:
+                tree = handle[tree_name]
+                record_path = path.resolve().as_posix() if multi_root else _relative_path(path, root)
+                records.append(
+                    FileRecord(
+                        path=record_path,
+                        label=label,
+                        num_entries=int(tree.num_entries),
+                    )
                 )
-            )
 
     if not records:
-        raise FileNotFoundError(f"No JetClass ROOT files matching {pattern!r} found under {root}")
+        roots_text = ", ".join(root.as_posix() for root in roots)
+        raise FileNotFoundError(f"No JetClass ROOT files matching {pattern!r} found under {roots_text}")
 
     labels_found = {record.label for record in records}
     if require_all_classes and labels_found != set(range(len(LABEL_NAMES))):
         missing = sorted(set(range(len(LABEL_NAMES))) - labels_found)
         missing_names = [LABEL_NAMES[i] for i in missing]
-        raise ValueError(f"Missing JetClass classes in {root}: {missing_names}")
+        roots_text = ", ".join(root.as_posix() for root in roots)
+        raise ValueError(f"Missing JetClass classes in {roots_text}: {missing_names}")
 
     return records
 
@@ -640,7 +673,7 @@ def load_offline_view(
     manifest: SplitManifest,
     split: str,
     *,
-    data_dir: str | Path | None = None,
+    data_dir: DataDirLike | None = None,
     tree_name: str = "tree",
     max_constits: int | None = None,
     verify_label_branches: bool = False,
@@ -661,7 +694,7 @@ def load_offline_view(
     except ImportError as exc:
         raise ImportError("load_offline_view requires uproot on the research compute environment") from exc
 
-    data_dir = manifest.data_dir if data_dir is None else str(data_dir)
+    resolved_data_dir: DataDirLike = manifest.data_dir if data_dir is None else data_dir
     max_constits = manifest.max_constits if max_constits is None else int(max_constits)
     identities = manifest.splits[split]
     n_jets = len(identities)
@@ -679,7 +712,7 @@ def load_offline_view(
         read_branches.extend(LABEL_BRANCHES)
 
     for file_name, rows in sorted(grouped.items()):
-        source = _resolve_data_file(data_dir, file_name)
+        source = _resolve_data_file(resolved_data_dir, file_name)
         rows = sorted(rows, key=lambda item: item[1])
         entries = np.array([entry for _, entry, _ in rows], dtype=np.int64)
         output_indices = np.array([index for index, _, _ in rows], dtype=np.int64)
@@ -719,7 +752,8 @@ def load_offline_view(
         jet_ids=list(identities),
         split=split,
         metadata={
-            "data_dir": str(data_dir),
+            "data_dir": _data_dir_repr(resolved_data_dir),
+            "data_dirs": [root.as_posix() for root in _normalize_data_dirs(resolved_data_dir)],
             "tree_name": tree_name,
             "max_constits": int(max_constits),
             "source_manifest_hash": manifest_hash(manifest),

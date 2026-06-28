@@ -1257,7 +1257,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("require_all_classes=False", script)
         self.assertIn("source_to_filtered", script)
         self.assertIn("requested_per_class_total", script)
+        self.assertIn("multi_data_dir", script)
+        self.assertIn("multi_data_dir_record_paths_are_absolute", script)
         self.assertIn("scripts/build_label_filtered_fresh_splits.py", runner)
+        self.assertIn("DATA_DIRS", runner)
         self.assertIn("LABEL_FILTER_MODEL_TRAIN_SIZE", runner)
         self.assertIn("--model-train", runner)
 

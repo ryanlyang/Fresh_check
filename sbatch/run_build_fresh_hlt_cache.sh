@@ -20,9 +20,23 @@ source "${SCRIPT_DIR}/common.sh"
 : "${VERIFY_LABEL_BRANCHES:=0}"
 : "${SHOW_PROGRESS:=0}"
 : "${HLT_DEGRADATION_STRENGTH:=1.0}"
+: "${DATA_DIRS:=}"
 
 fresh_setup "$@"
-fresh_require_data_dir
+data_dir_args=()
+if [[ -n "${DATA_DIRS}" ]]; then
+  fresh_split_words data_dir_args "${DATA_DIRS}"
+else
+  data_dir_args=("${DATA_DIR}")
+fi
+if ! fresh_is_dry_run; then
+  for data_dir_arg in "${data_dir_args[@]}"; do
+    if [[ ! -d "${data_dir_arg}" ]]; then
+      echo "JetClass data directory does not exist on this machine: ${data_dir_arg}" >&2
+      exit 2
+    fi
+  done
+fi
 fresh_require_file "${MANIFEST_PATH}"
 if [[ -d "${HLT_CACHE_DIR}" ]] && ! fresh_bool_enabled "${OVERWRITE}" && ! fresh_is_dry_run; then
   echo "Refusing to reuse existing HLT cache directory without OVERWRITE=1: ${HLT_CACHE_DIR}" >&2
@@ -33,7 +47,7 @@ fresh_split_words split_args "${HLT_SPLITS}"
 cmd=(
   "${PYTHON_BIN}" "scripts/build_fixed_hlt_cache.py"
   --manifest "${MANIFEST_PATH}"
-  --data-dir "${DATA_DIR}"
+  --data-dir "${data_dir_args[@]}"
   --cache-dir "${HLT_CACHE_DIR}"
   --splits "${split_args[@]}"
   --read-chunk-size "${READ_CHUNK_SIZE}"

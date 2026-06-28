@@ -31,8 +31,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-dir",
+        nargs="+",
         default=None,
-        help=f"JetClass data directory; defaults to manifest data_dir or {DEFAULT_DATA_DIR}",
+        help=f"One or more JetClass data directories; defaults to manifest data_dir or {DEFAULT_DATA_DIR}",
     )
     parser.add_argument(
         "--cache-dir",
@@ -69,7 +70,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     manifest = load_split_manifest(args.manifest)
-    data_dir = args.data_dir or manifest.data_dir or DEFAULT_DATA_DIR
+    data_dir = args.data_dir if args.data_dir is not None else (manifest.data_dir or DEFAULT_DATA_DIR)
+    data_dir_report = data_dir if isinstance(data_dir, list) else str(data_dir)
     hlt_params = fixed_hlt_params_from_strength(args.hlt_degradation_strength)
     reports = {}
 
@@ -102,7 +104,7 @@ def main() -> int:
     audit = audit_hlt_cache(manifest, args.cache_dir, splits=args.splits, expected_params=hlt_params)
     result = {
         "cache_dir": str(Path(args.cache_dir)),
-        "data_dir": str(data_dir),
+        "data_dir": data_dir_report,
         "splits": list(args.splits),
         "hlt_degradation_strength": float(args.hlt_degradation_strength),
         "hlt_params": fixed_hlt_params_dict(hlt_params),
