@@ -188,6 +188,11 @@ if fresh_bool_enabled "${MULTISCALE_SUBJET_PART_QCD_HGG_BUILD_BINARY_INPUTS}"; t
     "${SCRIPT_DIR}/run_build_label_filtered_hlt_cache.sh")"
   echo "submitted multiscale_binary_hlt_cache=${binary_hlt_cache_jid}"
   input_dependency="${binary_hlt_cache_jid}"
+else
+  if ! fresh_is_dry_run; then
+    fresh_require_file "${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_MANIFEST_PATH}"
+    fresh_require_dir "${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_HLT_CACHE_DIR}"
+  fi
 fi
 
 for variant in "${variant_args[@]}"; do
