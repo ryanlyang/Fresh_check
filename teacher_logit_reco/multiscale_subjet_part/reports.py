@@ -135,11 +135,13 @@ def _resolve_report_path(experiment_dir: Path, value: Any) -> Path | None:
 
 def _variant_from_report(report_path: Path, report: Mapping[str, Any] | None) -> str:
     if isinstance(report, Mapping):
-        for key in ("variant", "model_variant", "name"):
+        for key in ("profile", "ablation_profile", "variant", "model_variant", "name"):
             value = report.get(key)
             if value:
                 return str(value)
         config = report.get("config")
+        if isinstance(config, Mapping) and config.get("ablation_profile"):
+            return str(config["ablation_profile"])
         if isinstance(config, Mapping) and config.get("variant"):
             return str(config["variant"])
     return report_path.parent.name
@@ -739,6 +741,7 @@ def build_multiscale_subjet_part_report(config: MultiScaleSubjetReportConfig) ->
         primary_value = _lookup_metric(metrics, primary_metric)
         row = {
             "variant": variant,
+            "ablation_profile": payload.get("profile") or _metric(payload, ("config", "ablation_profile")),
             "model_variant": payload.get("variant"),
             "source_type": "hlt_part_baseline" if variant == config.baseline_variant else "multiscale_subjet_variant",
             "report_path": str(report_path),
@@ -761,6 +764,11 @@ def build_multiscale_subjet_part_report(config: MultiScaleSubjetReportConfig) ->
             "uses_reference_part_backbone": _metric(payload, ("model_config", "uses_reference_part_backbone")),
             "baseline_recoverable_at_zero_gamma": _metric(payload, ("model_config", "baseline_recoverable_at_zero_gamma")),
             "query_mode": _metric(payload, ("model_config", "query_mode")),
+            "scale_profile": _metric(payload, ("model_config", "scale_profile")),
+            "use_assignment_scale_embedding": _metric(payload, ("model_config", "use_assignment_scale_embedding")),
+            "use_token_scale_embedding": _metric(payload, ("model_config", "use_token_scale_embedding")),
+            "use_scale_pair_embedding": _metric(payload, ("model_config", "use_scale_pair_embedding")),
+            "effective_use_subjet_pair_bias": _metric(payload, ("model_config", "effective_use_subjet_pair_bias")),
         }
         _flatten_metrics_for_row(row, payload)
         metric_rows.append(row)

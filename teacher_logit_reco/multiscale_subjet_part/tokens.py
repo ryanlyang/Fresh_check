@@ -74,6 +74,7 @@ class MultiScaleSubjetTokenBuilderConfig:
     token_dim: int = 128
     hidden_dim: int = 256
     dropout: float = 0.05
+    use_scale_embedding: bool = True
     eps: float = 1.0e-8
 
     def __post_init__(self) -> None:
@@ -92,6 +93,7 @@ class MultiScaleSubjetTokenBuilderConfig:
         object.__setattr__(self, "token_dim", token_dim)
         object.__setattr__(self, "hidden_dim", hidden_dim)
         object.__setattr__(self, "dropout", dropout)
+        object.__setattr__(self, "use_scale_embedding", bool(self.use_scale_embedding))
         object.__setattr__(self, "eps", eps)
 
     @property
@@ -358,8 +360,12 @@ class MultiScaleSubjetTokenBuilder(_ModuleBase):
         )
         if int(token_inputs.shape[-1]) != self.input_dim:
             raise RuntimeError(f"token input dim {int(token_inputs.shape[-1])} does not match expected {self.input_dim}")
-        scale_embedding = self.scale_embedding(assignment_output.scale_index.to(device=prepared.tokens.device))[None, :, :]
-        subjet_tokens = self.output_norm(self.token_projection(token_inputs) + scale_embedding)
+        projected_tokens = self.token_projection(token_inputs)
+        if bool(self.config.use_scale_embedding):
+            scale_embedding = self.scale_embedding(assignment_output.scale_index.to(device=prepared.tokens.device))[None, :, :]
+        else:
+            scale_embedding = projected_tokens.new_zeros(projected_tokens.shape)
+        subjet_tokens = self.output_norm(projected_tokens + scale_embedding)
         subjet_tokens = torch.where(subjet_mask[:, :, None], subjet_tokens, torch.zeros_like(subjet_tokens))
         cluster_pt_fraction = torch.where(subjet_mask, cluster_pt_fraction, torch.zeros_like(cluster_pt_fraction))
         soft_four_vectors = torch.where(subjet_mask[:, :, None], soft_four_vectors, torch.zeros_like(soft_four_vectors))
@@ -382,6 +388,7 @@ class MultiScaleSubjetTokenBuilder(_ModuleBase):
             "contract": MULTISCALE_SUBJET_TOKEN_BUILDER_CONTRACT,
             "assignment_contract": assignment_output.diagnostics.get("contract"),
             "query_mode": assignment_output.query_mode,
+            "use_token_scale_embedding": bool(self.config.use_scale_embedding),
             "valid_subjet_fraction": float(valid.float().mean().detach().cpu().item()),
             "subjet_token_norm_mean": _masked_mean(token_norm, valid),
             "attention_pt_fraction_mean": _masked_mean(assignment_output.estimated_pt_fraction, valid),

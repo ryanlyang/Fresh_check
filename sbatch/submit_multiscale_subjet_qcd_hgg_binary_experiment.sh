@@ -22,7 +22,16 @@ MULTISCALE_SUBJET_PART_QCD_HGG_HLT_TAG="${MULTISCALE_SUBJET_PART_QCD_HGG_HLT_DEG
 : "${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_HLT_CACHE_DIR:=${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_INPUT_ROOT}/hlt_cache}"
 : "${MULTISCALE_SUBJET_PART_QCD_HGG_SOURCE_LABEL_NAMES:=QCD Hgg}"
 : "${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_LABEL_FILTER:=0 1}"
-: "${MULTISCALE_SUBJET_PART_QCD_HGG_VARIANTS:=hlt_part_baseline multiscale_subjet_residual_part_adapter pure_perceiver_latent_control part_plus_random_subjet_control}"
+: "${MULTISCALE_SUBJET_PART_QCD_HGG_BASE_PROFILES:=hlt_part_baseline multiscale_subjet_residual_part_adapter pure_perceiver_latent_control part_plus_random_subjet_control subjet_branch_only}"
+: "${MULTISCALE_SUBJET_PART_QCD_HGG_STEP14_PROFILES:=no_scale_bias one_scale_medium no_seeded_queries no_subjet_transformer no_particle_readback late_fusion cls_fusion cross_attention_branch_fusion few_subjets many_subjets physics_bias_removed large_hlt_part_control two_hlt_part_ensemble_control}"
+: "${MULTISCALE_SUBJET_PART_QCD_HGG_INCLUDE_STEP14_ABLATIONS:=0}"
+if [[ -z "${MULTISCALE_SUBJET_PART_QCD_HGG_VARIANTS:-}" ]]; then
+  if fresh_bool_enabled "${MULTISCALE_SUBJET_PART_QCD_HGG_INCLUDE_STEP14_ABLATIONS}"; then
+    MULTISCALE_SUBJET_PART_QCD_HGG_VARIANTS="${MULTISCALE_SUBJET_PART_QCD_HGG_BASE_PROFILES} ${MULTISCALE_SUBJET_PART_QCD_HGG_STEP14_PROFILES}"
+  else
+    MULTISCALE_SUBJET_PART_QCD_HGG_VARIANTS="${MULTISCALE_SUBJET_PART_QCD_HGG_BASE_PROFILES}"
+  fi
+fi
 
 : "${MULTISCALE_SUBJET_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000}"
 : "${MULTISCALE_SUBJET_PART_QCD_HGG_MODEL_VAL_SIZE:=150000}"
@@ -123,7 +132,7 @@ if ! fresh_is_dry_run; then
     echo "binary_manifest=${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_MANIFEST_PATH}"
     echo "binary_hlt_cache=${MULTISCALE_SUBJET_PART_QCD_HGG_BINARY_HLT_CACHE_DIR}"
     echo "hlt_degradation_strength=${MULTISCALE_SUBJET_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH}"
-    echo "variants=$(fresh_join_by_space "${variant_args[@]}")"
+    echo "profiles=$(fresh_join_by_space "${variant_args[@]}")"
     echo "selection_metric=${MULTISCALE_SUBJET_PART_SELECTION_METRIC}"
     echo "epochs=${MULTISCALE_SUBJET_PART_EPOCHS}"
   } > "${submitter_lock_dir}/metadata.txt"
@@ -236,7 +245,10 @@ multiscale_subjet_part_qcd_hgg_binary_submission:
     stack_val: ${MULTISCALE_SUBJET_PART_STACK_VAL_SIZE}
     final_test: ${MULTISCALE_SUBJET_PART_FINAL_TEST_SIZE}
   model:
-    variants: $(fresh_join_by_space "${variant_args[@]}")
+    profiles: $(fresh_join_by_space "${variant_args[@]}")
+    base_profiles: ${MULTISCALE_SUBJET_PART_QCD_HGG_BASE_PROFILES}
+    step14_profiles: ${MULTISCALE_SUBJET_PART_QCD_HGG_STEP14_PROFILES}
+    include_step14_ablations: ${MULTISCALE_SUBJET_PART_QCD_HGG_INCLUDE_STEP14_ABLATIONS}
     epochs: ${MULTISCALE_SUBJET_PART_EPOCHS}
     selection_metric: ${MULTISCALE_SUBJET_PART_SELECTION_METRIC}
   resources:

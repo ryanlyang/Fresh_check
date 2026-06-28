@@ -257,6 +257,7 @@ class MultiScaleSubjetTrainConfig:
     output_dir: str
     hlt_cache_dir: str
     variant: str = "multiscale_subjet_residual_part_adapter"
+    ablation_profile: str = ""
     train_split: str = "model_train"
     val_split: str = "model_val"
     stack_val_split: str = "stack_val"
@@ -298,6 +299,8 @@ class MultiScaleSubjetTrainConfig:
     token_hidden_dim: int = 256
     assignment_embed_dim: int = 64
     assignment_hidden_dim: int = 128
+    assignment_temperature: float = 1.0
+    assignment_geometry_bias_strength: float = 2.0
     transformer_layers: int = 2
     transformer_heads: int = 4
     transformer_ffn_dim: int = 256
@@ -309,12 +312,17 @@ class MultiScaleSubjetTrainConfig:
     residual_gamma_init: float = 0.0
     dropout: float = 0.05
     attention_dropout: float = 0.05
+    scale_profile: str = "default"
+    use_assignment_scale_embedding: bool = True
+    use_token_scale_embedding: bool = True
     use_subjet_pair_bias: bool = True
+    use_scale_pair_embedding: bool = True
     random_control_seed: int = 2027
     weight_threshold: float = 0.0
 
     def __post_init__(self) -> None:
         self.variant = normalize_multiscale_subjet_variant(self.variant)
+        self.ablation_profile = str(self.ablation_profile or self.variant).strip()
         if self.variant not in MULTISCALE_SUBJET_CLASSIFIER_VARIANTS:
             raise ValueError(f"variant must be one of {MULTISCALE_SUBJET_CLASSIFIER_VARIANTS}")
         if self.train_split != "model_train" or self.val_split != "model_val":
@@ -341,7 +349,6 @@ class MultiScaleSubjetTrainConfig:
             "token_hidden_dim",
             "assignment_embed_dim",
             "assignment_hidden_dim",
-            "transformer_layers",
             "transformer_heads",
             "transformer_ffn_dim",
             "transformer_pair_bias_hidden_dim",
@@ -354,12 +361,22 @@ class MultiScaleSubjetTrainConfig:
             if value <= 0:
                 raise ValueError(f"{field_name} must be positive")
             setattr(self, field_name, value)
+        self.transformer_layers = int(self.transformer_layers)
+        if self.transformer_layers < 0:
+            raise ValueError("transformer_layers must be non-negative")
         if int(self.token_dim) % int(self.transformer_heads) != 0:
             raise ValueError("token_dim must be divisible by transformer_heads")
         if int(self.readback_hidden_dim) % int(self.readback_heads) != 0:
             raise ValueError("readback_hidden_dim must be divisible by readback_heads")
-        if str(self.model_size) not in {"base", "tiny"}:
-            raise ValueError("model_size must be 'base' or 'tiny'")
+        if str(self.model_size) not in {"base", "tiny", "large"}:
+            raise ValueError("model_size must be 'base', 'tiny', or 'large'")
+        for field_name in ("assignment_temperature", "assignment_geometry_bias_strength"):
+            value = float(getattr(self, field_name))
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{field_name} must be non-negative and finite")
+            if field_name == "assignment_temperature" and value <= 0.0:
+                raise ValueError("assignment_temperature must be positive")
+            setattr(self, field_name, value)
         if int(self.num_workers) < 0:
             raise ValueError("num_workers cannot be negative")
         if float(self.lr) <= 0.0:
@@ -381,6 +398,16 @@ class MultiScaleSubjetTrainConfig:
         self.weight_threshold = float(self.weight_threshold)
         if self.weight_threshold < 0.0:
             raise ValueError("weight_threshold must be non-negative")
+        self.scale_profile = str(self.scale_profile).strip().lower().replace("-", "_")
+        # Validated in the model config too; importing here keeps bad Slurm args
+        # from running long enough to allocate a GPU.
+        from .features import multiscale_subjet_scale_specs_for_profile
+
+        multiscale_subjet_scale_specs_for_profile(self.scale_profile)
+        self.use_assignment_scale_embedding = bool(self.use_assignment_scale_embedding)
+        self.use_token_scale_embedding = bool(self.use_token_scale_embedding)
+        self.use_subjet_pair_bias = bool(self.use_subjet_pair_bias)
+        self.use_scale_pair_embedding = bool(self.use_scale_pair_embedding)
         self.max_train_batches = _optional_nonnegative_int(self.max_train_batches, field_name="max_train_batches")
         self.max_val_batches = _optional_nonnegative_int(self.max_val_batches, field_name="max_val_batches")
         self.max_stack_val_batches = _optional_nonnegative_int(self.max_stack_val_batches, field_name="max_stack_val_batches")
@@ -440,6 +467,8 @@ def build_multiscale_subjet_tagger_for_config(
         token_hidden_dim=int(config.token_hidden_dim),
         assignment_embed_dim=int(config.assignment_embed_dim),
         assignment_hidden_dim=int(config.assignment_hidden_dim),
+        assignment_temperature=float(config.assignment_temperature),
+        assignment_geometry_bias_strength=float(config.assignment_geometry_bias_strength),
         transformer_layers=int(config.transformer_layers),
         transformer_heads=int(config.transformer_heads),
         transformer_ffn_dim=int(config.transformer_ffn_dim),
@@ -451,7 +480,11 @@ def build_multiscale_subjet_tagger_for_config(
         residual_gamma_init=float(config.residual_gamma_init),
         dropout=float(config.dropout),
         attention_dropout=float(config.attention_dropout),
+        scale_profile=str(config.scale_profile),
+        use_assignment_scale_embedding=bool(config.use_assignment_scale_embedding),
+        use_token_scale_embedding=bool(config.use_token_scale_embedding),
         use_subjet_pair_bias=bool(config.use_subjet_pair_bias),
+        use_scale_pair_embedding=bool(config.use_scale_pair_embedding),
         random_control_seed=int(config.random_control_seed),
         weight_threshold=float(config.weight_threshold),
         part_model=part_model,
@@ -727,6 +760,7 @@ def multiscale_subjet_checkpoint_payload(
         "model_config": model.to_config_dict() if hasattr(model, "to_config_dict") else {},
         "metrics": _json_safe_metrics(metrics),
         "variant": str(config.variant),
+        "profile": str(config.ablation_profile),
         "label_names": list(config.label_names),
         "label_filter": list(config.label_filter),
         "num_classes": int(config.num_classes),
@@ -806,6 +840,7 @@ def train_multiscale_subjet_tagger(
         "experiment_step": MULTISCALE_SUBJET_TRAIN_STEP,
         "protocol": multiscale_subjet_part_protocol_manifest(),
         "variant": str(config.variant),
+        "profile": str(config.ablation_profile),
         "config": asdict(config),
         "model_config": checkpoint_model.to_config_dict() if hasattr(checkpoint_model, "to_config_dict") else {},
         "source": source,
@@ -988,6 +1023,7 @@ def train_multiscale_subjet_tagger(
         "protocol": multiscale_subjet_part_protocol_manifest(),
         "output_contract": getattr(best_model, "output_contract", None),
         "variant": str(config.variant),
+        "profile": str(config.ablation_profile),
         "best_epoch": int(best_epoch),
         "selection_metric": str(config.selection_metric),
         "selection_metric_direction": (

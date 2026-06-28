@@ -115,7 +115,18 @@ def default_part_config(*, num_classes: int = 10, model_size: str = "base") -> D
             }
         )
         return cfg
-    raise ValueError(f"Unknown model_size {model_size!r}; expected 'base' or 'tiny'")
+    if model_size == "large":
+        cfg.update(
+            {
+                "embed_dims": [192, 768, 192],
+                "pair_embed_dims": [96, 96, 96],
+                "num_heads": 8,
+                "num_layers": 12,
+                "num_cls_layers": 3,
+            }
+        )
+        return cfg
+    raise ValueError(f"Unknown model_size {model_size!r}; expected 'base', 'tiny', or 'large'")
 
 
 class ParticleTransformerHLTClassifier(_ModuleBase):

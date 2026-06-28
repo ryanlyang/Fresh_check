@@ -128,11 +128,15 @@ class MultiScaleSubjetTransformerConfig:
     pair_feature_config: MultiScaleSubjetPairFeatureConfig | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        for name in ("token_dim", "num_layers", "num_heads", "ffn_dim", "pair_bias_hidden_dim", "num_scales"):
+        for name in ("token_dim", "num_heads", "ffn_dim", "pair_bias_hidden_dim", "num_scales"):
             value = int(getattr(self, name))
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
             object.__setattr__(self, name, value)
+        num_layers = int(self.num_layers)
+        if num_layers < 0:
+            raise ValueError("num_layers must be non-negative")
+        object.__setattr__(self, "num_layers", num_layers)
         if int(self.token_dim) % int(self.num_heads) != 0:
             raise ValueError("num_heads must divide token_dim")
         for name in ("dropout", "attention_dropout"):

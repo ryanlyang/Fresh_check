@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--hlt-cache-dir", required=True)
     parser.add_argument("--variant", choices=MULTISCALE_SUBJET_CLASSIFIER_VARIANTS, default="multiscale_subjet_residual_part_adapter")
+    parser.add_argument("--ablation-profile", default="")
 
     parser.add_argument("--train-split", default="model_train")
     parser.add_argument("--val-split", default="model_val")
@@ -57,12 +58,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-hlt-params-check", action="store_true")
     parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
-    parser.add_argument("--model-size", choices=("base", "tiny"), default="base")
+    parser.add_argument("--model-size", choices=("base", "tiny", "large"), default="base")
     parser.add_argument("--max-constits", type=int, default=128)
     parser.add_argument("--token-dim", type=int, default=128)
     parser.add_argument("--token-hidden-dim", type=int, default=256)
     parser.add_argument("--assignment-embed-dim", type=int, default=64)
     parser.add_argument("--assignment-hidden-dim", type=int, default=128)
+    parser.add_argument("--assignment-temperature", type=float, default=1.0)
+    parser.add_argument("--assignment-geometry-bias-strength", type=float, default=2.0)
     parser.add_argument("--transformer-layers", type=int, default=2)
     parser.add_argument("--transformer-heads", type=int, default=4)
     parser.add_argument("--transformer-ffn-dim", type=int, default=256)
@@ -74,7 +77,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-gamma-init", type=float, default=0.0)
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--attention-dropout", type=float, default=0.05)
+    parser.add_argument("--scale-profile", default="default")
+    parser.add_argument("--disable-assignment-scale-embedding", action="store_true")
+    parser.add_argument("--disable-token-scale-embedding", action="store_true")
     parser.add_argument("--disable-subjet-pair-bias", action="store_true")
+    parser.add_argument("--disable-scale-pair-embedding", action="store_true")
     parser.add_argument("--random-control-seed", type=int, default=2027)
     parser.add_argument("--weight-threshold", type=float, default=0.0)
     return parser.parse_args()
@@ -86,6 +93,7 @@ def main() -> int:
         output_dir=args.output_dir,
         hlt_cache_dir=args.hlt_cache_dir,
         variant=args.variant,
+        ablation_profile=args.ablation_profile or args.variant,
         train_split=args.train_split,
         val_split=args.val_split,
         stack_val_split=args.stack_val_split,
@@ -122,6 +130,8 @@ def main() -> int:
         token_hidden_dim=args.token_hidden_dim,
         assignment_embed_dim=args.assignment_embed_dim,
         assignment_hidden_dim=args.assignment_hidden_dim,
+        assignment_temperature=args.assignment_temperature,
+        assignment_geometry_bias_strength=args.assignment_geometry_bias_strength,
         transformer_layers=args.transformer_layers,
         transformer_heads=args.transformer_heads,
         transformer_ffn_dim=args.transformer_ffn_dim,
@@ -133,7 +143,11 @@ def main() -> int:
         residual_gamma_init=args.residual_gamma_init,
         dropout=args.dropout,
         attention_dropout=args.attention_dropout,
+        scale_profile=args.scale_profile,
+        use_assignment_scale_embedding=not bool(args.disable_assignment_scale_embedding),
+        use_token_scale_embedding=not bool(args.disable_token_scale_embedding),
         use_subjet_pair_bias=not bool(args.disable_subjet_pair_bias),
+        use_scale_pair_embedding=not bool(args.disable_scale_pair_embedding),
         random_control_seed=args.random_control_seed,
         weight_threshold=args.weight_threshold,
     )
@@ -141,6 +155,7 @@ def main() -> int:
     print("multiscale_subjet_part_tagger_training_complete:")
     print(f"  output_dir: {args.output_dir}")
     print(f"  variant: {report['variant']}")
+    print(f"  profile: {report.get('profile')}")
     print(f"  output_contract: {report['output_contract']}")
     print(f"  best_epoch: {report['best_epoch']}")
     print(f"  selection_metric: {report['selection_metric']}")

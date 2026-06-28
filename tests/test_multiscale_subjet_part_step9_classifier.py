@@ -7,11 +7,15 @@ from teacher_logit_reco.multiscale_subjet_part import (
     CANONICAL_PART_FEATURE_NAMES,
     MULTISCALE_SUBJET_CLASSIFIER_CONTRACT,
     MULTISCALE_SUBJET_HLT_PART_BASELINE_CONTRACT,
+    MULTISCALE_SUBJET_VARIANT_CLS_FUSION,
+    MULTISCALE_SUBJET_VARIANT_CROSS_ATTENTION_FUSION,
     MULTISCALE_SUBJET_VARIANT_HLT_PART_BASELINE,
+    MULTISCALE_SUBJET_VARIANT_LATE_FUSION,
     MULTISCALE_SUBJET_VARIANT_PURE_PERCEIVER_LATENT_CONTROL,
     MULTISCALE_SUBJET_VARIANT_RANDOM_SUBJET_CONTROL,
     MULTISCALE_SUBJET_VARIANT_RESIDUAL_PART_ADAPTER,
     MULTISCALE_SUBJET_VARIANT_SUBJET_BRANCH_ONLY,
+    MULTISCALE_SUBJET_VARIANT_TWO_HLT_PART_ENSEMBLE,
     MultiScaleSubjetClassifierConfig,
     MultiScaleSubjetPartClassifier,
     build_multiscale_subjet_comparison_classifier,
@@ -214,12 +218,65 @@ class MultiscaleSubjetPartStep9ClassifierTests(unittest.TestCase):
 
     def test_variant_normalization_and_config_validation(self):
         self.assertEqual(normalize_multiscale_subjet_variant("primary"), MULTISCALE_SUBJET_VARIANT_RESIDUAL_PART_ADAPTER)
+        self.assertEqual(normalize_multiscale_subjet_variant("late_fusion"), MULTISCALE_SUBJET_VARIANT_LATE_FUSION)
+        self.assertEqual(normalize_multiscale_subjet_variant("cls_fusion"), MULTISCALE_SUBJET_VARIANT_CLS_FUSION)
+        self.assertEqual(
+            normalize_multiscale_subjet_variant("cross_attention_fusion"),
+            MULTISCALE_SUBJET_VARIANT_CROSS_ATTENTION_FUSION,
+        )
+        self.assertEqual(normalize_multiscale_subjet_variant("two_hlt_part"), MULTISCALE_SUBJET_VARIANT_TWO_HLT_PART_ENSEMBLE)
         with self.assertRaisesRegex(ValueError, "variant"):
             normalize_multiscale_subjet_variant("mystery")
         with self.assertRaisesRegex(ValueError, "divisible"):
             small_config(MULTISCALE_SUBJET_VARIANT_RESIDUAL_PART_ADAPTER, token_dim=25, transformer_heads=4)
         with self.assertRaisesRegex(ValueError, "divisible"):
             small_config(MULTISCALE_SUBJET_VARIANT_RESIDUAL_PART_ADAPTER, readback_hidden_dim=30, readback_heads=4)
+
+    def test_step14_scale_and_zero_transformer_ablation_knobs_are_real(self):
+        tokens, mask = make_tokens()
+        model = MultiScaleSubjetPartClassifier(
+            small_config(
+                MULTISCALE_SUBJET_VARIANT_RESIDUAL_PART_ADAPTER,
+                scale_profile="few_subjets",
+                use_assignment_scale_embedding=False,
+                use_token_scale_embedding=False,
+                use_scale_pair_embedding=False,
+                transformer_layers=0,
+            ),
+            part_model=DummyReferencePart(num_classes=2),
+        )
+        output = model(tokens, mask, return_outputs=True)
+
+        self.assertEqual(tuple(output.token_output.subjet_tokens.shape[:2]), (2, 10))
+        self.assertEqual(output.token_output.assignment_output.diagnostics["use_scale_embedding"], False)
+        self.assertEqual(output.token_output.diagnostics["use_token_scale_embedding"], False)
+        self.assertEqual(output.transformer_output.diagnostics["num_layers"], 0)
+        self.assertEqual(output.transformer_output.diagnostics["use_scale_pair_embedding"], False)
+
+    def test_step14_fusion_and_ensemble_variants_are_queueable_models(self):
+        tokens, mask = make_tokens()
+        for variant in (
+            MULTISCALE_SUBJET_VARIANT_LATE_FUSION,
+            MULTISCALE_SUBJET_VARIANT_CLS_FUSION,
+            MULTISCALE_SUBJET_VARIANT_CROSS_ATTENTION_FUSION,
+        ):
+            model = MultiScaleSubjetPartClassifier(
+                small_config(variant, residual_gamma_init=0.0),
+                part_model=DummyReferencePart(num_classes=2),
+            )
+            output = model(tokens, mask, return_outputs=True)
+            self.assertEqual(tuple(output.logits.shape), (2, 2))
+            self.assertTrue(output.summary()["uses_reference_part_backbone"])
+            self.assertTrue(output.summary()["uses_subjet_branch_logits"])
+
+        ensemble = MultiScaleSubjetPartClassifier(
+            small_config(MULTISCALE_SUBJET_VARIANT_TWO_HLT_PART_ENSEMBLE),
+            part_model=DummyReferencePart(num_classes=2),
+        )
+        output = ensemble(tokens, mask, return_outputs=True)
+        self.assertEqual(tuple(output.logits.shape), (2, 2))
+        self.assertTrue(output.summary()["uses_two_part_ensemble"])
+        self.assertIsNone(output.token_output)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-REQUESTED_VARIANT="${1:?Usage: sbatch run_train_multiscale_subjet_part_tagger.sh <hlt_part_baseline|multiscale_subjet_residual_part_adapter|pure_perceiver_latent_control|part_plus_random_subjet_control|subjet_branch_only>}"
+REQUESTED_PROFILE="${1:?Usage: sbatch run_train_multiscale_subjet_part_tagger.sh <profile-or-variant>}"
 
 : "${MULTISCALE_SUBJET_PART_ROOT:=${OUTPUT_ROOT}/multiscale_subjet_part_qcd_hgg_binary_hlt0p6}"
 : "${MULTISCALE_SUBJET_PART_TAGGER_ROOT:=${MULTISCALE_SUBJET_PART_ROOT}/taggers}"
@@ -48,6 +48,8 @@ REQUESTED_VARIANT="${1:?Usage: sbatch run_train_multiscale_subjet_part_tagger.sh
 : "${MULTISCALE_SUBJET_PART_TOKEN_HIDDEN_DIM:=256}"
 : "${MULTISCALE_SUBJET_PART_ASSIGNMENT_EMBED_DIM:=64}"
 : "${MULTISCALE_SUBJET_PART_ASSIGNMENT_HIDDEN_DIM:=128}"
+: "${MULTISCALE_SUBJET_PART_ASSIGNMENT_TEMPERATURE:=1.0}"
+: "${MULTISCALE_SUBJET_PART_ASSIGNMENT_GEOMETRY_BIAS_STRENGTH:=2.0}"
 : "${MULTISCALE_SUBJET_PART_TRANSFORMER_LAYERS:=2}"
 : "${MULTISCALE_SUBJET_PART_TRANSFORMER_HEADS:=4}"
 : "${MULTISCALE_SUBJET_PART_TRANSFORMER_FFN_DIM:=256}"
@@ -59,7 +61,11 @@ REQUESTED_VARIANT="${1:?Usage: sbatch run_train_multiscale_subjet_part_tagger.sh
 : "${MULTISCALE_SUBJET_PART_RESIDUAL_GAMMA_INIT:=0.0}"
 : "${MULTISCALE_SUBJET_PART_DROPOUT:=0.05}"
 : "${MULTISCALE_SUBJET_PART_ATTENTION_DROPOUT:=0.05}"
+: "${MULTISCALE_SUBJET_PART_SCALE_PROFILE:=default}"
+: "${MULTISCALE_SUBJET_PART_DISABLE_ASSIGNMENT_SCALE_EMBEDDING:=0}"
+: "${MULTISCALE_SUBJET_PART_DISABLE_TOKEN_SCALE_EMBEDDING:=0}"
 : "${MULTISCALE_SUBJET_PART_DISABLE_SUBJET_PAIR_BIAS:=0}"
+: "${MULTISCALE_SUBJET_PART_DISABLE_SCALE_PAIR_EMBEDDING:=0}"
 : "${MULTISCALE_SUBJET_PART_RANDOM_CONTROL_SEED:=2027}"
 : "${MULTISCALE_SUBJET_PART_WEIGHT_THRESHOLD:=0.0}"
 : "${MULTISCALE_SUBJET_PART_NO_AMP:=0}"
@@ -69,16 +75,77 @@ REQUESTED_VARIANT="${1:?Usage: sbatch run_train_multiscale_subjet_part_tagger.sh
 : "${MULTISCALE_SUBJET_PART_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6}"
 : "${MULTISCALE_SUBJET_PART_CONFIRM_FINAL_TEST:=1}"
 
-case "${REQUESTED_VARIANT}" in
-  hlt_part_baseline|multiscale_subjet_residual_part_adapter|pure_perceiver_latent_control|part_plus_random_subjet_control|subjet_branch_only)
+MODEL_VARIANT="${REQUESTED_PROFILE}"
+case "${REQUESTED_PROFILE}" in
+  hlt_part_baseline|multiscale_subjet_residual_part_adapter|pure_perceiver_latent_control|part_plus_random_subjet_control|subjet_branch_only|part_plus_subjet_late_fusion|part_plus_subjet_cls_fusion|part_plus_subjet_cross_attention_fusion|two_hlt_part_ensemble_control)
+    ;;
+  main|primary|residual_adapter)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    ;;
+  no_scale_bias)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_DISABLE_ASSIGNMENT_SCALE_EMBEDDING=1
+    MULTISCALE_SUBJET_PART_DISABLE_TOKEN_SCALE_EMBEDDING=1
+    MULTISCALE_SUBJET_PART_DISABLE_SCALE_PAIR_EMBEDDING=1
+    ;;
+  one_scale|one_scale_medium)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_SCALE_PROFILE="one_scale_medium"
+    ;;
+  one_scale_small)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_SCALE_PROFILE="one_scale_small"
+    ;;
+  one_scale_large)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_SCALE_PROFILE="one_scale_large"
+    ;;
+  no_seeded_queries)
+    MODEL_VARIANT="pure_perceiver_latent_control"
+    ;;
+  no_subjet_transformer)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_TRANSFORMER_LAYERS=0
+    ;;
+  no_particle_readback)
+    MODEL_VARIANT="subjet_branch_only"
+    ;;
+  late_fusion)
+    MODEL_VARIANT="part_plus_subjet_late_fusion"
+    ;;
+  cls_fusion)
+    MODEL_VARIANT="part_plus_subjet_cls_fusion"
+    ;;
+  cross_attention_branch_fusion)
+    MODEL_VARIANT="part_plus_subjet_cross_attention_fusion"
+    ;;
+  few_subjets)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_SCALE_PROFILE="few_subjets"
+    ;;
+  many_subjets)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_SCALE_PROFILE="many_subjets"
+    ;;
+  physics_bias_removed)
+    MODEL_VARIANT="multiscale_subjet_residual_part_adapter"
+    MULTISCALE_SUBJET_PART_DISABLE_SUBJET_PAIR_BIAS=1
+    MULTISCALE_SUBJET_PART_ASSIGNMENT_GEOMETRY_BIAS_STRENGTH=0.0
+    ;;
+  large_hlt_part_control)
+    MODEL_VARIANT="hlt_part_baseline"
+    MULTISCALE_SUBJET_PART_MODEL_SIZE="large"
+    ;;
+  two_hlt_part_ensemble|two_hlt_part_ensemble_control)
+    MODEL_VARIANT="two_hlt_part_ensemble_control"
     ;;
   *)
-    echo "Unknown multiscale subjet variant: ${REQUESTED_VARIANT}" >&2
+    echo "Unknown multiscale subjet profile/variant: ${REQUESTED_PROFILE}" >&2
     exit 2
     ;;
 esac
 
-OUTPUT_DIR="${MULTISCALE_SUBJET_PART_TAGGER_ROOT}/${REQUESTED_VARIANT}"
+OUTPUT_DIR="${MULTISCALE_SUBJET_PART_TAGGER_ROOT}/${REQUESTED_PROFILE}"
 
 fresh_setup "$@"
 fresh_require_file "scripts/train_multiscale_subjet_part_tagger.py"
@@ -92,7 +159,8 @@ cmd=(
   "${PYTHON_BIN}" "-u" "scripts/train_multiscale_subjet_part_tagger.py"
   --output-dir "${OUTPUT_DIR}"
   --hlt-cache-dir "${MULTISCALE_SUBJET_PART_HLT_CACHE_DIR}"
-  --variant "${REQUESTED_VARIANT}"
+  --variant "${MODEL_VARIANT}"
+  --ablation-profile "${REQUESTED_PROFILE}"
   --train-split model_train
   --val-split model_val
   --stack-val-split stack_val
@@ -120,6 +188,8 @@ cmd=(
   --token-hidden-dim "${MULTISCALE_SUBJET_PART_TOKEN_HIDDEN_DIM}"
   --assignment-embed-dim "${MULTISCALE_SUBJET_PART_ASSIGNMENT_EMBED_DIM}"
   --assignment-hidden-dim "${MULTISCALE_SUBJET_PART_ASSIGNMENT_HIDDEN_DIM}"
+  --assignment-temperature "${MULTISCALE_SUBJET_PART_ASSIGNMENT_TEMPERATURE}"
+  --assignment-geometry-bias-strength "${MULTISCALE_SUBJET_PART_ASSIGNMENT_GEOMETRY_BIAS_STRENGTH}"
   --transformer-layers "${MULTISCALE_SUBJET_PART_TRANSFORMER_LAYERS}"
   --transformer-heads "${MULTISCALE_SUBJET_PART_TRANSFORMER_HEADS}"
   --transformer-ffn-dim "${MULTISCALE_SUBJET_PART_TRANSFORMER_FFN_DIM}"
@@ -131,6 +201,7 @@ cmd=(
   --residual-gamma-init "${MULTISCALE_SUBJET_PART_RESIDUAL_GAMMA_INIT}"
   --dropout "${MULTISCALE_SUBJET_PART_DROPOUT}"
   --attention-dropout "${MULTISCALE_SUBJET_PART_ATTENTION_DROPOUT}"
+  --scale-profile "${MULTISCALE_SUBJET_PART_SCALE_PROFILE}"
   --random-control-seed "${MULTISCALE_SUBJET_PART_RANDOM_CONTROL_SEED}"
   --weight-threshold "${MULTISCALE_SUBJET_PART_WEIGHT_THRESHOLD}"
 )
@@ -139,13 +210,16 @@ fresh_append_flag_if_enabled cmd --no-amp "${MULTISCALE_SUBJET_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${MULTISCALE_SUBJET_PART_COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --skip-hlt-hash-check "${MULTISCALE_SUBJET_PART_SKIP_HLT_HASH_CHECK}"
 fresh_append_flag_if_enabled cmd --skip-hlt-params-check "${MULTISCALE_SUBJET_PART_SKIP_HLT_PARAMS_CHECK}"
+fresh_append_flag_if_enabled cmd --disable-assignment-scale-embedding "${MULTISCALE_SUBJET_PART_DISABLE_ASSIGNMENT_SCALE_EMBEDDING}"
+fresh_append_flag_if_enabled cmd --disable-token-scale-embedding "${MULTISCALE_SUBJET_PART_DISABLE_TOKEN_SCALE_EMBEDDING}"
 fresh_append_flag_if_enabled cmd --disable-subjet-pair-bias "${MULTISCALE_SUBJET_PART_DISABLE_SUBJET_PAIR_BIAS}"
+fresh_append_flag_if_enabled cmd --disable-scale-pair-embedding "${MULTISCALE_SUBJET_PART_DISABLE_SCALE_PAIR_EMBEDDING}"
 fresh_append_optional_arg cmd --max-train-batches "${MULTISCALE_SUBJET_PART_MAX_TRAIN_BATCHES}"
 fresh_append_optional_arg cmd --max-val-batches "${MULTISCALE_SUBJET_PART_MAX_VAL_BATCHES}"
 fresh_append_optional_arg cmd --max-stack-val-batches "${MULTISCALE_SUBJET_PART_MAX_STACK_VAL_BATCHES}"
 fresh_append_optional_arg cmd --max-final-test-batches "${MULTISCALE_SUBJET_PART_MAX_FINAL_TEST_BATCHES}"
 
-fresh_write_run_config "${OUTPUT_DIR}" "multiscale_subjet_part_${REQUESTED_VARIANT}" "${cmd[@]}"
+fresh_write_run_config "${OUTPUT_DIR}" "multiscale_subjet_part_${REQUESTED_PROFILE}" "${cmd[@]}"
 fresh_run "${cmd[@]}"
 
 if ! fresh_is_dry_run; then

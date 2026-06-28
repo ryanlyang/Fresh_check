@@ -70,6 +70,14 @@ MULTISCALE_SUBJET_DEFAULT_SCALE_SPECS: tuple[SubjetScaleSpec, ...] = (
     SubjetScaleSpec("medium", 8, 0.12, 0.25, "candidate prongs and proto-subjets"),
     SubjetScaleSpec("large", 4, 0.25, 0.50, "broad radiation regions and jet-scale context"),
 )
+MULTISCALE_SUBJET_SCALE_PROFILES = (
+    "default",
+    "one_scale_small",
+    "one_scale_medium",
+    "one_scale_large",
+    "few_subjets",
+    "many_subjets",
+)
 
 
 @dataclass(frozen=True)
@@ -540,10 +548,59 @@ def build_canonical_part_inputs(
     )
 
 
+def multiscale_subjet_scale_specs_for_profile(profile: str = "default") -> tuple[SubjetScaleSpec, ...]:
+    """Return named Step 14 scale layouts for serious and ablation runs."""
+
+    clean = str(profile).strip().lower().replace("-", "_")
+    aliases = {
+        "default": "default",
+        "multi": "default",
+        "multiscale": "default",
+        "three_scale": "default",
+        "small_only": "one_scale_small",
+        "one_scale_small": "one_scale_small",
+        "medium_only": "one_scale_medium",
+        "one_scale": "one_scale_medium",
+        "one_scale_medium": "one_scale_medium",
+        "large_only": "one_scale_large",
+        "one_scale_large": "one_scale_large",
+        "few": "few_subjets",
+        "fewer": "few_subjets",
+        "few_subjets": "few_subjets",
+        "many": "many_subjets",
+        "more": "many_subjets",
+        "many_subjets": "many_subjets",
+    }
+    if clean not in aliases:
+        raise ValueError(f"unknown multiscale subjet scale profile {profile!r}; expected one of {MULTISCALE_SUBJET_SCALE_PROFILES}")
+    clean = aliases[clean]
+    if clean == "default":
+        return tuple(MULTISCALE_SUBJET_DEFAULT_SCALE_SPECS)
+    if clean == "one_scale_small":
+        return (SubjetScaleSpec("small", 20, 0.05, 0.12, "single-scale tight local subjet ablation"),)
+    if clean == "one_scale_medium":
+        return (SubjetScaleSpec("medium", 20, 0.12, 0.25, "single-scale proto-subjet ablation"),)
+    if clean == "one_scale_large":
+        return (SubjetScaleSpec("large", 20, 0.25, 0.50, "single-scale broad-context ablation"),)
+    if clean == "few_subjets":
+        return (
+            SubjetScaleSpec("small", 4, 0.05, 0.12, "low-token tight local cores"),
+            SubjetScaleSpec("medium", 4, 0.12, 0.25, "low-token proto-subjets"),
+            SubjetScaleSpec("large", 2, 0.25, 0.50, "low-token broad context"),
+        )
+    if clean == "many_subjets":
+        return (
+            SubjetScaleSpec("small", 16, 0.05, 0.12, "high-token tight local cores"),
+            SubjetScaleSpec("medium", 16, 0.12, 0.25, "high-token proto-subjets"),
+            SubjetScaleSpec("large", 8, 0.25, 0.50, "high-token broad context"),
+        )
+    raise AssertionError(f"unhandled scale profile {clean!r}")
+
+
 def default_subjet_scale_specs() -> tuple[SubjetScaleSpec, ...]:
     """Return the default small/medium/large scale metadata."""
 
-    return tuple(MULTISCALE_SUBJET_DEFAULT_SCALE_SPECS)
+    return multiscale_subjet_scale_specs_for_profile("default")
 
 
 def scale_radius_bounds(scale_specs: tuple[SubjetScaleSpec, ...] | None = None) -> dict[str, tuple[float, float]]:

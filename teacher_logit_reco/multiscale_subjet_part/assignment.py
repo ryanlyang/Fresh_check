@@ -73,6 +73,7 @@ class SoftSubjetAssignmentConfig:
     hidden_dim: int = 128
     temperature: float = 1.0
     geometry_bias_strength: float = 2.0
+    use_scale_embedding: bool = True
     radius_floor: float = 0.03
     dead_token_weight_threshold: float = 1.0e-3
     seed_config: SubjetSeedBuilderConfig | Mapping[str, Any] | None = None
@@ -118,6 +119,7 @@ class SoftSubjetAssignmentConfig:
         object.__setattr__(self, "hidden_dim", hidden_dim)
         object.__setattr__(self, "temperature", temperature)
         object.__setattr__(self, "geometry_bias_strength", geometry_bias_strength)
+        object.__setattr__(self, "use_scale_embedding", bool(self.use_scale_embedding))
         object.__setattr__(self, "radius_floor", radius_floor)
         object.__setattr__(self, "dead_token_weight_threshold", dead_token_weight_threshold)
         object.__setattr__(self, "seed_config", seed_config)
@@ -284,7 +286,10 @@ class SoftSubjetAssignment(_ModuleBase):
         torch = require_torch()
         batch_size = int(prepared.tokens.shape[0])
         base_queries = self.learned_queries[None, :, :].expand(batch_size, -1, -1)
-        scale_queries = self.scale_embedding(self.scale_index.to(device=prepared.tokens.device))[None, :, :]
+        if bool(self.config.use_scale_embedding):
+            scale_queries = self.scale_embedding(self.scale_index.to(device=prepared.tokens.device))[None, :, :]
+        else:
+            scale_queries = base_queries.new_zeros(base_queries.shape)
         if mode == MULTISCALE_SUBJET_ASSIGNMENT_QUERY_LEARNED:
             subjet_mask = prepared.mask.any(dim=1, keepdim=True).expand(batch_size, int(self.config.total_num_subjets))
             return base_queries + scale_queries, subjet_mask, None
@@ -388,6 +393,7 @@ class SoftSubjetAssignment(_ModuleBase):
             "query_mode": mode,
             "seeded_default": bool(self.config.query_mode == MULTISCALE_SUBJET_ASSIGNMENT_QUERY_SEEDED),
             "geometry_bias_applied": bool(mode == MULTISCALE_SUBJET_ASSIGNMENT_QUERY_SEEDED and seed_output is not None),
+            "use_scale_embedding": bool(self.config.use_scale_embedding),
             "valid_subjet_fraction": float(valid_subjets.float().mean().detach().cpu().item()),
             "entropy_mean": float((entropy * valid_subjets.float()).sum().detach().cpu().item() / float(valid_count.detach().cpu().item())),
             "max_weight_mean": float((max_weight * valid_subjets.float()).sum().detach().cpu().item() / float(valid_count.detach().cpu().item())),

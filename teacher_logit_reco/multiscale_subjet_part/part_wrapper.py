@@ -55,8 +55,8 @@ class MultiScaleSubjetReferencePartConfig:
                 raise ValueError(f"{name} must be positive")
             object.__setattr__(self, name, value)
         model_size = str(self.model_size)
-        if model_size not in {"base", "tiny"}:
-            raise ValueError("model_size must be 'base' or 'tiny'")
+        if model_size not in {"base", "tiny", "large"}:
+            raise ValueError("model_size must be 'base', 'tiny', or 'large'")
         weight_threshold = float(self.weight_threshold)
         if weight_threshold < 0.0:
             raise ValueError("weight_threshold must be non-negative")
