@@ -127,6 +127,7 @@ SUBMITTERS = [
     "submit_subtoken_part_10class_experiment.sh",
     "submit_local_graph_qcd_hgg_binary_experiment.sh",
     "submit_local_graph_step10_first_serious_run.sh",
+    "submit_local_graph_step10_3m1m1m_reuse_cache_with_fusion.sh",
     "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
@@ -1511,6 +1512,10 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${train_dep}"', submitter)
         self.assertIn("local_graph_train: ${#train_job_ids[@]}", submitter)
         self.assertIn("final_report_json", submitter)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_SUBMIT_SCORE_FUSION:=0", submitter)
+        self.assertIn("run_local_graph_score_fusion.sh", submitter)
+        self.assertIn("localgraph_score_fusion", submitter)
+        self.assertIn("score_fusion_report", submitter)
 
     def test_local_graph_part_step10_wrapper_sets_first_serious_run_defaults(self):
         wrapper = self.read("submit_local_graph_step10_first_serious_run.sh")
@@ -1530,6 +1535,22 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LOCAL_GRAPH_PART_STEP10_SELECTION_METRIC:-fpr_at_signal_eff_0p50", wrapper)
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_TIME:-2-12:00:00", wrapper)
         self.assertIn("LOCAL_GRAPH_PART_STEP10_TRAIN_MEM:-160G", wrapper)
+        self.assertIn('bash "${SCRIPT_DIR}/submit_local_graph_qcd_hgg_binary_experiment.sh"', wrapper)
+
+    def test_local_graph_part_3m_wrapper_reuses_existing_cache_and_queues_fusion(self):
+        wrapper = self.read("submit_local_graph_step10_3m1m1m_reuse_cache_with_fusion.sh")
+
+        self.assertIn("qcd_hgg_hlt06_3m1m1m_full_20260628_194154", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_BUILD_BINARY_INPUTS=0", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_BINARY_MANIFEST_PATH", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_DIR", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_MODEL_TRAIN_SIZE:-3000000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_MODEL_VAL_SIZE:-1000000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_STACK_TRAIN_SIZE:-3000000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_STACK_VAL_SIZE:-1000000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_FINAL_TEST_SIZE:-1000000", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_QCD_HGG_SUBMIT_SCORE_FUSION=1", wrapper)
+        self.assertIn("LOCAL_GRAPH_PART_3M_SCORE_FUSION_TIME:-1-00:00:00", wrapper)
         self.assertIn('bash "${SCRIPT_DIR}/submit_local_graph_qcd_hgg_binary_experiment.sh"', wrapper)
 
     def test_multiscale_subjet_part_submitter_queues_step12_protocol(self):

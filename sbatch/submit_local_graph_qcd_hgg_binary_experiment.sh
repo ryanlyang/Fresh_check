@@ -43,6 +43,12 @@ LOCAL_GRAPH_PART_QCD_HGG_HLT_TAG="${LOCAL_GRAPH_PART_QCD_HGG_HLT_DEGRADATION_STR
 : "${LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_TIME:=1-00:00:00}"
 : "${LOCAL_GRAPH_PART_QCD_HGG_TRAIN_TIME:=2-12:00:00}"
 : "${LOCAL_GRAPH_PART_QCD_HGG_REPORT_TIME:=02:00:00}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SUBMIT_SCORE_FUSION:=0}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_DIR:=${LOCAL_GRAPH_PART_QCD_HGG_ROOT}/score_fusion}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_MEM:=96G}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_TIME:=08:00:00}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_CPUS:=4}"
+: "${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_REQUIRE_ALL_VARIANTS:=1}"
 : "${LOCAL_GRAPH_PART_QCD_HGG_BINARY_MANIFEST_CPUS:=2}"
 : "${LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_CPUS:=4}"
 : "${LOCAL_GRAPH_PART_QCD_HGG_TRAIN_CPUS:=8}"
@@ -152,6 +158,7 @@ binary_manifest_jid=""
 binary_hlt_cache_jid=""
 baseline_jid=""
 final_report_jid=""
+score_fusion_jid=""
 train_job_ids=()
 input_dependency="${UPSTREAM_DEPENDENCY}"
 
@@ -268,6 +275,26 @@ final_report_jid="$(submit_job "localgraph_part_report" \
   "${SCRIPT_DIR}/run_write_local_graph_part_report.sh")"
 echo "submitted localgraph_part_report=${final_report_jid}"
 
+if fresh_bool_enabled "${LOCAL_GRAPH_PART_QCD_HGG_SUBMIT_SCORE_FUSION}"; then
+  export LOCAL_GRAPH_SCORE_FUSION_TAGGER_ROOT="${LOCAL_GRAPH_PART_TAGGER_ROOT}"
+  export LOCAL_GRAPH_SCORE_FUSION_HLT_CACHE_DIR="${LOCAL_GRAPH_PART_HLT_CACHE_DIR}"
+  export LOCAL_GRAPH_SCORE_FUSION_OUTPUT_DIR="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_DIR}"
+  export LOCAL_GRAPH_SCORE_FUSION_PREDICTION_DIR="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_DIR}/predictions"
+  export LOCAL_GRAPH_SCORE_FUSION_VARIANTS="${LOCAL_GRAPH_PART_QCD_HGG_VARIANTS}"
+  export LOCAL_GRAPH_SCORE_FUSION_PRIMARY_METRIC="${LOCAL_GRAPH_PART_QCD_HGG_SELECTION_METRIC}"
+  export LOCAL_GRAPH_SCORE_FUSION_MAX_STACK_JETS="${LOCAL_GRAPH_PART_QCD_HGG_STACK_VAL_SIZE}"
+  export LOCAL_GRAPH_SCORE_FUSION_MAX_FINAL_TEST_JETS="${LOCAL_GRAPH_PART_QCD_HGG_FINAL_TEST_SIZE}"
+  export LOCAL_GRAPH_SCORE_FUSION_REQUIRE_ALL_VARIANTS="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_REQUIRE_ALL_VARIANTS}"
+  export LOCAL_GRAPH_SCORE_FUSION_CONFIRM_FINAL_TEST=1
+  score_fusion_jid="$(submit_job "localgraph_score_fusion" \
+    --time="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_TIME}" \
+    --cpus-per-task="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_CPUS}" \
+    --mem="${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_MEM}" \
+    --dependency="afterok:${train_dep}" \
+    "${SCRIPT_DIR}/run_local_graph_score_fusion.sh")"
+  echo "submitted localgraph_score_fusion=${score_fusion_jid}"
+fi
+
 cat <<SUMMARY
 local_graph_part_qcd_hgg_binary_submission:
   task: QCD_vs_Hgg_local_graph_part
@@ -290,6 +317,7 @@ local_graph_part_qcd_hgg_binary_submission:
     binary_hlt_cache: $([[ -n "${binary_hlt_cache_jid}" ]] && echo 1 || echo 0)
     local_graph_train: ${#train_job_ids[@]}
     local_graph_report: 1
+    local_graph_score_fusion: $([[ -n "${score_fusion_jid}" ]] && echo 1 || echo 0)
     total_submitted: ${submit_count}
   requested_split_caps:
     model_train: ${LOCAL_GRAPH_PART_MODEL_TRAIN_SIZE}
@@ -310,6 +338,7 @@ local_graph_part_qcd_hgg_binary_submission:
     binary_hlt_cache: time=${LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_TIME} mem=${LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_MEM} cpus=${LOCAL_GRAPH_PART_QCD_HGG_BINARY_HLT_CACHE_CPUS}
     train: time=${LOCAL_GRAPH_PART_QCD_HGG_TRAIN_TIME} mem=${LOCAL_GRAPH_PART_QCD_HGG_TRAIN_MEM} cpus=${LOCAL_GRAPH_PART_QCD_HGG_TRAIN_CPUS}
     report: time=${LOCAL_GRAPH_PART_QCD_HGG_REPORT_TIME} mem=${LOCAL_GRAPH_PART_QCD_HGG_REPORT_MEM} cpus=${LOCAL_GRAPH_PART_QCD_HGG_REPORT_CPUS}
+    score_fusion: time=${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_TIME} mem=${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_MEM} cpus=${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_CPUS}
   outputs:
     tagger_root: ${LOCAL_GRAPH_PART_TAGGER_ROOT}
     final_report_json: ${LOCAL_GRAPH_PART_FINAL_REPORT_DIR}/local_graph_part_report.json
@@ -317,5 +346,6 @@ local_graph_part_qcd_hgg_binary_submission:
     final_metric_table: ${LOCAL_GRAPH_PART_FINAL_REPORT_DIR}/metric_table.csv
     adapter_diagnostics: ${LOCAL_GRAPH_PART_FINAL_REPORT_DIR}/adapter_diagnostics.csv
     hlt_degradation_summary: ${LOCAL_GRAPH_PART_FINAL_REPORT_DIR}/hlt_degradation_summary.csv
+    score_fusion_report: ${LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_DIR}/fusion_report.json
     logs: ${PROJECT_DIR}/fresh_check_logs
 SUMMARY
