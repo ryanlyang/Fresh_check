@@ -17,6 +17,7 @@ from teacher_logit_reco.multiscale_subjet_part import (
     SubjetScaleSpec,
 )
 from teacher_logit_reco.multiscale_subjet_part import assignment as assignment_module
+from teacher_logit_reco.multiscale_subjet_part.tokens import _soft_four_vector_features
 
 torch = require_torch()
 
@@ -223,6 +224,20 @@ class MultiscaleSubjetPartStep5TokenBuilderTests(unittest.TestCase):
         mass_over_pt = float(output.soft_four_vector_features[0, 0, 6].item())
         self.assertLessEqual(abs(eta_feature), 5.0)
         self.assertLessEqual(mass_over_pt, 10.0)
+
+    def test_soft_four_vector_phi_has_finite_zero_pt_gradients(self):
+        soft_four_vectors = torch.zeros((1, 2, len(MULTISCALE_SUBJET_FOUR_VECTOR_NAMES)), dtype=torch.float32)
+        soft_four_vectors[:, :, 3] = 1.0
+        soft_four_vectors.requires_grad_(True)
+        estimated_pt_fraction = torch.zeros((1, 2), dtype=torch.float32)
+
+        features = _soft_four_vector_features(soft_four_vectors, estimated_pt_fraction, 1.0e-6)
+        loss = features.square().mean()
+        loss.backward()
+
+        self.assertTrue(bool(torch.isfinite(features).all()))
+        self.assertIsNotNone(soft_four_vectors.grad)
+        self.assertTrue(bool(torch.isfinite(soft_four_vectors.grad).all()))
 
     def test_pair_summaries_are_zero_when_only_one_particle_can_contribute(self):
         tokens = torch.zeros((1, 3, RAW_TOKEN_DIM), dtype=torch.float32)
