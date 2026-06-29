@@ -278,15 +278,16 @@ def build_multiscale_subjet_pair_features(
         )
 
     eps = float(pair_config.eps)
+    eps2 = eps * eps
     delta_eta = centers[:, :, None, 0] - centers[:, None, :, 0]
     delta_phi = wrap_delta_phi(centers[:, :, None, 1] - centers[:, None, :, 1])
-    delta_r = torch.sqrt(torch.clamp(delta_eta * delta_eta + delta_phi * delta_phi, min=0.0))
+    delta_r = torch.sqrt(torch.clamp(delta_eta * delta_eta + delta_phi * delta_phi, min=eps2))
 
     px = four_vectors[:, :, 0]
     py = four_vectors[:, :, 1]
     pz = four_vectors[:, :, 2]
     energy = torch.clamp(four_vectors[:, :, 3], min=eps)
-    pt = torch.sqrt(torch.clamp(px * px + py * py, min=0.0))
+    pt = torch.sqrt(torch.clamp(px * px + py * py, min=eps2))
 
     pair_px = px[:, :, None] + px[:, None, :]
     pair_py = py[:, :, None] + py[:, None, :]

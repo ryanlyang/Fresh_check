@@ -180,6 +180,30 @@ class MultiscaleSubjetPartStep9ClassifierTests(unittest.TestCase):
         self.assertIsNone(output.readback_output)
         self.assertIsNotNone(output.subjet_branch_attention)
 
+    def test_subjet_branch_only_supervised_step_has_finite_gradients(self):
+        tokens, mask = make_tokens()
+        model = MultiScaleSubjetPartClassifier(small_config(MULTISCALE_SUBJET_VARIANT_SUBJET_BRANCH_ONLY))
+        labels = torch.tensor([0, 1], dtype=torch.long)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+        criterion = torch.nn.CrossEntropyLoss()
+
+        with torch.no_grad():
+            before = model(tokens, mask).detach().clone()
+        optimizer.zero_grad(set_to_none=True)
+        loss = criterion(model(tokens, mask), labels)
+        loss.backward()
+        bad_grad_names = [
+            name
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
+        ]
+        self.assertEqual(bad_grad_names, [])
+        optimizer.step()
+        with torch.no_grad():
+            after = model(tokens, mask).detach()
+
+        self.assertGreater(float((after - before).abs().sum().item()), 0.0)
+
     def test_pure_perceiver_variant_uses_learned_queries(self):
         tokens, mask = make_tokens()
         model = MultiScaleSubjetPartClassifier(

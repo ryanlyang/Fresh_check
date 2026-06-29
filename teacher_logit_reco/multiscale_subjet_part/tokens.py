@@ -173,9 +173,10 @@ def _soft_four_vector_features(soft_four_vectors: Any, estimated_pt_fraction: An
     py = soft_four_vectors[:, :, 1]
     pz = soft_four_vectors[:, :, 2]
     energy = torch.clamp(soft_four_vectors[:, :, 3], min=0.0)
-    pt = torch.sqrt(torch.clamp(px * px + py * py, min=0.0))
+    eps2 = float(eps) * float(eps)
+    pt = torch.sqrt(torch.clamp(px * px + py * py, min=eps2))
     p2 = px * px + py * py + pz * pz
-    mass2 = torch.clamp(energy * energy - p2, min=0.0)
+    mass2 = torch.clamp(energy * energy - p2, min=eps2)
     mass = torch.sqrt(mass2)
     eta = torch.asinh(pz / torch.clamp(pt, min=float(eps)))
     eta = torch.where(pt > float(eps), eta, torch.zeros_like(eta))
@@ -217,7 +218,7 @@ def _particle_pair_observables(prepared: Any, eps: float) -> Any:
     pair_energy = energy_i + energy_j
     pair_mass2 = torch.clamp(
         pair_energy * pair_energy - pair_px * pair_px - pair_py * pair_py - pair_pz * pair_pz,
-        min=0.0,
+        min=float(eps) * float(eps),
     )
     pair_mass = torch.sqrt(pair_mass2)
     min_pt = torch.minimum(pt_i, pt_j)
@@ -262,7 +263,7 @@ def _weighted_center_delta_r_rms(weights: Any, centers: Any, prepared: Any, subj
     delta_r2 = delta_eta * delta_eta + delta_phi * delta_phi
     weighted = weights * prepared.mask[:, None, :].to(dtype=weights.dtype)
     denom = torch.clamp(weighted.sum(dim=-1), min=float(eps))
-    rms = torch.sqrt(torch.clamp((weighted * delta_r2).sum(dim=-1) / denom, min=0.0))
+    rms = torch.sqrt(torch.clamp((weighted * delta_r2).sum(dim=-1) / denom, min=float(eps) * float(eps)))
     return torch.where(subjet_mask, rms, torch.zeros_like(rms))
 
 
