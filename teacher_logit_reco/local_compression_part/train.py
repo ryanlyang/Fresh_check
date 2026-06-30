@@ -43,6 +43,7 @@ from .config import (
     LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
     LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+    LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL,
     LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
     LOCAL_COMPRESSION_VARIANTS,
     LocalCompressionFeatureConfig,
@@ -286,9 +287,60 @@ def _move_batch_to_device(batch: Mapping[str, Any], device) -> dict[str, Any]:
     return moved
 
 
-def _metrics_without_prediction_arrays(metrics: Mapping[str, Any]) -> dict[str, Any]:
+def _signal_scores_from_logits(logits: np.ndarray) -> np.ndarray:
+    logits = np.asarray(logits, dtype=np.float64)
+    if int(logits.ndim) != 2 or int(logits.shape[1]) < 2:
+        raise ValueError(f"logits must have shape [jets, classes>=2], got {tuple(logits.shape)}")
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    probs = exp / np.clip(exp.sum(axis=1, keepdims=True), 1.0e-12, None)
+    return probs[:, 1].astype(np.float32)
+
+
+def _jsonable_prediction_arrays(arrays: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(arrays, Mapping):
+        return None
+    labels = arrays.get("labels")
+    if labels is None:
+        return None
+    labels_np = np.asarray(labels, dtype=np.int64)
+    if "scores" in arrays and arrays.get("scores") is not None:
+        scores_np = np.asarray(arrays["scores"], dtype=np.float32)
+    elif "logits" in arrays and arrays.get("logits") is not None:
+        scores_np = _signal_scores_from_logits(np.asarray(arrays["logits"], dtype=np.float32))
+    else:
+        return None
+    if int(labels_np.shape[0]) != int(scores_np.shape[0]):
+        raise ValueError("prediction arrays have mismatched labels/scores lengths")
+    output: dict[str, Any] = {
+        "labels": labels_np.astype(np.int64).tolist(),
+        "scores": scores_np.astype(np.float32).tolist(),
+        "signal_label": str(LOCAL_COMPRESSION_SIGNAL_LABEL),
+        "signal_label_index": 1,
+        "background_label": str(LOCAL_COMPRESSION_BACKGROUND_LABEL),
+        "background_label_index": 0,
+        "score_name": "p_Hgg_from_2logit_softmax",
+    }
+    preds = arrays.get("preds")
+    if preds is not None:
+        preds_np = np.asarray(preds, dtype=np.int64)
+        if int(preds_np.shape[0]) == int(labels_np.shape[0]):
+            output["preds"] = preds_np.astype(np.int64).tolist()
+    output["n_jets"] = int(labels_np.shape[0])
+    return output
+
+
+def _metrics_without_prediction_arrays(
+    metrics: Mapping[str, Any],
+    *,
+    keep_prediction_arrays: bool = False,
+) -> dict[str, Any]:
     clean = dict(metrics)
-    clean.pop("_prediction_arrays", None)
+    arrays = clean.pop("_prediction_arrays", None)
+    if bool(keep_prediction_arrays):
+        json_arrays = _jsonable_prediction_arrays(arrays)
+        if json_arrays is not None:
+            clean["prediction_arrays"] = json_arrays
     return clean
 
 
@@ -299,19 +351,39 @@ def _write_epoch_metrics_csv(path: Path, curves: Sequence[Mapping[str, Any]]) ->
         train = row.get("train", {}) if isinstance(row.get("train"), Mapping) else {}
         val = row.get("model_val", {}) if isinstance(row.get("model_val"), Mapping) else {}
         val_binary = val.get("binary_metrics") if isinstance(val.get("binary_metrics"), Mapping) else {}
-        rows.append(
-            {
-                "epoch": row.get("epoch"),
-                "train_loss": train.get("loss"),
-                "train_accuracy": train.get("accuracy"),
-                "model_val_loss": val.get("loss"),
-                "model_val_accuracy": val.get("accuracy"),
-                "model_val_auc": val_binary.get("auc"),
-                "model_val_fpr_at_signal_eff_0p50": val_binary.get("fpr_at_signal_eff_0p50"),
-            }
-        )
+        output = {
+            "epoch": row.get("epoch"),
+            "train_loss": train.get("loss"),
+            "train_ce_loss": train.get("ce_loss"),
+            "train_delta_l2_loss": train.get("delta_l2_loss"),
+            "train_delta_l2_mean": train.get("delta_l2_mean"),
+            "train_accuracy": train.get("accuracy"),
+            "model_val_loss": val.get("loss"),
+            "model_val_ce_loss": val.get("ce_loss"),
+            "model_val_delta_l2_loss": val.get("delta_l2_loss"),
+            "model_val_delta_l2_mean": val.get("delta_l2_mean"),
+            "model_val_accuracy": val.get("accuracy"),
+            "model_val_auc": val_binary.get("auc"),
+            "model_val_fpr_at_signal_eff_0p50": val_binary.get("fpr_at_signal_eff_0p50"),
+        }
+        for prefix, metrics in (("train", train), ("model_val", val)):
+            diagnostics = metrics.get("diagnostics") if isinstance(metrics.get("diagnostics"), Mapping) else {}
+            for key, value in sorted(diagnostics.items()):
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(numeric):
+                    safe_key = str(key).replace(".", "_").replace("/", "_")
+                    output[f"{prefix}_diag_{safe_key}"] = numeric
+        rows.append(output)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=tuple(rows[0].keys()) if rows else ("epoch",))
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        writer = csv.DictWriter(handle, fieldnames=tuple(fieldnames) if fieldnames else ("epoch",), extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -396,6 +468,11 @@ class LocalCompressionTaggerTrainConfig:
         self.variant = normalize_local_compression_variant(self.variant)
         if self.variant not in LOCAL_COMPRESSION_VARIANTS:
             raise ValueError(f"unknown local-compression variant {self.variant!r}")
+        if self.variant == LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL:
+            raise ValueError(
+                "lc_larger_hlt_part_control is documented as an optional control but is not implemented "
+                "as a larger canonical ParT backbone yet; remove it from submitted Step 13 variants"
+            )
         self.pool_mode = normalize_local_compression_pool_mode(self.pool_mode)
         gate_mode = self.gate_mode
         if gate_mode is None:
@@ -493,6 +570,9 @@ def load_baseline_checkpoint_into_part_model(
     device=None,
     require: bool = True,
     expected_split_manifest_hash: str | None = None,
+    expected_label_names: Sequence[str] = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
+    expected_label_filter: Sequence[int] = LOCAL_COMPRESSION_BINARY_LABEL_FILTER,
+    expected_num_classes: int = 2,
 ) -> dict[str, Any]:
     """Load a frozen HLT ParT checkpoint into ``model.part_model`` only."""
 
@@ -503,7 +583,10 @@ def load_baseline_checkpoint_into_part_model(
         expected_selection_metric=LOCAL_COMPRESSION_PRIMARY_METRIC,
         expected_hlt_degradation_strength=LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
         expected_split_manifest_hash=expected_split_manifest_hash,
-        require_metadata=False,
+        expected_label_names=tuple(expected_label_names),
+        expected_label_filter=tuple(expected_label_filter),
+        expected_num_classes=int(expected_num_classes),
+        require_metadata=True,
         require_all_part_keys=bool(require),
     )
     return report.to_dict()
@@ -563,6 +646,90 @@ def _evaluate_tagger_dataset(
     )
 
 
+def _uncompiled_model(model):
+    return getattr(model, "_orig_mod", model)
+
+
+def _delta_l2_weight_for_model(model) -> float:
+    base_model = _uncompiled_model(model)
+    config = getattr(base_model, "config", None)
+    feature_config = getattr(config, "feature_config", None)
+    return _finite_float(getattr(feature_config, "delta_l2_weight", 0.0), default=0.0)
+
+
+def _delta_l2_mean_from_output(output) -> Any:
+    torch = require_torch()
+    delta_output = getattr(output, "delta_output", None)
+    if delta_output is None:
+        return torch.zeros((), device=output.logits.device, dtype=output.logits.dtype)
+    delta = delta_output.delta_F_rows
+    mask = delta_output.mask.bool()
+    if not bool(mask.any().detach().cpu().item()):
+        return delta.new_zeros(())
+    return delta.pow(2).sum(dim=-1)[mask].mean()
+
+
+def _tensor_quantile(value, q: float):
+    torch = require_torch()
+    if int(value.numel()) == 0:
+        return value.new_zeros(())
+    try:
+        return torch.quantile(value.float(), float(q))
+    except Exception:  # pragma: no cover - old torch fallback
+        flat = value.float().reshape(-1).sort().values
+        index = int(round((float(q) * max(0, int(flat.numel()) - 1))))
+        return flat[index]
+
+
+def _delta_diagnostics_from_output(model, output) -> dict[str, float]:
+    torch = require_torch()
+    delta_output = getattr(output, "delta_output", None)
+    if delta_output is None:
+        return {}
+    delta = delta_output.delta_F_rows
+    mask = delta_output.mask.bool()
+    if bool(mask.any().detach().cpu().item()):
+        active_delta = delta[mask]
+        abs_delta = active_delta.abs()
+        diagnostics: dict[str, float] = {
+            "delta_F_l2_mean": float(active_delta.pow(2).sum(dim=-1).mean().detach().cpu().item()),
+            "delta_F_abs_mean": float(abs_delta.mean().detach().cpu().item()),
+            "delta_F_abs_p90": float(_tensor_quantile(abs_delta, 0.90).detach().cpu().item()),
+            "delta_F_abs_max": float(abs_delta.max().detach().cpu().item()),
+        }
+        feature_names = tuple(getattr(delta_output, "feature_names", ()))
+        if feature_names and int(active_delta.shape[-1]) == len(feature_names):
+            per_feature_abs = abs_delta.detach()
+            for index, name in enumerate(feature_names):
+                safe_name = str(name).replace("/", "_")
+                column = per_feature_abs[:, index]
+                diagnostics[f"delta_feature_abs_mean.{safe_name}"] = float(column.mean().cpu().item())
+                diagnostics[f"delta_feature_abs_p90.{safe_name}"] = float(_tensor_quantile(column, 0.90).cpu().item())
+                diagnostics[f"delta_feature_abs_max.{safe_name}"] = float(column.max().cpu().item())
+    else:
+        diagnostics = {
+            "delta_F_l2_mean": 0.0,
+            "delta_F_abs_mean": 0.0,
+            "delta_F_abs_p90": 0.0,
+            "delta_F_abs_max": 0.0,
+        }
+    base_model = _uncompiled_model(model)
+    projector = getattr(getattr(base_model, "adapter", None), "projector", None)
+    final_projection = projector[-1] if projector is not None and len(projector) > 0 else None
+    if final_projection is not None and hasattr(final_projection, "weight"):
+        diagnostics["final_delta_projection_weight_norm"] = float(
+            final_projection.weight.detach().float().norm().cpu().item()
+        )
+        diagnostics["final_delta_projection_bias_norm"] = float(
+            final_projection.bias.detach().float().norm().cpu().item()
+        ) if getattr(final_projection, "bias", None) is not None else 0.0
+    return {
+        key: value
+        for key, value in diagnostics.items()
+        if isinstance(value, (int, float)) and np.isfinite(float(value))
+    }
+
+
 def run_local_compression_tagger_epoch(
     model,
     loader,
@@ -582,6 +749,9 @@ def run_local_compression_tagger_epoch(
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
+    total_ce_loss = 0.0
+    total_delta_l2_loss = 0.0
+    total_delta_l2_mean = 0.0
     total_correct = 0
     total_seen = 0
     collected_preds: list[np.ndarray] = []
@@ -589,6 +759,7 @@ def run_local_compression_tagger_epoch(
     collected_logits: list[np.ndarray] = []
     diagnostic_totals: dict[str, float] = {}
     diagnostic_weight_sum = 0.0
+    delta_l2_weight = float(_delta_l2_weight_for_model(model))
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
         for batch_index, batch in enumerate(loader):
@@ -599,14 +770,18 @@ def run_local_compression_tagger_epoch(
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=bool(amp and device.type == "cuda")):
+                need_full_output = bool(collect_diagnostics or training or delta_l2_weight > 0.0)
                 output = model(
                     batch["tokens"],
                     batch["mask"],
-                    return_outputs=bool(collect_diagnostics),
+                    return_outputs=need_full_output,
                     max_constits=int(batch["tokens"].shape[1]),
                 )
-                logits = output.logits if collect_diagnostics else output
-                loss = criterion(logits, labels)
+                logits = output.logits if need_full_output else output
+                ce_loss = criterion(logits, labels)
+                delta_l2_mean = _delta_l2_mean_from_output(output) if need_full_output else logits.new_zeros(())
+                delta_l2_loss = delta_l2_mean * float(delta_l2_weight)
+                loss = ce_loss + delta_l2_loss
             if training:
                 if scaler is not None and bool(scaler.is_enabled()):
                     scaler.scale(loss).backward()
@@ -623,6 +798,9 @@ def run_local_compression_tagger_epoch(
             preds = logits.detach().argmax(dim=1)
             batch_size = int(labels.numel())
             total_loss += float(loss.detach().item()) * batch_size
+            total_ce_loss += float(ce_loss.detach().item()) * batch_size
+            total_delta_l2_loss += float(delta_l2_loss.detach().item()) * batch_size
+            total_delta_l2_mean += float(delta_l2_mean.detach().item()) * batch_size
             total_correct += int((preds == labels).sum().item())
             total_seen += batch_size
             if collect_predictions:
@@ -631,6 +809,7 @@ def run_local_compression_tagger_epoch(
                 collected_logits.append(logits.detach().cpu().numpy().astype(np.float32))
             if collect_diagnostics:
                 diagnostics = _flatten_scalar_diagnostics(output.diagnostics())
+                diagnostics.update(_delta_diagnostics_from_output(model, output))
                 for key, value in diagnostics.items():
                     diagnostic_totals[key] = diagnostic_totals.get(key, 0.0) + float(value) * batch_size
                 diagnostic_weight_sum += float(batch_size)
@@ -638,6 +817,10 @@ def run_local_compression_tagger_epoch(
         return {"loss": float("nan"), "accuracy": 0.0, "n_jets": 0}
     metrics: dict[str, Any] = {
         "loss": total_loss / float(total_seen),
+        "ce_loss": total_ce_loss / float(total_seen),
+        "delta_l2_loss": total_delta_l2_loss / float(total_seen),
+        "delta_l2_mean": total_delta_l2_mean / float(total_seen),
+        "delta_l2_weight": float(delta_l2_weight),
         "accuracy": total_correct / float(total_seen),
         "n_jets": int(total_seen),
     }
@@ -645,6 +828,12 @@ def run_local_compression_tagger_epoch(
         preds_np = np.concatenate(collected_preds, axis=0) if collected_preds else np.asarray([], dtype=np.int64)
         labels_np = np.concatenate(collected_labels, axis=0) if collected_labels else np.asarray([], dtype=np.int64)
         logits_np = np.concatenate(collected_logits, axis=0) if collected_logits else None
+        if logits_np is not None:
+            metrics["_prediction_arrays"] = {
+                "preds": preds_np,
+                "labels": labels_np,
+                "logits": logits_np,
+            }
         metrics.update(
             classification_metrics_from_predictions(
                 preds=preds_np,
@@ -763,6 +952,9 @@ def train_local_compression_tagger(
         device=device,
         require=True,
         expected_split_manifest_hash=manifest_sha,
+        expected_label_names=tuple(config.label_names),
+        expected_label_filter=tuple(config.label_filter),
+        expected_num_classes=int(config.resolved_num_classes),
     )
     save_json(diagnostics_dir / "baseline_load_report.json", baseline_load_report)
     init_logit_sample_count = min(4, int(len(train_dataset)))
@@ -899,9 +1091,14 @@ def train_local_compression_tagger(
             "best_model_selection_score": float(val_score),
             "best_model_val_accuracy": _finite_float(best_val_metrics.get("accuracy"), default=-1.0),
             "best_model_val_loss": _finite_float(best_val_metrics.get("loss"), default=float("inf")),
-            "best_model_val_metrics": _metrics_without_prediction_arrays(best_val_metrics),
+            "best_model_val_metrics": _metrics_without_prediction_arrays(
+                best_val_metrics,
+                keep_prediction_arrays=True,
+            ),
             "stack_val_metrics": _metrics_without_prediction_arrays(stack_val_metrics),
-            "final_test_metrics": None if final_test_metrics is None else _metrics_without_prediction_arrays(final_test_metrics),
+            "final_test_metrics": None
+            if final_test_metrics is None
+            else _metrics_without_prediction_arrays(final_test_metrics, keep_prediction_arrays=True),
             "epochs_completed": 0,
             "final_epoch": curves[-1],
             "checkpoint": str(output_dir / "best_model_val.pt"),
@@ -926,6 +1123,9 @@ def train_local_compression_tagger(
             "baseline_checkpoint_split_manifest_hash": baseline_load_report.get(
                 "baseline_checkpoint_split_manifest_hash"
             ),
+            "baseline_checkpoint_label_names": baseline_load_report.get("baseline_checkpoint_label_names"),
+            "baseline_checkpoint_label_filter": baseline_load_report.get("baseline_checkpoint_label_filter"),
+            "baseline_checkpoint_num_classes": baseline_load_report.get("baseline_checkpoint_num_classes"),
             "part_config": baseline_load_report.get("part_config"),
             "adapter_config": checkpoint_model.to_config_dict().get("adapter_config"),
             "init_logit_diff_vs_baseline": init_logit_diff,
@@ -971,7 +1171,7 @@ def train_local_compression_tagger(
             grad_clip_norm=float(config.grad_clip_norm),
             max_batches=config.max_train_batches,
             collect_predictions=False,
-            collect_diagnostics=False,
+            collect_diagnostics=True,
             label_names=tuple(config.label_names),
         )
         val_metrics = run_local_compression_tagger_epoch(
@@ -982,7 +1182,7 @@ def train_local_compression_tagger(
             amp=False,
             max_batches=config.max_val_batches,
             collect_predictions=_selection_metric_requires_predictions(str(config.selection_metric)),
-            collect_diagnostics=False,
+            collect_diagnostics=True,
             label_names=tuple(config.label_names),
         )
         row = {
@@ -1105,9 +1305,14 @@ def train_local_compression_tagger(
         "best_model_selection_score": float(best_val_score),
         "best_model_val_accuracy": float(best_val_accuracy),
         "best_model_val_loss": float(best_val_loss),
-        "best_model_val_metrics": _metrics_without_prediction_arrays(best_val_metrics),
+        "best_model_val_metrics": _metrics_without_prediction_arrays(
+            best_val_metrics,
+            keep_prediction_arrays=True,
+        ),
         "stack_val_metrics": _metrics_without_prediction_arrays(stack_val_metrics),
-        "final_test_metrics": None if final_test_metrics is None else _metrics_without_prediction_arrays(final_test_metrics),
+        "final_test_metrics": None
+        if final_test_metrics is None
+        else _metrics_without_prediction_arrays(final_test_metrics, keep_prediction_arrays=True),
         "epochs_completed": len(curves),
         "final_epoch": curves[-1] if curves else None,
         "checkpoint": str(output_dir / "best_model_val.pt"),
@@ -1132,6 +1337,9 @@ def train_local_compression_tagger(
         "baseline_checkpoint_split_manifest_hash": baseline_load_report.get(
             "baseline_checkpoint_split_manifest_hash"
         ),
+        "baseline_checkpoint_label_names": baseline_load_report.get("baseline_checkpoint_label_names"),
+        "baseline_checkpoint_label_filter": baseline_load_report.get("baseline_checkpoint_label_filter"),
+        "baseline_checkpoint_num_classes": baseline_load_report.get("baseline_checkpoint_num_classes"),
         "part_config": baseline_load_report.get("part_config"),
         "adapter_config": best_model.to_config_dict().get("adapter_config"),
         "init_logit_diff_vs_baseline": init_logit_diff,

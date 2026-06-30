@@ -21,6 +21,7 @@ from teacher_logit_reco.local_compression_part.config import (  # noqa: E402
     LOCAL_COMPRESSION_GATE_MODES,
     LOCAL_COMPRESSION_POOL_MODES,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+    LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL,
     LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
     LOCAL_COMPRESSION_VARIANTS,
     normalize_local_compression_variant,
@@ -121,7 +122,12 @@ def parse_args() -> argparse.Namespace:
 def _normalize_variants(values: list[str], *, include_larger_control: bool) -> tuple[str, ...]:
     variants = [normalize_local_compression_variant(value) for value in values]
     if not include_larger_control:
-        variants = [variant for variant in variants if variant != "lc_larger_hlt_part_control"]
+        variants = [variant for variant in variants if variant != LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL]
+    if LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL in variants:
+        raise ValueError(
+            "lc_larger_hlt_part_control is not implemented as a true larger canonical ParT; "
+            "remove --include-larger-control until that control exists"
+        )
     output: list[str] = []
     seen: set[str] = set()
     for variant in variants:

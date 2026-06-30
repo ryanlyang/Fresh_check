@@ -13,6 +13,7 @@ from teacher_logit_reco.local_compression_part import (
     LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+    LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL,
     LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT,
     LOCAL_COMPRESSION_VARIANT_MLP_DELTA,
     LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
@@ -256,6 +257,25 @@ class LocalCompressionStep13VariantTests(unittest.TestCase):
                 variant=LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
                 gate_mode=LOCAL_COMPRESSION_GATE_NONE,
                 feature_config=LocalCompressionFeatureConfig(),
+            )
+
+    def test_larger_part_control_is_not_runnable_until_implemented(self):
+        with self.assertRaisesRegex(ValueError, "not implemented"):
+            LocalCompressionTaggerTrainConfig(
+                output_dir="out",
+                manifest_path="split_manifest.json.gz",
+                hlt_cache_dir="hlt_cache",
+                baseline_checkpoint="baseline.pt",
+                confirm_split_settings=True,
+                confirm_final_test=True,
+                variant=LOCAL_COMPRESSION_VARIANT_LARGER_HLT_PART_CONTROL,
+                label_names=("QCD", "Hgg"),
+                label_filter=(0, 1),
+                embed_dim=16,
+                local_heads=4,
+                context_heads=4,
+                dropout=0.0,
+                attention_dropout=0.0,
             )
 
 

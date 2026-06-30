@@ -12,14 +12,16 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier, require_torch
 
 from .config import (
+    LOCAL_COMPRESSION_BINARY_LABEL_FILTER,
     LOCAL_COMPRESSION_PART_CONTRACT,
     LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
     LOCAL_COMPRESSION_PRIMARY_METRIC,
+    LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
 )
 
 
@@ -139,6 +141,45 @@ def _coerce_str_or_none(value: Any) -> str | None:
     return text if text else None
 
 
+def _coerce_str_tuple_or_none(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return (value,)
+    try:
+        return tuple(str(item) for item in value)
+    except TypeError:
+        return None
+
+
+def _coerce_int_tuple_or_none(value: Any) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        values = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        try:
+            values = list(value)
+        except TypeError:
+            values = [value]
+    output: list[int] = []
+    try:
+        for item in values:
+            output.append(int(item))
+    except (TypeError, ValueError):
+        return None
+    return tuple(output)
+
+
+def _coerce_int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _sidecar_report_paths(checkpoint_path: Path, explicit: str | Path | None = None) -> tuple[Path, ...]:
     if explicit is not None:
         return (Path(explicit),)
@@ -205,12 +246,46 @@ def _metadata_from_checkpoint_and_reports(
         *payloads,
         paths=(("part_config",), ("part_model_config",), ("model_config",), ("config", "part_model_config")),
     )
+    label_names = _first_metadata_value(
+        *payloads,
+        paths=(
+            ("label_names",),
+            ("config", "label_names"),
+            ("training_config", "label_names"),
+            ("run_config", "label_names"),
+            ("metadata", "label_names"),
+        ),
+    )
+    label_filter = _first_metadata_value(
+        *payloads,
+        paths=(
+            ("label_filter",),
+            ("source_label_indices",),
+            ("config", "label_filter"),
+            ("training_config", "label_filter"),
+            ("run_config", "label_filter"),
+            ("metadata", "label_filter"),
+        ),
+    )
+    num_classes = _first_metadata_value(
+        *payloads,
+        paths=(
+            ("num_classes",),
+            ("config", "num_classes"),
+            ("training_config", "num_classes"),
+            ("run_config", "num_classes"),
+            ("metadata", "num_classes"),
+        ),
+    )
     return {
         "sidecar_report_paths": loaded_paths,
         "selection_metric": _coerce_str_or_none(selection_metric),
         "hlt_degradation_strength": _coerce_float_or_none(hlt_strength),
         "split_manifest_hash": _coerce_str_or_none(split_manifest_hash),
         "part_config": dict(part_config) if isinstance(part_config, Mapping) else {},
+        "label_names": _coerce_str_tuple_or_none(label_names),
+        "label_filter": _coerce_int_tuple_or_none(label_filter),
+        "num_classes": _coerce_int_or_none(num_classes),
     }
 
 
@@ -240,6 +315,9 @@ class LocalCompressionBaselineCheckpointReport:
     baseline_checkpoint_selection_metric: str | None
     baseline_checkpoint_hlt_degradation_strength: float | None
     baseline_checkpoint_split_manifest_hash: str | None
+    baseline_checkpoint_label_names: tuple[str, ...] | None
+    baseline_checkpoint_label_filter: tuple[int, ...] | None
+    baseline_checkpoint_num_classes: int | None
     baseline_checkpoint_sidecar_reports: tuple[str, ...]
     part_config: Mapping[str, Any]
     adapter_config: Mapping[str, Any]
@@ -274,6 +352,9 @@ def load_hlt_part_baseline_checkpoint(
     expected_selection_metric: str | None = LOCAL_COMPRESSION_PRIMARY_METRIC,
     expected_hlt_degradation_strength: float | None = LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
     expected_split_manifest_hash: str | None = None,
+    expected_label_names: Sequence[str] | None = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
+    expected_label_filter: Sequence[int] | None = LOCAL_COMPRESSION_BINARY_LABEL_FILTER,
+    expected_num_classes: int | None = 2,
     require_metadata: bool = False,
     require_all_part_keys: bool = True,
 ) -> LocalCompressionBaselineCheckpointReport:
@@ -355,6 +436,24 @@ def load_hlt_part_baseline_checkpoint(
         expected_split_manifest_hash,
         require_metadata=bool(require_metadata and expected_split_manifest_hash is not None),
     )
+    _check_optional_equal(
+        "label_names",
+        metadata["label_names"],
+        None if expected_label_names is None else tuple(str(name) for name in expected_label_names),
+        require_metadata=bool(require_metadata),
+    )
+    _check_optional_equal(
+        "label_filter",
+        metadata["label_filter"],
+        None if expected_label_filter is None else tuple(int(index) for index in expected_label_filter),
+        require_metadata=bool(require_metadata),
+    )
+    _check_optional_equal(
+        "num_classes",
+        metadata["num_classes"],
+        expected_num_classes,
+        require_metadata=bool(require_metadata),
+    )
 
     adapter_config = {}
     if hasattr(model_or_part_model, "config") and hasattr(getattr(model_or_part_model, "config"), "to_dict"):
@@ -370,6 +469,9 @@ def load_hlt_part_baseline_checkpoint(
         baseline_checkpoint_selection_metric=metadata["selection_metric"],
         baseline_checkpoint_hlt_degradation_strength=metadata["hlt_degradation_strength"],
         baseline_checkpoint_split_manifest_hash=metadata["split_manifest_hash"],
+        baseline_checkpoint_label_names=metadata["label_names"],
+        baseline_checkpoint_label_filter=metadata["label_filter"],
+        baseline_checkpoint_num_classes=metadata["num_classes"],
         baseline_checkpoint_sidecar_reports=tuple(metadata["sidecar_report_paths"]),
         part_config=dict(getattr(part_model, "config", {}) or metadata["part_config"] or {}),
         adapter_config=adapter_config,

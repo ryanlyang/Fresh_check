@@ -111,6 +111,9 @@ def write_checkpoint(path: Path, model: torch.nn.Module) -> None:
             "model_state_dict": model.state_dict(),
             "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
             "hlt_degradation_strength": 0.6,
+            "label_names": ["QCD", "Hgg"],
+            "label_filter": [0, 1],
+            "num_classes": 2,
             "model_config": dict(getattr(model, "config", {})),
         },
         path,
@@ -185,6 +188,8 @@ class LocalCompressionStep12TrainTests(unittest.TestCase):
             self.assertEqual(report["selection_metric"], LOCAL_COMPRESSION_PRIMARY_METRIC)
             self.assertTrue(report["final_test_evaluated"])
             self.assertIn("binary_metrics", report["final_test_metrics"])
+            self.assertIn("prediction_arrays", report["best_model_val_metrics"])
+            self.assertIn("prediction_arrays", report["final_test_metrics"])
             self.assertEqual(report["baseline_checkpoint_selection_metric"], LOCAL_COMPRESSION_PRIMARY_METRIC)
             self.assertEqual(report["baseline_checkpoint_hlt_degradation_strength"], 0.6)
             self.assertTrue(report["init_logit_diff_vs_baseline"]["allclose_atol_1e_6"])
@@ -196,6 +201,17 @@ class LocalCompressionStep12TrainTests(unittest.TestCase):
             self.assertTrue((output_dir / "diagnostics" / "init_logit_diff_vs_baseline.json").exists())
             saved = json.loads((output_dir / "run_report.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["label_filter"], [0, 1])
+            self.assertEqual(saved["final_test_metrics"]["prediction_arrays"]["signal_label"], "Hgg")
+            self.assertEqual(saved["final_test_metrics"]["prediction_arrays"]["signal_label_index"], 1)
+            curves = json.loads((output_dir / "training_curves.json").read_text(encoding="utf-8"))
+            epoch = curves["epochs"][0]
+            self.assertIn("ce_loss", epoch["train"])
+            self.assertIn("delta_l2_loss", epoch["train"])
+            self.assertIn("diagnostics", epoch["train"])
+            self.assertIn("delta_F_abs_max", epoch["train"]["diagnostics"])
+            csv_text = (output_dir / "diagnostics" / "epoch_metrics.csv").read_text(encoding="utf-8")
+            self.assertIn("train_ce_loss", csv_text)
+            self.assertIn("train_diag_delta_F_abs_max", csv_text)
 
 
 if __name__ == "__main__":

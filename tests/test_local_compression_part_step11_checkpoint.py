@@ -93,6 +93,9 @@ def write_checkpoint(path: Path, model: torch.nn.Module, *, prefixed: bool = Fal
             "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
             "hlt_degradation_strength": float(hlt_strength),
             "split_manifest_hash": "split-hash-123",
+            "label_names": ["QCD", "Hgg"],
+            "label_filter": [0, 1],
+            "num_classes": 2,
             "model_config": dict(getattr(model, "config", {})),
         },
         path,
@@ -125,6 +128,9 @@ class LocalCompressionStep11CheckpointTests(unittest.TestCase):
                 LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
             )
             self.assertEqual(report.baseline_checkpoint_split_manifest_hash, "split-hash-123")
+            self.assertEqual(report.baseline_checkpoint_label_names, ("QCD", "Hgg"))
+            self.assertEqual(report.baseline_checkpoint_label_filter, (0, 1))
+            self.assertEqual(report.baseline_checkpoint_num_classes, 2)
             self.assertEqual(report.missing_key_count, 0)
             self.assertEqual(report.loaded_key_count, len(source.state_dict()))
             for key, value in source.state_dict().items():
@@ -163,6 +169,31 @@ class LocalCompressionStep11CheckpointTests(unittest.TestCase):
                     DummyReferencePart(),
                     require_metadata=True,
                 )
+
+    def test_missing_or_wrong_label_metadata_is_rejected_when_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            missing = tmp_path / "missing_labels.pt"
+            wrong = tmp_path / "wrong_labels.pt"
+            torch.save(
+                {
+                    "model_state_dict": DummyReferencePart().state_dict(),
+                    "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
+                    "hlt_degradation_strength": 0.6,
+                    "split_manifest_hash": "split-hash-123",
+                    "model_config": {"dummy_reference_part": True, "num_classes": 2},
+                },
+                missing,
+            )
+            write_checkpoint(wrong, DummyReferencePart())
+            payload = torch.load(wrong, map_location="cpu")
+            payload["label_names"] = ["QCD", "Tbqq"]
+            torch.save(payload, wrong)
+
+            with self.assertRaisesRegex(ValueError, "missing required metadata field label_names"):
+                load_hlt_part_baseline_checkpoint(missing, DummyReferencePart(), require_metadata=True)
+            with self.assertRaisesRegex(ValueError, "label_names mismatch"):
+                load_hlt_part_baseline_checkpoint(wrong, DummyReferencePart(), require_metadata=True)
 
     def test_init_logit_diff_is_zero_for_zero_delta_adapter_and_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
