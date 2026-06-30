@@ -427,6 +427,59 @@ def default_local_compression_modality_specs() -> tuple[LocalCompressionModality
     )
 
 
+def randomized_local_compression_modality_specs(
+    *,
+    seed: int = 2907,
+    base_modalities: tuple[LocalCompressionModalitySpec, ...] | None = None,
+) -> tuple[LocalCompressionModalitySpec, ...]:
+    """Return a deterministic random-grouping control preserving group sizes.
+
+    The control keeps the modality names and per-modality field counts fixed,
+    but shuffles the raw/PF/derived fields across those names.  This lets the
+    random-grouping variant test whether semantic group structure matters,
+    rather than merely changing parameter count or tensor shape.
+    """
+
+    import random
+
+    base = tuple(base_modalities or default_local_compression_modality_specs())
+    fields: list[tuple[str, str]] = []
+    counts = []
+    descriptions = {}
+    for spec in base:
+        spec_fields = (
+            tuple(("raw", name) for name in spec.raw_feature_names)
+            + tuple(("pf", name) for name in spec.pf_feature_names)
+            + tuple(("derived", name) for name in spec.derived_feature_names)
+        )
+        fields.extend(spec_fields)
+        counts.append((spec.name, len(spec_fields)))
+        descriptions[spec.name] = spec.description
+    shuffled = list(fields)
+    random.Random(int(seed)).shuffle(shuffled)
+    output: list[LocalCompressionModalitySpec] = []
+    cursor = 0
+    for name, count in counts:
+        chunk = shuffled[cursor : cursor + count]
+        cursor += count
+        raw_names = tuple(value for kind, value in chunk if kind == "raw")
+        pf_names = tuple(value for kind, value in chunk if kind == "pf")
+        derived_names = tuple(value for kind, value in chunk if kind == "derived")
+        output.append(
+            LocalCompressionModalitySpec(
+                name=name,
+                raw_feature_names=raw_names,
+                pf_feature_names=pf_names,
+                derived_feature_names=derived_names,
+                description=(
+                    "Random grouping control preserving the default group size "
+                    f"for {name}; original role: {descriptions.get(name, '')}"
+                ),
+            )
+        )
+    return tuple(output)
+
+
 @dataclass(frozen=True)
 class LocalCompressionPartProtocol:
     """Single source of truth for the QCD/Hgg HLT0.6 local-compression experiment."""
@@ -721,6 +774,8 @@ class LocalCompressionPartConfig:
             raise ValueError("context-delta no-modalities control must use gate_mode='none'")
         if variant == LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED and gate_mode != LOCAL_COMPRESSION_GATE_CONTEXT_SIGMOID:
             raise ValueError("context-gated variant must use context_sigmoid gates")
+        if variant == LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING and gate_mode != LOCAL_COMPRESSION_GATE_CONTEXT_SIGMOID:
+            raise ValueError("random-grouping variant must use context_sigmoid gates")
         if variant == LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT and int(context_layers) != 1:
             # The config keeps a positive layer count for constructor simplicity;
             # later builders should ignore context_layers for this variant.

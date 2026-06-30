@@ -39,6 +39,7 @@ from .config import (
     LOCAL_COMPRESSION_RAW_FEATURE_NAMES,
     LOCAL_COMPRESSION_SIGNAL_LABEL,
     LOCAL_COMPRESSION_BACKGROUND_LABEL,
+    LOCAL_COMPRESSION_VALIDATION_THRESHOLD_METRIC,
     LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES,
     LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
@@ -67,6 +68,7 @@ from .config import (
     normalize_local_compression_pool_mode,
     normalize_local_compression_split_name,
     normalize_local_compression_variant,
+    randomized_local_compression_modality_specs,
 )
 from .features import (
     LOCAL_COMPRESSION_FEATURES_CONTRACT,
@@ -156,6 +158,13 @@ from .train import (
     run_local_compression_tagger_epoch,
     train_local_compression_tagger,
 )
+from .reports import (
+    LOCAL_COMPRESSION_REPORT_CONTRACT,
+    LOCAL_COMPRESSION_REPORT_SPLITS,
+    LOCAL_COMPRESSION_REPORT_STEP,
+    LocalCompressionPartReportConfig,
+    build_local_compression_part_report,
+)
 
 __all__ = [
     "LOCAL_COMPRESSION_ADAPTER_RESIDUAL_DELTA_FEATURES",
@@ -188,6 +197,7 @@ __all__ = [
     "LOCAL_COMPRESSION_RAW_FEATURE_NAMES",
     "LOCAL_COMPRESSION_SIGNAL_LABEL",
     "LOCAL_COMPRESSION_BACKGROUND_LABEL",
+    "LOCAL_COMPRESSION_VALIDATION_THRESHOLD_METRIC",
     "LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK",
     "LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES",
     "LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED",
@@ -216,6 +226,7 @@ __all__ = [
     "normalize_local_compression_pool_mode",
     "normalize_local_compression_split_name",
     "normalize_local_compression_variant",
+    "randomized_local_compression_modality_specs",
     "LOCAL_COMPRESSION_FEATURES_CONTRACT",
     "LOCAL_COMPRESSION_FEATURES_STEP",
     "LocalCompressionCanonicalInputs",
@@ -284,4 +295,9 @@ __all__ = [
     "local_compression_tagger_checkpoint_payload",
     "run_local_compression_tagger_epoch",
     "train_local_compression_tagger",
+    "LOCAL_COMPRESSION_REPORT_CONTRACT",
+    "LOCAL_COMPRESSION_REPORT_SPLITS",
+    "LOCAL_COMPRESSION_REPORT_STEP",
+    "LocalCompressionPartReportConfig",
+    "build_local_compression_part_report",
 ]

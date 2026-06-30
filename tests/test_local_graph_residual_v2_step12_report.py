@@ -255,6 +255,14 @@ class LocalGraphResidualV2Step12ReportTest(unittest.TestCase):
             self.assertIn("calibration_only_control", report)
             self.assertEqual(report["comparison_summary"]["comparison_split"], "final_test")
             self.assertEqual(report["comparison_summary"]["primary_metric"], "fpr_at_signal_eff_0p50")
+            self.assertIn("best_v2_source_type", report["comparison_summary"])
+            self.assertIn("best_v2_variant", report["comparison_summary"])
+            self.assertIn("best_v2_learned_variant", report["comparison_summary"])
+            self.assertIn("best_v2_val_shrunk_variant", report["comparison_summary"])
+            self.assertIn(
+                report["comparison_summary"]["best_v2_source_type"],
+                {"v2_residual_fused_learned_gamma", "v2_residual_fused_val_shrunk"},
+            )
             self.assertTrue(__import__("pathlib").Path(report["outputs"]["report_json"]).exists())
             self.assertTrue(__import__("pathlib").Path(report["outputs"]["metric_table_csv"]).exists())
             self.assertTrue(__import__("pathlib").Path(report["outputs"]["diagnostics_csv"]).exists())

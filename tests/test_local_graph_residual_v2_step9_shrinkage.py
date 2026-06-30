@@ -46,7 +46,8 @@ class LocalGraphResidualV2Step9ShrinkageTest(unittest.TestCase):
     def test_default_grid_matches_plan_shape(self):
         self.assertEqual(LOCAL_GRAPH_RESIDUAL_V2_GAMMA_SHRINKAGE_GRID[0], 0.0)
         self.assertIn(0.01, LOCAL_GRAPH_RESIDUAL_V2_GAMMA_SHRINKAGE_GRID)
-        self.assertIn(1.5, LOCAL_GRAPH_RESIDUAL_V2_GAMMA_SHRINKAGE_GRID)
+        self.assertIn(1.0, LOCAL_GRAPH_RESIDUAL_V2_GAMMA_SHRINKAGE_GRID)
+        self.assertLessEqual(max(LOCAL_GRAPH_RESIDUAL_V2_GAMMA_SHRINKAGE_GRID), 1.0)
 
 
 if __name__ == "__main__":

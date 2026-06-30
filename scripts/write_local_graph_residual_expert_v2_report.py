@@ -97,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  best_source_type: {summary.get('best_source_type')}")
     print(f"  best_variant: {summary.get('best_variant')}")
     print(f"  best_metric_value: {summary.get('best_metric_value')}")
+    print(f"  best_v2_source_type: {summary.get('best_v2_source_type')}")
+    print(f"  best_v2_variant: {summary.get('best_v2_variant')}")
+    print(f"  best_v2_metric_value: {summary.get('best_v2_metric_value')}")
+    print(f"  best_v2_learned_variant: {summary.get('best_v2_learned_variant')}")
+    print(f"  best_v2_val_shrunk_variant: {summary.get('best_v2_val_shrunk_variant')}")
     print(f"  report_json: {report['outputs']['report_json']}")
     print(f"  metric_table_csv: {report['outputs']['metric_table_csv']}")
     if report["problems"]:

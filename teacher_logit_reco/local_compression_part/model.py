@@ -14,7 +14,16 @@ from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier, build_
 
 from .adapter import LocalCompressionDeltaFAdapter, LocalCompressionDeltaFOutput
 from .compressor import LocalCompressionCompressorOutput, LocalModalityCompressor
-from .config import LOCAL_COMPRESSION_PART_CONTRACT, LocalCompressionPartConfig
+from .config import (
+    LOCAL_COMPRESSION_GATE_NONE,
+    LOCAL_COMPRESSION_PART_CONTRACT,
+    LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
+    LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES,
+    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+    LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT,
+    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+    LocalCompressionPartConfig,
+)
 from .context import ParticleContextBlock, ParticleContextOutput
 from .features import (
     LocalCompressionCanonicalInputs,
@@ -155,6 +164,34 @@ class LocalCompressionFeatureAdapterOutput:
             "baseline_recoverable_at_zero_delta": bool(self.baseline_recoverable_at_zero_delta),
             "uses_reference_part_backbone": bool(self.uses_reference_part_backbone),
             "part_model_class": str(self.part_model_class),
+            "variant": str(self.config.variant),
+            "variant_behavior": {
+                "variant": str(self.config.variant),
+                "uses_modalities": str(self.config.variant)
+                in {
+                    LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT,
+                    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+                    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+                },
+                "uses_local_compressor": str(self.config.variant)
+                in {
+                    LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT,
+                    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+                    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+                },
+                "uses_particle_context": str(self.config.variant)
+                in {
+                    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+                    LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES,
+                    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+                },
+                "uses_context_gates": str(self.config.variant)
+                in {
+                    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+                    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+                },
+                "forces_zero_delta": str(self.config.variant) == LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
+            },
             "gate_summary": self.gate_output.summary(),
             "delta_summary": self.delta_output.summary(),
             "baseline_checkpoint": checkpoint or None,
@@ -203,6 +240,41 @@ class LocalCompressionFeatureAdapterParT(_ModuleBase):
         self.init_logit_diff_vs_baseline: dict[str, Any] | None = None
 
     @property
+    def variant_name(self) -> str:
+        return str(self.config.variant)
+
+    @property
+    def variant_uses_modalities(self) -> bool:
+        return self.variant_name in {
+            LOCAL_COMPRESSION_VARIANT_LOCAL_NO_CONTEXT,
+            LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+            LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+        }
+
+    @property
+    def variant_uses_local_compressor(self) -> bool:
+        return self.variant_uses_modalities
+
+    @property
+    def variant_uses_particle_context(self) -> bool:
+        return self.variant_name in {
+            LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+            LOCAL_COMPRESSION_VARIANT_CONTEXT_DELTA_NO_MODALITIES,
+            LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+        }
+
+    @property
+    def variant_uses_context_gates(self) -> bool:
+        return self.variant_name in {
+            LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+            LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
+        }
+
+    @property
+    def variant_forces_zero_delta(self) -> bool:
+        return self.variant_name == LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK
+
+    @property
     def uses_reference_part_backbone(self) -> bool:
         return isinstance(self.part_model, ParticleTransformerHLTClassifier)
 
@@ -230,6 +302,27 @@ class LocalCompressionFeatureAdapterParT(_ModuleBase):
             "init_logit_diff_vs_baseline": dict(self.init_logit_diff_vs_baseline or {}),
             "uses_reference_part_backbone": bool(self.uses_reference_part_backbone),
             "baseline_recoverable_at_zero_delta": bool(self.baseline_recoverable_at_zero_delta),
+            "variant_behavior": self.variant_behavior(),
+        }
+
+    def variant_behavior(self) -> dict[str, Any]:
+        return {
+            "variant": self.variant_name,
+            "uses_modalities": bool(self.variant_uses_modalities),
+            "uses_local_compressor": bool(self.variant_uses_local_compressor),
+            "uses_particle_context": bool(self.variant_uses_particle_context),
+            "uses_context_gates": bool(self.variant_uses_context_gates),
+            "forces_zero_delta": bool(self.variant_forces_zero_delta),
+            "gate_mode": str(self.config.gate_mode),
+            "feature_config_modality_summary": {
+                spec.name: {
+                    "raw": list(spec.raw_feature_names),
+                    "pf": list(spec.pf_feature_names),
+                    "derived": list(spec.derived_feature_names),
+                    "field_count": int(spec.field_count),
+                }
+                for spec in self.config.feature_config.modalities
+            },
         }
 
     def build_canonical_inputs(
@@ -252,6 +345,112 @@ class LocalCompressionFeatureAdapterParT(_ModuleBase):
             config=self.config.feature_config,
         )
 
+    def _feature_anchor_tokens(self, canonical: LocalCompressionCanonicalInputs) -> Any:
+        torch = require_torch()
+        if self.subtoken_encoder.anchor_encoder is None:
+            tokens = canonical.feature_rows().new_zeros(
+                (*canonical.feature_rows().shape[:2], int(self.config.embed_dim))
+            )
+        else:
+            tokens = self.subtoken_encoder.anchor_encoder(canonical.feature_rows(), canonical.particle_mask)
+        return torch.where(canonical.particle_mask[:, :, None], tokens, torch.zeros_like(tokens))
+
+    def _single_token_compressor_output(
+        self,
+        canonical: LocalCompressionCanonicalInputs,
+        *,
+        modality_name: str,
+    ) -> LocalCompressionCompressorOutput:
+        torch = require_torch()
+        token = self._feature_anchor_tokens(canonical)
+        num_modalities = int(self.config.feature_config.num_modalities)
+        local_tokens = token[:, :, None, :].expand(
+            token.shape[0],
+            token.shape[1],
+            num_modalities,
+            token.shape[2],
+        ).contiguous()
+        modality_mask = canonical.particle_mask[:, :, None].expand(
+            token.shape[0],
+            token.shape[1],
+            num_modalities,
+        ).clone()
+        modality_names = tuple(f"{modality_name}_{index}" for index in range(num_modalities))
+        return LocalCompressionCompressorOutput(
+            local_tokens=local_tokens,
+            mask=canonical.particle_mask,
+            modality_mask=modality_mask,
+            modality_names=modality_names,
+            input_subtokens=torch.where(modality_mask[:, :, :, None], local_tokens, torch.zeros_like(local_tokens)),
+        )
+
+    def _identity_context_output(self, pool_output: LocalCompressionPoolOutput) -> ParticleContextOutput:
+        return ParticleContextOutput(
+            context_tokens=pool_output.local_particle_token,
+            mask=pool_output.mask,
+            input_particles=pool_output.local_particle_token,
+        )
+
+    def _identity_gate_output(
+        self,
+        compressor_output: LocalCompressionCompressorOutput,
+        context_output: ParticleContextOutput,
+        canonical: LocalCompressionCanonicalInputs,
+    ) -> LocalCompressionGateOutput:
+        torch = require_torch()
+        gates = compressor_output.modality_mask.to(dtype=compressor_output.local_tokens.dtype)
+        gate_logits = torch.zeros_like(gates)
+        active_counts = compressor_output.modality_mask.sum(dim=-1, keepdim=True).clamp(min=1).to(dtype=gates.dtype)
+        diagnostic_weights = torch.where(compressor_output.modality_mask, gates / active_counts, torch.zeros_like(gates))
+        return LocalCompressionGateOutput(
+            gates=gates,
+            gate_logits=gate_logits,
+            diagnostic_weights=diagnostic_weights,
+            mask=compressor_output.mask,
+            modality_mask=compressor_output.modality_mask,
+            modality_names=compressor_output.modality_names,
+            local_tokens=compressor_output.local_tokens,
+            context_tokens=context_output.context_tokens,
+            feature_rows=canonical.feature_rows(),
+            feature_summary=context_output.context_tokens,
+            gate_mode=LOCAL_COMPRESSION_GATE_NONE,
+        )
+
+    def _zero_delta_output(
+        self,
+        canonical: LocalCompressionCanonicalInputs,
+        pool_output: LocalCompressionPoolOutput,
+        context_output: ParticleContextOutput,
+        gate_output: LocalCompressionGateOutput,
+    ) -> LocalCompressionDeltaFOutput:
+        torch = require_torch()
+        feature_rows = canonical.feature_rows()
+        zeros = torch.zeros_like(feature_rows)
+        scales = self.adapter.feature_delta_scales.to(dtype=feature_rows.dtype, device=feature_rows.device)
+        active = self.adapter.feature_active_mask.to(dtype=feature_rows.dtype, device=feature_rows.device)
+        gate_weighted = (gate_output.local_tokens * gate_output.gates[:, :, :, None]).sum(dim=2)
+        return LocalCompressionDeltaFOutput(
+            delta_F_rows=zeros,
+            raw_delta_rows=zeros,
+            bounded_delta_rows=zeros,
+            adapted_feature_rows=feature_rows,
+            mask=canonical.particle_mask,
+            feature_rows=feature_rows,
+            local_particle_token=pool_output.local_particle_token,
+            context_tokens=context_output.context_tokens,
+            gate_weighted_token=torch.where(canonical.particle_mask[:, :, None], gate_weighted, torch.zeros_like(gate_weighted)),
+            gates=gate_output.gates,
+            feature_delta_scales=scales.detach(),
+            feature_active_mask=active.detach(),
+            feature_names=tuple(self.config.feature_config.canonical_feature_names),
+            adapter_diagnostics={
+                "zero_delta_forced_by_variant": True,
+                "variant": self.variant_name,
+                "delta_scale": float(self.config.delta_scale),
+                "active_feature_count": int(active.detach().cpu().sum().item()),
+            },
+        )
+
     def forward_outputs(
         self,
         tokens_or_batch: Any,
@@ -272,11 +471,30 @@ class LocalCompressionFeatureAdapterParT(_ModuleBase):
         )
         modalities = build_local_compression_modalities(canonical, config=self.config.feature_config)
         subtoken_output = self.subtoken_encoder(canonical, modalities)
-        compressor_output = self.compressor(subtoken_output)
-        pool_output = self.pooler(compressor_output)
-        context_output = self.context_block(pool_output)
-        gate_output = self.gate(compressor_output, context_output, canonical)
-        delta_output = self.adapter(canonical, pool_output, context_output, gate_output)
+        if self.variant_uses_local_compressor:
+            compressor_output = self.compressor(subtoken_output)
+            pool_output = self.pooler(compressor_output)
+        else:
+            compressor_output = self._single_token_compressor_output(
+                canonical,
+                modality_name="feature_anchor",
+            )
+            pool_output = self.pooler(compressor_output)
+
+        if self.variant_uses_particle_context:
+            context_output = self.context_block(pool_output)
+        else:
+            context_output = self._identity_context_output(pool_output)
+
+        if self.variant_uses_context_gates:
+            gate_output = self.gate(compressor_output, context_output, canonical)
+        else:
+            gate_output = self._identity_gate_output(compressor_output, context_output, canonical)
+
+        if self.variant_forces_zero_delta:
+            delta_output = self._zero_delta_output(canonical, pool_output, context_output, gate_output)
+        else:
+            delta_output = self.adapter(canonical, pool_output, context_output, gate_output)
         adapted = canonical.with_features(delta_output.adapted_feature_rows)
         logits = self.part_model(
             adapted.points,

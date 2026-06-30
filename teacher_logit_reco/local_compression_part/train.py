@@ -41,12 +41,17 @@ from .config import (
     LOCAL_COMPRESSION_SIGNAL_LABEL,
     LOCAL_COMPRESSION_BACKGROUND_LABEL,
     LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
+    LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK,
+    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
+    LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING,
     LOCAL_COMPRESSION_VARIANTS,
+    LocalCompressionFeatureConfig,
     LocalCompressionPartConfig,
     normalize_local_compression_gate_mode,
     normalize_local_compression_pool_mode,
     normalize_local_compression_split_name,
     normalize_local_compression_variant,
+    randomized_local_compression_modality_specs,
 )
 from .model import (
     LOCAL_COMPRESSION_MODEL_CONTRACT,
@@ -352,7 +357,8 @@ class LocalCompressionTaggerTrainConfig:
     expected_hlt_degradation_strength: float = LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH
     label_names: tuple[str, ...] = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES
     label_filter: tuple[int, ...] = ()
-    variant: str = "lc_context_gated"
+    variant: str = LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED
+    random_grouping_seed: int = 2907
     embed_dim: int = 96
     local_layers: int = 2
     local_heads: int = 4
@@ -393,7 +399,11 @@ class LocalCompressionTaggerTrainConfig:
         self.pool_mode = normalize_local_compression_pool_mode(self.pool_mode)
         gate_mode = self.gate_mode
         if gate_mode is None:
-            gate_mode = LOCAL_COMPRESSION_GATE_CONTEXT_SIGMOID if self.variant == "lc_context_gated" else LOCAL_COMPRESSION_GATE_NONE
+            gate_mode = (
+                LOCAL_COMPRESSION_GATE_CONTEXT_SIGMOID
+                if self.variant in {LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED, LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING}
+                else LOCAL_COMPRESSION_GATE_NONE
+            )
         self.gate_mode = normalize_local_compression_gate_mode(gate_mode)
         self.label_filter = _resolve_label_filter(self.label_filter)
         self.label_names = _resolve_label_names(self.label_names, self.label_filter)
@@ -401,11 +411,19 @@ class LocalCompressionTaggerTrainConfig:
             raise ValueError("Step 12 local-compression training is frozen to label names QCD/Hgg")
         if tuple(self.label_filter) != tuple(LOCAL_COMPRESSION_BINARY_LABEL_FILTER):
             raise ValueError("Step 12 expects binary-cache labels QCD=0, Hgg=1")
-        for name in ("seed", "batch_size", "eval_batch_size", "epochs", "num_workers", "early_stop_patience"):
+        for name in ("seed", "batch_size", "eval_batch_size", "epochs", "num_workers"):
             value = int(getattr(self, name))
             if value < 0 or (name != "num_workers" and value == 0):
                 raise ValueError(f"{name} must be positive" if name != "num_workers" else "num_workers must be non-negative")
             setattr(self, name, value)
+        self.early_stop_patience = int(self.early_stop_patience)
+        if int(self.early_stop_patience) < -1:
+            raise ValueError("early_stop_patience must be -1 or greater")
+        self.random_grouping_seed = int(self.random_grouping_seed)
+        if int(self.random_grouping_seed) < 0:
+            raise ValueError("random_grouping_seed must be non-negative")
+        if not bool(self.confirm_split_settings):
+            raise ValueError("Step 12/13 requires --confirm-split-settings")
         self.freeze_part_epochs = _optional_nonnegative_int(self.freeze_part_epochs, field_name="freeze_part_epochs") or 0
         for name in ("max_train_batches", "max_val_batches", "max_stack_val_batches", "max_final_test_batches"):
             setattr(self, name, _optional_positive_int(getattr(self, name), field_name=name))
@@ -425,9 +443,15 @@ class LocalCompressionTaggerTrainConfig:
         return len(tuple(self.label_names))
 
     def model_config(self) -> LocalCompressionPartConfig:
+        feature_config = LocalCompressionFeatureConfig()
+        if self.variant == LOCAL_COMPRESSION_VARIANT_RANDOM_GROUPING:
+            feature_config = LocalCompressionFeatureConfig(
+                modalities=randomized_local_compression_modality_specs(seed=int(self.random_grouping_seed))
+            )
         return LocalCompressionPartConfig(
             num_classes=int(self.resolved_num_classes),
             variant=self.variant,
+            feature_config=feature_config,
             embed_dim=int(self.embed_dim),
             local_layers=int(self.local_layers),
             local_heads=int(self.local_heads),
@@ -507,6 +531,36 @@ def _optimizer_for_model(model: LocalCompressionFeatureAdapterParT, config: Loca
     if not groups:
         raise ValueError("no trainable parameters available for optimizer")
     return torch.optim.AdamW(groups, weight_decay=float(config.weight_decay))
+
+
+def _evaluate_tagger_dataset(
+    model,
+    dataset: SubtokenHLTJetDataset,
+    config: LocalCompressionTaggerTrainConfig,
+    *,
+    device,
+    criterion,
+    seed_offset: int,
+    max_batches: int | None,
+) -> dict[str, Any]:
+    loader = make_subtoken_hlt_loader(
+        dataset,
+        batch_size=int(config.eval_batch_size),
+        shuffle=False,
+        num_workers=int(config.num_workers),
+        seed=int(config.seed) + int(seed_offset),
+    )
+    return run_local_compression_tagger_epoch(
+        model,
+        loader,
+        device=device,
+        criterion=criterion,
+        amp=False,
+        max_batches=max_batches,
+        collect_predictions=True,
+        collect_diagnostics=True,
+        label_names=tuple(config.label_names),
+    )
 
 
 def run_local_compression_tagger_epoch(
@@ -621,7 +675,9 @@ def local_compression_tagger_checkpoint_payload(
     return {
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+        "variant": str(config.variant),
+        "variant_behavior": model.variant_behavior(),
         "config": asdict(config),
         "model_config": model.to_config_dict(),
         "metrics": dict(metrics),
@@ -722,11 +778,14 @@ def train_local_compression_tagger(
             attach=True,
         )
         save_json(diagnostics_dir / "init_logit_diff_vs_baseline.json", init_logit_diff)
-    if config.freeze_part_epochs > 0:
+    is_baseline_recheck = config.variant == LOCAL_COMPRESSION_VARIANT_BASELINE_RECHECK
+    if is_baseline_recheck:
         _set_part_model_trainable(checkpoint_model, False)
-    optimizer = _optimizer_for_model(checkpoint_model, config)
+    elif config.freeze_part_epochs > 0:
+        _set_part_model_trainable(checkpoint_model, False)
+    optimizer = None if is_baseline_recheck else _optimizer_for_model(checkpoint_model, config)
     train_model = checkpoint_model
-    if config.compile_model and hasattr(torch, "compile"):
+    if config.compile_model and not is_baseline_recheck and hasattr(torch, "compile"):
         train_model = torch.compile(train_model)
 
     criterion = torch.nn.CrossEntropyLoss()
@@ -746,6 +805,9 @@ def train_local_compression_tagger(
         "label_filter": list(config.label_filter),
         "num_classes": int(config.resolved_num_classes),
         "selection_metric": str(config.selection_metric),
+        "variant": str(config.variant),
+        "variant_behavior": checkpoint_model.variant_behavior(),
+        "evaluation_only_baseline_recheck": bool(is_baseline_recheck),
         "baseline_checkpoint": str(config.baseline_checkpoint),
         "baseline_load_report": baseline_load_report,
         "init_logit_diff_vs_baseline": init_logit_diff,
@@ -757,6 +819,134 @@ def train_local_compression_tagger(
         "inference_consumes_hlt_only": True,
     }
     save_json(output_dir / "config.json", run_metadata)
+
+    if is_baseline_recheck:
+        checkpoint_model.eval()
+        best_val_metrics = _evaluate_tagger_dataset(
+            checkpoint_model,
+            val_dataset,
+            config,
+            device=device,
+            criterion=criterion,
+            seed_offset=1,
+            max_batches=config.max_val_batches,
+        )
+        val_score, selection_value = _selection_score(best_val_metrics, str(config.selection_metric))
+        stack_val_dataset = stack_val_dataset or _load_dataset(
+            config,
+            config.stack_val_split,
+            max_jets=config.max_stack_val_jets,
+        )
+        stack_val_metrics = _evaluate_tagger_dataset(
+            checkpoint_model,
+            stack_val_dataset,
+            config,
+            device=device,
+            criterion=criterion,
+            seed_offset=2,
+            max_batches=config.max_stack_val_batches,
+        )
+        final_test_metadata = None
+        final_test_metrics = None
+        if bool(config.confirm_final_test):
+            final_test_dataset = final_test_dataset or _load_dataset(
+                config,
+                config.final_test_split,
+                max_jets=config.max_final_test_jets,
+            )
+            final_test_metrics = _evaluate_tagger_dataset(
+                checkpoint_model,
+                final_test_dataset,
+                config,
+                device=device,
+                criterion=criterion,
+                seed_offset=3,
+                max_batches=config.max_final_test_batches,
+            )
+            final_test_metadata = dict(final_test_dataset.metadata)
+        curves: list[dict[str, Any]] = [
+            {
+                "epoch": 0,
+                "train": {"loss": None, "accuracy": None, "n_jets": 0, "mode": "evaluation_only_baseline_recheck"},
+                "model_val": _metrics_without_prediction_arrays(best_val_metrics),
+            }
+        ]
+        save_json(output_dir / "training_curves.json", {"epochs": curves})
+        _write_epoch_metrics_csv(diagnostics_dir / "epoch_metrics.csv", curves)
+        payload = local_compression_tagger_checkpoint_payload(
+            checkpoint_model,
+            optimizer,
+            epoch=0,
+            config=config,
+            metrics=curves[0],
+            source=source,
+            baseline_load_report=baseline_load_report,
+        )
+        torch.save(payload, output_dir / "best_model_val.pt")
+        torch.save(payload, output_dir / "last.pt")
+        elapsed_seconds = float(time.perf_counter() - run_start_time)
+        report = {
+            "experiment_step": LOCAL_COMPRESSION_TRAIN_STEP,
+            "train_contract": LOCAL_COMPRESSION_TRAIN_CONTRACT,
+            "model_step": LOCAL_COMPRESSION_MODEL_STEP,
+            "output_contract": checkpoint_model.output_contract,
+            "variant": str(config.variant),
+            "variant_behavior": checkpoint_model.variant_behavior(),
+            "best_epoch": 0,
+            "selection_metric": str(config.selection_metric),
+            "selection_metric_direction": LOCAL_COMPRESSION_PRIMARY_METRIC_DIRECTION,
+            "best_model_selection_metric_value": float(selection_value),
+            "best_model_selection_score": float(val_score),
+            "best_model_val_accuracy": _finite_float(best_val_metrics.get("accuracy"), default=-1.0),
+            "best_model_val_loss": _finite_float(best_val_metrics.get("loss"), default=float("inf")),
+            "best_model_val_metrics": _metrics_without_prediction_arrays(best_val_metrics),
+            "stack_val_metrics": _metrics_without_prediction_arrays(stack_val_metrics),
+            "final_test_metrics": None if final_test_metrics is None else _metrics_without_prediction_arrays(final_test_metrics),
+            "epochs_completed": 0,
+            "final_epoch": curves[-1],
+            "checkpoint": str(output_dir / "best_model_val.pt"),
+            "last_checkpoint": str(output_dir / "last.pt"),
+            "training_curves": str(output_dir / "training_curves.json"),
+            "diagnostic_csv": str(diagnostics_dir / "epoch_metrics.csv"),
+            "config": asdict(config),
+            "model_config": checkpoint_model.to_config_dict(),
+            "label_names": list(config.label_names),
+            "label_filter": list(config.label_filter),
+            "num_classes": int(config.resolved_num_classes),
+            "source": source,
+            "manifest": manifest_info,
+            "baseline_checkpoint": str(config.baseline_checkpoint),
+            "baseline_load_report": baseline_load_report,
+            "baseline_checkpoint_path": baseline_load_report.get("baseline_checkpoint_path"),
+            "baseline_checkpoint_hash": baseline_load_report.get("baseline_checkpoint_hash"),
+            "baseline_checkpoint_selection_metric": baseline_load_report.get("baseline_checkpoint_selection_metric"),
+            "baseline_checkpoint_hlt_degradation_strength": baseline_load_report.get(
+                "baseline_checkpoint_hlt_degradation_strength"
+            ),
+            "baseline_checkpoint_split_manifest_hash": baseline_load_report.get(
+                "baseline_checkpoint_split_manifest_hash"
+            ),
+            "part_config": baseline_load_report.get("part_config"),
+            "adapter_config": checkpoint_model.to_config_dict().get("adapter_config"),
+            "init_logit_diff_vs_baseline": init_logit_diff,
+            "train_dataset": dict(train_dataset.metadata),
+            "val_dataset": dict(val_dataset.metadata),
+            "stack_val_dataset": dict(stack_val_dataset.metadata),
+            "final_test_dataset": final_test_metadata,
+            "final_test_evaluated": bool(config.confirm_final_test),
+            "runtime": {
+                "elapsed_seconds": elapsed_seconds,
+                "elapsed_minutes": elapsed_seconds / 60.0,
+                "epochs_completed": 0,
+                "seconds_per_completed_epoch": None,
+            },
+            "walltime_seconds": elapsed_seconds,
+            "inference_consumes_hlt_only": True,
+            "evaluation_only_baseline_recheck": True,
+        }
+        save_json(output_dir / "model_val_report.json", report)
+        save_json(output_dir / "run_report.json", report)
+        return report
 
     curves: list[dict[str, Any]] = []
     best_val_score = float("-inf")
@@ -795,7 +985,11 @@ def train_local_compression_tagger(
             collect_diagnostics=False,
             label_names=tuple(config.label_names),
         )
-        row = {"epoch": int(epoch), "train": train_metrics, "model_val": val_metrics}
+        row = {
+            "epoch": int(epoch),
+            "train": _metrics_without_prediction_arrays(train_metrics),
+            "model_val": _metrics_without_prediction_arrays(val_metrics),
+        }
         curves.append(row)
         save_json(output_dir / "training_curves.json", {"epochs": curves})
         _write_epoch_metrics_csv(diagnostics_dir / "epoch_metrics.csv", curves)
@@ -902,6 +1096,8 @@ def train_local_compression_tagger(
         "train_contract": LOCAL_COMPRESSION_TRAIN_CONTRACT,
         "model_step": LOCAL_COMPRESSION_MODEL_STEP,
         "output_contract": best_model.output_contract,
+        "variant": str(config.variant),
+        "variant_behavior": best_model.variant_behavior(),
         "best_epoch": int(best_epoch),
         "selection_metric": str(config.selection_metric),
         "selection_metric_direction": LOCAL_COMPRESSION_PRIMARY_METRIC_DIRECTION,

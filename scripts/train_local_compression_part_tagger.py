@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.local_compression_part.config import (  # noqa: E402
     LOCAL_COMPRESSION_GATE_MODES,
     LOCAL_COMPRESSION_POOL_MODES,
+    LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED,
     LOCAL_COMPRESSION_VARIANTS,
 )
 from teacher_logit_reco.local_compression_part.train import (  # noqa: E402
@@ -71,7 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-hlt-params-check", action="store_true")
     parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
-    parser.add_argument("--variant", choices=LOCAL_COMPRESSION_VARIANTS, default="lc_context_gated")
+    parser.add_argument("--variant", choices=LOCAL_COMPRESSION_VARIANTS, default=LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED)
+    parser.add_argument("--random-grouping-seed", type=int, default=2907)
     parser.add_argument("--embed-dim", type=int, default=96)
     parser.add_argument("--local-layers", type=int, default=2)
     parser.add_argument("--local-heads", type=int, default=4)
@@ -136,6 +138,7 @@ def main() -> int:
         label_names=label_names,
         label_filter=label_filter,
         variant=args.variant,
+        random_grouping_seed=args.random_grouping_seed,
         embed_dim=args.embed_dim,
         local_layers=args.local_layers,
         local_heads=args.local_heads,

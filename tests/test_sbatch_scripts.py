@@ -98,6 +98,8 @@ RUNNERS = [
     "run_local_graph_score_fusion.sh",
     "run_train_dualview_part_residual.sh",
     "run_write_dualview_part_report.sh",
+    "run_train_local_compression_part.sh",
+    "run_write_local_compression_part_report.sh",
 ]
 
 SUBMITTERS = [
@@ -136,9 +138,11 @@ SUBMITTERS = [
     "submit_local_graph_step10_3m1m1m_reuse_cache_with_fusion.sh",
     "submit_local_graph_residual_expert_experiment.sh",
     "submit_local_graph_residual_expert_v2_experiment.sh",
+    "submit_local_graph_residual_expert_v2_3m1m1m_serious.sh",
     "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
+    "submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh",
 ]
 
 
@@ -1616,6 +1620,50 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn('--dependency="afterok:${train_dep}"', submitter)
         self.assertIn("final_report_json", submitter)
 
+    def test_local_compression_part_submitter_reuses_hlt06_cache_and_queues_variants(self):
+        train = self.read("run_train_local_compression_part.sh")
+        report = self.read("run_write_local_compression_part_report.sh")
+        submitter = self.read("submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh")
+
+        self.assertIn("scripts/train_local_compression_part_tagger.py", train)
+        self.assertIn("LOCAL_COMPRESSION_PART_BASELINE_CHECKPOINT:?", train)
+        self.assertIn("--manifest-path", train)
+        self.assertIn("--hlt-cache-dir", train)
+        self.assertIn("--baseline-checkpoint", train)
+        self.assertIn("--confirm-split-settings", train)
+        self.assertIn("--confirm-final-test", train)
+        self.assertIn("--selection-metric", train)
+        self.assertIn("--expected-hlt-degradation-strength", train)
+        self.assertIn("--random-grouping-seed", train)
+        self.assertIn("diagnostics/init_logit_diff_vs_baseline.json", train)
+
+        self.assertIn("scripts/write_local_compression_part_report.py", report)
+        self.assertIn("local_compression_part_final_report.json", report)
+        self.assertIn("metric_table.csv", report)
+        self.assertIn("baseline_comparison.csv", report)
+        self.assertIn("diagnostics.csv", report)
+        self.assertIn("runtime_summary.csv", report)
+
+        self.assertIn("QCD_vs_Hgg_local_compression_part", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_500k_full_20260628_194154", submitter)
+        self.assertIn("local_graph_part_step10_qcd_hgg_binary_hlt0p6_20260627_075757/taggers/hlt_part_baseline/best_model_val.pt", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_MODEL_VAL_SIZE:=150000", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_STACK_TRAIN_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_STACK_VAL_SIZE:=150000", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_EPOCHS:=45", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_SELECTION_METRIC:=fpr_at_signal_eff_0p50", submitter)
+        self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_VARIANTS:=hlt_part_baseline_recheck lc_mlp_delta lc_local_compression_no_context lc_context_gated lc_context_delta_no_modalities lc_random_grouping", submitter)
+        self.assertIn('export LOCAL_COMPRESSION_PART_BASELINE_CHECKPOINT="${LOCAL_COMPRESSION_PART_QCD_HGG_BASELINE_CHECKPOINT}"', submitter)
+        self.assertIn('export LOCAL_COMPRESSION_PART_REPORT_COMPARISON_SPLIT="final_test"', submitter)
+        self.assertIn("run_train_local_compression_part.sh", submitter)
+        self.assertIn("run_write_local_compression_part_report.sh", submitter)
+        self.assertIn("local_compression_train: ${#train_job_ids[@]}", submitter)
+        self.assertIn('--dependency="afterok:${train_dep}"', submitter)
+        self.assertIn("final_report_json", submitter)
+
     def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
         runner = self.read("run_local_graph_score_fusion.sh")
 
@@ -1781,6 +1829,31 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("afterok:${residual_dep}", submitter)
         self.assertNotIn("run_build_label_filtered_fresh_splits.sh", submitter)
         self.assertNotIn("run_train_local_graph_part_tagger.sh", submitter)
+
+    def test_local_graph_residual_v2_3m1m1m_serious_submitter_uses_existing_cache(self):
+        submitter = self.read("submit_local_graph_residual_expert_v2_3m1m1m_serious.sh")
+
+        self.assertIn("multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_3m1m1m_full_20260628_194154", submitter)
+        self.assertIn("local_graph_part_qcd_hgg_hlt0p6_3m1m1m_20260629_015555", submitter)
+        self.assertIn("taggers/hlt_part_baseline/best_model_val.pt", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_MODEL_TRAIN_SIZE:=3000000", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_MODEL_VAL_SIZE:=1000000", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_STACK_TRAIN_SIZE:=3000000", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_STACK_VAL_SIZE:=1000000", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_FINAL_TEST_SIZE:=1000000", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_LOSS_MODES:=A C D", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_TRAIN_TIME:=5-00:00:00", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_CACHE_TIME:=1-12:00:00", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_TIME:=1-00:00:00", submitter)
+        self.assertIn("submit_local_graph_residual_expert_v2_experiment.sh", submitter)
+        self.assertIn("fresh_require_file", submitter)
+        self.assertIn("fresh_is_dry_run", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_ALLOW_BASELINE_SPLIT_MISMATCH:=0", submitter)
+        self.assertIn("does not look like a 3M/1M/1M baseline", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_STANDALONE_REPORT_PATH", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_SCORE_FUSION_REPORT_PATH", submitter)
+        self.assertIn("score_fusion_*/fusion_report.json", submitter)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")

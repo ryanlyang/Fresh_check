@@ -465,6 +465,11 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
         f"- best source: {summary.get('best_source_type')}",
         f"- best variant: {summary.get('best_variant')}",
         f"- best value: {summary.get('best_metric_value')}",
+        f"- best V2 source: {summary.get('best_v2_source_type')}",
+        f"- best V2 variant: {summary.get('best_v2_variant')}",
+        f"- best V2 value: {summary.get('best_v2_metric_value')}",
+        f"- best V2 learned variant: {summary.get('best_v2_learned_variant')}",
+        f"- best V2 validation-shrunk variant: {summary.get('best_v2_val_shrunk_variant')}",
         "",
         "## Comparison",
         "",
@@ -720,6 +725,26 @@ def build_local_graph_residual_expert_v2_report(config: LocalGraphResidualExpert
     _apply_baseline_deltas(metric_rows, baseline_by_split=baseline_by_split)
     comparison_rows = [row for row in metric_rows if row.get("split") == config.comparison_split]
     best = _best_row(comparison_rows, direction)
+    best_v2_learned = _best_row(
+        [row for row in comparison_rows if row.get("source_type") == "v2_residual_fused_learned_gamma"],
+        direction,
+    )
+    best_v2_val_shrunk = _best_row(
+        [row for row in comparison_rows if row.get("source_type") == "v2_residual_fused_val_shrunk"],
+        direction,
+    )
+    best_v2_any = _best_row(
+        [
+            row
+            for row in comparison_rows
+            if row.get("source_type")
+            in {
+                "v2_residual_fused_learned_gamma",
+                "v2_residual_fused_val_shrunk",
+            }
+        ],
+        direction,
+    )
     baseline_value = baseline_by_split.get(config.comparison_split)
     if best is None:
         problems.append(f"no rows had {config.comparison_split} {config.primary_metric}")
@@ -756,11 +781,35 @@ def build_local_graph_residual_expert_v2_report(config: LocalGraphResidualExpert
             "best_improvement_vs_baseline": best.get("primary_metric_improvement_vs_baseline")
             if best is not None
             else None,
+            "best_v2_source_type": best_v2_any.get("source_type") if best_v2_any is not None else None,
+            "best_v2_variant": best_v2_any.get("variant") if best_v2_any is not None else None,
+            "best_v2_metric_value": best_v2_any.get("primary_metric_value") if best_v2_any is not None else None,
+            "best_v2_improvement_vs_baseline": best_v2_any.get("primary_metric_improvement_vs_baseline")
+            if best_v2_any is not None
+            else None,
+            "best_v2_learned_variant": best_v2_learned.get("variant") if best_v2_learned is not None else None,
+            "best_v2_learned_metric_value": best_v2_learned.get("primary_metric_value")
+            if best_v2_learned is not None
+            else None,
+            "best_v2_learned_improvement_vs_baseline": best_v2_learned.get("primary_metric_improvement_vs_baseline")
+            if best_v2_learned is not None
+            else None,
+            "best_v2_val_shrunk_variant": best_v2_val_shrunk.get("variant")
+            if best_v2_val_shrunk is not None
+            else None,
+            "best_v2_val_shrunk_metric_value": best_v2_val_shrunk.get("primary_metric_value")
+            if best_v2_val_shrunk is not None
+            else None,
+            "best_v2_val_shrunk_improvement_vs_baseline": best_v2_val_shrunk.get(
+                "primary_metric_improvement_vs_baseline"
+            )
+            if best_v2_val_shrunk is not None
+            else None,
             "hlt_degradation_strength": LOCAL_GRAPH_PART_HLT_DEGRADATION_STRENGTH,
             "rule": "Primary comparison is final-test FPR@50, lower is better.",
             "gamma_reporting_rule": (
                 "V2 rows are split into learned-gamma and model-val validation-shrunk rows; "
-                "gamma shrinkage is applied to the learned correction delta."
+                "gamma shrinkage is applied to the learned correction delta and is capped at 1.0 by default."
             ),
         },
         "baseline_embedding_cache_family": cache_family,
