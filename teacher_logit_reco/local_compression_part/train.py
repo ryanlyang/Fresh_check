@@ -426,6 +426,7 @@ class LocalCompressionTaggerTrainConfig:
     compile_model: bool = False
     verify_hlt_hash: bool = True
     verify_hlt_params: bool = True
+    require_baseline_split_manifest_hash: bool = False
     expected_hlt_degradation_strength: float = LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH
     label_names: tuple[str, ...] = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES
     label_filter: tuple[int, ...] = ()
@@ -951,7 +952,7 @@ def train_local_compression_tagger(
         config.baseline_checkpoint,
         device=device,
         require=True,
-        expected_split_manifest_hash=manifest_sha,
+        expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
         expected_label_names=tuple(config.label_names),
         expected_label_filter=tuple(config.label_filter),
         expected_num_classes=int(config.resolved_num_classes),

@@ -99,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")
     parser.add_argument("--skip-hlt-params-check", action="store_true")
+    parser.add_argument("--require-baseline-split-manifest-hash", action="store_true")
     parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
     parser.add_argument("--embed-dim", type=int, default=96)
@@ -183,6 +184,7 @@ def _config_for_variant(args: argparse.Namespace, variant: str, output_dir: Path
         compile_model=bool(args.compile_model),
         verify_hlt_hash=not bool(args.skip_hlt_hash_check),
         verify_hlt_params=not bool(args.skip_hlt_params_check),
+        require_baseline_split_manifest_hash=bool(args.require_baseline_split_manifest_hash),
         expected_hlt_degradation_strength=float(args.expected_hlt_degradation_strength),
         label_names=label_names,
         label_filter=label_filter,
