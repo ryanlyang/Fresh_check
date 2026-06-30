@@ -90,6 +90,9 @@ RUNNERS = [
     "run_cache_local_graph_baseline_logits.sh",
     "run_train_local_graph_residual_expert.sh",
     "run_write_local_graph_residual_expert_report.sh",
+    "run_cache_local_graph_residual_v2_embeddings.sh",
+    "run_train_local_graph_residual_expert_v2.sh",
+    "run_write_local_graph_residual_expert_v2_report.sh",
     "run_train_multiscale_subjet_part_tagger.sh",
     "run_write_multiscale_subjet_part_report.sh",
     "run_local_graph_score_fusion.sh",
@@ -132,6 +135,7 @@ SUBMITTERS = [
     "submit_local_graph_step10_first_serious_run.sh",
     "submit_local_graph_step10_3m1m1m_reuse_cache_with_fusion.sh",
     "submit_local_graph_residual_expert_experiment.sh",
+    "submit_local_graph_residual_expert_v2_experiment.sh",
     "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
@@ -1717,6 +1721,66 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--allow-precomputed-evaluations", report_runner)
         self.assertIn("LOCAL_GRAPH_RESIDUAL_REPORT_CONFIRM_FINAL_TEST:=1", report_runner)
         self.assertIn("local_graph_residual_expert_report.json", report_runner)
+
+    def test_local_graph_residual_v2_submitter_reuses_existing_inputs_and_queues_a_c_d(self):
+        cache_runner = self.read("run_cache_local_graph_residual_v2_embeddings.sh")
+        train_runner = self.read("run_train_local_graph_residual_expert_v2.sh")
+        report_runner = self.read("run_write_local_graph_residual_expert_v2_report.sh")
+        submitter = self.read("submit_local_graph_residual_expert_v2_experiment.sh")
+
+        self.assertIn("scripts/cache_local_graph_residual_v2_embeddings.py", cache_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_CACHE_SPLITS:=model_train model_val stack_train stack_val final_test", cache_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_CACHE_METRIC_SPLITS:=model_train model_val stack_train stack_val", cache_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_BASELINE_CHECKPOINT", cache_runner)
+        self.assertIn("--checkpoint", cache_runner)
+        self.assertIn("baseline_embedding_manifest.json", cache_runner)
+        self.assertIn("${split}_baseline_embedding_cache.npz", cache_runner)
+        self.assertIn("${split}_baseline_embedding_cache_metadata.json", cache_runner)
+
+        self.assertIn("scripts/train_local_graph_residual_expert_v2.py", train_runner)
+        self.assertIn("normalize_v2_loss_mode", train_runner)
+        self.assertIn("residual_v2_weighted_bce", train_runner)
+        self.assertIn("residual_v2_boundary_pairwise_bce_anchor", train_runner)
+        self.assertIn("residual_v2_boundary_pairwise_soft_fpr_bce_anchor", train_runner)
+        self.assertIn("not a training job", train_runner)
+        self.assertIn("--baseline-embedding-cache-dir", train_runner)
+        self.assertIn("--residual-input-mode", train_runner)
+        self.assertIn("--condition-control-mode", train_runner)
+        self.assertIn("--label-control-mode", train_runner)
+        self.assertIn("--confirm-split-settings", train_runner)
+        self.assertIn("--train-split model_train", train_runner)
+        self.assertIn("--val-split model_val", train_runner)
+        self.assertIn("diagnostics/model_val_learned_gamma_predictions.npz", train_runner)
+        self.assertNotIn("--final-test-split", train_runner)
+
+        self.assertIn("scripts/write_local_graph_residual_expert_v2_report.py", report_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_COMPARISON_SPLIT:=final_test", report_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_CONFIRM_FINAL_TEST:=1", report_runner)
+        self.assertIn("--hlt-cache-dir", report_runner)
+        self.assertIn("--baseline-embedding-cache-dir", report_runner)
+        self.assertIn("${split}_baseline_embedding_cache.npz", report_runner)
+        self.assertIn("--confirm-final-test", report_runner)
+        self.assertIn("local_graph_residual_expert_v2_report.json", report_runner)
+        self.assertIn("metric_table.csv", report_runner)
+
+        self.assertIn("local_graph_residual_expert_v2_qcd_hgg_binary_hlt", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_LOSS_MODES:=A C D", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_COMPARISON_SPLIT:=final_test", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_CONFIRM_FINAL_TEST:=1", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_RESIDUAL_INPUT_MODE:=full", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_CONDITION_CONTROL_MODE:=normal", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_LABEL_CONTROL_MODE:=normal", submitter)
+        self.assertNotIn("LOCAL_GRAPH_RESIDUAL_V2_LOSS_MODES:=A B C D", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_BASELINE_CHECKPOINT must point", submitter)
+        self.assertIn("run_cache_local_graph_residual_v2_embeddings.sh", submitter)
+        self.assertIn("run_train_local_graph_residual_expert_v2.sh", submitter)
+        self.assertIn("run_write_local_graph_residual_expert_v2_report.sh", submitter)
+        self.assertIn("localgraph_residual_v2_embeddings", submitter)
+        self.assertIn("localgraph_residual_v2_report", submitter)
+        self.assertIn("gamma_shrinkage=reported_as_model_val_validation_shrunk_rows", submitter)
+        self.assertIn("afterok:${residual_dep}", submitter)
+        self.assertNotIn("run_build_label_filtered_fresh_splits.sh", submitter)
+        self.assertNotIn("run_train_local_graph_part_tagger.sh", submitter)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")

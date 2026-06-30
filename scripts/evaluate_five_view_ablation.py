@@ -17,25 +17,7 @@ from teacher_logit_reco.set_matching.five_view_ablation import (  # noqa: E402
     parse_ablation_checkpoint_spec,
 )
 from teacher_logit_reco.set_matching.five_view_data import FIVE_VIEW_SELECTION_MODES  # noqa: E402
-from jetclass_fresh.jetclass_data import LABEL_NAMES  # noqa: E402
-
-
-def label_names_to_indices(values: list[str]) -> tuple[int, ...]:
-    if not values:
-        return ()
-    by_name = {name: index for index, name in enumerate(LABEL_NAMES)}
-    output: list[int] = []
-    for value in values:
-        text = str(value).strip()
-        if not text:
-            continue
-        if text.isdigit():
-            output.append(int(text))
-            continue
-        if text not in by_name:
-            raise ValueError(f"Unknown JetClass label {text!r}; expected one of {list(LABEL_NAMES)}")
-        output.append(by_name[text])
-    return tuple(output)
+from teacher_logit_reco.set_matching.label_filters import label_names_to_manifest_indices  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +81,10 @@ def main() -> int:
         max_final_test_jets=args.max_final_test_jets,
         max_val_batches=args.max_val_batches,
         max_final_test_batches=args.max_final_test_batches,
-        label_filter=label_names_to_indices(list(args.label_filter_names)),
+        label_filter=label_names_to_manifest_indices(
+            list(args.label_filter_names),
+            manifest_path=Path(args.hlt_cache_dir).parent / "split_manifest.json.gz",
+        ),
         max_tokens_per_view=args.max_tokens_per_view,
         min_tokens_per_view=args.min_tokens_per_view,
         confidence_threshold=args.confidence_threshold,

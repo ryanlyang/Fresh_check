@@ -11,29 +11,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jetclass_fresh.jetclass_data import LABEL_NAMES  # noqa: E402
 from teacher_logit_reco.set_matching.detr_slots.training import (  # noqa: E402
     DetrSlotReconstructorTrainConfig,
     train_detr_slot_reconstructor,
 )
-
-
-def label_names_to_indices(values: list[str]) -> tuple[int, ...]:
-    if not values:
-        return ()
-    by_name = {name: index for index, name in enumerate(LABEL_NAMES)}
-    output: list[int] = []
-    for value in values:
-        text = str(value).strip()
-        if not text:
-            continue
-        if text.isdigit():
-            output.append(int(text))
-            continue
-        if text not in by_name:
-            raise ValueError(f"Unknown JetClass label {text!r}; expected one of {list(LABEL_NAMES)}")
-        output.append(by_name[text])
-    return tuple(output)
+from teacher_logit_reco.set_matching.label_filters import label_names_to_manifest_indices  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,7 +121,7 @@ def main() -> int:
         max_val_batches=args.max_val_batches,
         max_train_jets=args.max_train_jets,
         max_val_jets=args.max_val_jets,
-        label_filter=label_names_to_indices(list(args.label_filter_names)),
+        label_filter=label_names_to_manifest_indices(list(args.label_filter_names), manifest_path=args.manifest_path),
         trim_to_valid=not bool(args.no_trim_to_valid),
         verify_hlt_hash=not bool(args.skip_hlt_hash_check),
         verify_label_branches=args.verify_label_branches,
