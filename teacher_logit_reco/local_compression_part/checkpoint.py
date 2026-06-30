@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier, require_torch
+from jetclass_fresh.jetclass_data import load_split_manifest, manifest_hash
 
 from .config import (
     LOCAL_COMPRESSION_BINARY_LABEL_FILTER,
@@ -74,6 +75,20 @@ def _first_metadata_value(*payloads: Mapping[str, Any] | None, paths: tuple[tupl
             if value is not None:
                 return value
     return None
+
+
+def _split_manifest_hash_from_hlt_cache_dir(value: Any) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    cache_dir = Path(str(value))
+    for candidate in (cache_dir.parent / "split_manifest.json.gz", cache_dir.parent / "split_manifest.json"):
+        if not candidate.exists():
+            continue
+        try:
+            return manifest_hash(load_split_manifest(candidate)), str(candidate)
+        except Exception:
+            continue
+    return None, None
 
 
 def _load_torch_payload(path: Path, *, map_location: Any = "cpu") -> Any:
@@ -277,6 +292,22 @@ def _metadata_from_checkpoint_and_reports(
             ("binary_inputs", "manifest_hash"),
         ),
     )
+    derived_manifest_path: str | None = None
+    if split_manifest_hash is None:
+        hlt_cache_dir = _first_metadata_value(
+            *payloads,
+            paths=(
+                ("hlt_cache_dir",),
+                ("config", "hlt_cache_dir"),
+                ("training_config", "hlt_cache_dir"),
+                ("run_config", "hlt_cache_dir"),
+                ("metadata", "hlt_cache_dir"),
+                ("binary_inputs", "hlt_cache_dir"),
+            ),
+        )
+        split_manifest_hash, derived_manifest_path = _split_manifest_hash_from_hlt_cache_dir(hlt_cache_dir)
+        if derived_manifest_path is not None:
+            loaded_paths.append(derived_manifest_path)
     part_config = _first_metadata_value(
         *payloads,
         paths=(("part_config",), ("part_model_config",), ("model_config",), ("config", "part_model_config")),

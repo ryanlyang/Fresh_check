@@ -1,10 +1,11 @@
+import json
 import math
 import tempfile
 import unittest
 from pathlib import Path
 
 from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier, require_torch
-from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
+from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM, SPLIT_ORDER, SplitManifest, manifest_hash, save_split_manifest
 
 from teacher_logit_reco.local_compression_part import (
     LOCAL_COMPRESSION_CANONICAL_FEATURE_NAMES,
@@ -100,6 +101,22 @@ def write_checkpoint(path: Path, model: torch.nn.Module, *, prefixed: bool = Fal
         },
         path,
     )
+
+
+def write_split_manifest(path: Path) -> str:
+    manifest = SplitManifest(
+        data_dir="toy",
+        max_constits=6,
+        class_names=["QCD", "Hgg"],
+        file_prefix_to_label={"ZJetsToNuNu": 0, "HToGG": 1},
+        split_sizes={split: 0 for split in SPLIT_ORDER},
+        split_seeds={split: index + 1 for index, split in enumerate(SPLIT_ORDER)},
+        file_records=[],
+        splits={split: [] for split in SPLIT_ORDER},
+        metadata={"test_manifest": True},
+    )
+    save_split_manifest(manifest, path)
+    return manifest_hash(manifest)
 
 
 class LocalCompressionStep11CheckpointTests(unittest.TestCase):
@@ -223,6 +240,34 @@ class LocalCompressionStep11CheckpointTests(unittest.TestCase):
             )
 
             self.assertEqual(report.baseline_checkpoint_split_manifest_hash, "sidecar-split-hash")
+
+    def test_split_manifest_hash_can_come_from_sidecar_hlt_cache_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            run_dir = tmp_path / "taggers" / "hlt_part_baseline"
+            run_dir.mkdir(parents=True)
+            path = run_dir / "best_model_val.pt"
+            write_checkpoint(path, DummyReferencePart())
+            payload = torch.load(path, map_location="cpu")
+            payload.pop("split_manifest_hash")
+            torch.save(payload, path)
+            hlt_cache_dir = tmp_path / "binary_inputs" / "hlt_cache"
+            hlt_cache_dir.mkdir(parents=True)
+            expected_hash = write_split_manifest(tmp_path / "binary_inputs" / "split_manifest.json.gz")
+            (run_dir / "run_report.json").write_text(
+                json.dumps({"config": {"hlt_cache_dir": str(hlt_cache_dir)}}) + "\n",
+                encoding="utf-8",
+            )
+
+            report = load_hlt_part_baseline_checkpoint(
+                path,
+                DummyReferencePart(),
+                expected_split_manifest_hash=expected_hash,
+                require_metadata=True,
+            )
+
+            self.assertEqual(report.baseline_checkpoint_split_manifest_hash, expected_hash)
+            self.assertIn("split_manifest.json.gz", " ".join(report.baseline_checkpoint_sidecar_reports))
 
     def test_missing_or_wrong_label_metadata_is_rejected_when_required(self):
         with tempfile.TemporaryDirectory() as tmp:
