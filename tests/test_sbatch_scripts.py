@@ -139,6 +139,7 @@ SUBMITTERS = [
     "submit_local_graph_residual_expert_experiment.sh",
     "submit_local_graph_residual_expert_v2_experiment.sh",
     "submit_local_graph_residual_expert_v2_3m1m1m_serious.sh",
+    "submit_local_graph_residual_expert_v2_3m1m1m_ablation_suite.sh",
     "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
@@ -1853,6 +1854,26 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("does not look like a 3M/1M/1M baseline", submitter)
         self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_STANDALONE_REPORT_PATH", submitter)
         self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_SCORE_FUSION_REPORT_PATH", submitter)
+        self.assertIn("score_fusion_*/fusion_report.json", submitter)
+
+    def test_local_graph_residual_v2_3m1m1m_ablation_suite_queues_controls(self):
+        submitter = self.read("submit_local_graph_residual_expert_v2_3m1m1m_ablation_suite.sh")
+
+        self.assertIn("multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_3m1m1m_full_20260628_194154", submitter)
+        self.assertIn("local_graph_part_qcd_hgg_hlt0p6_3m1m1m_20260629_015555", submitter)
+        self.assertIn("full_a|A|full|normal|normal", submitter)
+        self.assertIn("full_c|C|full|normal|normal", submitter)
+        self.assertIn("full_d|D|full|normal|normal", submitter)
+        self.assertIn("embedding_only_d|D|embedding_only|normal|normal", submitter)
+        self.assertIn("local_only_d|D|local_only|normal|normal", submitter)
+        self.assertIn("condition_shuffled_d|D|full|shuffled|normal", submitter)
+        self.assertIn("label_shuffled_d|D|full|normal|shuffled", submitter)
+        self.assertIn("run_cache_local_graph_residual_v2_embeddings.sh", submitter)
+        self.assertIn("run_train_local_graph_residual_expert_v2.sh", submitter)
+        self.assertIn("run_write_local_graph_residual_expert_v2_report.sh", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_V2_REPORT_VARIANTS", submitter)
+        self.assertIn("total_submitted", submitter)
+        self.assertIn("does not look like a 3M/1M/1M baseline", submitter)
         self.assertIn("score_fusion_*/fusion_report.json", submitter)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
