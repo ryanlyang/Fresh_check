@@ -202,6 +202,28 @@ class LocalCompressionStep11CheckpointTests(unittest.TestCase):
                     require_metadata=True,
                 )
 
+    def test_split_manifest_hash_can_come_from_sidecar_manifest_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            path = tmp_path / "best_model_val.pt"
+            write_checkpoint(path, DummyReferencePart())
+            payload = torch.load(path, map_location="cpu")
+            payload.pop("split_manifest_hash")
+            torch.save(payload, path)
+            (tmp_path / "run_report.json").write_text(
+                '{"manifest": {"manifest_hash": "sidecar-split-hash"}}\n',
+                encoding="utf-8",
+            )
+
+            report = load_hlt_part_baseline_checkpoint(
+                path,
+                DummyReferencePart(),
+                expected_split_manifest_hash="sidecar-split-hash",
+                require_metadata=True,
+            )
+
+            self.assertEqual(report.baseline_checkpoint_split_manifest_hash, "sidecar-split-hash")
+
     def test_missing_or_wrong_label_metadata_is_rejected_when_required(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

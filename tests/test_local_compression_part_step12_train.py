@@ -7,7 +7,15 @@ from pathlib import Path
 import numpy as np
 
 from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier, require_torch
-from jetclass_fresh.jetclass_data import JetIdentity, JetView, RAW_TOKEN_DIM
+from jetclass_fresh.jetclass_data import (
+    SPLIT_ORDER,
+    JetIdentity,
+    JetView,
+    RAW_TOKEN_DIM,
+    SplitManifest,
+    manifest_hash,
+    save_split_manifest,
+)
 
 from teacher_logit_reco.local_compression_part import (
     LOCAL_COMPRESSION_CANONICAL_FEATURE_NAMES,
@@ -105,19 +113,35 @@ def dataset(split: str) -> SubtokenHLTJetDataset:
     )
 
 
-def write_checkpoint(path: Path, model: torch.nn.Module) -> None:
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
-            "hlt_degradation_strength": 0.6,
-            "label_names": ["QCD", "Hgg"],
-            "label_filter": [0, 1],
-            "num_classes": 2,
-            "model_config": dict(getattr(model, "config", {})),
-        },
-        path,
+def write_split_manifest(path: Path) -> str:
+    manifest = SplitManifest(
+        data_dir="toy",
+        max_constits=6,
+        class_names=["QCD", "Hgg"],
+        file_prefix_to_label={"ZJetsToNuNu": 0, "HToGG": 1},
+        split_sizes={split: 0 for split in SPLIT_ORDER},
+        split_seeds={split: index + 1 for index, split in enumerate(SPLIT_ORDER)},
+        file_records=[],
+        splits={split: [] for split in SPLIT_ORDER},
+        metadata={"test_manifest": True},
     )
+    save_split_manifest(manifest, path)
+    return manifest_hash(manifest)
+
+
+def write_checkpoint(path: Path, model: torch.nn.Module, *, split_manifest_hash: str | None = None) -> None:
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
+        "hlt_degradation_strength": 0.6,
+        "label_names": ["QCD", "Hgg"],
+        "label_filter": [0, 1],
+        "num_classes": 2,
+        "model_config": dict(getattr(model, "config", {})),
+    }
+    if split_manifest_hash is not None:
+        payload["split_manifest_hash"] = str(split_manifest_hash)
+    torch.save(payload, path)
 
 
 class LocalCompressionStep12TrainTests(unittest.TestCase):
@@ -138,9 +162,9 @@ class LocalCompressionStep12TrainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manifest = tmp_path / "split_manifest.json"
-            manifest.write_text("not-json\n", encoding="utf-8")
+            manifest_sha = write_split_manifest(manifest)
             checkpoint = tmp_path / "baseline.pt"
-            write_checkpoint(checkpoint, DummyReferencePart())
+            write_checkpoint(checkpoint, DummyReferencePart(), split_manifest_hash=manifest_sha)
             output_dir = tmp_path / "out"
             config = LocalCompressionTaggerTrainConfig(
                 output_dir=str(output_dir),
@@ -201,6 +225,8 @@ class LocalCompressionStep12TrainTests(unittest.TestCase):
             self.assertTrue((output_dir / "diagnostics" / "init_logit_diff_vs_baseline.json").exists())
             saved = json.loads((output_dir / "run_report.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["label_filter"], [0, 1])
+            self.assertTrue(saved["config"]["require_baseline_split_manifest_hash"])
+            self.assertEqual(saved["config"]["freeze_part_epochs"], 1)
             self.assertEqual(saved["final_test_metrics"]["prediction_arrays"]["signal_label"], "Hgg")
             self.assertEqual(saved["final_test_metrics"]["prediction_arrays"]["signal_label_index"], 1)
             curves = json.loads((output_dir / "training_curves.json").read_text(encoding="utf-8"))
@@ -209,9 +235,33 @@ class LocalCompressionStep12TrainTests(unittest.TestCase):
             self.assertIn("delta_l2_loss", epoch["train"])
             self.assertIn("diagnostics", epoch["train"])
             self.assertIn("delta_F_abs_max", epoch["train"]["diagnostics"])
+            self.assertTrue(
+                any(key.startswith("delta_feature_sq_mean.") for key in epoch["train"]["diagnostics"])
+            )
             csv_text = (output_dir / "diagnostics" / "epoch_metrics.csv").read_text(encoding="utf-8")
             self.assertIn("train_ce_loss", csv_text)
             self.assertIn("train_diag_delta_F_abs_max", csv_text)
+            self.assertIn("train_diag_delta_feature_sq_mean", csv_text)
+
+    def test_strict_baseline_split_hash_requires_readable_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest = tmp_path / "split_manifest.json"
+            manifest.write_text("not-json\n", encoding="utf-8")
+            checkpoint = tmp_path / "baseline.pt"
+            write_checkpoint(checkpoint, DummyReferencePart())
+            config = LocalCompressionTaggerTrainConfig(
+                output_dir=str(tmp_path / "out"),
+                manifest_path=str(manifest),
+                hlt_cache_dir="unused",
+                baseline_checkpoint=str(checkpoint),
+                confirm_split_settings=True,
+                confirm_final_test=True,
+                device="cpu",
+            )
+
+            with self.assertRaisesRegex(ValueError, "requires a readable split manifest"):
+                train_local_compression_tagger(config)
 
 
 if __name__ == "__main__":

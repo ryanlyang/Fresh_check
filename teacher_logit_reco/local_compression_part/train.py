@@ -426,7 +426,7 @@ class LocalCompressionTaggerTrainConfig:
     compile_model: bool = False
     verify_hlt_hash: bool = True
     verify_hlt_params: bool = True
-    require_baseline_split_manifest_hash: bool = False
+    require_baseline_split_manifest_hash: bool = True
     expected_hlt_degradation_strength: float = LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH
     label_names: tuple[str, ...] = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES
     label_filter: tuple[int, ...] = ()
@@ -445,7 +445,7 @@ class LocalCompressionTaggerTrainConfig:
     delta_scale: float = 1.0
     freeze_pid_deltas: bool = False
     freeze_geometry_deltas: bool = False
-    freeze_part_epochs: int = 0
+    freeze_part_epochs: int = 1
 
     def __post_init__(self) -> None:
         self.output_dir = str(self.output_dir)
@@ -574,6 +574,7 @@ def load_baseline_checkpoint_into_part_model(
     expected_label_names: Sequence[str] = LOCAL_COMPRESSION_SOURCE_LABEL_NAMES,
     expected_label_filter: Sequence[int] = LOCAL_COMPRESSION_BINARY_LABEL_FILTER,
     expected_num_classes: int = 2,
+    expected_hlt_degradation_strength: float = LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
 ) -> dict[str, Any]:
     """Load a frozen HLT ParT checkpoint into ``model.part_model`` only."""
 
@@ -582,7 +583,7 @@ def load_baseline_checkpoint_into_part_model(
         checkpoint_path,
         map_location=device or "cpu",
         expected_selection_metric=LOCAL_COMPRESSION_PRIMARY_METRIC,
-        expected_hlt_degradation_strength=LOCAL_COMPRESSION_PART_HLT_DEGRADATION_STRENGTH,
+        expected_hlt_degradation_strength=float(expected_hlt_degradation_strength),
         expected_split_manifest_hash=expected_split_manifest_hash,
         expected_label_names=tuple(expected_label_names),
         expected_label_filter=tuple(expected_label_filter),
@@ -704,9 +705,13 @@ def _delta_diagnostics_from_output(model, output) -> dict[str, float]:
             for index, name in enumerate(feature_names):
                 safe_name = str(name).replace("/", "_")
                 column = per_feature_abs[:, index]
+                signed_column = active_delta[:, index].detach()
+                sq_mean = signed_column.pow(2).mean()
                 diagnostics[f"delta_feature_abs_mean.{safe_name}"] = float(column.mean().cpu().item())
                 diagnostics[f"delta_feature_abs_p90.{safe_name}"] = float(_tensor_quantile(column, 0.90).cpu().item())
                 diagnostics[f"delta_feature_abs_max.{safe_name}"] = float(column.max().cpu().item())
+                diagnostics[f"delta_feature_sq_mean.{safe_name}"] = float(sq_mean.cpu().item())
+                diagnostics[f"delta_feature_rms.{safe_name}"] = float(sq_mean.sqrt().cpu().item())
     else:
         diagnostics = {
             "delta_F_l2_mean": 0.0,
@@ -925,6 +930,17 @@ def train_local_compression_tagger(
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     manifest_info = _manifest_metadata(config.manifest_path)
     manifest_sha = manifest_info.get("manifest_hash") if manifest_info.get("load_ok") else None
+    if bool(config.require_baseline_split_manifest_hash):
+        if not bool(manifest_info.get("load_ok")):
+            raise ValueError(
+                "require_baseline_split_manifest_hash=True requires a readable split manifest; "
+                f"failed to load {config.manifest_path!r}: {manifest_info.get('load_error', 'unknown error')}"
+            )
+        if not manifest_sha:
+            raise ValueError(
+                "require_baseline_split_manifest_hash=True requires the active split manifest to expose "
+                "a non-empty manifest_hash"
+            )
 
     train_dataset = train_dataset or _load_dataset(config, config.train_split, max_jets=config.max_train_jets)
     val_dataset = val_dataset or _load_dataset(config, config.val_split, max_jets=config.max_val_jets)
@@ -956,6 +972,7 @@ def train_local_compression_tagger(
         expected_label_names=tuple(config.label_names),
         expected_label_filter=tuple(config.label_filter),
         expected_num_classes=int(config.resolved_num_classes),
+        expected_hlt_degradation_strength=float(config.expected_hlt_degradation_strength),
     )
     save_json(diagnostics_dir / "baseline_load_report.json", baseline_load_report)
     init_logit_sample_count = min(4, int(len(train_dataset)))

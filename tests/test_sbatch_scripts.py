@@ -1636,6 +1636,8 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("--selection-metric", train)
         self.assertIn("--expected-hlt-degradation-strength", train)
         self.assertIn("--random-grouping-seed", train)
+        self.assertIn("--require-baseline-split-manifest-hash", train)
+        self.assertIn("--allow-missing-baseline-split-manifest-hash", train)
         self.assertIn("diagnostics/init_logit_diff_vs_baseline.json", train)
 
         self.assertIn("scripts/write_local_compression_part_report.py", report)

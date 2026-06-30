@@ -70,7 +70,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")
     parser.add_argument("--skip-hlt-params-check", action="store_true")
-    parser.add_argument("--require-baseline-split-manifest-hash", action="store_true")
+    parser.set_defaults(require_baseline_split_manifest_hash=True)
+    parser.add_argument("--require-baseline-split-manifest-hash", dest="require_baseline_split_manifest_hash", action="store_true")
+    parser.add_argument("--allow-missing-baseline-split-manifest-hash", dest="require_baseline_split_manifest_hash", action="store_false")
     parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
     parser.add_argument("--variant", choices=LOCAL_COMPRESSION_VARIANTS, default=LOCAL_COMPRESSION_VARIANT_CONTEXT_GATED)
@@ -88,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta-scale", type=float, default=1.0)
     parser.add_argument("--freeze-pid-deltas", action="store_true")
     parser.add_argument("--freeze-geometry-deltas", action="store_true")
-    parser.add_argument("--freeze-part-epochs", type=int, default=0)
+    parser.add_argument("--freeze-part-epochs", type=int, default=1)
     return parser.parse_args()
 
 
