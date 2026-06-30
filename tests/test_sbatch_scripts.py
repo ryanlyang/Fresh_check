@@ -87,6 +87,9 @@ RUNNERS = [
     "run_write_subtoken_part_report.sh",
     "run_train_local_graph_part_tagger.sh",
     "run_write_local_graph_part_report.sh",
+    "run_cache_local_graph_baseline_logits.sh",
+    "run_train_local_graph_residual_expert.sh",
+    "run_write_local_graph_residual_expert_report.sh",
     "run_train_multiscale_subjet_part_tagger.sh",
     "run_write_multiscale_subjet_part_report.sh",
     "run_local_graph_score_fusion.sh",
@@ -128,6 +131,7 @@ SUBMITTERS = [
     "submit_local_graph_qcd_hgg_binary_experiment.sh",
     "submit_local_graph_step10_first_serious_run.sh",
     "submit_local_graph_step10_3m1m1m_reuse_cache_with_fusion.sh",
+    "submit_local_graph_residual_expert_experiment.sh",
     "submit_multiscale_subjet_qcd_hgg_binary_experiment.sh",
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
@@ -1624,6 +1628,95 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("fusion_report.json", runner)
         self.assertIn("fusion_metric_table.csv", runner)
         self.assertIn("fusion_prediction_manifest.json", runner)
+
+    def test_local_graph_residual_expert_runner_trains_one_loss_mode(self):
+        runner = self.read("run_train_local_graph_residual_expert.sh")
+
+        self.assertIn("scripts/train_local_graph_residual_expert.py", runner)
+        self.assertIn("REQUESTED_LOSS_MODE", runner)
+        self.assertIn("normalize_loss_mode", runner)
+        self.assertIn("residual_weighted_bce", runner)
+        self.assertIn("residual_boundary_pairwise", runner)
+        self.assertIn("residual_boundary_pairwise_bce_anchor", runner)
+        self.assertIn("residual_boundary_pairwise_soft_fpr_bce_anchor", runner)
+        self.assertIn("residual_boundary_pairwise_soft_fpr_bce_anchor_alpha_shrink", runner)
+        self.assertIn("not a training job", runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6", runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_SELECTION_METRIC:=fpr_at_signal_eff_0p50", runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_WARM_START_ENABLED:=1", runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_REQUIRE_WARM_START:=1", runner)
+        self.assertIn("--warm-start-checkpoint", runner)
+        self.assertIn("--require-warm-start", runner)
+        self.assertIn("--confirm-final-test", runner)
+        self.assertIn("--train-split model_train", runner)
+        self.assertIn("--val-split model_val", runner)
+        self.assertIn("${split}_baseline_logits.npz", runner)
+        self.assertIn("${split}_baseline_logits_metadata.json", runner)
+        self.assertIn("baseline_logit_manifest.json", runner)
+        self.assertIn("diagnostics/residual_diagnostics_model_val.json", runner)
+        self.assertNotIn("stack_train", runner)
+        self.assertNotIn("stack_val", runner)
+        self.assertNotIn("--final-test-split", runner)
+
+    def test_local_graph_baseline_logit_cache_runner_writes_all_split_logits(self):
+        runner = self.read("run_cache_local_graph_baseline_logits.sh")
+
+        self.assertIn("scripts/cache_local_graph_baseline_logits.py", runner)
+        self.assertIn("LOCAL_GRAPH_BASELINE_LOGIT_CACHE_SPLITS:=model_train model_val stack_train stack_val final_test", runner)
+        self.assertIn("LOCAL_GRAPH_BASELINE_LOGIT_CACHE_METRIC_SPLITS:=model_train model_val stack_train stack_val", runner)
+        self.assertIn("LOCAL_GRAPH_BASELINE_LOGIT_CACHE_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6", runner)
+        self.assertIn("LOCAL_GRAPH_BASELINE_LOGIT_CACHE_EXPECTED_CHECKPOINT_VARIANT:=hlt_part_baseline", runner)
+        self.assertIn("--checkpoint", runner)
+        self.assertIn("--expected-checkpoint-variant", runner)
+        self.assertIn("--splits", runner)
+        self.assertIn("--metric-splits", runner)
+        self.assertIn("--max-model-train-jets", runner)
+        self.assertIn("--max-model-val-jets", runner)
+        self.assertIn("--max-stack-train-jets", runner)
+        self.assertIn("--max-stack-val-jets", runner)
+        self.assertIn("--max-final-test-jets", runner)
+        self.assertIn("baseline_logit_manifest.json", runner)
+        self.assertIn("${split}_baseline_logits.npz", runner)
+        self.assertIn("${split}_baseline_logits_metadata.json", runner)
+
+    def test_local_graph_residual_expert_submitter_queues_baseline_logits_and_ladder(self):
+        submitter = self.read("submit_local_graph_residual_expert_experiment.sh")
+        report_runner = self.read("run_write_local_graph_residual_expert_report.sh")
+
+        self.assertIn("local_graph_residual_expert_qcd_hgg_binary_hlt", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_HLT_DEGRADATION_STRENGTH:=0.6", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_LOSS_MODES:=A B C D", submitter)
+        self.assertIn("alpha_shrinkage=reported_as_model_val_gamma_shrunk_rows", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_LOCAL_ADAPTER:=point_attention", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_TRAIN_BASELINE:=1", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_BUILD_BINARY_INPUTS:=1", submitter)
+        self.assertIn("run_build_label_filtered_fresh_splits.sh", submitter)
+        self.assertIn("run_build_label_filtered_hlt_cache.sh", submitter)
+        self.assertIn("run_train_local_graph_part_tagger.sh", submitter)
+        self.assertIn("run_cache_local_graph_baseline_logits.sh", submitter)
+        self.assertIn("run_train_local_graph_residual_expert.sh", submitter)
+        self.assertIn("run_write_local_graph_residual_expert_report.sh", submitter)
+        self.assertIn("localgraph_residual_baseline_logits", submitter)
+        self.assertIn("localgraph_residual_hlt_baseline", submitter)
+        self.assertIn("localgraph_residual_final_report", submitter)
+        self.assertIn("baseline_logit_cache_jid", submitter)
+        self.assertIn("residual_job_ids", submitter)
+        self.assertIn("residual_output_names", submitter)
+        self.assertIn("afterok_args", submitter)
+        self.assertIn('"${baseline_logit_cache_jid}"', submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_SUBMIT_FINAL_REPORT:=1", submitter)
+        self.assertIn("afterok:${residual_dep}", submitter)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_SUBMIT_SCORE_FUSION:=0", submitter)
+        self.assertIn("filtered_hlt_cache", submitter)
+        self.assertIn("baseline_logit_cache", submitter)
+        self.assertIn("residual_expert_root", submitter)
+        self.assertIn("final_report", submitter)
+        self.assertIn("scripts/write_local_graph_residual_expert_report.py", report_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_REPORT_PRIMARY_METRIC:=fpr_at_signal_eff_0p50", report_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_REPORT_ALLOW_PRECOMPUTED_EVALUATIONS:=0", report_runner)
+        self.assertIn("--allow-precomputed-evaluations", report_runner)
+        self.assertIn("LOCAL_GRAPH_RESIDUAL_REPORT_CONFIRM_FINAL_TEST:=1", report_runner)
+        self.assertIn("local_graph_residual_expert_report.json", report_runner)
 
     def test_dualview_part_step10_smoke_runner_trains_real_and_shuffled_pn(self):
         runner = self.read("run_train_dualview_part_residual.sh")

@@ -53,6 +53,9 @@ export LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_CPUS="${LOCAL_GRAPH_PART_3M_SCORE_F
 export LOCAL_GRAPH_PART_QCD_HGG_SCORE_FUSION_REQUIRE_ALL_VARIANTS=1
 
 fresh_prepare_submitter
+if fresh_is_dry_run; then
+  echo "DRY_RUN local_graph_part_step10_3m1m1m wrapper: delegated submitter will print sbatch commands." >&2
+fi
 for split in model_train model_val stack_train stack_val final_test; do
   fresh_require_file "${QCD_HGG_3M_HLT_CACHE_DIR}/${split}_fixed_hlt.npz"
   fresh_require_file "${QCD_HGG_3M_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"

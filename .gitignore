@@ -2,5 +2,6 @@ downloads/
 checkpoints/
 fresh_check_logs/
 fresh_check_diagnostics/
+.codex_queue_outputs/
 __pycache__/
 *.pyc
