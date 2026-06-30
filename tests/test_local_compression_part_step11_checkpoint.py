@@ -158,6 +158,38 @@ class LocalCompressionStep11CheckpointTests(unittest.TestCase):
             for key, value in source.state_dict().items():
                 self.assertTrue(torch.allclose(model.part_model.state_dict()[key], value))
 
+    def test_loads_multiscale_reference_part_wrapper_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "best_model_val.pt"
+            source = DummyReferencePart()
+            state = {f"reference_part.part_model.{key}": value.clone() for key, value in source.state_dict().items()}
+            torch.save(
+                {
+                    "model_state_dict": state,
+                    "selection_metric": LOCAL_COMPRESSION_PRIMARY_METRIC,
+                    "hlt_degradation_strength": 0.6,
+                    "split_manifest_hash": "split-hash-123",
+                    "label_names": ["QCD", "Hgg"],
+                    "label_filter": [0, 1],
+                    "num_classes": 2,
+                    "model_config": {"variant": "hlt_part_baseline"},
+                },
+                path,
+            )
+            model = LocalCompressionFeatureAdapterParT(small_config(), part_model=DummyReferencePart())
+
+            report = warm_start_local_compression_part_model(
+                model,
+                path,
+                expected_split_manifest_hash="split-hash-123",
+                require_metadata=True,
+            )
+
+            self.assertEqual(report.loaded_key_count, len(source.state_dict()))
+            self.assertEqual(report.missing_key_count, 0)
+            for key, value in source.state_dict().items():
+                self.assertTrue(torch.allclose(model.part_model.state_dict()[key], value))
+
     def test_metadata_mismatch_raises_before_training_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "best_model_val.pt"

@@ -35,6 +35,17 @@ class ClassifierNotUsedPart(ExactEmbeddingPart):
         return torch.stack((embedding[:, 0], embedding[:, 1]), dim=1)
 
 
+class EmptyJetNanPart(ExactEmbeddingPart):
+    def embedding(self, tokens, mask):
+        weights = mask.to(dtype=tokens.dtype).unsqueeze(-1)
+        pooled = (tokens * weights).sum(dim=1) / weights.sum(dim=1)
+        return self.encoder(pooled)
+
+    def forward(self, tokens, mask):
+        raw_logits = self.classifier(self.embedding(tokens, mask))
+        return torch.nan_to_num(raw_logits, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 class NoTwoClassHeadPart(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -113,6 +124,35 @@ class LocalGraphResidualV2Step3EmbeddingExtractionTest(unittest.TestCase):
         tokens, mask = self._batch()
 
         with self.assertRaisesRegex(RuntimeError, "embedding hook did not fire"):
+            anchor.forward_outputs(tokens, mask)
+
+    def test_empty_hlt_jet_nan_embedding_is_sanitized_to_zero(self):
+        anchor = HLTPartEmbeddingAnchor(
+            EmptyJetNanPart(),
+            config=HLTPartEmbeddingAnchorConfig(final_head_name="classifier"),
+        )
+        tokens, mask = self._batch()
+        mask[2, :] = False
+
+        output = anchor.forward_outputs(tokens, mask)
+
+        self.assertTrue(torch.isfinite(output.logits).all())
+        self.assertTrue(torch.isfinite(output.embedding).all())
+        self.assertTrue(torch.isfinite(output.final_head_output).all())
+        self.assertTrue(torch.allclose(output.embedding[2], torch.zeros_like(output.embedding[2])))
+        self.assertEqual(output.diagnostics["empty_hlt_jets"], 1)
+        self.assertEqual(output.diagnostics["hlt_part_penultimate_embedding_sanitized_empty_rows"], 1)
+        self.assertEqual(output.diagnostics["hlt_part_final_head_output_sanitized_empty_rows"], 1)
+
+    def test_nonempty_nan_embedding_still_fails(self):
+        anchor = HLTPartEmbeddingAnchor(
+            EmptyJetNanPart(),
+            config=HLTPartEmbeddingAnchorConfig(final_head_name="classifier"),
+        )
+        tokens, mask = self._batch()
+        tokens[0, 0, 0] = float("nan")
+
+        with self.assertRaisesRegex(FloatingPointError, "non-empty HLT jets"):
             anchor.forward_outputs(tokens, mask)
 
     def test_disallowed_proxy_embedding_source_is_rejected(self):

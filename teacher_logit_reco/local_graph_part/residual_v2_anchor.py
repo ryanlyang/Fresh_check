@@ -127,6 +127,65 @@ def _finite_tensor(value: Any, *, name: str) -> Any:
     return value
 
 
+def _forward_mask_from_args(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any | None:
+    torch = require_torch()
+    mask = kwargs.get("mask")
+    if mask is None and len(args) >= 2:
+        mask = args[1]
+    if mask is None and args:
+        first = args[0]
+        if isinstance(first, Mapping):
+            mask = first.get("mask", first.get("hlt_mask"))
+    if mask is None:
+        return None
+    if not isinstance(mask, torch.Tensor):
+        mask = torch.as_tensor(mask, dtype=torch.bool)
+    return mask.to(dtype=torch.bool)
+
+
+def _sanitize_nonfinite_empty_rows(value: Any, mask: Any | None, *, name: str) -> tuple[Any, dict[str, int]]:
+    """Allow non-finite embedding rows only for fully empty HLT jets.
+
+    The exact HLT ParT wrapper sanitizes its final logits.  On fully empty HLT
+    jets, Weaver can still expose NaNs in the raw penultimate tensor seen by
+    the forward hook.  Those rows contain no particle information, so the V2
+    cache stores a zero embedding for them while continuing to fail loudly on
+    non-finite values from any non-empty jet.
+    """
+
+    torch = require_torch()
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(value)!r}")
+    finite = torch.isfinite(value)
+    if bool(finite.all()):
+        return value, {
+            f"{name}_nonfinite_rows": 0,
+            f"{name}_sanitized_empty_rows": 0,
+        }
+    if mask is None:
+        raise FloatingPointError(f"{name} contains non-finite values and no HLT mask was available")
+    mask = mask.to(device=value.device, dtype=torch.bool)
+    if int(mask.ndim) != 2 or int(mask.shape[0]) != int(value.shape[0]):
+        raise ValueError(
+            f"HLT mask for {name} must have shape [batch, particles], got {tuple(mask.shape)} "
+            f"for tensor {tuple(value.shape)}"
+        )
+    row_finite = finite.reshape(int(value.shape[0]), -1).all(dim=1)
+    row_bad = ~row_finite
+    empty_rows = mask.sum(dim=1) == 0
+    bad_nonempty = row_bad & ~empty_rows
+    if bool(bad_nonempty.any()):
+        raise FloatingPointError(
+            f"{name} contains non-finite values for {int(bad_nonempty.sum().detach().cpu().item())} "
+            "non-empty HLT jets"
+        )
+    sanitized = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    return sanitized, {
+        f"{name}_nonfinite_rows": int(row_bad.sum().detach().cpu().item()),
+        f"{name}_sanitized_empty_rows": int((row_bad & empty_rows).sum().detach().cpu().item()),
+    }
+
+
 @dataclass(frozen=True)
 class HLTPartEmbeddingAnchorConfig:
     """Configuration for strict V2 HLT ParT embedding extraction."""
@@ -343,9 +402,18 @@ class HLTPartEmbeddingAnchor(_ModuleBase):
     def forward_outputs(self, *args: Any, **kwargs: Any) -> HLTPartEmbeddingAnchorOutput:
         torch = require_torch()
         logits, embedding, final_head_output = self._call_model_with_embedding_capture(*args, **kwargs)
+        hlt_mask = _forward_mask_from_args(args, kwargs)
         logits = _finite_tensor(logits, name="HLT ParT anchor logits")
-        embedding = _finite_tensor(embedding, name="HLT ParT penultimate embedding")
-        final_head_output = _finite_tensor(final_head_output, name="HLT ParT final head output")
+        embedding, embedding_finite_diagnostics = _sanitize_nonfinite_empty_rows(
+            embedding,
+            hlt_mask,
+            name="hlt_part_penultimate_embedding",
+        )
+        final_head_output, final_head_finite_diagnostics = _sanitize_nonfinite_empty_rows(
+            final_head_output,
+            hlt_mask,
+            name="hlt_part_final_head_output",
+        )
         if int(logits.ndim) != 2 or int(logits.shape[1]) != int(self.config.num_classes):
             raise ValueError(f"anchor logits must have shape [batch, 2], got {tuple(logits.shape)}")
         if int(embedding.ndim) != 2:
@@ -376,6 +444,9 @@ class HLTPartEmbeddingAnchor(_ModuleBase):
         embedding = torch.nan_to_num(embedding.detach(), nan=0.0, posinf=0.0, neginf=0.0)
         logits = torch.nan_to_num(logits.detach(), nan=0.0, posinf=0.0, neginf=0.0)
         final_head_output = torch.nan_to_num(final_head_output.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+        empty_hlt_jets = 0
+        if hlt_mask is not None:
+            empty_hlt_jets = int((hlt_mask.to(device=logits.device, dtype=torch.bool).sum(dim=1) == 0).sum().detach().cpu().item())
         diagnostics = {
             "step": LOCAL_GRAPH_RESIDUAL_V2_ANCHOR_STEP,
             "contract": LOCAL_GRAPH_RESIDUAL_V2_ANCHOR_CONTRACT,
@@ -388,6 +459,9 @@ class HLTPartEmbeddingAnchor(_ModuleBase):
             "logit_abs_mean": logits.abs().mean(),
             "embedding_reproduces_logits": reproduces,
             "anchor_parameters_frozen": self.anchor_parameters_frozen(),
+            "empty_hlt_jets": empty_hlt_jets,
+            **embedding_finite_diagnostics,
+            **final_head_finite_diagnostics,
         }
         return HLTPartEmbeddingAnchorOutput(
             logits=logits,

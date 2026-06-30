@@ -111,10 +111,28 @@ def _strip_wrapper_prefixes(key: str) -> str:
 
 def _part_model_candidate_keys(source_key: str) -> tuple[str, ...]:
     clean = _strip_wrapper_prefixes(source_key)
-    candidates = [clean]
-    for prefix in ("part_model.", "model.", "classifier."):
-        if clean.startswith(prefix):
-            candidates.append(clean[len(prefix) :])
+    removable_prefixes = (
+        "part_model.",
+        "model.",
+        "classifier.",
+        "reference_part.part_model.",
+        "reference_part.",
+        "backbone.part_model.",
+        "part_backbone.part_model.",
+        "part_anchor.part_model.",
+    )
+    candidates: list[str] = []
+    pending = [clean]
+    seen_pending: set[str] = set()
+    while pending:
+        current = _strip_wrapper_prefixes(pending.pop(0))
+        if current in seen_pending:
+            continue
+        seen_pending.add(current)
+        candidates.append(current)
+        for prefix in removable_prefixes:
+            if current.startswith(prefix):
+                pending.append(current[len(prefix) :])
     output: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
