@@ -96,6 +96,7 @@ RUNNERS = [
     "run_train_multiscale_subjet_part_tagger.sh",
     "run_write_multiscale_subjet_part_report.sh",
     "run_local_graph_score_fusion.sh",
+    "run_local_graph_multiscale_score_fusion.sh",
     "run_train_dualview_part_residual.sh",
     "run_write_dualview_part_report.sh",
     "run_train_local_compression_part.sh",
