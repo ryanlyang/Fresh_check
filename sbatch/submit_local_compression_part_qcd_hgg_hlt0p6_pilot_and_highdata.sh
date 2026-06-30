@@ -13,16 +13,18 @@ SUBMIT_SCRIPT="${SCRIPT_DIR}/submit_local_compression_part_qcd_hgg_hlt0p6_experi
 
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_VARIANTS:=hlt_part_baseline_recheck lc_mlp_delta lc_local_compression_no_context lc_context_gated lc_context_delta_no_modalities lc_random_grouping}"
 
-: "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_INPUT_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_500k_full_gradfix2_20260629_031038}"
-: "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_BASELINE_CHECKPOINT:=${LOCAL_COMPRESSION_PART_QCD_HGG_500K_INPUT_ROOT}/taggers/hlt_part_baseline/best_model_val.pt}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_INPUT_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_500k_full_20260628_194154}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_BASELINE_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_500k_full_gradfix2_20260629_031038}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_BASELINE_CHECKPOINT:=${LOCAL_COMPRESSION_PART_QCD_HGG_500K_BASELINE_ROOT}/taggers/hlt_part_baseline/best_model_val.pt}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_TAG:=500k_pilot_$(date +%Y%m%d_%H%M%S)}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_TRAIN_TIME:=2-12:00:00}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_REPORT_TIME:=03:00:00}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_TRAIN_MEM:=160G}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_500K_REPORT_MEM:=16G}"
 
-: "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_INPUT_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_3m1m1m_full_gradfix2_20260629_031038}"
-: "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_BASELINE_CHECKPOINT:=${LOCAL_COMPRESSION_PART_QCD_HGG_3M_INPUT_ROOT}/taggers/hlt_part_baseline/best_model_val.pt}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_INPUT_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_3m1m1m_full_20260628_194154}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_BASELINE_ROOT:=/home/ryreu/atlas/Fresh_check/checkpoints/multiscale_subjet_part_qcd_hgg_binary_hlt0p6_qcd_hgg_hlt06_3m1m1m_full_gradfix2_20260629_031038}"
+: "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_BASELINE_CHECKPOINT:=${LOCAL_COMPRESSION_PART_QCD_HGG_3M_BASELINE_ROOT}/taggers/hlt_part_baseline/best_model_val.pt}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_TAG:=3m1m1m_highdata_$(date +%Y%m%d_%H%M%S)}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_TRAIN_TIME:=5-00:00:00}"
 : "${LOCAL_COMPRESSION_PART_QCD_HGG_3M_REPORT_TIME:=06:00:00}"
