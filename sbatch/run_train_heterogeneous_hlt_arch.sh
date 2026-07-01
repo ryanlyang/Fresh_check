@@ -43,6 +43,7 @@ cmd=(
   --max-train-jets "${HETERO_HLT4_TRAIN_SIZE}"
   --max-val-jets "${HETERO_HLT4_VAL_SIZE}"
   --model-size "${MODEL_SIZE:-base}"
+  --expected-hlt-degradation-strength "${HLT_DEGRADATION_STRENGTH:-0.6}"
 )
 fresh_append_flag_if_enabled cmd --no-amp "${NO_AMP:-0}"
 

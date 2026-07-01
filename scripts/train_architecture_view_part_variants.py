@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--label-names", nargs="+", default=("QCD", "Hgg"))
     parser.add_argument("--label-filter-names", nargs="+", default=("QCD", "Hgg"))
+    parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--train-split", default="model_train")
     parser.add_argument("--val-split", default="model_val")
     parser.add_argument("--stack-val-split", default="stack_val")
@@ -168,6 +169,7 @@ def _config_for_variant(args: argparse.Namespace, variant: str, output_dir: Path
         max_stack_val_jets=args.max_stack_val_jets,
         max_final_test_jets=args.max_final_test_jets,
         selection_metric=args.selection_metric,
+        num_classes=args.num_classes,
         compile_model=bool(args.compile_model),
         verify_hlt_hash=not bool(args.skip_hlt_hash_check),
         verify_hlt_params=not bool(args.skip_hlt_params_check),

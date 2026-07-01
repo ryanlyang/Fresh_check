@@ -468,6 +468,7 @@ def train_heterogeneous_hlt_model(
     architecture: str,
     max_train_jets: int | None = None,
     max_val_jets: int | None = None,
+    expected_hlt_degradation_strength: float | None = None,
 ):
     model = build_heterogeneous_hlt_classifier(
         architecture,
@@ -499,6 +500,16 @@ def train_heterogeneous_hlt_model(
             "experiment_step": "heterogeneous_hlt_architecture_training",
             "architecture": arch,
             "model_name": default_model_name_for_architecture(arch),
+            "selection_metric": "accuracy",
+            "hlt_degradation_strength": None
+            if expected_hlt_degradation_strength is None
+            else float(expected_hlt_degradation_strength),
+            "split_manifest_hash": train_view.metadata.get("source_manifest_hash"),
+            "source_manifest_hash": train_view.metadata.get("source_manifest_hash"),
+            "hlt_cache_dir": str(config.cache_dir),
+            "label_names": list(LABEL_NAMES),
+            "label_filter": list(range(len(LABEL_NAMES))),
+            "num_classes": len(LABEL_NAMES),
             "max_train_jets": max_train_jets,
             "max_val_jets": max_val_jets,
             "subset_selection": {

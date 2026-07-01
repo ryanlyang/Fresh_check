@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
+from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM
 
 
 ARCHITECTURE_VIEW_PART_EXPERIMENT_NAME = "architecture_view_part"
@@ -21,6 +21,8 @@ ARCHITECTURE_VIEW_BACKGROUND_LABEL = "QCD"
 ARCHITECTURE_VIEW_SIGNAL_LABEL = "Hgg"
 ARCHITECTURE_VIEW_LABEL_NAMES = (ARCHITECTURE_VIEW_BACKGROUND_LABEL, ARCHITECTURE_VIEW_SIGNAL_LABEL)
 ARCHITECTURE_VIEW_BINARY_LABEL_FILTER = (0, 1)
+ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES = tuple(str(name) for name in LABEL_NAMES)
+ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER = tuple(range(len(ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES)))
 ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH = 0.6
 ARCHITECTURE_VIEW_PRIMARY_METRIC = "fpr_at_signal_eff_0p50"
 ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION = "minimize"
@@ -228,6 +230,7 @@ class ArchitectureViewConfig:
     pcnn_kernel_sizes: tuple[int, ...] = (3, 5)
     fusion_hidden_dim: int = 96
     part_embed_dim: int = 128
+    num_classes: int = 2
     dropout: float = 0.05
     attention_dropout: float = 0.05
     gate_bias_init: float = -5.0
@@ -251,6 +254,7 @@ class ArchitectureViewConfig:
             "pcnn_layers",
             "fusion_hidden_dim",
             "part_embed_dim",
+            "num_classes",
         ):
             value = int(getattr(self, name))
             if value <= 0:
@@ -313,6 +317,7 @@ def architecture_view_config_manifest(config: ArchitectureViewConfig | None = No
         "contract": ARCHITECTURE_VIEW_PART_CONTRACT,
         "hlt_degradation_strength": ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH,
         "label_names": list(ARCHITECTURE_VIEW_LABEL_NAMES),
+        "ten_class_label_names": list(ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES),
         "primary_metric": ARCHITECTURE_VIEW_PRIMARY_METRIC,
         "primary_metric_direction": ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION,
         "raw_feature_names": list(ARCHITECTURE_VIEW_RAW_FEATURE_NAMES),

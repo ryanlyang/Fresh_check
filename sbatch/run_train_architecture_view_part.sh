@@ -47,6 +47,7 @@ REQUESTED_VARIANT="${1:?Usage: sbatch run_train_architecture_view_part.sh <archi
 : "${ARCHITECTURE_VIEW_PART_STACK_VAL_SIZE:=150000}"
 : "${ARCHITECTURE_VIEW_PART_FINAL_TEST_SIZE:=500000}"
 : "${ARCHITECTURE_VIEW_PART_SELECTION_METRIC:=fpr_at_signal_eff_0p50}"
+: "${ARCHITECTURE_VIEW_PART_NUM_CLASSES:=}"
 : "${ARCHITECTURE_VIEW_PART_EXPECTED_HLT_DEGRADATION_STRENGTH:=0.6}"
 : "${ARCHITECTURE_VIEW_PART_LABEL_NAMES:=QCD Hgg}"
 : "${ARCHITECTURE_VIEW_PART_LABEL_FILTER_NAMES:=QCD Hgg}"
@@ -133,6 +134,7 @@ cmd=(
   --delta-l2-weight "${ARCHITECTURE_VIEW_PART_DELTA_L2_WEIGHT}"
   --freeze-part-epochs "${ARCHITECTURE_VIEW_PART_FREEZE_PART_EPOCHS}"
 )
+fresh_append_optional_arg cmd --num-classes "${ARCHITECTURE_VIEW_PART_NUM_CLASSES}"
 fresh_append_flag_if_enabled cmd --confirm-final-test "${ARCHITECTURE_VIEW_PART_CONFIRM_FINAL_TEST}"
 fresh_append_flag_if_enabled cmd --no-amp "${ARCHITECTURE_VIEW_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${ARCHITECTURE_VIEW_PART_COMPILE_MODEL}"

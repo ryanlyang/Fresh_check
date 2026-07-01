@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-jets", type=int, default=50000)
     parser.add_argument("--model-size", choices=["base", "tiny"], default="base")
     parser.add_argument("--compile-model", action="store_true")
+    parser.add_argument("--expected-hlt-degradation-strength", type=float, default=None)
     return parser.parse_args()
 
 
@@ -69,6 +70,7 @@ def main() -> int:
         architecture=arch,
         max_train_jets=args.max_train_jets,
         max_val_jets=args.max_val_jets,
+        expected_hlt_degradation_strength=args.expected_hlt_degradation_strength,
     )
     save_json(Path(args.output_dir) / "run_report.json", report)
     return 0

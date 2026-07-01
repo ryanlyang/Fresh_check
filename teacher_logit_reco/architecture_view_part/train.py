@@ -12,7 +12,7 @@ import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json, set_training_seed
 from jetclass_fresh.hlt_cache import load_cached_hlt_view
-from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
+from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM
 
 from teacher_logit_reco.local_compression_part.train import (
     _manifest_metadata,
@@ -32,11 +32,12 @@ from .checkpoint import (
 )
 from .config import (
     ARCHITECTURE_VIEW_BINARY_LABEL_FILTER,
+    ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
+    ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
     ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH,
     ARCHITECTURE_VIEW_LABEL_NAMES,
     ARCHITECTURE_VIEW_PART_CONTRACT,
     ARCHITECTURE_VIEW_PRIMARY_METRIC,
-    ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION,
     ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_VARIANTS,
     ArchitectureViewConfig,
@@ -67,6 +68,17 @@ ARCHITECTURE_VIEW_LOWER_IS_BETTER_SELECTION_METRICS = {
     "fpr_at_signal_eff_0p30",
     "fpr_at_signal_eff_0p50",
 }
+ARCHITECTURE_VIEW_BINARY_ONLY_SELECTION_METRICS = {
+    "auc",
+    "fpr_at_signal_eff_0p30",
+    "fpr_at_signal_eff_0p50",
+    "background_rejection_at_signal_eff_0p30",
+    "background_rejection_at_signal_eff_0p50",
+}
+
+
+def architecture_view_selection_metric_direction(metric_name: str) -> str:
+    return "minimize" if str(metric_name) in ARCHITECTURE_VIEW_LOWER_IS_BETTER_SELECTION_METRICS else "maximize"
 
 
 def _optional_positive_int(value: int | None, *, field_name: str) -> int | None:
@@ -143,6 +155,7 @@ class ArchitectureViewTaggerTrainConfig:
     max_stack_val_jets: int | None = None
     max_final_test_jets: int | None = None
     selection_metric: str = ARCHITECTURE_VIEW_PRIMARY_METRIC
+    num_classes: int | None = None
     compile_model: bool = False
     verify_hlt_hash: bool = True
     verify_hlt_params: bool = True
@@ -188,8 +201,9 @@ class ArchitectureViewTaggerTrainConfig:
             raise ValueError("Set --confirm-split-settings to acknowledge model_train/model_val selection")
         if not bool(self.confirm_final_test):
             raise ValueError("Architecture-view runner requires --confirm-final-test for guarded final evaluation")
-        if str(self.selection_metric) != ARCHITECTURE_VIEW_PRIMARY_METRIC:
-            raise ValueError("Architecture-view checkpoint selection must use fpr_at_signal_eff_0p50")
+        self.selection_metric = str(self.selection_metric)
+        if self.selection_metric not in ARCHITECTURE_VIEW_SELECTION_METRICS:
+            raise ValueError(f"selection_metric must be one of {ARCHITECTURE_VIEW_SELECTION_METRICS}")
         self.variant = normalize_architecture_view_variant(self.variant)
         if self.variant not in ARCHITECTURE_VIEW_VARIANTS:
             raise ValueError(f"unknown architecture-view variant {self.variant!r}")
@@ -249,17 +263,38 @@ class ArchitectureViewTaggerTrainConfig:
         self.max_final_test_jets = _optional_positive_int(self.max_final_test_jets, field_name="max_final_test_jets")
         self.label_names = tuple(str(name) for name in self.label_names)
         self.label_filter = tuple(int(value) for value in self.label_filter)
-        if self.label_names != ARCHITECTURE_VIEW_LABEL_NAMES:
-            raise ValueError(f"architecture-view uses active binary labels {ARCHITECTURE_VIEW_LABEL_NAMES}")
-        if self.label_filter != ARCHITECTURE_VIEW_BINARY_LABEL_FILTER:
-            raise ValueError(f"architecture-view expects binary-cache labels {ARCHITECTURE_VIEW_BINARY_LABEL_FILTER}")
+        if not self.label_names:
+            raise ValueError("label_names must not be empty")
+        if not self.label_filter:
+            raise ValueError("label_filter must not be empty")
+        if any(index < 0 or index >= len(tuple(LABEL_NAMES)) for index in self.label_filter):
+            raise ValueError(f"label_filter indices must be within JetClass label range 0..{len(tuple(LABEL_NAMES)) - 1}")
+        inferred_num_classes = len(self.label_filter)
+        if self.num_classes is None:
+            self.num_classes = int(inferred_num_classes)
+        else:
+            self.num_classes = int(self.num_classes)
+        if int(self.num_classes) != int(inferred_num_classes):
+            raise ValueError(
+                f"num_classes={self.num_classes} must match label_filter length {inferred_num_classes}"
+            )
+        if int(self.num_classes) == 2:
+            if self.label_names == ARCHITECTURE_VIEW_LABEL_NAMES and self.label_filter != ARCHITECTURE_VIEW_BINARY_LABEL_FILTER:
+                raise ValueError(
+                    f"QCD/Hgg binary architecture-view expects label_filter {ARCHITECTURE_VIEW_BINARY_LABEL_FILTER}"
+                )
+        elif self.selection_metric in ARCHITECTURE_VIEW_BINARY_ONLY_SELECTION_METRICS:
+            raise ValueError(
+                f"selection_metric={self.selection_metric!r} is binary-only; use accuracy or loss for "
+                f"{self.num_classes}-class architecture-view training"
+            )
         self.random_control_seed = int(self.random_control_seed)
         self.gate_bias_init = float(self.gate_bias_init)
         self.expected_hlt_degradation_strength = float(self.expected_hlt_degradation_strength)
 
     @property
     def resolved_num_classes(self) -> int:
-        return 2
+        return int(self.num_classes or len(self.label_filter))
 
     def model_config(self) -> ArchitectureViewConfig:
         return ArchitectureViewConfig(
@@ -272,6 +307,7 @@ class ArchitectureViewTaggerTrainConfig:
             pcnn_layers=int(self.pcnn_layers),
             fusion_hidden_dim=int(self.fusion_hidden_dim),
             part_embed_dim=int(self.part_embed_dim),
+            num_classes=int(self.resolved_num_classes),
             dropout=float(self.dropout),
             attention_dropout=float(self.attention_dropout),
             gate_bias_init=float(self.gate_bias_init),
@@ -673,6 +709,7 @@ def train_architecture_view_tagger(
         checkpoint_model,
         config.baseline_checkpoint,
         map_location=device,
+        expected_selection_metric=str(config.selection_metric),
         expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
         expected_label_names=tuple(config.label_names),
         expected_label_filter=tuple(config.label_filter),
@@ -915,7 +952,7 @@ def train_architecture_view_tagger(
         "variant_behavior": checkpoint_model.variant_behavior(),
         "best_epoch": int(best_epoch),
         "selection_metric": str(config.selection_metric),
-        "selection_metric_direction": ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION,
+        "selection_metric_direction": architecture_view_selection_metric_direction(str(config.selection_metric)),
         "best_model_selection_metric_value": float(selection_value),
         "best_model_selection_score": float(best_val_score),
         "best_model_val_accuracy": float(best_val_accuracy),
@@ -981,6 +1018,7 @@ __all__ = [
     "ARCHITECTURE_VIEW_TRAIN_STEP",
     "ArchitectureViewTaggerTrainConfig",
     "architecture_view_label_filter_names_to_indices",
+    "architecture_view_selection_metric_direction",
     "architecture_view_tagger_checkpoint_payload",
     "load_architecture_view_tagger_checkpoint",
     "run_architecture_view_tagger_epoch",

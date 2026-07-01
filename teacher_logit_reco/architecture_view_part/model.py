@@ -236,7 +236,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             if isinstance(feature_config, LocalCompressionFeatureConfig)
             else LocalCompressionFeatureConfig(**dict(feature_config or {}))
         )
-        self.part_model = part_model or build_hlt_classifier(num_classes=2)
+        self.part_model = part_model or build_hlt_classifier(num_classes=int(self.config.num_classes))
         if not isinstance(self.part_model, ParticleTransformerHLTClassifier):
             raise ValueError("ArchitectureViewResidualParT requires the real ParticleTransformerHLTClassifier backbone")
         self.view_module = ArchitectureViewParticleViews(self.config, enabled_views=self.config.enabled_views)
