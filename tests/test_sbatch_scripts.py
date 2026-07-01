@@ -101,6 +101,9 @@ RUNNERS = [
     "run_write_dualview_part_report.sh",
     "run_train_local_compression_part.sh",
     "run_write_local_compression_part_report.sh",
+    "run_train_arch_residual_part.sh",
+    "run_train_architecture_view_part.sh",
+    "run_write_architecture_view_part_report.sh",
 ]
 
 SUBMITTERS = [
@@ -145,6 +148,8 @@ SUBMITTERS = [
     "submit_dualview_part_residual_smoke_test.sh",
     "submit_dualview_part_residual_500k_qcd_hgg.sh",
     "submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh",
+    "submit_arch_residual_part_qcd_hgg_hlt0p6_500k.sh",
+    "submit_architecture_view_part_qcd_hgg_hlt0p6_experiment.sh",
 ]
 
 
