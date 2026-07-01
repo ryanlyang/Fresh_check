@@ -104,6 +104,10 @@ RUNNERS = [
     "run_train_arch_residual_part.sh",
     "run_train_architecture_view_part.sh",
     "run_write_architecture_view_part_report.sh",
+    "run_train_architecture_view_10class_part.sh",
+    "run_cache_architecture_view_10class_predictions.sh",
+    "run_architecture_view_10class_fusion.sh",
+    "run_write_architecture_view_10class_report.sh",
 ]
 
 SUBMITTERS = [
@@ -150,6 +154,7 @@ SUBMITTERS = [
     "submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh",
     "submit_arch_residual_part_qcd_hgg_hlt0p6_500k.sh",
     "submit_architecture_view_part_qcd_hgg_hlt0p6_experiment.sh",
+    "submit_architecture_view_10class_experiment.sh",
 ]
 
 

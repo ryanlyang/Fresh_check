@@ -15,8 +15,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from jetclass_fresh.hlt_baseline import save_json  # noqa: E402
 from teacher_logit_reco.architecture_view_part.config import (  # noqa: E402
+    ARCHITECTURE_VIEW_ALL_VARIANTS,
     ARCHITECTURE_VIEW_DEFAULT_PILOT_VARIANTS,
-    ARCHITECTURE_VIEW_VARIANTS,
     normalize_architecture_view_variant,
 )
 from teacher_logit_reco.architecture_view_part.train import (  # noqa: E402
@@ -42,7 +42,7 @@ def _normalize_variants(values: list[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     for value in values:
         variant = normalize_architecture_view_variant(value)
-        if variant not in ARCHITECTURE_VIEW_VARIANTS:
+        if variant not in ARCHITECTURE_VIEW_ALL_VARIANTS:
             raise ValueError(f"unknown architecture-view variant {variant!r}")
         if variant not in seen:
             output.append(variant)
@@ -94,7 +94,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--selection-metric",
         choices=ARCHITECTURE_VIEW_SELECTION_METRICS,
-        default="fpr_at_signal_eff_0p50",
+        default=None,
+        help="Checkpoint-selection metric. Defaults to FPR@50 for binary variants and accuracy for AV10 variants.",
     )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")

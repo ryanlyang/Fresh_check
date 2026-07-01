@@ -26,6 +26,12 @@ ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER = tuple(range(len(ARCHITECTURE_VIEW_10CLA
 ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH = 0.6
 ARCHITECTURE_VIEW_PRIMARY_METRIC = "fpr_at_signal_eff_0p50"
 ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION = "minimize"
+ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC = "accuracy"
+ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS = (
+    "accuracy",
+    "macro_per_class_accuracy",
+    "loss",
+)
 
 ARCHITECTURE_VIEW_BRANCH_PN = "pn"
 ARCHITECTURE_VIEW_BRANCH_PFN = "pfn"
@@ -62,6 +68,47 @@ ARCHITECTURE_VIEW_DEFAULT_PILOT_VARIANTS = (
     ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
 )
 
+ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK = "av10_baseline_recheck"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART = "av10_part_context_to_part"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART = "av10_pn_context_to_part"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART = "av10_pfn_context_to_part"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART = "av10_pcnn_context_to_part"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART = "av10_all_views_to_part"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL = "av10_random_view_control"
+ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL = "av10_context_mlp_control"
+ARCHITECTURE_VIEW_10CLASS_VARIANTS = (
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL,
+)
+ARCHITECTURE_VIEW_10CLASS_DEFAULT_VARIANTS = (
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL,
+)
+ARCHITECTURE_VIEW_ALL_VARIANTS = ARCHITECTURE_VIEW_VARIANTS + ARCHITECTURE_VIEW_10CLASS_VARIANTS
+
+ARCHITECTURE_VIEW_10CLASS_VARIANT_TO_BINARY_BEHAVIOR: dict[str, str] = {
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK: ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART: ARCHITECTURE_VIEW_VARIANT_PN_ONLY,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART: ARCHITECTURE_VIEW_VARIANT_PFN_ONLY,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART: ARCHITECTURE_VIEW_VARIANT_PCNN_ONLY,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART: ARCHITECTURE_VIEW_VARIANT_ALL_VIEWS,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL: ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+}
+
 ARCHITECTURE_VIEW_VARIANT_ALIASES: dict[str, str] = {
     "baseline": ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
     "hlt_part": ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
@@ -83,6 +130,24 @@ ARCHITECTURE_VIEW_VARIANT_ALIASES: dict[str, str] = {
     "context": ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     "context_mlp": ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     "context_mlp_control": ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    "av10_baseline": ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+    "av10_hlt_part": ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+    "av10_hlt_part_baseline": ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+    "av10_part": ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART,
+    "av10_part_context": ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART,
+    "av10_pn": ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART,
+    "av10_pn_only": ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART,
+    "av10_pfn": ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART,
+    "av10_pfn_only": ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART,
+    "av10_pcnn": ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART,
+    "av10_pcnn_only": ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART,
+    "av10_all": ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+    "av10_full": ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+    "av10_all_views": ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+    "av10_random": ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL,
+    "av10_random_view": ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL,
+    "av10_context": ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL,
+    "av10_context_mlp": ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL,
 }
 
 ARCHITECTURE_VIEW_RAW_FEATURE_NAMES = (
@@ -122,11 +187,28 @@ def normalize_architecture_view_variant(value: str) -> str:
 
     key = _alias_key(value)
     normalized = ARCHITECTURE_VIEW_VARIANT_ALIASES.get(key, key)
-    if normalized not in ARCHITECTURE_VIEW_VARIANTS:
+    if normalized not in ARCHITECTURE_VIEW_ALL_VARIANTS:
         raise ValueError(
-            f"Unknown architecture-view variant {value!r}; expected one of {ARCHITECTURE_VIEW_VARIANTS}"
+            f"Unknown architecture-view variant {value!r}; expected one of {ARCHITECTURE_VIEW_ALL_VARIANTS}"
         )
     return normalized
+
+
+def is_architecture_view_10class_variant(value: str) -> bool:
+    """Return whether a variant belongs to the 10-class architecture-view suite."""
+
+    return normalize_architecture_view_variant(value) in ARCHITECTURE_VIEW_10CLASS_VARIANTS
+
+
+def architecture_view_effective_variant(value: str) -> str:
+    """Map a reporting variant to the branch behavior implemented by the model."""
+
+    normalized = normalize_architecture_view_variant(value)
+    return ARCHITECTURE_VIEW_10CLASS_VARIANT_TO_BINARY_BEHAVIOR.get(normalized, normalized)
+
+
+def architecture_view_variant_num_classes(value: str) -> int:
+    return 10 if is_architecture_view_10class_variant(value) else 2
 
 
 def normalize_architecture_view_branch(value: str) -> str:
@@ -204,6 +286,49 @@ def architecture_view_variant_specs() -> dict[str, ArchitectureViewVariantSpec]:
             name=ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
             enabled_views=(),
             description="Non-architecture context adapter control for later embedding-injection steps.",
+            is_control=True,
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_BASELINE_RECHECK,
+            enabled_views=(),
+            description="10-class exact HLT ParT recheck with no architecture-view injection.",
+            is_control=True,
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_PART_CONTEXT_TO_PART,
+            enabled_views=(),
+            description="10-class ParT-context MLP residual into the real ParT embedding.",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_PN_CONTEXT_TO_PART,
+            enabled_views=(ARCHITECTURE_VIEW_BRANCH_PN,),
+            description="10-class PN latent particle context injected into ParT.",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_PFN_CONTEXT_TO_PART,
+            enabled_views=(ARCHITECTURE_VIEW_BRANCH_PFN,),
+            description="10-class PFN latent particle context injected into ParT.",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_PCNN_CONTEXT_TO_PART,
+            enabled_views=(ARCHITECTURE_VIEW_BRANCH_PCNN,),
+            description="10-class PCNN latent particle context injected into ParT.",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_ALL_VIEWS_TO_PART,
+            enabled_views=ARCHITECTURE_VIEW_BRANCHES,
+            description="10-class PN, PFN, and PCNN latent particle views injected into ParT.",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_RANDOM_VIEW_CONTROL,
+            enabled_views=ARCHITECTURE_VIEW_BRANCHES,
+            description="10-class randomized view-semantics control.",
+            is_control=True,
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_VARIANT_CONTEXT_MLP_CONTROL,
+            enabled_views=(),
+            description="10-class context-only MLP residual control.",
             is_control=True,
         ),
     )
@@ -318,10 +443,15 @@ def architecture_view_config_manifest(config: ArchitectureViewConfig | None = No
         "hlt_degradation_strength": ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH,
         "label_names": list(ARCHITECTURE_VIEW_LABEL_NAMES),
         "ten_class_label_names": list(ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES),
+        "ten_class_label_filter": list(ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER),
         "primary_metric": ARCHITECTURE_VIEW_PRIMARY_METRIC,
         "primary_metric_direction": ARCHITECTURE_VIEW_PRIMARY_METRIC_DIRECTION,
+        "ten_class_primary_metric": ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC,
+        "ten_class_selection_metrics": list(ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS),
         "raw_feature_names": list(ARCHITECTURE_VIEW_RAW_FEATURE_NAMES),
         "branches": list(ARCHITECTURE_VIEW_BRANCHES),
+        "binary_variants": list(ARCHITECTURE_VIEW_VARIANTS),
+        "ten_class_variants": list(ARCHITECTURE_VIEW_10CLASS_VARIANTS),
         "variants": {name: spec.to_dict() for name, spec in architecture_view_variant_specs().items()},
         "config": cfg.to_dict(),
     }

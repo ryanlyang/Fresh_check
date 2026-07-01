@@ -21,7 +21,10 @@ from teacher_logit_reco.local_compression_part.train import (
     _verify_hlt_params,
     local_compression_label_filter_names_to_indices,
 )
-from teacher_logit_reco.set_matching.five_view_train import classification_metrics_from_predictions
+from teacher_logit_reco.set_matching.five_view_train import (
+    binary_classification_metrics_from_logits,
+    classification_metrics_from_predictions,
+)
 from teacher_logit_reco.set_matching.train import source_metadata
 from teacher_logit_reco.subtoken_part.train import SubtokenHLTJetDataset, make_subtoken_hlt_loader
 
@@ -31,16 +34,20 @@ from .checkpoint import (
     warm_start_architecture_view_part_model,
 )
 from .config import (
-    ARCHITECTURE_VIEW_BINARY_LABEL_FILTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
+    ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC,
+    ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS,
+    ARCHITECTURE_VIEW_ALL_VARIANTS,
+    ARCHITECTURE_VIEW_BINARY_LABEL_FILTER,
     ARCHITECTURE_VIEW_HLT_DEGRADATION_STRENGTH,
     ARCHITECTURE_VIEW_LABEL_NAMES,
     ARCHITECTURE_VIEW_PART_CONTRACT,
     ARCHITECTURE_VIEW_PRIMARY_METRIC,
     ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
-    ARCHITECTURE_VIEW_VARIANTS,
     ArchitectureViewConfig,
+    architecture_view_effective_variant,
+    architecture_view_variant_num_classes,
     normalize_architecture_view_variant,
 )
 from .model import (
@@ -79,6 +86,10 @@ ARCHITECTURE_VIEW_BINARY_ONLY_SELECTION_METRICS = {
 
 def architecture_view_selection_metric_direction(metric_name: str) -> str:
     return "minimize" if str(metric_name) in ARCHITECTURE_VIEW_LOWER_IS_BETTER_SELECTION_METRICS else "maximize"
+
+
+def architecture_view_default_selection_metric(num_classes: int) -> str:
+    return ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC if int(num_classes) == 10 else ARCHITECTURE_VIEW_PRIMARY_METRIC
 
 
 def _optional_positive_int(value: int | None, *, field_name: str) -> int | None:
@@ -120,6 +131,74 @@ def architecture_view_label_filter_names_to_indices(
     )
 
 
+def architecture_view_binary_projection_scores(
+    logits: np.ndarray,
+    *,
+    label_names: Sequence[str],
+    positive_label: str,
+    negative_label: str,
+) -> np.ndarray:
+    """Project multiclass logits onto one binary logit difference."""
+
+    names = tuple(str(name) for name in label_names)
+    if positive_label not in names:
+        raise ValueError(f"positive_label {positive_label!r} is not in label_names")
+    if negative_label not in names:
+        raise ValueError(f"negative_label {negative_label!r} is not in label_names")
+    logits_np = np.asarray(logits, dtype=np.float32)
+    if int(logits_np.ndim) != 2:
+        raise ValueError(f"logits must have shape [n, classes], got {logits_np.shape}")
+    pos_index = names.index(str(positive_label))
+    neg_index = names.index(str(negative_label))
+    if logits_np.shape[1] <= max(pos_index, neg_index):
+        raise ValueError(f"logits class dimension {logits_np.shape[1]} is incompatible with label_names")
+    return logits_np[:, pos_index] - logits_np[:, neg_index]
+
+
+def architecture_view_binary_projection_metrics(
+    logits: np.ndarray,
+    labels: np.ndarray,
+    *,
+    label_names: Sequence[str],
+    pairs: Sequence[tuple[str, str]] = (("QCD", "Hgg"),),
+) -> dict[str, Any]:
+    """Compute optional one-vs-one diagnostics from multiclass logits."""
+
+    names = tuple(str(name) for name in label_names)
+    labels_np = np.asarray(labels, dtype=np.int64)
+    output: dict[str, Any] = {}
+    for negative_label, positive_label in pairs:
+        if negative_label not in names or positive_label not in names:
+            continue
+        neg_index = names.index(str(negative_label))
+        pos_index = names.index(str(positive_label))
+        keep = (labels_np == neg_index) | (labels_np == pos_index)
+        kept_count = int(np.count_nonzero(keep))
+        key = f"{negative_label}_vs_{positive_label}"
+        if kept_count == 0:
+            output[key] = {"n_jets": 0, "available": False}
+            continue
+        scores = architecture_view_binary_projection_scores(
+            np.asarray(logits)[keep],
+            label_names=names,
+            positive_label=positive_label,
+            negative_label=negative_label,
+        )
+        binary_logits = np.stack([-scores, scores], axis=1).astype(np.float32)
+        binary_labels = (labels_np[keep] == pos_index).astype(np.int64)
+        metrics = binary_classification_metrics_from_logits(
+            logits=binary_logits,
+            labels=binary_labels,
+            label_names=(str(negative_label), str(positive_label)),
+        )
+        metrics["n_jets"] = kept_count
+        metrics["available"] = True
+        metrics["negative_label"] = str(negative_label)
+        metrics["positive_label"] = str(positive_label)
+        output[key] = metrics
+    return output
+
+
 @dataclass
 class ArchitectureViewTaggerTrainConfig:
     """Training config for one architecture-view residual ParT run."""
@@ -154,7 +233,7 @@ class ArchitectureViewTaggerTrainConfig:
     max_val_jets: int | None = None
     max_stack_val_jets: int | None = None
     max_final_test_jets: int | None = None
-    selection_metric: str = ARCHITECTURE_VIEW_PRIMARY_METRIC
+    selection_metric: str | None = None
     num_classes: int | None = None
     compile_model: bool = False
     verify_hlt_hash: bool = True
@@ -201,11 +280,8 @@ class ArchitectureViewTaggerTrainConfig:
             raise ValueError("Set --confirm-split-settings to acknowledge model_train/model_val selection")
         if not bool(self.confirm_final_test):
             raise ValueError("Architecture-view runner requires --confirm-final-test for guarded final evaluation")
-        self.selection_metric = str(self.selection_metric)
-        if self.selection_metric not in ARCHITECTURE_VIEW_SELECTION_METRICS:
-            raise ValueError(f"selection_metric must be one of {ARCHITECTURE_VIEW_SELECTION_METRICS}")
         self.variant = normalize_architecture_view_variant(self.variant)
-        if self.variant not in ARCHITECTURE_VIEW_VARIANTS:
+        if self.variant not in ARCHITECTURE_VIEW_ALL_VARIANTS:
             raise ValueError(f"unknown architecture-view variant {self.variant!r}")
         for field_name in (
             "batch_size",
@@ -278,10 +354,37 @@ class ArchitectureViewTaggerTrainConfig:
             raise ValueError(
                 f"num_classes={self.num_classes} must match label_filter length {inferred_num_classes}"
             )
+        expected_variant_classes = architecture_view_variant_num_classes(self.variant)
+        if int(self.num_classes) != int(expected_variant_classes):
+            raise ValueError(
+                f"variant {self.variant!r} expects num_classes={expected_variant_classes}, "
+                f"got {self.num_classes}"
+            )
+        if self.selection_metric is None:
+            self.selection_metric = architecture_view_default_selection_metric(int(self.num_classes))
+        else:
+            self.selection_metric = str(self.selection_metric)
+        if self.selection_metric not in ARCHITECTURE_VIEW_SELECTION_METRICS:
+            raise ValueError(f"selection_metric must be one of {ARCHITECTURE_VIEW_SELECTION_METRICS}")
         if int(self.num_classes) == 2:
-            if self.label_names == ARCHITECTURE_VIEW_LABEL_NAMES and self.label_filter != ARCHITECTURE_VIEW_BINARY_LABEL_FILTER:
+            if self.label_names != ARCHITECTURE_VIEW_LABEL_NAMES:
+                raise ValueError(f"binary architecture-view expects label_names {ARCHITECTURE_VIEW_LABEL_NAMES}")
+            if self.label_filter != ARCHITECTURE_VIEW_BINARY_LABEL_FILTER:
                 raise ValueError(
                     f"QCD/Hgg binary architecture-view expects label_filter {ARCHITECTURE_VIEW_BINARY_LABEL_FILTER}"
+                )
+        elif int(self.num_classes) == 10:
+            if self.label_names != ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES:
+                raise ValueError("10-class architecture-view expects full JetClass label_names")
+            if self.label_filter != ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER:
+                raise ValueError(
+                    f"10-class architecture-view expects label_filter {ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER}"
+                )
+            if self.selection_metric not in ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS:
+                raise ValueError(
+                    f"10-class architecture-view selection_metric must be one of "
+                    f"{ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS}; "
+                    f"{self.selection_metric!r} is binary-only or otherwise unsupported"
                 )
         elif self.selection_metric in ARCHITECTURE_VIEW_BINARY_ONLY_SELECTION_METRICS:
             raise ValueError(
@@ -558,6 +661,13 @@ def run_architecture_view_tagger_epoch(
                 label_names=tuple(label_names),
             )
         )
+        if logits_np is not None and int(logits_np.shape[1]) > 2:
+            metrics["binary_projection_metrics"] = architecture_view_binary_projection_metrics(
+                logits_np,
+                labels_np,
+                label_names=tuple(label_names),
+                pairs=(("QCD", "Hgg"), ("QCD", "Hbb"), ("QCD", "Tbqq")),
+            )
     if diagnostic_weight_sum > 0.0:
         metrics["diagnostics"] = {
             key: value / diagnostic_weight_sum
@@ -733,7 +843,7 @@ def train_architecture_view_tagger(
         )
         save_json(diagnostics_dir / "init_logit_diff_vs_baseline.json", init_logit_diff)
 
-    is_baseline_recheck = config.variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK
+    is_baseline_recheck = architecture_view_effective_variant(config.variant) == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK
     if is_baseline_recheck or int(config.freeze_part_epochs) > 0:
         _set_part_model_trainable(checkpoint_model, False)
     optimizer = None if is_baseline_recheck else _optimizer_for_model(checkpoint_model, config)
@@ -1017,6 +1127,9 @@ __all__ = [
     "ARCHITECTURE_VIEW_TRAIN_CONTRACT",
     "ARCHITECTURE_VIEW_TRAIN_STEP",
     "ArchitectureViewTaggerTrainConfig",
+    "architecture_view_binary_projection_metrics",
+    "architecture_view_binary_projection_scores",
+    "architecture_view_default_selection_metric",
     "architecture_view_label_filter_names_to_indices",
     "architecture_view_selection_metric_direction",
     "architecture_view_tagger_checkpoint_payload",

@@ -24,6 +24,7 @@ from .config import (
     ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL,
     ArchitectureViewConfig,
+    architecture_view_effective_variant,
     enabled_views_for_variant,
     normalize_architecture_view_variant,
 )
@@ -226,6 +227,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
     ) -> None:
         super().__init__()
         self.variant = normalize_architecture_view_variant(variant)
+        self.effective_variant = architecture_view_effective_variant(self.variant)
         view_config = _normalize_view_config(config)
         view_config = ArchitectureViewConfig.from_dict(
             {**view_config.to_dict(), "enabled_views": enabled_views_for_variant(self.variant)}
@@ -291,6 +293,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "contract": ARCHITECTURE_VIEW_MODEL_CONTRACT,
             "step": ARCHITECTURE_VIEW_MODEL_STEP,
             "variant": str(self.variant),
+            "effective_variant": str(self.effective_variant),
             "config": self.config.to_dict(),
             "feature_config": self.feature_config.to_dict(),
             "part_model_config": dict(getattr(self.part_model, "config", {}) or {}),
@@ -305,13 +308,14 @@ class ArchitectureViewResidualParT(_ModuleBase):
     def variant_behavior(self) -> dict[str, Any]:
         return {
             "variant": str(self.variant),
+            "effective_variant": str(self.effective_variant),
             "enabled_views": list(self.config.enabled_views),
             "uses_architecture_views": bool(self.config.enabled_views)
-            and self.variant != ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
-            "uses_randomized_view_semantics": self.variant == ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL,
-            "uses_context_mlp_control": self.variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
-            "forces_zero_delta": self.variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
-            "injects_embedding_delta": self.variant != ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
+            and self.effective_variant != ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+            "uses_randomized_view_semantics": self.effective_variant == ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL,
+            "uses_context_mlp_control": self.effective_variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+            "forces_zero_delta": self.effective_variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
+            "injects_embedding_delta": self.effective_variant != ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
         }
 
     def build_canonical_inputs(
@@ -405,7 +409,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
 
     def _tokens_for_view_branches(self, canonical: LocalCompressionCanonicalInputs) -> Any:
         tokens = canonical.selected_tokens
-        if self.variant == ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL:
+        if self.effective_variant == ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL:
             permutation = self.random_view_feature_permutation.to(device=tokens.device)
             return tokens.index_select(dim=-1, index=permutation)
         return tokens
@@ -427,7 +431,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             max_constits=max_constits,
             weight_threshold=float(weight_threshold),
         )
-        if self.variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL:
+        if self.effective_variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL:
             view_output = self._context_control_view_output(canonical)
         else:
             view_tokens = self._tokens_for_view_branches(canonical)

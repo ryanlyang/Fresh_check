@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teacher_logit_reco.architecture_view_part.config import ARCHITECTURE_VIEW_VARIANTS  # noqa: E402
+from teacher_logit_reco.architecture_view_part.config import ARCHITECTURE_VIEW_ALL_VARIANTS  # noqa: E402
 from teacher_logit_reco.architecture_view_part.train import (  # noqa: E402
     ARCHITECTURE_VIEW_SELECTION_METRICS,
     ArchitectureViewTaggerTrainConfig,
@@ -60,7 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--selection-metric",
         choices=ARCHITECTURE_VIEW_SELECTION_METRICS,
-        default="fpr_at_signal_eff_0p50",
+        default=None,
+        help="Checkpoint-selection metric. Defaults to FPR@50 for binary variants and accuracy for AV10 variants.",
     )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--skip-hlt-hash-check", action="store_true")
@@ -78,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.6)
 
-    parser.add_argument("--variant", choices=ARCHITECTURE_VIEW_VARIANTS, default="av_all_views")
+    parser.add_argument("--variant", choices=ARCHITECTURE_VIEW_ALL_VARIANTS, default="av_all_views")
     parser.add_argument("--view-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--pn-k", type=int, default=16)
