@@ -1628,6 +1628,9 @@ class SbatchStep14Tests(unittest.TestCase):
         submitter = self.read("submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh")
 
         self.assertIn("scripts/train_local_compression_part_tagger.py", train)
+        self.assertIn("CONDA_ENV:=atlas_kd", train)
+        self.assertIn("CONDA_ENV:=atlas_kd", report)
+        self.assertIn("CONDA_ENV:=atlas_kd", submitter)
         self.assertIn("LOCAL_COMPRESSION_PART_BASELINE_CHECKPOINT:?", train)
         self.assertIn("--manifest-path", train)
         self.assertIn("--hlt-cache-dir", train)

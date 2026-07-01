@@ -8,6 +8,8 @@ set -euo pipefail
 IFS=$'\n\t'
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONDA_ENV:=atlas_kd}"
+export CONDA_ENV
 SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 SUBMIT_SCRIPT="${SCRIPT_DIR}/submit_local_compression_part_qcd_hgg_hlt0p6_experiment.sh"
 
