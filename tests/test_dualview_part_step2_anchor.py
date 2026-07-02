@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 if TORCH_AVAILABLE:
     import torch
 
+    from jetclass_fresh.hlt_cache import fixed_hlt_params_dict, fixed_hlt_params_from_strength
+    from teacher_logit_reco.dualview_part.config import DUALVIEW_PART_HLT_DEGRADATION_STRENGTH
     from teacher_logit_reco.dualview_part.anchor import (
         HLTPartAnchorConfig,
         HLTPartSummaryEncoder,
@@ -119,6 +122,46 @@ class DualViewPartStep2AnchorTests(unittest.TestCase):
         self.assertTrue(anchor.anchor_parameters_frozen())
         self.assertEqual(anchor.config.label_names, ("QCD", "Hgg"))
         self.assertEqual(anchor.metadata()["payload_epoch"], 3)
+
+    def test_load_hlt_part_anchor_can_verify_external_hlt_cache_metadata(self):
+        model = DummyPartModel(num_classes=2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint = root / "metadata_light.pt"
+            cache_dir = root / "hlt_cache"
+            cache_dir.mkdir()
+            (cache_dir / "model_train_fixed_hlt_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "view": "fixed_hlt",
+                        "hlt_params": fixed_hlt_params_dict(
+                            fixed_hlt_params_from_strength(DUALVIEW_PART_HLT_DEGRADATION_STRENGTH)
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "num_classes": 2,
+                    "label_names": ["QCD", "Hgg"],
+                    "model_config": {"num_classes": 2, "input_dim": 17},
+                },
+                checkpoint,
+            )
+            with patch(
+                "teacher_logit_reco.dualview_part.anchor._build_hlt_part_model_from_payload",
+                return_value=DummyPartModel(num_classes=2),
+            ):
+                anchor = load_hlt_part_anchor(
+                    checkpoint,
+                    device="cpu",
+                    contract_hlt_cache_dir=cache_dir,
+                )
+
+        evidence = anchor.payload["dualview_anchor_contract_evidence"]
+        self.assertEqual(evidence["hlt_degradation_evidence"]["cache_source"], "provided_hlt_cache_dir")
 
     def test_load_hlt_part_anchor_rejects_wrong_binary_labels(self):
         model = DummyPartModel(num_classes=2)

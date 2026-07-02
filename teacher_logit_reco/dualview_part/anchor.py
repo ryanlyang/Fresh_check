@@ -202,7 +202,12 @@ def _params_match_canonical(params: Mapping[str, Any]) -> bool:
     return True
 
 
-def _check_hlt_contract_metadata(payload: Mapping[str, Any], checkpoint_path: Path) -> dict[str, Any]:
+def _check_hlt_contract_metadata(
+    payload: Mapping[str, Any],
+    checkpoint_path: Path,
+    *,
+    contract_hlt_cache_dir: str | Path | None = None,
+) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "checked_label_names": True,
         "checked_num_classes": True,
@@ -242,11 +247,20 @@ def _check_hlt_contract_metadata(payload: Mapping[str, Any], checkpoint_path: Pa
             raise ValueError("HLT anchor hlt_params do not match the canonical HLT0.6 profile")
         evidence["hlt_degradation_evidence"] = {"source": "payload_hlt_params"}
 
-    cache_dir = _metadata_value(payload, "cache_dir", "hlt_cache_dir")
-    if evidence["hlt_degradation_evidence"] is None and cache_dir is not None:
-        cache_path = Path(str(cache_dir))
-        if cache_path.exists():
-            for split in ("model_train", "model_val"):
+    cache_candidates: list[tuple[str, Path]] = []
+    if contract_hlt_cache_dir is not None:
+        cache_candidates.append(("provided_hlt_cache_dir", Path(contract_hlt_cache_dir)))
+    payload_cache_dir = _metadata_value(payload, "cache_dir", "hlt_cache_dir")
+    if payload_cache_dir is not None:
+        cache_candidates.append(("payload_cache_dir", Path(str(payload_cache_dir))))
+
+    if evidence["hlt_degradation_evidence"] is None:
+        for cache_source, cache_path in cache_candidates:
+            if evidence["hlt_degradation_evidence"] is not None:
+                break
+            if not cache_path.exists():
+                continue
+            for split in ("model_train", "model_val", "stack_train", "stack_val", "final_test"):
                 try:
                     metadata = load_hlt_metadata(cache_path, split)
                 except FileNotFoundError:
@@ -257,7 +271,11 @@ def _check_hlt_contract_metadata(payload: Mapping[str, Any], checkpoint_path: Pa
                 view = str(metadata.get("view", "")).strip().lower()
                 if view and view not in {"fixed_hlt", "hlt"}:
                     raise ValueError(f"HLT anchor cache metadata for {split} is not fixed HLT: view={view!r}")
-                evidence["hlt_degradation_evidence"] = {"source": "cache_metadata", "split": split}
+                evidence["hlt_degradation_evidence"] = {
+                    "source": "cache_metadata",
+                    "cache_source": cache_source,
+                    "split": split,
+                }
                 evidence["hlt_view_evidence"] = {"source": "cache_metadata", "split": split, "value": view or "fixed_hlt"}
                 break
 
@@ -277,6 +295,7 @@ def _validate_canonical_anchor_contract(
     checkpoint_path: Path,
     num_classes: int,
     label_names: tuple[str, ...],
+    contract_hlt_cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     if int(num_classes) != DUALVIEW_PART_NUM_CLASSES:
         raise ValueError(f"HLT anchor must have {DUALVIEW_PART_NUM_CLASSES} classes, got {num_classes}")
@@ -284,7 +303,11 @@ def _validate_canonical_anchor_contract(
         raise ValueError(f"HLT anchor labels must be {DUALVIEW_PART_SOURCE_LABEL_NAMES}, got {tuple(label_names)}")
     if DUALVIEW_PART_POSITIVE_CLASS_NAME not in tuple(label_names):
         raise ValueError(f"HLT anchor labels must contain positive class {DUALVIEW_PART_POSITIVE_CLASS_NAME}")
-    return _check_hlt_contract_metadata(payload, checkpoint_path)
+    return _check_hlt_contract_metadata(
+        payload,
+        checkpoint_path,
+        contract_hlt_cache_dir=contract_hlt_cache_dir,
+    )
 
 
 def _build_hlt_part_model_from_payload(
@@ -503,6 +526,7 @@ def load_hlt_part_anchor(
     fallback_model_size: str = "base",
     fallback_label_names: tuple[str, ...] = DUALVIEW_PART_SOURCE_LABEL_NAMES,
     enforce_canonical_contract: bool = True,
+    contract_hlt_cache_dir: str | Path | None = None,
 ) -> HLTPartAnchor:
     """Load a trained QCD/Hgg HLT0.6 ParT checkpoint as the dual-view anchor."""
 
@@ -525,6 +549,7 @@ def load_hlt_part_anchor(
             checkpoint_path=checkpoint_path,
             num_classes=int(num_classes),
             label_names=tuple(label_names),
+            contract_hlt_cache_dir=contract_hlt_cache_dir,
         )
     positive_class_name = (
         DUALVIEW_PART_POSITIVE_CLASS_NAME if DUALVIEW_PART_POSITIVE_CLASS_NAME in label_names else label_names[-1]

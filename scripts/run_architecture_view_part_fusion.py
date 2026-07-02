@@ -21,7 +21,7 @@ from jetclass_fresh.hlt_cache import load_cached_hlt_view  # noqa: E402
 from jetclass_fresh.independent_fusion import FEATURE_MODES, IndependentFusionConfig, run_independent_fusion  # noqa: E402
 from jetclass_fresh.jetclass_data import LABEL_NAMES  # noqa: E402
 from teacher_logit_reco.architecture_view_part.config import (  # noqa: E402
-    ARCHITECTURE_VIEW_VARIANTS,
+    ARCHITECTURE_VIEW_ALL_VARIANTS,
     normalize_architecture_view_variant,
 )
 from teacher_logit_reco.architecture_view_part.train import (  # noqa: E402
@@ -191,7 +191,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--checkpoint-root", required=True, help="Directory containing <variant>/best_model_val.pt")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--variants", nargs="+", choices=ARCHITECTURE_VIEW_VARIANTS, required=True)
+    parser.add_argument("--variants", nargs="+", choices=ARCHITECTURE_VIEW_ALL_VARIANTS, required=True)
     parser.add_argument("--splits", nargs="+", choices=STACK_SPLITS, default=list(STACK_SPLITS))
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=0)

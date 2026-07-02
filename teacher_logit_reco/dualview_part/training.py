@@ -693,6 +693,7 @@ def build_dualview_residual_model_from_config(config: DualViewResidualTrainConfi
         fallback_model_size=str(config.anchor_model_size),
         fallback_label_names=tuple(config.label_names),
         enforce_canonical_contract=bool(config.enforce_anchor_contract),
+        contract_hlt_cache_dir=config.hlt_cache_dir,
     )
     pn_encoder = build_pn_memory_encoder(config.pn_encoder_config())
     model = build_dualview_residual_part(
