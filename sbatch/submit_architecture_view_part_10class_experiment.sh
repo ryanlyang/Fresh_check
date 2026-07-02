@@ -29,8 +29,8 @@ ARCHITECTURE_VIEW_PART_10CLASS_HLT_TAG="${ARCHITECTURE_VIEW_PART_10CLASS_HLT_DEG
 
 : "${ARCHITECTURE_VIEW_PART_10CLASS_LABEL_NAMES:=QCD Hbb Hcc Hgg H4q Hqql Zqq Wqq Tbqq Tbl}"
 : "${ARCHITECTURE_VIEW_PART_10CLASS_HETERO_ARCHITECTURES:=part pn pfn pcnn}"
-: "${ARCHITECTURE_VIEW_PART_10CLASS_AV_VARIANTS:=av_baseline_recheck av_context_mlp_control av_pn_only av_pfn_only av_pcnn_only av_all_views av_random_view_control}"
-: "${ARCHITECTURE_VIEW_PART_10CLASS_AV_FUSION_VARIANTS:=av_baseline_recheck av_context_mlp_control av_pn_only av_pfn_only av_pcnn_only av_all_views}"
+: "${ARCHITECTURE_VIEW_PART_10CLASS_AV_VARIANTS:=av10_baseline_recheck av10_context_mlp_control av10_part_context_to_part av10_pn_context_to_part av10_pfn_context_to_part av10_pcnn_context_to_part av10_all_views_to_part av10_random_view_control}"
+: "${ARCHITECTURE_VIEW_PART_10CLASS_AV_FUSION_VARIANTS:=av10_baseline_recheck av10_context_mlp_control av10_part_context_to_part av10_pn_context_to_part av10_pfn_context_to_part av10_pcnn_context_to_part av10_all_views_to_part}"
 
 : "${ARCHITECTURE_VIEW_PART_10CLASS_MODEL_TRAIN_SIZE:=500000}"
 : "${ARCHITECTURE_VIEW_PART_10CLASS_MODEL_VAL_SIZE:=150000}"
@@ -95,7 +95,7 @@ export ARCHITECTURE_VIEW_PART_EXPECTED_HLT_DEGRADATION_STRENGTH="${ARCHITECTURE_
 export ARCHITECTURE_VIEW_PART_REPORT_VARIANTS="${ARCHITECTURE_VIEW_PART_10CLASS_AV_VARIANTS}"
 export ARCHITECTURE_VIEW_PART_REPORT_PRIMARY_METRIC="${ARCHITECTURE_VIEW_PART_10CLASS_SELECTION_METRIC}"
 export ARCHITECTURE_VIEW_PART_REPORT_COMPARISON_SPLIT="final_test"
-export ARCHITECTURE_VIEW_PART_REPORT_BASELINE_VARIANT="av_baseline_recheck"
+export ARCHITECTURE_VIEW_PART_REPORT_BASELINE_VARIANT="av10_baseline_recheck"
 export ARCHITECTURE_VIEW_PART_REPORT_CONFIRM_FINAL_TEST=1
 export ARCHITECTURE_VIEW_PART_FUSION_DIR="${ARCHITECTURE_VIEW_PART_10CLASS_AV_FUSION_DIR}"
 export ARCHITECTURE_VIEW_PART_FUSION_VARIANTS="${ARCHITECTURE_VIEW_PART_10CLASS_AV_FUSION_VARIANTS}"
