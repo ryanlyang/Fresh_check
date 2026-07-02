@@ -14,6 +14,8 @@ IFS=$'\n\t'
 : "${CONDA_ENV:=weaver}"
 : "${PYTHON_BIN:=python}"
 : "${DRY_RUN:=0}"
+: "${SKIP_EXISTING:=0}"
+: "${CONFIRM_FINAL_TEST:=0}"
 : "${PRINT_ONLY:=0}"
 : "${OVERWRITE:=0}"
 : "${DEVICE:=auto}"
@@ -329,6 +331,88 @@ IFS=$'\n\t'
 : "${DUALVIEW_PART_REPORT_SHUFFLED_VARIANT:=frozen_anchor_shuffled_pn_control}"
 : "${DUALVIEW_PART_REPORT_COMPARISON_SPLIT:=final_test}"
 : "${DUALVIEW_PART_REPORT_REQUIRE_REAL_BEATS_SHUFFLED:=1}"
+: "${PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
+: "${PD10_ROOT:=${OUTPUT_ROOT}/privileged_distill_10class_5m}"
+: "${PD10_SPLIT_MANIFEST_DIR:=${PD10_ROOT}/split_manifest}"
+: "${PD10_MANIFEST_PATH:=${PD10_SPLIT_MANIFEST_DIR}/split_manifest.json.gz}"
+: "${PD10_HLT_CACHE_DIR:=${PD10_ROOT}/hlt_cache}"
+: "${PD10_AUDIT_DIR:=${PD10_ROOT}/audits}"
+: "${PD10_STEP2_AUDIT_DIR:=${PD10_AUDIT_DIR}/step2_splits_hlt_cache}"
+: "${PD10_TEACHERS_DIR:=${PD10_ROOT}/teachers}"
+: "${PD10_MODEL_TRAIN_SIZE:=5000000}"
+: "${PD10_MODEL_VAL_SIZE:=1000000}"
+: "${PD10_STACK_TRAIN_SIZE:=10}"
+: "${PD10_STACK_VAL_SIZE:=10}"
+: "${PD10_FINAL_TEST_SIZE:=1000000}"
+: "${PD10_HLT_SPLITS:=model_train model_val final_test}"
+: "${PD10_HLT_DEGRADATION_STRENGTH:=0.6}"
+: "${PD10_TEACHER_TARGETS:=hlt offline}"
+: "${PD10_HLT_TEACHER_SEED:=101}"
+: "${PD10_OFFLINE_TEACHER_SEED:=707}"
+: "${PD10_TEACHER_MODEL_SIZE:=base}"
+: "${PD10_HLT_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${PD10_HLT_TEACHER_SOURCE_REPORT:=}"
+: "${PD10_HLT_TEACHER_SOURCE_FINAL_TEST_REPORT:=}"
+: "${PD10_OFFLINE_TEACHER_SOURCE_CHECKPOINT:=}"
+: "${PD10_OFFLINE_TEACHER_SOURCE_REPORT:=}"
+: "${PD10_OFFLINE_TEACHER_SOURCE_FINAL_TEST_REPORT:=}"
+: "${PD10_TEACHER_LOGITS_DIR:=${PD10_ROOT}/teacher_logits}"
+: "${PD10_TEACHER_LOGIT_TARGETS:=${PD10_TEACHER_TARGETS}}"
+: "${PD10_TEACHER_LOGIT_SPLITS:=model_train model_val final_test}"
+: "${PD10_TEACHER_LOGIT_BATCH_SIZE:=128}"
+: "${PD10_TEACHER_LOGIT_NUM_WORKERS:=${NUM_WORKERS}}"
+: "${PD10_TEACHER_LOGIT_DEVICE:=${DEVICE}}"
+: "${PD10_TEACHER_LOGIT_CONTROL_SEED:=7207}"
+: "${PD10_TEACHER_LOGIT_NO_SKIP_EXISTING:=0}"
+: "${PD10_DUAL_VIEW_TEACHER_DIR:=${PD10_TEACHERS_DIR}/dual_view_logit_teacher_10class}"
+: "${PD10_DUAL_VIEW_TEACHER_LOGITS_DIR:=${PD10_TEACHER_LOGITS_DIR}/dual_view_logit_teacher_10class}"
+: "${PD10_DUAL_VIEW_TEACHER_SEED:=1709}"
+: "${PD10_DUAL_VIEW_BATCH_SIZE:=8192}"
+: "${PD10_DUAL_VIEW_EVAL_BATCH_SIZE:=16384}"
+: "${PD10_DUAL_VIEW_NUM_WORKERS:=0}"
+: "${PD10_DUAL_VIEW_EPOCHS:=20}"
+: "${PD10_DUAL_VIEW_LR:=0.001}"
+: "${PD10_DUAL_VIEW_WEIGHT_DECAY:=0.0001}"
+: "${PD10_DUAL_VIEW_HIDDEN_DIM:=128}"
+: "${PD10_DUAL_VIEW_DROPOUT:=0.05}"
+: "${PD10_DUAL_VIEW_EARLY_STOP_PATIENCE:=4}"
+: "${PD10_DUAL_VIEW_GRAD_CLIP_NORM:=1.0}"
+: "${PD10_DUAL_VIEW_DEVICE:=${DEVICE}}"
+: "${PD10_DUAL_VIEW_PREDICT_SPLITS:=model_train model_val final_test}"
+: "${PD10_DUAL_VIEW_NO_SKIP_EXISTING_PREDICTIONS:=0}"
+: "${PD10_STUDENTS_DIR:=${PD10_ROOT}/students}"
+: "${PD10_FINAL_REPORT_DIR:=${PD10_ROOT}/final_report}"
+: "${PD10_STUDENT_CORE_SPECS:=scratch|none|full_logits|2.0|0.5|3|pd10_student_scratch_ce_only scratch|hlt|full_logits|2.0|0.5|3|pd10_student_scratch_hlt_full_logits_t2_a0p5 scratch|offline|full_logits|2.0|0.5|3|pd10_student_scratch_offline_full_logits_t2_a0p5 scratch|dual_view|full_logits|2.0|0.5|3|pd10_student_scratch_dual_view_full_logits_t2_a0p5 warm_start|none|full_logits|2.0|0.5|3|pd10_student_warm_start_ce_only warm_start|hlt|full_logits|2.0|0.5|3|pd10_student_warm_start_hlt_full_logits_t2_a0p5 warm_start|offline|full_logits|2.0|0.5|3|pd10_student_warm_start_offline_full_logits_t2_a0p5 warm_start|dual_view|full_logits|2.0|0.5|3|pd10_student_warm_start_dual_view_full_logits_t2_a0p5}"
+: "${PD10_STUDENT_PRIORITY_SPECS:=warm_start|dual_view|full_logits|4.0|0.5|3|pd10_student_warm_start_dual_view_full_logits_t4_a0p5 warm_start|dual_view|full_logits|2.0|0.3|3|pd10_student_warm_start_dual_view_full_logits_t2_a0p3 warm_start|dual_view|top3|2.0|0.5|3|pd10_student_warm_start_dual_view_top3_t2_a0p5 warm_start|dual_view|confidence_weighted|2.0|0.5|3|pd10_student_warm_start_dual_view_confidence_weighted_t2_a0p5}"
+: "${PD10_STUDENT_SPECS:=${PD10_STUDENT_CORE_SPECS} ${PD10_STUDENT_PRIORITY_SPECS}}"
+: "${PD10_STUDENT_BATCH_SIZE:=128}"
+: "${PD10_STUDENT_NUM_WORKERS:=${NUM_WORKERS}}"
+: "${PD10_STUDENT_DEVICE:=${DEVICE}}"
+: "${PD10_STUDENT_MODEL_SIZE:=base}"
+: "${PD10_STUDENT_SEED:=2205}"
+: "${PD10_STUDENT_SCRATCH_EPOCHS:=20}"
+: "${PD10_STUDENT_WARM_START_EPOCHS:=8}"
+: "${PD10_STUDENT_EPOCHS:=}"
+: "${PD10_STUDENT_SCRATCH_LR:=0.001}"
+: "${PD10_STUDENT_WARM_START_LR:=0.00003}"
+: "${PD10_STUDENT_WEIGHT_DECAY:=0.0001}"
+: "${PD10_STUDENT_EARLY_STOP_PATIENCE:=5}"
+: "${PD10_STUDENT_GRAD_CLIP_NORM:=1.0}"
+: "${PD10_STUDENT_SCRATCH_KD_WARMUP_EPOCHS:=3}"
+: "${PD10_STUDENT_WARM_START_KD_WARMUP_EPOCHS:=1}"
+: "${PD10_STUDENT_NO_AMP:=0}"
+: "${PD10_STUDENT_COMPILE_MODEL:=0}"
+: "${PD10_STUDENT_SKIP_FINAL_TEST:=0}"
+: "${PD10_STUDENT_MAX_TRAIN_BATCHES:=}"
+: "${PD10_STUDENT_MAX_VAL_BATCHES:=}"
+: "${PD10_STUDENT_MAX_FINAL_TEST_BATCHES:=}"
+: "${PD10_STUDENT_WARM_START_BASELINE_CHECKPOINT:=${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt}"
+: "${PD10_REPORT_STUDENT_VARIANTS:=}"
+: "${PD10_REPORT_CORE_ONLY:=0}"
+: "${PD10_REPORT_ALLOW_MISSING_CORE_STUDENTS:=0}"
+: "${PD10_REPORT_ALLOW_MISSING_TEACHER_REPORTS:=0}"
+: "${PD10_REPORT_ALLOW_MISSING_AUDIT:=0}"
+: "${PD10_REPORT_SKIP_PREDICTION_METRICS:=0}"
 : "${CROSSARCH_ROOT:=${OUTPUT_ROOT}/teacher_logit_reco_crossarch_500k}"
 : "${CROSSARCH_SPLIT_MANIFEST_DIR:=${CROSSARCH_ROOT}/split_manifest}"
 : "${CROSSARCH_MANIFEST_PATH:=${CROSSARCH_SPLIT_MANIFEST_DIR}/split_manifest.json.gz}"
@@ -1418,6 +1502,88 @@ keys = [
     "DUALVIEW_PART_REPORT_SHUFFLED_VARIANT",
     "DUALVIEW_PART_REPORT_COMPARISON_SPLIT",
     "DUALVIEW_PART_REPORT_REQUIRE_REAL_BEATS_SHUFFLED",
+    "PD10_DATA_DIR",
+    "PD10_ROOT",
+    "PD10_SPLIT_MANIFEST_DIR",
+    "PD10_MANIFEST_PATH",
+    "PD10_HLT_CACHE_DIR",
+    "PD10_AUDIT_DIR",
+    "PD10_STEP2_AUDIT_DIR",
+    "PD10_TEACHERS_DIR",
+    "PD10_MODEL_TRAIN_SIZE",
+    "PD10_MODEL_VAL_SIZE",
+    "PD10_STACK_TRAIN_SIZE",
+    "PD10_STACK_VAL_SIZE",
+    "PD10_FINAL_TEST_SIZE",
+    "PD10_HLT_SPLITS",
+    "PD10_HLT_DEGRADATION_STRENGTH",
+    "PD10_TEACHER_TARGETS",
+    "PD10_HLT_TEACHER_SEED",
+    "PD10_OFFLINE_TEACHER_SEED",
+    "PD10_TEACHER_MODEL_SIZE",
+    "PD10_HLT_TEACHER_SOURCE_CHECKPOINT",
+    "PD10_HLT_TEACHER_SOURCE_REPORT",
+    "PD10_HLT_TEACHER_SOURCE_FINAL_TEST_REPORT",
+    "PD10_OFFLINE_TEACHER_SOURCE_CHECKPOINT",
+    "PD10_OFFLINE_TEACHER_SOURCE_REPORT",
+    "PD10_OFFLINE_TEACHER_SOURCE_FINAL_TEST_REPORT",
+    "PD10_TEACHER_LOGITS_DIR",
+    "PD10_TEACHER_LOGIT_TARGETS",
+    "PD10_TEACHER_LOGIT_SPLITS",
+    "PD10_TEACHER_LOGIT_BATCH_SIZE",
+    "PD10_TEACHER_LOGIT_NUM_WORKERS",
+    "PD10_TEACHER_LOGIT_DEVICE",
+    "PD10_TEACHER_LOGIT_CONTROL_SEED",
+    "PD10_TEACHER_LOGIT_NO_SKIP_EXISTING",
+    "PD10_DUAL_VIEW_TEACHER_DIR",
+    "PD10_DUAL_VIEW_TEACHER_LOGITS_DIR",
+    "PD10_DUAL_VIEW_TEACHER_SEED",
+    "PD10_DUAL_VIEW_BATCH_SIZE",
+    "PD10_DUAL_VIEW_EVAL_BATCH_SIZE",
+    "PD10_DUAL_VIEW_NUM_WORKERS",
+    "PD10_DUAL_VIEW_EPOCHS",
+    "PD10_DUAL_VIEW_LR",
+    "PD10_DUAL_VIEW_WEIGHT_DECAY",
+    "PD10_DUAL_VIEW_HIDDEN_DIM",
+    "PD10_DUAL_VIEW_DROPOUT",
+    "PD10_DUAL_VIEW_EARLY_STOP_PATIENCE",
+    "PD10_DUAL_VIEW_GRAD_CLIP_NORM",
+    "PD10_DUAL_VIEW_DEVICE",
+    "PD10_DUAL_VIEW_PREDICT_SPLITS",
+    "PD10_DUAL_VIEW_NO_SKIP_EXISTING_PREDICTIONS",
+    "PD10_STUDENTS_DIR",
+    "PD10_FINAL_REPORT_DIR",
+    "PD10_STUDENT_CORE_SPECS",
+    "PD10_STUDENT_PRIORITY_SPECS",
+    "PD10_STUDENT_SPECS",
+    "PD10_STUDENT_BATCH_SIZE",
+    "PD10_STUDENT_NUM_WORKERS",
+    "PD10_STUDENT_DEVICE",
+    "PD10_STUDENT_MODEL_SIZE",
+    "PD10_STUDENT_SEED",
+    "PD10_STUDENT_SCRATCH_EPOCHS",
+    "PD10_STUDENT_WARM_START_EPOCHS",
+    "PD10_STUDENT_EPOCHS",
+    "PD10_STUDENT_SCRATCH_LR",
+    "PD10_STUDENT_WARM_START_LR",
+    "PD10_STUDENT_WEIGHT_DECAY",
+    "PD10_STUDENT_EARLY_STOP_PATIENCE",
+    "PD10_STUDENT_GRAD_CLIP_NORM",
+    "PD10_STUDENT_SCRATCH_KD_WARMUP_EPOCHS",
+    "PD10_STUDENT_WARM_START_KD_WARMUP_EPOCHS",
+    "PD10_STUDENT_NO_AMP",
+    "PD10_STUDENT_COMPILE_MODEL",
+    "PD10_STUDENT_SKIP_FINAL_TEST",
+    "PD10_STUDENT_MAX_TRAIN_BATCHES",
+    "PD10_STUDENT_MAX_VAL_BATCHES",
+    "PD10_STUDENT_MAX_FINAL_TEST_BATCHES",
+    "PD10_STUDENT_WARM_START_BASELINE_CHECKPOINT",
+    "PD10_REPORT_STUDENT_VARIANTS",
+    "PD10_REPORT_CORE_ONLY",
+    "PD10_REPORT_ALLOW_MISSING_CORE_STUDENTS",
+    "PD10_REPORT_ALLOW_MISSING_TEACHER_REPORTS",
+    "PD10_REPORT_ALLOW_MISSING_AUDIT",
+    "PD10_REPORT_SKIP_PREDICTION_METRICS",
     "SUBTOKEN_PART_ROOT",
     "SUBTOKEN_PART_COMPAT_DIR",
     "SUBTOKEN_PART_FINAL_REPORT_DIR",
@@ -1847,6 +2013,7 @@ keys = [
     "FUSION_MAX_JETS_PER_SPLIT",
     "FUSION_FEATURE_MODE",
     "FUSION_MAX_ITER",
+    "SKIP_EXISTING",
     "CONFIRM_FINAL_TEST",
     "SLURM_CPUS_PER_TASK",
     "SLURM_MEM_PER_NODE",
@@ -2032,6 +2199,67 @@ fresh_teacher_logit_pcnn_model_name() {
     part|pn|pfn|pcnn) echo "pcnn_reco_to_${architecture}_teacher" ;;
     *)
       echo "Unknown teacher-logit PCNN teacher architecture: ${architecture}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_pd10_teacher_model_name() {
+  local teacher="$1"
+  case "${teacher}" in
+    hlt) echo "hlt_part_teacher_10class" ;;
+    offline) echo "offline_part_teacher_10class" ;;
+    dual|dual_view) echo "dual_view_logit_teacher_10class" ;;
+    *)
+      echo "Unknown PD10 teacher target: ${teacher}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_pd10_teacher_seed() {
+  local teacher="$1"
+  case "${teacher}" in
+    hlt) echo "${PD10_HLT_TEACHER_SEED}" ;;
+    offline) echo "${PD10_OFFLINE_TEACHER_SEED}" ;;
+    *)
+      echo "Unknown PD10 teacher target: ${teacher}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_pd10_teacher_source_checkpoint() {
+  local teacher="$1"
+  case "${teacher}" in
+    hlt) echo "${PD10_HLT_TEACHER_SOURCE_CHECKPOINT}" ;;
+    offline) echo "${PD10_OFFLINE_TEACHER_SOURCE_CHECKPOINT}" ;;
+    *)
+      echo "Unknown PD10 teacher target: ${teacher}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_pd10_teacher_source_report() {
+  local teacher="$1"
+  case "${teacher}" in
+    hlt) echo "${PD10_HLT_TEACHER_SOURCE_REPORT}" ;;
+    offline) echo "${PD10_OFFLINE_TEACHER_SOURCE_REPORT}" ;;
+    *)
+      echo "Unknown PD10 teacher target: ${teacher}" >&2
+      return 2
+      ;;
+  esac
+}
+
+fresh_pd10_teacher_source_final_test_report() {
+  local teacher="$1"
+  case "${teacher}" in
+    hlt) echo "${PD10_HLT_TEACHER_SOURCE_FINAL_TEST_REPORT}" ;;
+    offline) echo "${PD10_OFFLINE_TEACHER_SOURCE_FINAL_TEST_REPORT}" ;;
+    *)
+      echo "Unknown PD10 teacher target: ${teacher}" >&2
       return 2
       ;;
   esac
