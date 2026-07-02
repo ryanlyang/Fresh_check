@@ -78,7 +78,7 @@ class PD10Step2InputTests(unittest.TestCase):
             },
         )
 
-    def test_pd10_hlt_profile_is_hlt0p6(self):
+    def test_pd10_hlt_profile_defaults_to_hlt0p6(self):
         self.assertEqual(PD10_HLT_DEGRADATION_STRENGTH, 0.6)
         self.assertEqual(pd10_hlt_params_dict(), fixed_hlt_params_dict(fixed_hlt_params_from_strength(0.6)))
         self.assertNotEqual(pd10_hlt_params_dict(), fixed_hlt_params_dict(fixed_hlt_params_from_strength(1.0)))
@@ -150,7 +150,7 @@ class PD10Step2InputTests(unittest.TestCase):
         self.assertIn("base problem", problems)
         self.assertIn("n_jets is 4999999, expected 5000000", problems)
         self.assertIn("seed is 999, expected 1053", problems)
-        self.assertIn("HLT params do not match PD10 HLT0.6 profile", problems)
+        self.assertIn("HLT params do not match configured PD10 fixed-HLT profile (strength=0.6)", problems)
         self.assertIn("recomputed HLT content hash does not match metadata", problems)
 
     def test_audit_script_imports_and_uses_default_layout(self):

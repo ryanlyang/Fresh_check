@@ -152,7 +152,10 @@ def _load_source_view(config: PD10TeacherLogitCacheConfig, split: str) -> tuple[
         if view.metadata.get("view") not in (None, "fixed_hlt"):
             raise ValueError(f"Expected fixed_hlt cache for {split}, got {view.metadata.get('view')!r}")
         if view.metadata.get("hlt_params") != pd10_hlt_params_dict():
-            raise ValueError(f"HLT cache for {split} does not match PD10 HLT0.6 params")
+            raise ValueError(
+                f"HLT cache for {split} does not match configured PD10 fixed-HLT params "
+                f"(strength={PD10_HLT_DEGRADATION_STRENGTH:g})"
+            )
         metadata = {
             "source_view": "fixed_hlt",
             "source_manifest_hash": view.metadata.get("source_manifest_hash"),

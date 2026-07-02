@@ -7,6 +7,7 @@ helpers for later training, caching, and reporting scripts.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
@@ -28,7 +29,19 @@ PD10_SPLIT_SIZES: dict[str, int] = {
     "model_val": 1_000_000,
     "final_test": 1_000_000,
 }
-PD10_HLT_DEGRADATION_STRENGTH = 0.6
+
+
+def _float_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {raw!r}") from exc
+
+
+PD10_HLT_DEGRADATION_STRENGTH = _float_from_env("PD10_HLT_DEGRADATION_STRENGTH", 0.6)
 
 PD10_MANIFEST_SPLIT_ORDER: tuple[str, ...] = (
     "model_train",
@@ -493,8 +506,13 @@ class PD10ExperimentConfig:
         if any(size <= 0 for size in split_sizes.values()):
             raise ValueError("split sizes must be positive")
         hlt_degradation_strength = float(self.hlt_degradation_strength)
+        if hlt_degradation_strength < 0.0:
+            raise ValueError("hlt_degradation_strength must be non-negative")
         if abs(hlt_degradation_strength - PD10_HLT_DEGRADATION_STRENGTH) > 1.0e-12:
-            raise ValueError("PD10 first run is locked to HLT degradation strength 0.6")
+            raise ValueError(
+                "PD10 run is locked to configured HLT degradation strength "
+                f"{PD10_HLT_DEGRADATION_STRENGTH:g}"
+            )
         teacher_targets = tuple(normalize_pd10_teacher_target(value) for value in self.teacher_targets)
         if teacher_targets != PD10_TEACHER_TARGETS:
             raise ValueError(f"teacher_targets must be {PD10_TEACHER_TARGETS}")

@@ -70,7 +70,7 @@ def pd10_stack_placeholder_split_sizes(expected_counts: Mapping[str, int] | None
 
 
 def pd10_hlt_params_dict() -> dict[str, float]:
-    """Return the canonical PD10 HLT0.6 parameter profile as JSON-safe floats."""
+    """Return the configured canonical PD10 fixed-HLT profile as JSON-safe floats."""
 
     return fixed_hlt_params_dict(fixed_hlt_params_from_strength(PD10_HLT_DEGRADATION_STRENGTH))
 
@@ -242,7 +242,10 @@ def hlt_cache_split_problems(
     if int(item.get("seed", -1)) != int(expected_seed):
         problems.append(f"seed is {item.get('seed')}, expected {expected_seed}")
     if item.get("hlt_params") != item.get("expected_hlt_params"):
-        problems.append("HLT params do not match PD10 HLT0.6 profile")
+        problems.append(
+            "HLT params do not match configured PD10 fixed-HLT profile "
+            f"(strength={PD10_HLT_DEGRADATION_STRENGTH:g})"
+        )
     if item.get("source_manifest_hash") != manifest_sha:
         problems.append("source_manifest_hash does not match manifest hash")
     if not bool(item.get("content_hash_matches_metadata")):
