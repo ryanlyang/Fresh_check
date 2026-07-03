@@ -11,6 +11,10 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 source "${SCRIPT_DIR}/common.sh"
 
 : "${UPSTREAM_DEPENDENCY:=}"
+: "${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY:=${UPSTREAM_DEPENDENCY}}"
+: "${PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY:=${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY}}"
+: "${PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY:=${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY}}"
+: "${PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY:=${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY}}"
 
 fresh_prepare_submitter
 
@@ -60,6 +64,24 @@ afterok_args() {
     printf '%s\n' --dependency="afterok:${dependency}"
   fi
   printf '%s\n' "$@"
+}
+
+fresh_require_file_unless_deferred() {
+  local dependency="$1"
+  local path="$2"
+  if [[ -n "${dependency}" ]]; then
+    return 0
+  fi
+  fresh_require_file "${path}"
+}
+
+fresh_require_dir_unless_deferred() {
+  local dependency="$1"
+  local path="$2"
+  if [[ -n "${dependency}" ]]; then
+    return 0
+  fi
+  fresh_require_dir "${path}"
 }
 
 skip_existing_artifact() {
@@ -175,25 +197,38 @@ else
   fresh_split_words v2_student_specs "${PD10_V2_CORE_STUDENT_SPECS}"
 fi
 
-if [[ -z "${UPSTREAM_DEPENDENCY}" ]]; then
-  fresh_require_file "${PD10_MANIFEST_PATH}"
-  fresh_require_file "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
-  fresh_require_file "${PD10_STEP2_AUDIT_DIR}/pd10_step2_audit_report.json"
-  fresh_require_file "${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt"
-  fresh_require_file "${PD10_TEACHERS_DIR}/offline_part_teacher_10class/best_model_val.pt"
-  fresh_require_file "${PD10_DUAL_VIEW_TEACHER_DIR}/best_model_val.pt"
-  fresh_require_file "${PD10_TEACHER_LOGITS_DIR}/hlt_part_teacher_10class/teacher_logit_manifest.json"
-  fresh_require_file "${PD10_TEACHER_LOGITS_DIR}/offline_part_teacher_10class/teacher_logit_manifest.json"
-  fresh_require_file "${PD10_TEACHER_LOGITS_DIR}/dual_view_logit_teacher_10class/teacher_logit_manifest.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_scratch_ce_only/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_scratch_hlt_full_logits_t2_a0p5/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_scratch_offline_full_logits_t2_a0p5/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_scratch_dual_view_full_logits_t2_a0p5/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_warm_start_ce_only/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_warm_start_hlt_full_logits_t2_a0p5/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_warm_start_offline_full_logits_t2_a0p5/run_report.json"
-  fresh_require_file "${PD10_STUDENTS_DIR}/pd10_student_warm_start_dual_view_full_logits_t2_a0p5/run_report.json"
-fi
+particle_teacher_base_dep="${PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY}"
+dual_rep_base_dep="${PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY}"
+report_anchor_dep="${PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY}"
+
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_MANIFEST_PATH}"
+fresh_require_dir_unless_deferred "${particle_teacher_base_dep}" "${PD10_HLT_CACHE_DIR}"
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt"
+fresh_require_file_unless_deferred "${particle_teacher_base_dep}" "${PD10_TEACHERS_DIR}/offline_part_teacher_10class/best_model_val.pt"
+
+fresh_require_file_unless_deferred "${dual_rep_base_dep}" "${PD10_DUAL_VIEW_TEACHER_DIR}/best_model_val.pt"
+fresh_require_file_unless_deferred "${dual_rep_base_dep}" "${PD10_TEACHER_LOGITS_DIR}/hlt_part_teacher_10class/teacher_logit_manifest.json"
+fresh_require_file_unless_deferred "${dual_rep_base_dep}" "${PD10_TEACHER_LOGITS_DIR}/offline_part_teacher_10class/teacher_logit_manifest.json"
+fresh_require_file_unless_deferred "${dual_rep_base_dep}" "${PD10_TEACHER_LOGITS_DIR}/dual_view_logit_teacher_10class/teacher_logit_manifest.json"
+
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STEP2_AUDIT_DIR}/pd10_step2_audit_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_TEACHERS_DIR}/offline_part_teacher_10class/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_DUAL_VIEW_TEACHER_DIR}/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_TEACHER_LOGITS_DIR}/hlt_part_teacher_10class/teacher_logit_manifest.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_TEACHER_LOGITS_DIR}/offline_part_teacher_10class/teacher_logit_manifest.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_TEACHER_LOGITS_DIR}/dual_view_logit_teacher_10class/teacher_logit_manifest.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_scratch_ce_only/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_scratch_hlt_full_logits_t2_a0p5/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_scratch_offline_full_logits_t2_a0p5/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_scratch_dual_view_full_logits_t2_a0p5/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_warm_start_ce_only/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_warm_start_hlt_full_logits_t2_a0p5/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_warm_start_offline_full_logits_t2_a0p5/run_report.json"
+fresh_require_file_unless_deferred "${report_anchor_dep}" "${PD10_STUDENTS_DIR}/pd10_student_warm_start_dual_view_full_logits_t2_a0p5/run_report.json"
 
 submitter_lock_dir="${PD10_V2_ROOT}/submission_logs/pd10_v2_$(date +%Y%m%d_%H%M%S)"
 fresh_claim_new_dir "${submitter_lock_dir}"
@@ -206,6 +241,10 @@ if ! fresh_is_dry_run; then
     echo "pd10_root=${PD10_ROOT}"
     echo "pd10_v2_root=${PD10_V2_ROOT}"
     echo "upstream_dependency=${UPSTREAM_DEPENDENCY}"
+    echo "pd10_v2_global_upstream_dependency=${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY}"
+    echo "pd10_v2_particle_teacher_upstream_dependency=${PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY}"
+    echo "pd10_v2_dual_rep_upstream_dependency=${PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY}"
+    echo "pd10_v2_report_anchor_upstream_dependency=${PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY}"
     echo "skip_existing=${SKIP_EXISTING}"
     echo "confirm_final_test=${CONFIRM_FINAL_TEST}"
     echo "conda_env=${CONDA_ENV}"
@@ -223,7 +262,7 @@ prepare_anchor_teacher_logit_links
 particle_teacher_jid=""
 if ! skip_existing_artifact "pd10_v2_particle_teacher" "${PD10_V2_PARTICLE_DUAL_VIEW_TEACHER_DIR}/run_report.json"; then
   mapfile -t args < <(
-    afterok_args "${UPSTREAM_DEPENDENCY}" \
+    afterok_args "${particle_teacher_base_dep}" \
       "$(job_export_arg)" \
       "${SCRIPT_DIR}/run_pd10_train_particle_dual_view_teacher.sh"
   )
@@ -231,7 +270,7 @@ if ! skip_existing_artifact "pd10_v2_particle_teacher" "${PD10_V2_PARTICLE_DUAL_
   echo "submitted pd10_v2_particle_teacher=${particle_teacher_jid}"
 fi
 
-particle_cache_dep="$(join_nonempty_by_colon "${UPSTREAM_DEPENDENCY}" "${particle_teacher_jid}")"
+particle_cache_dep="$(join_nonempty_by_colon "${particle_teacher_base_dep}" "${particle_teacher_jid}")"
 particle_cache_jid=""
 if ! skip_existing_artifact "pd10_v2_particle_cache" "${PD10_V2_TEACHER_REPRESENTATIONS_DIR}/particle_dual_view_teacher_10class/teacher_representation_manifest.json"; then
   mapfile -t args < <(
@@ -258,7 +297,7 @@ for spec in "${v2_student_specs[@]}"; do
   fi
 done
 
-dual_rep_dep="$(join_nonempty_by_colon "${UPSTREAM_DEPENDENCY}")"
+dual_rep_dep="$(join_nonempty_by_colon "${dual_rep_base_dep}")"
 dual_rep_jid=""
 if [[ "${needs_dual_rep}" == "1" ]]; then
   if ! skip_existing_artifact "pd10_v2_dual_view_representations" "${PD10_V2_TEACHER_REPRESENTATIONS_DIR}/dual_view_logit_teacher_10class/teacher_representation_manifest.json"; then
@@ -285,7 +324,7 @@ for spec in "${v2_student_specs[@]}"; do
   fi
   student_variants+=("${variant_name}")
   student_done="${PD10_V2_STUDENTS_DIR}/${variant_name}/run_report.json"
-  student_dep_parts=("${UPSTREAM_DEPENDENCY}")
+  student_dep_parts=()
   case "${teacher_target}" in
     particle_dual_view) student_dep_parts+=("${particle_cache_jid}") ;;
     dual_view) student_dep_parts+=("${dual_rep_jid}") ;;
@@ -307,7 +346,7 @@ for spec in "${v2_student_specs[@]}"; do
   fi
 done
 
-report_dep="$(join_nonempty_by_colon "${UPSTREAM_DEPENDENCY}" "${particle_teacher_jid}" "${particle_cache_jid}" "${dual_rep_jid}" "${student_job_ids[@]}")"
+report_dep="$(join_nonempty_by_colon "${report_anchor_dep}" "${particle_teacher_jid}" "${particle_cache_jid}" "${dual_rep_jid}" "${student_job_ids[@]}")"
 report_jid=""
 if ! skip_existing_artifact "pd10_v2_report" "${PD10_V2_FINAL_REPORT_DIR}/pd10_report.json"; then
   report_extra="PD10_TEACHERS_DIR=${PD10_V2_TEACHERS_DIR},PD10_STUDENTS_DIR=${PD10_V2_STUDENTS_DIR},PD10_FINAL_REPORT_DIR=${PD10_V2_FINAL_REPORT_DIR},PD10_TEACHER_LOGITS_DIR=${PD10_V2_TEACHER_LOGITS_DIR},PD10_TEACHER_REPRESENTATIONS_DIR=${PD10_V2_TEACHER_REPRESENTATIONS_DIR},PD10_REPORT_ALLOW_MISSING_CORE_STUDENTS=${PD10_V2_REPORT_ALLOW_MISSING_CORE_STUDENTS},PD10_REPORT_ALLOW_MISSING_TEACHER_REPORTS=${PD10_V2_REPORT_ALLOW_MISSING_TEACHER_REPORTS},PD10_REPORT_ALLOW_MISSING_AUDIT=${PD10_V2_REPORT_ALLOW_MISSING_AUDIT}"
@@ -328,6 +367,11 @@ pd10_v2_repkd_particle_dualview_submission:
   skip_existing: ${SKIP_EXISTING}
   confirm_final_test: ${CONFIRM_FINAL_TEST}
   upstream_dependency: ${UPSTREAM_DEPENDENCY:-none}
+  granular_upstream_dependencies:
+    global: ${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY:-none}
+    particle_teacher: ${PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY:-none}
+    dual_view_representations: ${PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY:-none}
+    report_anchors: ${PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY:-none}
   job_ids:
     particle_dual_view_teacher: ${particle_teacher_jid:-skipped_existing}
     particle_dual_view_cache: ${particle_cache_jid:-skipped_existing}
@@ -335,10 +379,10 @@ pd10_v2_repkd_particle_dualview_submission:
     students: $(fresh_join_by_space "${student_job_ids[@]}")
     final_report: ${report_jid:-skipped_existing}
   dependency_summary:
-    particle_teacher_afterok: ${UPSTREAM_DEPENDENCY:-none}
+    particle_teacher_afterok: ${particle_teacher_base_dep:-none}
     particle_cache_afterok: ${particle_cache_dep:-none}
     dual_view_representations_afterok: ${dual_rep_dep:-none}
-    students_afterok: teacher-specific cache plus upstream
+    students_afterok: teacher-specific representation/cache jobs
     final_report_afterok: ${report_dep:-none}
   expected_jobs:
     students: ${#v2_student_specs[@]}
