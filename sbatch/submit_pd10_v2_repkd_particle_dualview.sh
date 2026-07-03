@@ -25,6 +25,51 @@ fi
 
 submit_count=0
 skip_count=0
+submitted_job_id=""
+
+dependency_token_is_valid() {
+  local token="$1"
+  if [[ "${token}" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if fresh_is_dry_run && [[ "${token}" =~ ^DRYRUN_[A-Za-z0-9_]+$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
+validate_dependency_list() {
+  local label="$1"
+  local dependency="$2"
+  if [[ -z "${dependency}" ]]; then
+    return 0
+  fi
+
+  local old_ifs="${IFS}"
+  local tokens=()
+  IFS=':'
+  read -r -a tokens <<< "${dependency}"
+  IFS="${old_ifs}"
+
+  local token
+  for token in "${tokens[@]}"; do
+    if [[ -z "${token}" ]] || ! dependency_token_is_valid "${token}"; then
+      echo "Invalid Slurm dependency for ${label}: '${dependency}'." >&2
+      echo "Use colon-separated numeric job IDs, for example 12345:12346. Do not pass placeholder text such as HLT_TEACHER_JOB." >&2
+      return 2
+    fi
+  done
+}
+
+validate_submitted_job_id() {
+  local label="$1"
+  local job_id="$2"
+  if ! dependency_token_is_valid "${job_id}"; then
+    echo "Failed to submit ${label}; expected a Slurm job ID but got '${job_id:-empty}'." >&2
+    return 2
+  fi
+}
+
 submit_job() {
   local label="$1"
   shift
@@ -34,13 +79,17 @@ submit_job() {
     fresh_print_shell_command sbatch "$@" >&2
     printf '\n' >&2
     local clean_label="${label//[^A-Za-z0-9_]/_}"
-    printf 'DRYRUN_%s\n' "${clean_label}"
+    submitted_job_id="DRYRUN_${clean_label}"
     return 0
   fi
   local output
-  output="$(sbatch "$@")"
+  if ! output="$(sbatch "$@")"; then
+    echo "Failed to submit ${label}." >&2
+    return 2
+  fi
   echo "${output}" >&2
-  echo "${output}" | awk '{print $NF}'
+  submitted_job_id="$(echo "${output}" | awk '{print $NF}')"
+  validate_submitted_job_id "${label}" "${submitted_job_id}"
 }
 
 join_nonempty_by_colon() {
@@ -60,6 +109,7 @@ join_nonempty_by_colon() {
 afterok_args() {
   local dependency="$1"
   shift
+  validate_dependency_list "afterok" "${dependency}"
   if [[ -n "${dependency}" ]]; then
     printf '%s\n' --dependency="afterok:${dependency}"
   fi
@@ -94,6 +144,28 @@ skip_existing_artifact() {
   fi
   return 1
 }
+
+require_artifact_or_submitted_job() {
+  local label="$1"
+  local artifact="$2"
+  local job_id="$3"
+  if [[ -e "${artifact}" ]]; then
+    return 0
+  fi
+  if [[ -n "${job_id}" ]]; then
+    validate_submitted_job_id "${label}" "${job_id}"
+    return 0
+  fi
+  echo "Cannot queue jobs that need ${label}; neither an existing artifact nor a submitted prerequisite job is available." >&2
+  echo "Missing artifact: ${artifact}" >&2
+  return 2
+}
+
+validate_dependency_list "UPSTREAM_DEPENDENCY" "${UPSTREAM_DEPENDENCY}"
+validate_dependency_list "PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY" "${PD10_V2_GLOBAL_UPSTREAM_DEPENDENCY}"
+validate_dependency_list "PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY" "${PD10_V2_PARTICLE_TEACHER_UPSTREAM_DEPENDENCY}"
+validate_dependency_list "PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY" "${PD10_V2_DUAL_REP_UPSTREAM_DEPENDENCY}"
+validate_dependency_list "PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY" "${PD10_V2_REPORT_ANCHOR_UPSTREAM_DEPENDENCY}"
 
 job_export_arg() {
   local extra="${1:-}"
@@ -266,7 +338,8 @@ if ! skip_existing_artifact "pd10_v2_particle_teacher" "${PD10_V2_PARTICLE_DUAL_
       "$(job_export_arg)" \
       "${SCRIPT_DIR}/run_pd10_train_particle_dual_view_teacher.sh"
   )
-  particle_teacher_jid="$(submit_job "pd10_v2_particle_teacher" "${args[@]}")"
+  submit_job "pd10_v2_particle_teacher" "${args[@]}"
+  particle_teacher_jid="${submitted_job_id}"
   echo "submitted pd10_v2_particle_teacher=${particle_teacher_jid}"
 fi
 
@@ -278,7 +351,8 @@ if ! skip_existing_artifact "pd10_v2_particle_cache" "${PD10_V2_TEACHER_REPRESEN
       "$(job_export_arg)" \
       "${SCRIPT_DIR}/run_pd10_cache_particle_dual_view_teacher.sh"
   )
-  particle_cache_jid="$(submit_job "pd10_v2_particle_cache" "${args[@]}")"
+  submit_job "pd10_v2_particle_cache" "${args[@]}"
+  particle_cache_jid="${submitted_job_id}"
   echo "submitted pd10_v2_particle_cache=${particle_cache_jid}"
 fi
 
@@ -306,7 +380,8 @@ if [[ "${needs_dual_rep}" == "1" ]]; then
         "$(job_export_arg)" \
         "${SCRIPT_DIR}/run_pd10_cache_dual_view_representations.sh"
     )
-    dual_rep_jid="$(submit_job "pd10_v2_dual_view_representations" "${args[@]}")"
+    submit_job "pd10_v2_dual_view_representations" "${args[@]}"
+    dual_rep_jid="${submitted_job_id}"
     echo "submitted pd10_v2_dual_view_representations=${dual_rep_jid}"
   fi
 fi
@@ -326,8 +401,20 @@ for spec in "${v2_student_specs[@]}"; do
   student_done="${PD10_V2_STUDENTS_DIR}/${variant_name}/run_report.json"
   student_dep_parts=()
   case "${teacher_target}" in
-    particle_dual_view) student_dep_parts+=("${particle_cache_jid}") ;;
-    dual_view) student_dep_parts+=("${dual_rep_jid}") ;;
+    particle_dual_view)
+      require_artifact_or_submitted_job \
+        "particle dual-view representation cache" \
+        "${PD10_V2_TEACHER_REPRESENTATIONS_DIR}/particle_dual_view_teacher_10class/teacher_representation_manifest.json" \
+        "${particle_cache_jid}"
+      student_dep_parts+=("${particle_cache_jid}")
+      ;;
+    dual_view)
+      require_artifact_or_submitted_job \
+        "dual-view representation cache" \
+        "${PD10_V2_TEACHER_REPRESENTATIONS_DIR}/dual_view_logit_teacher_10class/teacher_representation_manifest.json" \
+        "${dual_rep_jid}"
+      student_dep_parts+=("${dual_rep_jid}")
+      ;;
     *)
       echo "Unsupported PD10-V2 student teacher target: ${teacher_target}" >&2
       exit 2
@@ -340,7 +427,8 @@ for spec in "${v2_student_specs[@]}"; do
         "$(job_export_arg "PD10_STUDENTS_DIR=${PD10_V2_STUDENTS_DIR},PD10_TEACHER_LOGITS_DIR=${PD10_V2_TEACHER_LOGITS_DIR},PD10_TEACHER_REPRESENTATIONS_DIR=${PD10_V2_TEACHER_REPRESENTATIONS_DIR}")" \
         "${SCRIPT_DIR}/run_pd10_train_student.sh" "${spec}"
     )
-    student_jid="$(submit_job "pd10_v2_student_${variant_name}" "${args[@]}")"
+    submit_job "pd10_v2_student_${variant_name}" "${args[@]}"
+    student_jid="${submitted_job_id}"
     student_job_ids+=("${student_jid}")
     echo "submitted pd10_v2_student_${variant_name}=${student_jid}"
   fi
@@ -355,7 +443,8 @@ if ! skip_existing_artifact "pd10_v2_report" "${PD10_V2_FINAL_REPORT_DIR}/pd10_r
       "$(job_export_arg "${report_extra}")" \
       "${SCRIPT_DIR}/run_pd10_write_report.sh"
   )
-  report_jid="$(submit_job "pd10_v2_report" "${args[@]}")"
+  submit_job "pd10_v2_report" "${args[@]}"
+  report_jid="${submitted_job_id}"
   echo "submitted pd10_v2_report=${report_jid}"
 fi
 
