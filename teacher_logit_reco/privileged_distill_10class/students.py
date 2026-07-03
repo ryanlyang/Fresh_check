@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
-from jetclass_fresh.fusion import PredictionBlock, load_hlt_model_from_checkpoint, save_prediction_block, softmax_np
+from jetclass_fresh.fusion import (
+    PredictionBlock,
+    load_hlt_model_from_checkpoint,
+    sanitize_prediction_logits,
+    save_prediction_block,
+    softmax_np,
+)
 from jetclass_fresh.hlt_baseline import (
     build_hlt_classifier,
     require_torch,
@@ -568,6 +574,33 @@ def pd10_student_prediction_dir(output_dir: str | Path) -> Path:
     return Path(output_dir) / "student_predictions"
 
 
+def _amp_state_targets(model: Any) -> list[Any]:
+    targets: list[Any] = []
+    seen: set[int] = set()
+    for obj in (model, getattr(model, "mod", None), getattr(model, "module", None)):
+        if obj is None or not hasattr(obj, "use_amp"):
+            continue
+        obj_id = id(obj)
+        if obj_id in seen:
+            continue
+        targets.append(obj)
+        seen.add(obj_id)
+    return targets
+
+
+@contextmanager
+def _disable_model_amp_for_eval(model: Any):
+    targets = _amp_state_targets(model)
+    previous = [(target, getattr(target, "use_amp")) for target in targets]
+    try:
+        for target, _state in previous:
+            setattr(target, "use_amp", False)
+        yield bool(previous)
+    finally:
+        for target, state in previous:
+            setattr(target, "use_amp", state)
+
+
 def pd10_effective_kd_alpha(config: PD10StudentTrainConfig, epoch: int) -> float:
     if not config.uses_logit_teacher:
         return 0.0
@@ -848,21 +881,28 @@ def collect_pd10_student_prediction_block(
     labels_chunks: list[np.ndarray] = []
     jet_ids: list[Any] = []
     with torch.no_grad():
-        for batch_index, batch in enumerate(loader):
-            if max_batches is not None and batch_index >= int(max_batches):
-                break
-            assert_pd10_student_batch_hlt_only(batch)
-            if "teacher_logits" in batch or "teacher_representations" in batch:
-                raise ValueError("student prediction cache must be built from teacher-free HLT batches")
-            batch = move_pd10_student_batch_to_device(batch, device)
-            logits = model(batch["points"], batch["features"], batch["lorentz_vectors"], batch["mask"])
-            logits_chunks.append(logits.detach().cpu().numpy().astype(np.float32, copy=False))
-            labels_chunks.append(batch["labels"].detach().cpu().numpy().astype(np.int64, copy=False))
-            jet_ids.extend(batch["jet_ids"])
+        with _disable_model_amp_for_eval(model) as amp_disabled:
+            for batch_index, batch in enumerate(loader):
+                if max_batches is not None and batch_index >= int(max_batches):
+                    break
+                assert_pd10_student_batch_hlt_only(batch)
+                if "teacher_logits" in batch or "teacher_representations" in batch:
+                    raise ValueError("student prediction cache must be built from teacher-free HLT batches")
+                batch = move_pd10_student_batch_to_device(batch, device)
+                logits = model(batch["points"], batch["features"], batch["lorentz_vectors"], batch["mask"])
+                logits_chunks.append(logits.detach().cpu().numpy().astype(np.float32, copy=False))
+                labels_chunks.append(batch["labels"].detach().cpu().numpy().astype(np.int64, copy=False))
+                jet_ids.extend(batch["jet_ids"])
     if not labels_chunks:
         raise ValueError(f"student prediction cache for {split} collected no jets")
     logits_np = np.concatenate(logits_chunks, axis=0).astype(np.float32, copy=False)
     labels_np = np.concatenate(labels_chunks, axis=0).astype(np.int64, copy=False)
+    logits_np, logit_sanitization = sanitize_prediction_logits(
+        logits_np,
+        model_name=config.variant_name,
+        split=split,
+    )
+    logit_sanitization["amp_disabled_for_eval"] = bool(amp_disabled)
     checkpoint_payload = dict(checkpoint_payload or {})
     metadata = {
         "contract": PD10_STUDENT_PREDICTION_CACHE_CONTRACT,
@@ -904,6 +944,7 @@ def collect_pd10_student_prediction_block(
         "no_offline_inputs_loaded": True,
         "offline_privileged_inputs_loaded": False,
         "final_test_after_model_val_selection": split == config.final_test_split,
+        "logit_sanitization": logit_sanitization,
     }
     return PredictionBlock(
         model_name=config.variant_name,
@@ -959,6 +1000,7 @@ def collect_and_save_pd10_student_predictions(
     metrics.setdefault("rep_loss", 0.0)
     metrics.setdefault("effective_kd_alpha", 0.0)
     metrics.setdefault("effective_representation_beta", 0.0)
+    logit_sanitization = dict(block.metadata.get("logit_sanitization") or {})
     metrics.update(
         {
             "n_jets": int(block.labels.shape[0]),
@@ -967,6 +1009,10 @@ def collect_and_save_pd10_student_predictions(
             "prediction_npz_path": metadata.get("npz_path"),
             "prediction_metadata_path": metadata.get("metadata_path"),
             "metrics_source": "student_prediction_cache",
+            "logit_sanitization": logit_sanitization,
+            "nonfinite_logit_row_count": int(logit_sanitization.get("nonfinite_row_count", 0) or 0),
+            "nonfinite_logit_value_count": int(logit_sanitization.get("nonfinite_value_count", 0) or 0),
+            "nonfinite_logit_rows_repaired": bool(logit_sanitization.get("repaired", False)),
         }
     )
     save_json(Path(config.output_dir) / f"{split}_prediction_metrics.json", metrics)

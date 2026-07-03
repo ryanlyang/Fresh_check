@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +13,7 @@ from jetclass_fresh.fusion import (
     PredictionBlock,
     load_prediction_block,
     prediction_paths,
+    sanitize_prediction_logits,
     save_prediction_block,
     softmax_np,
 )
@@ -115,6 +117,33 @@ class PD10TeacherLogitCacheConfig:
         return Path(self.output_dir) / self.model_name
 
 
+def _amp_state_targets(model: Any) -> list[Any]:
+    targets: list[Any] = []
+    seen: set[int] = set()
+    for obj in (model, getattr(model, "mod", None), getattr(model, "module", None)):
+        if obj is None or not hasattr(obj, "use_amp"):
+            continue
+        obj_id = id(obj)
+        if obj_id in seen:
+            continue
+        targets.append(obj)
+        seen.add(obj_id)
+    return targets
+
+
+@contextmanager
+def _disable_model_amp_for_eval(model: Any):
+    targets = _amp_state_targets(model)
+    previous = [(target, getattr(target, "use_amp")) for target in targets]
+    try:
+        for target, _state in previous:
+            setattr(target, "use_amp", False)
+        yield bool(previous)
+    finally:
+        for target, state in previous:
+            setattr(target, "use_amp", state)
+
+
 def pd10_teacher_logit_cache_dir(
     teacher_target: str,
     *,
@@ -193,11 +222,13 @@ def collect_pd10_teacher_logits_for_view(
     view: JetView,
     *,
     teacher_target: str,
+    split: str,
+    model_name: str,
     batch_size: int,
     num_workers: int,
     device,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     torch = require_torch()
     target = normalize_pd10_part_teacher_target(teacher_target)
     if target == PD10_TEACHER_HLT:
@@ -218,11 +249,12 @@ def collect_pd10_teacher_logits_for_view(
     labels_rows: list[np.ndarray] = []
     model.eval()
     with torch.no_grad():
-        for batch in loader:
-            batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
-            logits = model(batch["points"], batch["features"], batch["lorentz_vectors"], batch["mask"])
-            logits_rows.append(logits.detach().cpu().numpy().astype(np.float32))
-            labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))
+        with _disable_model_amp_for_eval(model) as amp_disabled:
+            for batch in loader:
+                batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
+                logits = model(batch["points"], batch["features"], batch["lorentz_vectors"], batch["mask"])
+                logits_rows.append(logits.detach().cpu().numpy().astype(np.float32))
+                labels_rows.append(batch["labels"].detach().cpu().numpy().astype(np.int64))
     logits_np = (
         np.concatenate(logits_rows, axis=0).astype(np.float32, copy=False)
         if logits_rows
@@ -237,9 +269,13 @@ def collect_pd10_teacher_logits_for_view(
         raise ValueError(f"PD10 teacher logits must have shape [N, {PD10_NUM_CLASSES}], got {logits_np.shape}")
     if int(labels_np.shape[0]) != int(logits_np.shape[0]):
         raise ValueError("labels/logits row count mismatch")
-    if not np.isfinite(logits_np).all():
-        raise FloatingPointError("PD10 teacher logits contain non-finite values")
-    return logits_np, labels_np
+    logits_np, sanitization = sanitize_prediction_logits(
+        logits_np,
+        model_name=model_name,
+        split=split,
+    )
+    sanitization["amp_disabled_for_eval"] = bool(amp_disabled)
+    return logits_np, labels_np, sanitization
 
 
 def build_pd10_teacher_logit_block(
@@ -251,6 +287,7 @@ def build_pd10_teacher_logit_block(
     view: JetView,
     source_metadata: Mapping[str, Any],
     checkpoint_payload: Mapping[str, Any],
+    logit_sanitization: Mapping[str, Any] | None = None,
 ) -> PredictionBlock:
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
     logits = np.asarray(logits, dtype=np.float32)
@@ -280,6 +317,7 @@ def build_pd10_teacher_logit_block(
         "num_classes": PD10_NUM_CLASSES,
         "student_deployment_inputs": "HLT_only",
         "teacher_logits_train_time_only": True,
+        "logit_sanitization": dict(logit_sanitization or {}),
         **dict(source_metadata),
     }
     return PredictionBlock(
@@ -387,10 +425,12 @@ def cache_pd10_teacher_logits(config: PD10TeacherLogitCacheConfig) -> dict[str, 
             seed=pd10_teacher_logit_selection_seed(config, split),
         )
         source_metadata = {**source_metadata, "subset_selection": selection_report}
-        logits, labels = collect_pd10_teacher_logits_for_view(
+        logits, labels, logit_sanitization = collect_pd10_teacher_logits_for_view(
             model,
             view,
             teacher_target=config.teacher_target,
+            split=split,
+            model_name=config.model_name,
             batch_size=config.batch_size,
             num_workers=config.num_workers,
             device=device,
@@ -404,6 +444,7 @@ def cache_pd10_teacher_logits(config: PD10TeacherLogitCacheConfig) -> dict[str, 
             view=view,
             source_metadata=source_metadata,
             checkpoint_payload=payload,
+            logit_sanitization=logit_sanitization,
         )
         metadata = save_prediction_block(block, config.output_dir, overwrite=bool(config.overwrite))
         validate_pd10_teacher_logit_metadata(metadata, teacher_target=config.teacher_target, split=split)

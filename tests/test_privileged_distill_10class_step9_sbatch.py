@@ -4,11 +4,15 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SBATCH_DIR = REPO_ROOT / "sbatch"
+PD10_DIR = REPO_ROOT / "teacher_logit_reco" / "privileged_distill_10class"
 
 
 class PD10Step9SbatchTests(unittest.TestCase):
     def read(self, name: str) -> str:
         return (SBATCH_DIR / name).read_text(encoding="utf-8")
+
+    def read_pd10(self, name: str) -> str:
+        return (PD10_DIR / name).read_text(encoding="utf-8")
 
     def test_common_defines_student_report_and_submission_controls(self):
         common = self.read("common.sh")
@@ -88,6 +92,16 @@ class PD10Step9SbatchTests(unittest.TestCase):
         self.assertIn("total_skipped_existing", submitter)
         self.assertIn("PD10_MODEL_TRAIN_SIZE", submitter)
         self.assertIn("PD10_FINAL_TEST_SIZE", submitter)
+
+    def test_prediction_caches_disable_amp_and_sanitize_tiny_nonfinite_tails(self):
+        logits = self.read_pd10("logits.py")
+        students = self.read_pd10("students.py")
+
+        for source in (logits, students):
+            self.assertIn("sanitize_prediction_logits", source)
+            self.assertIn("_disable_model_amp_for_eval", source)
+            self.assertIn("amp_disabled_for_eval", source)
+            self.assertIn("logit_sanitization", source)
 
 
 if __name__ == "__main__":
