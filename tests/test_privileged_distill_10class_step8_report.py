@@ -69,14 +69,17 @@ def write_teacher_report(root: Path, target: str, *, model_val_acc: float, final
             "best_model_val_metrics": {
                 "accuracy": model_val_acc,
                 "cross_entropy": 1.0 - model_val_acc,
+                "macro_ovr_auc": model_val_acc + 0.10,
                 "n_jets": 100,
             },
             "final_test_metrics": {
                 "accuracy": final_acc,
                 "cross_entropy": 1.0 - final_acc,
+                "macro_ovr_auc": final_acc + 0.10,
                 "n_jets": 100,
                 "expected_calibration_error": 0.03,
                 "mean_confidence": 0.81,
+                "validation_threshold_fpr_at_signal_eff_0p50_macro": 0.30 - final_acc / 10.0,
                 "confusion_matrix": confusion(confused_count),
             },
         },
@@ -130,9 +133,11 @@ def write_student_report(root: Path, spec) -> None:
     metrics = {
         "accuracy": acc,
         "ce_loss": 1.0 - acc,
+        "macro_ovr_auc": acc + 0.10,
         "n_jets": 100,
         "expected_calibration_error": 0.04,
         "mean_confidence": 0.79,
+        "validation_threshold_fpr_at_signal_eff_0p50_macro": 0.30 - acc / 10.0,
     }
     if spec.teacher_target == PD10_TEACHER_DUAL_VIEW and spec.init_mode == "warm_start":
         metrics["binary_metrics"] = {
@@ -154,11 +159,12 @@ def write_student_report(root: Path, spec) -> None:
             "kd_alpha": spec.kd_alpha,
             "top_k": spec.top_k,
             "best_epoch": 3,
-            "selection_metric": "model_val_accuracy",
+            "selection_metric": "model_val_ce_loss",
             "checkpoint": str(root / "students" / spec.name / "best_model_val.pt"),
             "best_model_val_metrics": {
                 "accuracy": acc - 0.01,
                 "ce_loss": 1.01 - acc,
+                "macro_ovr_auc": acc + 0.09,
                 "n_jets": 100,
             },
             "final_test_metrics": metrics,
@@ -218,6 +224,57 @@ class PD10Step8ReportTests(unittest.TestCase):
 
             saved = json.loads((output / PD10_REPORT_JSON).read_text(encoding="utf-8"))
             self.assertEqual(saved["answers"]["best_student_variant"], report["answers"]["best_student_variant"])
+
+    def test_any_student_beat_hlt_answer_uses_all_students_not_ce_best_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_teacher_report(root, PD10_TEACHER_HLT, model_val_acc=0.740, final_acc=0.750, confused_count=6)
+
+            def write_custom_student(variant: str, *, accuracy: float, cross_entropy: float) -> None:
+                write_json(
+                    root / "students" / variant / "run_report.json",
+                    {
+                        "ok": True,
+                        "variant_name": variant,
+                        "student_init": "warm_start",
+                        "teacher_target": PD10_TEACHER_NONE,
+                        "target_mode": PD10_TARGET_FULL_LOGITS,
+                        "temperature": 2.0,
+                        "kd_alpha": 0.0,
+                        "best_epoch": 1,
+                        "selection_metric": "model_val_ce_loss",
+                        "best_model_val_metrics": {
+                            "accuracy": accuracy - 0.01,
+                            "cross_entropy": cross_entropy + 0.01,
+                            "n_jets": 100,
+                        },
+                        "final_test_metrics": {
+                            "accuracy": accuracy,
+                            "cross_entropy": cross_entropy,
+                            "n_jets": 100,
+                        },
+                    },
+                )
+
+            write_custom_student("ce_best_under_hlt", accuracy=0.740, cross_entropy=0.10)
+            write_custom_student("accuracy_best_over_hlt", accuracy=0.760, cross_entropy=0.30)
+
+            cfg = PD10ReportConfig(
+                output_dir=str(root / "report"),
+                teachers_dir=str(root / "teachers"),
+                students_dir=str(root / "students"),
+                student_variants=("ce_best_under_hlt", "accuracy_best_over_hlt"),
+                require_core_students=False,
+                require_teacher_reports=False,
+                require_audit=False,
+                confirm_final_test=True,
+            )
+            report = write_pd10_report(cfg)
+
+            self.assertTrue(report["ok"], report["problems"])
+            self.assertEqual(report["answers"]["best_student_variant"], "ce_best_under_hlt")
+            self.assertEqual(report["answers"]["best_accuracy_student_variant"], "accuracy_best_over_hlt")
+            self.assertTrue(report["answers"]["did_any_student_beat_hlt_part"])
 
     def test_missing_core_student_is_problem_unless_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:

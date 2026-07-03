@@ -38,6 +38,13 @@ from .logits import (
     PD10_TEACHER_LOGIT_SPLITS,
     load_pd10_teacher_logit_block,
 )
+from .representations import (
+    PD10TeacherRepresentationCacheConfig,
+    build_pd10_teacher_representation_block,
+    load_pd10_teacher_representation_block,
+    save_pd10_teacher_representation_block,
+    write_pd10_teacher_representation_manifest,
+)
 from .teachers import sha256_file
 
 
@@ -208,6 +215,49 @@ class PD10DualViewLogitTeacherConfig:
         return self.prediction_root / self.model_name
 
 
+@dataclass(frozen=True)
+class PD10DualViewRepresentationCacheConfig:
+    """Cache the logit-fusion teacher hidden representation for representation KD controls."""
+
+    checkpoint: str
+    teacher_logit_dir: str
+    output_dir: str
+    splits: tuple[str, ...] = field(default_factory=lambda: PD10_TEACHER_LOGIT_SPLITS)
+    batch_size: int = PD10_DUAL_VIEW_DEFAULT_EVAL_BATCH_SIZE
+    device: str = "auto"
+    max_model_train_jets: int | None = PD10_SPLIT_SIZES["model_train"]
+    max_model_val_jets: int | None = PD10_SPLIT_SIZES["model_val"]
+    max_final_test_jets: int | None = PD10_SPLIT_SIZES["final_test"]
+    overwrite: bool = False
+    skip_existing: bool = True
+    confirm_final_test: bool = False
+
+    def __post_init__(self) -> None:
+        splits = tuple(str(split) for split in self.splits)
+        if not splits:
+            raise ValueError("at least one representation split is required")
+        unknown = [split for split in splits if split not in PD10_TEACHER_LOGIT_SPLITS]
+        if unknown:
+            raise ValueError(f"unknown PD10 dual-view representation splits: {unknown}")
+        if "final_test" in splits and not bool(self.confirm_final_test):
+            raise ValueError("Refusing to cache final_test dual-view representations without confirm_final_test=True")
+        if int(self.batch_size) <= 0:
+            raise ValueError("batch_size must be positive")
+        object.__setattr__(self, "splits", splits)
+
+    @property
+    def teacher_target(self) -> str:
+        return PD10_TEACHER_DUAL_VIEW
+
+    @property
+    def model_name(self) -> str:
+        return PD10_DUAL_VIEW_LOGIT_MODEL_NAME
+
+    @property
+    def representation_dir(self) -> Path:
+        return Path(self.output_dir) / self.model_name
+
+
 def pd10_dual_view_teacher_dir(*, output_root: str | Path = "checkpoints") -> Path:
     return default_pd10_experiment_layout(output_root=output_root).teacher_dir(PD10_TEACHER_DUAL_VIEW)
 
@@ -218,6 +268,10 @@ def pd10_dual_view_teacher_checkpoint(*, output_root: str | Path = "checkpoints"
 
 def pd10_dual_view_teacher_logit_cache_dir(*, output_root: str | Path = "checkpoints") -> Path:
     return default_pd10_experiment_layout(output_root=output_root).teacher_logit_cache_dir(PD10_TEACHER_DUAL_VIEW)
+
+
+def pd10_dual_view_teacher_representation_cache_dir(*, output_root: str | Path = "checkpoints") -> Path:
+    return default_pd10_experiment_layout(output_root=output_root).root / "teacher_representations" / PD10_DUAL_VIEW_LOGIT_MODEL_NAME
 
 
 def _max_jets_for_split(config: PD10DualViewLogitTeacherConfig, split: str) -> int | None:
@@ -558,6 +612,44 @@ def collect_pd10_dual_view_logits_for_feature_block(
     return logits_np
 
 
+def collect_pd10_dual_view_representations_for_feature_block(
+    model,
+    block: PD10DualViewFeatureBlock,
+    *,
+    batch_size: int,
+    device,
+) -> np.ndarray:
+    torch = require_torch()
+    if not hasattr(model, "delta_net"):
+        raise TypeError("dual-view representation cache requires a PD10DualViewLogitFusionTeacher")
+    hidden_net = model.delta_net[:-1]
+    loader = _make_feature_loader(
+        block,
+        batch_size=int(batch_size),
+        shuffle=False,
+        num_workers=0,
+        seed=PD10_DUAL_VIEW_DEFAULT_SEED,
+    )
+    rows: list[np.ndarray] = []
+    model.eval()
+    with torch.no_grad():
+        for features, _base_logits, _labels in loader:
+            features = features.to(device, non_blocking=True)
+            hidden = hidden_net(features)
+            hidden = torch.nn.functional.normalize(hidden, dim=1)
+            rows.append(hidden.detach().cpu().numpy().astype(np.float32))
+    representations = (
+        np.concatenate(rows, axis=0).astype(np.float32, copy=False)
+        if rows
+        else np.zeros((0, int(getattr(model, "config", {}).get("hidden_dim", PD10_DUAL_VIEW_DEFAULT_HIDDEN_DIM))), dtype=np.float32)
+    )
+    if representations.ndim != 2:
+        raise ValueError(f"dual-view representations must be 2D [N, D], got {representations.shape}")
+    if not np.isfinite(representations).all():
+        raise FloatingPointError("dual-view representations contain non-finite values")
+    return representations
+
+
 def _checkpoint_payload(
     model,
     optimizer,
@@ -880,6 +972,109 @@ def _existing_dual_view_metadata_if_valid(
     return dict(block.metadata)
 
 
+def _max_jets_for_dual_view_representation_split(config: PD10DualViewRepresentationCacheConfig, split: str) -> int | None:
+    if split == "model_train":
+        return config.max_model_train_jets
+    if split == "model_val":
+        return config.max_model_val_jets
+    if split == "final_test":
+        return config.max_final_test_jets
+    return None
+
+
+def _existing_dual_view_representation_metadata_if_valid(
+    config: PD10DualViewRepresentationCacheConfig,
+    split: str,
+    *,
+    representation_dim: int,
+) -> dict[str, Any] | None:
+    if not config.skip_existing or config.overwrite:
+        return None
+    npz_path = config.representation_dir / f"{split}_representations.npz"
+    meta_path = config.representation_dir / f"{split}_representations_metadata.json"
+    if not (npz_path.exists() and meta_path.exists()):
+        return None
+    block = load_pd10_teacher_representation_block(config.output_dir, config.teacher_target, split)
+    if int(block.representations.shape[1]) != int(representation_dim):
+        return None
+    return dict(block.metadata)
+
+
+def cache_pd10_dual_view_teacher_representations(config: PD10DualViewRepresentationCacheConfig) -> dict[str, Any]:
+    device = resolve_device(config.device)
+    model, payload = load_pd10_dual_view_logit_teacher_checkpoint(config.checkpoint, device=device)
+    representation_dim = int(getattr(model, "config", {}).get("hidden_dim", PD10_DUAL_VIEW_DEFAULT_HIDDEN_DIM))
+    rep_config = PD10TeacherRepresentationCacheConfig(
+        teacher_target=PD10_TEACHER_DUAL_VIEW,
+        output_dir=config.output_dir,
+        splits=config.splits,
+        representation_dim=representation_dim,
+        overwrite=bool(config.overwrite),
+        skip_existing=bool(config.skip_existing),
+        confirm_final_test=bool(config.confirm_final_test),
+    )
+    Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    split_reports: dict[str, Any] = {}
+    for split in config.splits:
+        existing = _existing_dual_view_representation_metadata_if_valid(
+            config,
+            split,
+            representation_dim=representation_dim,
+        )
+        if existing is not None:
+            rows.append(existing)
+            split_reports[split] = {"skipped_existing": True, "representation_metadata": existing}
+            continue
+        feature_block = load_pd10_dual_view_feature_block(
+            config.teacher_logit_dir,
+            split,
+            max_rows=_max_jets_for_dual_view_representation_split(config, split),
+            seed=PD10_DUAL_VIEW_DEFAULT_SEED,
+        )
+        representations = collect_pd10_dual_view_representations_for_feature_block(
+            model,
+            feature_block,
+            batch_size=config.batch_size,
+            device=device,
+        )
+        block = build_pd10_teacher_representation_block(
+            rep_config,
+            split,
+            representations=representations,
+            labels=feature_block.labels,
+            jet_ids=feature_block.jet_ids,
+            source_metadata={
+                **dict(feature_block.metadata),
+                "representation_source": "dual_view_logit_fusion_hidden_pre_classifier",
+                "teacher_logit_dir": str(config.teacher_logit_dir),
+                "max_jets": _max_jets_for_dual_view_representation_split(config, split),
+            },
+            extra_metadata={
+                "checkpoint": str(config.checkpoint),
+                "checkpoint_sha256": sha256_file(config.checkpoint),
+                "checkpoint_epoch": payload.get("epoch"),
+                "checkpoint_experiment_step": payload.get("experiment_step"),
+            },
+        )
+        metadata = save_pd10_teacher_representation_block(block, config.output_dir, overwrite=bool(config.overwrite))
+        rows.append(metadata)
+        split_reports[split] = {"skipped_existing": False, "representation_metadata": metadata}
+    manifest = write_pd10_teacher_representation_manifest(rep_config, rows)
+    return {
+        "ok": True,
+        "teacher_target": PD10_TEACHER_DUAL_VIEW,
+        "model_name": config.model_name,
+        "checkpoint": str(config.checkpoint),
+        "teacher_logit_dir": str(config.teacher_logit_dir),
+        "representation_output_dir": str(config.output_dir),
+        "representation_dim": int(representation_dim),
+        "splits": list(config.splits),
+        "split_reports": split_reports,
+        "manifest": manifest,
+    }
+
+
 def cache_pd10_dual_view_teacher_logits(
     config: PD10DualViewLogitTeacherConfig,
     *,
@@ -992,12 +1187,15 @@ __all__ = [
     "PD10_STEP5_EXPERIMENT_STEP",
     "PD10DualViewFeatureBlock",
     "PD10DualViewLogitFusionTeacher",
+    "PD10DualViewRepresentationCacheConfig",
     "PD10DualViewLogitTeacherConfig",
     "build_pd10_dual_view_feature_block",
     "build_pd10_dual_view_prediction_block",
     "cache_pd10_dual_view_teacher_logits",
+    "cache_pd10_dual_view_teacher_representations",
     "classification_metrics_from_logits",
     "collect_pd10_dual_view_logits_for_feature_block",
+    "collect_pd10_dual_view_representations_for_feature_block",
     "limit_pd10_dual_view_feature_block",
     "load_pd10_dual_view_feature_block",
     "load_pd10_dual_view_logit_block",
@@ -1006,6 +1204,7 @@ __all__ = [
     "pd10_dual_view_teacher_checkpoint",
     "pd10_dual_view_teacher_dir",
     "pd10_dual_view_teacher_logit_cache_dir",
+    "pd10_dual_view_teacher_representation_cache_dir",
     "train_pd10_dual_view_logit_model_from_features",
     "train_pd10_dual_view_logit_teacher",
     "validate_pd10_dual_view_input_blocks",

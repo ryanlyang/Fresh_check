@@ -62,5 +62,7 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${PD10_FINAL_REPORT_DIR}/calibration_table.csv"
   fresh_require_file "${PD10_FINAL_REPORT_DIR}/class_pair_improvements.csv"
   fresh_require_file "${PD10_FINAL_REPORT_DIR}/leakage_audit_summary.csv"
+  fresh_require_file "${PD10_FINAL_REPORT_DIR}/v2_comparisons.csv"
+  fresh_require_file "${PD10_FINAL_REPORT_DIR}/v2_diagnostics.csv"
   fresh_assert_json_ok "${PD10_FINAL_REPORT_DIR}/run_report.json"
 fi

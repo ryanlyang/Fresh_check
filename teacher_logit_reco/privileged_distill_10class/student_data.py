@@ -15,15 +15,19 @@ from jetclass_fresh.jetclass_data import JetIdentity, JetView
 
 from .config import (
     PD10_EXPERIMENT_NAME,
+    PD10_EXTENDED_TEACHER_ALLOWED_INPUTS,
     PD10_NUM_CLASSES,
     PD10_TEACHER_DUAL_VIEW,
     PD10_TEACHER_HLT,
     PD10_TEACHER_NONE,
     PD10_TEACHER_OFFLINE,
-    normalize_pd10_teacher_target,
+    PD10_TEACHER_PARTICLE_DUAL_VIEW,
+    normalize_pd10_extended_teacher_target,
 )
 from .dual_view_teacher import load_pd10_dual_view_logit_block
 from .logits import load_pd10_teacher_logit_block
+from .particle_dual_view_teacher import load_pd10_particle_dual_view_logit_block
+from .representations import PD10TeacherRepresentationBlock, load_pd10_teacher_representation_block
 
 
 PD10_STEP6_EXPERIMENT_STEP = "pd10_step6_student_distillation_dataset"
@@ -45,10 +49,14 @@ class PD10StudentBatchMetadata:
     hlt_jet_identity_hash: str | None = None
     teacher_prediction_content_hash: str | None = None
     teacher_jet_identity_hash: str | None = None
+    teacher_representation_content_hash: str | None = None
+    teacher_representation_jet_identity_hash: str | None = None
     student_allowed_inputs: str = PD10_STUDENT_ALLOWED_INPUTS
     returns_teacher_logits: bool = False
+    returns_teacher_representations: bool = False
     returns_offline_particles: bool = False
     inference_export_requires_teacher_logits: bool = False
+    inference_export_requires_teacher_representations: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,10 +71,16 @@ class PD10StudentBatchMetadata:
             "hlt_jet_identity_hash": self.hlt_jet_identity_hash,
             "teacher_prediction_content_hash": self.teacher_prediction_content_hash,
             "teacher_jet_identity_hash": self.teacher_jet_identity_hash,
+            "teacher_representation_content_hash": self.teacher_representation_content_hash,
+            "teacher_representation_jet_identity_hash": self.teacher_representation_jet_identity_hash,
             "student_allowed_inputs": self.student_allowed_inputs,
             "returns_teacher_logits": bool(self.returns_teacher_logits),
+            "returns_teacher_representations": bool(self.returns_teacher_representations),
             "returns_offline_particles": bool(self.returns_offline_particles),
             "inference_export_requires_teacher_logits": bool(self.inference_export_requires_teacher_logits),
+            "inference_export_requires_teacher_representations": bool(
+                self.inference_export_requires_teacher_representations
+            ),
             "notes": list(self.notes),
         }
 
@@ -82,7 +96,7 @@ def _check_fixed_hlt_view(view: JetView) -> None:
 
 
 def _check_teacher_logits(block: PredictionBlock, teacher_target: str, split: str) -> None:
-    target = normalize_pd10_teacher_target(teacher_target)
+    target = normalize_pd10_extended_teacher_target(teacher_target)
     if target == PD10_TEACHER_NONE:
         raise ValueError("CE-only student datasets must not provide teacher logits")
     if block.split != split:
@@ -101,6 +115,45 @@ def _check_teacher_logits(block: PredictionBlock, teacher_target: str, split: st
         raise ValueError("teacher block must declare teacher_logits_train_time_only=True")
     if block.metadata.get("student_deployment_inputs") not in (None, PD10_STUDENT_ALLOWED_INPUTS):
         raise ValueError("teacher block is not compatible with HLT-only student deployment")
+    expected_allowed = PD10_EXTENDED_TEACHER_ALLOWED_INPUTS.get(target)
+    if expected_allowed is not None and block.metadata.get("allowed_inputs") not in (None, expected_allowed):
+        raise ValueError(f"teacher allowed_inputs mismatch: {block.metadata.get('allowed_inputs')} != {expected_allowed}")
+
+
+def _check_teacher_representations(
+    block: PD10TeacherRepresentationBlock,
+    teacher_target: str,
+    split: str,
+) -> None:
+    target = normalize_pd10_extended_teacher_target(teacher_target)
+    if target == PD10_TEACHER_NONE:
+        raise ValueError("CE-only student datasets must not provide teacher representations")
+    if block.split != split:
+        raise ValueError(f"teacher representation split mismatch: {block.split} != {split}")
+    if block.teacher_target != target:
+        raise ValueError(f"teacher representation target mismatch: {block.teacher_target} != {target}")
+    if block.metadata.get("teacher_target") not in (None, target):
+        raise ValueError(f"teacher representation metadata target mismatch: {block.metadata.get('teacher_target')} != {target}")
+    if block.representations.ndim != 2:
+        raise ValueError(f"teacher representations must be 2D [N, D], got {block.representations.shape}")
+    if int(block.labels.shape[0]) != int(block.representations.shape[0]):
+        raise ValueError("teacher representation labels/rows mismatch")
+    if len(block.jet_ids) != int(block.representations.shape[0]):
+        raise ValueError("teacher representation jet_ids/rows mismatch")
+    if not np.isfinite(block.representations).all():
+        raise FloatingPointError("teacher representations contain non-finite values")
+    if not bool(block.metadata.get("teacher_representations_train_time_only")):
+        raise ValueError("teacher representation block must declare teacher_representations_train_time_only=True")
+    if block.metadata.get("student_deployment_inputs") not in (None, PD10_STUDENT_ALLOWED_INPUTS):
+        raise ValueError("teacher representation block is not compatible with HLT-only student deployment")
+    expected_allowed = PD10_EXTENDED_TEACHER_ALLOWED_INPUTS.get(target)
+    if expected_allowed is not None and block.metadata.get("allowed_inputs") not in (None, expected_allowed):
+        raise ValueError(
+            f"teacher representation allowed_inputs mismatch: "
+            f"{block.metadata.get('allowed_inputs')} != {expected_allowed}"
+        )
+    if bool(block.metadata.get("inference_export_requires_teacher_features")):
+        raise ValueError("teacher representation block must not be required for student inference/export")
 
 
 def _view_index_by_identity(view: JetView) -> dict[tuple[str, int, int], int]:
@@ -123,15 +176,39 @@ def align_hlt_view_to_teacher_block(
 
     _check_fixed_hlt_view(view)
     _check_teacher_logits(teacher_block, teacher_target, view.split)
+    return align_hlt_view_to_teacher_rows(
+        view,
+        labels=teacher_block.labels,
+        jet_ids=teacher_block.jet_ids,
+        teacher_target=teacher_target,
+        alignment_source="teacher_logits",
+    )
+
+
+def align_hlt_view_to_teacher_rows(
+    view: JetView,
+    *,
+    labels: np.ndarray,
+    jet_ids: list[JetIdentity],
+    teacher_target: str,
+    alignment_source: str,
+) -> JetView:
+    """Return an HLT-only view ordered exactly like teacher-side cache rows."""
+
+    target = normalize_pd10_extended_teacher_target(teacher_target)
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    _check_fixed_hlt_view(view)
+    if int(labels.shape[0]) != len(jet_ids):
+        raise ValueError(f"{alignment_source} labels/jet_ids row count mismatch")
     index_by_id = _view_index_by_identity(view)
     indices: list[int] = []
-    for row, identity in enumerate(teacher_block.jet_ids):
+    for row, identity in enumerate(jet_ids):
         key = _identity_key(identity)
         if key not in index_by_id:
-            raise ValueError(f"teacher jet identity row {row} is missing from HLT view: {identity}")
+            raise ValueError(f"{alignment_source} jet identity row {row} is missing from HLT view: {identity}")
         view_index = index_by_id[key]
-        if int(view.labels[view_index]) != int(teacher_block.labels[row]):
-            raise ValueError(f"teacher/HLT label mismatch at teacher row {row}")
+        if int(view.labels[view_index]) != int(labels[row]):
+            raise ValueError(f"{alignment_source}/HLT label mismatch at teacher row {row}")
         indices.append(view_index)
     aligned = JetView(
         tokens=view.tokens[indices],
@@ -141,17 +218,36 @@ def align_hlt_view_to_teacher_block(
         split=view.split,
         metadata={
             **dict(view.metadata),
-            "aligned_to_teacher_target": normalize_pd10_teacher_target(teacher_target),
+            "aligned_to_teacher_target": target,
+            "aligned_to_teacher_source": str(alignment_source),
             "aligned_teacher_rows": int(len(indices)),
             "student_allowed_inputs": PD10_STUDENT_ALLOWED_INPUTS,
             "returns_offline_particles": False,
         },
     )
-    if not np.array_equal(aligned.labels, teacher_block.labels):
-        raise ValueError("aligned HLT labels do not match teacher labels")
-    if aligned.jet_ids != teacher_block.jet_ids:
-        raise ValueError("aligned HLT jet identities do not match teacher jet identities")
+    if not np.array_equal(aligned.labels, labels):
+        raise ValueError("aligned HLT labels do not match teacher-side labels")
+    if aligned.jet_ids != jet_ids:
+        raise ValueError("aligned HLT jet identities do not match teacher-side jet identities")
     return aligned
+
+
+def align_hlt_view_to_teacher_representation_block(
+    view: JetView,
+    teacher_representation_block: PD10TeacherRepresentationBlock,
+    *,
+    teacher_target: str,
+) -> JetView:
+    """Return an HLT-only view ordered exactly like the teacher representation block."""
+
+    _check_teacher_representations(teacher_representation_block, teacher_target, view.split)
+    return align_hlt_view_to_teacher_rows(
+        view,
+        labels=teacher_representation_block.labels,
+        jet_ids=teacher_representation_block.jet_ids,
+        teacher_target=teacher_target,
+        alignment_source="teacher_representations",
+    )
 
 
 def limit_hlt_view_without_teacher(view: JetView, max_jets: int | None) -> JetView:
@@ -175,7 +271,7 @@ def limit_hlt_view_without_teacher(view: JetView, max_jets: int | None) -> JetVi
 
 
 class PD10StudentDistillationDataset:
-    """HLT-only student dataset with optional train-time teacher logits."""
+    """HLT-only student dataset with optional train-time teacher logits/representations."""
 
     def __init__(
         self,
@@ -183,21 +279,38 @@ class PD10StudentDistillationDataset:
         *,
         teacher_target: str = PD10_TEACHER_NONE,
         teacher_block: PredictionBlock | None = None,
+        teacher_representation_block: PD10TeacherRepresentationBlock | None = None,
         max_jets: int | None = None,
     ) -> None:
         require_torch()
-        target = normalize_pd10_teacher_target(teacher_target)
+        target = normalize_pd10_extended_teacher_target(teacher_target)
         _check_fixed_hlt_view(hlt_view)
         if target == PD10_TEACHER_NONE:
-            if teacher_block is not None:
-                raise ValueError("teacher_target='none' cannot be paired with teacher_block")
+            if teacher_block is not None or teacher_representation_block is not None:
+                raise ValueError("teacher_target='none' cannot be paired with teacher supervision blocks")
             aligned_view = limit_hlt_view_without_teacher(hlt_view, max_jets)
             teacher_logits = None
+            teacher_representations = None
             teacher_metadata: dict[str, Any] = {}
+            representation_metadata: dict[str, Any] = {}
         else:
-            if teacher_block is None:
-                raise FileNotFoundError(f"teacher logits are required for teacher_target={target!r}")
-            aligned_view = align_hlt_view_to_teacher_block(hlt_view, teacher_block, teacher_target=target)
+            if teacher_block is None and teacher_representation_block is None:
+                raise FileNotFoundError(f"teacher supervision is required for teacher_target={target!r}")
+            if teacher_block is not None:
+                aligned_view = align_hlt_view_to_teacher_block(hlt_view, teacher_block, teacher_target=target)
+            else:
+                assert teacher_representation_block is not None
+                aligned_view = align_hlt_view_to_teacher_representation_block(
+                    hlt_view,
+                    teacher_representation_block,
+                    teacher_target=target,
+                )
+            if teacher_representation_block is not None:
+                _check_teacher_representations(teacher_representation_block, target, hlt_view.split)
+                if aligned_view.jet_ids != teacher_representation_block.jet_ids:
+                    raise ValueError("teacher logits and representations are not aligned by jet identity")
+                if not np.array_equal(aligned_view.labels, teacher_representation_block.labels):
+                    raise ValueError("teacher logits and representations are not aligned by labels")
             if max_jets is not None and int(max_jets) < int(len(aligned_view.labels)):
                 limit = int(max_jets)
                 aligned_view = JetView(
@@ -208,12 +321,36 @@ class PD10StudentDistillationDataset:
                     split=aligned_view.split,
                     metadata={**dict(aligned_view.metadata), "student_max_jets": limit},
                 )
-                teacher_logits = np.asarray(teacher_block.logits[:limit], dtype=np.float32)
+                teacher_logits = (
+                    np.asarray(teacher_block.logits[:limit], dtype=np.float32)
+                    if teacher_block is not None
+                    else None
+                )
+                teacher_representations = (
+                    np.asarray(teacher_representation_block.representations[:limit], dtype=np.float32)
+                    if teacher_representation_block is not None
+                    else None
+                )
             else:
-                teacher_logits = np.asarray(teacher_block.logits, dtype=np.float32)
-            teacher_metadata = dict(teacher_block.metadata)
-            if int(teacher_logits.shape[0]) != int(len(aligned_view.labels)):
+                teacher_logits = (
+                    np.asarray(teacher_block.logits, dtype=np.float32) if teacher_block is not None else None
+                )
+                teacher_representations = (
+                    np.asarray(teacher_representation_block.representations, dtype=np.float32)
+                    if teacher_representation_block is not None
+                    else None
+                )
+            teacher_metadata = dict(teacher_block.metadata) if teacher_block is not None else {}
+            representation_metadata = (
+                dict(teacher_representation_block.metadata) if teacher_representation_block is not None else {}
+            )
+            if teacher_logits is not None and int(teacher_logits.shape[0]) != int(len(aligned_view.labels)):
                 raise ValueError("teacher logits row count does not match aligned HLT rows")
+            if (
+                teacher_representations is not None
+                and int(teacher_representations.shape[0]) != int(len(aligned_view.labels))
+            ):
+                raise ValueError("teacher representation row count does not match aligned HLT rows")
 
         self.tokens = np.asarray(aligned_view.tokens, dtype=np.float32)
         self.hlt_mask = np.asarray(aligned_view.mask, dtype=bool)
@@ -222,8 +359,19 @@ class PD10StudentDistillationDataset:
         self.split = aligned_view.split
         self.teacher_target = target
         self.teacher_logits = teacher_logits
+        self.teacher_representations = teacher_representations
         self.hlt_metadata = dict(aligned_view.metadata)
         self.teacher_metadata = teacher_metadata
+        self.teacher_representation_metadata = representation_metadata
+        notes: tuple[str, ...]
+        if self.has_teacher_logits and self.has_teacher_representations:
+            notes = ("Teacher logits and representations are train-time supervision only.",)
+        elif self.has_teacher_logits:
+            notes = ("Teacher logits are train-time supervision only.",)
+        elif self.has_teacher_representations:
+            notes = ("Teacher representations are train-time supervision only.",)
+        else:
+            notes = ("Teacher-free HLT-only dataset for CE, validation, or export.",)
         self.metadata = PD10StudentBatchMetadata(
             split=self.split,
             teacher_target=self.teacher_target,
@@ -232,17 +380,20 @@ class PD10StudentDistillationDataset:
             hlt_jet_identity_hash=jet_identity_hash(self.jet_ids),
             teacher_prediction_content_hash=teacher_metadata.get("prediction_content_hash"),
             teacher_jet_identity_hash=teacher_metadata.get("jet_identity_hash"),
+            teacher_representation_content_hash=representation_metadata.get("representation_content_hash"),
+            teacher_representation_jet_identity_hash=representation_metadata.get("jet_identity_hash"),
             returns_teacher_logits=self.has_teacher_logits,
-            notes=(
-                ("Teacher logits are train-time supervision only.",)
-                if self.has_teacher_logits
-                else ("Teacher-free HLT-only dataset for CE, validation, or export.",)
-            ),
+            returns_teacher_representations=self.has_teacher_representations,
+            notes=notes,
         )
 
     @property
     def has_teacher_logits(self) -> bool:
         return self.teacher_logits is not None
+
+    @property
+    def has_teacher_representations(self) -> bool:
+        return self.teacher_representations is not None
 
     def __len__(self) -> int:
         return int(len(self.labels))
@@ -256,6 +407,8 @@ class PD10StudentDistillationDataset:
         }
         if self.teacher_logits is not None:
             sample["teacher_logits"] = self.teacher_logits[index]
+        if self.teacher_representations is not None:
+            sample["teacher_representations"] = self.teacher_representations[index]
         return sample
 
     def to_metadata(self) -> dict[str, Any]:
@@ -263,14 +416,17 @@ class PD10StudentDistillationDataset:
 
 
 def collate_pd10_student_batch(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Build one HLT-only student batch, optionally with teacher logits."""
+    """Build one HLT-only student batch, optionally with train-time teacher targets."""
 
     if not samples:
         raise ValueError("cannot collate an empty PD10 student batch")
     torch = require_torch()
-    has_teacher = ["teacher_logits" in sample for sample in samples]
-    if any(has_teacher) and not all(has_teacher):
+    has_teacher_logits = ["teacher_logits" in sample for sample in samples]
+    has_teacher_representations = ["teacher_representations" in sample for sample in samples]
+    if any(has_teacher_logits) and not all(has_teacher_logits):
         raise ValueError("PD10 student batch mixes samples with and without teacher logits")
+    if any(has_teacher_representations) and not all(has_teacher_representations):
+        raise ValueError("PD10 student batch mixes samples with and without teacher representations")
     tokens = np.stack([np.asarray(sample["hlt_tokens"], dtype=np.float32) for sample in samples], axis=0)
     hlt_mask = np.stack([np.asarray(sample["hlt_mask"], dtype=bool) for sample in samples], axis=0)
     labels = np.asarray([sample["label"] for sample in samples], dtype=np.int64)
@@ -296,13 +452,24 @@ def collate_pd10_student_batch(samples: list[Mapping[str, Any]]) -> dict[str, An
         "jet_keys": [identity.key() for identity in jet_ids],
         "student_allowed_inputs": PD10_STUDENT_ALLOWED_INPUTS,
         "returns_offline_particles": False,
-        "has_teacher_logits": bool(all(has_teacher)),
+        "has_teacher_logits": bool(all(has_teacher_logits)),
+        "has_teacher_representations": bool(all(has_teacher_representations)),
     }
-    if all(has_teacher):
+    if all(has_teacher_logits):
         teacher_logits = np.stack([np.asarray(sample["teacher_logits"], dtype=np.float32) for sample in samples], axis=0)
         if teacher_logits.ndim != 2 or int(teacher_logits.shape[1]) != PD10_NUM_CLASSES:
             raise ValueError(f"teacher_logits must have shape [N, {PD10_NUM_CLASSES}], got {teacher_logits.shape}")
         batch["teacher_logits"] = torch.from_numpy(teacher_logits).float()
+    if all(has_teacher_representations):
+        teacher_representations = np.stack(
+            [np.asarray(sample["teacher_representations"], dtype=np.float32) for sample in samples],
+            axis=0,
+        )
+        if teacher_representations.ndim != 2:
+            raise ValueError(f"teacher_representations must have shape [N, D], got {teacher_representations.shape}")
+        if not np.isfinite(teacher_representations).all():
+            raise FloatingPointError("teacher_representations contain non-finite values")
+        batch["teacher_representations"] = torch.from_numpy(teacher_representations).float()
     return batch
 
 
@@ -345,7 +512,7 @@ def load_pd10_student_teacher_block(
     *,
     verify_hash: bool = True,
 ) -> PredictionBlock | None:
-    target = normalize_pd10_teacher_target(teacher_target)
+    target = normalize_pd10_extended_teacher_target(teacher_target)
     if target == PD10_TEACHER_NONE:
         return None
     if teacher_logit_dir is None:
@@ -354,7 +521,29 @@ def load_pd10_student_teacher_block(
         return load_pd10_teacher_logit_block(teacher_logit_dir, target, split, verify_hash=verify_hash)
     if target == PD10_TEACHER_DUAL_VIEW:
         return load_pd10_dual_view_logit_block(teacher_logit_dir, split, verify_hash=verify_hash)
+    if target == PD10_TEACHER_PARTICLE_DUAL_VIEW:
+        return load_pd10_particle_dual_view_logit_block(teacher_logit_dir, split, verify_hash=verify_hash)
     raise AssertionError(f"Unhandled teacher target {target!r}")
+
+
+def load_pd10_student_teacher_representation_block(
+    teacher_representation_dir: str | Path,
+    teacher_target: str,
+    split: str,
+    *,
+    verify_hash: bool = True,
+) -> PD10TeacherRepresentationBlock | None:
+    target = normalize_pd10_extended_teacher_target(teacher_target)
+    if target == PD10_TEACHER_NONE:
+        return None
+    if teacher_representation_dir is None:
+        raise FileNotFoundError(f"teacher_representation_dir is required for teacher_target={target!r}")
+    return load_pd10_teacher_representation_block(
+        teacher_representation_dir,
+        target,
+        split,
+        verify_hash=verify_hash,
+    )
 
 
 def build_pd10_student_dataset_from_view(
@@ -362,20 +551,35 @@ def build_pd10_student_dataset_from_view(
     *,
     teacher_target: str = PD10_TEACHER_NONE,
     teacher_logit_dir: str | Path | None = None,
+    teacher_representation_dir: str | Path | None = None,
     teacher_block: PredictionBlock | None = None,
+    teacher_representation_block: PD10TeacherRepresentationBlock | None = None,
     max_jets: int | None = None,
     verify_hash: bool = True,
+    verify_representation_hash: bool | None = None,
 ) -> PD10StudentDistillationDataset:
-    target = normalize_pd10_teacher_target(teacher_target)
+    target = normalize_pd10_extended_teacher_target(teacher_target)
     block = teacher_block
-    if target != PD10_TEACHER_NONE and block is None:
+    rep_block = teacher_representation_block
+    if target != PD10_TEACHER_NONE and block is None and teacher_logit_dir is not None:
+        block = load_pd10_student_teacher_block(teacher_logit_dir, target, hlt_view.split, verify_hash=verify_hash)
+    if target != PD10_TEACHER_NONE and rep_block is None and teacher_representation_dir is not None:
+        rep_verify = verify_hash if verify_representation_hash is None else bool(verify_representation_hash)
+        rep_block = load_pd10_student_teacher_representation_block(
+            teacher_representation_dir,
+            target,
+            hlt_view.split,
+            verify_hash=rep_verify,
+        )
+    if target != PD10_TEACHER_NONE and block is None and rep_block is None:
         if teacher_logit_dir is None:
-            raise FileNotFoundError(f"teacher_logit_dir is required for teacher_target={target!r}")
+            raise FileNotFoundError(f"teacher supervision cache is required for teacher_target={target!r}")
         block = load_pd10_student_teacher_block(teacher_logit_dir, target, hlt_view.split, verify_hash=verify_hash)
     return PD10StudentDistillationDataset(
         hlt_view,
         teacher_target=target,
         teacher_block=block,
+        teacher_representation_block=rep_block,
         max_jets=max_jets,
     )
 
@@ -386,17 +590,21 @@ def load_pd10_student_dataset(
     *,
     teacher_target: str = PD10_TEACHER_NONE,
     teacher_logit_dir: str | Path | None = None,
+    teacher_representation_dir: str | Path | None = None,
     max_jets: int | None = None,
     verify_hlt_hash: bool = True,
     verify_teacher_hash: bool = True,
+    verify_teacher_representation_hash: bool | None = None,
 ) -> PD10StudentDistillationDataset:
     hlt_view = load_cached_hlt_view(hlt_cache_dir, split, verify_hash=bool(verify_hlt_hash))
     return build_pd10_student_dataset_from_view(
         hlt_view,
         teacher_target=teacher_target,
         teacher_logit_dir=teacher_logit_dir,
+        teacher_representation_dir=teacher_representation_dir,
         max_jets=max_jets,
         verify_hash=bool(verify_teacher_hash),
+        verify_representation_hash=verify_teacher_representation_hash,
     )
 
 
@@ -422,12 +630,15 @@ __all__ = [
     "PD10StudentBatchMetadata",
     "PD10StudentDistillationDataset",
     "align_hlt_view_to_teacher_block",
+    "align_hlt_view_to_teacher_representation_block",
+    "align_hlt_view_to_teacher_rows",
     "assert_pd10_student_batch_hlt_only",
     "build_pd10_student_dataset_from_view",
     "collate_pd10_student_batch",
     "limit_hlt_view_without_teacher",
     "load_pd10_student_dataset",
     "load_pd10_student_teacher_block",
+    "load_pd10_student_teacher_representation_block",
     "make_pd10_student_data_loader",
     "move_pd10_student_batch_to_device",
 ]

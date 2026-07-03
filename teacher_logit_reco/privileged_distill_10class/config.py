@@ -66,26 +66,49 @@ PD10_TEACHER_NONE = "none"
 PD10_TEACHER_HLT = "hlt"
 PD10_TEACHER_OFFLINE = "offline"
 PD10_TEACHER_DUAL_VIEW = "dual_view"
+PD10_TEACHER_PARTICLE_DUAL_VIEW = "particle_dual_view"
 PD10_TEACHER_TARGETS: tuple[str, ...] = (
     PD10_TEACHER_NONE,
     PD10_TEACHER_HLT,
     PD10_TEACHER_OFFLINE,
     PD10_TEACHER_DUAL_VIEW,
 )
+PD10_V2_TEACHER_TARGETS: tuple[str, ...] = (
+    PD10_TEACHER_PARTICLE_DUAL_VIEW,
+)
+PD10_EXTENDED_TEACHER_TARGETS: tuple[str, ...] = PD10_TEACHER_TARGETS + PD10_V2_TEACHER_TARGETS
 PD10_REAL_TEACHERS: tuple[str, ...] = (
     PD10_TEACHER_HLT,
     PD10_TEACHER_OFFLINE,
     PD10_TEACHER_DUAL_VIEW,
 )
+PD10_V2_REAL_TEACHERS: tuple[str, ...] = (
+    PD10_TEACHER_PARTICLE_DUAL_VIEW,
+)
+PD10_EXTENDED_REAL_TEACHERS: tuple[str, ...] = PD10_REAL_TEACHERS + PD10_V2_REAL_TEACHERS
 PD10_TEACHER_MODEL_NAMES: dict[str, str] = {
     PD10_TEACHER_HLT: "hlt_part_teacher_10class",
     PD10_TEACHER_OFFLINE: "offline_part_teacher_10class",
     PD10_TEACHER_DUAL_VIEW: "dual_view_logit_teacher_10class",
 }
+PD10_V2_TEACHER_MODEL_NAMES: dict[str, str] = {
+    PD10_TEACHER_PARTICLE_DUAL_VIEW: "particle_dual_view_teacher_10class",
+}
+PD10_EXTENDED_TEACHER_MODEL_NAMES: dict[str, str] = {
+    **PD10_TEACHER_MODEL_NAMES,
+    **PD10_V2_TEACHER_MODEL_NAMES,
+}
 PD10_TEACHER_ALLOWED_INPUTS: dict[str, str] = {
     PD10_TEACHER_HLT: "HLT_only",
     PD10_TEACHER_OFFLINE: "offline_only_train_time_privileged",
     PD10_TEACHER_DUAL_VIEW: "HLT_plus_offline_train_time_privileged",
+}
+PD10_V2_TEACHER_ALLOWED_INPUTS: dict[str, str] = {
+    PD10_TEACHER_PARTICLE_DUAL_VIEW: "HLT_plus_offline_train_time_privileged",
+}
+PD10_EXTENDED_TEACHER_ALLOWED_INPUTS: dict[str, str] = {
+    **PD10_TEACHER_ALLOWED_INPUTS,
+    **PD10_V2_TEACHER_ALLOWED_INPUTS,
 }
 
 PD10_STUDENT_INIT_SCRATCH = "scratch"
@@ -98,14 +121,33 @@ PD10_STUDENT_INIT_MODES: tuple[str, ...] = (
 PD10_TARGET_FULL_LOGITS = "full_logits"
 PD10_TARGET_TOP3 = "top3"
 PD10_TARGET_CONFIDENCE_WEIGHTED = "confidence_weighted"
+PD10_TARGET_REP_ONLY = "rep_only"
+PD10_TARGET_FULL_LOGITS_PLUS_REP = "full_logits_plus_rep"
+PD10_TARGET_TOP3_PLUS_REP = "top3_plus_rep"
+PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP = "confidence_weighted_plus_rep"
 PD10_STUDENT_TARGET_MODES: tuple[str, ...] = (
     PD10_TARGET_FULL_LOGITS,
     PD10_TARGET_TOP3,
     PD10_TARGET_CONFIDENCE_WEIGHTED,
 )
+PD10_V2_STUDENT_TARGET_MODES: tuple[str, ...] = (
+    PD10_TARGET_REP_ONLY,
+    PD10_TARGET_FULL_LOGITS_PLUS_REP,
+    PD10_TARGET_TOP3_PLUS_REP,
+    PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+)
+PD10_EXTENDED_STUDENT_TARGET_MODES: tuple[str, ...] = PD10_STUDENT_TARGET_MODES + PD10_V2_STUDENT_TARGET_MODES
 
 PD10_DEFAULT_TEMPERATURE = 2.0
 PD10_DEFAULT_ALPHA = 0.5
+PD10_DEFAULT_REPRESENTATION_BETA = 0.10
+PD10_REPRESENTATION_DIM = 256
+PD10_REPRESENTATION_MODE_NONE = "none"
+PD10_REPRESENTATION_MODE_COSINE = "cosine"
+PD10_REPRESENTATION_MODES: tuple[str, ...] = (
+    PD10_REPRESENTATION_MODE_NONE,
+    PD10_REPRESENTATION_MODE_COSINE,
+)
 PD10_TOP_K = 3
 
 PD10_CORE_STUDENT_VARIANTS = "core"
@@ -155,6 +197,10 @@ def float_tag(value: float) -> str:
     return f"{float(value):0.3g}".replace("-", "m").replace(".", "p")
 
 
+def _float_close(left: float, right: float, *, atol: float = 1.0e-12) -> bool:
+    return abs(float(left) - float(right)) <= float(atol)
+
+
 def normalize_pd10_split_name(value: str) -> str:
     split = str(value).strip()
     if split not in PD10_SPLIT_ORDER:
@@ -187,6 +233,32 @@ def normalize_pd10_teacher_target(value: str) -> str:
     normalized = aliases.get(key, key)
     if normalized not in PD10_TEACHER_TARGETS:
         raise ValueError(f"Unknown PD10 teacher target {value!r}; expected one of {PD10_TEACHER_TARGETS}")
+    return normalized
+
+
+def normalize_pd10_extended_teacher_target(value: str) -> str:
+    """Normalize teacher targets for PD10 plus additive V2 branches."""
+
+    key = _alias_key(value)
+    aliases = {
+        "particle": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "particle_dual": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "particle_dualview": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "particle_dual_view_teacher": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "particle_level_dual_view": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "part_dual_view": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+        "pdv": PD10_TEACHER_PARTICLE_DUAL_VIEW,
+    }
+    normalized = aliases.get(key)
+    if normalized is None:
+        try:
+            normalized = normalize_pd10_teacher_target(value)
+        except ValueError:
+            normalized = key
+    if normalized not in PD10_EXTENDED_TEACHER_TARGETS:
+        raise ValueError(
+            f"Unknown extended PD10 teacher target {value!r}; expected one of {PD10_EXTENDED_TEACHER_TARGETS}"
+        )
     return normalized
 
 
@@ -229,11 +301,103 @@ def normalize_pd10_student_target_mode(value: str) -> str:
     return normalized
 
 
+def normalize_pd10_extended_student_target_mode(value: str) -> str:
+    """Normalize target modes for PD10 plus representation-KD V2 branches."""
+
+    key = _alias_key(value)
+    aliases = {
+        "rep": PD10_TARGET_REP_ONLY,
+        "representation": PD10_TARGET_REP_ONLY,
+        "representation_only": PD10_TARGET_REP_ONLY,
+        "rep_kd": PD10_TARGET_REP_ONLY,
+        "full_plus_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "full_logits_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "full_logits_and_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "logit_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "logits_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "logits_plus_rep": PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        "top3_rep": PD10_TARGET_TOP3_PLUS_REP,
+        "top3_plus_rep": PD10_TARGET_TOP3_PLUS_REP,
+        "top_k_plus_rep": PD10_TARGET_TOP3_PLUS_REP,
+        "confidence_rep": PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+        "confidence_plus_rep": PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+        "confidence_weighted_rep": PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+    }
+    normalized = aliases.get(key)
+    if normalized is None:
+        try:
+            normalized = normalize_pd10_student_target_mode(value)
+        except ValueError:
+            normalized = key
+    if normalized not in PD10_EXTENDED_STUDENT_TARGET_MODES:
+        raise ValueError(
+            f"Unknown extended PD10 target mode {value!r}; expected one of {PD10_EXTENDED_STUDENT_TARGET_MODES}"
+        )
+    return normalized
+
+
+def normalize_pd10_representation_mode(value: str) -> str:
+    key = _alias_key(value)
+    aliases = {
+        "off": PD10_REPRESENTATION_MODE_NONE,
+        "disabled": PD10_REPRESENTATION_MODE_NONE,
+        "cos": PD10_REPRESENTATION_MODE_COSINE,
+        "cosine_similarity": PD10_REPRESENTATION_MODE_COSINE,
+        "cosine_distance": PD10_REPRESENTATION_MODE_COSINE,
+    }
+    normalized = aliases.get(key, key)
+    if normalized not in PD10_REPRESENTATION_MODES:
+        raise ValueError(f"Unknown PD10 representation mode {value!r}; expected one of {PD10_REPRESENTATION_MODES}")
+    return normalized
+
+
+def pd10_target_mode_uses_logits(target_mode: str) -> bool:
+    mode = normalize_pd10_extended_student_target_mode(target_mode)
+    return mode in {
+        PD10_TARGET_FULL_LOGITS,
+        PD10_TARGET_TOP3,
+        PD10_TARGET_CONFIDENCE_WEIGHTED,
+        PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        PD10_TARGET_TOP3_PLUS_REP,
+        PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+    }
+
+
+def pd10_target_mode_uses_representations(target_mode: str) -> bool:
+    mode = normalize_pd10_extended_student_target_mode(target_mode)
+    return mode in {
+        PD10_TARGET_REP_ONLY,
+        PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        PD10_TARGET_TOP3_PLUS_REP,
+        PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+    }
+
+
+def pd10_base_logit_target_mode(target_mode: str) -> str:
+    mode = normalize_pd10_extended_student_target_mode(target_mode)
+    mapping = {
+        PD10_TARGET_FULL_LOGITS_PLUS_REP: PD10_TARGET_FULL_LOGITS,
+        PD10_TARGET_TOP3_PLUS_REP: PD10_TARGET_TOP3,
+        PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP: PD10_TARGET_CONFIDENCE_WEIGHTED,
+    }
+    base_mode = mapping.get(mode, mode)
+    if base_mode == PD10_TARGET_REP_ONLY:
+        raise ValueError("rep_only target mode does not use teacher logits")
+    return normalize_pd10_student_target_mode(base_mode)
+
+
 def pd10_teacher_model_name(teacher_target: str) -> str:
     target = normalize_pd10_teacher_target(teacher_target)
     if target == PD10_TEACHER_NONE:
         raise ValueError("CE-only variants do not have a teacher model name")
     return PD10_TEACHER_MODEL_NAMES[target]
+
+
+def pd10_extended_teacher_model_name(teacher_target: str) -> str:
+    target = normalize_pd10_extended_teacher_target(teacher_target)
+    if target == PD10_TEACHER_NONE:
+        raise ValueError("CE-only variants do not have a teacher model name")
+    return PD10_EXTENDED_TEACHER_MODEL_NAMES[target]
 
 
 def pd10_student_variant_name(
@@ -263,6 +427,77 @@ def pd10_student_variant_name(
             f"_t{float_tag(temperature)}_a{float_tag(alpha)}"
         )
     return f"pd10_student_{init}_{teacher}_{mode}_t{float_tag(temperature)}_a{float_tag(alpha)}"
+
+
+def pd10_extended_student_variant_name(
+    init_mode: str,
+    teacher_target: str = PD10_TEACHER_NONE,
+    target_mode: str = PD10_TARGET_FULL_LOGITS,
+    *,
+    temperature: float = PD10_DEFAULT_TEMPERATURE,
+    kd_alpha: float = PD10_DEFAULT_ALPHA,
+    top_k: int = PD10_TOP_K,
+    representation_beta: float = PD10_DEFAULT_REPRESENTATION_BETA,
+    representation_mode: str = PD10_REPRESENTATION_MODE_COSINE,
+) -> str:
+    """Return stable names for PD10 v0.4 students plus additive V2 variants."""
+
+    teacher = normalize_pd10_extended_teacher_target(teacher_target)
+    mode = normalize_pd10_extended_student_target_mode(target_mode)
+    if teacher in PD10_TEACHER_TARGETS and mode in PD10_STUDENT_TARGET_MODES:
+        return pd10_student_variant_name(
+            init_mode,
+            teacher,
+            mode,
+            temperature=temperature,
+            kd_alpha=kd_alpha,
+            top_k=top_k,
+        )
+
+    init = normalize_pd10_student_init_mode(init_mode)
+    rep_mode = normalize_pd10_representation_mode(representation_mode)
+    if teacher == PD10_TEACHER_NONE:
+        if mode != PD10_TARGET_FULL_LOGITS:
+            raise ValueError("CE-only student variants must use target_mode='full_logits'")
+        return f"pd10_student_{init}_ce_only"
+
+    alpha = float(kd_alpha)
+    beta = float(representation_beta)
+    if pd10_target_mode_uses_logits(mode) and (alpha <= 0.0 or alpha > 1.0):
+        raise ValueError("kd_alpha must be in (0, 1] for logit-KD variants")
+    if pd10_target_mode_uses_representations(mode):
+        if rep_mode == PD10_REPRESENTATION_MODE_NONE:
+            raise ValueError("representation target modes require representation_mode!='none'")
+        if beta <= 0.0:
+            raise ValueError("representation_beta must be positive for representation-KD variants")
+
+    init_prefix = "warm" if init == PD10_STUDENT_INIT_WARM_START else "scratch"
+    teacher_prefix = {
+        PD10_TEACHER_PARTICLE_DUAL_VIEW: "particle_dual",
+        PD10_TEACHER_DUAL_VIEW: "logit_fusion_dual",
+        PD10_TEACHER_HLT: "hlt",
+        PD10_TEACHER_OFFLINE: "offline",
+    }.get(teacher, teacher)
+    mode_suffix = {
+        PD10_TARGET_FULL_LOGITS: "logit_kd",
+        PD10_TARGET_TOP3: "top3_logit_kd",
+        PD10_TARGET_CONFIDENCE_WEIGHTED: "confidence_logit_kd",
+        PD10_TARGET_REP_ONLY: "rep_kd",
+        PD10_TARGET_FULL_LOGITS_PLUS_REP: "logit_rep_kd",
+        PD10_TARGET_TOP3_PLUS_REP: "logit_rep_top3",
+        PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP: "logit_rep_confidence",
+    }[mode]
+    name = f"{init_prefix}_{teacher_prefix}_{mode_suffix}"
+    if (
+        pd10_target_mode_uses_logits(mode)
+        and (not _float_close(float(temperature), PD10_DEFAULT_TEMPERATURE) or not _float_close(alpha, PD10_DEFAULT_ALPHA))
+    ):
+        name += f"_t{float_tag(temperature)}_a{float_tag(alpha)}"
+    if pd10_target_mode_uses_representations(mode) and not _float_close(beta, PD10_DEFAULT_REPRESENTATION_BETA):
+        name += f"_beta{float_tag(beta)}"
+    if mode in {PD10_TARGET_TOP3, PD10_TARGET_TOP3_PLUS_REP} and int(top_k) != PD10_TOP_K:
+        name += f"_k{int(top_k)}"
+    return name
 
 
 @dataclass(frozen=True)
@@ -703,7 +938,13 @@ __all__ = [
     "PD10_CONTRACT",
     "PD10_CORE_STUDENT_VARIANTS",
     "PD10_DEFAULT_ALPHA",
+    "PD10_DEFAULT_REPRESENTATION_BETA",
     "PD10_DEFAULT_TEMPERATURE",
+    "PD10_EXTENDED_REAL_TEACHERS",
+    "PD10_EXTENDED_STUDENT_TARGET_MODES",
+    "PD10_EXTENDED_TEACHER_ALLOWED_INPUTS",
+    "PD10_EXTENDED_TEACHER_MODEL_NAMES",
+    "PD10_EXTENDED_TEACHER_TARGETS",
     "PD10_EXPERIMENT_NAME",
     "PD10_EXPERIMENT_STEP",
     "PD10_HLT_DEGRADATION_STRENGTH",
@@ -715,6 +956,10 @@ __all__ = [
     "PD10_NUM_CLASSES",
     "PD10_PRIORITY_STUDENT_VARIANTS",
     "PD10_REAL_TEACHERS",
+    "PD10_REPRESENTATION_DIM",
+    "PD10_REPRESENTATION_MODE_COSINE",
+    "PD10_REPRESENTATION_MODE_NONE",
+    "PD10_REPRESENTATION_MODES",
     "PD10_SPLIT_ORDER",
     "PD10_SPLIT_SIZES",
     "PD10_STUDENT_INIT_MODES",
@@ -722,16 +967,26 @@ __all__ = [
     "PD10_STUDENT_INIT_WARM_START",
     "PD10_STUDENT_TARGET_MODES",
     "PD10_TARGET_CONFIDENCE_WEIGHTED",
+    "PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP",
     "PD10_TARGET_FULL_LOGITS",
+    "PD10_TARGET_FULL_LOGITS_PLUS_REP",
+    "PD10_TARGET_REP_ONLY",
     "PD10_TARGET_TOP3",
+    "PD10_TARGET_TOP3_PLUS_REP",
     "PD10_TEACHER_ALLOWED_INPUTS",
     "PD10_TEACHER_DUAL_VIEW",
     "PD10_TEACHER_HLT",
     "PD10_TEACHER_MODEL_NAMES",
     "PD10_TEACHER_NONE",
     "PD10_TEACHER_OFFLINE",
+    "PD10_TEACHER_PARTICLE_DUAL_VIEW",
     "PD10_TEACHER_TARGETS",
     "PD10_TOP_K",
+    "PD10_V2_REAL_TEACHERS",
+    "PD10_V2_STUDENT_TARGET_MODES",
+    "PD10_V2_TEACHER_ALLOWED_INPUTS",
+    "PD10_V2_TEACHER_MODEL_NAMES",
+    "PD10_V2_TEACHER_TARGETS",
     "PD10ExperimentConfig",
     "PD10ExperimentLayout",
     "PD10StudentVariantSpec",
@@ -743,10 +998,18 @@ __all__ = [
     "default_pd10_experiment_layout",
     "float_tag",
     "normalize_pd10_split_name",
+    "normalize_pd10_extended_student_target_mode",
+    "normalize_pd10_extended_teacher_target",
+    "normalize_pd10_representation_mode",
     "normalize_pd10_student_init_mode",
     "normalize_pd10_student_target_mode",
     "normalize_pd10_teacher_target",
+    "pd10_base_logit_target_mode",
     "pd10_config_manifest",
+    "pd10_extended_student_variant_name",
+    "pd10_extended_teacher_model_name",
     "pd10_student_variant_name",
+    "pd10_target_mode_uses_logits",
+    "pd10_target_mode_uses_representations",
     "pd10_teacher_model_name",
 ]

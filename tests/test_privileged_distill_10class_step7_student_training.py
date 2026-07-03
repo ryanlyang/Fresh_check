@@ -313,7 +313,7 @@ class PD10Step7StudentTrainingTests(unittest.TestCase):
             self.assertEqual(report["teacher_target"], "hlt")
             self.assertEqual(report["target_mode"], PD10_TARGET_FULL_LOGITS)
             self.assertEqual(report["kd_warmup_epochs"], 1)
-            self.assertEqual(report["selection_metric"], "model_val_accuracy")
+            self.assertEqual(report["selection_metric"], "model_val_ce_loss")
             self.assertIn("best_model_val_metrics", report)
             self.assertTrue(report["teacher_logits_train_time_only"])
             self.assertFalse(report["inference_requires_teacher_logits"])

@@ -21,19 +21,28 @@ from .config import (
     PD10_NUM_CLASSES,
     PD10_STUDENT_INIT_SCRATCH,
     PD10_STUDENT_INIT_WARM_START,
+    PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
     PD10_TARGET_FULL_LOGITS,
+    PD10_TARGET_FULL_LOGITS_PLUS_REP,
+    PD10_TARGET_REP_ONLY,
+    PD10_TARGET_TOP3_PLUS_REP,
     PD10_TEACHER_DUAL_VIEW,
     PD10_TEACHER_HLT,
     PD10_TEACHER_NONE,
     PD10_TEACHER_OFFLINE,
+    PD10_TEACHER_PARTICLE_DUAL_VIEW,
     build_pd10_core_student_variants,
     build_pd10_priority_student_variants,
     default_pd10_experiment_layout,
-    pd10_teacher_model_name,
+    pd10_extended_student_variant_name,
+    pd10_extended_teacher_model_name,
+    pd10_target_mode_uses_logits,
+    pd10_target_mode_uses_representations,
 )
 from .dual_view_teacher import load_pd10_dual_view_logit_block
 from .logits import load_pd10_teacher_logit_block
 from .metrics import pd10_prediction_metrics_from_logits
+from .particle_dual_view_teacher import load_pd10_particle_dual_view_logit_block
 
 
 PD10_STEP8_EXPERIMENT_STEP = "pd10_step8_final_report"
@@ -55,6 +64,8 @@ PD10_REPORT_TABLES: dict[str, str] = {
     "calibration_table": "calibration_table.csv",
     "class_pair_improvements": "class_pair_improvements.csv",
     "leakage_audit_summary": "leakage_audit_summary.csv",
+    "v2_comparisons": "v2_comparisons.csv",
+    "v2_diagnostics": "v2_diagnostics.csv",
 }
 
 
@@ -73,6 +84,7 @@ class PD10ReportConfig:
     require_teacher_reports: bool = True
     require_audit: bool = True
     include_prediction_metrics: bool = True
+    include_v2_students: bool = True
     confirm_final_test: bool = False
 
     def __post_init__(self) -> None:
@@ -84,6 +96,8 @@ class PD10ReportConfig:
             if self.include_priority_students:
                 specs.extend(build_pd10_priority_student_variants())
             variants = tuple(spec.name for spec in specs)
+            if self.include_v2_students:
+                variants = tuple(dict.fromkeys([*variants, *_discover_v2_student_variants(self.students_dir)]))
         if len(set(variants)) != len(variants):
             raise ValueError("student_variants contains duplicates")
         object.__setattr__(self, "student_variants", variants)
@@ -113,6 +127,103 @@ def _read_json(path: str | Path | None) -> Any | None:
         return None
     with p.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _default_v2_student_variants() -> tuple[str, ...]:
+    """Student directory names for the planned additive PD10-V2 matrix."""
+
+    return (
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_REP_ONLY,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+            representation_beta=0.3,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_TOP3_PLUS_REP,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_CONFIDENCE_WEIGHTED_PLUS_REP,
+        ),
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_SCRATCH,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        ),
+    )
+
+
+def _target_mode_uses_logits(target_mode: Any) -> bool:
+    try:
+        return bool(pd10_target_mode_uses_logits(str(target_mode)))
+    except Exception:
+        return False
+
+
+def _target_mode_uses_representations(target_mode: Any) -> bool:
+    try:
+        return bool(pd10_target_mode_uses_representations(str(target_mode)))
+    except Exception:
+        return False
+
+
+def _is_v2_student_report(report: Mapping[str, Any] | None, *, variant: str | None = None) -> bool:
+    if variant in set(_default_v2_student_variants()):
+        return True
+    if not isinstance(report, Mapping):
+        return False
+    teacher = report.get("teacher_target")
+    target_mode = report.get("target_mode")
+    return (
+        teacher == PD10_TEACHER_PARTICLE_DUAL_VIEW
+        or _target_mode_uses_representations(target_mode)
+        or bool(report.get("uses_representations"))
+    )
+
+
+def _discover_v2_student_variants(students_dir: str | Path) -> tuple[str, ...]:
+    root = Path(students_dir)
+    if not root.exists():
+        return ()
+    variants: list[str] = []
+    for report_path in sorted(root.glob("*/run_report.json")):
+        try:
+            report = _read_json(report_path)
+        except Exception:
+            continue
+        if isinstance(report, Mapping):
+            variant = str(report.get("variant_name") or report_path.parent.name)
+            candidate_report: Mapping[str, Any] | None = report
+        else:
+            variant = report_path.parent.name
+            candidate_report = None
+        if _is_v2_student_report(candidate_report, variant=variant):
+            variants.append(report_path.parent.name)
+    return tuple(dict.fromkeys(variants))
 
 
 def _jsonable(value: Any) -> Any:
@@ -190,6 +301,13 @@ def _normalize_metrics(metrics: Mapping[str, Any] | None) -> dict[str, Any] | No
         "ce_loss",
         "kd_loss",
         "effective_kd_alpha",
+        "rep_loss",
+        "effective_representation_beta",
+        "teacher_student_representation_cosine",
+        "teacher_student_logit_kl",
+        "representation_beta",
+        "representation_dim",
+        "representation_mode",
         "expected_calibration_error",
         "ece",
         "mean_confidence",
@@ -271,22 +389,24 @@ def _metrics_from_report(report: Mapping[str, Any] | None, split: str) -> dict[s
     return None
 
 
+def _load_teacher_logit_block(config: PD10ReportConfig, teacher_target: str, split: str):
+    if teacher_target == PD10_TEACHER_DUAL_VIEW:
+        return load_pd10_dual_view_logit_block(config.teacher_logit_dir, split)
+    if teacher_target == PD10_TEACHER_PARTICLE_DUAL_VIEW:
+        return load_pd10_particle_dual_view_logit_block(config.teacher_logit_dir, split)
+    return load_pd10_teacher_logit_block(config.teacher_logit_dir, teacher_target, split)
+
+
 def _prediction_metrics(config: PD10ReportConfig, teacher_target: str, split: str) -> dict[str, Any] | None:
     if not config.include_prediction_metrics or not config.teacher_logit_dir:
         return None
     try:
-        if teacher_target == PD10_TEACHER_DUAL_VIEW:
-            block = load_pd10_dual_view_logit_block(config.teacher_logit_dir, split)
-        else:
-            block = load_pd10_teacher_logit_block(config.teacher_logit_dir, teacher_target, split)
+        block = _load_teacher_logit_block(config, teacher_target, split)
         validation_thresholds = None
         validation_binary_thresholds = None
         if split == "final_test":
             try:
-                if teacher_target == PD10_TEACHER_DUAL_VIEW:
-                    val_block = load_pd10_dual_view_logit_block(config.teacher_logit_dir, "model_val")
-                else:
-                    val_block = load_pd10_teacher_logit_block(config.teacher_logit_dir, teacher_target, "model_val")
+                val_block = _load_teacher_logit_block(config, teacher_target, "model_val")
                 val_metrics = pd10_prediction_metrics_from_logits(val_block.logits, val_block.labels)
                 validation_thresholds = val_metrics.get("score_thresholds_by_class")
                 validation_binary_thresholds = val_metrics.get("binary_score_thresholds")
@@ -358,17 +478,34 @@ def _merge_metric_payloads(
 
 
 def _teacher_report_path(config: PD10ReportConfig, teacher_target: str) -> Path:
-    return Path(config.teachers_dir) / pd10_teacher_model_name(teacher_target) / "run_report.json"
+    return Path(config.teachers_dir) / pd10_extended_teacher_model_name(teacher_target) / "run_report.json"
+
+
+def _teacher_logit_cache_exists(config: PD10ReportConfig, teacher_target: str) -> bool:
+    if not config.teacher_logit_dir:
+        return False
+    model_name = pd10_extended_teacher_model_name(teacher_target)
+    root = Path(config.teacher_logit_dir) / model_name
+    return any((root / f"{split}_predictions_metadata.json").exists() for split in ("model_val", "final_test"))
+
+
+def _teacher_targets_for_report(config: PD10ReportConfig) -> tuple[str, ...]:
+    targets = [PD10_TEACHER_HLT, PD10_TEACHER_OFFLINE, PD10_TEACHER_DUAL_VIEW]
+    particle_path = _teacher_report_path(config, PD10_TEACHER_PARTICLE_DUAL_VIEW)
+    if particle_path.exists() or _teacher_logit_cache_exists(config, PD10_TEACHER_PARTICLE_DUAL_VIEW):
+        targets.append(PD10_TEACHER_PARTICLE_DUAL_VIEW)
+    return tuple(targets)
 
 
 def _teacher_metric_rows(config: PD10ReportConfig, problems: list[str], warnings: list[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for target in (PD10_TEACHER_HLT, PD10_TEACHER_OFFLINE, PD10_TEACHER_DUAL_VIEW):
+    for target in _teacher_targets_for_report(config):
         path = _teacher_report_path(config, target)
         report = _read_json(path)
         if not isinstance(report, Mapping):
             message = f"missing teacher run_report for {target}: {path}"
-            (problems if config.require_teacher_reports else warnings).append(message)
+            required_teacher = target != PD10_TEACHER_PARTICLE_DUAL_VIEW
+            (problems if required_teacher and config.require_teacher_reports else warnings).append(message)
             report = {}
         for split in ("model_val", "final_test"):
             report_metrics = _metrics_from_report(report, split)
@@ -386,11 +523,12 @@ def _teacher_metric_rows(config: PD10ReportConfig, problems: list[str], warnings
                 {
                     "row_type": "teacher",
                     "teacher_target": target,
-                    "model_name": pd10_teacher_model_name(target),
+                    "model_name": pd10_extended_teacher_model_name(target),
                     "split": split,
                     "accuracy": metrics.get("accuracy"),
                     "cross_entropy": metrics.get("cross_entropy"),
                     "n_jets": metrics.get("n_jets"),
+                    "macro_ovr_auc": metrics.get("macro_ovr_auc"),
                     "expected_calibration_error": metrics.get("expected_calibration_error") or metrics.get("ece"),
                     "mean_confidence": metrics.get("mean_confidence"),
                     "fpr_at_signal_eff_0p50_macro": metrics.get("fpr_at_signal_eff_0p50_macro"),
@@ -416,6 +554,16 @@ def _student_specs_by_name() -> dict[str, Any]:
     return {spec.name: spec for spec in specs}
 
 
+def _student_group(variant: str, report: Mapping[str, Any], *, spec: Any | None, is_core: bool) -> str:
+    if is_core:
+        return "core"
+    if spec is not None:
+        return "priority"
+    if _is_v2_student_report(report, variant=variant):
+        return "v2"
+    return "custom"
+
+
 def _student_metric_rows(config: PD10ReportConfig, problems: list[str], warnings: list[str]) -> list[dict[str, Any]]:
     specs_by_name = _student_specs_by_name()
     core_names = {spec.name for spec in build_pd10_core_student_variants()}
@@ -435,7 +583,13 @@ def _student_metric_rows(config: PD10ReportConfig, problems: list[str], warnings
         temperature = report.get("temperature", None if spec is None else spec.temperature)
         kd_alpha = report.get("kd_alpha", None if spec is None else spec.kd_alpha)
         top_k = report.get("top_k", None if spec is None else spec.top_k)
-        group = "core" if is_core else "priority"
+        group = _student_group(variant, report, spec=spec, is_core=is_core)
+        uses_logit_teacher = report.get("uses_logit_teacher")
+        if uses_logit_teacher is None:
+            uses_logit_teacher = teacher_target != PD10_TEACHER_NONE and _target_mode_uses_logits(target_mode)
+        uses_representations = report.get("uses_representations")
+        if uses_representations is None:
+            uses_representations = teacher_target != PD10_TEACHER_NONE and _target_mode_uses_representations(target_mode)
         for split in ("model_val", "final_test"):
             report_metrics = _metrics_from_report(report, split)
             cache_metrics = _student_prediction_metrics(config, variant, split)
@@ -459,10 +613,22 @@ def _student_metric_rows(config: PD10ReportConfig, problems: list[str], warnings
                     "temperature": temperature,
                     "kd_alpha": kd_alpha,
                     "top_k": top_k,
+                    "representation_beta": report.get("representation_beta"),
+                    "representation_dim": report.get("representation_dim"),
+                    "representation_mode": report.get("representation_mode"),
+                    "uses_logit_teacher": bool(uses_logit_teacher),
+                    "uses_representations": bool(uses_representations),
                     "split": split,
                     "accuracy": metrics.get("accuracy"),
                     "cross_entropy": metrics.get("cross_entropy"),
+                    "kd_loss": metrics.get("kd_loss"),
+                    "rep_loss": metrics.get("rep_loss"),
+                    "effective_kd_alpha": metrics.get("effective_kd_alpha"),
+                    "effective_representation_beta": metrics.get("effective_representation_beta"),
+                    "teacher_student_representation_cosine": metrics.get("teacher_student_representation_cosine"),
+                    "teacher_student_logit_kl": metrics.get("teacher_student_logit_kl"),
                     "n_jets": metrics.get("n_jets"),
+                    "macro_ovr_auc": metrics.get("macro_ovr_auc"),
                     "expected_calibration_error": metrics.get("expected_calibration_error") or metrics.get("ece"),
                     "mean_confidence": metrics.get("mean_confidence"),
                     "fpr_at_signal_eff_0p50_macro": metrics.get("fpr_at_signal_eff_0p50_macro"),
@@ -481,8 +647,17 @@ def _student_metric_rows(config: PD10ReportConfig, problems: list[str], warnings
                     "report_path": str(path),
                     "metrics_source": source,
                     "teacher_logits_train_time_only": report.get("teacher_logits_train_time_only"),
+                    "teacher_representations_train_time_only": report.get("teacher_representations_train_time_only"),
                     "inference_requires_teacher_logits": report.get("inference_requires_teacher_logits"),
+                    "inference_requires_teacher_representations": report.get(
+                        "inference_requires_teacher_representations"
+                    ),
                     "inference_requires_offline_inputs": report.get("inference_requires_offline_inputs"),
+                    "inference_export_requires_teacher_features": report.get(
+                        "inference_export_requires_teacher_features"
+                    ),
+                    "teacher_logit_cache": report.get("teacher_logit_cache"),
+                    "teacher_representation_cache": report.get("teacher_representation_cache"),
                     "metrics": metrics,
                 }
             )
@@ -493,15 +668,57 @@ def _final_rows(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return [row for row in rows if row.get("split") == "final_test" and _finite_float(row.get("accuracy")) is not None]
 
 
+def _row_metric_value(row: Mapping[str, Any] | None, key: str) -> float | None:
+    if row is None:
+        return None
+    value = _finite_float(row.get(key))
+    if value is not None:
+        return value
+    metrics = row.get("metrics")
+    if isinstance(metrics, Mapping):
+        return _finite_float(metrics.get(key))
+    return None
+
+
+def _row_fpr_value(row: Mapping[str, Any] | None) -> float | None:
+    value = _row_metric_value(row, "validation_threshold_fpr_at_signal_eff_0p50_macro")
+    if value is not None:
+        return value
+    return _row_metric_value(row, "fpr_at_signal_eff_0p50_macro")
+
+
+def _best_outcome_row(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    candidates = _final_rows(rows)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda row: (
+            _row_metric_value(row, "cross_entropy")
+            if _row_metric_value(row, "cross_entropy") is not None
+            else float("inf"),
+            -(_row_metric_value(row, "accuracy") or float("-inf")),
+            -(_row_metric_value(row, "macro_ovr_auc") or float("-inf")),
+            _row_fpr_value(row) if _row_fpr_value(row) is not None else float("inf"),
+        ),
+    )
+
+
 def _best_accuracy_row(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """Backward-compatible name; ranking is now CE-first per the PD10-V2 plan."""
+
+    return _best_outcome_row(rows)
+
+
+def _best_final_accuracy_row(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     candidates = _final_rows(rows)
     if not candidates:
         return None
     return max(
         candidates,
         key=lambda row: (
-            _finite_float(row.get("accuracy")) or float("-inf"),
-            -(_finite_float(row.get("cross_entropy")) or 1.0e9),
+            _row_metric_value(row, "accuracy") or float("-inf"),
+            -(_row_metric_value(row, "cross_entropy") or float("inf")),
         ),
     )
 
@@ -561,15 +778,37 @@ def _find_default_student(
 
 
 def _comparison(candidate: Mapping[str, Any] | None, baseline: Mapping[str, Any] | None) -> dict[str, Any]:
-    candidate_acc = None if candidate is None else _finite_float(candidate.get("accuracy"))
-    baseline_acc = None if baseline is None else _finite_float(baseline.get("accuracy"))
+    candidate_acc = _row_metric_value(candidate, "accuracy")
+    baseline_acc = _row_metric_value(baseline, "accuracy")
+    candidate_ce = _row_metric_value(candidate, "cross_entropy")
+    baseline_ce = _row_metric_value(baseline, "cross_entropy")
+    candidate_auc = _row_metric_value(candidate, "macro_ovr_auc")
+    baseline_auc = _row_metric_value(baseline, "macro_ovr_auc")
+    candidate_fpr = _row_fpr_value(candidate)
+    baseline_fpr = _row_fpr_value(baseline)
     delta = None if candidate_acc is None or baseline_acc is None else candidate_acc - baseline_acc
+    delta_ce = None if candidate_ce is None or baseline_ce is None else candidate_ce - baseline_ce
+    delta_auc = None if candidate_auc is None or baseline_auc is None else candidate_auc - baseline_auc
+    delta_fpr = None if candidate_fpr is None or baseline_fpr is None else candidate_fpr - baseline_fpr
+    required = (delta, delta_ce, delta_auc, delta_fpr)
+    beats = None
+    if all(value is not None for value in required):
+        beats = bool(delta > 0.0 and delta_ce < 0.0 and delta_auc > 0.0 and delta_fpr < 0.0)
     return {
         "available": candidate_acc is not None and baseline_acc is not None,
         "candidate_accuracy": candidate_acc,
         "baseline_accuracy": baseline_acc,
         "delta_accuracy": delta,
-        "beats_baseline": None if delta is None else bool(delta > 0.0),
+        "candidate_cross_entropy": candidate_ce,
+        "baseline_cross_entropy": baseline_ce,
+        "delta_cross_entropy": delta_ce,
+        "candidate_macro_ovr_auc": candidate_auc,
+        "baseline_macro_ovr_auc": baseline_auc,
+        "delta_macro_ovr_auc": delta_auc,
+        "candidate_fpr_at_signal_eff_0p50_macro": candidate_fpr,
+        "baseline_fpr_at_signal_eff_0p50_macro": baseline_fpr,
+        "delta_fpr_at_signal_eff_0p50_macro": delta_fpr,
+        "beats_baseline": beats,
         "candidate_variant": None if candidate is None else candidate.get("variant"),
         "baseline_variant": None if baseline is None else baseline.get("variant"),
     }
@@ -640,6 +879,221 @@ def _topk_confidence_ablation_rows(student_rows: Sequence[Mapping[str, Any]]) ->
         )
     if not rows:
         rows.append({"available": False, "reason": "no priority ablation student reports found"})
+    return rows
+
+
+def _final_student_by_variant(student_rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    return {str(row.get("variant")): row for row in _final_rows(student_rows) if row.get("variant") is not None}
+
+
+def _teacher_final_row(teacher_rows: Sequence[Mapping[str, Any]], teacher_target: str) -> Mapping[str, Any] | None:
+    return next(
+        (
+            row
+            for row in teacher_rows
+            if row.get("teacher_target") == teacher_target and row.get("split") == "final_test"
+        ),
+        None,
+    )
+
+
+def _row_source_name(row: Mapping[str, Any] | None) -> Any:
+    if row is None:
+        return None
+    return row.get("variant") or row.get("teacher_target")
+
+
+def _row_metric(row: Mapping[str, Any] | None, key: str) -> float | None:
+    return _row_metric_value(row, key)
+
+
+def _row_fpr_0p50(row: Mapping[str, Any] | None) -> float | None:
+    return _row_fpr_value(row)
+
+
+def _v2_comparison(
+    candidate: Mapping[str, Any] | None,
+    baseline: Mapping[str, Any] | None,
+    *,
+    comparison_type: str,
+    baseline_label: str,
+) -> dict[str, Any]:
+    row = {
+        "comparison_type": comparison_type,
+        "baseline_label": baseline_label,
+        "candidate_source": _row_source_name(candidate),
+        "baseline_source": _row_source_name(baseline),
+        "candidate_group": None if candidate is None else candidate.get("group"),
+        "student_init": None if candidate is None else candidate.get("student_init"),
+        "candidate_teacher_target": None if candidate is None else candidate.get("teacher_target"),
+        "baseline_teacher_target": None if baseline is None else baseline.get("teacher_target"),
+        "candidate_target_mode": None if candidate is None else candidate.get("target_mode"),
+        "baseline_target_mode": None if baseline is None else baseline.get("target_mode"),
+        "candidate_rep_loss": _row_metric(candidate, "rep_loss"),
+        "candidate_effective_representation_beta": _row_metric(candidate, "effective_representation_beta"),
+        "candidate_representation_beta": None if candidate is None else candidate.get("representation_beta"),
+        "candidate_representation_mode": None if candidate is None else candidate.get("representation_mode"),
+        **_comparison(candidate, baseline),
+    }
+    candidate_ce = _row_metric(candidate, "cross_entropy")
+    baseline_ce = _row_metric(baseline, "cross_entropy")
+    candidate_fpr = _row_fpr_0p50(candidate)
+    baseline_fpr = _row_fpr_0p50(baseline)
+    row.update(
+        {
+            "candidate_cross_entropy": candidate_ce,
+            "baseline_cross_entropy": baseline_ce,
+            "delta_cross_entropy": None if candidate_ce is None or baseline_ce is None else candidate_ce - baseline_ce,
+            "candidate_fpr_at_signal_eff_0p50_macro": candidate_fpr,
+            "baseline_fpr_at_signal_eff_0p50_macro": baseline_fpr,
+            "delta_fpr_at_signal_eff_0p50_macro": None
+            if candidate_fpr is None or baseline_fpr is None
+            else candidate_fpr - baseline_fpr,
+        }
+    )
+    return row
+
+
+def _v2_comparison_rows(
+    teacher_rows: Sequence[Mapping[str, Any]],
+    student_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    condition_rows = _student_final_by_condition(student_rows)
+    by_variant = _final_student_by_variant(student_rows)
+    v2_students = [
+        row
+        for row in _final_rows(student_rows)
+        if row.get("group") == "v2" or _is_v2_student_report(row, variant=str(row.get("variant")))
+    ]
+    for candidate in v2_students:
+        init_mode = str(candidate.get("student_init") or PD10_STUDENT_INIT_WARM_START)
+        ce_anchor = _find_default_student(condition_rows, init_mode, PD10_TEACHER_NONE)
+        dual_anchor = _find_default_student(condition_rows, init_mode, PD10_TEACHER_DUAL_VIEW)
+        rows.append(
+            _v2_comparison(
+                candidate,
+                ce_anchor,
+                comparison_type="student_vs_v04_anchor",
+                baseline_label=f"{init_mode}_ce_only",
+            )
+        )
+        rows.append(
+            _v2_comparison(
+                candidate,
+                dual_anchor,
+                comparison_type="student_vs_v04_anchor",
+                baseline_label=f"{init_mode}_dual_view_full_logits_t2_a0p5",
+            )
+        )
+
+    particle_logit = by_variant.get(
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS,
+        )
+    )
+    particle_logit_rep = by_variant.get(
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        )
+    )
+    particle_rep = by_variant.get(
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_PARTICLE_DUAL_VIEW,
+            PD10_TARGET_REP_ONLY,
+        )
+    )
+    logit_fusion_rep = by_variant.get(
+        pd10_extended_student_variant_name(
+            PD10_STUDENT_INIT_WARM_START,
+            PD10_TEACHER_DUAL_VIEW,
+            PD10_TARGET_FULL_LOGITS_PLUS_REP,
+        )
+    )
+    if particle_logit_rep is not None or particle_logit is not None:
+        rows.append(
+            _v2_comparison(
+                particle_logit_rep,
+                particle_logit,
+                comparison_type="v2_ablation",
+                baseline_label="particle_dual_logit_only",
+            )
+        )
+    if particle_rep is not None or particle_logit is not None:
+        rows.append(
+            _v2_comparison(
+                particle_rep,
+                particle_logit,
+                comparison_type="v2_ablation",
+                baseline_label="particle_dual_logit_only",
+            )
+        )
+    if particle_logit_rep is not None or logit_fusion_rep is not None:
+        rows.append(
+            _v2_comparison(
+                particle_logit_rep,
+                logit_fusion_rep,
+                comparison_type="v2_ablation",
+                baseline_label="logit_fusion_dual_logit_rep_kd",
+            )
+        )
+
+    particle_teacher = _teacher_final_row(teacher_rows, PD10_TEACHER_PARTICLE_DUAL_VIEW)
+    if particle_teacher is not None:
+        for baseline_target in (PD10_TEACHER_HLT, PD10_TEACHER_OFFLINE, PD10_TEACHER_DUAL_VIEW):
+            rows.append(
+                _v2_comparison(
+                    particle_teacher,
+                    _teacher_final_row(teacher_rows, baseline_target),
+                    comparison_type="teacher_vs_anchor",
+                    baseline_label=baseline_target,
+                )
+            )
+
+    if not rows:
+        rows.append({"available": False, "reason": "no V2 teacher/student reports found"})
+    return rows
+
+
+def _v2_diagnostic_rows(student_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in student_rows:
+        if row.get("split") != "model_val":
+            continue
+        if row.get("group") != "v2" and not _is_v2_student_report(row, variant=str(row.get("variant"))):
+            continue
+        rows.append(
+            {
+                "variant": row.get("variant"),
+                "student_init": row.get("student_init"),
+                "teacher_target": row.get("teacher_target"),
+                "target_mode": row.get("target_mode"),
+                "uses_logit_teacher": row.get("uses_logit_teacher"),
+                "uses_representations": row.get("uses_representations"),
+                "model_val_cross_entropy": _row_metric(row, "cross_entropy"),
+                "model_val_accuracy": _row_metric(row, "accuracy"),
+                "model_val_kd_loss": _row_metric(row, "kd_loss"),
+                "model_val_rep_loss": _row_metric(row, "rep_loss"),
+                "model_val_teacher_student_logit_kl": _row_metric(row, "teacher_student_logit_kl"),
+                "model_val_teacher_student_representation_cosine": _row_metric(
+                    row,
+                    "teacher_student_representation_cosine",
+                ),
+                "effective_kd_alpha": _row_metric(row, "effective_kd_alpha"),
+                "effective_representation_beta": _row_metric(row, "effective_representation_beta"),
+                "representation_beta": row.get("representation_beta"),
+                "representation_mode": row.get("representation_mode"),
+                "metrics_source": row.get("metrics_source"),
+                "report_path": row.get("report_path"),
+            }
+        )
+    if not rows:
+        rows.append({"available": False, "reason": "no V2 model_val diagnostic rows found"})
     return rows
 
 
@@ -943,8 +1397,34 @@ def _answer_summary(
 ) -> dict[str, Any]:
     hlt_acc = _teacher_final_accuracy(teacher_rows, PD10_TEACHER_HLT)
     offline_acc = _teacher_final_accuracy(teacher_rows, PD10_TEACHER_OFFLINE)
+    particle_acc = _teacher_final_accuracy(teacher_rows, PD10_TEACHER_PARTICLE_DUAL_VIEW)
     best_student = _best_accuracy_row(student_rows)
     best_student_acc = None if best_student is None else _finite_float(best_student.get("accuracy"))
+    best_accuracy_student = _best_final_accuracy_row(student_rows)
+    best_accuracy_student_acc = _row_metric(best_accuracy_student, "accuracy")
+    did_any_student_beat_hlt_part = None
+    if hlt_acc is not None:
+        student_final_accuracies = [_row_metric(row, "accuracy") for row in _final_rows(student_rows)]
+        did_any_student_beat_hlt_part = any(
+            accuracy is not None and accuracy > hlt_acc for accuracy in student_final_accuracies
+        )
+    v2_students = [
+        row
+        for row in _final_rows(student_rows)
+        if row.get("group") == "v2" or _is_v2_student_report(row, variant=str(row.get("variant")))
+    ]
+    best_v2_student = _best_accuracy_row(v2_students)
+    best_v2_acc = None if best_v2_student is None else _finite_float(best_v2_student.get("accuracy"))
+    best_v2_ce = _row_metric(best_v2_student, "cross_entropy")
+    best_v2_auc = _row_metric(best_v2_student, "macro_ovr_auc")
+    best_v2_fpr = _row_fpr_0p50(best_v2_student)
+    condition_rows = _student_final_by_condition(student_rows)
+    warm_ce = _find_default_student(condition_rows, PD10_STUDENT_INIT_WARM_START, PD10_TEACHER_NONE)
+    warm_dual = _find_default_student(condition_rows, PD10_STUDENT_INIT_WARM_START, PD10_TEACHER_DUAL_VIEW)
+    warm_ce_acc = None if warm_ce is None else _finite_float(warm_ce.get("accuracy"))
+    warm_dual_acc = None if warm_dual is None else _finite_float(warm_dual.get("accuracy"))
+    best_v2_vs_warm_ce = _comparison(best_v2_student, warm_ce)
+    best_v2_vs_warm_dual = _comparison(best_v2_student, warm_dual)
     best_gap = None
     finite_gap_rows = [row for row in gap_rows if _finite_float(row.get("gap_closure_fraction")) is not None]
     if finite_gap_rows:
@@ -971,10 +1451,30 @@ def _answer_summary(
     return {
         "hlt_part_final_test_accuracy": hlt_acc,
         "offline_part_final_test_accuracy": offline_acc,
+        "particle_dual_view_teacher_final_test_accuracy": particle_acc,
         "best_student_variant": None if best_student is None else best_student.get("variant"),
         "best_student_final_test_accuracy": best_student_acc,
         "best_student_delta_vs_hlt_part": None if best_student_acc is None or hlt_acc is None else best_student_acc - hlt_acc,
-        "did_any_student_beat_hlt_part": None if best_student_acc is None or hlt_acc is None else bool(best_student_acc > hlt_acc),
+        "best_accuracy_student_variant": None if best_accuracy_student is None else best_accuracy_student.get("variant"),
+        "best_accuracy_student_final_test_accuracy": best_accuracy_student_acc,
+        "did_any_student_beat_hlt_part": did_any_student_beat_hlt_part,
+        "v2_students_available": bool(v2_students),
+        "best_v2_student_variant": None if best_v2_student is None else best_v2_student.get("variant"),
+        "best_v2_student_final_test_accuracy": best_v2_acc,
+        "best_v2_student_final_test_cross_entropy": best_v2_ce,
+        "best_v2_student_final_test_macro_ovr_auc": best_v2_auc,
+        "best_v2_student_final_test_fpr_at_signal_eff_0p50_macro": best_v2_fpr,
+        "best_v2_delta_vs_hlt_part": None if best_v2_acc is None or hlt_acc is None else best_v2_acc - hlt_acc,
+        "best_v2_delta_vs_warm_start_ce_only": None
+        if best_v2_acc is None or warm_ce_acc is None
+        else best_v2_acc - warm_ce_acc,
+        "best_v2_multimetric_vs_warm_start_ce_only": best_v2_vs_warm_ce,
+        "did_best_v2_beat_warm_start_ce_only": best_v2_vs_warm_ce.get("beats_baseline"),
+        "best_v2_delta_vs_v04_warm_dual_view_kd": None
+        if best_v2_acc is None or warm_dual_acc is None
+        else best_v2_acc - warm_dual_acc,
+        "best_v2_multimetric_vs_v04_warm_dual_view_kd": best_v2_vs_warm_dual,
+        "did_best_v2_beat_v04_warm_dual_view_kd": best_v2_vs_warm_dual.get("beats_baseline"),
         "did_dual_view_kd_beat_hlt_self_kd": {
             str(row.get("student_init")): row.get("beats_baseline") for row in dual_vs_hlt
         },
@@ -1002,8 +1502,11 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
         f"- Overall ok: {report.get('ok')}",
         f"- HLT ParT final-test accuracy: {answers.get('hlt_part_final_test_accuracy')}",
         f"- Offline ParT final-test accuracy: {answers.get('offline_part_final_test_accuracy')}",
+        f"- Particle dual-view teacher final-test accuracy: {answers.get('particle_dual_view_teacher_final_test_accuracy')}",
         f"- Best student: `{answers.get('best_student_variant')}`",
         f"- Best student final-test accuracy: {answers.get('best_student_final_test_accuracy')}",
+        f"- Accuracy-best student: `{answers.get('best_accuracy_student_variant')}`",
+        f"- Accuracy-best student final-test accuracy: {answers.get('best_accuracy_student_final_test_accuracy')}",
         f"- Best student delta vs HLT ParT: {answers.get('best_student_delta_vs_hlt_part')}",
         "",
         "## Answers",
@@ -1019,6 +1522,17 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
             f"at {answers.get('best_fpr_gap_closure_fraction')}"
         ),
         f"- Class-pair improvements available? {answers.get('class_pair_improvements_available')}",
+        "",
+        "## V2",
+        "",
+        f"- V2 students available? {answers.get('v2_students_available')}",
+        f"- Best V2 student: `{answers.get('best_v2_student_variant')}`",
+        f"- Best V2 final-test accuracy: {answers.get('best_v2_student_final_test_accuracy')}",
+        f"- Best V2 delta vs HLT ParT: {answers.get('best_v2_delta_vs_hlt_part')}",
+        f"- Best V2 delta vs warm-start CE-only: {answers.get('best_v2_delta_vs_warm_start_ce_only')}",
+        f"- Best V2 delta vs v0.4 warm dual-view KD: {answers.get('best_v2_delta_vs_v04_warm_dual_view_kd')}",
+        f"- Did best V2 beat warm-start CE-only? {answers.get('did_best_v2_beat_warm_start_ce_only')}",
+        f"- Did best V2 beat v0.4 warm dual-view KD? {answers.get('did_best_v2_beat_v04_warm_dual_view_kd')}",
         "",
         "## Tables",
         "",
@@ -1055,6 +1569,8 @@ def build_pd10_report(config: PD10ReportConfig) -> dict[str, Any]:
     scratch_rows = _init_comparison_rows(student_rows, PD10_STUDENT_INIT_SCRATCH)
     teacher_target_rows = _teacher_target_comparison_rows(student_rows)
     ablation_rows = _topk_confidence_ablation_rows(student_rows)
+    v2_rows = _v2_comparison_rows(teacher_rows, student_rows)
+    v2_diagnostics = _v2_diagnostic_rows(student_rows)
     hlt_part_accuracy = _teacher_final_accuracy(teacher_rows, PD10_TEACHER_HLT)
     offline_part_accuracy = _teacher_final_accuracy(teacher_rows, PD10_TEACHER_OFFLINE)
     hlt_part_fpr_0p50 = _teacher_final_metric(
@@ -1119,6 +1635,8 @@ def build_pd10_report(config: PD10ReportConfig) -> dict[str, Any]:
         "scratch_comparisons": scratch_rows,
         "teacher_target_comparison_rows": teacher_target_rows,
         "topk_confidence_ablation_rows": ablation_rows,
+        "v2_comparison_rows": v2_rows,
+        "v2_diagnostic_rows": v2_diagnostics,
         "binary_projection_rows": binary_rows,
         "gap_closure_rows": gap_rows,
         "calibration_rows": calibration_rows,
@@ -1136,6 +1654,8 @@ def build_pd10_report(config: PD10ReportConfig) -> dict[str, Any]:
     _write_csv(output_dir / PD10_REPORT_TABLES["scratch_comparisons"], scratch_rows)
     _write_csv(output_dir / PD10_REPORT_TABLES["teacher_target_comparison"], teacher_target_rows)
     _write_csv(output_dir / PD10_REPORT_TABLES["topk_confidence_ablations"], ablation_rows)
+    _write_csv(output_dir / PD10_REPORT_TABLES["v2_comparisons"], v2_rows)
+    _write_csv(output_dir / PD10_REPORT_TABLES["v2_diagnostics"], v2_diagnostics)
     _write_csv(output_dir / PD10_REPORT_TABLES["binary_projection_table"], binary_rows)
     _write_csv(output_dir / PD10_REPORT_TABLES["gap_closure_table"], gap_rows)
     _write_csv(output_dir / PD10_REPORT_TABLES["calibration_table"], calibration_rows)

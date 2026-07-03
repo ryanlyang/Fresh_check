@@ -14,20 +14,27 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.privileged_distill_10class import (  # noqa: E402
     PD10_DEFAULT_ALPHA,
+    PD10_DEFAULT_REPRESENTATION_BETA,
     PD10_DEFAULT_TEMPERATURE,
+    PD10_EXTENDED_STUDENT_TARGET_MODES,
+    PD10_EXTENDED_TEACHER_TARGETS,
+    PD10_REPRESENTATION_DIM,
+    PD10_REPRESENTATION_MODE_COSINE,
+    PD10_REPRESENTATION_MODES,
     PD10_SPLIT_SIZES,
     PD10_STUDENT_INIT_MODES,
     PD10_STUDENT_INIT_WARM_START,
-    PD10_STUDENT_TARGET_MODES,
     PD10_TARGET_FULL_LOGITS,
     PD10_TEACHER_HLT,
     PD10_TEACHER_NONE,
-    PD10_TEACHER_TARGETS,
     PD10_TOP_K,
     PD10StudentTrainConfig,
     default_pd10_experiment_layout,
+    normalize_pd10_extended_student_target_mode,
+    normalize_pd10_extended_teacher_target,
     normalize_pd10_student_init_mode,
-    normalize_pd10_teacher_target,
+    pd10_target_mode_uses_logits,
+    pd10_target_mode_uses_representations,
     pd10_student_dir,
     train_pd10_student,
 )
@@ -37,17 +44,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     layout = default_pd10_experiment_layout(output_root="checkpoints")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--student-init", choices=PD10_STUDENT_INIT_MODES, required=True)
-    parser.add_argument("--teacher-target", choices=PD10_TEACHER_TARGETS, required=True)
-    parser.add_argument("--target-mode", choices=PD10_STUDENT_TARGET_MODES, default=PD10_TARGET_FULL_LOGITS)
+    parser.add_argument("--teacher-target", choices=PD10_EXTENDED_TEACHER_TARGETS, required=True)
+    parser.add_argument("--target-mode", choices=PD10_EXTENDED_STUDENT_TARGET_MODES, default=PD10_TARGET_FULL_LOGITS)
     parser.add_argument("--temperature", type=float, default=PD10_DEFAULT_TEMPERATURE)
     parser.add_argument("--kd-alpha", type=float, default=PD10_DEFAULT_ALPHA)
     parser.add_argument("--kd-warmup-epochs", type=int, default=None)
     parser.add_argument("--top-k", type=int, default=PD10_TOP_K)
+    parser.add_argument("--representation-beta", type=float, default=PD10_DEFAULT_REPRESENTATION_BETA)
+    parser.add_argument("--representation-dim", type=int, default=PD10_REPRESENTATION_DIM)
+    parser.add_argument("--representation-mode", choices=PD10_REPRESENTATION_MODES, default=PD10_REPRESENTATION_MODE_COSINE)
     parser.add_argument("--hlt-cache-dir", default=str(layout.hlt_cache_dir))
     parser.add_argument(
         "--teacher-logit-cache",
         default=str(layout.teacher_logits_dir),
         help="Root containing cached teacher logits; ignored for teacher_target=none.",
+    )
+    parser.add_argument(
+        "--teacher-representation-cache",
+        default=str(layout.root / "teacher_representations"),
+        help="Root containing cached teacher representations; used by representation-KD target modes.",
     )
     parser.add_argument(
         "--baseline-checkpoint",
@@ -78,6 +93,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-size", choices=["base", "tiny", "large"], default="base")
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument(
+        "--align-prediction-to-teacher-cache",
+        action="store_true",
+        help=(
+            "Diagnostic mode: align selected model_val/final_test prediction rows to teacher-cache rows, "
+            "then strip teacher fields before inference. Off by default so prediction works from HLT cache only."
+        ),
+    )
+    parser.add_argument(
         "--confirm-final-test",
         action="store_true",
         help="Required before evaluating the selected checkpoint on final_test.",
@@ -94,19 +117,31 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     layout = default_pd10_experiment_layout(output_root="checkpoints")
     student_init = normalize_pd10_student_init_mode(args.student_init)
-    teacher_target = normalize_pd10_teacher_target(args.teacher_target)
+    teacher_target = normalize_pd10_extended_teacher_target(args.teacher_target)
+    target_mode = normalize_pd10_extended_student_target_mode(args.target_mode)
     baseline_checkpoint = args.baseline_checkpoint
     if student_init == PD10_STUDENT_INIT_WARM_START and baseline_checkpoint is None:
         baseline_checkpoint = str(layout.teacher_checkpoint(PD10_TEACHER_HLT))
-    teacher_logit_cache = None if teacher_target == PD10_TEACHER_NONE else args.teacher_logit_cache
+    teacher_logit_cache = (
+        args.teacher_logit_cache
+        if teacher_target != PD10_TEACHER_NONE and pd10_target_mode_uses_logits(target_mode)
+        else None
+    )
+    teacher_representation_cache = (
+        args.teacher_representation_cache
+        if teacher_target != PD10_TEACHER_NONE and pd10_target_mode_uses_representations(target_mode)
+        else None
+    )
     output_dir = args.output_dir or str(
         pd10_student_dir(
             student_init,
             teacher_target,
-            args.target_mode,
+            target_mode,
             temperature=args.temperature,
             kd_alpha=args.kd_alpha,
             top_k=args.top_k,
+            representation_beta=args.representation_beta,
+            representation_mode=args.representation_mode,
             output_root="checkpoints",
         )
     )
@@ -116,12 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         "output_dir": output_dir,
         "hlt_cache_dir": args.hlt_cache_dir,
         "teacher_logit_cache": teacher_logit_cache,
+        "teacher_representation_cache": teacher_representation_cache,
         "baseline_checkpoint": baseline_checkpoint,
-        "target_mode": args.target_mode,
+        "target_mode": target_mode,
         "temperature": args.temperature,
         "kd_alpha": args.kd_alpha,
         "kd_warmup_epochs": args.kd_warmup_epochs,
         "top_k": args.top_k,
+        "representation_beta": args.representation_beta,
+        "representation_dim": args.representation_dim,
+        "representation_mode": args.representation_mode,
         "num_workers": args.num_workers,
         "device": args.device,
         "amp": not args.no_amp,
@@ -135,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_final_test_jets": args.max_final_test_jets,
         "model_size": args.model_size,
         "compile_model": args.compile_model,
+        "align_prediction_to_teacher_cache": bool(args.align_prediction_to_teacher_cache),
         "confirm_final_test": args.confirm_final_test,
         "evaluate_final_test": not args.skip_final_test,
     }
