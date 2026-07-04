@@ -117,6 +117,19 @@ class TinyStudent(require_torch().nn.Module):
         return self.bias.unsqueeze(0).expand(batch_size, -1)
 
 
+class OneBadBatchStudent(TinyStudent):
+    def __init__(self):
+        super().__init__()
+        self.forward_calls = 0
+
+    def forward(self, points, features, lorentz_vectors, mask):
+        logits = super().forward(points, features, lorentz_vectors, mask)
+        self.forward_calls += 1
+        if self.forward_calls == 1:
+            return logits + logits.new_full(logits.shape, float("nan"))
+        return logits
+
+
 class PD10Step7StudentTrainingTests(unittest.TestCase):
     def test_student_config_guardrails_defaults_and_paths_are_fixed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -408,6 +421,43 @@ class PD10Step7StudentTrainingTests(unittest.TestCase):
                 device=torch.device("cpu"),
                 epoch=1,
             )
+
+    def test_run_epoch_skips_nonfinite_train_batch_and_reports_counts(self):
+        torch = require_torch()
+        view = make_hlt_view(labels=(0, 1, 2, 3), split="model_train")
+        dataset = PD10StudentDistillationDataset(view, teacher_target=PD10_TEACHER_NONE)
+        loader = __import__(
+            "teacher_logit_reco.privileged_distill_10class",
+            fromlist=["make_pd10_student_data_loader"],
+        ).make_pd10_student_data_loader(dataset, batch_size=2, shuffle=False, seed=1)
+        model = OneBadBatchStudent()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        config = PD10StudentTrainConfig(
+            student_init="scratch",
+            teacher_target=PD10_TEACHER_NONE,
+            output_dir="out",
+            hlt_cache_dir="hlt_cache",
+            evaluate_final_test=False,
+            amp=False,
+        )
+
+        metrics = run_pd10_student_epoch(
+            model,
+            loader,
+            config=config,
+            device=torch.device("cpu"),
+            epoch=1,
+            optimizer=optimizer,
+        )
+
+        self.assertTrue(np.isfinite(metrics["loss"]))
+        self.assertEqual(metrics["n_jets"], 4)
+        self.assertEqual(metrics["finite_metric_n_jets"], 2)
+        self.assertEqual(metrics["nonfinite_batch_count"], 1)
+        self.assertEqual(metrics["nonfinite_jet_count"], 2)
+        self.assertEqual(metrics["nonfinite_logit_batch_count"], 1)
+        self.assertEqual(metrics["nonfinite_loss_batch_count"], 1)
+        self.assertEqual(metrics["skipped_optimizer_step_count"], 1)
 
     def test_cli_defaults_use_pd10_student_layout_and_canonical_sources(self):
         module = load_script_module()

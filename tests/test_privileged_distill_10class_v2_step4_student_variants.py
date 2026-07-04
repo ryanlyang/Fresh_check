@@ -95,6 +95,7 @@ class TinyStudent(require_torch().nn.Module):
         self.config = {"kind": "tiny_v2_step4_student", "num_classes": PD10_NUM_CLASSES}
 
     def forward(self, points, features, lorentz_vectors, mask):
+        torch = require_torch()
         mask_float = mask.float()
         pooled = (features.float() * mask_float).sum(dim=-1) / torch.clamp(mask_float.sum(dim=-1), min=1.0)
         return self.classifier(pooled)

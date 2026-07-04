@@ -749,6 +749,14 @@ def run_pd10_student_epoch(
     total_teacher_student_representation_cosine_seen = 0
     total_correct = 0
     total_seen = 0
+    finite_metric_seen = 0
+    nonfinite_batch_count = 0
+    nonfinite_jet_count = 0
+    nonfinite_logit_batch_count = 0
+    nonfinite_loss_batch_count = 0
+    skipped_optimizer_step_count = 0
+    empty_hlt_batch_count = 0
+    empty_hlt_jet_count = 0
     effective_alpha = pd10_effective_kd_alpha(config, epoch)
     effective_beta = pd10_effective_representation_beta(config, epoch)
     context = torch.enable_grad() if is_train else torch.no_grad()
@@ -768,6 +776,13 @@ def run_pd10_student_epoch(
                 raise ValueError("student batch unexpectedly includes teacher_representations")
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
+            batch_size = int(batch["labels"].numel())
+            total_seen += batch_size
+            valid_mask = batch["mask"].view(batch_size, -1).any(dim=1)
+            empty_in_batch = int((~valid_mask).sum().detach().cpu().item())
+            if empty_in_batch:
+                empty_hlt_batch_count += 1
+                empty_hlt_jet_count += empty_in_batch
             autocast_enabled = bool(config.amp and device.type == "cuda")
             if autocast_enabled and hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
                 autocast_context = torch.amp.autocast("cuda", enabled=True)
@@ -804,6 +819,25 @@ def run_pd10_student_epoch(
                     representation_mode=config.representation_mode,
                     top_k=config.top_k,
                 )
+            logits_are_finite = bool(torch.isfinite(logits.detach()).all().cpu().item())
+            loss_is_finite = bool(torch.isfinite(loss.detach()).all().cpu().item())
+            scalar_parts_are_finite = all(
+                np.isfinite(float(loss_parts[name]))
+                for name in ("loss", "ce_loss", "kd_loss", "rep_loss")
+                if name in loss_parts
+            )
+            if not logits_are_finite or not loss_is_finite or not scalar_parts_are_finite:
+                nonfinite_batch_count += 1
+                nonfinite_jet_count += batch_size
+                if not logits_are_finite:
+                    nonfinite_logit_batch_count += 1
+                if not loss_is_finite or not scalar_parts_are_finite:
+                    nonfinite_loss_batch_count += 1
+                if is_train:
+                    skipped_optimizer_step_count += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                continue
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
@@ -817,7 +851,6 @@ def run_pd10_student_epoch(
                     if config.grad_clip_norm and config.grad_clip_norm > 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.grad_clip_norm))
                     optimizer.step()
-            batch_size = int(batch["labels"].numel())
             total_loss += float(loss_parts["loss"]) * batch_size
             total_ce += float(loss_parts["ce_loss"]) * batch_size
             total_kd += float(loss_parts["kd_loss"]) * batch_size
@@ -832,27 +865,43 @@ def run_pd10_student_epoch(
                 total_teacher_student_representation_cosine_seen += batch_size
             correct, seen = _accuracy_from_logits(logits.detach(), batch["labels"])
             total_correct += correct
-            total_seen += seen
-    if total_seen == 0:
+            finite_metric_seen += seen
+    if total_seen == 0 or finite_metric_seen == 0:
         return {
             "loss": float("nan"),
             "ce_loss": float("nan"),
             "kd_loss": 0.0,
             "rep_loss": 0.0,
             "accuracy": 0.0,
-            "n_jets": 0,
+            "n_jets": int(total_seen),
+            "finite_metric_n_jets": int(finite_metric_seen),
+            "nonfinite_batch_count": int(nonfinite_batch_count),
+            "nonfinite_jet_count": int(nonfinite_jet_count),
+            "nonfinite_logit_batch_count": int(nonfinite_logit_batch_count),
+            "nonfinite_loss_batch_count": int(nonfinite_loss_batch_count),
+            "skipped_optimizer_step_count": int(skipped_optimizer_step_count),
+            "empty_hlt_batch_count": int(empty_hlt_batch_count),
+            "empty_hlt_jet_count": int(empty_hlt_jet_count),
             "effective_kd_alpha": float(effective_alpha),
             "effective_representation_beta": float(effective_beta),
             "teacher_student_logit_kl": None,
             "teacher_student_representation_cosine": None,
         }
     return {
-        "loss": total_loss / float(total_seen),
-        "ce_loss": total_ce / float(total_seen),
-        "kd_loss": total_kd / float(total_seen),
-        "rep_loss": total_rep / float(total_seen),
-        "accuracy": total_correct / float(total_seen),
+        "loss": total_loss / float(finite_metric_seen),
+        "ce_loss": total_ce / float(finite_metric_seen),
+        "kd_loss": total_kd / float(finite_metric_seen),
+        "rep_loss": total_rep / float(finite_metric_seen),
+        "accuracy": total_correct / float(finite_metric_seen),
         "n_jets": int(total_seen),
+        "finite_metric_n_jets": int(finite_metric_seen),
+        "nonfinite_batch_count": int(nonfinite_batch_count),
+        "nonfinite_jet_count": int(nonfinite_jet_count),
+        "nonfinite_logit_batch_count": int(nonfinite_logit_batch_count),
+        "nonfinite_loss_batch_count": int(nonfinite_loss_batch_count),
+        "skipped_optimizer_step_count": int(skipped_optimizer_step_count),
+        "empty_hlt_batch_count": int(empty_hlt_batch_count),
+        "empty_hlt_jet_count": int(empty_hlt_jet_count),
         "effective_kd_alpha": float(effective_alpha),
         "effective_representation_beta": float(effective_beta),
         "teacher_student_logit_kl": None
