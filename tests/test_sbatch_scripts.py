@@ -156,6 +156,8 @@ SUBMITTERS = [
     "submit_arch_residual_part_qcd_hgg_hlt0p6_500k.sh",
     "submit_architecture_view_part_qcd_hgg_hlt0p6_experiment.sh",
     "submit_architecture_view_10class_experiment.sh",
+    "submit_architecture_view_10class_ablation_experiment.sh",
+    "submit_architecture_view_10class_ablation_pilot_and_highdata.sh",
 ]
 
 
@@ -1686,12 +1688,28 @@ class SbatchStep14Tests(unittest.TestCase):
     def test_architecture_view_10class_ablation_runners_keep_strict_baseline_and_a5_report(self):
         train = self.read("run_train_architecture_view_10class_part.sh")
         report = self.read("run_write_architecture_view_10class_ablation_report.sh")
+        submitter = self.read("submit_architecture_view_10class_ablation_experiment.sh")
+        wrapper = self.read("submit_architecture_view_10class_ablation_pilot_and_highdata.sh")
 
         self.assertIn("ARCHITECTURE_VIEW_10CLASS_REQUIRE_BASELINE_SPLIT_MANIFEST_HASH:=1", train)
         self.assertIn("--require-baseline-split-manifest-hash", train)
         self.assertIn("--allow-missing-baseline-split-manifest-hash", train)
         self.assertIn("av10_lc_mlp_delta_features", report)
         self.assertIn("scripts/write_architecture_view_10class_ablation_report.py", report)
+        self.assertIn("av10_lc_mlp_delta_features", submitter)
+        self.assertIn("av10_context_mlp_control", submitter)
+        self.assertIn("av10_pfn_context_to_part", submitter)
+        self.assertIn("av10_pcnn_context_to_part", submitter)
+        self.assertIn("run_train_heterogeneous_hlt_arch.sh", submitter)
+        self.assertIn("run_fuse_heterogeneous_hlt4.sh", submitter)
+        self.assertIn("run_cache_architecture_view_offline_inputs.sh", submitter)
+        self.assertIn("run_train_architecture_view_10class_offline_part.sh", submitter)
+        self.assertIn("run_write_architecture_view_10class_report.sh", submitter)
+        self.assertIn("run_write_architecture_view_10class_ablation_report.sh", submitter)
+        self.assertIn("av10_architecture_view_core", submitter)
+        self.assertIn("av10_all_ablation", submitter)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_HIGHDATA_MODEL_TRAIN_SIZE:=3000000", wrapper)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_PILOT_MODEL_TRAIN_SIZE:=500000", wrapper)
 
     def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
         runner = self.read("run_local_graph_score_fusion.sh")
