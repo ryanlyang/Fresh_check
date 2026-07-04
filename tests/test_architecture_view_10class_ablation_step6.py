@@ -13,6 +13,7 @@ from teacher_logit_reco.architecture_view_part import (
     ArchitectureViewResidualParT,
     architecture_view_variant_is_runnable,
 )
+from teacher_logit_reco.architecture_view_part.fusion import ArchitectureViewFusionOutput
 from teacher_logit_reco.architecture_view_part.train import _delta_l2_mean_from_output
 from teacher_logit_reco.local_compression_part import LOCAL_COMPRESSION_CANONICAL_FEATURE_NAMES
 
@@ -184,6 +185,53 @@ def test_step6_delta_l2_regularizer_uses_delta_f_for_input_delta_variant():
     assert expected.item() > 0.0
     assert torch.allclose(_delta_l2_mean_from_output(output), expected)
     assert torch.all(output.feature_delta_output.delta_F_rows.abs() <= output.feature_delta_output.feature_delta_scales.view(1, 1, -1) + 1.0e-6)
+
+
+def test_step6_delta_l2_regularizer_handles_trimmed_embedding_delta_masks():
+    class _ViewOutput:
+        pass
+
+    class _Output:
+        feature_delta_output = None
+
+    delta_h = torch.ones((2, 3, 4), dtype=torch.float32)
+    mask = torch.tensor(
+        [
+            [True, True, False, True, True],
+            [True, False, True, True, False],
+        ]
+    )
+    view_output = _ViewOutput()
+    view_output.delta_h = delta_h
+    view_output.mask = mask
+    output = _Output()
+    output.view_output = view_output
+
+    expected = delta_h.square().sum(dim=-1)[mask[:, :3]].mean()
+    assert torch.allclose(_delta_l2_mean_from_output(output), expected)
+
+
+def test_step6_fusion_summary_handles_trimmed_embedding_delta_masks():
+    delta_h = torch.ones((2, 3, 4), dtype=torch.float32)
+    gate = torch.zeros((2, 5, 1), dtype=torch.float32)
+    mask = torch.tensor(
+        [
+            [True, True, False, True, True],
+            [True, False, True, True, False],
+        ]
+    )
+    output = ArchitectureViewFusionOutput(
+        view_embeddings={},
+        combined_view=torch.zeros((2, 5, 0), dtype=torch.float32),
+        delta_h=delta_h,
+        gate=gate,
+        mask=mask,
+    )
+
+    summary = output.summary()
+    assert summary["delta_h_shape"] == [2, 3, 4]
+    assert summary["gate_shape"] == [2, 5, 1]
+    assert summary["mean_delta_h_norm"] > 0.0
 
 
 def test_step6_input_delta_can_freeze_pid_and_geometry_channels():

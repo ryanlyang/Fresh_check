@@ -40,7 +40,7 @@ from .config import (
     enabled_views_for_variant,
     normalize_architecture_view_variant,
 )
-from .fusion import ArchitectureViewFusionOutput, ArchitectureViewParticleViews
+from .fusion import ArchitectureViewFusionOutput, ArchitectureViewParticleViews, align_particle_mask_to_length
 
 try:  # Keep package imports cheap on machines without torch.
     import torch as _torch
@@ -458,10 +458,14 @@ class ArchitectureViewResidualPartOutput:
 
     def diagnostics(self) -> dict[str, Any]:
         delta = self.view_output.delta_h.detach()
-        mask = self.view_output.mask.detach().bool()
+        mask = align_particle_mask_to_length(self.view_output.mask.detach().bool(), int(delta.shape[1]))
         valid = mask.to(dtype=delta.dtype)
         denom = valid.sum().clamp_min(1.0)
         delta_norm = delta.norm(dim=-1)
+        gate_values = self.view_output.gate.squeeze(-1)
+        gate_mask = align_particle_mask_to_length(self.view_output.mask.detach().bool(), int(gate_values.shape[1]))
+        gate_valid = gate_mask.to(dtype=gate_values.dtype)
+        gate_denom = gate_valid.sum().clamp_min(1.0)
         accounting = dict(self.parameter_accounting or {})
         checkpoint = dict(self.baseline_checkpoint_report or {})
         init_diff = dict(self.init_logit_diff_vs_baseline or {})
@@ -480,7 +484,7 @@ class ArchitectureViewResidualPartOutput:
             if bool(mask.any())
             else 0.0,
             "delta_h_norm_max": float(delta_norm[mask].max().detach().cpu().item()) if bool(mask.any()) else 0.0,
-            "gate_mean": float(((self.view_output.gate.squeeze(-1) * valid).sum() / denom).detach().cpu().item()),
+            "gate_mean": float(((gate_values * gate_valid).sum() / gate_denom).detach().cpu().item()),
             "part_model_trainable": bool((accounting.get("trainable_part_params") or 0) > 0),
             "active_adapter_module_count": int(len(self.variant_behavior.get("active_adapter_module_names", [])))
             if isinstance(self.variant_behavior, Mapping)

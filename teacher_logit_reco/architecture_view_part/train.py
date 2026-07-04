@@ -58,6 +58,7 @@ from .model import (
     ArchitectureViewResidualParT,
     build_architecture_view_residual_part,
 )
+from .fusion import align_particle_mask_to_length
 
 
 ARCHITECTURE_VIEW_TRAIN_STEP = "architecture_view_part_step3_train"
@@ -755,6 +756,7 @@ def _delta_l2_mean_from_output(output: Any) -> Any:
     else:
         delta = output.view_output.delta_h
         mask = output.view_output.mask.bool()
+    mask = align_particle_mask_to_length(mask, int(delta.shape[1]))
     if not bool(mask.any()):
         return delta.new_zeros(())
     return delta.square().sum(dim=-1)[mask].mean()

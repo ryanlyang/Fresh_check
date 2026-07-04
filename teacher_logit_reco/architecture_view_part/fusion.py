@@ -31,6 +31,18 @@ else:
 ARCHITECTURE_VIEW_FUSION_CONTRACT = "architecture_view_fusion_gate_v1"
 
 
+def align_particle_mask_to_length(mask: Any, target_particles: int) -> Any:
+    """Return a particle mask with the same sequence length as an adapter tensor."""
+
+    target_particles = int(target_particles)
+    if int(mask.shape[1]) == target_particles:
+        return mask.bool()
+    if int(mask.shape[1]) > target_particles:
+        return mask[:, :target_particles].bool()
+    pad = mask.new_zeros((int(mask.shape[0]), target_particles - int(mask.shape[1])), dtype=mask.dtype)
+    return _torch.cat((mask, pad), dim=1).bool()
+
+
 @dataclass(frozen=True)
 class ArchitectureViewFusionOutput:
     """Fused view tensor and the eventual ParT embedding-space residual."""
@@ -43,14 +55,19 @@ class ArchitectureViewFusionOutput:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
-        valid = self.mask.to(dtype=self.delta_h.dtype)
-        denom = valid.sum().clamp_min(1.0)
         delta_norm = self.delta_h.norm(dim=-1)
-        flat_delta_norm = delta_norm[self.mask.bool()]
+        delta_mask = align_particle_mask_to_length(self.mask, int(delta_norm.shape[1]))
+        delta_valid = delta_mask.to(dtype=self.delta_h.dtype)
+        delta_denom = delta_valid.sum().clamp_min(1.0)
+        flat_delta_norm = delta_norm[delta_mask]
         gate_values = self.gate.squeeze(-1)
-        flat_gate = gate_values[self.mask.bool()]
+        gate_mask = align_particle_mask_to_length(self.mask, int(gate_values.shape[1]))
+        gate_valid = gate_mask.to(dtype=gate_values.dtype)
+        gate_denom = gate_valid.sum().clamp_min(1.0)
+        flat_gate = gate_values[gate_mask]
         combined_norm = self.combined_view.norm(dim=-1) if int(self.combined_view.shape[-1]) else delta_norm.new_zeros(delta_norm.shape)
-        flat_combined_norm = combined_norm[self.mask.bool()]
+        combined_mask = align_particle_mask_to_length(self.mask, int(combined_norm.shape[1]))
+        flat_combined_norm = combined_norm[combined_mask]
         if int(flat_delta_norm.numel()) == 0:
             delta_p90 = delta_norm.new_zeros(())
             delta_max = delta_norm.new_zeros(())
@@ -75,10 +92,10 @@ class ArchitectureViewFusionOutput:
             "combined_view_shape": list(self.combined_view.shape),
             "delta_h_shape": list(self.delta_h.shape),
             "gate_shape": list(self.gate.shape),
-            "mean_delta_h_norm": float(((delta_norm * valid).sum() / denom).detach().cpu().item()),
+            "mean_delta_h_norm": float(((delta_norm * delta_valid).sum() / delta_denom).detach().cpu().item()),
             "delta_h_norm_p90": float(delta_p90.detach().cpu().item()),
             "delta_h_norm_max": float(delta_max.detach().cpu().item()),
-            "mean_gate": float(((self.gate.squeeze(-1) * valid).sum() / denom).detach().cpu().item()),
+            "mean_gate": float(((gate_values * gate_valid).sum() / gate_denom).detach().cpu().item()),
             "gate_p10": float(gate_p10.detach().cpu().item()),
             "gate_p90": float(gate_p90.detach().cpu().item()),
             "adapter_output_norm_mean": float(combined_mean.detach().cpu().item()),
