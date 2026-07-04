@@ -19,10 +19,10 @@ from teacher_logit_reco.subtoken_part.train import SubtokenHLTJetDataset, make_s
 
 from .checkpoint import sha256_file
 from .config import (
+    ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS,
     ARCHITECTURE_VIEW_10CLASS_DEFAULT_VARIANTS,
     ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
-    ARCHITECTURE_VIEW_10CLASS_VARIANTS,
     normalize_architecture_view_variant,
 )
 from .train import (
@@ -362,7 +362,7 @@ class ArchitectureView10ClassPredictionCacheConfig:
         variants = tuple(normalize_architecture_view_variant(variant) for variant in self.variants)
         if not variants:
             raise ValueError("at least one AV10 variant is required")
-        bad = [variant for variant in variants if variant not in ARCHITECTURE_VIEW_10CLASS_VARIANTS]
+        bad = [variant for variant in variants if variant not in ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS]
         if bad:
             raise ValueError(f"prediction cache runner only accepts AV10 variants, got {bad}")
         splits = tuple(str(split) for split in self.splits)

@@ -345,7 +345,14 @@ IFS=$'\n\t'
 : "${PD10_STACK_VAL_SIZE:=10}"
 : "${PD10_FINAL_TEST_SIZE:=1000000}"
 : "${PD10_HLT_SPLITS:=model_train model_val final_test}"
-: "${PD10_HLT_DEGRADATION_STRENGTH:=0.6}"
+if [[ -z "${PD10_HLT_DEGRADATION_STRENGTH:-}" ]]; then
+  case "$(basename "${PD10_ROOT}")" in
+    *hlt0p4*|*hlt0P4*) PD10_HLT_DEGRADATION_STRENGTH=0.4 ;;
+    *hlt0p6*|*hlt0P6*) PD10_HLT_DEGRADATION_STRENGTH=0.6 ;;
+    *) PD10_HLT_DEGRADATION_STRENGTH=0.6 ;;
+  esac
+fi
+export PD10_HLT_DEGRADATION_STRENGTH
 : "${PD10_TEACHER_TARGETS:=hlt offline}"
 : "${PD10_HLT_TEACHER_SEED:=101}"
 : "${PD10_OFFLINE_TEACHER_SEED:=707}"

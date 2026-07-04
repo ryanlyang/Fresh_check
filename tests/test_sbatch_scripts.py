@@ -108,6 +108,7 @@ RUNNERS = [
     "run_cache_architecture_view_10class_predictions.sh",
     "run_architecture_view_10class_fusion.sh",
     "run_write_architecture_view_10class_report.sh",
+    "run_write_architecture_view_10class_ablation_report.sh",
 ]
 
 SUBMITTERS = [
@@ -1668,6 +1669,7 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_MODEL_TRAIN_SIZE:=500000", submitter)
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_MODEL_VAL_SIZE:=150000", submitter)
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_STACK_TRAIN_SIZE:=500000", submitter)
+
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_STACK_VAL_SIZE:=150000", submitter)
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_FINAL_TEST_SIZE:=500000", submitter)
         self.assertIn("LOCAL_COMPRESSION_PART_QCD_HGG_EPOCHS:=45", submitter)
@@ -1680,6 +1682,16 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("local_compression_train: ${#train_job_ids[@]}", submitter)
         self.assertIn('--dependency="afterok:${train_dep}"', submitter)
         self.assertIn("final_report_json", submitter)
+
+    def test_architecture_view_10class_ablation_runners_keep_strict_baseline_and_a5_report(self):
+        train = self.read("run_train_architecture_view_10class_part.sh")
+        report = self.read("run_write_architecture_view_10class_ablation_report.sh")
+
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_REQUIRE_BASELINE_SPLIT_MANIFEST_HASH:=1", train)
+        self.assertIn("--require-baseline-split-manifest-hash", train)
+        self.assertIn("--allow-missing-baseline-split-manifest-hash", train)
+        self.assertIn("av10_lc_mlp_delta_features", report)
+        self.assertIn("scripts/write_architecture_view_10class_ablation_report.py", report)
 
     def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
         runner = self.read("run_local_graph_score_fusion.sh")

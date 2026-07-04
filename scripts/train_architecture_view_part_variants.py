@@ -128,6 +128,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-control-seed", type=int, default=2907)
     parser.add_argument("--delta-l2-weight", type=float, default=1.0e-4)
     parser.add_argument("--freeze-part-epochs", type=int, default=2)
+    parser.add_argument("--input-delta-scale", type=float, default=1.0)
+    parser.add_argument("--disable-feature-wise-input-delta-scales", action="store_true")
+    parser.add_argument("--freeze-input-delta-pid", action="store_true")
+    parser.add_argument("--freeze-input-delta-geometry", action="store_true")
     return parser.parse_args()
 
 
@@ -194,6 +198,10 @@ def _config_for_variant(args: argparse.Namespace, variant: str, output_dir: Path
         random_control_seed=int(args.random_control_seed),
         delta_l2_weight=float(args.delta_l2_weight),
         freeze_part_epochs=int(args.freeze_part_epochs),
+        input_delta_scale=float(args.input_delta_scale),
+        use_feature_wise_input_delta_scales=not bool(args.disable_feature_wise_input_delta_scales),
+        freeze_input_delta_pid=bool(args.freeze_input_delta_pid),
+        freeze_input_delta_geometry=bool(args.freeze_input_delta_geometry),
     )
 
 

@@ -46,6 +46,29 @@ class ArchitectureViewFusionOutput:
         valid = self.mask.to(dtype=self.delta_h.dtype)
         denom = valid.sum().clamp_min(1.0)
         delta_norm = self.delta_h.norm(dim=-1)
+        flat_delta_norm = delta_norm[self.mask.bool()]
+        gate_values = self.gate.squeeze(-1)
+        flat_gate = gate_values[self.mask.bool()]
+        combined_norm = self.combined_view.norm(dim=-1) if int(self.combined_view.shape[-1]) else delta_norm.new_zeros(delta_norm.shape)
+        flat_combined_norm = combined_norm[self.mask.bool()]
+        if int(flat_delta_norm.numel()) == 0:
+            delta_p90 = delta_norm.new_zeros(())
+            delta_max = delta_norm.new_zeros(())
+        else:
+            delta_p90 = _torch.quantile(flat_delta_norm.float(), 0.90)
+            delta_max = flat_delta_norm.max()
+        if int(flat_gate.numel()) == 0:
+            gate_p10 = gate_values.new_zeros(())
+            gate_p90 = gate_values.new_zeros(())
+        else:
+            gate_p10 = _torch.quantile(flat_gate.float(), 0.10)
+            gate_p90 = _torch.quantile(flat_gate.float(), 0.90)
+        if int(flat_combined_norm.numel()) == 0:
+            combined_mean = combined_norm.new_zeros(())
+            combined_p90 = combined_norm.new_zeros(())
+        else:
+            combined_mean = flat_combined_norm.mean()
+            combined_p90 = _torch.quantile(flat_combined_norm.float(), 0.90)
         return {
             "contract": ARCHITECTURE_VIEW_FUSION_CONTRACT,
             "view_names": list(self.view_embeddings),
@@ -53,7 +76,13 @@ class ArchitectureViewFusionOutput:
             "delta_h_shape": list(self.delta_h.shape),
             "gate_shape": list(self.gate.shape),
             "mean_delta_h_norm": float(((delta_norm * valid).sum() / denom).detach().cpu().item()),
+            "delta_h_norm_p90": float(delta_p90.detach().cpu().item()),
+            "delta_h_norm_max": float(delta_max.detach().cpu().item()),
             "mean_gate": float(((self.gate.squeeze(-1) * valid).sum() / denom).detach().cpu().item()),
+            "gate_p10": float(gate_p10.detach().cpu().item()),
+            "gate_p90": float(gate_p90.detach().cpu().item()),
+            "adapter_output_norm_mean": float(combined_mean.detach().cpu().item()),
+            "adapter_output_norm_p90": float(combined_p90.detach().cpu().item()),
             **self.diagnostics,
         }
 

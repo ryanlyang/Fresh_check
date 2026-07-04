@@ -378,6 +378,7 @@ class PD10StudentTrainConfig:
     confirm_final_test: bool = False
     evaluate_final_test: bool = True
     align_prediction_to_teacher_cache: bool = False
+    overwrite: bool = False
 
     def __post_init__(self) -> None:
         init = normalize_pd10_student_init_mode(self.student_init)
@@ -986,7 +987,7 @@ def collect_and_save_pd10_student_predictions(
         max_batches=max_batches,
     )
     prediction_dir = pd10_student_prediction_dir(config.output_dir)
-    metadata = save_prediction_block(block, prediction_dir)
+    metadata = save_prediction_block(block, prediction_dir, overwrite=bool(config.overwrite))
     metrics = pd10_prediction_metrics_from_logits(
         block.logits,
         block.labels,
@@ -1215,7 +1216,7 @@ def train_pd10_student(
     set_training_seed(config.seed)
     device = resolve_device(config.device)
     output_dir = Path(config.output_dir)
-    if config.checkpoint_path.exists():
+    if config.checkpoint_path.exists() and not config.overwrite:
         raise FileExistsError(f"PD10 student checkpoint already exists: {config.checkpoint_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
 

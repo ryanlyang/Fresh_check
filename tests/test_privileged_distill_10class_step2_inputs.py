@@ -195,7 +195,10 @@ class PD10Step2InputTests(unittest.TestCase):
         self.assertIn("PD10_STACK_VAL_SIZE:=10", common)
         self.assertIn("PD10_FINAL_TEST_SIZE:=1000000", common)
         self.assertIn("PD10_HLT_SPLITS:=model_train model_val final_test", common)
-        self.assertIn("PD10_HLT_DEGRADATION_STRENGTH:=0.6", common)
+        self.assertIn("*hlt0p4*|*hlt0P4*) PD10_HLT_DEGRADATION_STRENGTH=0.4", common)
+        self.assertIn("*hlt0p6*|*hlt0P6*) PD10_HLT_DEGRADATION_STRENGTH=0.6", common)
+        self.assertIn("*) PD10_HLT_DEGRADATION_STRENGTH=0.6", common)
+        self.assertIn("export PD10_HLT_DEGRADATION_STRENGTH", common)
 
         self.assertIn("scripts/build_jetclass_splits.py", split)
         self.assertIn("--data-dir \"${PD10_DATA_DIR}\"", split)

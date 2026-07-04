@@ -139,6 +139,7 @@ class PD10Step7StudentTrainingTests(unittest.TestCase):
             self.assertEqual(ce.seed, PD10_STUDENT_DEFAULT_SEED)
             self.assertEqual(ce.variant_name, "pd10_student_scratch_ce_only")
             self.assertEqual(ce.checkpoint_path, root / "ce" / "best_model_val.pt")
+            self.assertFalse(ce.overwrite)
 
             warm = PD10StudentTrainConfig(
                 student_init="warm_start",
@@ -257,6 +258,20 @@ class PD10Step7StudentTrainingTests(unittest.TestCase):
             target_mode=PD10_TARGET_CONFIDENCE_WEIGHTED,
         )
         self.assertAlmostEqual(float(weighted.item()), 0.0, places=7)
+
+    def test_train_script_accepts_overwrite_flag(self):
+        script = load_script_module()
+        args = script.parse_args(
+            [
+                "--student-init",
+                "scratch",
+                "--teacher-target",
+                "none",
+                "--skip-final-test",
+                "--overwrite",
+            ]
+        )
+        self.assertTrue(args.overwrite)
 
     def test_training_runner_writes_student_reports_and_preserves_hlt_only_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

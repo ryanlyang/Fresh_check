@@ -24,8 +24,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--manifest-path", required=True)
-    parser.add_argument("--hlt-cache-dir", required=True)
-    parser.add_argument("--baseline-checkpoint", required=True)
+    parser.add_argument("--hlt-cache-dir", default="")
+    parser.add_argument("--offline-cache-dir", default="")
+    parser.add_argument("--baseline-checkpoint", default="")
+    parser.add_argument("--input-source", choices=("hlt", "offline"), default=None)
 
     parser.add_argument("--label-names", nargs="+", default=("QCD", "Hgg"))
     parser.add_argument("--label-filter-names", nargs="+", default=("QCD", "Hgg"))
@@ -95,6 +97,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-control-seed", type=int, default=2907)
     parser.add_argument("--delta-l2-weight", type=float, default=1.0e-4)
     parser.add_argument("--freeze-part-epochs", type=int, default=2)
+    parser.add_argument("--input-delta-scale", type=float, default=1.0)
+    parser.add_argument("--disable-feature-wise-input-delta-scales", action="store_true")
+    parser.add_argument("--freeze-input-delta-pid", action="store_true")
+    parser.add_argument("--freeze-input-delta-geometry", action="store_true")
     return parser.parse_args()
 
 
@@ -111,6 +117,8 @@ def main() -> int:
         manifest_path=args.manifest_path,
         hlt_cache_dir=args.hlt_cache_dir,
         baseline_checkpoint=args.baseline_checkpoint,
+        input_source=args.input_source,
+        offline_cache_dir=args.offline_cache_dir,
         train_split=args.train_split,
         val_split=args.val_split,
         stack_val_split=args.stack_val_split,
@@ -162,12 +170,17 @@ def main() -> int:
         random_control_seed=args.random_control_seed,
         delta_l2_weight=args.delta_l2_weight,
         freeze_part_epochs=args.freeze_part_epochs,
+        input_delta_scale=args.input_delta_scale,
+        use_feature_wise_input_delta_scales=not bool(args.disable_feature_wise_input_delta_scales),
+        freeze_input_delta_pid=bool(args.freeze_input_delta_pid),
+        freeze_input_delta_geometry=bool(args.freeze_input_delta_geometry),
     )
     report = train_architecture_view_tagger(config)
     print("architecture_view_part_tagger_training_complete:")
     print(f"  output_dir: {args.output_dir}")
     print(f"  output_contract: {report['output_contract']}")
     print(f"  variant: {report['variant']}")
+    print(f"  input_source: {report.get('input_source')}")
     print(f"  best_epoch: {report['best_epoch']}")
     print(f"  selection_metric: {report['selection_metric']}")
     print(f"  best_model_selection_metric_value: {report['best_model_selection_metric_value']:.8g}")

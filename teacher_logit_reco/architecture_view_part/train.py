@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import csv
+import json
 from pathlib import Path
 import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json, set_training_seed
-from jetclass_fresh.hlt_cache import load_cached_hlt_view
-from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM
+from jetclass_fresh.hlt_baseline import build_hlt_classifier, require_torch, resolve_device, save_json, set_training_seed
+from jetclass_fresh.hlt_cache import hash_arrays, jet_identity_hash, load_cached_hlt_view
+from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM, JetIdentity, JetView
 
 from teacher_logit_reco.local_compression_part.train import (
     _manifest_metadata,
@@ -44,9 +45,10 @@ from .config import (
     ARCHITECTURE_VIEW_LABEL_NAMES,
     ARCHITECTURE_VIEW_PART_CONTRACT,
     ARCHITECTURE_VIEW_PRIMARY_METRIC,
-    ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
     ArchitectureViewConfig,
-    architecture_view_effective_variant,
+    architecture_view_variant_is_baseline_recheck,
+    architecture_view_variant_is_runnable,
+    architecture_view_variant_spec,
     architecture_view_variant_num_classes,
     normalize_architecture_view_variant,
 )
@@ -82,6 +84,8 @@ ARCHITECTURE_VIEW_BINARY_ONLY_SELECTION_METRICS = {
     "background_rejection_at_signal_eff_0p30",
     "background_rejection_at_signal_eff_0p50",
 }
+ARCHITECTURE_VIEW_OFFLINE_ARRAY_FILENAME = "{split}_offline.npz"
+ARCHITECTURE_VIEW_OFFLINE_METADATA_FILENAME = "{split}_offline_metadata.json"
 
 
 def architecture_view_selection_metric_direction(metric_name: str) -> str:
@@ -206,7 +210,9 @@ class ArchitectureViewTaggerTrainConfig:
     output_dir: str
     manifest_path: str
     hlt_cache_dir: str
-    baseline_checkpoint: str
+    baseline_checkpoint: str = ""
+    input_source: str | None = None
+    offline_cache_dir: str | None = None
     train_split: str = "model_train"
     val_split: str = "model_val"
     stack_val_split: str = "stack_val"
@@ -258,14 +264,17 @@ class ArchitectureViewTaggerTrainConfig:
     random_control_seed: int = 2907
     delta_l2_weight: float = 1.0e-4
     freeze_part_epochs: int = 2
+    input_delta_scale: float = 1.0
+    use_feature_wise_input_delta_scales: bool = True
+    freeze_input_delta_pid: bool = False
+    freeze_input_delta_geometry: bool = False
 
     def __post_init__(self) -> None:
         self.output_dir = str(self.output_dir)
         self.manifest_path = str(self.manifest_path)
         self.hlt_cache_dir = str(self.hlt_cache_dir)
-        self.baseline_checkpoint = str(self.baseline_checkpoint)
-        if not self.baseline_checkpoint:
-            raise ValueError("baseline_checkpoint is required for architecture-view training")
+        self.baseline_checkpoint = "" if self.baseline_checkpoint is None else str(self.baseline_checkpoint)
+        self.offline_cache_dir = "" if self.offline_cache_dir is None else str(self.offline_cache_dir)
         for split_field, expected in (
             ("train_split", "model_train"),
             ("val_split", "model_val"),
@@ -283,6 +292,37 @@ class ArchitectureViewTaggerTrainConfig:
         self.variant = normalize_architecture_view_variant(self.variant)
         if self.variant not in ARCHITECTURE_VIEW_ALL_VARIANTS:
             raise ValueError(f"unknown architecture-view variant {self.variant!r}")
+        if not architecture_view_variant_is_runnable(self.variant):
+            spec = architecture_view_variant_spec(self.variant)
+            raise ValueError(
+                f"architecture-view variant {self.variant!r} is registered for {spec.implementation_step} "
+                "but is not runnable yet"
+            )
+        variant_spec = architecture_view_variant_spec(self.variant)
+        if self.input_source is None:
+            self.input_source = str(variant_spec.input_source)
+        else:
+            self.input_source = str(self.input_source).strip().lower()
+        if self.input_source not in ("hlt", "offline"):
+            raise ValueError("input_source must be 'hlt' or 'offline'")
+        if self.input_source != str(variant_spec.input_source):
+            raise ValueError(
+                f"variant {self.variant!r} is registered for input_source={variant_spec.input_source!r}, "
+                f"got {self.input_source!r}"
+            )
+        if self.input_source == "hlt":
+            if not self.hlt_cache_dir:
+                raise ValueError("hlt_cache_dir is required for HLT architecture-view training")
+            if not self.baseline_checkpoint:
+                raise ValueError("baseline_checkpoint is required for HLT architecture-view training")
+        else:
+            if not (self.offline_cache_dir or self.hlt_cache_dir):
+                raise ValueError("offline_cache_dir is required for offline architecture-view training")
+            if variant_spec.adapter_type != "none" and not self.baseline_checkpoint:
+                raise ValueError(
+                    "baseline_checkpoint is required for offline adapter variants; "
+                    "train av10_offline_part_baseline first and pass its best_model_val.pt"
+                )
         for field_name in (
             "batch_size",
             "eval_batch_size",
@@ -394,10 +434,26 @@ class ArchitectureViewTaggerTrainConfig:
         self.random_control_seed = int(self.random_control_seed)
         self.gate_bias_init = float(self.gate_bias_init)
         self.expected_hlt_degradation_strength = float(self.expected_hlt_degradation_strength)
+        self.input_delta_scale = float(self.input_delta_scale)
+        if self.input_delta_scale < 0.0:
+            raise ValueError("input_delta_scale must be non-negative")
+        self.use_feature_wise_input_delta_scales = bool(self.use_feature_wise_input_delta_scales)
+        self.freeze_input_delta_pid = bool(self.freeze_input_delta_pid)
+        self.freeze_input_delta_geometry = bool(self.freeze_input_delta_geometry)
 
     @property
     def resolved_num_classes(self) -> int:
         return int(self.num_classes or len(self.label_filter))
+
+    @property
+    def resolved_input_source(self) -> str:
+        return str(self.input_source or architecture_view_variant_spec(self.variant).input_source)
+
+    @property
+    def resolved_input_cache_dir(self) -> str:
+        if self.resolved_input_source == "offline":
+            return str(self.offline_cache_dir or self.hlt_cache_dir)
+        return str(self.hlt_cache_dir)
 
     def model_config(self) -> ArchitectureViewConfig:
         return ArchitectureViewConfig(
@@ -415,6 +471,10 @@ class ArchitectureViewTaggerTrainConfig:
             attention_dropout=float(self.attention_dropout),
             gate_bias_init=float(self.gate_bias_init),
             random_control_seed=int(self.random_control_seed),
+            input_delta_scale=float(self.input_delta_scale),
+            use_feature_wise_input_delta_scales=bool(self.use_feature_wise_input_delta_scales),
+            freeze_input_delta_pid=bool(self.freeze_input_delta_pid),
+            freeze_input_delta_geometry=bool(self.freeze_input_delta_geometry),
         )
 
 
@@ -427,20 +487,239 @@ def _move_batch_to_device(batch: Mapping[str, Any], device) -> dict[str, Any]:
     return moved
 
 
-def _load_dataset(config: ArchitectureViewTaggerTrainConfig, split: str, *, max_jets: int | None) -> SubtokenHLTJetDataset:
-    view = load_cached_hlt_view(config.hlt_cache_dir, split, verify_hash=bool(config.verify_hlt_hash))
-    audit = _verify_hlt_params(
-        view.metadata,
-        split=split,
-        expected_strength=float(config.expected_hlt_degradation_strength),
-        required=bool(config.verify_hlt_params),
+class ArchitectureViewJetDataset:
+    """Dataset over cached HLT or offline raw tokens for architecture-view training."""
+
+    def __init__(
+        self,
+        view: JetView,
+        *,
+        label_filter: Sequence[int],
+        label_names: Sequence[str],
+        max_jets: int | None = None,
+        expected_input_source: str = "hlt",
+    ) -> None:
+        expected_input_source = str(expected_input_source)
+        expected_view = "offline" if expected_input_source == "offline" else "fixed_hlt"
+        if view.metadata.get("view") not in (None, expected_view):
+            raise ValueError(f"Expected {expected_view} cached view, got {view.metadata.get('view')!r}")
+        labels = np.asarray(view.labels, dtype=np.int64)
+        label_filter = tuple(int(label) for label in label_filter)
+        label_names = tuple(str(name) for name in label_names)
+        if len(label_filter) != len(label_names):
+            raise ValueError("label_filter and label_names must have the same length")
+        keep = np.isin(labels, np.asarray(label_filter, dtype=np.int64))
+        if not np.all(keep):
+            labels = labels[keep]
+            tokens = np.asarray(view.tokens, dtype=np.float32)[keep]
+            mask = np.asarray(view.mask, dtype=bool)[keep]
+            jet_ids = [jet_id for jet_id, should_keep in zip(view.jet_ids, keep) if bool(should_keep)]
+        else:
+            tokens = np.asarray(view.tokens, dtype=np.float32)
+            mask = np.asarray(view.mask, dtype=bool)
+            jet_ids = list(view.jet_ids)
+        remap = {source_label: index for index, source_label in enumerate(label_filter)}
+        remapped = np.asarray([remap[int(label)] for label in labels], dtype=np.int64)
+        if max_jets is not None:
+            limit = min(int(max_jets), int(remapped.shape[0]))
+            tokens = tokens[:limit]
+            mask = mask[:limit]
+            remapped = remapped[:limit]
+            jet_ids = jet_ids[:limit]
+        self.tokens = np.asarray(tokens, dtype=np.float32)
+        self.mask = np.asarray(mask, dtype=bool)
+        self.labels = remapped
+        self.jet_ids = jet_ids
+        self.split = view.split
+        self.label_names = label_names
+        self.label_filter = label_filter
+        self.metadata = {
+            "split": view.split,
+            "input_source": expected_input_source,
+            "source_view": expected_view,
+            "n_jets": int(remapped.shape[0]),
+            "raw_token_dim": int(self.tokens.shape[-1]),
+            "max_constits": int(self.tokens.shape[1]),
+            "label_filter": list(label_filter),
+            "label_names": list(label_names),
+            "label_counts": self.label_counts(),
+            "max_jets_limit": None if max_jets is None else int(max_jets),
+            "hlt_content_hash": view.metadata.get("hlt_content_hash"),
+            "offline_content_hash": view.metadata.get("offline_content_hash"),
+            "jet_identity_hash": view.metadata.get("jet_identity_hash"),
+            "hlt_params": view.metadata.get("hlt_params"),
+            "hlt_seed": view.metadata.get("seed"),
+            "source_manifest_hash": view.metadata.get("source_manifest_hash"),
+        }
+
+    def __len__(self) -> int:
+        return int(self.labels.shape[0])
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return {
+            "tokens": self.tokens[index],
+            "mask": self.mask[index],
+            "labels": self.labels[index],
+            "indices": np.int64(index),
+        }
+
+    def label_counts(self) -> dict[str, int]:
+        return {
+            self.label_names[index]: int(np.sum(self.labels == index))
+            for index in range(len(self.label_names))
+        }
+
+
+def _offline_cache_paths(cache_dir: str | Path, split: str) -> tuple[Path, Path]:
+    root = Path(cache_dir)
+    return (
+        root / ARCHITECTURE_VIEW_OFFLINE_ARRAY_FILENAME.format(split=split),
+        root / ARCHITECTURE_VIEW_OFFLINE_METADATA_FILENAME.format(split=split),
     )
-    dataset = SubtokenHLTJetDataset(
+
+
+def load_cached_offline_view(
+    cache_dir: str | Path,
+    split: str,
+    *,
+    verify_hash: bool = True,
+) -> JetView:
+    """Load one cached offline raw-token split as a JetView."""
+
+    array_path, metadata_path = _offline_cache_paths(cache_dir, split)
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    with np.load(array_path, allow_pickle=False) as data:
+        tokens = data["tokens"].astype(np.float32, copy=False)
+        mask = data["mask"].astype(bool, copy=False)
+        labels = data["labels"].astype(np.int64, copy=False)
+        file_indices = data["jet_file_indices"].astype(np.int64, copy=False)
+        entries = data["jet_entries"].astype(np.int64, copy=False)
+
+    jet_files = [str(path) for path in metadata["jet_files"]]
+    jet_ids = [
+        JetIdentity(file=jet_files[int(file_index)], entry=int(entry), label=int(label))
+        for file_index, entry, label in zip(file_indices, entries, labels)
+    ]
+
+    if verify_hash:
+        actual_content_hash = hash_arrays(
+            {
+                "tokens": tokens,
+                "mask": mask,
+                "labels": labels,
+                "jet_file_indices": file_indices.astype(np.int32),
+                "jet_entries": entries,
+            }
+        )
+        expected_content_hash = metadata.get("offline_content_hash") or metadata.get("content_hash")
+        if expected_content_hash and actual_content_hash != expected_content_hash:
+            raise ValueError(
+                f"offline cache content hash mismatch for {split}: "
+                f"{actual_content_hash} != {expected_content_hash}"
+            )
+        actual_identity_hash = jet_identity_hash(jet_ids)
+        expected_identity_hash = metadata.get("jet_identity_hash")
+        if expected_identity_hash and actual_identity_hash != expected_identity_hash:
+            raise ValueError(
+                f"offline cache identity hash mismatch for {split}: "
+                f"{actual_identity_hash} != {expected_identity_hash}"
+            )
+
+    return JetView(
+        tokens=tokens,
+        mask=mask,
+        labels=labels,
+        jet_ids=jet_ids,
+        split=split,
+        metadata={
+            **metadata,
+            "view": "offline",
+            "input_source": "offline",
+            "offline_content_hash": metadata.get("offline_content_hash") or metadata.get("content_hash"),
+        },
+    )
+
+
+def save_cached_offline_view(view: JetView, cache_dir: str | Path, *, overwrite: bool = False) -> dict[str, Any]:
+    """Persist one offline JetView using the Step 4 offline-transfer cache contract."""
+
+    array_path, metadata_path = _offline_cache_paths(cache_dir, view.split)
+    array_path.parent.mkdir(parents=True, exist_ok=True)
+    if not overwrite and (array_path.exists() or metadata_path.exists()):
+        raise FileExistsError(f"offline cache already exists for split {view.split!r}: {array_path}")
+    jet_files: list[str] = []
+    file_to_index: dict[str, int] = {}
+    file_indices: list[int] = []
+    entries: list[int] = []
+    for identity in view.jet_ids:
+        file_name = str(identity.file)
+        if file_name not in file_to_index:
+            file_to_index[file_name] = len(jet_files)
+            jet_files.append(file_name)
+        file_indices.append(file_to_index[file_name])
+        entries.append(int(identity.entry))
+    arrays = {
+        "tokens": np.asarray(view.tokens, dtype=np.float32),
+        "mask": np.asarray(view.mask, dtype=bool),
+        "labels": np.asarray(view.labels, dtype=np.int64),
+        "jet_file_indices": np.asarray(file_indices, dtype=np.int32),
+        "jet_entries": np.asarray(entries, dtype=np.int64),
+    }
+    np.savez_compressed(array_path, **arrays)
+    content_hash = hash_arrays(arrays)
+    identity_hash = jet_identity_hash(view.jet_ids)
+    metadata = {
+        **dict(view.metadata),
+        "view": "offline",
+        "input_source": "offline",
+        "split": str(view.split),
+        "jet_files": jet_files,
+        "offline_content_hash": content_hash,
+        "jet_identity_hash": identity_hash,
+        "n_jets": int(view.tokens.shape[0]),
+        "max_constits": int(view.tokens.shape[1]),
+        "raw_token_dim": int(view.tokens.shape[2]),
+        "cache_contract": "architecture_view_10class_offline_transfer_cache_v1",
+        "array_path": str(array_path),
+        "metadata_path": str(metadata_path),
+    }
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return metadata
+
+
+def _load_dataset(config: ArchitectureViewTaggerTrainConfig, split: str, *, max_jets: int | None) -> ArchitectureViewJetDataset:
+    if config.resolved_input_source == "offline":
+        view = load_cached_offline_view(
+            config.resolved_input_cache_dir,
+            split,
+            verify_hash=bool(config.verify_hlt_hash),
+        )
+        audit = {
+            "ok": True,
+            "split": str(split),
+            "input_source": "offline",
+            "hlt_degradation_strength": None,
+            "note": "offline transfer run consumes cached offline raw tokens, not fixed-HLT tokens",
+        }
+    else:
+        view = load_cached_hlt_view(config.hlt_cache_dir, split, verify_hash=bool(config.verify_hlt_hash))
+        audit = _verify_hlt_params(
+            view.metadata,
+            split=split,
+            expected_strength=float(config.expected_hlt_degradation_strength),
+            required=bool(config.verify_hlt_params),
+        )
+    dataset = ArchitectureViewJetDataset(
         view,
         label_filter=tuple(config.label_filter),
         label_names=tuple(config.label_names),
         max_jets=max_jets,
+        expected_input_source=str(config.resolved_input_source),
     )
+    dataset.metadata["input_source"] = str(config.resolved_input_source)
     dataset.metadata["hlt_protocol_audit"] = audit
     return dataset
 
@@ -470,8 +749,12 @@ def _flatten_scalar_diagnostics(diagnostics: Mapping[str, Any], *, prefix: str =
 
 def _delta_l2_mean_from_output(output: Any) -> Any:
     torch = require_torch()
-    delta = output.view_output.delta_h
-    mask = output.view_output.mask.bool()
+    if getattr(output, "feature_delta_output", None) is not None:
+        delta = output.feature_delta_output.delta_F_rows
+        mask = output.feature_delta_output.mask.bool()
+    else:
+        delta = output.view_output.delta_h
+        mask = output.view_output.mask.bool()
     if not bool(mask.any()):
         return delta.new_zeros(())
     return delta.square().sum(dim=-1)[mask].mean()
@@ -525,12 +808,13 @@ def _set_part_model_trainable(model: ArchitectureViewResidualParT, trainable: bo
     for parameter in model.part_model.parameters():
         parameter.requires_grad_(bool(trainable))
     model.part_model.train(bool(trainable))
+    setattr(model, "_force_part_model_eval", not bool(trainable))
 
 
 def _optimizer_for_model(model: ArchitectureViewResidualParT, config: ArchitectureViewTaggerTrainConfig):
     torch = require_torch()
     adapter_params: list[Any] = []
-    for module in (model.view_module, model.context_control, model.context_control_gate):
+    for module in model.adapter_modules():
         adapter_params.extend([param for param in module.parameters() if param.requires_grad])
     part_params = [param for param in model.part_model.parameters() if param.requires_grad]
     groups = []
@@ -541,6 +825,56 @@ def _optimizer_for_model(model: ArchitectureViewResidualParT, config: Architectu
     if not groups:
         return None
     return torch.optim.AdamW(groups, weight_decay=float(config.weight_decay))
+
+
+def _unwrap_compiled_model(model: Any) -> Any:
+    return getattr(model, "_orig_mod", model)
+
+
+def _grad_sq_sum_for_parameters(parameters: Sequence[Any]) -> Any | None:
+    total = None
+    for parameter in parameters:
+        grad = getattr(parameter, "grad", None)
+        if grad is None:
+            continue
+        term = grad.detach().float().square().sum()
+        total = term if total is None else total + term
+    return total
+
+
+def _sqrt_item(value: Any | None) -> float:
+    if value is None:
+        return 0.0
+    return float(value.clamp_min(0.0).sqrt().detach().cpu().item())
+
+
+def _gradient_norm_diagnostics(model: Any) -> dict[str, float]:
+    base_model = _unwrap_compiled_model(model)
+    if not hasattr(base_model, "part_model"):
+        return {}
+    part_params = [parameter for parameter in base_model.part_model.parameters() if parameter.requires_grad]
+    adapter_params: list[Any] = []
+    if hasattr(base_model, "adapter_modules"):
+        for module in base_model.adapter_modules(active_only=True):
+            adapter_params.extend([parameter for parameter in module.parameters() if parameter.requires_grad])
+    part_head_params: list[Any] = []
+    if hasattr(base_model, "_part_head_parameter_modules"):
+        for module in base_model._part_head_parameter_modules():
+            part_head_params.extend([parameter for parameter in module.parameters() if parameter.requires_grad])
+    part_sq = _grad_sq_sum_for_parameters(part_params)
+    adapter_sq = _grad_sq_sum_for_parameters(adapter_params)
+    part_head_sq = _grad_sq_sum_for_parameters(part_head_params)
+    total_sq = None
+    for value in (part_sq, adapter_sq):
+        if value is None:
+            continue
+        total_sq = value if total_sq is None else total_sq + value
+    return {
+        "grad_norm.part": _sqrt_item(part_sq),
+        "grad_norm.active_adapter": _sqrt_item(adapter_sq),
+        "grad_norm.part_head": _sqrt_item(part_head_sq),
+        "grad_norm.total_trainable": _sqrt_item(total_sq),
+    }
 
 
 def run_architecture_view_tagger_epoch(
@@ -562,6 +896,8 @@ def run_architecture_view_tagger_epoch(
     torch = require_torch()
     training = optimizer is not None
     model.train(training)
+    if bool(getattr(model, "_force_part_model_eval", False)):
+        model.part_model.eval()
     total_loss = 0.0
     total_ce_loss = 0.0
     total_delta_l2_loss = 0.0
@@ -573,6 +909,8 @@ def run_architecture_view_tagger_epoch(
     collected_logits: list[np.ndarray] = []
     diagnostic_totals: dict[str, float] = {}
     diagnostic_weight_sum = 0.0
+    gradient_norm_totals: dict[str, float] = {}
+    gradient_norm_weight_sum = 0.0
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
         for batch_index, batch in enumerate(loader):
@@ -580,6 +918,7 @@ def run_architecture_view_tagger_epoch(
                 break
             batch = _move_batch_to_device(batch, device)
             labels = batch["labels"]
+            batch_size = int(labels.numel())
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=bool(amp and device.type == "cuda")):
@@ -593,23 +932,34 @@ def run_architecture_view_tagger_epoch(
                 logits = output.logits if need_output else output
                 ce_loss = criterion(logits, labels)
                 delta_l2_mean = _delta_l2_mean_from_output(output) if need_output else logits.new_zeros(())
-                delta_l2_loss = delta_l2_mean * float(delta_l2_weight)
+                applies_delta_l2 = bool(
+                    need_output and getattr(output, "feature_delta_output", None) is not None
+                )
+                applied_delta_l2_weight = float(delta_l2_weight) if applies_delta_l2 else 0.0
+                delta_l2_loss = delta_l2_mean * applied_delta_l2_weight
                 loss = ce_loss + delta_l2_loss
             if training:
                 if scaler is not None and bool(scaler.is_enabled()):
                     scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    grad_norms = _gradient_norm_diagnostics(model)
+                    for key, value in grad_norms.items():
+                        gradient_norm_totals[key] = gradient_norm_totals.get(key, 0.0) + float(value) * batch_size
+                    gradient_norm_weight_sum += float(batch_size)
                     if float(grad_clip_norm) > 0.0:
-                        scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
+                    grad_norms = _gradient_norm_diagnostics(model)
+                    for key, value in grad_norms.items():
+                        gradient_norm_totals[key] = gradient_norm_totals.get(key, 0.0) + float(value) * batch_size
+                    gradient_norm_weight_sum += float(batch_size)
                     if float(grad_clip_norm) > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                     optimizer.step()
             preds = logits.detach().argmax(dim=1)
-            batch_size = int(labels.numel())
             total_loss += float(loss.detach().item()) * batch_size
             total_ce_loss += float(ce_loss.detach().item()) * batch_size
             total_delta_l2_loss += float(delta_l2_loss.detach().item()) * batch_size
@@ -639,6 +989,7 @@ def run_architecture_view_tagger_epoch(
         "delta_l2_loss": total_delta_l2_loss / float(total_seen),
         "delta_l2_mean": total_delta_l2_mean / float(total_seen),
         "delta_l2_weight": float(delta_l2_weight),
+        "delta_l2_scope": "feature_delta_only",
         "accuracy": total_correct / float(total_seen),
         "n_jets": int(total_seen),
     }
@@ -656,7 +1007,7 @@ def run_architecture_view_tagger_epoch(
             classification_metrics_from_predictions(
                 preds=preds_np,
                 labels=labels_np,
-                loss_sum=total_loss,
+                loss_sum=total_ce_loss,
                 logits=logits_np,
                 label_names=tuple(label_names),
             )
@@ -673,6 +1024,15 @@ def run_architecture_view_tagger_epoch(
             key: value / diagnostic_weight_sum
             for key, value in sorted(diagnostic_totals.items())
         }
+    if gradient_norm_weight_sum > 0.0:
+        diagnostics = dict(metrics.get("diagnostics") or {})
+        diagnostics.update(
+            {
+                key: value / gradient_norm_weight_sum
+                for key, value in sorted(gradient_norm_totals.items())
+            }
+        )
+        metrics["diagnostics"] = diagnostics
     return metrics
 
 
@@ -815,19 +1175,68 @@ def train_architecture_view_tagger(
         variant=str(config.variant),
     )
     checkpoint_model = checkpoint_model.to(device)
-    baseline_report = warm_start_architecture_view_part_model(
-        checkpoint_model,
-        config.baseline_checkpoint,
-        map_location=device,
-        expected_selection_metric=str(config.selection_metric),
-        expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
-        expected_label_names=tuple(config.label_names),
-        expected_label_filter=tuple(config.label_filter),
-        expected_num_classes=int(config.resolved_num_classes),
-        expected_hlt_degradation_strength=float(config.expected_hlt_degradation_strength),
-        require_metadata=True,
-        require_all_part_keys=True,
-    ).to_dict()
+    variant_spec = architecture_view_variant_spec(config.variant)
+    has_baseline_checkpoint = bool(config.baseline_checkpoint)
+    skip_weight_warm_start = bool(variant_spec.part_size == "larger")
+    expected_hlt_strength = (
+        float(config.expected_hlt_degradation_strength) if config.resolved_input_source == "hlt" else None
+    )
+    if not has_baseline_checkpoint:
+        baseline_report = {
+            "baseline_checkpoint_path": None,
+            "baseline_checkpoint_hash": None,
+            "baseline_checkpoint_selection_metric": None,
+            "baseline_checkpoint_hlt_degradation_strength": None,
+            "baseline_checkpoint_split_manifest_hash": None,
+            "baseline_checkpoint_label_names": list(config.label_names),
+            "baseline_checkpoint_label_filter": list(config.label_filter),
+            "baseline_checkpoint_num_classes": int(config.resolved_num_classes),
+            "weight_warm_start_skipped": True,
+            "weight_warm_start_skip_reason": "offline_part_baseline_trains_from_scratch",
+            "input_source": str(config.resolved_input_source),
+        }
+        checkpoint_model.baseline_checkpoint_report = dict(baseline_report)
+    elif skip_weight_warm_start:
+        metadata_part_model = build_hlt_classifier(num_classes=int(config.resolved_num_classes), model_size="base")
+        metadata_part_model = metadata_part_model.to(device)
+        baseline_report = warm_start_architecture_view_part_model(
+            metadata_part_model,
+            config.baseline_checkpoint,
+            map_location=device,
+            expected_selection_metric=str(config.selection_metric),
+            expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
+            expected_label_names=tuple(config.label_names),
+            expected_label_filter=tuple(config.label_filter),
+            expected_num_classes=int(config.resolved_num_classes),
+            expected_hlt_degradation_strength=expected_hlt_strength,
+            require_metadata=True,
+            require_all_part_keys=True,
+        ).to_dict()
+        baseline_report.update(
+            {
+                "weight_warm_start_skipped": True,
+                "weight_warm_start_skip_reason": "larger_part_capacity_control_uses_different_backbone_shapes",
+                "trained_part_model_size": "large",
+            }
+        )
+        checkpoint_model.baseline_checkpoint_report = dict(baseline_report)
+        del metadata_part_model
+    else:
+        baseline_report = warm_start_architecture_view_part_model(
+            checkpoint_model,
+            config.baseline_checkpoint,
+            map_location=device,
+            expected_selection_metric=str(config.selection_metric),
+            expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
+            expected_label_names=tuple(config.label_names),
+            expected_label_filter=tuple(config.label_filter),
+            expected_num_classes=int(config.resolved_num_classes),
+            expected_hlt_degradation_strength=expected_hlt_strength,
+            require_metadata=True,
+            require_all_part_keys=True,
+        ).to_dict()
+        baseline_report["weight_warm_start_skipped"] = False
+    baseline_report["input_source"] = str(config.resolved_input_source)
     save_json(diagnostics_dir / "baseline_load_report.json", baseline_report)
     init_logit_sample_count = min(4, int(len(train_dataset)))
     init_logit_diff: dict[str, Any] = {}
@@ -843,8 +1252,12 @@ def train_architecture_view_tagger(
         )
         save_json(diagnostics_dir / "init_logit_diff_vs_baseline.json", init_logit_diff)
 
-    is_baseline_recheck = architecture_view_effective_variant(config.variant) == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK
-    if is_baseline_recheck or int(config.freeze_part_epochs) > 0:
+    is_baseline_recheck = architecture_view_variant_is_baseline_recheck(config.variant)
+    freeze_part_for_all_epochs = bool(variant_spec.freeze_policy == "frozen_part_adapter_only")
+    effective_freeze_part_epochs = (
+        0 if variant_spec.part_size == "larger" or variant_spec.adapter_type == "none" else int(config.freeze_part_epochs)
+    )
+    if is_baseline_recheck or freeze_part_for_all_epochs or int(effective_freeze_part_epochs) > 0:
         _set_part_model_trainable(checkpoint_model, False)
     optimizer = None if is_baseline_recheck else _optimizer_for_model(checkpoint_model, config)
     train_model = checkpoint_model
@@ -869,16 +1282,25 @@ def train_architecture_view_tagger(
         "num_classes": int(config.resolved_num_classes),
         "selection_metric": str(config.selection_metric),
         "variant": str(config.variant),
+        "input_source": str(config.resolved_input_source),
+        "input_cache_dir": str(config.resolved_input_cache_dir),
         "variant_behavior": checkpoint_model.variant_behavior(),
+        "effective_freeze_part_epochs": int(effective_freeze_part_epochs),
+        "freeze_part_for_all_epochs": bool(freeze_part_for_all_epochs),
+        "parameter_accounting": checkpoint_model.parameter_accounting(),
         "baseline_checkpoint": str(config.baseline_checkpoint),
         "baseline_load_report": baseline_report,
         "init_logit_diff_vs_baseline": init_logit_diff,
         "leakage_rule": (
-            "Step 3 consumes cached fixed-HLT tokens only. Training uses model_train, "
+            "Step 4 offline transfer consumes cached offline raw tokens only. Training uses model_train, "
+            "checkpoint selection uses model_val, and final_test is loaded only after model_val selection."
+            if config.resolved_input_source == "offline"
+            else "Step 3 consumes cached fixed-HLT tokens only. Training uses model_train, "
             "checkpoint selection uses model_val, and final_test is loaded only after model_val selection."
         ),
         "final_test_loaded_during_training": False,
-        "inference_consumes_hlt_only": True,
+        "inference_consumes_hlt_only": bool(config.resolved_input_source == "hlt"),
+        "inference_input_source": str(config.resolved_input_source),
     }
     save_json(output_dir / "config.json", run_metadata)
 
@@ -925,7 +1347,11 @@ def train_architecture_view_tagger(
         best_epoch = -1
         epochs_without_improvement = 0
         for epoch in range(1, int(config.epochs) + 1):
-            if epoch == int(config.freeze_part_epochs) + 1 and int(config.freeze_part_epochs) > 0:
+            if (
+                not bool(freeze_part_for_all_epochs)
+                and epoch == int(effective_freeze_part_epochs) + 1
+                and int(effective_freeze_part_epochs) > 0
+            ):
                 _set_part_model_trainable(checkpoint_model, True)
                 optimizer = _optimizer_for_model(checkpoint_model, config)
             train_metrics = run_architecture_view_tagger_epoch(
@@ -1060,6 +1486,9 @@ def train_architecture_view_tagger(
         "output_contract": checkpoint_model.output_contract,
         "variant": str(config.variant),
         "variant_behavior": checkpoint_model.variant_behavior(),
+        "effective_freeze_part_epochs": int(effective_freeze_part_epochs),
+        "freeze_part_for_all_epochs": bool(freeze_part_for_all_epochs),
+        "parameter_accounting": checkpoint_model.parameter_accounting(),
         "best_epoch": int(best_epoch),
         "selection_metric": str(config.selection_metric),
         "selection_metric_direction": architecture_view_selection_metric_direction(str(config.selection_metric)),
@@ -1082,6 +1511,8 @@ def train_architecture_view_tagger(
         "label_names": list(config.label_names),
         "label_filter": list(config.label_filter),
         "num_classes": int(config.resolved_num_classes),
+        "input_source": str(config.resolved_input_source),
+        "input_cache_dir": str(config.resolved_input_cache_dir),
         "source": source,
         "manifest": manifest_info,
         "baseline_checkpoint": str(config.baseline_checkpoint),
@@ -1111,7 +1542,8 @@ def train_architecture_view_tagger(
             if epochs_completed <= 0
             else elapsed_seconds / float(epochs_completed),
         },
-        "inference_consumes_hlt_only": True,
+        "inference_consumes_hlt_only": bool(config.resolved_input_source == "hlt"),
+        "inference_input_source": str(config.resolved_input_source),
     }
     save_json(output_dir / "model_val_report.json", _metrics_without_prediction_arrays(best_val_metrics))
     save_json(output_dir / "stack_val_report.json", _metrics_without_prediction_arrays(stack_val_metrics))

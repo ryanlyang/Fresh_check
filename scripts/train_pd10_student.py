@@ -110,6 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Debug escape hatch; canonical PD10 runs should not use this.",
     )
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing student artifacts in output-dir.")
     return parser.parse_args(argv)
 
 
@@ -177,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         "align_prediction_to_teacher_cache": bool(args.align_prediction_to_teacher_cache),
         "confirm_final_test": args.confirm_final_test,
         "evaluate_final_test": not args.skip_final_test,
+        "overwrite": bool(args.overwrite),
     }
     if args.seed is not None:
         config_kwargs["seed"] = args.seed

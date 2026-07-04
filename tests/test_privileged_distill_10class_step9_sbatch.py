@@ -48,6 +48,7 @@ class PD10Step9SbatchTests(unittest.TestCase):
         self.assertIn("teacher_logit_manifest.json", runner)
         self.assertIn("--confirm-final-test", runner)
         self.assertIn("PD10_STUDENT_SKIP_FINAL_TEST", runner)
+        self.assertIn('fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"', runner)
         self.assertIn("final_test_report.json", runner)
         self.assertIn("fresh_assert_json_ok \"${OUTPUT_DIR}/run_report.json\"", runner)
 
