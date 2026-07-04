@@ -110,6 +110,7 @@ class PD10ParticleDualViewTeacherTrainConfig:
     read_chunk_size: int = 50_000
     verify_hlt_hash: bool = True
     initialize_branches: bool = True
+    overwrite: bool = False
 
     def __post_init__(self) -> None:
         if (self.train_split, self.val_split) != ("model_train", "model_val"):
@@ -723,6 +724,8 @@ def train_pd10_particle_dual_view_teacher(
     set_training_seed(config.seed)
     device = resolve_device(config.device)
     output_dir = Path(config.output_dir)
+    if config.checkpoint_path.exists() and not config.overwrite:
+        raise FileExistsError(f"PD10 particle dual-view teacher checkpoint already exists: {config.checkpoint_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     train_hlt, train_offline, train_source = _load_paired_views(

@@ -127,6 +127,7 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
             self.assertEqual(train_cfg.model_name, PD10_PARTICLE_DUAL_VIEW_MODEL_NAME)
             self.assertEqual(train_cfg.checkpoint_path, root / "teacher" / "best_model_val.pt")
             self.assertEqual(train_cfg.allowed_inputs, "HLT_plus_offline_train_time_privileged")
+            self.assertFalse(train_cfg.overwrite)
 
             with self.assertRaises(ValueError):
                 PD10ParticleDualViewTeacherTrainConfig(
@@ -185,6 +186,10 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
                 / "teacher_representations"
                 / PD10_PARTICLE_DUAL_VIEW_MODEL_NAME,
             )
+
+            script = load_script(TRAIN_SCRIPT_PATH, "train_pd10_particle_dual_view_teacher")
+            args = script.parse_args(["--overwrite"])
+            self.assertTrue(args.overwrite)
 
     def test_paired_alignment_and_collate_keep_views_separate(self):
         torch = require_torch()

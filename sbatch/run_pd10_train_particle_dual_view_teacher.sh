@@ -67,6 +67,7 @@ fresh_append_flag_if_enabled cmd --compile-model "${PD10_V2_PARTICLE_DUAL_VIEW_C
 fresh_append_flag_if_enabled cmd --verify-label-branches "${PD10_V2_PARTICLE_DUAL_VIEW_VERIFY_LABEL_BRANCHES}"
 fresh_append_flag_if_enabled cmd --no-verify-hlt-hash "${PD10_V2_PARTICLE_DUAL_VIEW_NO_VERIFY_HLT_HASH}"
 fresh_append_flag_if_enabled cmd --no-branch-init "${PD10_V2_PARTICLE_DUAL_VIEW_NO_BRANCH_INIT}"
+fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_optional_arg cmd --max-train-batches "${PD10_V2_PARTICLE_DUAL_VIEW_MAX_TRAIN_BATCHES}"
 fresh_append_optional_arg cmd --max-val-batches "${PD10_V2_PARTICLE_DUAL_VIEW_MAX_VAL_BATCHES}"
 

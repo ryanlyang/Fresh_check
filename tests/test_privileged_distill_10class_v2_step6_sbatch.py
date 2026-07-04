@@ -41,6 +41,7 @@ class PD10V2Step6SbatchTests(unittest.TestCase):
         self.assertIn("--hlt-teacher-checkpoint", train)
         self.assertIn("--offline-teacher-checkpoint", train)
         self.assertIn("--max-train-jets \"${PD10_MODEL_TRAIN_SIZE}\"", train)
+        self.assertIn('fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"', train)
         self.assertIn("fresh_assert_json_ok \"${OUTPUT_DIR}/run_report.json\"", train)
 
         self.assertIn("CONDA_ENV:=atlas_kd", cache)

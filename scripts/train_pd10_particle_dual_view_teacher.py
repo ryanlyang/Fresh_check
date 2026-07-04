@@ -81,6 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--read-chunk-size", type=int, default=50_000)
     parser.add_argument("--no-verify-hlt-hash", action="store_true")
     parser.add_argument("--no-branch-init", action="store_true")
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing particle dual-view teacher artifacts.")
     return parser.parse_args(argv)
 
 
@@ -120,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         read_chunk_size=args.read_chunk_size,
         verify_hlt_hash=not bool(args.no_verify_hlt_hash),
         initialize_branches=not bool(args.no_branch_init),
+        overwrite=bool(args.overwrite),
     )
     report = train_pd10_particle_dual_view_teacher(config)
     print("pd10_particle_dual_view_teacher_complete:")
@@ -129,4 +131,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
