@@ -1711,6 +1711,13 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_HIGHDATA_MODEL_TRAIN_SIZE:=3000000", wrapper)
         self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_PILOT_MODEL_TRAIN_SIZE:=500000", wrapper)
 
+    def test_architecture_view_10class_offline_baseline_does_not_warm_start_from_itself(self):
+        runner = self.read("run_train_architecture_view_10class_offline_part.sh")
+
+        self.assertIn('if [[ "${REQUESTED_VARIANT}" != "av10_offline_part_baseline" ]]; then', runner)
+        self.assertIn('cmd+=(--baseline-checkpoint "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_BASELINE_CHECKPOINT}")', runner)
+        self.assertIn('ARCHITECTURE_VIEW_10CLASS_OFFLINE_BASELINE_CHECKPOINT:?Set', runner)
+
     def test_local_graph_score_fusion_runner_uses_frozen_step10_outputs(self):
         runner = self.read("run_local_graph_score_fusion.sh")
 

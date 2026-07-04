@@ -92,7 +92,6 @@ cmd=(
   --output-dir "${OUTPUT_DIR}"
   --manifest-path "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_MANIFEST_PATH}"
   --offline-cache-dir "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_CACHE_DIR}"
-  --baseline-checkpoint "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_BASELINE_CHECKPOINT}"
   --input-source offline
   --label-names "${label_name_args[@]}"
   --label-filter-names "${label_filter_args[@]}"
@@ -135,6 +134,9 @@ cmd=(
   --delta-l2-weight "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_DELTA_L2_WEIGHT}"
   --freeze-part-epochs "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_FREEZE_PART_EPOCHS}"
 )
+if [[ "${REQUESTED_VARIANT}" != "av10_offline_part_baseline" ]]; then
+  cmd+=(--baseline-checkpoint "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_BASELINE_CHECKPOINT}")
+fi
 fresh_append_flag_if_enabled cmd --confirm-final-test "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_CONFIRM_FINAL_TEST}"
 fresh_append_flag_if_enabled cmd --no-amp "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_COMPILE_MODEL}"
