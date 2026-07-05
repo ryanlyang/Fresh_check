@@ -12,9 +12,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.architecture_view_part import (  # noqa: E402
+    ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS,
     ARCHITECTURE_VIEW_10CLASS_DEFAULT_VARIANTS,
     ARCHITECTURE_VIEW_10CLASS_FUSION_MODES,
-    ARCHITECTURE_VIEW_10CLASS_VARIANTS,
     ArchitectureView10ClassFusionConfig,
     default_architecture_view_10class_fusion_groups,
     normalize_architecture_view_variant,
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-names",
         nargs="+",
-        choices=ARCHITECTURE_VIEW_10CLASS_VARIANTS,
+        choices=ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS,
         default=list(ARCHITECTURE_VIEW_10CLASS_DEFAULT_VARIANTS),
         help="Prediction-cache variants to load.",
     )

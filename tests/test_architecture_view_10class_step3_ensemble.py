@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 
 from jetclass_fresh.jetclass_data import JetIdentity
+from scripts import run_architecture_view_10class_fusion as fusion_cli
 
 from teacher_logit_reco.architecture_view_part import (
     ARCHITECTURE_VIEW_10CLASS_FUSION_CONTRACT,
@@ -189,3 +191,31 @@ def test_binary_projection_weighted_reports_fpr50(tmp_path: Path) -> None:
     hgg_index = ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES.index("Hgg")
     expected_binary_jets = int(((labels == qcd_index) | (labels == hgg_index)).sum())
     assert pair["metrics"]["final_test"]["n_jets"] == expected_binary_jets
+
+
+def test_fusion_cli_accepts_ablation_variants(monkeypatch, tmp_path: Path) -> None:
+    prediction_dir = tmp_path / "predictions"
+    output_dir = tmp_path / "fusion"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_architecture_view_10class_fusion.py",
+            "--prediction-dir",
+            str(prediction_dir),
+            "--output-dir",
+            str(output_dir),
+            "--model-names",
+            "av10_hlt_baseline_recheck",
+            "av10_lc_mlp_delta_features",
+            "--group",
+            "av10_input_delta:av10_hlt_baseline_recheck,av10_lc_mlp_delta_features",
+        ],
+    )
+
+    args = fusion_cli.parse_args()
+
+    assert tuple(args.model_names) == ("av10_hlt_baseline_recheck", "av10_lc_mlp_delta_features")
+    assert args.group == [
+        ("av10_input_delta", ("av10_hlt_baseline_recheck", "av10_lc_mlp_delta_features"))
+    ]
