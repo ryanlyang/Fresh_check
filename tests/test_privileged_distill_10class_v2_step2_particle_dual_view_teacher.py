@@ -23,6 +23,7 @@ from teacher_logit_reco.privileged_distill_10class import (
     PD10PairedParticleViewDataset,
     align_pd10_hlt_offline_views,
     build_pd10_particle_dual_view_logit_block,
+    collect_pd10_particle_dual_view_outputs,
     collate_pd10_particle_dual_view_batch,
     default_pd10_experiment_layout,
     load_pd10_particle_dual_view_logit_block,
@@ -270,6 +271,58 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
             bad["inference_export_requires_teacher_features"] = True
             with self.assertRaises(ValueError):
                 validate_pd10_particle_dual_view_logit_metadata(bad, split="model_val")
+
+    def test_particle_dual_cache_repairs_tiny_nonfinite_output_tail(self):
+        torch = require_torch()
+
+        class OneBadRowModel(torch.nn.Module):
+            def forward(self, hlt_inputs, offline_inputs, *, return_representation=False):
+                batch_size = int(hlt_inputs["features"].shape[0])
+                logits = torch.zeros((batch_size, PD10_NUM_CLASSES), dtype=torch.float32)
+                representations = torch.zeros((batch_size, PD10_REPRESENTATION_DIM), dtype=torch.float32)
+                representations[:, 0] = 1.0
+                logits[0, 0] = float("nan")
+                representations[0, 0] = float("nan")
+                return logits, representations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = make_cache_config(root, confirm_final_test=True)
+            hlt_view = make_view(labels=(0, 1, 2, 3), split="model_val", view_name="fixed_hlt")
+            offline_view = make_view(labels=(0, 1, 2, 3), split="model_val", view_name="offline")
+
+            logits, reps, labels, logit_report, rep_report = collect_pd10_particle_dual_view_outputs(
+                OneBadRowModel(),
+                hlt_view,
+                offline_view,
+                split="model_val",
+                batch_size=4,
+                num_workers=0,
+                device=torch.device("cpu"),
+                seed=11,
+                max_bad_row_fraction=0.5,
+            )
+
+            self.assertTrue(np.isfinite(logits).all())
+            self.assertTrue(np.isfinite(reps).all())
+            self.assertTrue(np.all(logits[0] == 0.0))
+            self.assertTrue(np.all(reps[0] == 0.0))
+            self.assertEqual(logit_report["nonfinite_row_count"], 1)
+            self.assertEqual(rep_report["nonfinite_row_count"], 1)
+            self.assertTrue(logit_report["repaired"])
+            self.assertTrue(rep_report["repaired"])
+
+            block = build_pd10_particle_dual_view_logit_block(
+                cfg,
+                "model_val",
+                logits=logits,
+                labels=labels,
+                jet_ids=hlt_view.jet_ids,
+                source_metadata={"hlt_content_hash": "hlt-hash", "source_manifest_hash": "manifest-hash"},
+                checkpoint_payload={"epoch": 3, "experiment_step": "unit_test"},
+                logit_sanitization=logit_report,
+            )
+            self.assertEqual(block.metadata["logit_sanitization"]["nonfinite_row_count"], 1)
 
     def test_scripts_defaults_use_canonical_layouts(self):
         train_module = load_script(TRAIN_SCRIPT_PATH, "train_pd10_particle_dual_view_teacher")

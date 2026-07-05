@@ -18,4 +18,4 @@ source "${SCRIPT_DIR}/common.sh"
 # shellcheck source=pdv3_pd10_env.sh
 source "${SCRIPT_DIR}/pdv3_pd10_env.sh"
 
-exec "${SCRIPT_DIR}/run_pd10_train_teacher.sh" "$@"
+exec bash "${SCRIPT_DIR}/run_pd10_train_teacher.sh" "$@"

@@ -78,7 +78,7 @@ class PDV3Step2TeacherTests(unittest.TestCase):
                 text = (SBATCH_DIR / wrapper_name).read_text(encoding="utf-8")
                 self.assertIn('source "${SCRIPT_DIR}/common.sh"', text)
                 self.assertIn('source "${SCRIPT_DIR}/pdv3_pd10_env.sh"', text)
-                self.assertIn(f'exec "${{SCRIPT_DIR}}/{pd10_script}" "$@"', text)
+                self.assertIn(f'exec bash "${{SCRIPT_DIR}}/{pd10_script}" "$@"', text)
 
     def test_step2_submitter_queues_teacher_graph_after_step1_contract(self):
         submitter = (SBATCH_DIR / "submit_pdv3_step2_teachers.sh").read_text(encoding="utf-8")

@@ -9,7 +9,13 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from jetclass_fresh.fusion import PredictionBlock, load_prediction_block, save_prediction_block, softmax_np
+from jetclass_fresh.fusion import (
+    PredictionBlock,
+    load_prediction_block,
+    sanitize_prediction_logits,
+    save_prediction_block,
+    softmax_np,
+)
 from jetclass_fresh.heterogeneous_hlt import balanced_limit_jet_view
 from jetclass_fresh.hlt_baseline import (
     default_part_config,
@@ -959,12 +965,14 @@ def collect_pd10_particle_dual_view_outputs(
     hlt_view: JetView,
     offline_view: JetView,
     *,
+    split: str,
     batch_size: int,
     num_workers: int,
     device,
     seed: int,
     max_batches: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    max_bad_row_fraction: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any], dict[str, Any]]:
     torch = require_torch()
     dataset = PD10PairedParticleViewDataset(hlt_view, offline_view)
     loader = make_pd10_particle_dual_view_loader(
@@ -1008,11 +1016,15 @@ def collect_pd10_particle_dual_view_outputs(
         raise ValueError(f"particle dual-view representations must have shape [N, D], got {reps_np.shape}")
     if int(labels_np.shape[0]) != int(logits_np.shape[0]) or int(labels_np.shape[0]) != int(reps_np.shape[0]):
         raise ValueError("labels/logits/representations row count mismatch")
-    if not np.isfinite(logits_np).all():
-        raise FloatingPointError("particle dual-view logits contain non-finite values")
-    if not np.isfinite(reps_np).all():
-        raise FloatingPointError("particle dual-view representations contain non-finite values")
-    return logits_np, reps_np, labels_np
+    sanitize_kwargs = {"model_name": PD10_PARTICLE_DUAL_VIEW_MODEL_NAME, "split": split}
+    if max_bad_row_fraction is not None:
+        sanitize_kwargs["max_bad_row_fraction"] = float(max_bad_row_fraction)
+    logits_np, logit_sanitization = sanitize_prediction_logits(logits_np, **sanitize_kwargs)
+    rep_sanitize_kwargs = {"model_name": f"{PD10_PARTICLE_DUAL_VIEW_MODEL_NAME}_representations", "split": split}
+    if max_bad_row_fraction is not None:
+        rep_sanitize_kwargs["max_bad_row_fraction"] = float(max_bad_row_fraction)
+    reps_np, representation_sanitization = sanitize_prediction_logits(reps_np, **rep_sanitize_kwargs)
+    return logits_np, reps_np, labels_np, logit_sanitization, representation_sanitization
 
 
 def build_pd10_particle_dual_view_logit_block(
@@ -1024,6 +1036,7 @@ def build_pd10_particle_dual_view_logit_block(
     jet_ids: Sequence[JetIdentity],
     source_metadata: Mapping[str, Any],
     checkpoint_payload: Mapping[str, Any],
+    logit_sanitization: Mapping[str, Any] | None = None,
 ) -> PredictionBlock:
     logits = np.asarray(logits, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
@@ -1063,6 +1076,7 @@ def build_pd10_particle_dual_view_logit_block(
         "inference_requires_offline_inputs": True,
         "teacher_inference_requires_offline_inputs": True,
         "inference_export_requires_teacher_features": False,
+        "logit_sanitization": dict(logit_sanitization or {}),
         **dict(source_metadata),
     }
     return PredictionBlock(
@@ -1172,15 +1186,18 @@ def cache_pd10_particle_dual_view_teacher(config: PD10ParticleDualViewTeacherCac
             read_chunk_size=config.read_chunk_size,
             verify_hlt_hash=config.verify_hlt_hash,
         )
-        logits, representations, labels = collect_pd10_particle_dual_view_outputs(
-            model,
-            hlt_view,
-            offline_view,
-            batch_size=config.batch_size,
-            num_workers=config.num_workers,
-            device=device,
-            seed=seed + 1,
-            max_batches=config.max_batches,
+        logits, representations, labels, logit_sanitization, representation_sanitization = (
+            collect_pd10_particle_dual_view_outputs(
+                model,
+                hlt_view,
+                offline_view,
+                split=split,
+                batch_size=config.batch_size,
+                num_workers=config.num_workers,
+                device=device,
+                seed=seed + 1,
+                max_batches=config.max_batches,
+            )
         )
         if config.max_batches is not None:
             hlt_view = JetView(
@@ -1199,6 +1216,7 @@ def cache_pd10_particle_dual_view_teacher(config: PD10ParticleDualViewTeacherCac
             jet_ids=hlt_view.jet_ids,
             source_metadata=source_metadata,
             checkpoint_payload=payload,
+            logit_sanitization=logit_sanitization,
         )
         logit_metadata = save_prediction_block(logit_block, config.logit_output_dir, overwrite=bool(config.overwrite))
         validate_pd10_particle_dual_view_logit_metadata(logit_metadata, split=split)
@@ -1224,6 +1242,7 @@ def cache_pd10_particle_dual_view_teacher(config: PD10ParticleDualViewTeacherCac
                 "checkpoint_epoch": payload.get("epoch"),
                 "checkpoint_experiment_step": payload.get("experiment_step"),
                 "teacher_logits_dir": str(config.logit_dir),
+                "representation_sanitization": dict(representation_sanitization),
             },
         )
         rep_metadata = save_pd10_teacher_representation_block(
