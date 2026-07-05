@@ -1,4 +1,4 @@
-"""PDV3 Step 1 split, HLT0.2 cache, and paired-offline cache audits."""
+"""PDV3 Step 1 split, HLT cache, and paired-offline cache audits."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from jetclass_fresh.hlt_cache import (
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
     fixed_hlt_params_dict,
-    fixed_hlt_params_from_strength,
+    fixed_hlt_params_from_profile,
     hash_arrays,
     jet_identity_hash,
     load_cached_hlt_view,
@@ -32,6 +32,7 @@ from .config import (
     PDV3_EXPERIMENT_STEP,
     PDV3_HLT_AUDIT_REPORT,
     PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
     PDV3_INPUTS_CONTRACT,
     PDV3_MANIFEST_SPLIT_ORDER,
     PDV3_MODEL_SPLIT_ORDER,
@@ -45,8 +46,10 @@ from .config import (
 )
 
 
-def pdv3_hlt_params_dict() -> dict[str, float]:
-    return fixed_hlt_params_dict(fixed_hlt_params_from_strength(PDV3_HLT_DEGRADATION_STRENGTH))
+def pdv3_hlt_params_dict() -> dict[str, Any]:
+    return fixed_hlt_params_dict(
+        fixed_hlt_params_from_profile(PDV3_HLT_PROFILE, PDV3_HLT_DEGRADATION_STRENGTH)
+    )
 
 
 def _subset_mapping(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -209,6 +212,8 @@ def build_hlt_report(
         hlt_cache_dir,
         splits=PDV3_MODEL_SPLIT_ORDER,
         expected_params=expected_params,
+        expected_hlt_profile=PDV3_HLT_PROFILE,
+        expected_hlt_degradation_strength=PDV3_HLT_DEGRADATION_STRENGTH,
     )
     split_reports: dict[str, Any] = {}
     problems: list[str] = []
@@ -235,6 +240,11 @@ def build_hlt_report(
                 "content_hash_matches_metadata": array_report["hlt_content_hash"] == metadata.get("hlt_content_hash"),
                 "hlt_params": metadata.get("hlt_params"),
                 "expected_hlt_params": expected_params,
+                "hlt_profile": metadata.get("hlt_profile"),
+                "expected_hlt_profile": PDV3_HLT_PROFILE,
+                "hlt_profile_version": metadata.get("hlt_profile_version"),
+                "hlt_degradation_strength": metadata.get("hlt_degradation_strength"),
+                "expected_hlt_degradation_strength": float(PDV3_HLT_DEGRADATION_STRENGTH),
                 "hlt_diagnostics_summary": metadata.get("hlt_diagnostics_summary"),
             }
             item_problems = list(base_item.get("problems") or [])
@@ -244,10 +254,20 @@ def build_hlt_report(
                 item_problems.append(f"seed is {item['seed']}, expected {item['expected_seed']}")
             if item["source_manifest_hash"] != manifest_sha:
                 item_problems.append("source_manifest_hash does not match manifest hash")
+            if item["hlt_profile"] != PDV3_HLT_PROFILE:
+                item_problems.append(
+                    f"HLT profile is {item['hlt_profile']!r}, expected {PDV3_HLT_PROFILE!r}"
+                )
+            actual_strength = item.get("hlt_degradation_strength")
+            if actual_strength is None or abs(float(actual_strength) - float(PDV3_HLT_DEGRADATION_STRENGTH)) > 1.0e-12:
+                item_problems.append(
+                    f"HLT degradation strength is {actual_strength}, "
+                    f"expected {PDV3_HLT_DEGRADATION_STRENGTH:g}"
+                )
             if item["hlt_params"] != expected_params:
                 item_problems.append(
-                    "HLT params do not match PDV3 HLT0.2 profile "
-                    f"(strength={PDV3_HLT_DEGRADATION_STRENGTH:g})"
+                    "HLT params do not match PDV3 HLT profile "
+                    f"(profile={PDV3_HLT_PROFILE}, strength={PDV3_HLT_DEGRADATION_STRENGTH:g})"
                 )
             if not bool(item["content_hash_matches_metadata"]):
                 item_problems.append("recomputed HLT content hash does not match metadata")
@@ -269,6 +289,7 @@ def build_hlt_report(
         "manifest_hash": manifest_sha,
         "model_splits": list(PDV3_MODEL_SPLIT_ORDER),
         "expected_split_sizes": expected_counts,
+        "hlt_profile": PDV3_HLT_PROFILE,
         "hlt_degradation_strength": float(PDV3_HLT_DEGRADATION_STRENGTH),
         "expected_hlt_params": expected_params,
         "split_reports": split_reports,
@@ -389,6 +410,7 @@ def build_pdv3_step1_input_audit_report(
         "model_splits": list(PDV3_MODEL_SPLIT_ORDER),
         "expected_split_sizes": expected_counts,
         "expected_manifest_split_sizes": pdv3_manifest_split_sizes(expected_counts, placeholder_counts),
+        "hlt_profile": PDV3_HLT_PROFILE,
         "hlt_degradation_strength": float(PDV3_HLT_DEGRADATION_STRENGTH),
         "expected_hlt_params": pdv3_hlt_params_dict(),
         "audits": {
@@ -409,12 +431,13 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def write_summary(path: Path, report: Mapping[str, Any]) -> None:
     lines = [
-        "# PDV3 Step 1 HLT0.2 Paired Input Audit",
+        "# PDV3 Step 1 Paired Input Audit",
         "",
         f"experiment_name: `{report['experiment_name']}`",
         f"contract: `{report['contract']}`",
         f"overall_ok: {report['ok']}",
         f"manifest_hash: `{report['manifest_hash']}`",
+        f"hlt_profile: `{report['hlt_profile']}`",
         f"hlt_degradation_strength: {report['hlt_degradation_strength']}",
         "",
         "## Split Counts",

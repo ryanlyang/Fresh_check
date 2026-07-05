@@ -72,6 +72,7 @@ cmd=(
   --max-val-jets "${PDV3_MODEL_VAL_SIZE}"
   --max-final-test-jets "${PDV3_FINAL_TEST_SIZE}"
   --selection-metric "${PDV3_STUDENT_SELECTION_METRIC}"
+  --expected-hlt-profile "${PDV3_HLT_PROFILE}"
   --expected-hlt-degradation-strength "${PDV3_HLT_DEGRADATION_STRENGTH}"
   --delta-l2-weight "${PDV3_STUDENT_DELTA_L2_WEIGHT}"
   --representation-dim "${PDV3_STUDENT_REPRESENTATION_DIM}"

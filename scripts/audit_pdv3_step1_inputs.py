@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify PDV3 HLT0.2 split, fixed-HLT cache, and paired offline cache artifacts."""
+"""Verify PDV3 split, fixed-HLT cache, and paired offline cache artifacts."""
 
 from __future__ import annotations
 

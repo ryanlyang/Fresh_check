@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from teacher_logit_reco.privileged_distill_v3 import (
+    PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
     PDV3_LABEL_NAMES,
     PDV3_REPORT_CONTRACT,
     PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD,
@@ -38,6 +40,8 @@ def _dataset_meta(split: str, *, teacher_supervision_loaded: bool = False) -> di
     return {
         "split": split,
         "source_manifest_hash": "manifest-hash-1",
+        "hlt_profile": PDV3_HLT_PROFILE,
+        "hlt_degradation_strength": PDV3_HLT_DEGRADATION_STRENGTH,
         "hlt_content_hash": f"hlt-content-{split}",
         "jet_identity_hash": f"jets-{split}",
         "source_hlt_jet_identity_hash": f"jets-{split}",

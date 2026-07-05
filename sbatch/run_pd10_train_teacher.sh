@@ -28,6 +28,7 @@ TEACHER_SEED="$(fresh_pd10_teacher_seed "${TEACHER}")"
 : "${MAX_TRAIN_BATCHES:=}"
 : "${MAX_VAL_BATCHES:=}"
 : "${MAX_FINAL_TEST_BATCHES:=}"
+: "${PD10_TEACHER_SKIP_FINAL_TEST:=0}"
 
 DATA_DIR="${PD10_DATA_DIR}"
 
@@ -50,7 +51,9 @@ else
   if [[ "${TEACHER}" == "hlt" ]]; then
     fresh_require_file "${PD10_HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
     fresh_require_file "${PD10_HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
-    fresh_require_file "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
+    if ! fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
+      fresh_require_file "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
+    fi
   else
     fresh_require_data_dir
   fi
@@ -77,8 +80,12 @@ cmd=(
   --max-final-test-jets "${PD10_FINAL_TEST_SIZE}"
   --model-size "${PD10_TEACHER_MODEL_SIZE}"
   --read-chunk-size "${READ_CHUNK_SIZE}"
-  --confirm-final-test
 )
+if fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
+  cmd+=(--skip-final-test)
+else
+  cmd+=(--confirm-final-test)
+fi
 fresh_append_flag_if_enabled cmd --no-amp "${NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${VERIFY_LABEL_BRANCHES}"
@@ -96,7 +103,9 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${OUTPUT_DIR}/best_model_val.pt"
   fresh_require_file "${OUTPUT_DIR}/run_report.json"
   fresh_require_file "${OUTPUT_DIR}/model_val_report.json"
-  fresh_require_file "${OUTPUT_DIR}/final_test_report.json"
+  if ! fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
+    fresh_require_file "${OUTPUT_DIR}/final_test_report.json"
+  fi
   fresh_require_file "${OUTPUT_DIR}/source_metadata.json"
   fresh_require_file "${OUTPUT_DIR}/config.json"
 fi

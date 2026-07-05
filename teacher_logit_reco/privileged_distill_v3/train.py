@@ -16,7 +16,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, save_json, set_training_seed
-from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view
+from jetclass_fresh.hlt_cache import (
+    fixed_hlt_params_dict,
+    fixed_hlt_params_from_profile,
+    jet_identity_hash,
+    load_cached_hlt_view,
+    normalize_hlt_profile,
+)
 from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 
 from teacher_logit_reco.architecture_view_part.checkpoint import (
@@ -39,7 +45,6 @@ from teacher_logit_reco.architecture_view_part.train import (
     _move_batch_to_device,
     _selection_score,
     _set_part_model_trainable,
-    _verify_hlt_params,
     architecture_view_binary_projection_metrics,
     architecture_view_selection_metric_direction,
 )
@@ -62,6 +67,7 @@ from teacher_logit_reco.subtoken_part.train import make_subtoken_hlt_loader
 
 from .config import (
     PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
     PDV3_LABEL_FILTER,
     PDV3_LABEL_NAMES,
     PDV3_MODEL_SPLIT_ORDER,
@@ -116,6 +122,47 @@ def pdv3_effective_weight(target: float, warmup_epochs: int, epoch: int) -> floa
     return target * min(1.0, float(epoch) / float(warmup))
 
 
+def _pdv3_expected_hlt_params(profile: str, strength: float) -> dict[str, Any]:
+    return fixed_hlt_params_dict(fixed_hlt_params_from_profile(profile, strength))
+
+
+def _verify_pdv3_hlt_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    split: str,
+    expected_profile: str,
+    expected_strength: float,
+    required: bool,
+) -> dict[str, Any]:
+    expected_profile = normalize_hlt_profile(expected_profile)
+    expected_strength = float(expected_strength)
+    expected_params = _pdv3_expected_hlt_params(expected_profile, expected_strength)
+    actual_profile = metadata.get("hlt_profile")
+    actual_strength = metadata.get("hlt_degradation_strength")
+    actual_params = metadata.get("hlt_params") if isinstance(metadata.get("hlt_params"), Mapping) else {}
+    problems: list[str] = []
+    if actual_profile != expected_profile:
+        problems.append(f"HLT profile is {actual_profile!r}, expected {expected_profile!r}")
+    if actual_strength is None or abs(float(actual_strength) - expected_strength) > 1.0e-12:
+        problems.append(f"HLT degradation strength is {actual_strength}, expected {expected_strength:g}")
+    if actual_params != expected_params:
+        problems.append("HLT parameters do not match the expected PDV3 HLT profile/strength")
+    report = {
+        "ok": not problems,
+        "split": split,
+        "expected_hlt_profile": expected_profile,
+        "actual_hlt_profile": actual_profile,
+        "expected_hlt_degradation_strength": expected_strength,
+        "actual_hlt_degradation_strength": actual_strength,
+        "expected_hlt_params": expected_params,
+        "actual_hlt_params": actual_params,
+        "problems": problems,
+    }
+    if bool(required) and problems:
+        raise ValueError(f"PDV3 HLT cache contract failed for {split}: {'; '.join(problems)}")
+    return report
+
+
 @dataclass
 class PDV3StudentTrainConfig:
     """Config for one Step 4 AV10-adapter student training run."""
@@ -155,6 +202,7 @@ class PDV3StudentTrainConfig:
     verify_hlt_hash: bool = True
     verify_hlt_params: bool = True
     require_baseline_split_manifest_hash: bool = True
+    expected_hlt_profile: str = PDV3_HLT_PROFILE
     expected_hlt_degradation_strength: float = PDV3_HLT_DEGRADATION_STRENGTH
     view_dim: int = 32
     hidden_dim: int = 64
@@ -222,6 +270,9 @@ class PDV3StudentTrainConfig:
                 raise ValueError(f"max jets for {split} cannot exceed {PDV3_MODEL_SPLIT_SIZES[split]}")
         if self.selection_metric not in ("accuracy", "macro_per_class_accuracy", "loss"):
             raise ValueError("PDV3 Step 4 selection_metric must be accuracy, macro_per_class_accuracy, or loss")
+        self.expected_hlt_profile = normalize_hlt_profile(self.expected_hlt_profile)
+        if self.expected_hlt_profile != PDV3_HLT_PROFILE:
+            raise ValueError(f"PDV3 Step 4 is locked to HLT profile {PDV3_HLT_PROFILE}")
         self.expected_hlt_degradation_strength = float(self.expected_hlt_degradation_strength)
         if abs(self.expected_hlt_degradation_strength - PDV3_HLT_DEGRADATION_STRENGTH) > 1.0e-12:
             raise ValueError(f"PDV3 Step 4 is locked to HLT degradation {PDV3_HLT_DEGRADATION_STRENGTH:g}")
@@ -487,9 +538,10 @@ def _load_pdv3_student_dataset(
     load_teacher_supervision: bool = True,
 ) -> PDV3ArchitectureViewStudentDataset:
     view = load_cached_hlt_view(config.hlt_cache_dir, split, verify_hash=bool(config.verify_hlt_hash))
-    audit = _verify_hlt_params(
+    audit = _verify_pdv3_hlt_metadata(
         view.metadata,
         split=split,
+        expected_profile=str(config.expected_hlt_profile),
         expected_strength=float(config.expected_hlt_degradation_strength),
         required=bool(config.verify_hlt_params),
     )

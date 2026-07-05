@@ -7,6 +7,7 @@ import numpy as np
 from jetclass_fresh.hlt_cache import (
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
+    fixed_hlt_params_from_profile,
     fixed_hlt_params_from_strength,
     fixed_hlt_params_dict,
     generate_and_cache_hlt_view,
@@ -167,6 +168,51 @@ class HLTCacheStep3Tests(unittest.TestCase):
         self.assertEqual(metadata["hlt_params"], fixed_hlt_params_dict(params))
         self.assertFalse(audit_default["ok"])
         self.assertTrue(audit_scaled["ok"])
+
+    def test_v2_hlt_profile_metadata_and_audit_are_strict(self):
+        base_view = make_small_offline_view()
+        manifest = make_small_manifest(base_view.jet_ids)
+        offline_view = make_small_offline_view(source_manifest_hash=manifest_hash(manifest))
+        params = fixed_hlt_params_from_profile("fixed_hlt_v2_realistic", 1.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = generate_and_cache_hlt_view(
+                offline_view,
+                tmp,
+                seed=DEFAULT_HLT_SEEDS["model_train"],
+                params=params,
+                hlt_degradation_strength=1.0,
+            )
+            audit_v2 = audit_hlt_cache(
+                manifest,
+                tmp,
+                splits=["model_train"],
+                expected_params=params,
+                expected_hlt_profile="fixed_hlt_v2_realistic",
+                expected_hlt_profile_version="v1",
+                expected_hlt_degradation_strength=1.0,
+            )
+            audit_v1 = audit_hlt_cache(
+                manifest,
+                tmp,
+                splits=["model_train"],
+                expected_params=fixed_hlt_params_from_strength(1.0),
+                expected_hlt_profile="fixed_hlt_v1",
+            )
+
+        self.assertEqual(metadata["hlt_profile"], "fixed_hlt_v2_realistic")
+        self.assertEqual(metadata["hlt_profile_version"], "v1")
+        self.assertEqual(metadata["hlt_degradation_strength"], 1.0)
+        self.assertEqual(metadata["generator"]["function"], "build_fixed_hlt_v2_realistic_view")
+        self.assertEqual(metadata["hlt_params"], fixed_hlt_params_dict(params))
+        self.assertTrue(audit_v2["ok"])
+        self.assertFalse(audit_v1["ok"])
+        self.assertTrue(
+            any(
+                "HLT profile is fixed_hlt_v2_realistic" in problem
+                for problem in audit_v1["split_reports"]["model_train"]["problems"]
+            )
+        )
 
 
 if __name__ == "__main__":

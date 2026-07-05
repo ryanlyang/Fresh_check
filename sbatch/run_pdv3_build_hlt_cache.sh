@@ -36,6 +36,7 @@ cmd=(
   --cache-dir "${PDV3_HLT_CACHE_DIR}"
   --splits "${split_args[@]}"
   --read-chunk-size "${READ_CHUNK_SIZE}"
+  --hlt-profile "${PDV3_HLT_PROFILE}"
   --hlt-degradation-strength "${PDV3_HLT_DEGRADATION_STRENGTH}"
 )
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"

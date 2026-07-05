@@ -9,6 +9,7 @@ from jetclass_fresh.hlt_baseline import ParticleTransformerHLTClassifier
 from teacher_logit_reco.local_compression_part import LOCAL_COMPRESSION_CANONICAL_FEATURE_NAMES
 from teacher_logit_reco.privileged_distill_v3 import (
     PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
     PDV3_LABEL_FILTER,
     PDV3_LABEL_NAMES,
     PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD,
@@ -25,6 +26,7 @@ from teacher_logit_reco.privileged_distill_v3 import (
     pdv3_student_training_phase_plan,
     pdv3_student_representation_source_from_output,
 )
+from teacher_logit_reco.privileged_distill_v3.train import _pdv3_expected_hlt_params, _verify_pdv3_hlt_metadata
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +87,35 @@ def test_step4_train_config_maps_student_spec_to_av10_config():
     assert arch.label_names == PDV3_LABEL_NAMES
     assert arch.label_filter == PDV3_LABEL_FILTER
     assert arch.num_classes == 10
+    assert config.expected_hlt_profile == PDV3_HLT_PROFILE
     assert arch.expected_hlt_degradation_strength == PDV3_HLT_DEGRADATION_STRENGTH
+
+
+def test_step4_hlt_contract_verifier_rejects_wrong_profile():
+    metadata = {
+        "hlt_profile": PDV3_HLT_PROFILE,
+        "hlt_degradation_strength": PDV3_HLT_DEGRADATION_STRENGTH,
+        "hlt_params": _pdv3_expected_hlt_params(PDV3_HLT_PROFILE, PDV3_HLT_DEGRADATION_STRENGTH),
+    }
+    ok = _verify_pdv3_hlt_metadata(
+        metadata,
+        split="model_train",
+        expected_profile=PDV3_HLT_PROFILE,
+        expected_strength=PDV3_HLT_DEGRADATION_STRENGTH,
+        required=True,
+    )
+    assert ok["ok"]
+
+    wrong_profile = "fixed_hlt_v2_realistic" if PDV3_HLT_PROFILE != "fixed_hlt_v2_realistic" else "fixed_hlt_v1"
+    bad = {**metadata, "hlt_profile": wrong_profile}
+    with pytest.raises(ValueError, match="HLT profile"):
+        _verify_pdv3_hlt_metadata(
+            bad,
+            split="model_train",
+            expected_profile=PDV3_HLT_PROFILE,
+            expected_strength=PDV3_HLT_DEGRADATION_STRENGTH,
+            required=True,
+        )
 
 
 def test_step4_ce_and_v1_configs_require_the_right_teacher_payloads():
@@ -263,6 +293,7 @@ def test_step4_training_contract_and_runner_are_exposed():
     assert "--student-variant" in runner
     assert "--teacher-logit-root" in runner
     assert "--teacher-representation-root" in runner
+    assert "--expected-hlt-profile" in runner
     assert "--require-baseline-split-manifest-hash" in runner
     assert "--disable-baseline-from-scratch" in runner
     assert "--final-test-teacher-diagnostics" in runner

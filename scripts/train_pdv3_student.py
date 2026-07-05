@@ -10,7 +10,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teacher_logit_reco.privileged_distill_v3 import PDV3_STUDENT_VARIANTS  # noqa: E402
+from teacher_logit_reco.privileged_distill_v3 import (  # noqa: E402
+    PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
+    PDV3_STUDENT_VARIANTS,
+)
 from teacher_logit_reco.privileged_distill_v3.train import PDV3StudentTrainConfig, train_pdv3_student  # noqa: E402
 
 
@@ -62,7 +66,8 @@ def parse_args() -> argparse.Namespace:
         dest="require_baseline_split_manifest_hash",
         action="store_false",
     )
-    parser.add_argument("--expected-hlt-degradation-strength", type=float, default=0.2)
+    parser.add_argument("--expected-hlt-profile", default=PDV3_HLT_PROFILE)
+    parser.add_argument("--expected-hlt-degradation-strength", type=float, default=PDV3_HLT_DEGRADATION_STRENGTH)
 
     parser.add_argument("--view-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
@@ -145,6 +150,7 @@ def main() -> int:
         verify_hlt_hash=not bool(args.skip_hlt_hash_check),
         verify_hlt_params=not bool(args.skip_hlt_params_check),
         require_baseline_split_manifest_hash=bool(args.require_baseline_split_manifest_hash),
+        expected_hlt_profile=args.expected_hlt_profile,
         expected_hlt_degradation_strength=args.expected_hlt_degradation_strength,
         view_dim=args.view_dim,
         hidden_dim=args.hidden_dim,

@@ -30,6 +30,7 @@ from jetclass_fresh.offline_teacher import OfflineTeacherTrainConfig, train_offl
 from .config import (
     PD10_EXPERIMENT_NAME,
     PD10_HLT_DEGRADATION_STRENGTH,
+    PD10_HLT_PROFILE,
     PD10_SPLIT_ORDER,
     PD10_SPLIT_SIZES,
     PD10_TEACHER_ALLOWED_INPUTS,
@@ -216,11 +217,88 @@ def _manifest_report(config: PD10PartTeacherTrainConfig) -> dict[str, Any]:
     }
 
 
+def _hlt_contract_splits(
+    config: PD10PartTeacherTrainConfig,
+    *,
+    include_final_test: bool | None = None,
+) -> tuple[str, ...]:
+    splits = [config.train_split, config.val_split]
+    should_include_final = config.evaluate_final_test if include_final_test is None else bool(include_final_test)
+    if should_include_final:
+        splits.append(config.final_test_split)
+    return tuple(dict.fromkeys(splits))
+
+
+def _require_hlt_cache_contract(
+    config: PD10PartTeacherTrainConfig,
+    *,
+    include_final_test: bool | None = None,
+) -> dict[str, Any]:
+    """Hard-fail if an HLT teacher would train/evaluate on the wrong cache profile."""
+
+    if config.teacher_target != PD10_TEACHER_HLT:
+        return {"ok": True, "skipped": True, "reason": "teacher is not HLT"}
+    manifest_report = _manifest_report(config)
+    manifest_sha = manifest_report.get("manifest_hash")
+    expected_params = pd10_hlt_params_dict()
+    split_reports: dict[str, Any] = {}
+    problems: list[str] = []
+    splits = _hlt_contract_splits(config, include_final_test=include_final_test)
+    for split in splits:
+        try:
+            metadata = load_hlt_metadata(config.cache_dir, split)
+        except Exception as exc:
+            split_reports[split] = {"ok": False, "error": str(exc)}
+            problems.append(f"{split}: could not load HLT metadata: {exc}")
+            continue
+        split_problems: list[str] = []
+        if metadata.get("hlt_profile") != PD10_HLT_PROFILE:
+            split_problems.append(
+                f"hlt_profile is {metadata.get('hlt_profile')!r}, expected {PD10_HLT_PROFILE!r}"
+            )
+        actual_strength = metadata.get("hlt_degradation_strength")
+        if actual_strength is None or abs(float(actual_strength) - float(PD10_HLT_DEGRADATION_STRENGTH)) > 1.0e-12:
+            split_problems.append(
+                "hlt_degradation_strength is "
+                f"{actual_strength!r}, expected {PD10_HLT_DEGRADATION_STRENGTH:g}"
+            )
+        if metadata.get("hlt_params") != expected_params:
+            split_problems.append("hlt_params do not match the configured PD10 HLT profile")
+        if manifest_sha and metadata.get("source_manifest_hash") != manifest_sha:
+            split_problems.append("source_manifest_hash does not match active manifest")
+        split_reports[split] = {
+            "ok": not split_problems,
+            "metadata_path": str(Path(config.cache_dir) / f"{split}_fixed_hlt_metadata.json"),
+            "hlt_profile": metadata.get("hlt_profile"),
+            "expected_hlt_profile": PD10_HLT_PROFILE,
+            "hlt_degradation_strength": actual_strength,
+            "expected_hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
+            "source_manifest_hash": metadata.get("source_manifest_hash"),
+            "expected_source_manifest_hash": manifest_sha,
+            "hlt_content_hash": metadata.get("hlt_content_hash"),
+            "problems": split_problems,
+        }
+        problems.extend(f"{split}: {problem}" for problem in split_problems)
+    report = {
+        "ok": not problems,
+        "cache_dir": config.cache_dir,
+        "manifest_hash": manifest_sha,
+        "expected_hlt_profile": PD10_HLT_PROFILE,
+        "expected_hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
+        "splits": list(splits),
+        "split_reports": split_reports,
+        "problems": problems,
+    }
+    if problems:
+        raise ValueError("PD10 HLT cache contract check failed: " + "; ".join(problems))
+    return report
+
+
 def _hlt_metadata_summary(config: PD10PartTeacherTrainConfig) -> dict[str, Any]:
     if config.teacher_target != PD10_TEACHER_HLT:
         return {}
     summaries: dict[str, Any] = {}
-    for split in PD10_SPLIT_ORDER:
+    for split in _hlt_contract_splits(config):
         try:
             metadata = load_hlt_metadata(config.cache_dir, split)
         except Exception as exc:  # pragma: no cover - exercised by compute-side failures
@@ -233,8 +311,12 @@ def _hlt_metadata_summary(config: PD10PartTeacherTrainConfig) -> dict[str, Any]:
             "source_manifest_hash": metadata.get("source_manifest_hash"),
             "hlt_content_hash": metadata.get("hlt_content_hash"),
             "jet_identity_hash": metadata.get("jet_identity_hash"),
+            "hlt_profile": metadata.get("hlt_profile"),
+            "expected_hlt_profile": PD10_HLT_PROFILE,
+            "hlt_profile_version": metadata.get("hlt_profile_version"),
             "hlt_params": metadata.get("hlt_params"),
             "expected_hlt_params": pd10_hlt_params_dict(),
+            "hlt_profile_match_pd10": metadata.get("hlt_profile") == PD10_HLT_PROFILE,
             "hlt_params_match_pd10": metadata.get("hlt_params") == pd10_hlt_params_dict(),
         }
     return summaries
@@ -276,6 +358,7 @@ def _source_metadata(
         "no_stack_partitions_loaded": True,
         "student_deployment_inputs": "HLT_only",
         "teacher_is_train_time_only_for_distillation": True,
+        "hlt_profile": PD10_HLT_PROFILE,
         "hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
         "expected_hlt_params": pd10_hlt_params_dict(),
         "manifest": manifest_report,
@@ -395,6 +478,8 @@ def evaluate_pd10_part_teacher_final_test(
 ) -> dict[str, Any]:
     if not config.confirm_final_test:
         raise ValueError("PD10 final-test evaluation requires confirm_final_test=True")
+    if config.teacher_target == PD10_TEACHER_HLT:
+        _require_hlt_cache_contract(config, include_final_test=True)
 
     torch = require_torch()
     device = resolve_device(config.device)
@@ -482,6 +567,7 @@ def train_pd10_part_teacher(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if config.teacher_target == PD10_TEACHER_HLT:
+        _require_hlt_cache_contract(config)
         base_config = HLTBaselineTrainConfig(
             output_dir=config.output_dir,
             cache_dir=config.cache_dir,

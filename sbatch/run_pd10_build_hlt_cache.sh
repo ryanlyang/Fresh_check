@@ -37,6 +37,7 @@ cmd=(
   --cache-dir "${PD10_HLT_CACHE_DIR}"
   --splits "${split_args[@]}"
   --read-chunk-size "${READ_CHUNK_SIZE}"
+  --hlt-profile "${PD10_HLT_PROFILE}"
   --hlt-degradation-strength "${PD10_HLT_DEGRADATION_STRENGTH}"
 )
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"

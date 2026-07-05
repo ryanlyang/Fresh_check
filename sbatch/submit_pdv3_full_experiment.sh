@@ -162,6 +162,7 @@ if ! fresh_is_dry_run; then
     echo "root=${PDV3_ROOT}"
     echo "data_dir=${PDV3_DATA_DIR}"
     echo "upstream_dependency=${PDV3_UPSTREAM_DEPENDENCY}"
+    echo "hlt_profile=${PDV3_HLT_PROFILE}"
     echo "hlt_degradation_strength=${PDV3_HLT_DEGRADATION_STRENGTH}"
     echo "model_train_size=${PDV3_MODEL_TRAIN_SIZE}"
     echo "model_val_size=${PDV3_MODEL_VAL_SIZE}"
@@ -173,6 +174,7 @@ fi
 echo "pdv3_full_submission_start:"
 echo "  root: ${PDV3_ROOT}"
 echo "  upstream_dependency: ${PDV3_UPSTREAM_DEPENDENCY:-none}"
+echo "  hlt_profile: ${PDV3_HLT_PROFILE}"
 echo "  hlt_degradation_strength: ${PDV3_HLT_DEGRADATION_STRENGTH}"
 echo "  sizes: ${PDV3_MODEL_TRAIN_SIZE}/${PDV3_MODEL_VAL_SIZE}/${PDV3_FINAL_TEST_SIZE}"
 
@@ -249,6 +251,7 @@ cat <<SUMMARY
 pdv3_full_submission:
   root: ${PDV3_ROOT}
   data_dir: ${PDV3_DATA_DIR}
+  hlt_profile: ${PDV3_HLT_PROFILE}
   hlt_degradation_strength: ${PDV3_HLT_DEGRADATION_STRENGTH}
   sizes:
     model_train: ${PDV3_MODEL_TRAIN_SIZE}

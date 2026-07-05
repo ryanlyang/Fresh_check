@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
 
+from jetclass_fresh.hlt_cache import HLT_PROFILE_V1, normalize_hlt_profile
 from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM
 
 
@@ -41,6 +42,14 @@ def _float_from_env(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a float, got {raw!r}") from exc
 
 
+def _hlt_profile_from_env(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return normalize_hlt_profile(default)
+    return normalize_hlt_profile(raw)
+
+
+PD10_HLT_PROFILE = _hlt_profile_from_env("PD10_HLT_PROFILE", HLT_PROFILE_V1)
 PD10_HLT_DEGRADATION_STRENGTH = _float_from_env("PD10_HLT_DEGRADATION_STRENGTH", 0.6)
 
 PD10_MANIFEST_SPLIT_ORDER: tuple[str, ...] = (
@@ -948,6 +957,7 @@ __all__ = [
     "PD10_EXPERIMENT_NAME",
     "PD10_EXPERIMENT_STEP",
     "PD10_HLT_DEGRADATION_STRENGTH",
+    "PD10_HLT_PROFILE",
     "PD10_LABEL_FILTER",
     "PD10_LABEL_NAMES",
     "PD10_MANIFEST_SPLIT_ORDER",

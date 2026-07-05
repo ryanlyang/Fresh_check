@@ -12,7 +12,7 @@ from jetclass_fresh.hlt_cache import (
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
     fixed_hlt_params_dict,
-    fixed_hlt_params_from_strength,
+    fixed_hlt_params_from_profile,
     hash_arrays,
     load_cached_hlt_view,
     load_hlt_metadata,
@@ -28,6 +28,7 @@ from jetclass_fresh.jetclass_data import (
 from .config import (
     PD10_EXPERIMENT_NAME,
     PD10_HLT_DEGRADATION_STRENGTH,
+    PD10_HLT_PROFILE,
     PD10_MANIFEST_SPLIT_ORDER,
     PD10_MANIFEST_SPLIT_SIZES,
     PD10_MANIFEST_STACK_SPLIT_SIZES,
@@ -72,7 +73,9 @@ def pd10_stack_placeholder_split_sizes(expected_counts: Mapping[str, int] | None
 def pd10_hlt_params_dict() -> dict[str, float]:
     """Return the configured canonical PD10 fixed-HLT profile as JSON-safe floats."""
 
-    return fixed_hlt_params_dict(fixed_hlt_params_from_strength(PD10_HLT_DEGRADATION_STRENGTH))
+    return fixed_hlt_params_dict(
+        fixed_hlt_params_from_profile(PD10_HLT_PROFILE, PD10_HLT_DEGRADATION_STRENGTH)
+    )
 
 
 def split_size_problems(
@@ -210,6 +213,9 @@ def read_cache_array_report(cache_dir: Path, split: str) -> dict[str, Any]:
         "class_counts_from_cache": class_counts(hlt_view.labels),
         "seed": int(metadata.get("seed", -1)),
         "expected_seed": int(DEFAULT_HLT_SEEDS[split]),
+        "hlt_profile": metadata.get("hlt_profile"),
+        "expected_hlt_profile": PD10_HLT_PROFILE,
+        "hlt_profile_version": metadata.get("hlt_profile_version"),
         "hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
         "hlt_params": metadata.get("hlt_params"),
         "expected_hlt_params": expected_params,
@@ -245,6 +251,10 @@ def hlt_cache_split_problems(
         problems.append(
             "HLT params do not match configured PD10 fixed-HLT profile "
             f"(strength={PD10_HLT_DEGRADATION_STRENGTH:g})"
+        )
+    if item.get("hlt_profile") != item.get("expected_hlt_profile"):
+        problems.append(
+            f"HLT profile is {item.get('hlt_profile')!r}, expected {item.get('expected_hlt_profile')!r}"
         )
     if item.get("source_manifest_hash") != manifest_sha:
         problems.append("source_manifest_hash does not match manifest hash")
@@ -312,6 +322,8 @@ def build_hlt_report(
         cache_dir,
         splits=PD10_SPLIT_ORDER,
         expected_params=expected_params,
+        expected_hlt_profile=PD10_HLT_PROFILE,
+        expected_hlt_degradation_strength=PD10_HLT_DEGRADATION_STRENGTH,
     )
     split_reports: dict[str, Any] = {}
     expected_counts = pd10_expected_split_sizes(expected_split_sizes)
@@ -361,6 +373,7 @@ def build_hlt_report(
         "pd10_splits": list(PD10_SPLIT_ORDER),
         "expected_split_sizes": expected_counts,
         "hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
+        "hlt_profile": PD10_HLT_PROFILE,
         "expected_hlt_params": expected_params,
         "expected_hlt_seeds": {split: int(DEFAULT_HLT_SEEDS[split]) for split in PD10_SPLIT_ORDER},
         "base_audit": base_hlt_audit,
@@ -401,6 +414,7 @@ def build_pd10_step2_audit_report(
         "expected_split_sizes": expected_counts,
         "expected_manifest_split_sizes": pd10_manifest_split_sizes(expected_counts, placeholder_counts),
         "hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
+        "hlt_profile": PD10_HLT_PROFILE,
         "expected_hlt_params": pd10_hlt_params_dict(),
         "audits": {
             "split_manifest": split_report,

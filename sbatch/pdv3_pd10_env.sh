@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Map the PDV3 HLT0.2 experiment contract onto the existing PD10 teacher tools.
+# Map the PDV3 HLT-profile experiment contract onto the existing PD10 teacher tools.
 #
 # Source this after common.sh and before invoking any run_pd10_* script. The
 # PD10 Python code remains the implementation of teacher training/caching, but
@@ -28,6 +28,7 @@ export PD10_STACK_TRAIN_SIZE="${PDV3_STACK_TRAIN_SIZE}"
 export PD10_STACK_VAL_SIZE="${PDV3_STACK_VAL_SIZE}"
 export PD10_FINAL_TEST_SIZE="${PDV3_FINAL_TEST_SIZE}"
 export PD10_HLT_SPLITS="${PDV3_HLT_SPLITS}"
+export PD10_HLT_PROFILE="${PDV3_HLT_PROFILE}"
 export PD10_HLT_DEGRADATION_STRENGTH="${PDV3_HLT_DEGRADATION_STRENGTH}"
 export PD10_TEACHER_TARGETS="${PDV3_TEACHER_TARGETS}"
 export PD10_TEACHER_LOGIT_TARGETS="${PDV3_TEACHER_LOGIT_TARGETS}"

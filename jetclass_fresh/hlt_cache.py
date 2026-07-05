@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -12,8 +12,14 @@ import numpy as np
 
 from jetclass_fixed_hlt import (
     FixedHLTParams,
+    FixedHLTV2Params,
+    HLT_PROFILE_V1,
+    HLT_PROFILE_V2_REALISTIC,
+    HLT_PROFILE_V2_REALISTIC_VERSION,
     build_fixed_hlt_view,
+    build_fixed_hlt_v2_realistic_view,
     scaled_fixed_hlt_params,
+    scaled_fixed_hlt_v2_realistic_params,
     summarize_hlt_diagnostics,
 )
 
@@ -39,16 +45,77 @@ HLT_ARRAY_FILENAME = "{split}_fixed_hlt.npz"
 HLT_METADATA_FILENAME = "{split}_fixed_hlt_metadata.json"
 
 
-def fixed_hlt_params_dict(params: FixedHLTParams | None = None) -> Dict[str, float]:
+def _jsonable_hlt_param(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+def fixed_hlt_params_dict(params: FixedHLTParams | FixedHLTV2Params | None = None) -> Dict[str, Any]:
     """Return the exact fixed HLT parameter profile as plain JSON values."""
 
-    return {key: float(value) for key, value in asdict(params or FixedHLTParams()).items()}
+    return {key: _jsonable_hlt_param(value) for key, value in asdict(params or FixedHLTParams()).items()}
 
 
 def fixed_hlt_params_from_strength(strength: float = 1.0) -> FixedHLTParams:
     """Build the HLT parameter profile for an experimental degradation strength."""
 
     return scaled_fixed_hlt_params(strength)
+
+
+def normalize_hlt_profile(profile: str | None = None) -> str:
+    value = HLT_PROFILE_V1 if profile is None else str(profile).strip()
+    aliases = {
+        "": HLT_PROFILE_V1,
+        "fixed_hlt": HLT_PROFILE_V1,
+        HLT_PROFILE_V1: HLT_PROFILE_V1,
+        "v1": HLT_PROFILE_V1,
+        "fixed_hlt_v2": HLT_PROFILE_V2_REALISTIC,
+        "hlt_v2_realistic": HLT_PROFILE_V2_REALISTIC,
+        HLT_PROFILE_V2_REALISTIC: HLT_PROFILE_V2_REALISTIC,
+        "v2": HLT_PROFILE_V2_REALISTIC,
+    }
+    if value not in aliases:
+        raise ValueError(f"Unknown HLT profile {profile!r}; expected {sorted(set(aliases.values()))}")
+    return aliases[value]
+
+
+def hlt_profile_from_params(params: FixedHLTParams | FixedHLTV2Params | Mapping[str, Any] | None) -> str:
+    if params is None or isinstance(params, FixedHLTParams):
+        return HLT_PROFILE_V1
+    if isinstance(params, FixedHLTV2Params):
+        return HLT_PROFILE_V2_REALISTIC
+    return normalize_hlt_profile(str(params.get("profile_name") or params.get("hlt_profile") or HLT_PROFILE_V1))
+
+
+def hlt_profile_version_from_params(params: FixedHLTParams | FixedHLTV2Params | Mapping[str, Any] | None) -> str:
+    profile = hlt_profile_from_params(params)
+    if profile == HLT_PROFILE_V1:
+        return "v1"
+    if isinstance(params, FixedHLTV2Params):
+        return str(params.profile_version)
+    if isinstance(params, Mapping):
+        return str(params.get("profile_version") or params.get("hlt_profile_version") or HLT_PROFILE_V2_REALISTIC_VERSION)
+    return HLT_PROFILE_V2_REALISTIC_VERSION
+
+
+def fixed_hlt_params_from_profile(profile: str = HLT_PROFILE_V1, strength: float = 1.0) -> FixedHLTParams | FixedHLTV2Params:
+    """Build profile-aware HLT parameters for cache generation."""
+
+    normalized = normalize_hlt_profile(profile)
+    if normalized == HLT_PROFILE_V1:
+        return scaled_fixed_hlt_params(strength)
+    if normalized == HLT_PROFILE_V2_REALISTIC:
+        return scaled_fixed_hlt_v2_realistic_params(strength)
+    raise AssertionError(f"Unhandled HLT profile {normalized!r}")
+
+
+def _coerce_param_mapping(params: FixedHLTParams | FixedHLTV2Params | Mapping[str, Any] | None) -> Dict[str, Any]:
+    if params is None or is_dataclass(params):
+        return fixed_hlt_params_dict(params)
+    return {str(key): _jsonable_hlt_param(value) for key, value in params.items()}
 
 
 def _hash_update_array(hasher: "hashlib._Hash", name: str, array: np.ndarray) -> None:
@@ -148,19 +215,35 @@ def build_fixed_hlt_jet_view(
     offline_view: JetView,
     *,
     seed: int,
-    params: FixedHLTParams | None = None,
+    params: FixedHLTParams | FixedHLTV2Params | None = None,
+    hlt_degradation_strength: float | None = None,
     show_progress: bool = False,
 ) -> tuple[JetView, Dict[str, np.ndarray], Dict[str, Any]]:
     """Generate a fixed HLT view from one offline split view."""
 
     params = params or FixedHLTParams()
-    hlt_tokens, hlt_mask, diagnostics = build_fixed_hlt_view(
-        offline_view.tokens,
-        offline_view.mask,
-        seed=int(seed),
-        params=params,
-        show_progress=show_progress,
-    )
+    hlt_profile = hlt_profile_from_params(params)
+    hlt_profile_version = hlt_profile_version_from_params(params)
+    if hlt_profile == HLT_PROFILE_V2_REALISTIC:
+        hlt_tokens, hlt_mask, diagnostics = build_fixed_hlt_v2_realistic_view(
+            offline_view.tokens,
+            offline_view.mask,
+            seed=int(seed),
+            params=params if isinstance(params, FixedHLTV2Params) else FixedHLTV2Params(),
+            show_progress=show_progress,
+        )
+        generator_function = "build_fixed_hlt_v2_realistic_view"
+        params_class = "FixedHLTV2Params"
+    else:
+        hlt_tokens, hlt_mask, diagnostics = build_fixed_hlt_view(
+            offline_view.tokens,
+            offline_view.mask,
+            seed=int(seed),
+            params=params if isinstance(params, FixedHLTParams) else FixedHLTParams(),
+            show_progress=show_progress,
+        )
+        generator_function = "build_fixed_hlt_view"
+        params_class = "FixedHLTParams"
     hlt_view = JetView(
         tokens=hlt_tokens.astype(np.float32, copy=False),
         mask=hlt_mask.astype(bool, copy=False),
@@ -171,6 +254,11 @@ def build_fixed_hlt_jet_view(
             "view": "fixed_hlt",
             "source_view": offline_view.metadata.get("view", "offline"),
             "seed": int(seed),
+            "hlt_profile": hlt_profile,
+            "hlt_profile_version": hlt_profile_version,
+            "hlt_degradation_strength": None
+            if hlt_degradation_strength is None
+            else float(hlt_degradation_strength),
             "hlt_params": fixed_hlt_params_dict(params),
             "source_manifest_hash": offline_view.metadata.get("source_manifest_hash"),
         },
@@ -181,6 +269,9 @@ def build_fixed_hlt_jet_view(
         diagnostics=diagnostics,
         seed=seed,
         params=params,
+        hlt_degradation_strength=hlt_degradation_strength,
+        generator_function=generator_function,
+        params_class=params_class,
     )
     hlt_view.metadata.update(metadata)
     return hlt_view, diagnostics, metadata
@@ -192,11 +283,20 @@ def build_hlt_metadata(
     offline_view: JetView,
     diagnostics: Mapping[str, np.ndarray],
     seed: int,
-    params: FixedHLTParams | None = None,
+    params: FixedHLTParams | FixedHLTV2Params | None = None,
+    hlt_degradation_strength: float | None = None,
+    generator_function: str | None = None,
+    params_class: str | None = None,
 ) -> Dict[str, Any]:
     """Build metadata proving a split's HLT cache identity and diagnostics."""
 
     params = params or FixedHLTParams()
+    hlt_profile = hlt_profile_from_params(params)
+    hlt_profile_version = hlt_profile_version_from_params(params)
+    generator_function = generator_function or (
+        "build_fixed_hlt_v2_realistic_view" if hlt_profile == HLT_PROFILE_V2_REALISTIC else "build_fixed_hlt_view"
+    )
+    params_class = params_class or ("FixedHLTV2Params" if hlt_profile == HLT_PROFILE_V2_REALISTIC else "FixedHLTParams")
     offline_counts = np.sum(offline_view.mask, axis=1).astype(np.int32)
     hlt_counts = np.sum(hlt_view.mask, axis=1).astype(np.int32)
     unique_files, file_indices, entries = _identity_arrays(hlt_view.jet_ids)
@@ -225,6 +325,9 @@ def build_hlt_metadata(
         "view": "fixed_hlt",
         "split": hlt_view.split,
         "seed": int(seed),
+        "hlt_profile": hlt_profile,
+        "hlt_profile_version": hlt_profile_version,
+        "hlt_degradation_strength": None if hlt_degradation_strength is None else float(hlt_degradation_strength),
         "hlt_params": fixed_hlt_params_dict(params),
         "source_manifest_hash": offline_view.metadata.get("source_manifest_hash"),
         "source_view": offline_view.metadata.get("view", "offline"),
@@ -241,8 +344,8 @@ def build_hlt_metadata(
         "hlt_diagnostics_summary": summarize_hlt_diagnostics(dict(diagnostics)),
         "generator": {
             "module": "jetclass_fixed_hlt",
-            "function": "build_fixed_hlt_view",
-            "params_class": "FixedHLTParams",
+            "function": generator_function,
+            "params_class": params_class,
         },
         "leakage_note": (
             "HLT tokens were generated from offline constituents once for this split. "
@@ -300,7 +403,8 @@ def generate_and_cache_hlt_view(
     cache_dir: str | Path,
     *,
     seed: int,
-    params: FixedHLTParams | None = None,
+    params: FixedHLTParams | FixedHLTV2Params | None = None,
+    hlt_degradation_strength: float | None = None,
     overwrite: bool = False,
     show_progress: bool = False,
 ) -> Dict[str, Any]:
@@ -310,6 +414,7 @@ def generate_and_cache_hlt_view(
         offline_view,
         seed=int(seed),
         params=params,
+        hlt_degradation_strength=hlt_degradation_strength,
         show_progress=show_progress,
     )
     return save_hlt_cache(hlt_view, diagnostics, metadata, cache_dir, overwrite=overwrite)
@@ -322,7 +427,8 @@ def generate_and_cache_hlt_split(
     *,
     data_dir: str | Path | None = None,
     seed: int | None = None,
-    params: FixedHLTParams | None = None,
+    params: FixedHLTParams | FixedHLTV2Params | None = None,
+    hlt_degradation_strength: float | None = None,
     overwrite: bool = False,
     show_progress: bool = False,
     verify_label_branches: bool = False,
@@ -345,6 +451,7 @@ def generate_and_cache_hlt_split(
         cache_dir,
         seed=seed,
         params=params,
+        hlt_degradation_strength=hlt_degradation_strength,
         overwrite=overwrite,
         show_progress=show_progress,
     )
@@ -423,17 +530,21 @@ def audit_hlt_cache(
     cache_dir: str | Path,
     *,
     splits: Iterable[str] = SPLIT_ORDER,
-    expected_params: FixedHLTParams | Mapping[str, float] | None = None,
+    expected_params: FixedHLTParams | FixedHLTV2Params | Mapping[str, Any] | None = None,
+    expected_hlt_profile: str | None = None,
+    expected_hlt_profile_version: str | None = None,
+    expected_hlt_degradation_strength: float | None = None,
 ) -> Dict[str, Any]:
     """Verify cached HLT views match split identities and fixed profile metadata."""
 
     manifest_sha = manifest_hash(manifest)
     split_reports: Dict[str, Any] = {}
     ok = True
-    if isinstance(expected_params, FixedHLTParams) or expected_params is None:
-        expected_param_dict = fixed_hlt_params_dict(expected_params)
-    else:
-        expected_param_dict = {key: float(value) for key, value in expected_params.items()}
+    if expected_params is None and expected_hlt_profile is not None and expected_hlt_degradation_strength is not None:
+        expected_params = fixed_hlt_params_from_profile(expected_hlt_profile, expected_hlt_degradation_strength)
+    expected_param_dict = _coerce_param_mapping(expected_params)
+    expected_profile = normalize_hlt_profile(expected_hlt_profile or hlt_profile_from_params(expected_params))
+    expected_profile_version = str(expected_hlt_profile_version or hlt_profile_version_from_params(expected_params))
 
     for split in splits:
         split_ok = True
@@ -460,9 +571,24 @@ def audit_hlt_cache(
         if metadata.get("source_manifest_hash") not in (None, manifest_sha):
             split_ok = False
             problems.append("source_manifest_hash does not match manifest")
+        metadata_profile = normalize_hlt_profile(metadata.get("hlt_profile") or HLT_PROFILE_V1)
+        metadata_profile_version = str(metadata.get("hlt_profile_version") or "v1")
+        if metadata_profile != expected_profile:
+            split_ok = False
+            problems.append(f"HLT profile is {metadata_profile}, expected {expected_profile}")
+        if metadata_profile_version != expected_profile_version:
+            split_ok = False
+            problems.append(f"HLT profile version is {metadata_profile_version}, expected {expected_profile_version}")
+        if expected_hlt_degradation_strength is not None:
+            actual_strength = metadata.get("hlt_degradation_strength")
+            if actual_strength is None or abs(float(actual_strength) - float(expected_hlt_degradation_strength)) > 1.0e-12:
+                split_ok = False
+                problems.append(
+                    f"HLT degradation strength is {actual_strength}, expected {expected_hlt_degradation_strength}"
+                )
         if metadata.get("hlt_params") != expected_param_dict:
             split_ok = False
-            problems.append("HLT parameters do not match expected FixedHLTParams profile")
+            problems.append("HLT parameters do not match expected HLT profile")
         expected_seed = DEFAULT_HLT_SEEDS.get(split)
         if expected_seed is not None and int(metadata.get("seed", -1)) != int(expected_seed):
             split_ok = False
@@ -473,8 +599,14 @@ def audit_hlt_cache(
             "problems": problems,
             "n_jets": int(metadata.get("n_jets", 0)),
             "seed": int(metadata.get("seed", -1)),
+            "hlt_profile": metadata_profile,
+            "hlt_profile_version": metadata_profile_version,
+            "hlt_degradation_strength": metadata.get("hlt_degradation_strength"),
             "hlt_content_hash": metadata.get("hlt_content_hash"),
             "hlt_params": metadata.get("hlt_params"),
+            "expected_hlt_profile": expected_profile,
+            "expected_hlt_profile_version": expected_profile_version,
+            "expected_hlt_degradation_strength": expected_hlt_degradation_strength,
             "expected_hlt_params": expected_param_dict,
             "hlt_diagnostics_summary": metadata.get("hlt_diagnostics_summary"),
         }
@@ -484,6 +616,9 @@ def audit_hlt_cache(
     return {
         "ok": bool(ok),
         "manifest_hash": manifest_sha,
+        "expected_hlt_profile": expected_profile,
+        "expected_hlt_profile_version": expected_profile_version,
+        "expected_hlt_degradation_strength": expected_hlt_degradation_strength,
         "expected_hlt_params": expected_param_dict,
         "split_reports": split_reports,
         "all_splits_have_distinct_content_hashes": len(hashes) == len(set(hashes)),

@@ -15,9 +15,11 @@ if str(REPO_ROOT) not in sys.path:
 from jetclass_fresh.hlt_cache import (  # noqa: E402
     DEFAULT_HLT_SEEDS,
     audit_hlt_cache,
+    fixed_hlt_params_from_profile,
     fixed_hlt_params_dict,
-    fixed_hlt_params_from_strength,
     generate_and_cache_hlt_split,
+    hlt_profile_version_from_params,
+    normalize_hlt_profile,
 )
 from jetclass_fresh.jetclass_data import DEFAULT_DATA_DIR, SPLIT_ORDER, load_split_manifest  # noqa: E402
 
@@ -56,12 +58,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--read-chunk-size", type=int, default=50_000)
     parser.add_argument(
+        "--hlt-profile",
+        default="fixed_hlt_v1",
+        choices=["fixed_hlt_v1", "fixed_hlt_v2_realistic"],
+        help=(
+            "HLT generation profile. fixed_hlt_v1 is the historical stress-test profile; "
+            "fixed_hlt_v2_realistic is the new mild realistic profile."
+        ),
+    )
+    parser.add_argument(
         "--hlt-degradation-strength",
         type=float,
         default=1.0,
         help=(
-            "Scale the fixed HLT degradation profile. 1.0 is the original fixed HLT; "
-            "smaller values produce a less degraded HLT cache."
+            "Scale the selected HLT profile. For fixed_hlt_v1, 1.0 is the original harsh "
+            "fixed HLT. For fixed_hlt_v2_realistic, 1.0 is the realistic mild target."
         ),
     )
     return parser.parse_args()
@@ -72,7 +83,9 @@ def main() -> int:
     manifest = load_split_manifest(args.manifest)
     data_dir = args.data_dir if args.data_dir is not None else (manifest.data_dir or DEFAULT_DATA_DIR)
     data_dir_report = data_dir if isinstance(data_dir, list) else str(data_dir)
-    hlt_params = fixed_hlt_params_from_strength(args.hlt_degradation_strength)
+    hlt_profile = normalize_hlt_profile(args.hlt_profile)
+    hlt_params = fixed_hlt_params_from_profile(hlt_profile, args.hlt_degradation_strength)
+    hlt_profile_version = hlt_profile_version_from_params(hlt_params)
     reports = {}
 
     for split in args.splits:
@@ -83,6 +96,7 @@ def main() -> int:
             data_dir=data_dir,
             seed=DEFAULT_HLT_SEEDS[split],
             params=hlt_params,
+            hlt_degradation_strength=args.hlt_degradation_strength,
             overwrite=args.overwrite,
             show_progress=args.show_progress,
             verify_label_branches=args.verify_label_branches,
@@ -93,6 +107,8 @@ def main() -> int:
             "metadata_path": metadata["metadata_path"],
             "n_jets": metadata["n_jets"],
             "seed": metadata["seed"],
+            "hlt_profile": metadata["hlt_profile"],
+            "hlt_profile_version": metadata["hlt_profile_version"],
             "hlt_degradation_strength": float(args.hlt_degradation_strength),
             "hlt_params": metadata["hlt_params"],
             "hlt_content_hash": metadata["hlt_content_hash"],
@@ -101,11 +117,21 @@ def main() -> int:
             "hlt_diagnostics_summary": metadata["hlt_diagnostics_summary"],
         }
 
-    audit = audit_hlt_cache(manifest, args.cache_dir, splits=args.splits, expected_params=hlt_params)
+    audit = audit_hlt_cache(
+        manifest,
+        args.cache_dir,
+        splits=args.splits,
+        expected_params=hlt_params,
+        expected_hlt_profile=hlt_profile,
+        expected_hlt_profile_version=hlt_profile_version,
+        expected_hlt_degradation_strength=args.hlt_degradation_strength,
+    )
     result = {
         "cache_dir": str(Path(args.cache_dir)),
         "data_dir": data_dir_report,
         "splits": list(args.splits),
+        "hlt_profile": hlt_profile,
+        "hlt_profile_version": hlt_profile_version,
         "hlt_degradation_strength": float(args.hlt_degradation_strength),
         "hlt_params": fixed_hlt_params_dict(hlt_params),
         "reports": reports,

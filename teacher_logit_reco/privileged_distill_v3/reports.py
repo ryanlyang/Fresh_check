@@ -39,9 +39,18 @@ PDV3_REPORT_TABLES = {
 PDV3_REPORT_SPLITS = ("model_val", "final_test")
 PDV3_DATASET_CONSISTENCY_FIELDS = (
     "source_manifest_hash",
+    "hlt_profile",
+    "hlt_degradation_strength",
     "hlt_content_hash",
     "jet_identity_hash",
     "source_hlt_jet_identity_hash",
+)
+PDV3_REQUIRED_DATASET_CONSISTENCY_FIELDS = (
+    "source_manifest_hash",
+    "hlt_profile",
+    "hlt_degradation_strength",
+    "hlt_content_hash",
+    "jet_identity_hash",
 )
 
 
@@ -282,7 +291,7 @@ def _check_student_report_consistency(reports: Mapping[str, Mapping[str, Any]], 
                 label=f"{split_key}.{field}",
                 path=(split_key, field),
                 problems=problems,
-                required=field in ("source_manifest_hash", "hlt_content_hash", "jet_identity_hash"),
+                required=field in PDV3_REQUIRED_DATASET_CONSISTENCY_FIELDS,
             )
     for variant, report in reports.items():
         if bool(report.get("final_test_uses_teacher_logits")) or bool(report.get("final_test_uses_teacher_representations")):

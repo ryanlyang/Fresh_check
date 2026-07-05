@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,12 +15,14 @@ from teacher_logit_reco.privileged_distill_10class import (
     default_pd10_experiment_layout,
     default_pd10_teacher_seed,
     normalize_pd10_part_teacher_target,
+    pd10_hlt_params_dict,
     pd10_part_teacher_checkpoint,
     pd10_part_teacher_dir,
     pd10_part_teacher_model_name,
     register_pd10_part_teacher_checkpoint,
     sha256_file,
 )
+from teacher_logit_reco.privileged_distill_10class.teachers import _require_hlt_cache_contract
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -165,6 +168,59 @@ class PD10Step3TeacherTests(unittest.TestCase):
                     source_model_val_report=source_report,
                     source_final_test_report=source_final,
                 )
+
+    def test_hlt_teacher_cache_contract_rejects_wrong_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "hlt_cache"
+            cache.mkdir()
+            for split in ("model_train", "model_val"):
+                payload = {
+                    "hlt_profile": "fixed_hlt_v2_realistic",
+                    "hlt_degradation_strength": 0.6,
+                    "hlt_params": pd10_hlt_params_dict(),
+                }
+                (cache / f"{split}_fixed_hlt_metadata.json").write_text(
+                    json.dumps(payload, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            cfg = PD10PartTeacherTrainConfig(
+                teacher_target="hlt",
+                output_dir=str(root / "teacher"),
+                manifest_path=str(root / "missing_manifest.json.gz"),
+                cache_dir=str(cache),
+                evaluate_final_test=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "hlt_profile"):
+                _require_hlt_cache_contract(cfg)
+
+    def test_hlt_cache_contract_can_force_final_test_split_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "hlt_cache"
+            cache.mkdir()
+            for split in ("model_train", "model_val"):
+                payload = {
+                    "hlt_profile": "fixed_hlt_v1",
+                    "hlt_degradation_strength": 0.6,
+                    "hlt_params": pd10_hlt_params_dict(),
+                }
+                (cache / f"{split}_fixed_hlt_metadata.json").write_text(
+                    json.dumps(payload, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            cfg = PD10PartTeacherTrainConfig(
+                teacher_target="hlt",
+                output_dir=str(root / "teacher"),
+                manifest_path=str(root / "missing_manifest.json.gz"),
+                cache_dir=str(cache),
+                evaluate_final_test=False,
+            )
+
+            self.assertTrue(_require_hlt_cache_contract(cfg)["ok"])
+            with self.assertRaisesRegex(ValueError, "final_test"):
+                _require_hlt_cache_contract(cfg, include_final_test=True)
 
     def test_cli_defaults_use_pd10_layout_and_require_teacher(self):
         module = load_script_module()

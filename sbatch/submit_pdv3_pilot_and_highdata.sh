@@ -20,8 +20,17 @@ SUBMIT_SCRIPT="${SCRIPT_DIR}/submit_pdv3_full_experiment.sh"
 : "${PDV3_SUBMIT_HIGHDATA:=1}"
 : "${PDV3_HIGHDATA_AFTER_PILOT:=1}"
 
+pdv3_hlt_tag() {
+  local profile_tag="${PDV3_HLT_PROFILE//[^A-Za-z0-9]/_}"
+  local strength_tag="${PDV3_HLT_DEGRADATION_STRENGTH//./p}"
+  strength_tag="${strength_tag//-/_neg_}"
+  printf '%s_s%s' "${profile_tag}" "${strength_tag}"
+}
+
+PDV3_HLT_TAG="$(pdv3_hlt_tag)"
+
 : "${PDV3_PILOT_TAG:=pilot_${PDV3_RUN_STAMP}}"
-: "${PDV3_PILOT_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_hlt0p2_${PDV3_PILOT_TAG}}"
+: "${PDV3_PILOT_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_${PDV3_HLT_TAG}_${PDV3_PILOT_TAG}}"
 : "${PDV3_PILOT_MODEL_TRAIN_SIZE:=500000}"
 : "${PDV3_PILOT_MODEL_VAL_SIZE:=150000}"
 : "${PDV3_PILOT_STACK_TRAIN_SIZE:=10}"
@@ -31,7 +40,7 @@ SUBMIT_SCRIPT="${SCRIPT_DIR}/submit_pdv3_full_experiment.sh"
 : "${PDV3_PILOT_EARLY_STOP_PATIENCE:=4}"
 
 : "${PDV3_HIGHDATA_TAG:=highdata_${PDV3_RUN_STAMP}}"
-: "${PDV3_HIGHDATA_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_hlt0p2_${PDV3_HIGHDATA_TAG}}"
+: "${PDV3_HIGHDATA_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_${PDV3_HLT_TAG}_${PDV3_HIGHDATA_TAG}}"
 : "${PDV3_HIGHDATA_MODEL_TRAIN_SIZE:=5000000}"
 : "${PDV3_HIGHDATA_MODEL_VAL_SIZE:=1000000}"
 : "${PDV3_HIGHDATA_STACK_TRAIN_SIZE:=10}"
@@ -59,6 +68,8 @@ submit_campaign() {
 
   echo "submitting ${label}:"
   echo "  root=${root}"
+  echo "  hlt_profile=${PDV3_HLT_PROFILE}"
+  echo "  hlt_degradation_strength=${PDV3_HLT_DEGRADATION_STRENGTH}"
   echo "  sizes=${train_size}/${val_size}/${final_test_size}"
   echo "  upstream_dependency=${dependency:-none}"
 
@@ -77,7 +88,7 @@ submit_campaign() {
 pilot_report_job=""
 if fresh_bool_enabled "${PDV3_SUBMIT_PILOT}"; then
   pilot_output="$(submit_campaign \
-    "PDV3 HLT0.2 pilot" \
+    "PDV3 ${PDV3_HLT_TAG} pilot" \
     "${PDV3_PILOT_ROOT}" \
     "${PDV3_PILOT_MODEL_TRAIN_SIZE}" \
     "${PDV3_PILOT_MODEL_VAL_SIZE}" \
@@ -97,7 +108,7 @@ fi
 
 if fresh_bool_enabled "${PDV3_SUBMIT_HIGHDATA}"; then
   submit_campaign \
-    "PDV3 HLT0.2 high-data" \
+    "PDV3 ${PDV3_HLT_TAG} high-data" \
     "${PDV3_HIGHDATA_ROOT}" \
     "${PDV3_HIGHDATA_MODEL_TRAIN_SIZE}" \
     "${PDV3_HIGHDATA_MODEL_VAL_SIZE}" \
@@ -113,6 +124,8 @@ cat <<SUMMARY
 pdv3_pilot_and_highdata_submission:
   pilot_root: ${PDV3_PILOT_ROOT}
   highdata_root: ${PDV3_HIGHDATA_ROOT}
+  hlt_profile: ${PDV3_HLT_PROFILE}
+  hlt_degradation_strength: ${PDV3_HLT_DEGRADATION_STRENGTH}
   highdata_after_pilot: ${PDV3_HIGHDATA_AFTER_PILOT}
   pilot_report_job: ${pilot_report_job:-none}
   highdata_dependency: ${highdata_dependency:-none}

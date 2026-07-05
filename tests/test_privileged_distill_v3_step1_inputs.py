@@ -7,7 +7,13 @@ import unittest
 
 import numpy as np
 
-from jetclass_fresh.hlt_cache import DEFAULT_HLT_SEEDS, fixed_hlt_params_dict, fixed_hlt_params_from_strength
+from jetclass_fresh.hlt_cache import (
+    DEFAULT_HLT_SEEDS,
+    HLT_PROFILE_V1,
+    fixed_hlt_params_dict,
+    fixed_hlt_params_from_profile,
+    fixed_hlt_params_from_strength,
+)
 from jetclass_fresh.hlt_cache import generate_and_cache_hlt_view
 from jetclass_fresh.jetclass_data import (
     FILE_PREFIX_TO_LABEL,
@@ -26,6 +32,7 @@ from teacher_logit_reco.privileged_distill_v3 import (
     PDV3_CONTRACT,
     PDV3_EXPERIMENT_NAME,
     PDV3_HLT_DEGRADATION_STRENGTH,
+    PDV3_HLT_PROFILE,
     PDV3_INPUTS_CONTRACT,
     PDV3_LABEL_FILTER,
     PDV3_LABEL_NAMES,
@@ -126,7 +133,7 @@ def _toy_manifest() -> SplitManifest:
 
 
 class PDV3Step1InputTests(unittest.TestCase):
-    def test_config_locks_hlt0p2_full_10class_contract(self):
+    def test_config_locks_default_hlt_profile_full_10class_contract(self):
         cfg = default_pdv3_input_contract_config()
         payload = cfg.to_dict()
 
@@ -138,8 +145,13 @@ class PDV3Step1InputTests(unittest.TestCase):
         self.assertEqual(cfg.manifest_split_sizes, PDV3_MANIFEST_SPLIT_SIZES)
         self.assertEqual(PDV3_MODEL_SPLIT_ORDER, ("model_train", "model_val", "final_test"))
         self.assertEqual(PDV3_MANIFEST_SPLIT_ORDER, ("model_train", "model_val", "stack_train", "stack_val", "final_test"))
+        self.assertEqual(PDV3_HLT_PROFILE, HLT_PROFILE_V1)
+        self.assertEqual(cfg.hlt_profile, PDV3_HLT_PROFILE)
         self.assertEqual(PDV3_HLT_DEGRADATION_STRENGTH, 0.2)
-        self.assertEqual(pdv3_hlt_params_dict(), fixed_hlt_params_dict(fixed_hlt_params_from_strength(0.2)))
+        self.assertEqual(
+            pdv3_hlt_params_dict(),
+            fixed_hlt_params_dict(fixed_hlt_params_from_profile(PDV3_HLT_PROFILE, 0.2)),
+        )
         self.assertEqual(payload["contract"], PDV3_CONTRACT)
         self.assertEqual(payload["experiment_name"], PDV3_EXPERIMENT_NAME)
         self.assertTrue(payload["require_offline_cache"])
@@ -194,6 +206,7 @@ class PDV3Step1InputTests(unittest.TestCase):
                     hlt_cache_dir,
                     seed=DEFAULT_HLT_SEEDS[split],
                     params=fixed_hlt_params_from_strength(0.2),
+                    hlt_degradation_strength=0.2,
                 )
                 save_cached_offline_view(view, offline_cache_dir)
 
@@ -217,11 +230,13 @@ class PDV3Step1InputTests(unittest.TestCase):
 
         self.assertTrue(report["ok"], report["problems"])
         self.assertEqual(report["contract"], PDV3_INPUTS_CONTRACT)
+        self.assertEqual(report["hlt_profile"], PDV3_HLT_PROFILE)
         self.assertEqual(report["hlt_degradation_strength"], 0.2)
         for split in PDV3_MODEL_SPLIT_ORDER:
             hlt_item = report["audits"]["hlt_cache"]["split_reports"][split]
             offline_item = report["audits"]["offline_cache"]["split_reports"][split]
             self.assertEqual(hlt_item["jet_identity_hash"], offline_item["jet_identity_hash"])
+            self.assertEqual(hlt_item["hlt_profile"], PDV3_HLT_PROFILE)
             self.assertEqual(hlt_item["hlt_params"], pdv3_hlt_params_dict())
         self.assertTrue(result["ok"])
         self.assertTrue(audit_report_exists)
@@ -244,6 +259,7 @@ class PDV3Step1InputTests(unittest.TestCase):
                     hlt_cache_dir,
                     seed=DEFAULT_HLT_SEEDS[split],
                     params=fixed_hlt_params_from_strength(0.6),
+                    hlt_degradation_strength=0.6,
                 )
                 save_cached_offline_view(view, offline_cache_dir)
 
@@ -256,7 +272,7 @@ class PDV3Step1InputTests(unittest.TestCase):
             )
 
         self.assertFalse(report["ok"])
-        self.assertTrue(any("HLT params do not match PDV3 HLT0.2 profile" in item for item in report["problems"]))
+        self.assertTrue(any("HLT params do not match PDV3 HLT profile" in item for item in report["problems"]))
 
     def test_audit_script_defaults_to_pdv3_layout_and_accepts_smoke_sizes(self):
         module = _load_audit_module()

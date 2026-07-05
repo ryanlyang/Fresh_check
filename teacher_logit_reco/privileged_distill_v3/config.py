@@ -1,17 +1,20 @@
 """Configuration contract for PDV3 AV10-adapter privileged distillation.
 
 Step 1 is deliberately data-contract only. It locks the new experiment family
-to full 10-class JetClass, the 5M/1M/1M split sizes, and HLT degradation
-strength 0.2, then names the shared split/cache artifacts later teacher and
-student stages must reuse.
+to full 10-class JetClass and the 5M/1M/1M split sizes, then names the shared
+split/cache artifacts later teacher and student stages must reuse.  The HLT
+profile/strength are environment-configurable so the same PDV3 machinery can
+run the original fixed-HLT v1 HLT0.2 setup or the newer realistic HLT v2 setup.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from jetclass_fresh.hlt_cache import HLT_PROFILE_V1, normalize_hlt_profile
 from jetclass_fresh.jetclass_data import LABEL_NAMES, RAW_TOKEN_DIM
 
 
@@ -23,7 +26,25 @@ PDV3_LABEL_NAMES: tuple[str, ...] = tuple(str(name) for name in LABEL_NAMES)
 PDV3_LABEL_FILTER: tuple[int, ...] = tuple(range(len(PDV3_LABEL_NAMES)))
 PDV3_NUM_CLASSES = len(PDV3_LABEL_NAMES)
 
-PDV3_HLT_DEGRADATION_STRENGTH = 0.2
+def _float_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {raw!r}") from exc
+
+
+def _hlt_profile_from_env(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return normalize_hlt_profile(default)
+    return normalize_hlt_profile(raw)
+
+
+PDV3_HLT_PROFILE = _hlt_profile_from_env("PDV3_HLT_PROFILE", HLT_PROFILE_V1)
+PDV3_HLT_DEGRADATION_STRENGTH = _float_from_env("PDV3_HLT_DEGRADATION_STRENGTH", 0.2)
 
 PDV3_MODEL_SPLIT_ORDER: tuple[str, ...] = ("model_train", "model_val", "final_test")
 PDV3_MODEL_SPLIT_SIZES: dict[str, int] = {
@@ -87,7 +108,7 @@ def pdv3_manifest_split_sizes(
 
 @dataclass(frozen=True)
 class PDV3InputContractConfig:
-    """Strict data contract for the first PDV3 HLT0.2 run."""
+    """Strict data contract for one PDV3 HLT profile run."""
 
     label_names: tuple[str, ...] = PDV3_LABEL_NAMES
     label_filter: tuple[int, ...] = PDV3_LABEL_FILTER
@@ -96,6 +117,7 @@ class PDV3InputContractConfig:
     stack_placeholder_split_sizes: Mapping[str, int] = field(
         default_factory=lambda: dict(PDV3_STACK_PLACEHOLDER_SPLIT_SIZES)
     )
+    hlt_profile: str = PDV3_HLT_PROFILE
     hlt_degradation_strength: float = PDV3_HLT_DEGRADATION_STRENGTH
     raw_token_dim: int = RAW_TOKEN_DIM
     require_offline_cache: bool = True
@@ -118,6 +140,9 @@ class PDV3InputContractConfig:
         placeholders = pdv3_stack_placeholder_split_sizes(self.stack_placeholder_split_sizes)
         if placeholders != PDV3_STACK_PLACEHOLDER_SPLIT_SIZES:
             raise ValueError(f"PDV3 stack placeholders must be {PDV3_STACK_PLACEHOLDER_SPLIT_SIZES}")
+        hlt_profile = normalize_hlt_profile(self.hlt_profile)
+        if hlt_profile != PDV3_HLT_PROFILE:
+            raise ValueError(f"PDV3 is locked to HLT profile {PDV3_HLT_PROFILE}")
         strength = float(self.hlt_degradation_strength)
         if abs(strength - PDV3_HLT_DEGRADATION_STRENGTH) > 1.0e-12:
             raise ValueError(f"PDV3 is locked to HLT degradation strength {PDV3_HLT_DEGRADATION_STRENGTH:g}")
@@ -131,6 +156,7 @@ class PDV3InputContractConfig:
         object.__setattr__(self, "label_filter", label_filter)
         object.__setattr__(self, "model_split_sizes", model_split_sizes)
         object.__setattr__(self, "stack_placeholder_split_sizes", placeholders)
+        object.__setattr__(self, "hlt_profile", hlt_profile)
         object.__setattr__(self, "hlt_degradation_strength", strength)
         object.__setattr__(self, "raw_token_dim", int(self.raw_token_dim))
         object.__setattr__(self, "require_offline_cache", bool(self.require_offline_cache))
@@ -153,6 +179,7 @@ class PDV3InputContractConfig:
             "manifest_split_order": list(PDV3_MANIFEST_SPLIT_ORDER),
             "manifest_split_sizes": {split: int(self.manifest_split_sizes[split]) for split in PDV3_MANIFEST_SPLIT_ORDER},
             "stack_placeholder_split_sizes": dict(self.stack_placeholder_split_sizes),
+            "hlt_profile": self.hlt_profile,
             "hlt_degradation_strength": float(self.hlt_degradation_strength),
             "raw_token_dim": int(self.raw_token_dim),
             "require_offline_cache": bool(self.require_offline_cache),
@@ -257,6 +284,7 @@ __all__ = [
     "PDV3_EXPERIMENT_NAME",
     "PDV3_EXPERIMENT_STEP",
     "PDV3_HLT_DEGRADATION_STRENGTH",
+    "PDV3_HLT_PROFILE",
     "PDV3_HLT_AUDIT_REPORT",
     "PDV3_INPUTS_CONTRACT",
     "PDV3_LABEL_FILTER",
