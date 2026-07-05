@@ -27,6 +27,7 @@ from .config import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER_WIDE,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_FROZEN_PART_FEATURE_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
+    ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LARGER_PART,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER,
@@ -445,6 +446,7 @@ class ArchitectureViewResidualPartOutput:
     parameter_accounting: Mapping[str, Any] | None = None
     baseline_checkpoint_report: Mapping[str, Any] | None = None
     init_logit_diff_vs_baseline: Mapping[str, Any] | None = None
+    part_embedding: Any | None = None
 
     @property
     def output_contract(self) -> str:
@@ -501,7 +503,21 @@ class ArchitectureViewResidualPartOutput:
             else self.feature_delta_output.summary(),
             "baseline_checkpoint": checkpoint or None,
             "init_logit_diff_vs_baseline": init_diff or None,
+            "part_embedding_shape": None if self.part_embedding is None else list(self.part_embedding.shape),
         }
+        if self.part_embedding is not None:
+            embedding = self.part_embedding.detach()
+            embed_mask = align_particle_mask_to_length(mask, int(embedding.shape[1]))
+            if bool(embed_mask.any()):
+                embedding_norm = embedding.norm(dim=-1)[embed_mask]
+                diagnostics.update(
+                    {
+                        "part_embedding_norm_mean": float(embedding_norm.mean().detach().cpu().item()),
+                        "part_embedding_norm_p90": float(
+                            _tensor_quantile(embedding_norm, 0.90).detach().cpu().item()
+                        ),
+                    }
+                )
         if checkpoint:
             diagnostics.update(
                 {
@@ -634,7 +650,10 @@ class ArchitectureViewResidualParT(_ModuleBase):
         self.extra_part_block_out = torch.nn.Linear(part_embed_dim, part_embed_dim)
         torch.nn.init.zeros_(self.extra_part_block_out.weight)
         torch.nn.init.zeros_(self.extra_part_block_out.bias)
-        if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES:
+        if self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
+        ):
             self.feature_delta_adapter = ArchitectureViewFeatureDeltaMLP(self.feature_config, self.config)
         else:
             self.feature_delta_adapter = torch.nn.Identity()
@@ -656,6 +675,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
         self._pending_delta_h: Any | None = None
         self._pending_particle_mask: Any | None = None
         self._last_delta_h: Any | None = None
+        self._last_part_embedding: Any | None = None
         self._last_injection_summary: dict[str, Any] = {}
         self._freeze_inactive_adapter_modules()
 
@@ -686,6 +706,8 @@ class ArchitectureViewResidualParT(_ModuleBase):
         }
 
     def active_adapter_module_names(self) -> tuple[str, ...]:
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER:
+            return ("feature_delta_adapter", "context_control", "context_control_gate")
         if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES:
             return ("feature_delta_adapter",)
         if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK:
@@ -793,7 +815,13 @@ class ArchitectureViewResidualParT(_ModuleBase):
     def variant_behavior(self) -> dict[str, Any]:
         uses_extra_part_block = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK
         uses_part_only_adapter = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER
-        uses_lc_mlp_delta_features = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES
+        uses_combined_lc_plus_feature_mlp = (
+            self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER
+        )
+        uses_lc_mlp_delta_features = self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
+        )
         uses_larger_part = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LARGER_PART
         uses_wide_feature_mlp = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER_WIDE
         uses_frozen_feature_mlp = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_FROZEN_PART_FEATURE_ADAPTER
@@ -823,6 +851,12 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "uses_randomized_view_semantics": self.effective_variant == ARCHITECTURE_VIEW_VARIANT_RANDOM_VIEW_CONTROL,
             "uses_context_mlp_control": uses_context_mlp,
             "uses_lc_mlp_delta_features": bool(uses_lc_mlp_delta_features),
+            "uses_combined_lc_plus_feature_mlp_adapter": bool(uses_combined_lc_plus_feature_mlp),
+            "combined_adapter": bool(uses_combined_lc_plus_feature_mlp),
+            "input_delta_adapter_active": bool(uses_lc_mlp_delta_features),
+            "embedding_delta_adapter_active": bool(
+                uses_combined_lc_plus_feature_mlp or (not forces_zero_delta and not uses_lc_mlp_delta_features)
+            ),
             "input_feature_delta_policy": "bounded_tanh_feature_scales"
             if uses_lc_mlp_delta_features
             else "none",
@@ -837,7 +871,9 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "uses_larger_part_backbone": bool(uses_larger_part),
             "part_model_size": str(self.part_model_size),
             "forces_zero_delta": bool(forces_zero_delta),
-            "injects_embedding_delta": bool(not forces_zero_delta and not uses_lc_mlp_delta_features),
+            "injects_embedding_delta": bool(
+                uses_combined_lc_plus_feature_mlp or (not forces_zero_delta and not uses_lc_mlp_delta_features)
+            ),
             "adapts_input_features": bool(uses_lc_mlp_delta_features),
         }
 
@@ -906,7 +942,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
                 adapter_kind = "extra_part_block"
             else:
                 delta = torch.zeros_like(base)
-                adapter_kind = "zero_delta"
+                adapter_kind = "no_injection"
             delta = delta * valid
         self._last_delta_h = delta
         embedding_norm_mean: float | None = None
@@ -946,10 +982,18 @@ class ArchitectureViewResidualParT(_ModuleBase):
             first = output[0] + _delta_for_embed_output(delta, output[0])
             output = (first, *output[1:])
             output_shape = tuple(first.shape)
+            output_tensor_for_representation = first
         else:
             residual = _delta_for_embed_output(delta, output)
             output = output + residual
             output_shape = tuple(output.shape)
+            output_tensor_for_representation = output
+        self._last_part_embedding = _batch_first_from_embed_output(
+            output_tensor_for_representation,
+            batch=int(delta.shape[0]),
+            particles=int(delta.shape[1]),
+            dim=int(self.config.part_embed_dim),
+        )
         self._last_injection_summary = {
             "embed_module_name": str(self.embed_module_name),
             "delta_h_shape": list(delta.shape),
@@ -960,38 +1004,13 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "embedding_norm_mean": embedding_norm_mean,
             "embedding_norm_p90": embedding_norm_p90,
             "delta_to_embedding_norm_ratio": delta_to_embedding_norm_ratio,
-            "injection_applied": True,
+            "injection_applied": bool(adapter_kind != "no_injection"),
         }
         return output
 
     def _part_forward_with_delta(self, canonical: LocalCompressionCanonicalInputs, delta_h: Any | None) -> tuple[Any, Any]:
         torch = require_torch()
-        if delta_h is None and self.variant not in (
-            ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK,
-            ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
-        ):
-            logits = self.part_model(
-                canonical.points,
-                canonical.features,
-                canonical.lorentz_vectors,
-                canonical.mask,
-            )
-            zero_delta = torch.zeros(
-                int(canonical.particle_mask.shape[0]),
-                int(canonical.particle_mask.shape[1]),
-                int(self.config.part_embed_dim),
-                dtype=canonical.features.dtype,
-                device=canonical.features.device,
-            )
-            self._last_delta_h = zero_delta
-            self._last_injection_summary = {
-                "embed_module_name": str(self.embed_module_name),
-                "delta_h_shape": list(zero_delta.shape),
-                "delta_h_abs_max": 0.0,
-                "adapter_kind": "no_injection",
-                "injection_applied": False,
-            }
-            return _nan_to_num_torch(logits.float()), zero_delta
+        self._last_part_embedding = None
         self._pending_delta_h = delta_h
         self._pending_particle_mask = canonical.particle_mask
         self._last_delta_h = delta_h
@@ -1094,6 +1113,76 @@ class ArchitectureViewResidualParT(_ModuleBase):
             diagnostics=diagnostics,
         )
 
+    def _combined_adapter_diagnostics(
+        self,
+        feature_delta_output: ArchitectureViewFeatureDeltaOutput,
+        view_output: ArchitectureViewFusionOutput,
+    ) -> dict[str, Any]:
+        torch = require_torch()
+        delta_f = feature_delta_output.delta_F_rows.detach().float()
+        delta_h = view_output.delta_h.detach().float()
+        mask_f = feature_delta_output.mask.detach().bool()
+        mask_h = align_particle_mask_to_length(view_output.mask.detach().bool(), int(delta_h.shape[1]))
+        particles = min(int(delta_f.shape[1]), int(delta_h.shape[1]), int(mask_f.shape[1]), int(mask_h.shape[1]))
+        if particles <= 0:
+            return {
+                "combined_adapter": True,
+                "input_delta_adapter_active": True,
+                "embedding_delta_adapter_active": True,
+                "combined_delta_F_delta_h_corr": None,
+                "fraction_jets_delta_F_only": 0.0,
+                "fraction_jets_delta_h_only": 0.0,
+                "fraction_jets_both_adapters_active": 0.0,
+            }
+        delta_f_norm = delta_f[:, :particles].norm(dim=-1)
+        delta_h_norm = delta_h[:, :particles].norm(dim=-1)
+        valid = mask_f[:, :particles] & mask_h[:, :particles]
+        batch_valid = valid.any(dim=1)
+        if bool(batch_valid.any()):
+            jet_delta_f = (delta_f_norm * valid.to(dtype=delta_f_norm.dtype)).sum(dim=1) / valid.sum(
+                dim=1
+            ).clamp_min(1).to(dtype=delta_f_norm.dtype)
+            jet_delta_h = (delta_h_norm * valid.to(dtype=delta_h_norm.dtype)).sum(dim=1) / valid.sum(
+                dim=1
+            ).clamp_min(1).to(dtype=delta_h_norm.dtype)
+            jet_delta_f = jet_delta_f[batch_valid]
+            jet_delta_h = jet_delta_h[batch_valid]
+            f_active = jet_delta_f > 1.0e-8
+            h_active = jet_delta_h > 1.0e-8
+            if int(jet_delta_f.numel()) > 1:
+                centered_f = jet_delta_f - jet_delta_f.mean()
+                centered_h = jet_delta_h - jet_delta_h.mean()
+                denom = centered_f.norm() * centered_h.norm()
+                corr = None if float(denom.detach().cpu().item()) <= 1.0e-12 else float(
+                    ((centered_f * centered_h).sum() / denom).detach().cpu().item()
+                )
+            else:
+                corr = None
+            denom_jets = float(jet_delta_f.numel())
+            return {
+                "combined_adapter": True,
+                "input_delta_adapter_active": True,
+                "embedding_delta_adapter_active": True,
+                "combined_delta_F_mean_per_jet": float(jet_delta_f.mean().detach().cpu().item()),
+                "combined_delta_h_mean_per_jet": float(jet_delta_h.mean().detach().cpu().item()),
+                "combined_delta_F_delta_h_corr": corr,
+                "fraction_jets_delta_F_only": float((f_active & ~h_active).float().sum().detach().cpu().item())
+                / denom_jets,
+                "fraction_jets_delta_h_only": float((~f_active & h_active).float().sum().detach().cpu().item())
+                / denom_jets,
+                "fraction_jets_both_adapters_active": float((f_active & h_active).float().sum().detach().cpu().item())
+                / denom_jets,
+            }
+        return {
+            "combined_adapter": True,
+            "input_delta_adapter_active": True,
+            "embedding_delta_adapter_active": True,
+            "combined_delta_F_delta_h_corr": None,
+            "fraction_jets_delta_F_only": 0.0,
+            "fraction_jets_delta_h_only": 0.0,
+            "fraction_jets_both_adapters_active": 0.0,
+        }
+
     def _zero_view_output(
         self,
         canonical: LocalCompressionCanonicalInputs,
@@ -1183,6 +1272,40 @@ class ArchitectureViewResidualParT(_ModuleBase):
                 },
             )
             delta_for_part = None
+        elif self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER:
+            feature_delta_output = self.feature_delta_adapter(canonical)
+            adapted_canonical = canonical.with_features(feature_delta_output.adapted_feature_rows)
+            view_output = self._context_control_view_output(adapted_canonical)
+            view_output = replace(
+                view_output,
+                diagnostics={
+                    **view_output.diagnostics,
+                    "lc_plus_feature_mlp_adapter": True,
+                    "baseline_recovery_zero_projection": True,
+                    "feature_input_delta_adapter": True,
+                    "embedding_delta_adapter": True,
+                    **self._combined_adapter_diagnostics(feature_delta_output, view_output),
+                },
+            )
+            logits, actual_delta_h = self._part_forward_with_delta(adapted_canonical, view_output.delta_h)
+            if actual_delta_h is not view_output.delta_h:
+                view_output = replace(view_output, delta_h=actual_delta_h)
+            return ArchitectureViewResidualPartOutput(
+                logits=logits,
+                canonical_inputs=adapted_canonical,
+                view_output=view_output,
+                config=self.config,
+                variant=str(self.variant),
+                part_model_class=type(self.part_model).__name__,
+                embed_module_name=str(self.embed_module_name),
+                injection_summary=dict(self._last_injection_summary),
+                feature_delta_output=feature_delta_output,
+                part_embedding=self._last_part_embedding,
+                variant_behavior=self.variant_behavior(),
+                parameter_accounting=self.parameter_accounting(),
+                baseline_checkpoint_report=self.baseline_checkpoint_report,
+                init_logit_diff_vs_baseline=self.init_logit_diff_vs_baseline,
+            )
         elif self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES:
             feature_delta_output = self.feature_delta_adapter(canonical)
             adapted_canonical = canonical.with_features(feature_delta_output.adapted_feature_rows)
@@ -1206,6 +1329,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
                 embed_module_name=str(self.embed_module_name),
                 injection_summary=dict(self._last_injection_summary),
                 feature_delta_output=feature_delta_output,
+                part_embedding=self._last_part_embedding,
                 variant_behavior=self.variant_behavior(),
                 parameter_accounting=self.parameter_accounting(),
                 baseline_checkpoint_report=self.baseline_checkpoint_report,
@@ -1250,6 +1374,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             embed_module_name=str(self.embed_module_name),
             injection_summary=dict(self._last_injection_summary),
             feature_delta_output=None,
+            part_embedding=self._last_part_embedding,
             variant_behavior=self.variant_behavior(),
             parameter_accounting=self.parameter_accounting(),
             baseline_checkpoint_report=self.baseline_checkpoint_report,

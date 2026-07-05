@@ -854,15 +854,37 @@ def _gradient_norm_diagnostics(model: Any) -> dict[str, float]:
     base_model = _unwrap_compiled_model(model)
     if not hasattr(base_model, "part_model"):
         return {}
-    part_params = [parameter for parameter in base_model.part_model.parameters() if parameter.requires_grad]
-    adapter_params: list[Any] = []
-    if hasattr(base_model, "adapter_modules"):
-        for module in base_model.adapter_modules(active_only=True):
-            adapter_params.extend([parameter for parameter in module.parameters() if parameter.requires_grad])
     part_head_params: list[Any] = []
+    seen_head_params: set[int] = set()
     if hasattr(base_model, "_part_head_parameter_modules"):
         for module in base_model._part_head_parameter_modules():
-            part_head_params.extend([parameter for parameter in module.parameters() if parameter.requires_grad])
+            for parameter in module.parameters():
+                if not parameter.requires_grad or id(parameter) in seen_head_params:
+                    continue
+                seen_head_params.add(id(parameter))
+                part_head_params.append(parameter)
+    part_head_ids = {id(parameter) for parameter in part_head_params}
+    part_params = [
+        parameter
+        for parameter in base_model.part_model.parameters()
+        if parameter.requires_grad and id(parameter) not in part_head_ids
+    ]
+    adapter_params: list[Any] = []
+    adapter_module_sq: dict[str, Any | None] = {}
+    if hasattr(base_model, "adapter_modules"):
+        module_map = getattr(base_model, "adapter_module_map", lambda: {})()
+        active_names = tuple(getattr(base_model, "active_adapter_module_names", lambda: ())())
+        if module_map and active_names:
+            for name in active_names:
+                module = module_map.get(name)
+                if module is None:
+                    continue
+                params = [parameter for parameter in module.parameters() if parameter.requires_grad]
+                adapter_params.extend(params)
+                adapter_module_sq[str(name)] = _grad_sq_sum_for_parameters(params)
+        else:
+            for module in base_model.adapter_modules(active_only=True):
+                adapter_params.extend([parameter for parameter in module.parameters() if parameter.requires_grad])
     part_sq = _grad_sq_sum_for_parameters(part_params)
     adapter_sq = _grad_sq_sum_for_parameters(adapter_params)
     part_head_sq = _grad_sq_sum_for_parameters(part_head_params)
@@ -871,12 +893,15 @@ def _gradient_norm_diagnostics(model: Any) -> dict[str, float]:
         if value is None:
             continue
         total_sq = value if total_sq is None else total_sq + value
-    return {
+    output = {
         "grad_norm.part": _sqrt_item(part_sq),
         "grad_norm.active_adapter": _sqrt_item(adapter_sq),
         "grad_norm.part_head": _sqrt_item(part_head_sq),
         "grad_norm.total_trainable": _sqrt_item(total_sq),
     }
+    for name, value in sorted(adapter_module_sq.items()):
+        output[f"grad_norm.adapter.{name}"] = _sqrt_item(value)
+    return output
 
 
 def run_architecture_view_tagger_epoch(

@@ -158,6 +158,10 @@ SUBMITTERS = [
     "submit_architecture_view_10class_experiment.sh",
     "submit_architecture_view_10class_ablation_experiment.sh",
     "submit_architecture_view_10class_ablation_pilot_and_highdata.sh",
+    "submit_pdv3_step1_inputs.sh",
+    "submit_pdv3_step2_teachers.sh",
+    "submit_pdv3_full_experiment.sh",
+    "submit_pdv3_pilot_and_highdata.sh",
 ]
 
 

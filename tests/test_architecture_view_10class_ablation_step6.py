@@ -9,6 +9,7 @@ from teacher_logit_reco.architecture_view_part import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
+    ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
     ArchitectureViewConfig,
     ArchitectureViewResidualParT,
     architecture_view_variant_is_runnable,
@@ -139,6 +140,47 @@ def test_step6_lc_mlp_delta_starts_as_exact_input_feature_identity():
     assert accounting["adapter_params"] < accounting["all_adapter_params"]
 
 
+def test_step6_combined_lc_plus_feature_mlp_starts_as_exact_baseline_with_two_adapters():
+    tokens, mask = _tokens()
+    model = ArchitectureViewResidualParT(
+        _config(),
+        variant=ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
+        part_model=DummyTenClassPart(),
+    )
+    model.eval()
+
+    with torch.no_grad():
+        baseline = _baseline_logits(model, tokens, mask)
+        output = model(tokens, mask, return_outputs=True, max_constits=tokens.shape[1])
+
+    diagnostics = output.diagnostics()
+    assert architecture_view_variant_is_runnable(ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER)
+    assert torch.allclose(output.logits, baseline, atol=1.0e-6, rtol=1.0e-6)
+    assert output.feature_delta_output is not None
+    assert output.view_output.delta_h.shape[-1] == model.config.part_embed_dim
+    assert torch.allclose(
+        output.feature_delta_output.delta_F_rows,
+        torch.zeros_like(output.feature_delta_output.delta_F_rows),
+    )
+    assert torch.allclose(output.view_output.delta_h, torch.zeros_like(output.view_output.delta_h))
+    assert diagnostics["variant_behavior"]["uses_lc_mlp_delta_features"]
+    assert diagnostics["variant_behavior"]["uses_combined_lc_plus_feature_mlp_adapter"]
+    assert diagnostics["variant_behavior"]["adapts_input_features"]
+    assert diagnostics["variant_behavior"]["injects_embedding_delta"]
+    assert diagnostics["embed_injection"]["adapter_kind"] == "precomputed_delta"
+    assert diagnostics["feature_delta"]["diagnostics"]["adapter_kind"] == "lc_mlp_delta_features"
+    assert diagnostics["view_fusion"]["combined_adapter"]
+    assert diagnostics["view_fusion"]["input_delta_adapter_active"]
+    assert diagnostics["view_fusion"]["embedding_delta_adapter_active"]
+    accounting = model.parameter_accounting()
+    assert accounting["active_adapter_module_names"] == [
+        "feature_delta_adapter",
+        "context_control",
+        "context_control_gate",
+    ]
+    assert accounting["dormant_adapter_params"] > 0
+
+
 def test_step6_parameter_accounting_is_variant_active():
     baseline = ArchitectureViewResidualParT(
         _config(),
@@ -155,17 +197,30 @@ def test_step6_parameter_accounting_is_variant_active():
         variant=ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
         part_model=DummyTenClassPart(),
     )
+    combined = ArchitectureViewResidualParT(
+        _config(),
+        variant=ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
+        part_model=DummyTenClassPart(),
+    )
 
     baseline_accounting = baseline.parameter_accounting()
     feature_accounting = feature.parameter_accounting()
     lc_accounting = lc_delta.parameter_accounting()
+    combined_accounting = combined.parameter_accounting()
 
     assert baseline_accounting["adapter_params"] == 0
     assert baseline_accounting["active_adapter_module_names"] == []
     assert feature_accounting["active_adapter_module_names"] == ["context_control", "context_control_gate"]
     assert lc_accounting["active_adapter_module_names"] == ["feature_delta_adapter"]
+    assert combined_accounting["active_adapter_module_names"] == [
+        "feature_delta_adapter",
+        "context_control",
+        "context_control_gate",
+    ]
     assert feature_accounting["adapter_params"] < feature_accounting["all_adapter_params"]
     assert lc_accounting["adapter_params"] < lc_accounting["all_adapter_params"]
+    assert combined_accounting["adapter_params"] > feature_accounting["adapter_params"]
+    assert combined_accounting["adapter_params"] > lc_accounting["adapter_params"]
 
 
 def test_step6_delta_l2_regularizer_uses_delta_f_for_input_delta_variant():
