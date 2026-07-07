@@ -294,6 +294,19 @@ def _check_student_report_consistency(reports: Mapping[str, Mapping[str, Any]], 
                 required=field in PDV3_REQUIRED_DATASET_CONSISTENCY_FIELDS,
             )
     for variant, report in reports.items():
+        manifest_hash = _nested_value(report, ("manifest", "manifest_hash"))
+        if manifest_hash in (None, ""):
+            continue
+        for split_key in ("train_dataset", "val_dataset", "final_test_dataset"):
+            dataset_manifest_hash = _nested_value(report, (split_key, "source_manifest_hash"))
+            if dataset_manifest_hash in (None, ""):
+                continue
+            if str(dataset_manifest_hash) != str(manifest_hash):
+                problems.append(
+                    f"{variant} {split_key}.source_manifest_hash does not match manifest.manifest_hash: "
+                    f"{dataset_manifest_hash} != {manifest_hash}"
+                )
+    for variant, report in reports.items():
         if bool(report.get("final_test_uses_teacher_logits")) or bool(report.get("final_test_uses_teacher_representations")):
             problems.append(
                 f"{variant} final_test evaluation used privileged teacher tensors; "
@@ -328,6 +341,9 @@ def _student_metric_rows(
     rows: list[dict[str, Any]] = []
     for variant, report in reports.items():
         spec = pdv3_student_variant_spec(variant)
+        hlt_contract = report.get("hlt_input_contract")
+        if not isinstance(hlt_contract, Mapping):
+            hlt_contract = {}
         for split in PDV3_REPORT_SPLITS:
             metrics = _metrics_for_split(report, split)
             baseline_split = baseline_metrics.get(split)
@@ -346,6 +362,9 @@ def _student_metric_rows(
                 "freeze_policy": spec.freeze_policy,
                 "combined_adapter": bool(spec.combined_adapter),
                 "architecture_view_variant": spec.architecture_view_variant,
+                "hlt_input_profile": hlt_contract.get("profile"),
+                "hlt_input_degradation_strength": hlt_contract.get("degradation_strength"),
+                "hlt_input_contract_label": hlt_contract.get("label"),
                 "accuracy": accuracy,
                 "baseline_accuracy": baseline_accuracy,
                 "accuracy_gain_vs_baseline": None
@@ -378,6 +397,9 @@ def _student_metric_rows(
                 ),
                 "effective_kd_alpha": _metric(metrics, "effective_kd_alpha"),
                 "effective_representation_beta": _metric(metrics, "effective_representation_beta"),
+                "representation_delta_l2_loss": _metric(metrics, "representation_delta_l2_loss"),
+                "representation_delta_l2_mean": _metric(metrics, "representation_delta_l2_mean"),
+                "representation_delta_l2_weight": _metric(metrics, "representation_delta_l2_weight"),
                 "nonfinite_batches_skipped": _metric(metrics, "nonfinite_batches_skipped"),
                 "best_epoch": report.get("best_epoch"),
                 "run_report": report.get("_run_report_path"),
@@ -524,6 +546,13 @@ def _parameter_rows(reports: Mapping[str, Mapping[str, Any]]) -> list[dict[str, 
                 if isinstance(accounting.get("active_adapter_module_names"), list)
                 else accounting.get("active_adapter_module_names"),
                 "representation_projector_source": projector.get("source") if isinstance(projector, Mapping) else None,
+                "representation_projector_contract": projector.get("contract") if isinstance(projector, Mapping) else None,
+                "representation_projector_residual_form": projector.get("residual_form")
+                if isinstance(projector, Mapping)
+                else None,
+                "representation_projector_zero_init_delta_projection": projector.get("zero_init_delta_projection")
+                if isinstance(projector, Mapping)
+                else None,
                 "representation_projector_input_dim": projector.get("input_dim")
                 if isinstance(projector, Mapping)
                 else None,
@@ -558,6 +587,9 @@ def _diagnostic_rows(reports: Mapping[str, Mapping[str, Any]], *, kind: str) -> 
             "student_accuracy_when_teacher_student_disagree",
             "delta_l2_loss",
             "delta_l2_mean",
+            "representation_delta_l2_loss",
+            "representation_delta_l2_mean",
+            "representation_delta_l2_weight",
         ):
             if any(needle in key for needle in needles):
                 rows.append(

@@ -474,6 +474,71 @@ export PD10_HLT_DEGRADATION_STRENGTH
 : "${PD10_V2_REPORT_ALLOW_MISSING_CORE_STUDENTS:=0}"
 : "${PD10_V2_REPORT_ALLOW_MISSING_TEACHER_REPORTS:=1}"
 : "${PD10_V2_REPORT_ALLOW_MISSING_AUDIT:=0}"
+: "${PD10_HLT_SDV_ROOT:=${PD10_ROOT}/hlt_self_dualview}"
+: "${PD10_HLT_SDV_HLT2_CACHE_ROOT:=${PD10_HLT_SDV_ROOT}/hlt2_cache}"
+: "${PD10_HLT_SDV_AUDIT_DIR:=${PD10_HLT_SDV_ROOT}/audits}"
+: "${PD10_HLT_SDV_MODELS_DIR:=${PD10_HLT_SDV_ROOT}/models}"
+: "${PD10_HLT_SDV_FINAL_REPORT_DIR:=${PD10_HLT_SDV_ROOT}/final_report}"
+: "${PD10_HLT_SDV_STRENGTHS:=0.00 0.10 0.20 0.35 1.00}"
+: "${PD10_HLT_SDV_VARIANTS:=sdv_hlt_hlt_same_view sdv_hlt_hlt2_s0p10 sdv_hlt_hlt2_s0p20 sdv_hlt_hlt2_s0p35 sdv_hlt_hlt2_s1p00}"
+: "${PD10_HLT_SDV_CONTROL_VARIANTS:=hlt2_only_part_s0p20 tta_hlt_part_hlt_plus_hlt2_s0p20}"
+: "${PD10_HLT_SDV_PRIMARY_STRENGTH:=0.20}"
+: "${PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT:=${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt}"
+: "${PD10_HLT_SDV_HLT2_SEED:=710053}"
+: "${PD10_HLT_SDV_HLT2_SHOW_PROGRESS:=0}"
+: "${PD10_HLT_SDV_SEED:=8801}"
+: "${PD10_HLT_SDV_EPOCHS:=10}"
+: "${PD10_HLT_SDV_HEAD_WARMUP_EPOCHS:=1}"
+: "${PD10_HLT_SDV_BATCH_SIZE:=128}"
+: "${PD10_HLT_SDV_EVAL_BATCH_SIZE:=128}"
+: "${PD10_HLT_SDV_HEAD_WARMUP_LR:=0.001}"
+: "${PD10_HLT_SDV_BRANCH_LR:=0.00003}"
+: "${PD10_HLT_SDV_HEAD_LR:=0.0003}"
+: "${PD10_HLT_SDV_WEIGHT_DECAY:=0.0001}"
+: "${PD10_HLT_SDV_DROPOUT:=0.05}"
+: "${PD10_HLT_SDV_FUSION_HIDDEN_DIM:=512}"
+: "${PD10_HLT_SDV_REPRESENTATION_DIM:=256}"
+: "${PD10_HLT_SDV_EARLY_STOP_PATIENCE:=3}"
+: "${PD10_HLT_SDV_GRAD_CLIP_NORM:=1.0}"
+: "${PD10_HLT_SDV_NUM_WORKERS:=${NUM_WORKERS}}"
+: "${PD10_HLT_SDV_DEVICE:=${DEVICE}}"
+: "${PD10_HLT_SDV_MODEL_SIZE:=base}"
+: "${PD10_HLT_SDV_NO_AMP:=0}"
+: "${PD10_HLT_SDV_COMPILE_MODEL:=0}"
+: "${PD10_HLT_SDV_NO_BRANCH_INIT:=0}"
+: "${PD10_HLT_SDV_SKIP_MODEL_VAL_PREDICTIONS:=0}"
+: "${PD10_HLT_SDV_SKIP_FINAL_TEST:=0}"
+: "${PD10_HLT_SDV_MAX_TRAIN_BATCHES:=}"
+: "${PD10_HLT_SDV_MAX_VAL_BATCHES:=}"
+: "${PD10_HLT_SDV_MAX_FINAL_TEST_BATCHES:=}"
+: "${PD10_HLT2_ONLY_SEED:=8811}"
+: "${PD10_HLT2_ONLY_EPOCHS:=10}"
+: "${PD10_HLT2_ONLY_BATCH_SIZE:=${PD10_HLT_SDV_BATCH_SIZE}}"
+: "${PD10_HLT2_ONLY_EVAL_BATCH_SIZE:=${PD10_HLT_SDV_EVAL_BATCH_SIZE}}"
+: "${PD10_HLT2_ONLY_LR:=0.00003}"
+: "${PD10_HLT2_ONLY_WEIGHT_DECAY:=${PD10_HLT_SDV_WEIGHT_DECAY}}"
+: "${PD10_HLT2_ONLY_EARLY_STOP_PATIENCE:=3}"
+: "${PD10_HLT2_ONLY_NUM_WORKERS:=${PD10_HLT_SDV_NUM_WORKERS}}"
+: "${PD10_HLT2_ONLY_DEVICE:=${PD10_HLT_SDV_DEVICE}}"
+: "${PD10_HLT2_ONLY_MODEL_SIZE:=${PD10_HLT_SDV_MODEL_SIZE}}"
+: "${PD10_HLT2_ONLY_NO_AMP:=${PD10_HLT_SDV_NO_AMP}}"
+: "${PD10_HLT2_ONLY_COMPILE_MODEL:=${PD10_HLT_SDV_COMPILE_MODEL}}"
+: "${PD10_HLT2_ONLY_NO_WARM_START:=0}"
+: "${PD10_HLT2_ONLY_SKIP_MODEL_VAL_PREDICTIONS:=0}"
+: "${PD10_HLT2_ONLY_SKIP_FINAL_TEST:=${PD10_HLT_SDV_SKIP_FINAL_TEST}}"
+: "${PD10_HLT2_ONLY_MAX_TRAIN_BATCHES:=}"
+: "${PD10_HLT2_ONLY_MAX_VAL_BATCHES:=}"
+: "${PD10_HLT2_ONLY_MAX_FINAL_TEST_BATCHES:=}"
+: "${PD10_HLT_TTA_SEED:=8821}"
+: "${PD10_HLT_TTA_BATCH_SIZE:=${PD10_HLT_SDV_EVAL_BATCH_SIZE}}"
+: "${PD10_HLT_TTA_NUM_WORKERS:=${PD10_HLT_SDV_NUM_WORKERS}}"
+: "${PD10_HLT_TTA_DEVICE:=${PD10_HLT_SDV_DEVICE}}"
+: "${PD10_HLT_TTA_SKIP_FINAL_TEST:=${PD10_HLT_SDV_SKIP_FINAL_TEST}}"
+: "${PD10_HLT_TTA_MAX_VAL_BATCHES:=}"
+: "${PD10_HLT_TTA_MAX_FINAL_TEST_BATCHES:=}"
+: "${PD10_HLT_SDV_REPORT_SKIP_PREDICTION_METRICS:=0}"
+: "${PD10_HLT_SDV_REPORT_ALLOW_MISSING_SDV_VARIANTS:=0}"
+: "${PD10_HLT_SDV_REPORT_REQUIRE_ANCHORS:=0}"
 : "${PDV3_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
 : "${PDV3_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_hlt0p2_5m}"
 : "${PDV3_INPUTS_DIR:=${PDV3_ROOT}/inputs}"
@@ -509,7 +574,7 @@ export PDV3_HLT_DEGRADATION_STRENGTH
 : "${PDV3_OFFLINE_TEACHER_SEED:=707}"
 : "${PDV3_DUAL_VIEW_TEACHER_SEED:=1709}"
 : "${PDV3_V2_PARTICLE_DUAL_VIEW_TEACHER_SEED:=2707}"
-: "${PDV3_STUDENT_VARIANTS:=pdv3_hlt_part_ce pdv3_hlt_part_v1_dual_logit_kd pdv3_hlt_part_v2_logit_rep_kd pdv3_feature_mlp_ce pdv3_feature_mlp_v1_dual_logit_kd pdv3_feature_mlp_v2_logit_rep_kd pdv3_feature_mlp_v2_logit_rep_kd_frozen_start pdv3_lc_mlp_delta_ce pdv3_lc_mlp_delta_v2_logit_rep_kd pdv3_lc_mlp_delta_v2_logit_rep_kd_frozen_start pdv3_lc_plus_feature_mlp_ce_joint pdv3_lc_plus_feature_mlp_ce_staged pdv3_lc_plus_feature_mlp_v2_logit_rep_kd_joint pdv3_lc_plus_feature_mlp_v2_logit_rep_kd_staged}"
+: "${PDV3_STUDENT_VARIANTS:=pdv3_hlt_part_ce pdv3_hlt_part_v1_dual_logit_kd pdv3_hlt_part_v2_logit_rep_kd r0_hlt_part_ce_baseline r1_hlt_part_logit_kd r2_frozen_delta_z_repkd r3_delta_z_upper_unfreeze_repkd r4_delta_z_full_gentle_unfreeze_repkd r5_delta_z_joint_from_start_repkd pdv3_feature_mlp_ce pdv3_feature_mlp_v1_dual_logit_kd pdv3_feature_mlp_v2_logit_rep_kd pdv3_feature_mlp_v2_logit_rep_kd_frozen_start pdv3_lc_mlp_delta_ce pdv3_lc_mlp_delta_v2_logit_rep_kd pdv3_lc_mlp_delta_v2_logit_rep_kd_frozen_start pdv3_lc_plus_feature_mlp_ce_joint pdv3_lc_plus_feature_mlp_ce_staged pdv3_lc_plus_feature_mlp_v2_logit_rep_kd_joint pdv3_lc_plus_feature_mlp_v2_logit_rep_kd_staged context_adapter_ce hlt_part_logit_kd hlt_part_logit_kd_repkd feature_mlp_adapter_repkd feature_mlp_adapter_logit_kd_repkd feature_mlp_adapter_logit_kd_repkd_freeze_adapter_after_warmup context_adapter_logit_kd context_adapter_logit_kd_repkd context_adapter_repkd_only}"
 : "${PDV3_STUDENT_BASELINE_CHECKPOINT:=${PDV3_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt}"
 : "${PDV3_STUDENT_SEED:=7707}"
 : "${PDV3_STUDENT_BATCH_SIZE:=64}"
@@ -528,6 +593,7 @@ export PDV3_HLT_DEGRADATION_STRENGTH
 : "${PDV3_STUDENT_REPRESENTATION_DIM:=128}"
 : "${PDV3_STUDENT_REQUIRE_BASELINE_SPLIT_MANIFEST_HASH:=1}"
 : "${PDV3_STUDENT_DELTA_L2_WEIGHT:=0.0001}"
+: "${PDV3_STUDENT_REPRESENTATION_DELTA_L2_WEIGHT:=0.0001}"
 : "${PDV3_STUDENT_ALLOW_BASELINE_FROM_SCRATCH:=1}"
 : "${PDV3_STUDENT_FINAL_TEST_TEACHER_DIAGNOSTICS:=0}"
 : "${PDV3_REPORT_STUDENT_VARIANTS:=${PDV3_STUDENT_VARIANTS}}"
@@ -1728,6 +1794,71 @@ keys = [
     "PD10_REPORT_ALLOW_MISSING_TEACHER_REPORTS",
     "PD10_REPORT_ALLOW_MISSING_AUDIT",
     "PD10_REPORT_SKIP_PREDICTION_METRICS",
+    "PD10_HLT_SDV_ROOT",
+    "PD10_HLT_SDV_HLT2_CACHE_ROOT",
+    "PD10_HLT_SDV_AUDIT_DIR",
+    "PD10_HLT_SDV_MODELS_DIR",
+    "PD10_HLT_SDV_FINAL_REPORT_DIR",
+    "PD10_HLT_SDV_STRENGTHS",
+    "PD10_HLT_SDV_VARIANTS",
+    "PD10_HLT_SDV_CONTROL_VARIANTS",
+    "PD10_HLT_SDV_PRIMARY_STRENGTH",
+    "PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT",
+    "PD10_HLT_SDV_HLT2_SEED",
+    "PD10_HLT_SDV_HLT2_SHOW_PROGRESS",
+    "PD10_HLT_SDV_SEED",
+    "PD10_HLT_SDV_EPOCHS",
+    "PD10_HLT_SDV_HEAD_WARMUP_EPOCHS",
+    "PD10_HLT_SDV_BATCH_SIZE",
+    "PD10_HLT_SDV_EVAL_BATCH_SIZE",
+    "PD10_HLT_SDV_HEAD_WARMUP_LR",
+    "PD10_HLT_SDV_BRANCH_LR",
+    "PD10_HLT_SDV_HEAD_LR",
+    "PD10_HLT_SDV_WEIGHT_DECAY",
+    "PD10_HLT_SDV_DROPOUT",
+    "PD10_HLT_SDV_FUSION_HIDDEN_DIM",
+    "PD10_HLT_SDV_REPRESENTATION_DIM",
+    "PD10_HLT_SDV_EARLY_STOP_PATIENCE",
+    "PD10_HLT_SDV_GRAD_CLIP_NORM",
+    "PD10_HLT_SDV_NUM_WORKERS",
+    "PD10_HLT_SDV_DEVICE",
+    "PD10_HLT_SDV_MODEL_SIZE",
+    "PD10_HLT_SDV_NO_AMP",
+    "PD10_HLT_SDV_COMPILE_MODEL",
+    "PD10_HLT_SDV_NO_BRANCH_INIT",
+    "PD10_HLT_SDV_SKIP_MODEL_VAL_PREDICTIONS",
+    "PD10_HLT_SDV_SKIP_FINAL_TEST",
+    "PD10_HLT_SDV_MAX_TRAIN_BATCHES",
+    "PD10_HLT_SDV_MAX_VAL_BATCHES",
+    "PD10_HLT_SDV_MAX_FINAL_TEST_BATCHES",
+    "PD10_HLT2_ONLY_SEED",
+    "PD10_HLT2_ONLY_EPOCHS",
+    "PD10_HLT2_ONLY_BATCH_SIZE",
+    "PD10_HLT2_ONLY_EVAL_BATCH_SIZE",
+    "PD10_HLT2_ONLY_LR",
+    "PD10_HLT2_ONLY_WEIGHT_DECAY",
+    "PD10_HLT2_ONLY_EARLY_STOP_PATIENCE",
+    "PD10_HLT2_ONLY_NUM_WORKERS",
+    "PD10_HLT2_ONLY_DEVICE",
+    "PD10_HLT2_ONLY_MODEL_SIZE",
+    "PD10_HLT2_ONLY_NO_AMP",
+    "PD10_HLT2_ONLY_COMPILE_MODEL",
+    "PD10_HLT2_ONLY_NO_WARM_START",
+    "PD10_HLT2_ONLY_SKIP_MODEL_VAL_PREDICTIONS",
+    "PD10_HLT2_ONLY_SKIP_FINAL_TEST",
+    "PD10_HLT2_ONLY_MAX_TRAIN_BATCHES",
+    "PD10_HLT2_ONLY_MAX_VAL_BATCHES",
+    "PD10_HLT2_ONLY_MAX_FINAL_TEST_BATCHES",
+    "PD10_HLT_TTA_SEED",
+    "PD10_HLT_TTA_BATCH_SIZE",
+    "PD10_HLT_TTA_NUM_WORKERS",
+    "PD10_HLT_TTA_DEVICE",
+    "PD10_HLT_TTA_SKIP_FINAL_TEST",
+    "PD10_HLT_TTA_MAX_VAL_BATCHES",
+    "PD10_HLT_TTA_MAX_FINAL_TEST_BATCHES",
+    "PD10_HLT_SDV_REPORT_SKIP_PREDICTION_METRICS",
+    "PD10_HLT_SDV_REPORT_ALLOW_MISSING_SDV_VARIANTS",
+    "PD10_HLT_SDV_REPORT_REQUIRE_ANCHORS",
     "SUBTOKEN_PART_ROOT",
     "SUBTOKEN_PART_COMPAT_DIR",
     "SUBTOKEN_PART_FINAL_REPORT_DIR",
@@ -2407,6 +2538,44 @@ fresh_pd10_teacher_source_final_test_report() {
       echo "Unknown PD10 teacher target: ${teacher}" >&2
       return 2
       ;;
+  esac
+}
+
+fresh_pd10_hlt_sdv_strength_value() {
+  local value="$1"
+  value="${value#s}"
+  value="${value//p/.}"
+  value="${value//m/-}"
+  printf '%.2f\n' "${value}"
+}
+
+fresh_pd10_hlt_sdv_strength_tag() {
+  local normalized
+  normalized="$(fresh_pd10_hlt_sdv_strength_value "$1")"
+  normalized="${normalized//-/m}"
+  normalized="${normalized//./p}"
+  printf 's%s\n' "${normalized}"
+}
+
+fresh_pd10_hlt_sdv_hlt2_cache_name() {
+  printf 'hlt_second_degrade_mild_v1_%s\n' "$(fresh_pd10_hlt_sdv_strength_tag "$1")"
+}
+
+fresh_pd10_hlt_sdv_hlt2_cache_dir() {
+  printf '%s/%s\n' "${PD10_HLT_SDV_HLT2_CACHE_ROOT}" "$(fresh_pd10_hlt_sdv_hlt2_cache_name "$1")"
+}
+
+fresh_pd10_hlt_sdv_hlt2_audit_dir() {
+  printf '%s/hlt2_cache/%s\n' "${PD10_HLT_SDV_AUDIT_DIR}" "$(fresh_pd10_hlt_sdv_strength_tag "$1")"
+}
+
+fresh_pd10_hlt_sdv_strength_from_variant() {
+  local variant="$1"
+  case "${variant}" in
+    sdv_hlt_hlt2_s*) fresh_pd10_hlt_sdv_strength_value "${variant#sdv_hlt_hlt2_}" ;;
+    hlt2_only_part_s*) fresh_pd10_hlt_sdv_strength_value "${variant#hlt2_only_part_}" ;;
+    tta_hlt_part_hlt_plus_hlt2_s*) fresh_pd10_hlt_sdv_strength_value "${variant#tta_hlt_part_hlt_plus_hlt2_}" ;;
+    *) return 1 ;;
   esac
 }
 

@@ -75,6 +75,7 @@ cmd=(
   --expected-hlt-profile "${PDV3_HLT_PROFILE}"
   --expected-hlt-degradation-strength "${PDV3_HLT_DEGRADATION_STRENGTH}"
   --delta-l2-weight "${PDV3_STUDENT_DELTA_L2_WEIGHT}"
+  --representation-delta-l2-weight "${PDV3_STUDENT_REPRESENTATION_DELTA_L2_WEIGHT}"
   --representation-dim "${PDV3_STUDENT_REPRESENTATION_DIM}"
 )
 

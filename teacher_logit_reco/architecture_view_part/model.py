@@ -31,6 +31,14 @@ from .config import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LARGER_PART,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
     ARCHITECTURE_VIEW_PART_CONTRACT,
     ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
@@ -126,6 +134,51 @@ def _resolve_embed_module(part_model: Any) -> Any:
         "Could not locate the HLT ParT particle embedding module. "
         "Expected part_model.mod.embed or an equivalent named module ending in 'embed'."
     )
+
+
+def _resolve_jet_representation_module(part_model: Any) -> Any:
+    """Locate the classifier/head module whose input is the jet-level ParT vector."""
+
+    direct_candidates = (
+        ("mod.fc", getattr(getattr(part_model, "mod", None), "fc", None)),
+        ("mod.head", getattr(getattr(part_model, "mod", None), "head", None)),
+        ("mod.classifier", getattr(getattr(part_model, "mod", None), "classifier", None)),
+        ("fc", getattr(part_model, "fc", None)),
+        ("head", getattr(part_model, "head", None)),
+        ("classifier", getattr(part_model, "classifier", None)),
+    )
+    for name, module in direct_candidates:
+        if module is not None and hasattr(module, "register_forward_pre_hook"):
+            return name, module
+    matches: list[tuple[str, Any]] = []
+    for name, module in part_model.named_modules():
+        lower = str(name).lower()
+        leaf = lower.rsplit(".", 1)[-1]
+        if leaf in {"fc", "head", "classifier"} and hasattr(module, "register_forward_pre_hook"):
+            matches.append((str(name), module))
+    if matches:
+        return matches[0]
+    raise ValueError(
+        "Could not locate the HLT ParT classifier/head module. "
+        "Expected part_model.mod.fc/head/classifier or an equivalent named module."
+    )
+
+
+def _first_tensor(value: Any) -> Any | None:
+    torch = require_torch()
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    if isinstance(value, Mapping):
+        for item in value.values():
+            found = _first_tensor(item)
+            if found is not None:
+                return found
+    return None
 
 
 def _delta_for_embed_output(delta_h: Any, embed_output: Any) -> Any:
@@ -429,6 +482,312 @@ class ArchitectureViewFeatureDeltaMLP(_ModuleBase):
         )
 
 
+class _ArchitectureViewDeltaHAdapterBase(_ModuleBase):
+    """Shared diagnostics for contextual embedding-residual adapters."""
+
+    adapter_kind: str = "contextual_delta_h_adapter"
+
+    def _zero_init_delta_and_gate(self, delta_out: Any, gate_out: Any, gate_bias_init: float) -> None:
+        torch = require_torch()
+        torch.nn.init.zeros_(delta_out.weight)
+        torch.nn.init.zeros_(delta_out.bias)
+        torch.nn.init.zeros_(gate_out.weight)
+        torch.nn.init.constant_(gate_out.bias, float(gate_bias_init))
+
+    def _diagnostics(self, delta_h: Any, gate: Any, adapter_output: Any, mask: Any) -> dict[str, Any]:
+        diagnostics: dict[str, Any] = {
+            "adapter_kind": str(self.adapter_kind),
+            "baseline_recovery_zero_projection": True,
+            "zero_init_delta_projection": True,
+        }
+        valid = mask.bool()
+        if not bool(valid.any()):
+            diagnostics.update(
+                {
+                    "delta_h_norm_mean": 0.0,
+                    "delta_h_norm_p90": 0.0,
+                    "delta_h_norm_max": 0.0,
+                    "adapter_output_norm_mean": 0.0,
+                    "adapter_output_norm_p90": 0.0,
+                    "adapter_output_norm_max": 0.0,
+                    "gate_mean": 0.0,
+                    "gate_p10": 0.0,
+                    "gate_p90": 0.0,
+                }
+            )
+            return diagnostics
+        delta_norm = delta_h.norm(dim=-1)[valid]
+        adapter_norm = adapter_output.norm(dim=-1)[valid]
+        gate_values = gate.squeeze(-1)[valid]
+        diagnostics.update(
+            {
+                "delta_h_norm_mean": float(delta_norm.mean().detach().cpu().item()),
+                "delta_h_norm_p90": float(_tensor_quantile(delta_norm, 0.90).detach().cpu().item()),
+                "delta_h_norm_max": float(delta_norm.max().detach().cpu().item()),
+                "adapter_output_norm_mean": float(adapter_norm.mean().detach().cpu().item()),
+                "adapter_output_norm_p90": float(_tensor_quantile(adapter_norm, 0.90).detach().cpu().item()),
+                "adapter_output_norm_max": float(adapter_norm.max().detach().cpu().item()),
+                "gate_mean": float(gate_values.mean().detach().cpu().item()),
+                "gate_p10": float(_tensor_quantile(gate_values, 0.10).detach().cpu().item()),
+                "gate_p90": float(_tensor_quantile(gate_values, 0.90).detach().cpu().item()),
+            }
+        )
+        return diagnostics
+
+
+class ArchitectureViewDeepSetsContextAdapter(_ArchitectureViewDeltaHAdapterBase):
+    """Per-particle residual adapter with masked pooled full-jet context."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        output_dim: int,
+        config: ArchitectureViewConfig,
+        adapter_kind: str,
+    ) -> None:
+        super().__init__()
+        torch = require_torch()
+        self.adapter_kind = str(adapter_kind)
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.context_dim = int(config.context_adapter_dim)
+        hidden_dim = max(int(config.fusion_hidden_dim), self.context_dim)
+        self.phi = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.input_dim),
+            torch.nn.Linear(self.input_dim, self.context_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(config.dropout)),
+            torch.nn.Linear(self.context_dim, self.context_dim),
+        )
+        self.delta_mlp = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.input_dim + self.context_dim),
+            torch.nn.Linear(self.input_dim + self.context_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(config.dropout)),
+            torch.nn.Linear(hidden_dim, self.output_dim),
+        )
+        self.gate_mlp = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.input_dim + self.context_dim),
+            torch.nn.Linear(self.input_dim + self.context_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, 1),
+        )
+        self._zero_init_delta_and_gate(self.delta_mlp[-1], self.gate_mlp[-1], float(config.gate_bias_init))
+
+    def forward(self, rows: Any, mask: Any) -> ArchitectureViewFusionOutput:
+        torch = require_torch()
+        mask = mask.bool()
+        valid = mask[:, :, None].to(dtype=rows.dtype)
+        rows = torch.where(valid.bool(), rows, torch.zeros_like(rows))
+        phi = self.phi(rows) * valid
+        denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(dtype=phi.dtype)
+        context = phi.sum(dim=1) / denom
+        context_rows = context[:, None, :].expand(-1, int(rows.shape[1]), -1)
+        adapter_input = torch.cat([rows, context_rows], dim=-1)
+        adapter_output = _nan_to_num_torch(self.delta_mlp(adapter_input)) * valid
+        gate = torch.sigmoid(self.gate_mlp(adapter_input)) * valid
+        delta_h = gate * adapter_output
+        combined = torch.zeros(
+            int(rows.shape[0]),
+            int(rows.shape[1]),
+            0,
+            dtype=rows.dtype,
+            device=rows.device,
+        )
+        diagnostics = self._diagnostics(delta_h, gate, adapter_output, mask)
+        diagnostics.update(
+            {
+                "uses_deepsets_context_adapter": True,
+                "context_norm_mean": float(context.norm(dim=-1).mean().detach().cpu().item())
+                if int(context.numel())
+                else 0.0,
+            }
+        )
+        return ArchitectureViewFusionOutput(
+            view_embeddings={},
+            combined_view=combined,
+            delta_h=delta_h,
+            gate=gate,
+            mask=mask,
+            diagnostics=diagnostics,
+        )
+
+
+class ArchitectureViewSelfAttentionContextAdapter(_ArchitectureViewDeltaHAdapterBase):
+    """Tiny mask-aware self-attention adapter that predicts per-particle ``delta_h``."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        output_dim: int,
+        config: ArchitectureViewConfig,
+        adapter_kind: str,
+    ) -> None:
+        super().__init__()
+        torch = require_torch()
+        self.adapter_kind = str(adapter_kind)
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.context_dim = int(config.context_adapter_dim)
+        heads = max(1, min(int(config.context_adapter_heads), self.context_dim))
+        while self.context_dim % heads != 0 and heads > 1:
+            heads -= 1
+        self.context_heads = int(heads)
+        feedforward = max(
+            self.context_dim * 2,
+            int(round(float(config.context_adapter_mlp_ratio) * self.context_dim)),
+        )
+        self.input_projection = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.input_dim),
+            torch.nn.Linear(self.input_dim, self.context_dim),
+        )
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=self.context_dim,
+            nhead=self.context_heads,
+            dim_feedforward=int(feedforward),
+            dropout=float(config.dropout),
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=int(config.context_adapter_layers))
+        self.delta_out = torch.nn.Linear(self.context_dim, self.output_dim)
+        self.gate_out = torch.nn.Linear(self.context_dim, 1)
+        self._zero_init_delta_and_gate(self.delta_out, self.gate_out, float(config.gate_bias_init))
+
+    def forward(self, rows: Any, mask: Any) -> ArchitectureViewFusionOutput:
+        torch = require_torch()
+        mask = mask.bool()
+        valid = mask[:, :, None].to(dtype=rows.dtype)
+        rows = torch.where(valid.bool(), rows, torch.zeros_like(rows))
+        projected = self.input_projection(rows)
+        key_padding_mask = ~mask
+        all_padded = key_padding_mask.all(dim=1)
+        if bool(all_padded.any().item()):
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[all_padded, 0] = False
+        encoded = self.encoder(projected, src_key_padding_mask=key_padding_mask)
+        if bool(all_padded.any().item()):
+            encoded = encoded.clone()
+            encoded[all_padded] = 0.0
+        encoded = encoded * valid
+        adapter_output = _nan_to_num_torch(self.delta_out(encoded)) * valid
+        gate = torch.sigmoid(self.gate_out(encoded)) * valid
+        delta_h = gate * adapter_output
+        combined = torch.zeros(
+            int(rows.shape[0]),
+            int(rows.shape[1]),
+            0,
+            dtype=rows.dtype,
+            device=rows.device,
+        )
+        diagnostics = self._diagnostics(delta_h, gate, adapter_output, mask)
+        diagnostics.update(
+            {
+                "uses_self_attention_context_adapter": True,
+                "context_adapter_heads": int(self.context_heads),
+                "context_encoded_norm_mean": float(encoded.norm(dim=-1)[mask].mean().detach().cpu().item())
+                if bool(mask.any())
+                else 0.0,
+            }
+        )
+        return ArchitectureViewFusionOutput(
+            view_embeddings={},
+            combined_view=combined,
+            delta_h=delta_h,
+            gate=gate,
+            mask=mask,
+            diagnostics=diagnostics,
+        )
+
+
+class ArchitectureViewNoiseContextAdapter(_ArchitectureViewDeltaHAdapterBase):
+    """Deterministic per-row noise control with the same delta-h output contract."""
+
+    def __init__(self, *, output_dim: int, config: ArchitectureViewConfig) -> None:
+        super().__init__()
+        torch = require_torch()
+        self.adapter_kind = "noise_context_adapter"
+        self.noise_dim = int(config.context_adapter_dim)
+        self.output_dim = int(output_dim)
+        hidden_dim = max(int(config.fusion_hidden_dim), self.noise_dim)
+        generator = torch.Generator()
+        generator.manual_seed(int(config.context_adapter_noise_seed))
+        projection = torch.randn(self.noise_dim, self.noise_dim, generator=generator) / max(1.0, self.noise_dim ** 0.5)
+        self.register_buffer("noise_projection", projection, persistent=False)
+        self.delta_mlp = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.noise_dim),
+            torch.nn.Linear(self.noise_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(float(config.dropout)),
+            torch.nn.Linear(hidden_dim, self.output_dim),
+        )
+        self.gate_mlp = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.noise_dim),
+            torch.nn.Linear(self.noise_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, 1),
+        )
+        self._zero_init_delta_and_gate(self.delta_mlp[-1], self.gate_mlp[-1], float(config.gate_bias_init))
+
+    def _noise_rows(self, mask: Any, *, dtype: Any, device: Any, sample_indices: Any | None = None) -> Any:
+        torch = require_torch()
+        batch, particles = int(mask.shape[0]), int(mask.shape[1])
+        positions = torch.arange(particles, device=device, dtype=dtype).view(1, particles, 1)
+        channels = torch.arange(self.noise_dim, device=device, dtype=dtype).view(1, 1, self.noise_dim)
+        if sample_indices is None:
+            seed = torch.arange(batch, device=device, dtype=dtype).view(batch, 1, 1)
+        else:
+            seed = torch.as_tensor(sample_indices, device=device).to(dtype=dtype).reshape(batch, 1, 1)
+        base = torch.sin(seed * 0.013 + (positions + 1.0) * 78.233 + (channels + 1.0) * 37.719)
+        base = base - torch.floor(base)
+        base = base * 2.0 - 1.0
+        projection = self.noise_projection.to(device=device, dtype=dtype)
+        return base @ projection
+
+    def forward(
+        self,
+        mask: Any,
+        *,
+        dtype: Any,
+        device: Any,
+        sample_indices: Any | None = None,
+    ) -> ArchitectureViewFusionOutput:
+        torch = require_torch()
+        mask = mask.bool()
+        valid = mask[:, :, None].to(dtype=dtype)
+        rows = self._noise_rows(mask, dtype=dtype, device=device, sample_indices=sample_indices) * valid
+        adapter_output = _nan_to_num_torch(self.delta_mlp(rows)) * valid
+        gate = torch.sigmoid(self.gate_mlp(rows)) * valid
+        delta_h = gate * adapter_output
+        combined = torch.zeros(
+            int(mask.shape[0]),
+            int(mask.shape[1]),
+            0,
+            dtype=dtype,
+            device=device,
+        )
+        diagnostics = self._diagnostics(delta_h, gate, adapter_output, mask)
+        diagnostics.update(
+            {
+                "uses_noise_context_adapter": True,
+                "noise_context_dim": int(self.noise_dim),
+                "noise_context_policy": "deterministic_sample_index_particle_channel_noise",
+                "noise_uses_particle_features": False,
+            }
+        )
+        return ArchitectureViewFusionOutput(
+            view_embeddings={},
+            combined_view=combined,
+            delta_h=delta_h,
+            gate=gate,
+            mask=mask,
+            diagnostics=diagnostics,
+        )
+
+
 @dataclass(frozen=True)
 class ArchitectureViewResidualPartOutput:
     """Full Step 2 forward output."""
@@ -447,6 +806,7 @@ class ArchitectureViewResidualPartOutput:
     baseline_checkpoint_report: Mapping[str, Any] | None = None
     init_logit_diff_vs_baseline: Mapping[str, Any] | None = None
     part_embedding: Any | None = None
+    part_jet_representation: Any | None = None
 
     @property
     def output_contract(self) -> str:
@@ -504,6 +864,9 @@ class ArchitectureViewResidualPartOutput:
             "baseline_checkpoint": checkpoint or None,
             "init_logit_diff_vs_baseline": init_diff or None,
             "part_embedding_shape": None if self.part_embedding is None else list(self.part_embedding.shape),
+            "part_jet_representation_shape": None
+            if self.part_jet_representation is None
+            else list(self.part_jet_representation.shape),
         }
         if self.part_embedding is not None:
             embedding = self.part_embedding.detach()
@@ -515,6 +878,20 @@ class ArchitectureViewResidualPartOutput:
                         "part_embedding_norm_mean": float(embedding_norm.mean().detach().cpu().item()),
                         "part_embedding_norm_p90": float(
                             _tensor_quantile(embedding_norm, 0.90).detach().cpu().item()
+                        ),
+                    }
+                )
+        if self.part_jet_representation is not None:
+            jet_rep = self.part_jet_representation.detach().float()
+            if int(jet_rep.ndim) == 2 and int(jet_rep.numel()):
+                jet_rep_norm = jet_rep.norm(dim=-1)
+                diagnostics.update(
+                    {
+                        "part_jet_representation_norm_mean": float(
+                            jet_rep_norm.mean().detach().cpu().item()
+                        ),
+                        "part_jet_representation_norm_p90": float(
+                            _tensor_quantile(jet_rep_norm, 0.90).detach().cpu().item()
                         ),
                     }
                 )
@@ -637,6 +1014,31 @@ class ArchitectureViewResidualParT(_ModuleBase):
         torch.nn.init.zeros_(self.part_only_adapter[-1].bias)
         torch.nn.init.zeros_(self.part_only_gate[-1].weight)
         torch.nn.init.constant_(self.part_only_gate[-1].bias, float(self.config.gate_bias_init))
+        self.feature_deepsets_context_adapter = ArchitectureViewDeepSetsContextAdapter(
+            input_dim=canonical_feature_dim,
+            output_dim=part_embed_dim,
+            config=self.config,
+            adapter_kind="feature_deepsets_context_adapter",
+        )
+        self.feature_self_attention_context_adapter = ArchitectureViewSelfAttentionContextAdapter(
+            input_dim=canonical_feature_dim,
+            output_dim=part_embed_dim,
+            config=self.config,
+            adapter_kind="feature_self_attention_context_adapter",
+        )
+        self.part_embedding_deepsets_context_adapter = ArchitectureViewDeepSetsContextAdapter(
+            input_dim=part_embed_dim,
+            output_dim=part_embed_dim,
+            config=self.config,
+            adapter_kind="part_embedding_deepsets_context_adapter",
+        )
+        self.part_embedding_self_attention_context_adapter = ArchitectureViewSelfAttentionContextAdapter(
+            input_dim=part_embed_dim,
+            output_dim=part_embed_dim,
+            config=self.config,
+            adapter_kind="part_embedding_self_attention_context_adapter",
+        )
+        self.noise_context_adapter = ArchitectureViewNoiseContextAdapter(output_dim=part_embed_dim, config=self.config)
         extra_layer = torch.nn.TransformerEncoderLayer(
             d_model=part_embed_dim,
             nhead=int(adapter_heads),
@@ -670,12 +1072,17 @@ class ArchitectureViewResidualParT(_ModuleBase):
             persistent=False,
         )
         self.embed_module_name, self.embed_module = _resolve_embed_module(self.part_model)
+        self.jet_representation_module_name, self.jet_representation_module = _resolve_jet_representation_module(
+            self.part_model
+        )
         self.baseline_checkpoint_report: dict[str, Any] | None = None
         self.init_logit_diff_vs_baseline: dict[str, Any] | None = None
         self._pending_delta_h: Any | None = None
         self._pending_particle_mask: Any | None = None
         self._last_delta_h: Any | None = None
         self._last_part_embedding: Any | None = None
+        self._last_part_jet_representation: Any | None = None
+        self._last_context_adapter_diagnostics: dict[str, Any] = {}
         self._last_injection_summary: dict[str, Any] = {}
         self._freeze_inactive_adapter_modules()
 
@@ -700,6 +1107,11 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "context_control_gate": self.context_control_gate,
             "part_only_adapter": self.part_only_adapter,
             "part_only_gate": self.part_only_gate,
+            "feature_deepsets_context_adapter": self.feature_deepsets_context_adapter,
+            "feature_self_attention_context_adapter": self.feature_self_attention_context_adapter,
+            "part_embedding_deepsets_context_adapter": self.part_embedding_deepsets_context_adapter,
+            "part_embedding_self_attention_context_adapter": self.part_embedding_self_attention_context_adapter,
+            "noise_context_adapter": self.noise_context_adapter,
             "extra_part_block": self.extra_part_block,
             "extra_part_block_out": self.extra_part_block_out,
             "feature_delta_adapter": self.feature_delta_adapter,
@@ -712,8 +1124,24 @@ class ArchitectureViewResidualParT(_ModuleBase):
             return ("feature_delta_adapter",)
         if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK:
             return ("extra_part_block", "extra_part_block_out")
-        if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER:
+        if self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+        ):
             return ("part_only_adapter", "part_only_gate")
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER:
+            return ("feature_deepsets_context_adapter",)
+        if self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+        ):
+            return ("feature_self_attention_context_adapter",)
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER:
+            return ("part_embedding_deepsets_context_adapter",)
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER:
+            return ("part_embedding_self_attention_context_adapter",)
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER:
+            return ("noise_context_adapter",)
         if self.effective_variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL:
             return ("context_control", "context_control_gate")
         if self.effective_variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK:
@@ -804,6 +1232,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "part_model_size": str(self.part_model_size),
             "enabled_views": list(self.config.enabled_views),
             "embed_module_name": str(self.embed_module_name),
+            "jet_representation_module_name": str(self.jet_representation_module_name),
             "baseline_checkpoint": dict(self.baseline_checkpoint_report or {}),
             "init_logit_diff_vs_baseline": dict(self.init_logit_diff_vs_baseline or {}),
             "uses_reference_part_backbone": bool(self.uses_reference_part_backbone),
@@ -814,7 +1243,30 @@ class ArchitectureViewResidualParT(_ModuleBase):
 
     def variant_behavior(self) -> dict[str, Any]:
         uses_extra_part_block = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK
-        uses_part_only_adapter = self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER
+        uses_part_only_adapter = self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+        )
+        uses_feature_deepsets_context = self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER
+        uses_feature_self_attention_context = self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+        )
+        uses_part_embedding_deepsets_context = (
+            self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER
+        )
+        uses_part_embedding_self_attention_context = (
+            self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER
+        )
+        uses_noise_context = self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER
+        uses_finetune_only_control = self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL
+        uses_contextual_adapter = bool(
+            uses_feature_deepsets_context
+            or uses_feature_self_attention_context
+            or uses_part_embedding_deepsets_context
+            or uses_part_embedding_self_attention_context
+            or uses_noise_context
+        )
         uses_combined_lc_plus_feature_mlp = (
             self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER
         )
@@ -829,6 +1281,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
         uses_context_mlp = (
             self.effective_variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL
             and not uses_part_only_adapter
+            and not uses_contextual_adapter
         )
         forces_zero_delta = (
             self.effective_variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK
@@ -865,8 +1318,21 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "uses_shuffled_feature_adapter": bool(uses_shuffled_feature_mlp),
             "feature_shuffle_policy": "cross_particle_roll_plus_feature_permutation"
             if uses_shuffled_feature_mlp
+            else "valid_particles_only_within_jet_feature_permutation_and_roll"
+            if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER
             else "none",
             "uses_part_only_adapter": bool(uses_part_only_adapter),
+            "uses_contextual_adapter": bool(uses_contextual_adapter),
+            "uses_finetune_only_control": bool(uses_finetune_only_control),
+            "trainable_no_adapter_control": bool(uses_finetune_only_control),
+            "uses_feature_deepsets_context_adapter": bool(uses_feature_deepsets_context),
+            "uses_feature_self_attention_context_adapter": bool(uses_feature_self_attention_context),
+            "uses_part_embedding_deepsets_context_adapter": bool(uses_part_embedding_deepsets_context),
+            "uses_part_embedding_self_attention_context_adapter": bool(uses_part_embedding_self_attention_context),
+            "uses_noise_context_adapter": bool(uses_noise_context),
+            "uses_within_jet_shuffled_context_adapter": bool(
+                self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER
+            ),
             "uses_extra_part_block": bool(uses_extra_part_block),
             "uses_larger_part_backbone": bool(uses_larger_part),
             "part_model_size": str(self.part_model_size),
@@ -919,7 +1385,10 @@ class ArchitectureViewResidualParT(_ModuleBase):
             )
             local_mask = mask[:, : int(base.shape[1])]
             valid = local_mask[:, :, None].to(dtype=base.dtype)
-            if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER:
+            if self.variant in (
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+            ):
                 gate = torch.sigmoid(self.part_only_gate(base))
                 delta = gate * self.part_only_adapter(base)
                 gate_denom = local_mask.sum().clamp_min(1)
@@ -927,6 +1396,32 @@ class ArchitectureViewResidualParT(_ModuleBase):
                     ((gate.squeeze(-1) * local_mask.to(dtype=gate.dtype)).sum() / gate_denom).detach().cpu().item()
                 )
                 adapter_kind = "part_embedding_mlp"
+                self._last_context_adapter_diagnostics = {
+                    "part_only_adapter": True,
+                    "adapter_kind": adapter_kind,
+                    "baseline_recovery_zero_projection": True,
+                    "gate_mean": gate_mean,
+                }
+            elif self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER:
+                adapter_output = self.part_embedding_deepsets_context_adapter(base, local_mask)
+                delta = adapter_output.delta_h
+                gate = adapter_output.gate
+                gate_denom = local_mask.sum().clamp_min(1)
+                gate_mean = float(
+                    ((gate.squeeze(-1) * local_mask.to(dtype=gate.dtype)).sum() / gate_denom).detach().cpu().item()
+                )
+                adapter_kind = "part_embedding_deepsets_context_adapter"
+                self._last_context_adapter_diagnostics = dict(adapter_output.diagnostics)
+            elif self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER:
+                adapter_output = self.part_embedding_self_attention_context_adapter(base, local_mask)
+                delta = adapter_output.delta_h
+                gate = adapter_output.gate
+                gate_denom = local_mask.sum().clamp_min(1)
+                gate_mean = float(
+                    ((gate.squeeze(-1) * local_mask.to(dtype=gate.dtype)).sum() / gate_denom).detach().cpu().item()
+                )
+                adapter_kind = "part_embedding_self_attention_context_adapter"
+                self._last_context_adapter_diagnostics = dict(adapter_output.diagnostics)
             elif self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK:
                 key_padding_mask = ~local_mask
                 all_padded = key_padding_mask.all(dim=1)
@@ -1008,9 +1503,24 @@ class ArchitectureViewResidualParT(_ModuleBase):
         }
         return output
 
+    def _jet_representation_pre_hook(self, module: Any, inputs: tuple[Any, ...]) -> None:
+        del module
+        tensor = _first_tensor(inputs)
+        if tensor is None:
+            self._last_part_jet_representation = None
+            return
+        if int(tensor.ndim) == 2:
+            self._last_part_jet_representation = tensor
+            return
+        if int(tensor.ndim) == 3 and int(tensor.shape[1]) == 1:
+            self._last_part_jet_representation = tensor[:, 0, :]
+            return
+        self._last_part_jet_representation = None
+
     def _part_forward_with_delta(self, canonical: LocalCompressionCanonicalInputs, delta_h: Any | None) -> tuple[Any, Any]:
         torch = require_torch()
         self._last_part_embedding = None
+        self._last_part_jet_representation = None
         self._pending_delta_h = delta_h
         self._pending_particle_mask = canonical.particle_mask
         self._last_delta_h = delta_h
@@ -1024,6 +1534,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             "injection_applied": False,
         }
         handle = self.embed_module.register_forward_hook(self._embed_injection_hook)
+        jet_handle = self.jet_representation_module.register_forward_pre_hook(self._jet_representation_pre_hook)
         try:
             logits = self.part_model(
                 canonical.points,
@@ -1033,6 +1544,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             )
         finally:
             handle.remove()
+            jet_handle.remove()
             self._pending_delta_h = None
             self._pending_particle_mask = None
         actual_delta = self._last_delta_h
@@ -1228,6 +1740,72 @@ class ArchitectureViewResidualParT(_ModuleBase):
             return tokens.index_select(dim=-1, index=permutation)
         return tokens
 
+    def _within_jet_shuffled_feature_rows(self, canonical: LocalCompressionCanonicalInputs) -> Any:
+        torch = require_torch()
+        feature_rows = canonical.feature_rows()
+        permutation = self.shuffled_context_feature_permutation.to(device=feature_rows.device)
+        feature_rows = feature_rows.index_select(dim=-1, index=permutation)
+        mask = canonical.particle_mask.bool()
+        shuffled = feature_rows.new_zeros(feature_rows.shape)
+        for batch_index in range(int(feature_rows.shape[0])):
+            valid_indices = torch.nonzero(mask[batch_index], as_tuple=False).flatten()
+            valid_count = int(valid_indices.numel())
+            if valid_count <= 0:
+                continue
+            source_indices = valid_indices
+            if valid_count > 1:
+                source_indices = valid_indices.roll(shifts=max(1, valid_count // 2), dims=0)
+            shuffled[batch_index, valid_indices] = feature_rows[batch_index, source_indices]
+        return shuffled
+
+    def _contextual_feature_view_output(
+        self,
+        canonical: LocalCompressionCanonicalInputs,
+        *,
+        sample_indices: Any | None = None,
+    ) -> ArchitectureViewFusionOutput:
+        feature_rows = canonical.feature_rows()
+        mask = canonical.particle_mask.bool()
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER:
+            output = self.feature_deepsets_context_adapter(feature_rows, mask)
+            return replace(
+                output,
+                diagnostics={
+                    **output.diagnostics,
+                    "feature_deepsets_context_adapter": True,
+                },
+            )
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER:
+            output = self.feature_self_attention_context_adapter(feature_rows, mask)
+            return replace(
+                output,
+                diagnostics={
+                    **output.diagnostics,
+                    "feature_self_attention_context_adapter": True,
+                },
+            )
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER:
+            shuffled_rows = self._within_jet_shuffled_feature_rows(canonical)
+            output = self.feature_self_attention_context_adapter(shuffled_rows, mask)
+            return replace(
+                output,
+                diagnostics={
+                    **output.diagnostics,
+                    "within_jet_shuffled_context_adapter": True,
+                    "feature_shuffle_policy": "valid_particles_only_within_jet_feature_permutation_and_roll",
+                    "cross_batch_shuffle": False,
+                    "padding_rows_used_as_shuffle_sources": False,
+                },
+            )
+        if self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER:
+            return self.noise_context_adapter(
+                mask,
+                dtype=canonical.features.dtype,
+                device=canonical.features.device,
+                sample_indices=sample_indices,
+            )
+        raise ValueError(f"variant {self.variant!r} is not a feature-context adapter")
+
     def forward_outputs(
         self,
         tokens_or_batch: Any,
@@ -1236,6 +1814,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
         weights: Any | None = None,
         max_constits: int | None = None,
         weight_threshold: float = 0.0,
+        sample_indices: Any | None = None,
     ) -> ArchitectureViewResidualPartOutput:
         raw_tokens, raw_mask = _coerce_tokens_and_mask(tokens_or_batch, mask)
         canonical = self.build_canonical_inputs(
@@ -1245,11 +1824,27 @@ class ArchitectureViewResidualParT(_ModuleBase):
             max_constits=max_constits,
             weight_threshold=float(weight_threshold),
         )
-        if self.variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER:
+        self._last_context_adapter_diagnostics = {}
+        if self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+        ):
             view_output = self._zero_view_output(
                 canonical,
                 diagnostics={
                     "part_only_adapter": True,
+                    "baseline_recovery_zero_projection": True,
+                },
+            )
+            delta_for_part = None
+        elif self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+        ):
+            view_output = self._zero_view_output(
+                canonical,
+                diagnostics={
+                    "part_embedding_context_adapter": True,
                     "baseline_recovery_zero_projection": True,
                 },
             )
@@ -1301,6 +1896,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
                 injection_summary=dict(self._last_injection_summary),
                 feature_delta_output=feature_delta_output,
                 part_embedding=self._last_part_embedding,
+                part_jet_representation=self._last_part_jet_representation,
                 variant_behavior=self.variant_behavior(),
                 parameter_accounting=self.parameter_accounting(),
                 baseline_checkpoint_report=self.baseline_checkpoint_report,
@@ -1330,20 +1926,32 @@ class ArchitectureViewResidualParT(_ModuleBase):
                 injection_summary=dict(self._last_injection_summary),
                 feature_delta_output=feature_delta_output,
                 part_embedding=self._last_part_embedding,
+                part_jet_representation=self._last_part_jet_representation,
                 variant_behavior=self.variant_behavior(),
                 parameter_accounting=self.parameter_accounting(),
                 baseline_checkpoint_report=self.baseline_checkpoint_report,
                 init_logit_diff_vs_baseline=self.init_logit_diff_vs_baseline,
             )
         elif self.effective_variant == ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK:
+            is_finetune_only = self.variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL
             view_output = self._zero_view_output(
                 canonical,
                 diagnostics={
-                    "baseline_recheck": True,
+                    "baseline_recheck": not bool(is_finetune_only),
+                    "fine_tune_only_control": bool(is_finetune_only),
+                    "trainable_no_adapter_control": bool(is_finetune_only),
                     "no_embedding_injection": True,
                 },
             )
             delta_for_part = None
+        elif self.variant in (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+        ):
+            view_output = self._contextual_feature_view_output(canonical, sample_indices=sample_indices)
+            delta_for_part = view_output.delta_h
         elif self.effective_variant == ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL:
             view_output = self._context_control_view_output(canonical)
             delta_for_part = view_output.delta_h
@@ -1361,7 +1969,11 @@ class ArchitectureViewResidualParT(_ModuleBase):
                     "hook_computed_delta": bool(delta_for_part is None and self.variant in (
                         ARCHITECTURE_VIEW_10CLASS_ABLATION_EXTRA_PART_BLOCK,
                         ARCHITECTURE_VIEW_10CLASS_ABLATION_PART_ONLY_ADAPTER,
+                        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+                        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+                        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
                     )),
+                    **dict(self._last_context_adapter_diagnostics),
                 },
             )
         return ArchitectureViewResidualPartOutput(
@@ -1375,6 +1987,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             injection_summary=dict(self._last_injection_summary),
             feature_delta_output=None,
             part_embedding=self._last_part_embedding,
+            part_jet_representation=self._last_part_jet_representation,
             variant_behavior=self.variant_behavior(),
             parameter_accounting=self.parameter_accounting(),
             baseline_checkpoint_report=self.baseline_checkpoint_report,
@@ -1391,6 +2004,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
         weights: Any | None = None,
         max_constits: int | None = None,
         weight_threshold: float = 0.0,
+        sample_indices: Any | None = None,
     ) -> Any:
         output = self.forward_outputs(
             tokens_or_batch,
@@ -1398,6 +2012,7 @@ class ArchitectureViewResidualParT(_ModuleBase):
             weights=weights,
             max_constits=max_constits,
             weight_threshold=weight_threshold,
+            sample_indices=sample_indices,
         )
         if bool(return_outputs):
             return output
@@ -1424,7 +2039,10 @@ def build_architecture_view_residual_part(
 __all__ = [
     "ARCHITECTURE_VIEW_MODEL_CONTRACT",
     "ARCHITECTURE_VIEW_MODEL_STEP",
+    "ArchitectureViewDeepSetsContextAdapter",
+    "ArchitectureViewNoiseContextAdapter",
     "ArchitectureViewResidualParT",
     "ArchitectureViewResidualPartOutput",
+    "ArchitectureViewSelfAttentionContextAdapter",
     "build_architecture_view_residual_part",
 ]

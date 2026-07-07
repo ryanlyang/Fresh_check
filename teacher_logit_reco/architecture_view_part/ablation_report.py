@@ -26,6 +26,15 @@ from .config import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PCNN_CONTEXT,
@@ -44,6 +53,10 @@ ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_CONTRACT = "architecture_view_10class_
 ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_SPLITS = ("model_val", "stack_val", "final_test")
 ARCHITECTURE_VIEW_10CLASS_CORE_FUSION_GROUP = "av10_architecture_view_core"
 ARCHITECTURE_VIEW_10CLASS_SCALAR_FUSION_MODE = "scalar_weighted_logit_mean"
+ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS = (
+    ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS
+    + ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS
+)
 
 
 ABLATION_LABELS = {
@@ -58,6 +71,16 @@ ABLATION_LABELS = {
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER: "A8 shuffled-feature control",
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT: "A9 PCNN-context repeat",
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT: "A10 PFN-context repeat",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL: "C1 fine-tune-only control",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER: "C2 ParT-embedding MLP adapter",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER: "C3 feature DeepSets context adapter",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER: "C4 feature self-attention context adapter",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER: "C5 ParT-embedding DeepSets adapter",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER: (
+        "C6 ParT-embedding self-attention adapter"
+    ),
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER: "C7 within-jet shuffled context control",
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER: "C8 pure-noise context control",
 }
 OFFLINE_LABELS = {
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE: "O0 offline ParT baseline",
@@ -163,6 +186,149 @@ def _load_variant_reports(root: Path | None, variants: Sequence[str], problems: 
     return reports
 
 
+def _path_value(payload: Mapping[str, Any], path: Sequence[str]) -> Any:
+    value: Any = payload
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _first_path_value(payload: Mapping[str, Any], paths: Sequence[Sequence[str]]) -> Any:
+    for path in paths:
+        value = _path_value(payload, path)
+        if value is not None:
+            return value
+    return None
+
+
+def _stable_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(_jsonable(value), sort_keys=True)
+    return str(value)
+
+
+def _split_dataset_key(split: str) -> str:
+    return {
+        "model_train": "train_dataset",
+        "model_val": "val_dataset",
+        "stack_val": "stack_val_dataset",
+        "final_test": "final_test_dataset",
+    }[split]
+
+
+def _provenance_value(report: Mapping[str, Any], field: str) -> Any:
+    if field == "manifest_hash":
+        return _first_path_value(
+            report,
+            (
+                ("manifest", "manifest_hash"),
+                ("train_dataset", "source_manifest_hash"),
+                ("val_dataset", "source_manifest_hash"),
+                ("baseline_checkpoint_split_manifest_hash",),
+                ("baseline_load_report", "baseline_checkpoint_split_manifest_hash"),
+            ),
+        )
+    if field == "baseline_checkpoint_hash":
+        return _first_path_value(
+            report,
+            (
+                ("baseline_checkpoint_hash",),
+                ("baseline_load_report", "baseline_checkpoint_hash"),
+            ),
+        )
+    if field == "label_names":
+        return _first_path_value(report, (("label_names",), ("config", "label_names")))
+    if field == "label_filter":
+        return _first_path_value(report, (("label_filter",), ("config", "label_filter")))
+    if field == "final_test_policy":
+        return {
+            "final_test_evaluated": report.get("final_test_evaluated"),
+            "confirm_final_test": _first_path_value(report, (("config", "confirm_final_test"), ("confirm_final_test",))),
+            "final_test_loaded_during_training": report.get("final_test_loaded_during_training"),
+            "inference_consumes_hlt_only": report.get("inference_consumes_hlt_only"),
+            "inference_input_source": report.get("inference_input_source"),
+        }
+    for split in ("model_train", "model_val", "stack_val", "final_test"):
+        prefix = f"{split}_"
+        if field.startswith(prefix):
+            dataset_key = _split_dataset_key(split)
+            source_field = field.removeprefix(prefix)
+            return _path_value(report, (dataset_key, source_field))
+    return None
+
+
+def _provenance_consistency(
+    reports: Mapping[str, Mapping[str, Any]],
+    *,
+    family: str,
+    fields: Sequence[str],
+    required_fields: Sequence[str] = (),
+) -> dict[str, Any]:
+    field_rows: list[dict[str, Any]] = []
+    problems: list[str] = []
+    required = set(str(field) for field in required_fields)
+    for field in fields:
+        values_by_variant: dict[str, str] = {}
+        missing_variants: list[str] = []
+        raw_values: dict[str, Any] = {}
+        for variant, report in reports.items():
+            value = _provenance_value(report, field)
+            stable = _stable_value(value)
+            raw_values[variant] = value
+            if stable is None:
+                missing_variants.append(str(variant))
+            else:
+                values_by_variant[str(variant)] = stable
+        unique_values = sorted(set(values_by_variant.values()))
+        conflict = len(unique_values) > 1
+        required_missing = bool(field in required and missing_variants)
+        if conflict:
+            problems.append(f"{family} provenance mismatch for {field}: {values_by_variant}")
+        if required_missing:
+            problems.append(
+                f"{family} missing required provenance field {field} for variants: "
+                f"{' '.join(sorted(missing_variants))}"
+            )
+        field_rows.append(
+            {
+                "family": family,
+                "field": field,
+                "ok": not conflict and not required_missing,
+                "required": field in required,
+                "unique_value_count": len(unique_values),
+                "values_by_variant": raw_values,
+                "missing_variants": missing_variants,
+            }
+        )
+    if "manifest_hash" in fields:
+        for variant, report in reports.items():
+            manifest_hash = _provenance_value(report, "manifest_hash")
+            if manifest_hash in (None, ""):
+                continue
+            for split in ("model_train", "model_val", "stack_val", "final_test"):
+                field = f"{split}_source_manifest_hash"
+                if field not in fields:
+                    continue
+                dataset_manifest_hash = _provenance_value(report, field)
+                if dataset_manifest_hash in (None, ""):
+                    continue
+                if str(dataset_manifest_hash) != str(manifest_hash):
+                    problems.append(
+                        f"{family} {variant} {field} does not match manifest_hash: "
+                        f"{dataset_manifest_hash} != {manifest_hash}"
+                    )
+    return {
+        "family": family,
+        "ok": not problems,
+        "problems": problems,
+        "fields": field_rows,
+    }
+
+
 def _parameter_row(variant: str, report: Mapping[str, Any], *, family: str, baseline_total: float | None) -> dict[str, Any]:
     accounting = report.get("parameter_accounting")
     if not isinstance(accounting, Mapping):
@@ -203,6 +369,12 @@ def _annotate_parameter_match_ratios(rows: list[dict[str, Any]]) -> None:
         "current_context_mlp_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
         "input_feature_repair_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
         "scaled_feature_mlp_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        "baseline_part_finetune_schedule": ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+        "contextual_feature_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        "contextual_feature_attention_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        "contextual_part_embedding_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        "contextual_part_embedding_attention_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        "contextual_noise_adapter": ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
         "offline_baseline_part": ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
         "offline_feature_mlp_adapter": ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER,
         "offline_pcnn_context_adapter": ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER,
@@ -440,6 +612,32 @@ def _decision_summary(
     shuffled = _float(by_variant.get(ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER, {}).get("final_test_accuracy"))
     pcnn = _float(by_variant.get(ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT, {}).get("final_test_accuracy"))
     pfn = _float(by_variant.get(ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT, {}).get("final_test_accuracy"))
+    finetune_only = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL, {}).get("final_test_accuracy")
+    )
+    context_part_only = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER, {}).get("final_test_accuracy")
+    )
+    feature_deepsets = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER, {}).get("final_test_accuracy")
+    )
+    feature_attention = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER, {}).get("final_test_accuracy")
+    )
+    embedding_deepsets = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER, {}).get(
+            "final_test_accuracy"
+        )
+    )
+    embedding_attention = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER, {}).get(
+            "final_test_accuracy"
+        )
+    )
+    within_jet_shuffled = _float(
+        by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER, {}).get("final_test_accuracy")
+    )
+    noise_context = _float(by_variant.get(ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER, {}).get("final_test_accuracy"))
     offline_base = _float(offline_by_variant.get(ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE, {}).get("final_test_accuracy"))
     offline_feature = _float(offline_by_variant.get(ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER, {}).get("final_test_accuracy"))
     core_scalar = _best_fusion_row(
@@ -456,8 +654,34 @@ def _decision_summary(
     shuffled_gain = None if baseline is None or shuffled is None else shuffled - baseline
     frozen_gain = None if baseline is None or frozen is None else frozen - baseline
     offline_gain = None if offline_base is None or offline_feature is None else offline_feature - offline_base
+    finetune_gain = None if baseline is None or finetune_only is None else finetune_only - baseline
+    context_part_only_gain = None if baseline is None or context_part_only is None else context_part_only - baseline
+    feature_deepsets_gain = None if baseline is None or feature_deepsets is None else feature_deepsets - baseline
+    feature_attention_gain = None if baseline is None or feature_attention is None else feature_attention - baseline
+    embedding_deepsets_gain = None if baseline is None or embedding_deepsets is None else embedding_deepsets - baseline
+    embedding_attention_gain = None if baseline is None or embedding_attention is None else embedding_attention - baseline
+    within_jet_shuffled_gain = None if baseline is None or within_jet_shuffled is None else within_jet_shuffled - baseline
+    noise_context_gain = None if baseline is None or noise_context is None else noise_context - baseline
+    context_candidates = {
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER: feature_deepsets,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER: feature_attention,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER: embedding_deepsets,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER: embedding_attention,
+    }
+    available_context_candidates = {
+        variant: value for variant, value in context_candidates.items() if value is not None
+    }
+    best_context_variant = None
+    best_context_accuracy = None
+    if available_context_candidates:
+        best_context_variant, best_context_accuracy = max(
+            available_context_candidates.items(),
+            key=lambda item: item[1],
+        )
+    best_context_gain = None if baseline is None or best_context_accuracy is None else best_context_accuracy - baseline
 
     target_gain = feature_gain if feature_gain is not None and feature_gain > 0.0 else None
+    context_target_gain = best_context_gain if best_context_gain is not None and best_context_gain > 0.0 else target_gain
     capacity_match_larger = None if target_gain is None or larger_gain is None else larger_gain >= 0.8 * target_gain
     capacity_match_extra = None if target_gain is None or extra_gain is None else extra_gain >= 0.8 * target_gain
     shuffled_fails = None if shuffled_gain is None or target_gain is None else shuffled_gain < 0.25 * target_gain
@@ -471,9 +695,32 @@ def _decision_summary(
     pcnn_or_pfn_strong = None if baseline is None or (pcnn is None and pfn is None) else max(pcnn or -1.0, pfn or -1.0) > baseline
     core_fusion_beats_feature = None if core_scalar_acc is None or feature is None else core_scalar_acc > feature
     offline_works = None if offline_gain is None else offline_gain > 0.0
+    finetune_explains_gain = None if target_gain is None or finetune_gain is None else finetune_gain >= 0.8 * target_gain
+    context_part_only_explains_gain = (
+        None if target_gain is None or context_part_only_gain is None else context_part_only_gain >= 0.8 * target_gain
+    )
+    old_or_new_part_only_explains_gain = None
+    old_part_only_gain = None if baseline is None or part_only is None else part_only - baseline
+    if target_gain is not None:
+        part_only_gains = [gain for gain in (old_part_only_gain, context_part_only_gain) if gain is not None]
+        if part_only_gains:
+            old_or_new_part_only_explains_gain = max(part_only_gains) >= 0.8 * target_gain
+    full_jet_context_improves = None if best_context_accuracy is None or feature is None else best_context_accuracy > feature
+    context_beats_finetune = None if best_context_accuracy is None or finetune_only is None else best_context_accuracy > finetune_only
+    context_controls_collapse = None
+    if context_target_gain is not None:
+        control_gains = [gain for gain in (within_jet_shuffled_gain, noise_context_gain) if gain is not None]
+        if control_gains:
+            context_controls_collapse = max(control_gains) < 0.25 * context_target_gain
 
     capacity_evidence = any(value is True for value in (capacity_match_larger, capacity_match_extra)) or (
         shuffled_fails is False
+    )
+    finetune_evidence = finetune_explains_gain is True
+    context_evidence = (
+        full_jet_context_improves is True
+        and context_beats_finetune is not False
+        and context_controls_collapse is not False
     )
     feature_conditioned_evidence = (
         feature_gain is not None
@@ -486,7 +733,11 @@ def _decision_summary(
     architecture_view_evidence = pcnn_or_pfn_strong is True and core_fusion_beats_feature is True
     hlt_specific_evidence = feature_gain is not None and feature_gain > 0.0 and offline_works is False
 
-    if capacity_evidence and not feature_conditioned_evidence:
+    if finetune_evidence and not context_evidence:
+        hypothesis = "warm_started_part_finetuning"
+    elif context_evidence:
+        hypothesis = "full_jet_contextual_embedding_adapter"
+    elif capacity_evidence and not feature_conditioned_evidence:
         hypothesis = "capacity_or_extra_compute"
     elif input_feature_repair_evidence and (input_delta is not None and feature is not None and input_delta >= feature):
         hypothesis = "input_feature_repair_before_part"
@@ -530,12 +781,40 @@ def _decision_summary(
             "Yes. Input-feature repair matched most of the embedding-space feature adapter gain.",
             "No. Input-feature repair did not match the embedding-space feature adapter gain.",
         ),
+        "did_finetune_only_explain_gain": _decision_answer(
+            finetune_explains_gain,
+            "Yes. Fine-tuning the warm-started ParT without an adapter recovered most of the feature-adapter gain.",
+            "No. Fine-tune-only did not recover most of the feature-adapter gain.",
+            missing="fine-tune-only control unavailable",
+        ),
+        "did_part_only_adapter_explain_gain": _decision_answer(
+            old_or_new_part_only_explains_gain,
+            "Yes. A ParT-embedding-only adapter recovered most of the feature-adapter gain.",
+            "No. ParT-embedding-only adapters did not recover most of the feature-adapter gain.",
+            missing="ParT-only adapter controls unavailable",
+        ),
+        "did_full_jet_context_improve_over_local_mlp": _decision_answer(
+            full_jet_context_improves,
+            "Yes. The best full-jet context adapter beat the local feature MLP adapter.",
+            "No. The best full-jet context adapter did not beat the local feature MLP adapter.",
+            missing="contextual adapters unavailable",
+        ),
+        "did_contextual_controls_collapse": _decision_answer(
+            context_controls_collapse,
+            "Yes. Within-jet shuffle/noise controls collapsed relative to the contextual-adapter gain.",
+            "No. Within-jet shuffle/noise controls retained too much gain to claim clean semantic context.",
+            missing="contextual shuffle/noise controls unavailable",
+        ),
         "did_offline_transfer_work": _decision_answer(
             offline_works,
             "Yes. The offline feature adapter beat the offline ParT baseline.",
             "No. The offline feature adapter did not beat the offline ParT baseline.",
             missing="offline transfer unavailable",
         ),
+        "which_contextual_adapter_won": {
+            "answer": best_context_variant or "unavailable",
+            "satisfied": None,
+        },
         "which_hypothesis_is_most_consistent": {
             "answer": hypothesis,
             "satisfied": None,
@@ -556,6 +835,25 @@ def _decision_summary(
             "frozen_adapter_gain": frozen_gain,
             "pcnn_context_accuracy": pcnn,
             "pfn_context_accuracy": pfn,
+            "finetune_only_accuracy": finetune_only,
+            "finetune_only_gain": finetune_gain,
+            "context_part_only_accuracy": context_part_only,
+            "context_part_only_gain": context_part_only_gain,
+            "feature_deepsets_context_accuracy": feature_deepsets,
+            "feature_deepsets_context_gain": feature_deepsets_gain,
+            "feature_self_attention_context_accuracy": feature_attention,
+            "feature_self_attention_context_gain": feature_attention_gain,
+            "part_embedding_deepsets_context_accuracy": embedding_deepsets,
+            "part_embedding_deepsets_context_gain": embedding_deepsets_gain,
+            "part_embedding_self_attention_context_accuracy": embedding_attention,
+            "part_embedding_self_attention_context_gain": embedding_attention_gain,
+            "within_jet_shuffled_context_accuracy": within_jet_shuffled,
+            "within_jet_shuffled_context_gain": within_jet_shuffled_gain,
+            "noise_context_accuracy": noise_context,
+            "noise_context_gain": noise_context_gain,
+            "best_contextual_adapter_variant": best_context_variant,
+            "best_contextual_adapter_accuracy": best_context_accuracy,
+            "best_contextual_adapter_gain": best_context_gain,
             "core_scalar_fusion_accuracy": core_scalar_acc,
             "offline_baseline_accuracy": offline_base,
             "offline_feature_adapter_accuracy": offline_feature,
@@ -611,7 +909,7 @@ class ArchitectureView10ClassAblationReportConfig:
 
     output_dir: str
     hlt_tagger_root: str
-    hlt_variants: tuple[str, ...] = ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS
+    hlt_variants: tuple[str, ...] = ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS
     hlt_baseline_variant: str = ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK
     fusion_report: str | None = None
     offline_tagger_root: str | None = None
@@ -668,6 +966,61 @@ def build_architecture_view_10class_ablation_report(
         )
     elif config.require_offline_transfer:
         problems.append("require_offline_transfer=True but no offline_tagger_root was provided")
+
+    common_provenance_fields = (
+        "manifest_hash",
+        "label_names",
+        "label_filter",
+        "final_test_policy",
+    )
+    hlt_provenance_fields = common_provenance_fields + (
+        "baseline_checkpoint_hash",
+        "model_train_source_manifest_hash",
+        "model_val_source_manifest_hash",
+        "stack_val_source_manifest_hash",
+        "final_test_source_manifest_hash",
+        "model_train_hlt_content_hash",
+        "model_val_hlt_content_hash",
+        "stack_val_hlt_content_hash",
+        "final_test_hlt_content_hash",
+        "model_train_jet_identity_hash",
+        "model_val_jet_identity_hash",
+        "stack_val_jet_identity_hash",
+        "final_test_jet_identity_hash",
+    )
+    offline_provenance_fields = common_provenance_fields + (
+        "model_train_source_manifest_hash",
+        "model_val_source_manifest_hash",
+        "stack_val_source_manifest_hash",
+        "final_test_source_manifest_hash",
+        "model_train_offline_content_hash",
+        "model_val_offline_content_hash",
+        "stack_val_offline_content_hash",
+        "final_test_offline_content_hash",
+        "model_train_jet_identity_hash",
+        "model_val_jet_identity_hash",
+        "stack_val_jet_identity_hash",
+        "final_test_jet_identity_hash",
+    )
+    provenance_consistency = {
+        "hlt_ablation": _provenance_consistency(
+            hlt_reports,
+            family="hlt_ablation",
+            fields=hlt_provenance_fields,
+            required_fields=hlt_provenance_fields,
+        ),
+        "offline_transfer": _provenance_consistency(
+            offline_reports,
+            family="offline_transfer",
+            fields=offline_provenance_fields,
+            required_fields=offline_provenance_fields,
+        )
+        if offline_reports
+        else {"family": "offline_transfer", "ok": True, "problems": [], "fields": []},
+    }
+    for payload in provenance_consistency.values():
+        if isinstance(payload, Mapping):
+            problems.extend(str(problem) for problem in payload.get("problems", []))
 
     hlt_baseline_report = hlt_reports.get(config.hlt_baseline_variant)
     hlt_baseline_acc = _metric(_metrics_for_split(hlt_baseline_report, "final_test") if hlt_baseline_report else None, "accuracy")
@@ -783,6 +1136,7 @@ def build_architecture_view_10class_ablation_report(
         "offline_transfer_rows": offline_rows,
         "parameter_accounting_rows": parameter_rows,
         "diagnostic_rows": diagnostic_rows,
+        "provenance_consistency": provenance_consistency,
         "interpretation_summary": interpretation,
         "outputs": outputs,
     }
@@ -801,6 +1155,7 @@ def build_architecture_view_10class_ablation_report(
 __all__ = [
     "ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_CONTRACT",
     "ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_STEP",
+    "ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS",
     "ARCHITECTURE_VIEW_10CLASS_CORE_FUSION_GROUP",
     "ARCHITECTURE_VIEW_10CLASS_SCALAR_FUSION_MODE",
     "ArchitectureView10ClassAblationReportConfig",

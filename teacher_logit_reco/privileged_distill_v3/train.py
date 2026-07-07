@@ -12,6 +12,7 @@ from pathlib import Path
 import csv
 import time
 from typing import Any, Mapping, Sequence
+import re
 
 import numpy as np
 
@@ -82,6 +83,10 @@ from .students import (
     PDV3_TEACHER_NONE,
     PDV3_TEACHER_V1_DUAL_VIEW,
     PDV3_TEACHER_V2_PARTICLE_DUAL_VIEW,
+    PDV3_TRAINING_SCHEDULE_REP_FROZEN,
+    PDV3_TRAINING_SCHEDULE_REP_FULL_UNFREEZE,
+    PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE,
+    PDV3_TRAINING_SCHEDULE_STAGED,
     PDV3StudentVariantSpec,
     normalize_pdv3_student_variant,
     pdv3_student_variant_spec,
@@ -90,7 +95,8 @@ from .students import (
 
 PDV3_STEP4_TRAIN_STEP = "pdv3_step4_av10_adapter_student_kd_train"
 PDV3_STUDENT_TRAIN_CONTRACT = "pdv3_av10_adapter_student_kd_train_v1"
-PDV3_STUDENT_REPRESENTATION_SOURCE = "masked_mean_injected_part_embedding"
+PDV3_STUDENT_REPRESENTATION_SOURCE = "preclassifier_part_jet_representation"
+PDV3_RESIDUAL_REPRESENTATION_PROJECTOR_CONTRACT = "pdv3_residual_delta_z_representation_projector_v1"
 
 
 def _pd10_teacher_target_for_spec(spec: PDV3StudentVariantSpec) -> str:
@@ -227,6 +233,7 @@ class PDV3StudentTrainConfig:
     use_teacher_representations: bool | None = None
     allow_baseline_from_scratch: bool = True
     final_test_teacher_diagnostics: bool = False
+    representation_delta_l2_weight: float = 1.0e-4
     overwrite: bool = False
 
     def __post_init__(self) -> None:
@@ -290,6 +297,10 @@ class PDV3StudentTrainConfig:
             raise ValueError("CE-only PDV3 variants cannot enable teacher supervision")
         if active_reps and spec.teacher_family != PDV3_TEACHER_V2_PARTICLE_DUAL_VIEW:
             raise ValueError("representation KD is only supported for V2 particle-dual-view teacher variants")
+        if active_logits and not spec.teacher_logit_name:
+            raise ValueError(f"{self.student_variant} has no teacher_logit_name configured")
+        if active_reps and not spec.teacher_representation_name:
+            raise ValueError(f"{self.student_variant} has no teacher_representation_name configured")
         if spec.teacher_family != PDV3_TEACHER_NONE and not active_logits and not active_reps:
             raise ValueError("KD variants must keep at least one teacher signal active")
         for field_name in (
@@ -298,6 +309,7 @@ class PDV3StudentTrainConfig:
             "dropout",
             "attention_dropout",
             "input_delta_scale",
+            "representation_delta_l2_weight",
         ):
             value = float(getattr(self, field_name))
             if value < 0.0:
@@ -633,6 +645,28 @@ def _load_pdv3_student_dataset(
     )
 
 
+def _verify_pdv3_dataset_manifest_hash(
+    dataset: PDV3ArchitectureViewStudentDataset,
+    *,
+    expected_manifest_hash: str | None,
+    split: str,
+    cache_dir: str,
+) -> None:
+    if not expected_manifest_hash:
+        return
+    actual = dataset.metadata.get("source_manifest_hash")
+    if not actual:
+        raise ValueError(
+            f"PDV3 {split} cache loaded from {cache_dir!r} is missing source_manifest_hash; "
+            f"expected {expected_manifest_hash}"
+        )
+    if str(actual) != str(expected_manifest_hash):
+        raise ValueError(
+            f"PDV3 {split} cache source_manifest_hash mismatch for {cache_dir!r}: "
+            f"{actual} != {expected_manifest_hash}"
+        )
+
+
 def _teacher_tensor_for_batch(loader, batch: Mapping[str, Any], field_name: str, device) -> Any | None:
     torch = require_torch()
     array = getattr(loader.dataset, field_name, None)
@@ -643,29 +677,111 @@ def _teacher_tensor_for_batch(loader, batch: Mapping[str, Any], field_name: str,
 
 
 class PDV3RepresentationProjector(require_torch().nn.Module):
-    """Auxiliary projection head for V2 representation KD."""
+    """Residual ``delta_z`` head for V2 representation KD.
+
+    The student representation source is a deployable HLT-only jet vector
+    ``z_hlt``.  This module projects it into teacher-representation space,
+    predicts a zero-initialized residual ``delta_z``, and returns
+    ``z_corr = z_hlt_projected + gate * delta_z`` for the cosine RepKD loss.
+    """
 
     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 256, dropout: float = 0.05) -> None:
         torch = require_torch()
         super().__init__()
         self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
-        self.net = torch.nn.Sequential(
-            torch.nn.LayerNorm(int(input_dim)),
-            torch.nn.Linear(int(input_dim), int(hidden_dim)),
-            torch.nn.GELU(),
-            torch.nn.Dropout(float(dropout)),
-            torch.nn.Linear(int(hidden_dim), int(output_dim)),
+        self.hidden_dim = int(hidden_dim)
+        self.dropout_value = float(dropout)
+        if self.input_dim <= 0 or self.output_dim <= 0 or self.hidden_dim <= 0:
+            raise ValueError("input_dim, output_dim, and hidden_dim must be positive")
+        self.source_norm = torch.nn.LayerNorm(self.input_dim)
+        self.base_projection = (
+            torch.nn.Identity()
+            if self.input_dim == self.output_dim
+            else torch.nn.Linear(self.input_dim, self.output_dim)
         )
+        self.delta_in = torch.nn.Linear(self.input_dim, self.hidden_dim * 2)
+        self.dropout = torch.nn.Dropout(self.dropout_value)
+        self.delta_out = torch.nn.Linear(self.hidden_dim, self.output_dim)
+        self.gate_logit = torch.nn.Parameter(torch.tensor(-5.0, dtype=torch.float32))
+        torch.nn.init.zeros_(self.delta_out.weight)
+        torch.nn.init.zeros_(self.delta_out.bias)
+        self._last_output: dict[str, Any] = {}
 
     def forward(self, representation_source):
-        return self.net(representation_source.float())
+        torch = require_torch()
+        source = representation_source.float()
+        normalized = self.source_norm(source)
+        base = self.base_projection(source)
+        hidden_pair = self.delta_in(normalized)
+        hidden, gate_hidden = hidden_pair.chunk(2, dim=-1)
+        hidden = torch.nn.functional.silu(gate_hidden) * hidden
+        hidden = self.dropout(hidden)
+        raw_delta = self.delta_out(hidden)
+        gate = torch.sigmoid(self.gate_logit).to(dtype=raw_delta.dtype, device=raw_delta.device)
+        delta_z = raw_delta * gate
+        corrected = base + delta_z
+        self._last_output = {
+            "z_hlt_projected": base,
+            "raw_delta_z": raw_delta,
+            "delta_z": delta_z,
+            "z_corr": corrected,
+            "gate": gate,
+        }
+        return corrected
+
+    def delta_z_l2_mean(self):
+        torch = require_torch()
+        delta_z = self._last_output.get("delta_z")
+        if delta_z is None:
+            return torch.zeros((), device=self.gate_logit.device, dtype=self.gate_logit.dtype)
+        return delta_z.float().square().sum(dim=-1).mean()
+
+    def diagnostics(self) -> dict[str, Any]:
+        output = self._last_output
+        if not output:
+            return {
+                "representation_projector_contract": PDV3_RESIDUAL_REPRESENTATION_PROJECTOR_CONTRACT,
+                "representation_projector_has_forward_state": False,
+            }
+        delta_z = output["delta_z"].detach().float()
+        raw_delta = output["raw_delta_z"].detach().float()
+        base = output["z_hlt_projected"].detach().float()
+        corrected = output["z_corr"].detach().float()
+        gate = output["gate"].detach().float()
+        delta_norm = delta_z.norm(dim=-1)
+        raw_delta_norm = raw_delta.norm(dim=-1)
+        base_norm = base.norm(dim=-1)
+        corrected_norm = corrected.norm(dim=-1)
+        ratio = delta_norm / base_norm.clamp_min(1.0e-12)
+        return {
+            "representation_projector_contract": PDV3_RESIDUAL_REPRESENTATION_PROJECTOR_CONTRACT,
+            "representation_projector_has_forward_state": True,
+            "representation_projector_kind": "residual_delta_z",
+            "representation_projector_zero_init_delta": True,
+            "representation_projector_residual_form": "z_corr=z_hlt_projected+sigmoid(gate_logit)*delta_z",
+            "representation_projector_gate": float(gate.detach().cpu().item()),
+            "z_hlt_projected_norm_mean": float(base_norm.mean().detach().cpu().item()),
+            "z_corr_norm_mean": float(corrected_norm.mean().detach().cpu().item()),
+            "raw_delta_z_norm_mean": float(raw_delta_norm.mean().detach().cpu().item()),
+            "delta_z_norm_mean": float(delta_norm.mean().detach().cpu().item()),
+            "delta_z_norm_max": float(delta_norm.max().detach().cpu().item()) if int(delta_norm.numel()) else 0.0,
+            "delta_z_l2_mean": float(delta_z.square().sum(dim=-1).mean().detach().cpu().item()),
+            "delta_z_to_z_hlt_norm_ratio_mean": float(ratio.mean().detach().cpu().item()),
+        }
 
     def to_config_dict(self) -> dict[str, Any]:
         return {
+            "contract": PDV3_RESIDUAL_REPRESENTATION_PROJECTOR_CONTRACT,
             "source": PDV3_STUDENT_REPRESENTATION_SOURCE,
             "input_dim": int(self.input_dim),
             "output_dim": int(self.output_dim),
+            "hidden_dim": int(self.hidden_dim),
+            "dropout": float(self.dropout_value),
+            "base_projection": "identity" if self.input_dim == self.output_dim else "linear",
+            "residual_form": "z_corr=z_hlt_projected+sigmoid(gate_logit)*delta_z",
+            "zero_init_delta_projection": True,
+            "gate_init": -5.0,
             "class_name": type(self).__name__,
         }
 
@@ -680,17 +796,22 @@ def _masked_mean(rows, mask):
 
 
 def pdv3_student_representation_source_from_output(output) -> Any:
-    """Build the HLT-only ParT embedding vector used for representation KD."""
+    """Return the HLT-only jet vector immediately before the ParT classifier head."""
 
     torch = require_torch()
-    if getattr(output, "part_embedding", None) is None:
+    representation = getattr(output, "part_jet_representation", None)
+    if representation is None:
         raise ValueError(
-            "PDV3 representation KD requires ArchitectureViewResidualPartOutput.part_embedding. "
-            "The AV10/ParT wrapper must capture the injected ParT embedding during forward."
+            "PDV3 representation KD requires ArchitectureViewResidualPartOutput.part_jet_representation. "
+            "The AV10/ParT wrapper must capture the pre-classifier ParT jet vector during forward."
         )
-    embedding = output.part_embedding.float()
-    feature_mask = output.canonical_inputs.particle_mask.bool()
-    return _masked_mean(embedding, feature_mask)
+    representation = representation.float()
+    if int(representation.ndim) != 2:
+        raise ValueError(
+            "PDV3 representation KD expects a rank-2 [batch, dim] pre-classifier jet representation; "
+            f"got shape {tuple(representation.shape)}"
+        )
+    return representation
 
 
 def _representation_source_dim(model: ArchitectureViewResidualParT) -> int:
@@ -772,19 +893,167 @@ def _part_head_parameters(model: ArchitectureViewResidualParT) -> tuple[Any, ...
     return tuple(output)
 
 
+def _set_part_model_trainable_scope(
+    model: ArchitectureViewResidualParT,
+    scope: str,
+    *,
+    upper_block_count: int = 2,
+) -> dict[str, Any]:
+    """Apply full/frozen/upper-block trainability to the wrapped ParT body."""
+
+    scope = str(scope)
+    upper_block_count = max(1, int(upper_block_count))
+    if scope == "full":
+        _set_part_model_trainable(model, True)
+        return {
+            "part_trainability_scope": "full",
+            "upper_unfreeze_block_count": int(upper_block_count),
+            "trainable_part_module_names": ["part_model"],
+            "trainable_part_module_count": 1,
+        }
+    _set_part_model_trainable(model, False)
+    if scope != "upper":
+        return {
+            "part_trainability_scope": "frozen",
+            "upper_unfreeze_block_count": int(upper_block_count),
+            "trainable_part_module_names": [],
+            "trainable_part_module_count": 0,
+        }
+
+    config = getattr(model.part_model, "config", {}) or {}
+    num_layers = int(config.get("num_layers") or 0)
+    threshold = max(0, num_layers - upper_block_count) if num_layers > 0 else None
+    selected_modules: list[str] = []
+    selected_parameter_ids: set[int] = set()
+    block_re = re.compile(r"(?:^|\.)(?:blocks|particle_blocks)\.(\d+)(?:\.|$)")
+    cls_block_re = re.compile(r"(?:^|\.)(?:cls_blocks|class_blocks)\.(\d+)(?:\.|$)")
+    for name, module in model.part_model.named_modules():
+        if not name:
+            continue
+        match = block_re.search(name)
+        cls_match = cls_block_re.search(name)
+        selected = False
+        if match is not None:
+            block_index = int(match.group(1))
+            selected = threshold is None or block_index >= int(threshold)
+        elif cls_match is not None:
+            selected = True
+        if not selected:
+            continue
+        any_parameter = False
+        for parameter in module.parameters(recurse=True):
+            selected_parameter_ids.add(id(parameter))
+            parameter.requires_grad_(True)
+            any_parameter = True
+        if any_parameter:
+            selected_modules.append(str(name))
+    if selected_parameter_ids:
+        model.part_model.train(True)
+        setattr(model, "_force_part_model_eval", False)
+    return {
+        "part_trainability_scope": "upper",
+        "upper_unfreeze_block_count": int(upper_block_count),
+        "trainable_part_module_names": selected_modules[:64],
+        "trainable_part_module_count": len(selected_modules),
+        "trainable_part_parameter_count": len(selected_parameter_ids),
+    }
+
+
+def _phase_weight_metadata(spec: PDV3StudentVariantSpec) -> dict[str, Any]:
+    return {
+        "configured_kd_alpha": float(spec.kd_alpha),
+        "configured_rep_beta": float(spec.rep_beta),
+        "kd_warmup_epochs": int(spec.kd_warmup_epochs),
+        "rep_warmup_epochs": int(spec.rep_warmup_epochs),
+    }
+
+
+def _with_phase_weight_metadata(
+    phases: Sequence[Mapping[str, Any]],
+    spec: PDV3StudentVariantSpec,
+) -> list[dict[str, Any]]:
+    weight_metadata = _phase_weight_metadata(spec)
+    return [{**dict(phase), **weight_metadata} for phase in phases]
+
+
 def pdv3_student_training_phase_plan(spec: PDV3StudentVariantSpec) -> list[dict[str, Any]]:
     """Human-readable training phase plan for Step 6 combined adapters."""
 
-    if str(spec.training_schedule) == "staged":
+    if str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_REP_FROZEN:
+        adapter_label: Any = [] if spec.architecture_adapter_type == "none" else "all_active"
+        return _with_phase_weight_metadata(
+            [
+                {
+                    "phase_name": "delta_z_frozen_repkd",
+                    "epoch_start": 1,
+                    "epoch_end": "end",
+                    "part_model_trainable": False,
+                    "part_trainability_scope": "frozen",
+                    "classifier_head_trainable": True,
+                    "representation_projector_trainable": bool(spec.requires_teacher_representations),
+                    "trainable_adapter_module_names": adapter_label,
+                }
+            ],
+            spec,
+        )
+    if str(spec.training_schedule) in (
+        PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE,
+        PDV3_TRAINING_SCHEDULE_REP_FULL_UNFREEZE,
+    ):
+        warmup_epochs = max(1, int(spec.freeze_part_epochs))
+        second_phase_name = (
+            "delta_z_upper_unfreeze_repkd"
+            if str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE
+            else "delta_z_full_gentle_unfreeze_repkd"
+        )
+        second_scope = (
+            "upper"
+            if str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE
+            else "full"
+        )
+        adapter_label: Any = [] if spec.architecture_adapter_type == "none" else "all_active"
+        second_adapter_label = (
+            []
+            if "freeze_adapter_after_warmup" in str(spec.freeze_policy)
+            else adapter_label
+        )
+        return _with_phase_weight_metadata(
+            [
+                {
+                    "phase_name": "delta_z_frozen_warmup",
+                    "epoch_start": 1,
+                    "epoch_end": int(warmup_epochs),
+                    "part_model_trainable": False,
+                    "part_trainability_scope": "frozen",
+                    "classifier_head_trainable": True,
+                    "representation_projector_trainable": bool(spec.requires_teacher_representations),
+                    "trainable_adapter_module_names": adapter_label,
+                },
+                {
+                    "phase_name": second_phase_name,
+                    "epoch_start": int(warmup_epochs) + 1,
+                    "epoch_end": "end",
+                    "part_model_trainable": True,
+                    "part_trainability_scope": second_scope,
+                    "classifier_head_trainable": True,
+                    "representation_projector_trainable": bool(spec.requires_teacher_representations),
+                    "trainable_adapter_module_names": second_adapter_label,
+                },
+            ],
+            spec,
+        )
+    if str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_STAGED:
         warmup_epochs = max(2, int(spec.freeze_part_epochs))
         input_end = max(1, warmup_epochs // 2)
-        return [
+        return _with_phase_weight_metadata([
             {
                 "phase_name": "input_repair_warmup",
                 "epoch_start": 1,
                 "epoch_end": int(input_end),
                 "part_model_trainable": False,
+                "part_trainability_scope": "frozen",
                 "classifier_head_trainable": False,
+                "representation_projector_trainable": bool(spec.requires_teacher_representations),
                 "trainable_adapter_module_names": ["feature_delta_adapter"],
             },
             {
@@ -792,7 +1061,9 @@ def pdv3_student_training_phase_plan(spec: PDV3StudentVariantSpec) -> list[dict[
                 "epoch_start": int(input_end + 1),
                 "epoch_end": int(warmup_epochs),
                 "part_model_trainable": False,
+                "part_trainability_scope": "frozen",
                 "classifier_head_trainable": False,
+                "representation_projector_trainable": bool(spec.requires_teacher_representations),
                 "trainable_adapter_module_names": ["context_control", "context_control_gate"],
             },
             {
@@ -800,18 +1071,22 @@ def pdv3_student_training_phase_plan(spec: PDV3StudentVariantSpec) -> list[dict[
                 "epoch_start": int(warmup_epochs + 1),
                 "epoch_end": "end",
                 "part_model_trainable": True,
+                "part_trainability_scope": "full",
                 "classifier_head_trainable": True,
+                "representation_projector_trainable": bool(spec.requires_teacher_representations),
                 "trainable_adapter_module_names": "all_active",
             },
-        ]
+        ], spec)
     if int(spec.freeze_part_epochs) > 0:
-        return [
+        return _with_phase_weight_metadata([
             {
                 "phase_name": "adapter_warmup",
                 "epoch_start": 1,
                 "epoch_end": int(spec.freeze_part_epochs),
                 "part_model_trainable": False,
+                "part_trainability_scope": "frozen",
                 "classifier_head_trainable": True,
+                "representation_projector_trainable": bool(spec.requires_teacher_representations),
                 "trainable_adapter_module_names": "all_active",
             },
             {
@@ -819,20 +1094,25 @@ def pdv3_student_training_phase_plan(spec: PDV3StudentVariantSpec) -> list[dict[
                 "epoch_start": int(spec.freeze_part_epochs) + 1,
                 "epoch_end": "end",
                 "part_model_trainable": True,
+                "part_trainability_scope": "full",
                 "classifier_head_trainable": True,
+                "representation_projector_trainable": bool(spec.requires_teacher_representations),
                 "trainable_adapter_module_names": "all_active",
             },
-        ]
-    return [
+        ], spec)
+    phase_name = "delta_z_joint_from_start_repkd" if str(spec.freeze_policy) == "delta_z_joint_from_start" else "joint_finetune"
+    return _with_phase_weight_metadata([
         {
-            "phase_name": "joint_finetune",
+            "phase_name": phase_name,
             "epoch_start": 1,
             "epoch_end": "end",
             "part_model_trainable": True,
+            "part_trainability_scope": "full",
             "classifier_head_trainable": True,
+            "representation_projector_trainable": bool(spec.requires_teacher_representations),
             "trainable_adapter_module_names": "all_active",
         }
-    ]
+    ], spec)
 
 
 def apply_pdv3_student_training_phase(
@@ -846,32 +1126,72 @@ def apply_pdv3_student_training_phase(
     """Apply the CE/KD student trainability schedule for one epoch."""
 
     active_adapters = tuple(str(name) for name in model.active_adapter_module_names())
+    part_trainability_scope = "full"
     if bool(evaluation_only):
         part_trainable = False
         trainable_adapters: tuple[str, ...] = ()
+        part_trainability_scope = "frozen"
         phase_name = "evaluation_only"
-    elif str(spec.training_schedule) == "staged":
+    elif str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_REP_FROZEN:
+        phase_name = "delta_z_frozen_repkd"
+        part_trainable = False
+        part_trainability_scope = "frozen"
+        trainable_adapters = active_adapters
+    elif str(spec.training_schedule) in (
+        PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE,
+        PDV3_TRAINING_SCHEDULE_REP_FULL_UNFREEZE,
+    ):
+        warmup_epochs = max(1, int(spec.freeze_part_epochs))
+        current_epoch = max(1, int(epoch))
+        freeze_adapter_after_warmup = "freeze_adapter_after_warmup" in str(spec.freeze_policy)
+        if current_epoch <= warmup_epochs:
+            phase_name = "delta_z_frozen_warmup"
+            part_trainable = False
+            part_trainability_scope = "frozen"
+            trainable_adapters = active_adapters
+        elif str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE:
+            phase_name = "delta_z_upper_unfreeze_repkd"
+            part_trainable = True
+            part_trainability_scope = "upper"
+            trainable_adapters = () if freeze_adapter_after_warmup else active_adapters
+        else:
+            phase_name = "delta_z_full_gentle_unfreeze_repkd"
+            part_trainable = True
+            part_trainability_scope = "full"
+            trainable_adapters = () if freeze_adapter_after_warmup else active_adapters
+    elif str(spec.training_schedule) == PDV3_TRAINING_SCHEDULE_STAGED:
         warmup_epochs = max(2, int(spec.freeze_part_epochs))
         input_end = max(1, warmup_epochs // 2)
         current_epoch = max(1, int(epoch))
         if current_epoch <= input_end:
             phase_name = "input_repair_warmup"
             part_trainable = False
+            part_trainability_scope = "frozen"
             trainable_adapters = tuple(name for name in active_adapters if name == "feature_delta_adapter")
         elif current_epoch <= warmup_epochs:
             phase_name = "embedding_residual_warmup"
             part_trainable = False
+            part_trainability_scope = "frozen"
             trainable_adapters = tuple(
                 name for name in active_adapters if name in {"context_control", "context_control_gate"}
             )
         else:
             phase_name = "joint_finetune"
             part_trainable = True
+            part_trainability_scope = "full"
             trainable_adapters = active_adapters
     else:
         current_epoch = max(1, int(epoch))
         part_trainable = current_epoch > int(spec.freeze_part_epochs)
-        phase_name = "adapter_warmup" if not part_trainable and int(spec.freeze_part_epochs) > 0 else "joint_finetune"
+        part_trainability_scope = "full" if part_trainable else "frozen"
+        if not part_trainable and int(spec.freeze_part_epochs) > 0:
+            phase_name = "adapter_warmup"
+        else:
+            phase_name = (
+                "delta_z_joint_from_start_repkd"
+                if str(spec.freeze_policy) == "delta_z_joint_from_start"
+                else "joint_finetune"
+            )
         trainable_adapters = active_adapters
 
     train_head_during_frozen_adapter_warmup = bool(
@@ -879,10 +1199,10 @@ def apply_pdv3_student_training_phase(
         and not part_trainable
         and str(spec.training_schedule) != "staged"
         and int(spec.freeze_part_epochs) > 0
-        and bool(active_adapters)
+        and bool(active_adapters or representation_projector is not None or spec.requires_teacher_logits)
         and not bool(spec.is_baseline)
     )
-    _set_part_model_trainable(model, bool(part_trainable))
+    part_scope_info = _set_part_model_trainable_scope(model, part_trainability_scope)
     _set_part_head_trainable(model, bool(part_trainable or train_head_during_frozen_adapter_warmup))
     enabled_adapters = _set_active_adapter_modules_trainable(model, trainable_adapters)
     representation_projector_trainable = bool(not evaluation_only and representation_projector is not None)
@@ -908,8 +1228,14 @@ def apply_pdv3_student_training_phase(
         "freeze_policy": str(spec.freeze_policy),
         "phase_name": str(phase_name),
         "part_model_trainable": bool(part_trainable),
+        "part_trainability_scope": str(part_scope_info.get("part_trainability_scope", part_trainability_scope)),
+        "upper_unfreeze_block_count": int(part_scope_info.get("upper_unfreeze_block_count", 2)),
+        "trainable_part_module_names": list(part_scope_info.get("trainable_part_module_names", [])),
+        "trainable_part_module_count": int(part_scope_info.get("trainable_part_module_count", 0)),
+        "trainable_part_parameter_count": int(part_scope_info.get("trainable_part_parameter_count", 0)),
         "classifier_head_trainable": bool(part_head_trainable),
         "representation_projector_trainable": bool(representation_projector_trainable),
+        **_phase_weight_metadata(spec),
         "module_group_trainability": module_group_trainability,
         "active_adapter_module_names": list(active_adapters),
         "trainable_adapter_module_names": list(enabled_adapters),
@@ -1044,6 +1370,8 @@ def run_pdv3_student_epoch(
     teacher_low_conf_count = 0.0
     total_delta_l2_loss = 0.0
     total_delta_l2_mean = 0.0
+    total_representation_delta_l2_loss = 0.0
+    total_representation_delta_l2_mean = 0.0
     total_effective_alpha = 0.0
     total_effective_beta = 0.0
     total_nonfinite_batches = 0
@@ -1087,14 +1415,17 @@ def run_pdv3_student_epoch(
                     batch["mask"],
                     return_outputs=True,
                     max_constits=int(batch["tokens"].shape[1]),
+                    sample_indices=batch.get("indices"),
                 )
                 logits = output.logits
                 student_repr_projected = None
+                representation_delta_l2_mean = logits.new_zeros(())
                 if teacher_representations is not None:
                     if representation_projector is None:
                         raise ValueError("teacher representations require a representation projector")
                     repr_source = pdv3_student_representation_source_from_output(output)
                     student_repr_projected = representation_projector(repr_source)
+                    representation_delta_l2_mean = representation_projector.delta_z_l2_mean()
                 kd_loss, loss_parts = pd10_student_loss(
                     logits,
                     labels,
@@ -1114,11 +1445,18 @@ def run_pdv3_student_epoch(
                 applies_delta_l2 = getattr(output, "feature_delta_output", None) is not None
                 delta_l2_weight = float(config.delta_l2_weight) if applies_delta_l2 else 0.0
                 delta_l2_loss = delta_l2_mean * delta_l2_weight
-                loss = kd_loss + delta_l2_loss
+                representation_delta_l2_weight = (
+                    float(config.representation_delta_l2_weight)
+                    if teacher_representations is not None and representation_projector is not None
+                    else 0.0
+                )
+                representation_delta_l2_loss = representation_delta_l2_mean * representation_delta_l2_weight
+                loss = kd_loss + delta_l2_loss + representation_delta_l2_loss
             finite_terms = [
                 torch.isfinite(loss.detach()).all(),
                 torch.isfinite(logits.detach()).all(),
                 torch.isfinite(delta_l2_loss.detach()).all(),
+                torch.isfinite(representation_delta_l2_loss.detach()).all(),
             ]
             if teacher_logits is not None:
                 finite_terms.append(torch.isfinite(teacher_logits.detach()).all())
@@ -1210,6 +1548,8 @@ def run_pdv3_student_epoch(
                 teacher_representation_weight_sum += float(batch_size)
             total_delta_l2_loss += float(delta_l2_loss.detach().item()) * batch_size
             total_delta_l2_mean += float(delta_l2_mean.detach().item()) * batch_size
+            total_representation_delta_l2_loss += float(representation_delta_l2_loss.detach().item()) * batch_size
+            total_representation_delta_l2_mean += float(representation_delta_l2_mean.detach().item()) * batch_size
             total_effective_alpha += float(effective_alpha) * batch_size
             total_effective_beta += float(effective_beta) * batch_size
             total_correct += int((preds == labels).sum().detach().cpu().item())
@@ -1236,6 +1576,14 @@ def run_pdv3_student_epoch(
                     flat["student_repr_projected_norm_mean"] = float(
                         student_repr_projected.detach().float().norm(dim=-1).mean().cpu().item()
                     )
+                if representation_projector is not None and student_repr_projected is not None:
+                    for key, value in representation_projector.diagnostics().items():
+                        try:
+                            flat[key] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                    flat["representation_delta_l2_loss"] = float(representation_delta_l2_loss.detach().cpu().item())
+                    flat["representation_delta_l2_weight"] = float(config.representation_delta_l2_weight)
                 for key, value in flat.items():
                     diagnostic_totals[key] = diagnostic_totals.get(key, 0.0) + float(value) * batch_size
                     diagnostic_weight_totals[key] = diagnostic_weight_totals.get(key, 0.0) + float(batch_size)
@@ -1296,6 +1644,10 @@ def run_pdv3_student_epoch(
         "delta_l2_mean": total_delta_l2_mean / float(total_seen),
         "delta_l2_weight": float(config.delta_l2_weight),
         "delta_l2_scope": "feature_delta_only",
+        "representation_delta_l2_loss": total_representation_delta_l2_loss / float(total_seen),
+        "representation_delta_l2_mean": total_representation_delta_l2_mean / float(total_seen),
+        "representation_delta_l2_weight": float(config.representation_delta_l2_weight),
+        "representation_delta_l2_scope": "delta_z_residual_only",
         "configured_kd_alpha": float(configured_alpha),
         "configured_representation_beta": float(configured_beta),
         "effective_kd_alpha": total_effective_alpha / float(total_seen),
@@ -1386,6 +1738,8 @@ def _write_epoch_metrics_csv(path: Path, curves: Sequence[Mapping[str, Any]]) ->
             "train_student_entropy_mean_with_teacher": train.get("student_entropy_mean_with_teacher"),
             "train_nonfinite_batches_skipped": train.get("nonfinite_batches_skipped"),
             "train_delta_l2_loss": train.get("delta_l2_loss"),
+            "train_representation_delta_l2_loss": train.get("representation_delta_l2_loss"),
+            "train_representation_delta_l2_mean": train.get("representation_delta_l2_mean"),
             "train_accuracy": train.get("accuracy"),
             "model_val_loss": val.get("loss"),
             "model_val_ce_loss": val.get("ce_loss"),
@@ -1398,6 +1752,8 @@ def _write_epoch_metrics_csv(path: Path, curves: Sequence[Mapping[str, Any]]) ->
             "model_val_student_entropy_mean_with_teacher": val.get("student_entropy_mean_with_teacher"),
             "model_val_nonfinite_batches_skipped": val.get("nonfinite_batches_skipped"),
             "model_val_delta_l2_loss": val.get("delta_l2_loss"),
+            "model_val_representation_delta_l2_loss": val.get("representation_delta_l2_loss"),
+            "model_val_representation_delta_l2_mean": val.get("representation_delta_l2_mean"),
             "model_val_accuracy": val.get("accuracy"),
             "selection_metric_value": row.get("selection_metric_value"),
         }
@@ -1508,6 +1864,18 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
         config.val_split,
         max_jets=config.max_val_jets,
         load_teacher_supervision=True,
+    )
+    _verify_pdv3_dataset_manifest_hash(
+        train_dataset,
+        expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+        split=str(config.train_split),
+        cache_dir=str(config.hlt_cache_dir),
+    )
+    _verify_pdv3_dataset_manifest_hash(
+        val_dataset,
+        expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+        split=str(config.val_split),
+        cache_dir=str(config.hlt_cache_dir),
     )
     if train_dataset.tokens.shape[-1] != RAW_TOKEN_DIM or val_dataset.tokens.shape[-1] != RAW_TOKEN_DIM:
         raise ValueError(f"PDV3 students expect raw token dim {RAW_TOKEN_DIM}")
@@ -1642,6 +2010,16 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
         "manifest": manifest_info,
         "train_dataset": dict(train_dataset.metadata),
         "val_dataset": dict(val_dataset.metadata),
+        "hlt_input_contract": {
+            "profile": str(config.expected_hlt_profile),
+            "degradation_strength": float(config.expected_hlt_degradation_strength),
+            "label": f"{config.expected_hlt_profile}@{float(config.expected_hlt_degradation_strength):g}",
+            "matches_pdv3_default": bool(
+                str(config.expected_hlt_profile) == PDV3_HLT_PROFILE
+                and abs(float(config.expected_hlt_degradation_strength) - float(PDV3_HLT_DEGRADATION_STRENGTH))
+                <= 1.0e-12
+            ),
+        },
         "baseline_checkpoint": str(config.baseline_checkpoint),
         "baseline_load_report": baseline_report,
         "baseline_initialization": str(baseline_initialization),
@@ -1876,6 +2254,12 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
         max_jets=config.max_final_test_jets,
         load_teacher_supervision=False,
     )
+    _verify_pdv3_dataset_manifest_hash(
+        final_test_dataset,
+        expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+        split=str(config.final_test_split),
+        cache_dir=str(config.hlt_cache_dir),
+    )
     final_test_loader = make_subtoken_hlt_loader(
         final_test_dataset,
         batch_size=int(config.eval_batch_size),
@@ -1901,6 +2285,12 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
             config.final_test_split,
             max_jets=config.max_final_test_jets,
             load_teacher_supervision=True,
+        )
+        _verify_pdv3_dataset_manifest_hash(
+            final_test_teacher_dataset,
+            expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+            split=str(config.final_test_split),
+            cache_dir=str(config.hlt_cache_dir),
         )
         final_test_teacher_loader = make_subtoken_hlt_loader(
             final_test_teacher_dataset,
@@ -1973,6 +2363,16 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
         "num_classes": PDV3_NUM_CLASSES,
         "source": source,
         "manifest": manifest_info,
+        "hlt_input_contract": {
+            "profile": str(config.expected_hlt_profile),
+            "degradation_strength": float(config.expected_hlt_degradation_strength),
+            "label": f"{config.expected_hlt_profile}@{float(config.expected_hlt_degradation_strength):g}",
+            "matches_pdv3_default": bool(
+                str(config.expected_hlt_profile) == PDV3_HLT_PROFILE
+                and abs(float(config.expected_hlt_degradation_strength) - float(PDV3_HLT_DEGRADATION_STRENGTH))
+                <= 1.0e-12
+            ),
+        },
         "baseline_checkpoint": str(config.baseline_checkpoint),
         "baseline_load_report": baseline_report,
         "baseline_initialization": str(baseline_initialization),
@@ -2018,6 +2418,7 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
 
 __all__ = [
     "PDV3_STEP4_TRAIN_STEP",
+    "PDV3_RESIDUAL_REPRESENTATION_PROJECTOR_CONTRACT",
     "PDV3_STUDENT_REPRESENTATION_SOURCE",
     "PDV3_STUDENT_TRAIN_CONTRACT",
     "PDV3ArchitectureViewStudentDataset",

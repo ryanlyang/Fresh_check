@@ -14,6 +14,15 @@ from teacher_logit_reco.architecture_view_part import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_CONTRACT,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_STEP,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_CORE_FUSION_GROUP,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
@@ -44,11 +53,39 @@ def _metrics(*, acc: float, ce: float = 0.6) -> dict:
 
 
 def _run_report(variant: str, *, final_acc: float, input_source: str = "hlt", total_params: int = 1000) -> dict:
+    content_field = "offline_content_hash" if input_source == "offline" else "hlt_content_hash"
     return {
         "variant": variant,
         "input_source": input_source,
         "inference_input_source": input_source,
         "inference_consumes_hlt_only": input_source == "hlt",
+        "final_test_evaluated": True,
+        "final_test_loaded_during_training": False,
+        "manifest": {"manifest_hash": "shared-manifest-hash"},
+        "label_names": ["QCD", "Hbb", "Hcc", "Hgg", "H4q", "Hqql", "Zqq", "Wqq", "Tbqq", "Tbl"],
+        "label_filter": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "baseline_checkpoint_hash": "shared-baseline-hash" if input_source == "hlt" else None,
+        "baseline_checkpoint_split_manifest_hash": "shared-manifest-hash" if input_source == "hlt" else None,
+        "train_dataset": {
+            "source_manifest_hash": "shared-manifest-hash",
+            content_field: f"{input_source}-train-content",
+            "jet_identity_hash": "train-identity",
+        },
+        "val_dataset": {
+            "source_manifest_hash": "shared-manifest-hash",
+            content_field: f"{input_source}-val-content",
+            "jet_identity_hash": "val-identity",
+        },
+        "stack_val_dataset": {
+            "source_manifest_hash": "shared-manifest-hash",
+            content_field: f"{input_source}-stack-val-content",
+            "jet_identity_hash": "stack-val-identity",
+        },
+        "final_test_dataset": {
+            "source_manifest_hash": "shared-manifest-hash",
+            content_field: f"{input_source}-final-test-content",
+            "jet_identity_hash": "final-test-identity",
+        },
         "best_epoch": 4,
         "epochs_completed": 6,
         "checkpoint": f"/fake/{variant}/best_model_val.pt",
@@ -222,6 +259,8 @@ def test_step5_ablation_report_merges_hlt_fusion_offline_and_answers_decisions(t
     assert report["step"] == ARCHITECTURE_VIEW_10CLASS_ABLATION_REPORT_STEP
     assert report["summary"]["best_hlt_variant"] == ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER
     assert report["summary"]["best_fusion_accuracy"] == 0.762
+    assert report["provenance_consistency"]["hlt_ablation"]["ok"]
+    assert report["provenance_consistency"]["offline_transfer"]["ok"]
     feature_row = next(
         row for row in report["hlt_ablation_rows"] if row["variant"] == ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER
     )
@@ -250,6 +289,84 @@ def test_step5_ablation_report_merges_hlt_fusion_offline_and_answers_decisions(t
     assert part_only_parameter_row["parameter_match_reference_variant"] == ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER
     assert part_only_parameter_row["adapter_param_ratio_vs_match_reference"] == 0.9
     assert part_only_parameter_row["adapter_param_match_within_20pct"] is True
+
+
+def test_step5_ablation_report_rejects_mixed_hlt_provenance(tmp_path: Path) -> None:
+    hlt_root = tmp_path / "taggers"
+    baseline = _run_report(
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+        final_acc=0.750,
+    )
+    feature = _run_report(
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        final_acc=0.760,
+    )
+    feature["train_dataset"] = {**feature["train_dataset"], "source_manifest_hash": "different-manifest"}
+    feature["manifest"] = {"manifest_hash": "different-manifest"}
+    _write_run_reports(
+        hlt_root,
+        {
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK: baseline,
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER: feature,
+        },
+    )
+
+    report = build_architecture_view_10class_ablation_report(
+        ArchitectureView10ClassAblationReportConfig(
+            output_dir=str(tmp_path / "final_report"),
+            hlt_tagger_root=str(hlt_root),
+            hlt_variants=(
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+            ),
+            confirm_final_test=True,
+            require_fusion=False,
+            require_offline_transfer=False,
+        )
+    )
+
+    assert not report["ok"]
+    assert not report["provenance_consistency"]["hlt_ablation"]["ok"]
+    assert any("provenance mismatch" in problem for problem in report["problems"])
+
+
+def test_step5_ablation_report_rejects_missing_required_hlt_provenance(tmp_path: Path) -> None:
+    hlt_root = tmp_path / "taggers"
+    baseline = _run_report(
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+        final_acc=0.750,
+    )
+    feature = _run_report(
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        final_acc=0.760,
+    )
+    feature["train_dataset"] = {**feature["train_dataset"]}
+    feature["train_dataset"].pop("hlt_content_hash")
+    _write_run_reports(
+        hlt_root,
+        {
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK: baseline,
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER: feature,
+        },
+    )
+
+    report = build_architecture_view_10class_ablation_report(
+        ArchitectureView10ClassAblationReportConfig(
+            output_dir=str(tmp_path / "final_report"),
+            hlt_tagger_root=str(hlt_root),
+            hlt_variants=(
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+            ),
+            confirm_final_test=True,
+            require_fusion=False,
+            require_offline_transfer=False,
+        )
+    )
+
+    assert not report["ok"]
+    assert not report["provenance_consistency"]["hlt_ablation"]["ok"]
+    assert any("missing required provenance field model_train_hlt_content_hash" in problem for problem in report["problems"])
     train_grad_row = next(
         row
         for row in report["diagnostic_rows"]
@@ -289,3 +406,111 @@ def test_step5_report_records_missing_required_inputs(tmp_path: Path) -> None:
     assert not report["ok"]
     assert any("require_fusion=True" in problem for problem in report["problems"])
     assert any("require_offline_transfer=True" in problem for problem in report["problems"])
+
+
+def test_multi_adapter_step4_clean_report_answers_contextual_mechanism_questions(tmp_path: Path) -> None:
+    hlt_root = tmp_path / "taggers"
+    hlt_variants = (
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    )
+    _write_run_reports(
+        hlt_root,
+        {
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
+                final_acc=0.750,
+                total_params=1000,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER,
+                final_acc=0.760,
+                total_params=1100,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+                final_acc=0.752,
+                total_params=1000,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+                final_acc=0.755,
+                total_params=1080,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+                final_acc=0.762,
+                total_params=1120,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+                final_acc=0.764,
+                total_params=1130,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+                final_acc=0.761,
+                total_params=1120,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+                final_acc=0.763,
+                total_params=1130,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+                final_acc=0.751,
+                total_params=1130,
+            ),
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER: _run_report(
+                ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+                final_acc=0.7505,
+                total_params=1130,
+            ),
+        },
+    )
+
+    report = build_architecture_view_10class_ablation_report(
+        ArchitectureView10ClassAblationReportConfig(
+            output_dir=str(tmp_path / "final_report"),
+            hlt_tagger_root=str(hlt_root),
+            hlt_variants=hlt_variants,
+            confirm_final_test=True,
+        )
+    )
+
+    assert report["ok"], report["problems"]
+    assert ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER in ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS
+    assert report["summary"]["best_hlt_variant"] == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER
+    decisions = report["interpretation_summary"]["decisions"]
+    assert decisions["did_finetune_only_explain_gain"]["satisfied"] is False
+    assert decisions["did_part_only_adapter_explain_gain"]["satisfied"] is False
+    assert decisions["did_full_jet_context_improve_over_local_mlp"]["satisfied"] is True
+    assert decisions["did_contextual_controls_collapse"]["satisfied"] is True
+    assert decisions["which_contextual_adapter_won"]["answer"] == (
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER
+    )
+    assert decisions["which_hypothesis_is_most_consistent"]["answer"] == (
+        "full_jet_contextual_embedding_adapter"
+    )
+    evidence = report["interpretation_summary"]["evidence_values"]
+    assert evidence["finetune_only_gain"] == 0.0020000000000000018
+    assert evidence["best_contextual_adapter_gain"] == 0.014000000000000012
+    assert evidence["within_jet_shuffled_context_gain"] == 0.0010000000000000009
+    context_parameter_row = next(
+        row
+        for row in report["parameter_accounting_rows"]
+        if row["variant"] == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER
+    )
+    assert context_parameter_row["parameter_match_reference_variant"] == (
+        ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER
+    )
+    assert context_parameter_row["adapter_param_match_within_20pct"] is True

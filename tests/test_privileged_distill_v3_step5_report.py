@@ -221,6 +221,27 @@ def test_step5_report_rejects_final_test_teacher_cache_dependency(tmp_path):
     assert any("final_test_dataset loaded privileged teacher caches" in problem for problem in report["problems"])
 
 
+def test_step5_report_rejects_dataset_manifest_mismatch(tmp_path):
+    students = tmp_path / "students"
+    _write_student(students, PDV3_STUDENT_HLT_PART_CE, final_accuracy=0.900, val_accuracy=0.890)
+    variant_dir = students / PDV3_STUDENT_HLT_PART_CE
+    payload = json.loads((variant_dir / "run_report.json").read_text(encoding="utf-8"))
+    payload["train_dataset"] = {**payload["train_dataset"], "source_manifest_hash": "stale-manifest"}
+    (variant_dir / "run_report.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_pdv3_report(
+        PDV3ReportConfig(
+            output_dir=str(tmp_path / "report"),
+            students_dir=str(students),
+            student_variants=(PDV3_STUDENT_HLT_PART_CE,),
+            confirm_final_test=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert any("source_manifest_hash does not match manifest.manifest_hash" in problem for problem in report["problems"])
+
+
 def test_step5_report_accepts_scratch_baseline_checkpoint_identity(tmp_path):
     students = tmp_path / "students"
     _write_student(

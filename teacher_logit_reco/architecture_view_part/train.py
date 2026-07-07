@@ -37,6 +37,7 @@ from .checkpoint import (
 from .config import (
     ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
     ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC,
     ARCHITECTURE_VIEW_10CLASS_SELECTION_METRICS,
     ARCHITECTURE_VIEW_ALL_VARIANTS,
@@ -725,6 +726,28 @@ def _load_dataset(config: ArchitectureViewTaggerTrainConfig, split: str, *, max_
     return dataset
 
 
+def _verify_loaded_dataset_manifest_hash(
+    dataset: ArchitectureViewJetDataset,
+    *,
+    expected_manifest_hash: str | None,
+    split: str,
+    cache_dir: str,
+) -> None:
+    if not expected_manifest_hash:
+        return
+    actual = dataset.metadata.get("source_manifest_hash")
+    if not actual:
+        raise ValueError(
+            f"{split} cache loaded from {cache_dir!r} is missing source_manifest_hash; "
+            f"expected {expected_manifest_hash}"
+        )
+    if str(actual) != str(expected_manifest_hash):
+        raise ValueError(
+            f"{split} cache source_manifest_hash mismatch for {cache_dir!r}: "
+            f"{actual} != {expected_manifest_hash}"
+        )
+
+
 def _flatten_scalar_diagnostics(diagnostics: Mapping[str, Any], *, prefix: str = "") -> dict[str, float]:
     output: dict[str, float] = {}
     for key, value in diagnostics.items():
@@ -955,6 +978,7 @@ def run_architecture_view_tagger_epoch(
                     batch["mask"],
                     return_outputs=need_output,
                     max_constits=int(batch["tokens"].shape[1]),
+                    sample_indices=batch.get("indices"),
                 )
                 logits = output.logits if need_output else output
                 ce_loss = criterion(logits, labels)
@@ -1177,8 +1201,26 @@ def train_architecture_view_tagger(
         if not manifest_sha:
             raise ValueError("require_baseline_split_manifest_hash=True requires a non-empty manifest_hash")
 
+    provided_train_dataset = train_dataset is not None
+    provided_val_dataset = val_dataset is not None
+    provided_stack_val_dataset = stack_val_dataset is not None
+    provided_final_test_dataset = final_test_dataset is not None
     train_dataset = train_dataset or _load_dataset(config, config.train_split, max_jets=config.max_train_jets)
     val_dataset = val_dataset or _load_dataset(config, config.val_split, max_jets=config.max_val_jets)
+    if not provided_train_dataset:
+        _verify_loaded_dataset_manifest_hash(
+            train_dataset,
+            expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+            split=str(config.train_split),
+            cache_dir=str(config.resolved_input_cache_dir),
+        )
+    if not provided_val_dataset:
+        _verify_loaded_dataset_manifest_hash(
+            val_dataset,
+            expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+            split=str(config.val_split),
+            cache_dir=str(config.resolved_input_cache_dir),
+        )
     if train_dataset.tokens.shape[-1] != RAW_TOKEN_DIM or val_dataset.tokens.shape[-1] != RAW_TOKEN_DIM:
         raise ValueError(f"architecture-view tagger expects raw token dim {RAW_TOKEN_DIM}")
 
@@ -1281,11 +1323,29 @@ def train_architecture_view_tagger(
 
     is_baseline_recheck = architecture_view_variant_is_baseline_recheck(config.variant)
     freeze_part_for_all_epochs = bool(variant_spec.freeze_policy == "frozen_part_adapter_only")
+    schedule_matched_no_adapter = str(config.variant) == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL
     effective_freeze_part_epochs = (
-        0 if variant_spec.part_size == "larger" or variant_spec.adapter_type == "none" else int(config.freeze_part_epochs)
+        0
+        if variant_spec.part_size == "larger"
+        or (variant_spec.adapter_type == "none" and not bool(schedule_matched_no_adapter))
+        else int(config.freeze_part_epochs)
     )
     if is_baseline_recheck or freeze_part_for_all_epochs or int(effective_freeze_part_epochs) > 0:
         _set_part_model_trainable(checkpoint_model, False)
+    freeze_warmup_trainable_param_count = sum(
+        int(parameter.numel()) for parameter in checkpoint_model.parameters() if bool(parameter.requires_grad)
+    )
+    freeze_warmup_has_trainable_params = bool(
+        int(effective_freeze_part_epochs) > 0 and freeze_warmup_trainable_param_count > 0
+    )
+    freeze_warmup_note = (
+        "schedule_matched_no_adapter_control_has_no_trainable_parameters_until_part_unfreeze"
+        if bool(schedule_matched_no_adapter) and int(effective_freeze_part_epochs) > 0
+        and freeze_warmup_trainable_param_count == 0
+        else "trainable_adapter_or_part_parameters_available_during_warmup"
+        if int(effective_freeze_part_epochs) > 0
+        else "no_freeze_warmup"
+    )
     optimizer = None if is_baseline_recheck else _optimizer_for_model(checkpoint_model, config)
     train_model = checkpoint_model
     if config.compile_model and not is_baseline_recheck and hasattr(torch, "compile"):
@@ -1314,6 +1374,9 @@ def train_architecture_view_tagger(
         "variant_behavior": checkpoint_model.variant_behavior(),
         "effective_freeze_part_epochs": int(effective_freeze_part_epochs),
         "freeze_part_for_all_epochs": bool(freeze_part_for_all_epochs),
+        "freeze_warmup_trainable_param_count": int(freeze_warmup_trainable_param_count),
+        "freeze_warmup_has_trainable_params": bool(freeze_warmup_has_trainable_params),
+        "freeze_warmup_note": str(freeze_warmup_note),
         "parameter_accounting": checkpoint_model.parameter_accounting(),
         "baseline_checkpoint": str(config.baseline_checkpoint),
         "baseline_load_report": baseline_report,
@@ -1477,6 +1540,13 @@ def train_architecture_view_tagger(
     _write_epoch_metrics_csv(diagnostics_dir / "epoch_metrics.csv", curves)
 
     stack_val_dataset = stack_val_dataset or _load_dataset(config, config.stack_val_split, max_jets=config.max_stack_val_jets)
+    if not provided_stack_val_dataset:
+        _verify_loaded_dataset_manifest_hash(
+            stack_val_dataset,
+            expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+            split=str(config.stack_val_split),
+            cache_dir=str(config.resolved_input_cache_dir),
+        )
     stack_val_metrics = _evaluate_dataset(
         checkpoint_model,
         stack_val_dataset,
@@ -1494,6 +1564,13 @@ def train_architecture_view_tagger(
             config.final_test_split,
             max_jets=config.max_final_test_jets,
         )
+        if not provided_final_test_dataset:
+            _verify_loaded_dataset_manifest_hash(
+                final_test_dataset,
+                expected_manifest_hash=str(manifest_sha) if manifest_sha else None,
+                split=str(config.final_test_split),
+                cache_dir=str(config.resolved_input_cache_dir),
+            )
         final_test_metrics = _evaluate_dataset(
             checkpoint_model,
             final_test_dataset,
@@ -1515,6 +1592,9 @@ def train_architecture_view_tagger(
         "variant_behavior": checkpoint_model.variant_behavior(),
         "effective_freeze_part_epochs": int(effective_freeze_part_epochs),
         "freeze_part_for_all_epochs": bool(freeze_part_for_all_epochs),
+        "freeze_warmup_trainable_param_count": int(freeze_warmup_trainable_param_count),
+        "freeze_warmup_has_trainable_params": bool(freeze_warmup_has_trainable_params),
+        "freeze_warmup_note": str(freeze_warmup_note),
         "parameter_accounting": checkpoint_model.parameter_accounting(),
         "best_epoch": int(best_epoch),
         "selection_metric": str(config.selection_metric),

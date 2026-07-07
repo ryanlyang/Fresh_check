@@ -9,23 +9,41 @@ from teacher_logit_reco.architecture_view_part import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_MLP_DELTA_FEATURES,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LC_PLUS_FEATURE_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
 )
 from teacher_logit_reco.privileged_distill_v3 import (
+    PDV3_DEFAULT_CONTEXT_ADAPTER_VARIANT,
     PDV3_LOSS_CE,
     PDV3_LOSS_LOGIT_KD,
     PDV3_LOSS_LOGIT_REP_KD,
+    PDV3_STUDENT_CONTEXT_ADAPTER_CE,
+    PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD,
+    PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD_REPKD,
+    PDV3_STUDENT_CONTEXT_ADAPTER_REPKD_ONLY,
     PDV3_STUDENT_DEFAULT_VARIANTS,
+    PDV3_STUDENT_FAMILY_CONTEXT_ADAPTER,
     PDV3_STUDENT_FAMILY_FEATURE_MLP,
     PDV3_STUDENT_FAMILY_HLT_PART,
     PDV3_STUDENT_FAMILY_LC_MLP_DELTA,
     PDV3_STUDENT_FAMILY_LC_PLUS_FEATURE_MLP,
     PDV3_STUDENT_FEATURE_MLP_CE,
+    PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD,
+    PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD_FREEZE_ADAPTER_AFTER_WARMUP,
+    PDV3_STUDENT_FEATURE_MLP_ADAPTER_REPKD,
     PDV3_STUDENT_FEATURE_MLP_V1_DUAL_LOGIT_KD,
     PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD,
     PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD_FROZEN_START,
     PDV3_STUDENT_HLT_PART_CE,
+    PDV3_STUDENT_HLT_PART_LOGIT_KD,
+    PDV3_STUDENT_HLT_PART_LOGIT_KD_REPKD,
     PDV3_STUDENT_HLT_PART_V1_DUAL_LOGIT_KD,
     PDV3_STUDENT_HLT_PART_V2_LOGIT_REP_KD,
+    PDV3_STUDENT_R0_HLT_PART_CE_BASELINE,
+    PDV3_STUDENT_R1_HLT_PART_LOGIT_KD,
+    PDV3_STUDENT_R2_FROZEN_DELTA_Z_REPKD,
+    PDV3_STUDENT_R3_DELTA_Z_UPPER_UNFREEZE_REPKD,
+    PDV3_STUDENT_R4_DELTA_Z_FULL_GENTLE_UNFREEZE_REPKD,
+    PDV3_STUDENT_R5_DELTA_Z_JOINT_FROM_START_REPKD,
     PDV3_STUDENT_LC_MLP_DELTA_CE,
     PDV3_STUDENT_LC_MLP_DELTA_V2_LOGIT_REP_KD,
     PDV3_STUDENT_LC_MLP_DELTA_V2_LOGIT_REP_KD_FROZEN_START,
@@ -39,6 +57,10 @@ from teacher_logit_reco.privileged_distill_v3 import (
     PDV3_TEACHER_NONE,
     PDV3_TEACHER_V1_DUAL_VIEW,
     PDV3_TEACHER_V2_PARTICLE_DUAL_VIEW,
+    PDV3_TRAINING_SCHEDULE_JOINT,
+    PDV3_TRAINING_SCHEDULE_REP_FROZEN,
+    PDV3_TRAINING_SCHEDULE_REP_FULL_UNFREEZE,
+    PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE,
     PDV3_V1_DUAL_VIEW_TEACHER_NAME,
     PDV3_V2_PARTICLE_DUAL_VIEW_TEACHER_NAME,
     PDV3StudentVariantSpec,
@@ -59,6 +81,12 @@ def test_step3_student_registry_contains_planned_matrix_in_order():
         PDV3_STUDENT_HLT_PART_CE,
         PDV3_STUDENT_HLT_PART_V1_DUAL_LOGIT_KD,
         PDV3_STUDENT_HLT_PART_V2_LOGIT_REP_KD,
+        PDV3_STUDENT_R0_HLT_PART_CE_BASELINE,
+        PDV3_STUDENT_R1_HLT_PART_LOGIT_KD,
+        PDV3_STUDENT_R2_FROZEN_DELTA_Z_REPKD,
+        PDV3_STUDENT_R3_DELTA_Z_UPPER_UNFREEZE_REPKD,
+        PDV3_STUDENT_R4_DELTA_Z_FULL_GENTLE_UNFREEZE_REPKD,
+        PDV3_STUDENT_R5_DELTA_Z_JOINT_FROM_START_REPKD,
         PDV3_STUDENT_FEATURE_MLP_CE,
         PDV3_STUDENT_FEATURE_MLP_V1_DUAL_LOGIT_KD,
         PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD,
@@ -70,10 +98,20 @@ def test_step3_student_registry_contains_planned_matrix_in_order():
         PDV3_STUDENT_LC_PLUS_FEATURE_MLP_CE_STAGED,
         PDV3_STUDENT_LC_PLUS_FEATURE_MLP_V2_LOGIT_REP_KD_JOINT,
         PDV3_STUDENT_LC_PLUS_FEATURE_MLP_V2_LOGIT_REP_KD_STAGED,
+        PDV3_STUDENT_CONTEXT_ADAPTER_CE,
+        PDV3_STUDENT_HLT_PART_LOGIT_KD,
+        PDV3_STUDENT_HLT_PART_LOGIT_KD_REPKD,
+        PDV3_STUDENT_FEATURE_MLP_ADAPTER_REPKD,
+        PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD,
+        PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD_FREEZE_ADAPTER_AFTER_WARMUP,
+        PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD,
+        PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD_REPKD,
+        PDV3_STUDENT_CONTEXT_ADAPTER_REPKD_ONLY,
     )
     assert PDV3_STUDENT_DEFAULT_VARIANTS == PDV3_STUDENT_VARIANTS
     assert pdv3_student_variants() == PDV3_STUDENT_VARIANTS
     assert PDV3_STUDENT_HLT_PART_CE not in pdv3_student_variants(candidates_only=True)
+    assert PDV3_STUDENT_R0_HLT_PART_CE_BASELINE not in pdv3_student_variants(candidates_only=True)
     assert PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD in pdv3_student_variants(candidates_only=True)
 
 
@@ -87,6 +125,33 @@ def test_step3_aliases_resolve_to_canonical_student_variants():
     assert normalize_pdv3_student_variant("input_delta_v2_frozen") == (
         PDV3_STUDENT_LC_MLP_DELTA_V2_LOGIT_REP_KD_FROZEN_START
     )
+    assert normalize_pdv3_student_variant("R0_hlt_part_ce_baseline") == PDV3_STUDENT_R0_HLT_PART_CE_BASELINE
+    assert normalize_pdv3_student_variant("R1_hlt_part_logit_kd") == PDV3_STUDENT_R1_HLT_PART_LOGIT_KD
+    assert normalize_pdv3_student_variant("R2_frozen_delta_z_repkd") == PDV3_STUDENT_R2_FROZEN_DELTA_Z_REPKD
+    assert normalize_pdv3_student_variant("R3_delta_z_upper_unfreeze_repkd") == (
+        PDV3_STUDENT_R3_DELTA_Z_UPPER_UNFREEZE_REPKD
+    )
+    assert normalize_pdv3_student_variant("R4_delta_z_full_gentle_unfreeze_repkd") == (
+        PDV3_STUDENT_R4_DELTA_Z_FULL_GENTLE_UNFREEZE_REPKD
+    )
+    assert normalize_pdv3_student_variant("R5_delta_z_joint_from_start_repkd") == (
+        PDV3_STUDENT_R5_DELTA_Z_JOINT_FROM_START_REPKD
+    )
+    assert normalize_pdv3_student_variant("context_adapter_ce") == PDV3_STUDENT_CONTEXT_ADAPTER_CE
+    assert normalize_pdv3_student_variant("hlt_part_logit_kd") == PDV3_STUDENT_HLT_PART_LOGIT_KD
+    assert normalize_pdv3_student_variant("hlt_part_logit_kd_repkd") == PDV3_STUDENT_HLT_PART_LOGIT_KD_REPKD
+    assert normalize_pdv3_student_variant("feature_mlp_adapter_repkd") == PDV3_STUDENT_FEATURE_MLP_ADAPTER_REPKD
+    assert normalize_pdv3_student_variant("feature_mlp_adapter_logit_kd_repkd") == (
+        PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD
+    )
+    assert normalize_pdv3_student_variant("feature_mlp_logit_kd_repkd_freeze_adapter_after_warmup") == (
+        PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD_FREEZE_ADAPTER_AFTER_WARMUP
+    )
+    assert normalize_pdv3_student_variant("context_adapter_logit_kd") == PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD
+    assert normalize_pdv3_student_variant("context_adapter_logit_kd_repkd") == (
+        PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD_REPKD
+    )
+    assert normalize_pdv3_student_variant("context_adapter_repkd_only") == PDV3_STUDENT_CONTEXT_ADAPTER_REPKD_ONLY
     with pytest.raises(ValueError, match="Unknown PDV3 student variant"):
         normalize_pdv3_student_variant("pdv3_not_a_real_variant")
 
@@ -174,6 +239,88 @@ def test_step3_specs_encode_ce_v1_and_v2_kd_requirements():
     assert v2.requires_teacher_representations
 
 
+def test_step6_residual_representation_ladder_specs_are_explicit():
+    specs = pdv3_student_variant_specs()
+
+    r0 = specs[PDV3_STUDENT_R0_HLT_PART_CE_BASELINE]
+    assert r0.is_baseline
+    assert r0.loss_mode == PDV3_LOSS_CE
+    assert r0.teacher_family == PDV3_TEACHER_NONE
+
+    r1 = specs[PDV3_STUDENT_R1_HLT_PART_LOGIT_KD]
+    assert r1.teacher_family == PDV3_TEACHER_V2_PARTICLE_DUAL_VIEW
+    assert r1.loss_mode == PDV3_LOSS_LOGIT_KD
+    assert r1.teacher_logit_name == PDV3_V2_PARTICLE_DUAL_VIEW_TEACHER_NAME
+    assert r1.teacher_representation_name == ""
+    assert r1.requires_teacher_logits
+    assert not r1.requires_teacher_representations
+
+    r2 = specs[PDV3_STUDENT_R2_FROZEN_DELTA_Z_REPKD]
+    assert r2.training_schedule == PDV3_TRAINING_SCHEDULE_REP_FROZEN
+    assert r2.freeze_policy == "delta_z_frozen_part"
+    assert r2.requires_teacher_representations
+
+    r3 = specs[PDV3_STUDENT_R3_DELTA_Z_UPPER_UNFREEZE_REPKD]
+    assert r3.training_schedule == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE
+    assert r3.freeze_part_epochs == 2
+
+    r4 = specs[PDV3_STUDENT_R4_DELTA_Z_FULL_GENTLE_UNFREEZE_REPKD]
+    assert r4.training_schedule == PDV3_TRAINING_SCHEDULE_REP_FULL_UNFREEZE
+    assert r4.freeze_part_epochs == 2
+
+    r5 = specs[PDV3_STUDENT_R5_DELTA_Z_JOINT_FROM_START_REPKD]
+    assert r5.training_schedule == PDV3_TRAINING_SCHEDULE_JOINT
+    assert r5.freeze_policy == "delta_z_joint_from_start"
+
+
+def test_step7_context_and_adapter_distillation_specs_are_explicit():
+    specs = pdv3_student_variant_specs()
+
+    assert PDV3_DEFAULT_CONTEXT_ADAPTER_VARIANT == ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER
+
+    context_ce = specs[PDV3_STUDENT_CONTEXT_ADAPTER_CE]
+    assert context_ce.student_family == PDV3_STUDENT_FAMILY_CONTEXT_ADAPTER
+    assert context_ce.architecture_view_variant == PDV3_DEFAULT_CONTEXT_ADAPTER_VARIANT
+    assert context_ce.loss_mode == PDV3_LOSS_CE
+    assert context_ce.freeze_part_epochs == 1
+
+    hlt_logit = specs[PDV3_STUDENT_HLT_PART_LOGIT_KD]
+    assert hlt_logit.student_family == PDV3_STUDENT_FAMILY_HLT_PART
+    assert hlt_logit.loss_mode == PDV3_LOSS_LOGIT_KD
+    assert hlt_logit.teacher_family == PDV3_TEACHER_V2_PARTICLE_DUAL_VIEW
+    assert hlt_logit.requires_teacher_logits
+    assert not hlt_logit.requires_teacher_representations
+
+    feature_repkd = specs[PDV3_STUDENT_FEATURE_MLP_ADAPTER_REPKD]
+    assert feature_repkd.student_family == PDV3_STUDENT_FAMILY_FEATURE_MLP
+    assert feature_repkd.architecture_view_variant == ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER
+    assert feature_repkd.loss_mode == PDV3_LOSS_LOGIT_REP_KD
+    assert not feature_repkd.requires_teacher_logits
+    assert feature_repkd.requires_teacher_representations
+    assert feature_repkd.kd_alpha == 0.0
+    assert feature_repkd.rep_beta > 0.0
+    assert feature_repkd.training_schedule == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE
+
+    feature_both = specs[PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD]
+    assert feature_both.requires_teacher_logits
+    assert feature_both.requires_teacher_representations
+    assert feature_both.training_schedule == PDV3_TRAINING_SCHEDULE_REP_UPPER_UNFREEZE
+
+    feature_freeze = specs[PDV3_STUDENT_FEATURE_MLP_ADAPTER_LOGIT_KD_REPKD_FREEZE_ADAPTER_AFTER_WARMUP]
+    assert feature_freeze.freeze_policy == "freeze_adapter_after_warmup"
+
+    context_both = specs[PDV3_STUDENT_CONTEXT_ADAPTER_LOGIT_KD_REPKD]
+    assert context_both.student_family == PDV3_STUDENT_FAMILY_CONTEXT_ADAPTER
+    assert context_both.architecture_view_variant == PDV3_DEFAULT_CONTEXT_ADAPTER_VARIANT
+    assert context_both.requires_teacher_logits
+    assert context_both.requires_teacher_representations
+
+    context_rep = specs[PDV3_STUDENT_CONTEXT_ADAPTER_REPKD_ONLY]
+    assert context_rep.student_family == PDV3_STUDENT_FAMILY_CONTEXT_ADAPTER
+    assert not context_rep.requires_teacher_logits
+    assert context_rep.requires_teacher_representations
+
+
 def test_step3_specs_track_expected_ranking_and_frozen_start_policy():
     best = pdv3_student_variant_spec(PDV3_STUDENT_LC_PLUS_FEATURE_MLP_V2_LOGIT_REP_KD_STAGED)
     assert best.expected_rank == 1
@@ -222,6 +369,8 @@ def test_step3_registry_manifest_is_serializable_and_complete():
     assert set(manifest["variants"]) == set(PDV3_STUDENT_VARIANTS)
     assert manifest["variants"][PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD]["requires_teacher_logits"]
     assert manifest["variants"][PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD]["requires_teacher_representations"]
+    assert manifest["variants"][PDV3_STUDENT_R1_HLT_PART_LOGIT_KD]["requires_teacher_logits"]
+    assert not manifest["variants"][PDV3_STUDENT_R1_HLT_PART_LOGIT_KD]["requires_teacher_representations"]
 
 
 def test_step3_spec_validation_rejects_inconsistent_kd_recipes():
@@ -241,7 +390,7 @@ def test_step3_spec_validation_rejects_inconsistent_kd_recipes():
             loss_mode=PDV3_LOSS_LOGIT_KD,
             kd_alpha=0.5,
         )
-    with pytest.raises(ValueError, match="V2 variants require both teacher logits and representations"):
+    with pytest.raises(ValueError, match="V2 representation variants require teacher representations"):
         PDV3StudentVariantSpec(
             name=PDV3_STUDENT_FEATURE_MLP_V2_LOGIT_REP_KD,
             student_family=PDV3_STUDENT_FAMILY_FEATURE_MLP,

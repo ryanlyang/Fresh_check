@@ -88,6 +88,20 @@ ARCHITECTURE_VIEW_10CLASS_ABLATION_FROZEN_PART_FEATURE_ADAPTER = "av10_frozen_pa
 ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER = "av10_shuffled_feature_adapter"
 ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT = "av10_pcnn_context_repeat"
 ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT = "av10_pfn_context_repeat"
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL = "av10_finetune_only_control"
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER = "av10_part_only_mlp_adapter"
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER = "av10_feature_deepsets_context_adapter"
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER = (
+    "av10_feature_self_attention_context_adapter"
+)
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER = (
+    "av10_part_embedding_deepsets_adapter"
+)
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER = (
+    "av10_part_embedding_self_attention_adapter"
+)
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER = "av10_within_jet_shuffled_context_adapter"
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER = "av10_noise_context_adapter"
 ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE = "av10_offline_part_baseline"
 ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER = "av10_offline_feature_mlp_adapter"
 ARCHITECTURE_VIEW_10CLASS_OFFLINE_PCNN_CONTEXT = "av10_offline_pcnn_context"
@@ -115,6 +129,16 @@ ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS = (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT,
 )
+ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS = (
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+)
 ARCHITECTURE_VIEW_10CLASS_ABLATION_DEFAULT_VARIANTS = (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_LARGER_PART,
@@ -134,6 +158,7 @@ ARCHITECTURE_VIEW_10CLASS_OFFLINE_TRANSFER_VARIANTS = (
 ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS = (
     ARCHITECTURE_VIEW_10CLASS_VARIANTS
     + ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS
+    + ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS
     + ARCHITECTURE_VIEW_10CLASS_OFFLINE_TRANSFER_VARIANTS
 )
 ARCHITECTURE_VIEW_10CLASS_DEFAULT_VARIANTS = (
@@ -150,6 +175,7 @@ ARCHITECTURE_VIEW_ALL_VARIANTS = (
     ARCHITECTURE_VIEW_VARIANTS
     + ARCHITECTURE_VIEW_10CLASS_VARIANTS
     + ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS
+    + ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS
     + ARCHITECTURE_VIEW_10CLASS_OFFLINE_TRANSFER_VARIANTS
 )
 
@@ -174,6 +200,14 @@ ARCHITECTURE_VIEW_10CLASS_VARIANT_TO_BINARY_BEHAVIOR: dict[str, str] = {
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT: ARCHITECTURE_VIEW_VARIANT_PCNN_ONLY,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT: ARCHITECTURE_VIEW_VARIANT_PFN_ONLY,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL: ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE: ARCHITECTURE_VIEW_VARIANT_BASELINE_RECHECK,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_FEATURE_MLP_ADAPTER: ARCHITECTURE_VIEW_VARIANT_CONTEXT_MLP_CONTROL,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PCNN_CONTEXT: ARCHITECTURE_VIEW_VARIANT_PCNN_ONLY,
@@ -250,6 +284,35 @@ ARCHITECTURE_VIEW_VARIANT_ALIASES: dict[str, str] = {
     "av10_pcnn_context_repeat": ARCHITECTURE_VIEW_10CLASS_ABLATION_PCNN_CONTEXT_REPEAT,
     "av10_pfn_repeat": ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT,
     "av10_pfn_context_repeat": ARCHITECTURE_VIEW_10CLASS_ABLATION_PFN_CONTEXT_REPEAT,
+    "av10_finetune_only": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    "av10_finetune_only_control": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    "av10_part_only_mlp": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    "av10_part_only_mlp_adapter": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    "av10_feature_deepsets": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    "av10_feature_deepsets_context": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    "av10_feature_deepsets_context_adapter": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    "av10_feature_attention_context": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    "av10_feature_self_attention": ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    "av10_feature_self_attention_context_adapter": (
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER
+    ),
+    "av10_embedding_deepsets": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    "av10_part_embedding_deepsets": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    "av10_part_embedding_deepsets_adapter": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    "av10_embedding_attention": ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    "av10_part_embedding_self_attention": (
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER
+    ),
+    "av10_part_embedding_self_attention_adapter": (
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER
+    ),
+    "av10_within_jet_shuffle": ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+    "av10_within_jet_shuffled_context": ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+    "av10_within_jet_shuffled_context_adapter": (
+        ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER
+    ),
+    "av10_noise_context": ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    "av10_noise_context_adapter": ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
     "av10_offline_baseline": ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
     "av10_offline_part": ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
     "av10_offline_part_baseline": ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
@@ -587,6 +650,112 @@ def architecture_view_variant_specs() -> dict[str, ArchitectureViewVariantSpec]:
             parameter_target="current_pfn_context_adapter",
         ),
         ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A1: warm-started HLT ParT trained with the adapter schedule "
+                "but no adapter modules."
+            ),
+            is_control=True,
+            suite="av10_contextual_adapter",
+            adapter_type="none",
+            parameter_target="baseline_part_finetune_schedule",
+            is_candidate=False,
+            implementation_step="implemented_multi_adapter_step3_finetune_only_control",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A3: ParT embedding h_i-only MLP residual adapter with no raw "
+                "feature conditioning."
+            ),
+            is_control=True,
+            suite="av10_contextual_adapter",
+            adapter_type="part_embedding_mlp",
+            parameter_target="match_feature_mlp_adapter",
+            is_candidate=False,
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A4: canonical feature DeepSets adapter that combines each "
+                "particle row with pooled full-jet context before predicting delta_h."
+            ),
+            suite="av10_contextual_adapter",
+            adapter_type="feature_deepsets_context",
+            parameter_target="contextual_feature_adapter",
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A5: lightweight self-attention adapter over canonical feature "
+                "rows before predicting per-particle delta_h."
+            ),
+            suite="av10_contextual_adapter",
+            adapter_type="feature_self_attention_context",
+            parameter_target="contextual_feature_attention_adapter",
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A6: DeepSets adapter over ParT particle embeddings before "
+                "predicting per-particle delta_h."
+            ),
+            suite="av10_contextual_adapter",
+            adapter_type="part_embedding_deepsets_context",
+            parameter_target="contextual_part_embedding_adapter",
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A7: lightweight self-attention adapter over ParT particle "
+                "embeddings before predicting per-particle delta_h."
+            ),
+            suite="av10_contextual_adapter",
+            adapter_type="part_embedding_self_attention_context",
+            parameter_target="contextual_part_embedding_attention_adapter",
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A8: same-capacity contextual adapter with features shuffled "
+                "within each jet to avoid cross-batch roll artifacts."
+            ),
+            is_control=True,
+            suite="av10_contextual_adapter",
+            adapter_type="feature_self_attention_context",
+            shuffle_policy="within_jet_shuffled_context",
+            parameter_target="contextual_feature_attention_adapter",
+            is_candidate=False,
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
+            name=ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+            enabled_views=(),
+            description=(
+                "Contextual adapter plan A9: deterministic pure-noise context adapter control with "
+                "the same residual delta_h output contract."
+            ),
+            is_control=True,
+            suite="av10_contextual_adapter",
+            adapter_type="noise_context",
+            shuffle_policy="deterministic_noise_context",
+            parameter_target="contextual_noise_adapter",
+            is_candidate=False,
+            implementation_step="implemented_multi_adapter_step2_contextual_adapter_modules",
+        ),
+        ArchitectureViewVariantSpec(
             name=ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
             enabled_views=(),
             description="AV10 offline transfer O0: normal offline ParT baseline with no HLT-degraded inputs.",
@@ -667,6 +836,11 @@ class ArchitectureViewConfig:
     pcnn_kernel_sizes: tuple[int, ...] = (3, 5)
     fusion_hidden_dim: int = 96
     part_embed_dim: int = 128
+    context_adapter_dim: int = 96
+    context_adapter_heads: int = 4
+    context_adapter_layers: int = 1
+    context_adapter_mlp_ratio: float = 2.0
+    context_adapter_noise_seed: int = 290703
     num_classes: int = 2
     dropout: float = 0.05
     attention_dropout: float = 0.05
@@ -695,6 +869,9 @@ class ArchitectureViewConfig:
             "pcnn_layers",
             "fusion_hidden_dim",
             "part_embed_dim",
+            "context_adapter_dim",
+            "context_adapter_heads",
+            "context_adapter_layers",
             "num_classes",
         ):
             value = int(getattr(self, name))
@@ -716,6 +893,10 @@ class ArchitectureViewConfig:
         if eps <= 0.0:
             raise ValueError("eps must be positive")
         object.__setattr__(self, "eps", eps)
+        context_adapter_mlp_ratio = float(self.context_adapter_mlp_ratio)
+        if context_adapter_mlp_ratio <= 0.0:
+            raise ValueError("context_adapter_mlp_ratio must be positive")
+        object.__setattr__(self, "context_adapter_mlp_ratio", context_adapter_mlp_ratio)
         input_delta_scale = float(self.input_delta_scale)
         if input_delta_scale < 0.0:
             raise ValueError("input_delta_scale must be non-negative")
@@ -731,6 +912,7 @@ class ArchitectureViewConfig:
             raise ValueError(f"enabled_views contains duplicates: {views}")
         object.__setattr__(self, "enabled_views", views)
         object.__setattr__(self, "random_control_seed", int(self.random_control_seed))
+        object.__setattr__(self, "context_adapter_noise_seed", int(self.context_adapter_noise_seed))
         object.__setattr__(self, "pfn_use_global_context", bool(self.pfn_use_global_context))
         object.__setattr__(self, "gate_bias_init", float(self.gate_bias_init))
         object.__setattr__(
@@ -780,6 +962,7 @@ def architecture_view_config_manifest(config: ArchitectureViewConfig | None = No
         "binary_variants": list(ARCHITECTURE_VIEW_VARIANTS),
         "ten_class_variants": list(ARCHITECTURE_VIEW_10CLASS_VARIANTS),
         "ten_class_ablation_variants": list(ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS),
+        "ten_class_context_adapter_variants": list(ARCHITECTURE_VIEW_10CLASS_CONTEXT_ADAPTER_VARIANTS),
         "ten_class_offline_transfer_variants": list(ARCHITECTURE_VIEW_10CLASS_OFFLINE_TRANSFER_VARIANTS),
         "ten_class_all_variants": list(ARCHITECTURE_VIEW_10CLASS_ALL_VARIANTS),
         "variants": {name: spec.to_dict() for name, spec in architecture_view_variant_specs().items()},

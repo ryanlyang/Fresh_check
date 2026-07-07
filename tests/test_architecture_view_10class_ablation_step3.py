@@ -23,6 +23,14 @@ from teacher_logit_reco.architecture_view_part import (
     ARCHITECTURE_VIEW_10CLASS_ABLATION_FEATURE_MLP_ADAPTER_WIDE,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_FROZEN_PART_FEATURE_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_ABLATION_SHUFFLED_FEATURE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+    ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
     ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
     ARCHITECTURE_VIEW_10CLASS_PRIMARY_METRIC,
@@ -255,6 +263,171 @@ def test_step3_feature_mlp_adapter_reports_real_adapter_output_norm():
     view_fusion = output.diagnostics()["view_fusion"]
     assert view_fusion["adapter_output_norm_mean"] > 0.0
     assert view_fusion["adapter_output_norm_p90"] > 0.0
+    assert output.diagnostics()["part_jet_representation_shape"] == [2, 16]
+
+
+def test_multi_adapter_step2_contextual_feature_adapters_zero_recover_baseline():
+    tokens, mask = _tokens()
+    variants = (
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_DEEPSETS_ADAPTER,
+            "uses_feature_deepsets_context_adapter",
+            "feature_deepsets_context_adapter",
+        ),
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_FEATURE_SELF_ATTENTION_ADAPTER,
+            "uses_feature_self_attention_context_adapter",
+            "feature_self_attention_context_adapter",
+        ),
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER,
+            "uses_within_jet_shuffled_context_adapter",
+            "within_jet_shuffled_context_adapter",
+        ),
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_NOISE_ADAPTER,
+            "uses_noise_context_adapter",
+            "uses_noise_context_adapter",
+        ),
+    )
+    for variant, behavior_flag, diagnostic_flag in variants:
+        model = ArchitectureViewResidualParT(
+            _config(),
+            variant=variant,
+            part_model=DummyTenClassPart(),
+        )
+        model.eval()
+        with torch.no_grad():
+            baseline = _baseline_logits(model, tokens, mask)
+            output = model(tokens, mask, return_outputs=True, max_constits=tokens.shape[1])
+
+        diagnostics = output.diagnostics()
+        assert architecture_view_variant_is_runnable(variant)
+        assert diagnostics["variant_behavior"][behavior_flag]
+        assert diagnostics["view_fusion"][diagnostic_flag]
+        if variant == ARCHITECTURE_VIEW_10CLASS_CONTEXT_WITHIN_JET_SHUFFLED_ADAPTER:
+            assert diagnostics["view_fusion"]["feature_shuffle_policy"] == (
+                "valid_particles_only_within_jet_feature_permutation_and_roll"
+            )
+            assert diagnostics["view_fusion"]["padding_rows_used_as_shuffle_sources"] is False
+        assert diagnostics["view_fusion"]["baseline_recovery_zero_projection"]
+        assert output.parameter_accounting["adapter_params"] > 0
+        assert torch.allclose(output.logits, baseline, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_multi_adapter_step2_part_embedding_adapters_zero_recover_baseline_through_hook():
+    tokens, mask = _tokens()
+    variants = (
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_ONLY_MLP_ADAPTER,
+            "uses_part_only_adapter",
+            "part_embedding_mlp",
+        ),
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_DEEPSETS_ADAPTER,
+            "uses_part_embedding_deepsets_context_adapter",
+            "part_embedding_deepsets_context_adapter",
+        ),
+        (
+            ARCHITECTURE_VIEW_10CLASS_CONTEXT_PART_EMBEDDING_SELF_ATTENTION_ADAPTER,
+            "uses_part_embedding_self_attention_context_adapter",
+            "part_embedding_self_attention_context_adapter",
+        ),
+    )
+    for variant, behavior_flag, adapter_kind in variants:
+        model = ArchitectureViewResidualParT(
+            _config(),
+            variant=variant,
+            part_model=DummyTenClassPart(),
+        )
+        model.eval()
+        with torch.no_grad():
+            baseline = _baseline_logits(model, tokens, mask)
+            output = model(tokens, mask, return_outputs=True, max_constits=tokens.shape[1])
+
+        diagnostics = output.diagnostics()
+        assert architecture_view_variant_is_runnable(variant)
+        assert diagnostics["variant_behavior"][behavior_flag]
+        assert diagnostics["embed_injection"]["adapter_kind"] == adapter_kind
+        assert diagnostics["embed_injection"]["injection_applied"]
+        assert output.parameter_accounting["adapter_params"] > 0
+        assert torch.allclose(output.logits, baseline, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_multi_adapter_step3_finetune_only_control_trains_part_without_adapters():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        manifest = tmp_path / "split_manifest.json"
+        manifest_sha = _write_manifest(manifest)
+        checkpoint = tmp_path / "baseline.pt"
+        _write_checkpoint(checkpoint, DummyTenClassPart(), split_manifest_hash=manifest_sha)
+        output_dir = tmp_path / "out"
+        config = ArchitectureViewTaggerTrainConfig(
+            output_dir=str(output_dir),
+            manifest_path=str(manifest),
+            hlt_cache_dir="unused",
+            baseline_checkpoint=str(checkpoint),
+            confirm_split_settings=True,
+            confirm_final_test=True,
+            seed=31,
+            batch_size=5,
+            eval_batch_size=5,
+            epochs=1,
+            adapter_lr=1.0e-3,
+            part_lr=1.0e-4,
+            num_workers=0,
+            device="cpu",
+            amp=False,
+            early_stop_patience=-1,
+            max_train_batches=1,
+            max_val_batches=1,
+            max_stack_val_batches=1,
+            max_final_test_batches=1,
+            label_names=ARCHITECTURE_VIEW_10CLASS_LABEL_NAMES,
+            label_filter=ARCHITECTURE_VIEW_10CLASS_LABEL_FILTER,
+            variant=ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+            view_dim=8,
+            hidden_dim=16,
+            pn_k=3,
+            pn_layers=1,
+            pfn_hidden_dim=16,
+            pcnn_channels=16,
+            pcnn_layers=1,
+            fusion_hidden_dim=20,
+            part_embed_dim=16,
+            dropout=0.0,
+            attention_dropout=0.0,
+            freeze_part_epochs=2,
+        )
+        model = ArchitectureViewResidualParT(
+            _config(),
+            variant=ARCHITECTURE_VIEW_10CLASS_CONTEXT_FINETUNE_ONLY_CONTROL,
+            part_model=DummyTenClassPart(),
+        )
+
+        report = train_architecture_view_tagger(
+            config,
+            model=model,
+            train_dataset=_dataset("model_train"),
+            val_dataset=_dataset("model_val"),
+            stack_val_dataset=_dataset("stack_val"),
+            final_test_dataset=_dataset("final_test"),
+        )
+
+    assert report["best_epoch"] == 1
+    assert report["epochs_completed"] == 1
+    assert report["effective_freeze_part_epochs"] == 2
+    assert report["freeze_part_for_all_epochs"] is False
+    assert report["freeze_warmup_has_trainable_params"] is False
+    assert report["freeze_warmup_note"] == (
+        "schedule_matched_no_adapter_control_has_no_trainable_parameters_until_part_unfreeze"
+    )
+    assert report["variant_behavior"]["uses_finetune_only_control"]
+    assert report["variant_behavior"]["trainable_no_adapter_control"]
+    assert report["parameter_accounting"]["adapter_params"] == 0
+    assert report["parameter_accounting"]["trainable_part_params"] == 0
+    assert report["baseline_load_report"]["weight_warm_start_skipped"] is False
+    assert report["training_curves"]
 
 
 def test_step3_frozen_part_feature_adapter_keeps_part_frozen_during_training():

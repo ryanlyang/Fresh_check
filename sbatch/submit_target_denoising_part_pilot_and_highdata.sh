@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Submit both the 500k pilot and 5M high-data target-denoising ParT campaigns.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONDA_ENV:=atlas_kd}"
+export CONDA_ENV
+SCRIPT_DIR="${PROJECT_DIR}/sbatch"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+fresh_prepare_submitter
+
+run_tag="$(date +%Y%m%d_%H%M%S)"
+: "${TARGET_DENOISING_PART_PILOT_ROOT:=${OUTPUT_ROOT}/target_conditioned_denoising_part_hltv2_500k_pilot_${run_tag}}"
+: "${TARGET_DENOISING_PART_HIGHDATA_ROOT:=${OUTPUT_ROOT}/target_conditioned_denoising_part_hltv2_5m_highdata_${run_tag}}"
+: "${TARGET_DENOISING_PART_PILOT_VARIANTS:=hlt_part_baseline feature_mlp_adapter_tag_only denoiser_features_frozen denoiser_features_joint denoiser_tag_only_same_arch denoiser_no_pair_bias}"
+: "${TARGET_DENOISING_PART_HIGHDATA_VARIANTS:=hlt_part_baseline feature_mlp_adapter_tag_only denoiser_features_joint denoiser_tag_only_same_arch denoiser_shuffled_targets denoiser_no_pair_bias}"
+: "${TARGET_DENOISING_PART_PILOT_MODEL_TRAIN_SIZE:=500000}"
+: "${TARGET_DENOISING_PART_PILOT_MODEL_VAL_SIZE:=150000}"
+: "${TARGET_DENOISING_PART_PILOT_FINAL_TEST_SIZE:=150000}"
+: "${TARGET_DENOISING_PART_HIGHDATA_MODEL_TRAIN_SIZE:=5000000}"
+: "${TARGET_DENOISING_PART_HIGHDATA_MODEL_VAL_SIZE:=1000000}"
+: "${TARGET_DENOISING_PART_HIGHDATA_FINAL_TEST_SIZE:=1000000}"
+: "${TARGET_DENOISING_PART_PILOT_MANIFEST_PATH:=${TARGET_DENOISING_PART_MANIFEST_PATH:-${MANIFEST_PATH:-}}}"
+: "${TARGET_DENOISING_PART_PILOT_HLT_CACHE_DIR:=${TARGET_DENOISING_PART_HLT_CACHE_DIR:-${HLT_CACHE_DIR:-}}}"
+: "${TARGET_DENOISING_PART_HIGHDATA_MANIFEST_PATH:=${TARGET_DENOISING_PART_MANIFEST_PATH:-${MANIFEST_PATH:-}}}"
+: "${TARGET_DENOISING_PART_HIGHDATA_HLT_CACHE_DIR:=${TARGET_DENOISING_PART_HLT_CACHE_DIR:-${HLT_CACHE_DIR:-}}}"
+
+if fresh_is_dry_run; then
+  echo "DRY_RUN enabled; nested target-denoising submitters will print sbatch commands."
+fi
+
+echo "target_denoising_part_pilot_and_highdata_submission_start:"
+echo "  pilot_root: ${TARGET_DENOISING_PART_PILOT_ROOT}"
+echo "  highdata_root: ${TARGET_DENOISING_PART_HIGHDATA_ROOT}"
+echo "  pilot_variants: ${TARGET_DENOISING_PART_PILOT_VARIANTS}"
+echo "  highdata_variants: ${TARGET_DENOISING_PART_HIGHDATA_VARIANTS}"
+
+pilot_output="$(
+  TARGET_DENOISING_PART_ROOT="${TARGET_DENOISING_PART_PILOT_ROOT}" \
+  TARGET_DENOISING_PART_MANIFEST_PATH="${TARGET_DENOISING_PART_PILOT_MANIFEST_PATH}" \
+  TARGET_DENOISING_PART_HLT_CACHE_DIR="${TARGET_DENOISING_PART_PILOT_HLT_CACHE_DIR}" \
+  TARGET_DENOISING_PART_VARIANTS="${TARGET_DENOISING_PART_PILOT_VARIANTS}" \
+  TARGET_DENOISING_PART_MODEL_TRAIN_SIZE="${TARGET_DENOISING_PART_PILOT_MODEL_TRAIN_SIZE}" \
+  TARGET_DENOISING_PART_MODEL_VAL_SIZE="${TARGET_DENOISING_PART_PILOT_MODEL_VAL_SIZE}" \
+  TARGET_DENOISING_PART_FINAL_TEST_SIZE="${TARGET_DENOISING_PART_PILOT_FINAL_TEST_SIZE}" \
+  bash "${SCRIPT_DIR}/submit_target_denoising_part_experiment.sh"
+)"
+echo "${pilot_output}"
+
+highdata_output="$(
+  TARGET_DENOISING_PART_ROOT="${TARGET_DENOISING_PART_HIGHDATA_ROOT}" \
+  TARGET_DENOISING_PART_MANIFEST_PATH="${TARGET_DENOISING_PART_HIGHDATA_MANIFEST_PATH}" \
+  TARGET_DENOISING_PART_HLT_CACHE_DIR="${TARGET_DENOISING_PART_HIGHDATA_HLT_CACHE_DIR}" \
+  TARGET_DENOISING_PART_VARIANTS="${TARGET_DENOISING_PART_HIGHDATA_VARIANTS}" \
+  TARGET_DENOISING_PART_MODEL_TRAIN_SIZE="${TARGET_DENOISING_PART_HIGHDATA_MODEL_TRAIN_SIZE}" \
+  TARGET_DENOISING_PART_MODEL_VAL_SIZE="${TARGET_DENOISING_PART_HIGHDATA_MODEL_VAL_SIZE}" \
+  TARGET_DENOISING_PART_FINAL_TEST_SIZE="${TARGET_DENOISING_PART_HIGHDATA_FINAL_TEST_SIZE}" \
+  bash "${SCRIPT_DIR}/submit_target_denoising_part_experiment.sh"
+)"
+echo "${highdata_output}"
+
+cat <<SUMMARY
+target_denoising_part_pilot_and_highdata_submission:
+  pilot_root: ${TARGET_DENOISING_PART_PILOT_ROOT}
+  highdata_root: ${TARGET_DENOISING_PART_HIGHDATA_ROOT}
+  pilot_variants: ${TARGET_DENOISING_PART_PILOT_VARIANTS}
+  highdata_variants: ${TARGET_DENOISING_PART_HIGHDATA_VARIANTS}
+  logs: ${PROJECT_DIR}/fresh_check_logs
+SUMMARY

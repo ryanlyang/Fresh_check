@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
 import random
@@ -80,6 +81,25 @@ def resolve_device(device: str):
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
+
+
+def amp_autocast_context(enabled: bool):
+    torch = require_torch()
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
+def amp_grad_scaler(enabled: bool):
+    torch = require_torch()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=bool(enabled))
+        except TypeError:  # pragma: no cover - older torch signature
+            return torch.amp.GradScaler(enabled=bool(enabled))
+    return torch.cuda.amp.GradScaler(enabled=bool(enabled))
 
 
 def default_part_config(*, num_classes: int = 10, model_size: str = "base") -> Dict[str, Any]:
@@ -300,7 +320,7 @@ def run_epoch(
                 optimizer.zero_grad(set_to_none=True)
 
             autocast_enabled = bool(amp and device.type == "cuda")
-            with torch.cuda.amp.autocast(enabled=autocast_enabled):
+            with amp_autocast_context(autocast_enabled):
                 logits = model(
                     batch["points"],
                     batch["features"],
@@ -413,7 +433,7 @@ def train_hlt_baseline(
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.lr), weight_decay=float(config.weight_decay))
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(config.amp and device.type == "cuda"))
+    scaler = amp_grad_scaler(bool(config.amp and device.type == "cuda"))
 
     run_metadata = {
         "config": asdict(config),

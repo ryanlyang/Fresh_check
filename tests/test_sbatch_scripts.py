@@ -101,6 +101,9 @@ RUNNERS = [
     "run_write_dualview_part_report.sh",
     "run_train_local_compression_part.sh",
     "run_write_local_compression_part_report.sh",
+    "run_train_target_conditioned_denoising_part.sh",
+    "run_train_target_denoising_part_tagger.sh",
+    "run_write_target_denoising_part_report.sh",
     "run_train_arch_residual_part.sh",
     "run_train_architecture_view_part.sh",
     "run_write_architecture_view_part_report.sh",
@@ -162,6 +165,8 @@ SUBMITTERS = [
     "submit_pdv3_step2_teachers.sh",
     "submit_pdv3_full_experiment.sh",
     "submit_pdv3_pilot_and_highdata.sh",
+    "submit_target_denoising_part_experiment.sh",
+    "submit_target_denoising_part_pilot_and_highdata.sh",
 ]
 
 
@@ -1701,6 +1706,22 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("av10_lc_mlp_delta_features", report)
         self.assertIn("scripts/write_architecture_view_10class_ablation_report.py", report)
         self.assertIn("av10_lc_mlp_delta_features", submitter)
+        self.assertIn("av10_finetune_only_control", submitter)
+        self.assertIn("av10_part_only_mlp_adapter", submitter)
+        self.assertIn("av10_feature_deepsets_context_adapter", submitter)
+        self.assertIn("av10_feature_self_attention_context_adapter", submitter)
+        self.assertIn("av10_part_embedding_deepsets_adapter", submitter)
+        self.assertIn("av10_part_embedding_self_attention_adapter", submitter)
+        self.assertIn("av10_within_jet_shuffled_context_adapter", submitter)
+        self.assertIn("av10_noise_context_adapter", submitter)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_REUSE_EXISTING_INPUTS:=0", submitter)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_EXISTING_INPUT_ROOT", submitter)
+        self.assertIn("av10_require_reused_inputs", submitter)
+        self.assertIn("reusing av10 input manifest and HLT cache", submitter)
+        self.assertIn("baseline_checkpoint_hash=$(av10_sha256_or_pending", submitter)
+        self.assertIn("source_status_hash=$(fresh_source_status_hash)", submitter)
+        self.assertIn("av10_contextual_adapters", submitter)
+        self.assertIn("av10_context_controls", submitter)
         self.assertIn("av10_context_mlp_control", submitter)
         self.assertIn("av10_pfn_context_to_part", submitter)
         self.assertIn("av10_pcnn_context_to_part", submitter)
@@ -1714,6 +1735,9 @@ class SbatchStep14Tests(unittest.TestCase):
         self.assertIn("av10_all_ablation", submitter)
         self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_HIGHDATA_MODEL_TRAIN_SIZE:=3000000", wrapper)
         self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_PILOT_MODEL_TRAIN_SIZE:=500000", wrapper)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_PILOT_REUSE_EXISTING_INPUTS:=0", wrapper)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_ABLATION_HIGHDATA_REUSE_EXISTING_INPUTS:=0", wrapper)
+        self.assertIn("ARCHITECTURE_VIEW_10CLASS_EXISTING_INPUT_ROOT", wrapper)
 
     def test_architecture_view_10class_offline_baseline_does_not_warm_start_from_itself(self):
         runner = self.read("run_train_architecture_view_10class_offline_part.sh")

@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Train one target-conditioned pairwise particle denoiser.
+
+#SBATCH --job-name=tdenoise_part
+#SBATCH --output=fresh_check_logs/%x_%j.out
+#SBATCH --error=fresh_check_logs/%x_%j.err
+#SBATCH --partition=tier3
+#SBATCH --time=2-12:00:00
+#SBATCH --mem=160G
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONDA_ENV:=atlas_kd}"
+export CONDA_ENV
+SCRIPT_DIR="${PROJECT_DIR}/sbatch"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+: "${TARGET_DENOISING_PART_ROOT:=${OUTPUT_ROOT}/target_conditioned_denoising_part_hltv2}"
+: "${TARGET_DENOISING_PART_OUTPUT_DIR:=${TARGET_DENOISING_PART_DENOISER_OUTPUT_DIR:-${TARGET_DENOISING_PART_ROOT}/denoisers/real}}"
+: "${TARGET_DENOISING_PART_MANIFEST_PATH:=${MANIFEST_PATH}}"
+: "${TARGET_DENOISING_PART_HLT_CACHE_DIR:=${HLT_CACHE_DIR}}"
+: "${TARGET_DENOISING_PART_DATA_DIR:=${DATA_DIR}}"
+: "${TARGET_DENOISING_PART_SEED:=7207}"
+: "${TARGET_DENOISING_PART_BATCH_SIZE:=128}"
+: "${TARGET_DENOISING_PART_EVAL_BATCH_SIZE:=256}"
+: "${TARGET_DENOISING_PART_EPOCHS:=30}"
+: "${TARGET_DENOISING_PART_LR:=0.0003}"
+: "${TARGET_DENOISING_PART_WEIGHT_DECAY:=0.0001}"
+: "${TARGET_DENOISING_PART_NUM_WORKERS:=${NUM_WORKERS}}"
+: "${TARGET_DENOISING_PART_DEVICE:=${DEVICE}}"
+: "${TARGET_DENOISING_PART_GRAD_CLIP_NORM:=${GRAD_CLIP_NORM}}"
+: "${TARGET_DENOISING_PART_EARLY_STOP_PATIENCE:=6}"
+: "${TARGET_DENOISING_PART_MODEL_TRAIN_SIZE:=500000}"
+: "${TARGET_DENOISING_PART_MODEL_VAL_SIZE:=150000}"
+: "${TARGET_DENOISING_PART_MAX_TRAIN_BATCHES:=}"
+: "${TARGET_DENOISING_PART_MAX_VAL_BATCHES:=}"
+: "${TARGET_DENOISING_PART_SELECTION_METRIC:=normalized_rmse}"
+: "${TARGET_DENOISING_PART_HLT_PROFILE:=fixed_hlt_v2_realistic}"
+: "${TARGET_DENOISING_PART_HLT_PROFILE_VERSION:=v1}"
+: "${TARGET_DENOISING_PART_HLT_DEGRADATION_STRENGTH:=1.0}"
+: "${TARGET_DENOISING_PART_ALIGNMENT_MODE:=aligned_direct}"
+: "${TARGET_DENOISING_PART_SHUFFLE_TARGET_RESIDUALS:=0}"
+: "${TARGET_DENOISING_PART_TARGET_SHUFFLE_SEED:=93217}"
+: "${TARGET_DENOISING_PART_NO_AMP:=0}"
+: "${TARGET_DENOISING_PART_COMPILE_MODEL:=0}"
+: "${TARGET_DENOISING_PART_SKIP_HLT_HASH_CHECK:=0}"
+: "${TARGET_DENOISING_PART_VERIFY_LABEL_BRANCHES:=0}"
+: "${TARGET_DENOISING_PART_READ_CHUNK_SIZE:=50000}"
+: "${TARGET_DENOISING_PART_EMBED_DIM:=64}"
+: "${TARGET_DENOISING_PART_NUM_HEADS:=4}"
+: "${TARGET_DENOISING_PART_PAIR_HIDDEN_DIM:=64}"
+: "${TARGET_DENOISING_PART_HEAD_HIDDEN_DIM:=128}"
+: "${TARGET_DENOISING_PART_MLP_RATIO:=2.0}"
+: "${TARGET_DENOISING_PART_DROPOUT:=0.0}"
+: "${TARGET_DENOISING_PART_ATTENTION_DROPOUT:=0.0}"
+: "${TARGET_DENOISING_PART_DISABLE_PAIR_BIAS:=0}"
+: "${TARGET_DENOISING_PART_DISABLE_LOCAL_KERNEL:=0}"
+: "${TARGET_DENOISING_PART_LOCAL_KERNEL_RADIUS:=0.12}"
+: "${TARGET_DENOISING_PART_LOCAL_KERNEL_INIT:=0.0}"
+: "${TARGET_DENOISING_PART_PAIR_BIAS_MAX_ABS:=4.0}"
+: "${TARGET_DENOISING_PART_MAX_DELTA_LOG_PT:=0.30}"
+: "${TARGET_DENOISING_PART_MAX_DELTA_ETA:=0.08}"
+: "${TARGET_DENOISING_PART_MAX_DELTA_PHI:=0.08}"
+: "${TARGET_DENOISING_PART_MAX_DELTA_LOG_ENERGY:=0.30}"
+: "${TARGET_DENOISING_PART_SMOOTH_L1_WEIGHT:=0.5}"
+: "${TARGET_DENOISING_PART_NLL_WEIGHT:=0.5}"
+: "${TARGET_DENOISING_PART_RELIABILITY_WEIGHT:=0.05}"
+: "${TARGET_DENOISING_PART_DELTA_L2_WEIGHT:=0.0001}"
+: "${TARGET_DENOISING_PART_PAIR_BIAS_L2_WEIGHT:=0.00001}"
+
+fresh_setup "$@"
+fresh_require_file "scripts/train_target_conditioned_denoising_part.py"
+fresh_require_file "${TARGET_DENOISING_PART_MANIFEST_PATH}"
+for split in model_train model_val; do
+  fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt.npz"
+  fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
+done
+fresh_claim_new_dir "${TARGET_DENOISING_PART_OUTPUT_DIR}"
+
+cmd=(
+  "${PYTHON_BIN}" "-u" "scripts/train_target_conditioned_denoising_part.py"
+  --output-dir "${TARGET_DENOISING_PART_OUTPUT_DIR}"
+  --manifest-path "${TARGET_DENOISING_PART_MANIFEST_PATH}"
+  --hlt-cache-dir "${TARGET_DENOISING_PART_HLT_CACHE_DIR}"
+  --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
+  --train-split model_train
+  --val-split model_val
+  --seed "${TARGET_DENOISING_PART_SEED}"
+  --batch-size "${TARGET_DENOISING_PART_BATCH_SIZE}"
+  --eval-batch-size "${TARGET_DENOISING_PART_EVAL_BATCH_SIZE}"
+  --epochs "${TARGET_DENOISING_PART_EPOCHS}"
+  --lr "${TARGET_DENOISING_PART_LR}"
+  --weight-decay "${TARGET_DENOISING_PART_WEIGHT_DECAY}"
+  --num-workers "${TARGET_DENOISING_PART_NUM_WORKERS}"
+  --device "${TARGET_DENOISING_PART_DEVICE}"
+  --grad-clip-norm "${TARGET_DENOISING_PART_GRAD_CLIP_NORM}"
+  --early-stop-patience "${TARGET_DENOISING_PART_EARLY_STOP_PATIENCE}"
+  --max-train-jets "${TARGET_DENOISING_PART_MODEL_TRAIN_SIZE}"
+  --max-val-jets "${TARGET_DENOISING_PART_MODEL_VAL_SIZE}"
+  --selection-metric "${TARGET_DENOISING_PART_SELECTION_METRIC}"
+  --expected-hlt-profile "${TARGET_DENOISING_PART_HLT_PROFILE}"
+  --expected-hlt-profile-version "${TARGET_DENOISING_PART_HLT_PROFILE_VERSION}"
+  --expected-hlt-degradation-strength "${TARGET_DENOISING_PART_HLT_DEGRADATION_STRENGTH}"
+  --alignment-mode "${TARGET_DENOISING_PART_ALIGNMENT_MODE}"
+  --target-shuffle-seed "${TARGET_DENOISING_PART_TARGET_SHUFFLE_SEED}"
+  --read-chunk-size "${TARGET_DENOISING_PART_READ_CHUNK_SIZE}"
+  --embed-dim "${TARGET_DENOISING_PART_EMBED_DIM}"
+  --num-heads "${TARGET_DENOISING_PART_NUM_HEADS}"
+  --pair-hidden-dim "${TARGET_DENOISING_PART_PAIR_HIDDEN_DIM}"
+  --head-hidden-dim "${TARGET_DENOISING_PART_HEAD_HIDDEN_DIM}"
+  --mlp-ratio "${TARGET_DENOISING_PART_MLP_RATIO}"
+  --dropout "${TARGET_DENOISING_PART_DROPOUT}"
+  --attention-dropout "${TARGET_DENOISING_PART_ATTENTION_DROPOUT}"
+  --local-kernel-radius "${TARGET_DENOISING_PART_LOCAL_KERNEL_RADIUS}"
+  --local-kernel-init "${TARGET_DENOISING_PART_LOCAL_KERNEL_INIT}"
+  --pair-bias-max-abs "${TARGET_DENOISING_PART_PAIR_BIAS_MAX_ABS}"
+  --max-delta-log-pt "${TARGET_DENOISING_PART_MAX_DELTA_LOG_PT}"
+  --max-delta-eta "${TARGET_DENOISING_PART_MAX_DELTA_ETA}"
+  --max-delta-phi "${TARGET_DENOISING_PART_MAX_DELTA_PHI}"
+  --max-delta-log-energy "${TARGET_DENOISING_PART_MAX_DELTA_LOG_ENERGY}"
+  --smooth-l1-weight "${TARGET_DENOISING_PART_SMOOTH_L1_WEIGHT}"
+  --nll-weight "${TARGET_DENOISING_PART_NLL_WEIGHT}"
+  --reliability-weight "${TARGET_DENOISING_PART_RELIABILITY_WEIGHT}"
+  --delta-l2-weight "${TARGET_DENOISING_PART_DELTA_L2_WEIGHT}"
+  --pair-bias-l2-weight "${TARGET_DENOISING_PART_PAIR_BIAS_L2_WEIGHT}"
+)
+fresh_append_flag_if_enabled cmd --no-amp "${TARGET_DENOISING_PART_NO_AMP}"
+fresh_append_flag_if_enabled cmd --compile-model "${TARGET_DENOISING_PART_COMPILE_MODEL}"
+fresh_append_flag_if_enabled cmd --shuffle-target-residuals "${TARGET_DENOISING_PART_SHUFFLE_TARGET_RESIDUALS}"
+fresh_append_flag_if_enabled cmd --skip-hlt-hash-check "${TARGET_DENOISING_PART_SKIP_HLT_HASH_CHECK}"
+fresh_append_flag_if_enabled cmd --verify-label-branches "${TARGET_DENOISING_PART_VERIFY_LABEL_BRANCHES}"
+fresh_append_flag_if_enabled cmd --disable-pair-bias "${TARGET_DENOISING_PART_DISABLE_PAIR_BIAS}"
+fresh_append_flag_if_enabled cmd --disable-local-kernel "${TARGET_DENOISING_PART_DISABLE_LOCAL_KERNEL}"
+fresh_append_optional_arg cmd --max-train-batches "${TARGET_DENOISING_PART_MAX_TRAIN_BATCHES}"
+fresh_append_optional_arg cmd --max-val-batches "${TARGET_DENOISING_PART_MAX_VAL_BATCHES}"
+
+fresh_write_run_config "${TARGET_DENOISING_PART_OUTPUT_DIR}" "target_conditioned_denoising_part" "${cmd[@]}"
+fresh_run "${cmd[@]}"
+
+if ! fresh_is_dry_run; then
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/best_denoiser_model_val.pt"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/last.pt"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/config.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/training_curves.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/model_val_diagnostics.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/run_report.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/diagnostics/train_dataset_metadata.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/diagnostics/model_val_dataset_metadata.json"
+  fresh_require_file "${TARGET_DENOISING_PART_OUTPUT_DIR}/diagnostics/epoch_metrics.csv"
+fi

@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.architecture_view_part import (  # noqa: E402
     ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK,
-    ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS,
+    ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_PART_BASELINE,
     ARCHITECTURE_VIEW_10CLASS_OFFLINE_TRANSFER_VARIANTS,
     ArchitectureView10ClassAblationReportConfig,
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hlt-tagger-root", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--hlt-variants", nargs="+", default=list(ARCHITECTURE_VIEW_10CLASS_ABLATION_VARIANTS))
+    parser.add_argument("--hlt-variants", nargs="+", default=list(ARCHITECTURE_VIEW_10CLASS_CLEAN_REPORT_VARIANTS))
     parser.add_argument("--hlt-baseline-variant", default=ARCHITECTURE_VIEW_10CLASS_ABLATION_HLT_BASELINE_RECHECK)
     parser.add_argument("--fusion-report", default=None)
     parser.add_argument("--offline-tagger-root", default=None)

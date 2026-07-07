@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-bias-init", type=float, default=-5.0)
     parser.add_argument("--random-control-seed", type=int, default=2907)
     parser.add_argument("--delta-l2-weight", type=float, default=1.0e-4)
+    parser.add_argument("--representation-delta-l2-weight", type=float, default=1.0e-4)
     parser.add_argument("--input-delta-scale", type=float, default=1.0)
     parser.add_argument("--disable-feature-wise-input-delta-scales", action="store_true")
     parser.add_argument("--freeze-input-delta-pid", action="store_true")
@@ -166,6 +167,7 @@ def main() -> int:
         gate_bias_init=args.gate_bias_init,
         random_control_seed=args.random_control_seed,
         delta_l2_weight=args.delta_l2_weight,
+        representation_delta_l2_weight=args.representation_delta_l2_weight,
         input_delta_scale=args.input_delta_scale,
         use_feature_wise_input_delta_scales=not bool(args.disable_feature_wise_input_delta_scales),
         freeze_input_delta_pid=bool(args.freeze_input_delta_pid),
