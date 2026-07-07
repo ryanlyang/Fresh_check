@@ -241,11 +241,16 @@ def target_denoising_loss(
     delta_l2_loss = _weighted_mean(output.deltas.square(), weights3)
     pair_bias_l2_loss = output.attention_bias.square().mean()
 
-    reliability_target = mask.to(output.reliability.dtype)
-    reliability_loss = torch.nn.functional.binary_cross_entropy(
-        torch.clamp(output.reliability, min=1.0e-6, max=1.0 - 1.0e-6),
-        reliability_target,
-    )
+    if not hasattr(output, "reliability_logits"):
+        raise ValueError("target denoiser output is missing reliability_logits required for AMP-safe BCE")
+    if bool(mask.any()):
+        valid_reliability_logits = output.reliability_logits[mask]
+        reliability_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            valid_reliability_logits,
+            torch.ones_like(valid_reliability_logits),
+        )
+    else:
+        reliability_loss = output.deltas.new_zeros(())
     total = (
         float(config.smooth_l1_weight) * smooth_loss
         + float(config.nll_weight) * nll_loss

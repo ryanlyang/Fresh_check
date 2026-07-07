@@ -229,6 +229,7 @@ class TargetDenoisingOutput:
     deltas: Any
     log_variances: Any
     reliability: Any
+    reliability_logits: Any
     token_mask: Any
     attention_weights: Any | None
     attention_bias: Any
@@ -244,6 +245,7 @@ class TargetDenoisingOutput:
             "deltas_shape": list(self.deltas.shape),
             "log_variances_shape": list(self.log_variances.shape),
             "reliability_shape": list(self.reliability.shape),
+            "reliability_logits_shape": list(self.reliability_logits.shape),
             "attention_bias_shape": list(self.attention_bias.shape),
             "has_attention_weights": self.attention_weights is not None,
             "target_names": list(self.target_names),
@@ -444,7 +446,7 @@ class DenoisingResidualHead(_ModuleBase):
         bounds = torch.tensor(tuple(self.config.delta_bounds), dtype=torch.float32)
         self.register_buffer("delta_bounds", bounds, persistent=False)
 
-    def forward(self, tokens: Any, mask: Any) -> tuple[Any, Any, Any]:
+    def forward(self, tokens: Any, mask: Any) -> tuple[Any, Any, Any, Any]:
         torch = require_torch()
         tokens = _nan_to_num_torch(tokens.float())
         mask = mask.to(device=tokens.device, dtype=torch.bool)
@@ -459,11 +461,13 @@ class DenoisingResidualHead(_ModuleBase):
         log_variances = float(self.config.max_abs_log_variance) * torch.tanh(
             raw_log_var / float(self.config.max_abs_log_variance)
         )
-        reliability = torch.sigmoid(raw_reliability)
+        reliability_logits = _nan_to_num_torch(raw_reliability)
+        reliability = torch.sigmoid(reliability_logits)
         deltas = torch.where(mask[:, :, None], _nan_to_num_torch(deltas), torch.zeros_like(deltas))
         log_variances = torch.where(mask[:, :, None], _nan_to_num_torch(log_variances), torch.zeros_like(log_variances))
         reliability = torch.where(mask, _nan_to_num_torch(reliability), torch.zeros_like(reliability))
-        return deltas, log_variances, reliability
+        reliability_logits = torch.where(mask, reliability_logits, torch.zeros_like(reliability_logits))
+        return deltas, log_variances, reliability, reliability_logits
 
 
 class TargetConditionedPairwiseDenoiser(_ModuleBase):
@@ -584,7 +588,7 @@ class TargetConditionedPairwiseDenoiser(_ModuleBase):
         x = target + self.dropout(attended)
         x = x + self.dropout(self.feed_forward(self.norm_after_attention(x)))
         x = torch.where(mask[:, :, None], _nan_to_num_torch(x), torch.zeros_like(x))
-        deltas, log_variances, reliability = self.residual_head(x, mask)
+        deltas, log_variances, reliability, reliability_logits = self.residual_head(x, mask)
         if weights is not None:
             weights = torch.where(mask[:, None, :, None], _nan_to_num_torch(weights), torch.zeros_like(weights))
             weights = torch.where(mask[:, None, None, :], weights, torch.zeros_like(weights))
@@ -600,6 +604,7 @@ class TargetConditionedPairwiseDenoiser(_ModuleBase):
             deltas=deltas,
             log_variances=log_variances,
             reliability=reliability,
+            reliability_logits=reliability_logits,
             token_mask=mask,
             attention_weights=weights,
             attention_bias=attention_bias,
