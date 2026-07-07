@@ -24,7 +24,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${TARGET_DENOISING_PART_OUTPUT_DIR:=${TARGET_DENOISING_PART_DENOISER_OUTPUT_DIR:-${TARGET_DENOISING_PART_ROOT}/denoisers/real}}"
 : "${TARGET_DENOISING_PART_MANIFEST_PATH:=${MANIFEST_PATH}}"
 : "${TARGET_DENOISING_PART_HLT_CACHE_DIR:=${HLT_CACHE_DIR}}"
-: "${TARGET_DENOISING_PART_DATA_DIR:=${DATA_DIR}}"
+: "${TARGET_DENOISING_PART_DATA_DIR:=}"
 : "${TARGET_DENOISING_PART_SEED:=7207}"
 : "${TARGET_DENOISING_PART_BATCH_SIZE:=128}"
 : "${TARGET_DENOISING_PART_EVAL_BATCH_SIZE:=256}"
@@ -87,7 +87,6 @@ cmd=(
   --output-dir "${TARGET_DENOISING_PART_OUTPUT_DIR}"
   --manifest-path "${TARGET_DENOISING_PART_MANIFEST_PATH}"
   --hlt-cache-dir "${TARGET_DENOISING_PART_HLT_CACHE_DIR}"
-  --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
   --train-split model_train
   --val-split model_val
   --seed "${TARGET_DENOISING_PART_SEED}"
@@ -129,6 +128,7 @@ cmd=(
   --delta-l2-weight "${TARGET_DENOISING_PART_DELTA_L2_WEIGHT}"
   --pair-bias-l2-weight "${TARGET_DENOISING_PART_PAIR_BIAS_L2_WEIGHT}"
 )
+fresh_append_optional_arg cmd --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
 fresh_append_flag_if_enabled cmd --no-amp "${TARGET_DENOISING_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${TARGET_DENOISING_PART_COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --shuffle-target-residuals "${TARGET_DENOISING_PART_SHUFFLE_TARGET_RESIDUALS}"

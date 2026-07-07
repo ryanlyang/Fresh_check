@@ -31,7 +31,7 @@ fi
 : "${TARGET_DENOISING_PART_OUTPUT_DIR:=${TARGET_DENOISING_PART_TAGGER_ROOT}/${variant}}"
 : "${TARGET_DENOISING_PART_MANIFEST_PATH:=${MANIFEST_PATH}}"
 : "${TARGET_DENOISING_PART_HLT_CACHE_DIR:=${HLT_CACHE_DIR}}"
-: "${TARGET_DENOISING_PART_DATA_DIR:=${DATA_DIR}}"
+: "${TARGET_DENOISING_PART_DATA_DIR:=}"
 : "${TARGET_DENOISING_PART_DENOISER_CHECKPOINT:=${TARGET_DENOISING_PART_ROOT}/denoisers/real/best_denoiser_model_val.pt}"
 : "${TARGET_DENOISING_PART_SEED:=7307}"
 : "${TARGET_DENOISING_PART_BATCH_SIZE:=64}"
@@ -132,7 +132,6 @@ cmd=(
   --output-dir "${TARGET_DENOISING_PART_OUTPUT_DIR}"
   --manifest-path "${TARGET_DENOISING_PART_MANIFEST_PATH}"
   --hlt-cache-dir "${TARGET_DENOISING_PART_HLT_CACHE_DIR}"
-  --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
   --denoiser-checkpoint "${TARGET_DENOISING_PART_DENOISER_CHECKPOINT}"
   --variant "${variant}"
   --train-split model_train
@@ -181,6 +180,7 @@ cmd=(
   --max-delta-phi "${TARGET_DENOISING_PART_MAX_DELTA_PHI}"
   --max-delta-log-energy "${TARGET_DENOISING_PART_MAX_DELTA_LOG_ENERGY}"
 )
+fresh_append_optional_arg cmd --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
 fresh_append_flag_if_enabled cmd --no-amp "${TARGET_DENOISING_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${TARGET_DENOISING_PART_COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --skip-hlt-hash-check "${TARGET_DENOISING_PART_SKIP_HLT_HASH_CHECK}"
