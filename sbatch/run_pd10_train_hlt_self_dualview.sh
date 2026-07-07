@@ -29,6 +29,9 @@ fresh_require_file "${PD10_HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
 fresh_require_file "${PD10_HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
 fresh_require_file "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
 fresh_require_file "${PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT}"
+if [[ -n "${PD10_HLT_SDV_HLT2_BRANCH_CHECKPOINT}" ]]; then
+  fresh_require_file "${PD10_HLT_SDV_HLT2_BRANCH_CHECKPOINT}"
+fi
 if [[ "${VARIANT_NAME}" != "sdv_hlt_hlt_same_view" ]]; then
   STRENGTH="$(fresh_pd10_hlt_sdv_strength_from_variant "${VARIANT_NAME}")"
   HLT2_CACHE_DIR="$(fresh_pd10_hlt_sdv_hlt2_cache_dir "${STRENGTH}")"
@@ -71,6 +74,7 @@ cmd=(
   --max-final-test-jets "${PD10_FINAL_TEST_SIZE}"
 )
 fresh_append_optional_arg cmd --hlt2-cache-dir "${HLT2_CACHE_DIR}"
+fresh_append_optional_arg cmd --hlt2-branch-checkpoint "${PD10_HLT_SDV_HLT2_BRANCH_CHECKPOINT}"
 fresh_append_optional_arg cmd --max-train-batches "${PD10_HLT_SDV_MAX_TRAIN_BATCHES}"
 fresh_append_optional_arg cmd --max-val-batches "${PD10_HLT_SDV_MAX_VAL_BATCHES}"
 fresh_append_optional_arg cmd --max-final-test-batches "${PD10_HLT_SDV_MAX_FINAL_TEST_BATCHES}"

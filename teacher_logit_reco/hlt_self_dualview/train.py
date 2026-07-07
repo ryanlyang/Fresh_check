@@ -52,7 +52,7 @@ from .model import (
     HLT_SDV_MODEL_ARCHITECTURE,
     HLTSelfDualViewFusionModel,
     build_hlt_sdv_fusion_model,
-    initialize_hlt_sdv_branches_from_hlt_checkpoint,
+    initialize_hlt_sdv_branches_from_checkpoints,
     sha256_file,
 )
 
@@ -80,6 +80,7 @@ class HLTSDVTrainConfig:
     hlt_cache_dir: str
     hlt_teacher_checkpoint: str
     variant_name: str
+    hlt2_branch_checkpoint: str | None = None
     hlt2_cache_dir: str | None = None
     branch2_mode: str | None = None
     train_split: str = "model_train"
@@ -130,6 +131,8 @@ class HLTSDVTrainConfig:
             raise ValueError("hlt2_cache_dir is required for HLT+HLT2 variants")
         if branch2_mode == HLT_SDV_BRANCH2_SAME_HLT and self.hlt2_cache_dir:
             raise ValueError("same-view HLT-SDV variant must not provide hlt2_cache_dir")
+        if self.hlt2_branch_checkpoint and not bool(self.initialize_branches):
+            raise ValueError("hlt2_branch_checkpoint cannot be used when initialize_branches=False")
         if self.evaluate_final_test and not bool(self.confirm_final_test):
             raise ValueError("HLT-SDV final-test evaluation requires confirm_final_test=True")
         if int(self.batch_size) <= 0 or int(self.eval_batch_size) <= 0:
@@ -607,9 +610,10 @@ def train_hlt_sdv_model(
     branch_initialization: dict[str, Any] = {"enabled": bool(config.initialize_branches)}
     if config.initialize_branches:
         branch_initialization.update(
-            initialize_hlt_sdv_branches_from_hlt_checkpoint(
+            initialize_hlt_sdv_branches_from_checkpoints(
                 model,
                 hlt_checkpoint=config.hlt_teacher_checkpoint,
+                hlt2_checkpoint=config.hlt2_branch_checkpoint,
                 device=device,
             )
         )

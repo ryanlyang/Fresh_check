@@ -336,15 +336,17 @@ def load_matching_branch_weights(
     }
 
 
-def initialize_hlt_sdv_branches_from_hlt_checkpoint(
+def initialize_hlt_sdv_branches_from_checkpoints(
     model: HLTSelfDualViewFusionModel,
     *,
     hlt_checkpoint: str | Path,
+    hlt2_checkpoint: str | Path | None = None,
     device,
     min_match_fraction: float = 0.50,
 ) -> dict[str, Any]:
-    """Initialize both deployable branches from the same HLT ParT teacher."""
+    """Initialize deployable branches from HLT and optional HLT2-specialist checkpoints."""
 
+    branch2_checkpoint = hlt_checkpoint if hlt2_checkpoint is None else hlt2_checkpoint
     return {
         "hlt_branch": load_matching_branch_weights(
             model.hlt_branch,
@@ -355,14 +357,36 @@ def initialize_hlt_sdv_branches_from_hlt_checkpoint(
         ),
         "hlt2_branch": load_matching_branch_weights(
             model.hlt2_branch,
-            hlt_checkpoint,
+            branch2_checkpoint,
             device=device,
             branch_label="hlt2_branch",
             min_match_fraction=min_match_fraction,
         ),
-        "source": "same_hlt_part_teacher_checkpoint",
-        "both_branches_initialized_from_same_checkpoint": True,
+        "source": "same_hlt_part_teacher_checkpoint"
+        if hlt2_checkpoint is None
+        else "hlt_part_teacher_plus_hlt2_only_checkpoint",
+        "both_branches_initialized_from_same_checkpoint": hlt2_checkpoint is None,
+        "hlt_checkpoint": str(hlt_checkpoint),
+        "hlt2_checkpoint": str(branch2_checkpoint),
     }
+
+
+def initialize_hlt_sdv_branches_from_hlt_checkpoint(
+    model: HLTSelfDualViewFusionModel,
+    *,
+    hlt_checkpoint: str | Path,
+    device,
+    min_match_fraction: float = 0.50,
+) -> dict[str, Any]:
+    """Initialize both deployable branches from the same HLT ParT teacher."""
+
+    return initialize_hlt_sdv_branches_from_checkpoints(
+        model,
+        hlt_checkpoint=hlt_checkpoint,
+        hlt2_checkpoint=None,
+        device=device,
+        min_match_fraction=min_match_fraction,
+    )
 
 
 def forward_hlt_sdv_batch(
@@ -388,6 +412,7 @@ __all__ = [
     "forward_hlt_sdv_batch",
     "hlt_sdv_branch_dim_from_config",
     "hlt_sdv_embedding_branch_config",
+    "initialize_hlt_sdv_branches_from_checkpoints",
     "initialize_hlt_sdv_branches_from_hlt_checkpoint",
     "load_matching_branch_weights",
     "sha256_file",

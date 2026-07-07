@@ -38,6 +38,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-cache-dir", default=None)
     parser.add_argument("--hlt2-cache-dir", default=None)
     parser.add_argument("--hlt-teacher-checkpoint", default=None)
+    parser.add_argument(
+        "--hlt2-branch-checkpoint",
+        default=None,
+        help=(
+            "Optional HLT2-only ParT checkpoint used to initialize branch 2. "
+            "When omitted, both branches initialize from --hlt-teacher-checkpoint."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--head-warmup-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -98,6 +106,9 @@ def build_config(args: argparse.Namespace) -> HLTSDVTrainConfig:
         hlt_teacher_checkpoint=str(
             Path(args.hlt_teacher_checkpoint) if args.hlt_teacher_checkpoint else layout.hlt_teacher_checkpoint
         ),
+        hlt2_branch_checkpoint=None
+        if args.hlt2_branch_checkpoint is None
+        else str(Path(args.hlt2_branch_checkpoint)),
         variant_name=variant,
         branch2_mode=branch2_mode,
         seed=args.seed,
