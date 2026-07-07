@@ -31,7 +31,11 @@ fresh_require_file "${PD10_MANIFEST_PATH}"
 if [[ "${TEACHER}" == "hlt" ]]; then
   fresh_require_dir "${PD10_HLT_CACHE_DIR}"
 else
-  fresh_require_data_dir
+  if [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
+    fresh_require_dir "${PD10_OFFLINE_CACHE_DIR}"
+  else
+    fresh_require_data_dir
+  fi
 fi
 if fresh_bool_enabled "${PD10_TEACHER_LOGIT_NO_SKIP_EXISTING}"; then
   fresh_refuse_existing_dir "${PD10_TEACHER_LOGITS_DIR}/${MODEL_NAME}"
@@ -57,6 +61,7 @@ cmd=(
   --read-chunk-size "${READ_CHUNK_SIZE}"
   --confirm-final-test
 )
+fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --no-skip-existing "${PD10_TEACHER_LOGIT_NO_SKIP_EXISTING}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${VERIFY_LABEL_BRANCHES}"

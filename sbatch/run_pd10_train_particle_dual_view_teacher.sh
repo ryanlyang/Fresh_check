@@ -30,7 +30,11 @@ fresh_require_file "${PD10_HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
 fresh_require_file "${PD10_HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_TEACHER_CHECKPOINT}"
 fresh_require_file "${OFFLINE_TEACHER_CHECKPOINT}"
-fresh_require_data_dir
+if [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
+  fresh_require_dir "${PD10_OFFLINE_CACHE_DIR}"
+else
+  fresh_require_data_dir
+fi
 fresh_claim_new_dir "${OUTPUT_DIR}"
 
 cmd=(
@@ -62,6 +66,7 @@ cmd=(
   --dropout "${PD10_V2_PARTICLE_DUAL_VIEW_DROPOUT}"
   --read-chunk-size "${PD10_V2_PARTICLE_DUAL_VIEW_READ_CHUNK_SIZE}"
 )
+fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
 fresh_append_flag_if_enabled cmd --no-amp "${PD10_V2_PARTICLE_DUAL_VIEW_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${PD10_V2_PARTICLE_DUAL_VIEW_COMPILE_MODEL}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${PD10_V2_PARTICLE_DUAL_VIEW_VERIFY_LABEL_BRANCHES}"

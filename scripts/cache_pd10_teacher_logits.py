@@ -39,6 +39,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--manifest", default=str(layout.split_manifest_path))
     parser.add_argument("--hlt-cache-dir", default=str(layout.hlt_cache_dir))
+    parser.add_argument("--offline-cache-dir", default=None)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--splits", nargs="+", choices=PD10_TEACHER_LOGIT_SPLITS, default=list(PD10_TEACHER_LOGIT_SPLITS))
     parser.add_argument("--batch-size", type=int, default=128)
@@ -68,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         manifest_path=args.manifest,
         hlt_cache_dir=args.hlt_cache_dir,
+        offline_cache_dir=args.offline_cache_dir,
         data_dir=args.data_dir,
         splits=tuple(args.splits),
         batch_size=args.batch_size,

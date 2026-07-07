@@ -26,7 +26,11 @@ fresh_setup "$@"
 fresh_require_file "${CHECKPOINT}"
 fresh_require_file "${PD10_MANIFEST_PATH}"
 fresh_require_dir "${PD10_HLT_CACHE_DIR}"
-fresh_require_data_dir
+if [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
+  fresh_require_dir "${PD10_OFFLINE_CACHE_DIR}"
+else
+  fresh_require_data_dir
+fi
 if fresh_bool_enabled "${PD10_V2_PARTICLE_DUAL_VIEW_CACHE_NO_SKIP_EXISTING}"; then
   fresh_refuse_existing_dir "${PD10_V2_TEACHER_LOGITS_DIR}/${MODEL_NAME}"
   fresh_refuse_existing_dir "${PD10_V2_TEACHER_REPRESENTATIONS_DIR}/${MODEL_NAME}"
@@ -53,6 +57,7 @@ cmd=(
   --confirm-final-test
 )
 fresh_append_optional_arg cmd --max-batches "${PD10_V2_PARTICLE_DUAL_VIEW_CACHE_MAX_BATCHES}"
+fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --no-skip-existing "${PD10_V2_PARTICLE_DUAL_VIEW_CACHE_NO_SKIP_EXISTING}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${PD10_V2_PARTICLE_DUAL_VIEW_VERIFY_LABEL_BRANCHES}"

@@ -128,6 +128,7 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
             self.assertEqual(train_cfg.model_name, PD10_PARTICLE_DUAL_VIEW_MODEL_NAME)
             self.assertEqual(train_cfg.checkpoint_path, root / "teacher" / "best_model_val.pt")
             self.assertEqual(train_cfg.allowed_inputs, "HLT_plus_offline_train_time_privileged")
+            self.assertIsNone(train_cfg.offline_cache_dir)
             self.assertFalse(train_cfg.overwrite)
 
             with self.assertRaises(ValueError):
@@ -160,6 +161,7 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
                 )
             cache_cfg = make_cache_config(root, confirm_final_test=True)
             self.assertEqual(cache_cfg.model_name, PD10_PARTICLE_DUAL_VIEW_MODEL_NAME)
+            self.assertIsNone(cache_cfg.offline_cache_dir)
             self.assertEqual(cache_cfg.splits, ("model_val", "final_test"))
             self.assertEqual(cache_cfg.logit_dir, root / "teacher_logits" / PD10_PARTICLE_DUAL_VIEW_MODEL_NAME)
             self.assertEqual(
@@ -249,8 +251,15 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
             self.assertEqual(loaded.metadata["student_deployment_inputs"], "HLT_only")
             self.assertTrue(loaded.metadata["teacher_logits_train_time_only"])
             self.assertTrue(loaded.metadata["uses_raw_offline_particles"])
+            self.assertTrue(loaded.metadata["offline_privileged_inputs_loaded"])
             self.assertTrue(loaded.metadata["teacher_inference_requires_offline_inputs"])
             self.assertFalse(loaded.metadata["inference_export_requires_teacher_features"])
+
+            cached_metadata = dict(metadata)
+            cached_metadata["uses_raw_offline_particles"] = False
+            cached_metadata["offline_source"] = "cached_offline"
+            cached_metadata["offline_cache_dir"] = "/tmp/offline_cache"
+            validate_pd10_particle_dual_view_logit_metadata(cached_metadata, split="model_val")
 
             bad = dict(metadata)
             bad["allowed_inputs"] = "HLT_only"
@@ -258,7 +267,7 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
                 validate_pd10_particle_dual_view_logit_metadata(bad, split="model_val")
 
             bad = dict(metadata)
-            bad["uses_raw_offline_particles"] = False
+            bad["offline_privileged_inputs_loaded"] = False
             with self.assertRaises(ValueError):
                 validate_pd10_particle_dual_view_logit_metadata(bad, split="model_val")
 
@@ -333,12 +342,14 @@ class PD10V2Step2ParticleDualViewTeacherTests(unittest.TestCase):
         self.assertEqual(train_args.output_dir, str(pd10_particle_dual_view_teacher_dir(output_root="checkpoints")))
         self.assertEqual(train_args.hlt_teacher_checkpoint, str(layout.teacher_checkpoint("hlt")))
         self.assertEqual(train_args.offline_teacher_checkpoint, str(layout.teacher_checkpoint("offline")))
+        self.assertIsNone(train_args.offline_cache_dir)
         self.assertEqual(train_args.epochs, PD10_PARTICLE_DUAL_VIEW_DEFAULT_EPOCHS)
 
         cache_args = cache_module.parse_args(["--confirm-final-test"])
         self.assertEqual(cache_args.checkpoint, str(pd10_particle_dual_view_teacher_checkpoint(output_root="checkpoints")))
         self.assertEqual(cache_args.logit_output_dir, str(layout.teacher_logits_dir))
         self.assertEqual(cache_args.representation_output_dir, str(layout.root / "teacher_representations"))
+        self.assertIsNone(cache_args.offline_cache_dir)
         self.assertEqual(cache_args.splits, list(PD10_PARTICLE_DUAL_VIEW_LOGIT_SPLITS))
         self.assertTrue(cache_args.confirm_final_test)
 

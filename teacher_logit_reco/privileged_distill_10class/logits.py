@@ -28,6 +28,7 @@ from jetclass_fresh.hlt_baseline import (
 )
 from jetclass_fresh.hlt_cache import load_cached_hlt_view
 from jetclass_fresh.jetclass_data import JetView, LABEL_NAMES, load_offline_view, load_split_manifest, manifest_hash
+from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
 from .config import (
     PD10_EXPERIMENT_NAME,
@@ -66,6 +67,7 @@ class PD10TeacherLogitCacheConfig:
     output_dir: str
     manifest_path: str
     hlt_cache_dir: str
+    offline_cache_dir: str | None = None
     data_dir: str | None = None
     splits: tuple[str, ...] = field(default_factory=lambda: PD10_TEACHER_LOGIT_SPLITS)
     batch_size: int = 128
@@ -198,13 +200,18 @@ def _load_source_view(config: PD10TeacherLogitCacheConfig, split: str) -> tuple[
         return view, metadata
 
     manifest = load_split_manifest(config.manifest_path)
-    view = load_offline_view(
-        manifest,
-        split,
-        data_dir=config.data_dir,
-        verify_label_branches=config.verify_label_branches,
-        read_chunk_size=config.read_chunk_size,
-    )
+    if config.offline_cache_dir:
+        view = load_cached_offline_view(config.offline_cache_dir, split, verify_hash=True)
+        offline_source = "cached_offline"
+    else:
+        view = load_offline_view(
+            manifest,
+            split,
+            data_dir=config.data_dir,
+            verify_label_branches=config.verify_label_branches,
+            read_chunk_size=config.read_chunk_size,
+        )
+        offline_source = "raw_offline"
     if view.metadata.get("view") not in (None, "offline"):
         raise ValueError(f"Expected offline view for {split}, got {view.metadata.get('view')!r}")
     metadata = {
@@ -213,6 +220,10 @@ def _load_source_view(config: PD10TeacherLogitCacheConfig, split: str) -> tuple[
         "hlt_content_hash": None,
         "no_hlt_inputs_loaded": True,
         "offline_privileged_inputs_loaded": True,
+        "offline_source": offline_source,
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
+        "offline_content_hash": view.metadata.get("offline_content_hash"),
+        "offline_jet_identity_hash": view.metadata.get("jet_identity_hash"),
     }
     return view, metadata
 

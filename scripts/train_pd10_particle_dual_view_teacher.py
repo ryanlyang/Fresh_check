@@ -41,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default=str(layout.split_manifest_path))
     parser.add_argument("--hlt-cache-dir", default=str(layout.hlt_cache_dir))
+    parser.add_argument("--offline-cache-dir", default=None)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument(
         "--hlt-teacher-checkpoint",
@@ -91,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         manifest_path=args.manifest,
         hlt_cache_dir=args.hlt_cache_dir,
+        offline_cache_dir=args.offline_cache_dir,
         hlt_teacher_checkpoint=args.hlt_teacher_checkpoint,
         offline_teacher_checkpoint=args.offline_teacher_checkpoint,
         data_dir=args.data_dir,

@@ -27,6 +27,7 @@ from jetclass_fresh.hlt_baseline import (
 from jetclass_fresh.hlt_cache import load_cached_hlt_view
 from jetclass_fresh.jetclass_data import JetIdentity, JetView, LABEL_NAMES, load_offline_view, load_split_manifest, manifest_hash
 from jetclass_fresh.part_inputs import PF_FEATURE_NAMES, build_particle_transformer_inputs_from_tokens
+from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
 from .config import (
     PD10_EXPERIMENT_NAME,
@@ -86,6 +87,7 @@ class PD10ParticleDualViewTeacherTrainConfig:
     hlt_cache_dir: str
     hlt_teacher_checkpoint: str
     offline_teacher_checkpoint: str
+    offline_cache_dir: str | None = None
     data_dir: str | None = None
     train_split: str = "model_train"
     val_split: str = "model_val"
@@ -176,6 +178,7 @@ class PD10ParticleDualViewTeacherCacheConfig:
     hlt_cache_dir: str
     logit_output_dir: str
     representation_output_dir: str
+    offline_cache_dir: str | None = None
     data_dir: str | None = None
     splits: tuple[str, ...] = field(default_factory=lambda: PD10_PARTICLE_DUAL_VIEW_LOGIT_SPLITS)
     batch_size: int = PD10_PARTICLE_DUAL_VIEW_DEFAULT_EVAL_BATCH_SIZE
@@ -415,6 +418,7 @@ def _load_paired_views(
     *,
     manifest_path: str | Path,
     hlt_cache_dir: str | Path,
+    offline_cache_dir: str | Path | None,
     split: str,
     data_dir: str | None,
     max_jets: int | None,
@@ -427,13 +431,18 @@ def _load_paired_views(
     if hlt_view.metadata.get("hlt_params") != pd10_hlt_params_dict():
         raise ValueError(f"HLT cache for {split} does not match configured PD10 fixed-HLT params")
     manifest = load_split_manifest(manifest_path)
-    offline_view = load_offline_view(
-        manifest,
-        split,
-        data_dir=data_dir,
-        verify_label_branches=verify_label_branches,
-        read_chunk_size=read_chunk_size,
-    )
+    if offline_cache_dir:
+        offline_view = load_cached_offline_view(offline_cache_dir, split, verify_hash=True)
+        offline_source = "cached_offline"
+    else:
+        offline_view = load_offline_view(
+            manifest,
+            split,
+            data_dir=data_dir,
+            verify_label_branches=verify_label_branches,
+            read_chunk_size=read_chunk_size,
+        )
+        offline_source = "raw_offline"
     hlt_view, selection_report = balanced_limit_jet_view(hlt_view, max_jets, seed=int(seed))
     hlt_view, offline_view = align_pd10_hlt_offline_views(hlt_view, offline_view)
     source_metadata = {
@@ -444,7 +453,11 @@ def _load_paired_views(
         "hlt_degradation_strength": hlt_view.metadata.get("hlt_degradation_strength"),
         "expected_hlt_params": pd10_hlt_params_dict(),
         "offline_privileged_inputs_loaded": True,
-        "uses_raw_offline_particles": True,
+        "uses_raw_offline_particles": offline_cache_dir is None,
+        "offline_source": offline_source,
+        "offline_cache_dir": str(offline_cache_dir) if offline_cache_dir else None,
+        "offline_content_hash": offline_view.metadata.get("offline_content_hash"),
+        "offline_jet_identity_hash": offline_view.metadata.get("jet_identity_hash"),
         "student_deployment_inputs": "HLT_only",
         "returns_offline_particles": False,
         "teacher_is_train_time_only_for_distillation": True,
@@ -710,7 +723,9 @@ def _checkpoint_payload(
         "allowed_inputs": PD10_EXTENDED_TEACHER_ALLOWED_INPUTS[PD10_TEACHER_PARTICLE_DUAL_VIEW],
         "student_deployment_inputs": "HLT_only",
         "returns_offline_particles": False,
-        "uses_raw_offline_particles": True,
+        "uses_raw_offline_particles": config.offline_cache_dir is None,
+        "offline_source": "cached_offline" if config.offline_cache_dir else "raw_offline",
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
         "offline_privileged_inputs_loaded": True,
         "teacher_is_train_time_only_for_distillation": True,
         "inference_requires_offline_inputs": True,
@@ -737,6 +752,7 @@ def train_pd10_particle_dual_view_teacher(
     train_hlt, train_offline, train_source = _load_paired_views(
         manifest_path=config.manifest_path,
         hlt_cache_dir=config.hlt_cache_dir,
+        offline_cache_dir=config.offline_cache_dir,
         split=config.train_split,
         data_dir=config.data_dir,
         max_jets=config.max_train_jets,
@@ -748,6 +764,7 @@ def train_pd10_particle_dual_view_teacher(
     val_hlt, val_offline, val_source = _load_paired_views(
         manifest_path=config.manifest_path,
         hlt_cache_dir=config.hlt_cache_dir,
+        offline_cache_dir=config.offline_cache_dir,
         split=config.val_split,
         data_dir=config.data_dir,
         max_jets=config.max_val_jets,
@@ -805,7 +822,9 @@ def train_pd10_particle_dual_view_teacher(
         "allowed_inputs": config.allowed_inputs,
         "student_deployment_inputs": "HLT_only",
         "returns_offline_particles": False,
-        "uses_raw_offline_particles": True,
+        "uses_raw_offline_particles": config.offline_cache_dir is None,
+        "offline_source": "cached_offline" if config.offline_cache_dir else "raw_offline",
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
         "offline_privileged_inputs_loaded": True,
         "teacher_is_train_time_only_for_distillation": True,
         "inference_requires_offline_inputs": True,
@@ -913,7 +932,9 @@ def train_pd10_particle_dual_view_teacher(
         "last_checkpoint": str(config.last_checkpoint_path),
         "selection_metric": "model_val_cross_entropy",
         "no_final_test_used_for_selection": True,
-        "uses_raw_offline_particles": True,
+        "uses_raw_offline_particles": config.offline_cache_dir is None,
+        "offline_source": "cached_offline" if config.offline_cache_dir else "raw_offline",
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
         "offline_privileged_inputs_loaded": True,
         "teacher_is_train_time_only_for_distillation": True,
         "inference_requires_offline_inputs": True,
@@ -1070,7 +1091,9 @@ def build_pd10_particle_dual_view_logit_block(
         "teacher_logits_train_time_only": True,
         "teacher_representations_train_time_only": True,
         "returns_offline_particles": False,
-        "uses_raw_offline_particles": True,
+        "uses_raw_offline_particles": config.offline_cache_dir is None,
+        "offline_source": "cached_offline" if config.offline_cache_dir else "raw_offline",
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
         "offline_privileged_inputs_loaded": True,
         "teacher_is_train_time_only_for_distillation": True,
         "inference_requires_offline_inputs": True,
@@ -1119,8 +1142,8 @@ def validate_pd10_particle_dual_view_logit_metadata(
         raise ValueError("particle dual-view representations must be train-time only")
     if bool(metadata.get("returns_offline_particles")):
         raise ValueError("particle dual-view caches must not return offline particles")
-    if not bool(metadata.get("uses_raw_offline_particles")):
-        raise ValueError("particle dual-view teacher must declare raw offline particle privilege")
+    if not bool(metadata.get("offline_privileged_inputs_loaded")):
+        raise ValueError("particle dual-view teacher must declare privileged offline inputs")
     if not bool(metadata.get("inference_requires_offline_inputs")):
         raise ValueError("particle dual-view teacher must declare offline inputs are required for teacher inference")
     if not bool(metadata.get("teacher_inference_requires_offline_inputs")):
@@ -1178,6 +1201,7 @@ def cache_pd10_particle_dual_view_teacher(config: PD10ParticleDualViewTeacherCac
         hlt_view, offline_view, source_metadata = _load_paired_views(
             manifest_path=config.manifest_path,
             hlt_cache_dir=config.hlt_cache_dir,
+            offline_cache_dir=config.offline_cache_dir,
             split=split,
             data_dir=config.data_dir,
             max_jets=_max_jets_for_cache_split(config, split),

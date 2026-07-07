@@ -35,6 +35,7 @@ class PDV3Step2TeacherTests(unittest.TestCase):
         self.assertIn('export PD10_ROOT="${PDV3_ROOT}"', bridge)
         self.assertIn('export PD10_MANIFEST_PATH="${PDV3_MANIFEST_PATH}"', bridge)
         self.assertIn('export PD10_HLT_CACHE_DIR="${PDV3_HLT_CACHE_DIR}"', bridge)
+        self.assertIn('export PD10_OFFLINE_CACHE_DIR="${PDV3_OFFLINE_CACHE_DIR}"', bridge)
         self.assertIn('export PD10_TEACHERS_DIR="${PDV3_TEACHERS_DIR}"', bridge)
         self.assertIn('export PD10_TEACHER_LOGITS_DIR="${PDV3_TEACHER_LOGITS_DIR}"', bridge)
         self.assertIn(

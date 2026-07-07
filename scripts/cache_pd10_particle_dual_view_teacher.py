@@ -32,6 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--manifest", default=str(layout.split_manifest_path))
     parser.add_argument("--hlt-cache-dir", default=str(layout.hlt_cache_dir))
+    parser.add_argument("--offline-cache-dir", default=None)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument(
         "--logit-output-dir",
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint=args.checkpoint,
         manifest_path=args.manifest,
         hlt_cache_dir=args.hlt_cache_dir,
+        offline_cache_dir=args.offline_cache_dir,
         logit_output_dir=args.logit_output_dir,
         representation_output_dir=args.representation_output_dir,
         data_dir=args.data_dir,
@@ -99,4 +101,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

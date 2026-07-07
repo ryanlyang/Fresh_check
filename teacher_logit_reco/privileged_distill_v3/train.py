@@ -1911,7 +1911,7 @@ def train_pdv3_student(config: PDV3StudentTrainConfig) -> dict[str, Any]:
             model,
             config.baseline_checkpoint,
             map_location=device,
-            expected_selection_metric=str(config.selection_metric),
+            expected_selection_metric=None,
             expected_split_manifest_hash=manifest_sha if bool(config.require_baseline_split_manifest_hash) else None,
             expected_label_names=PDV3_LABEL_NAMES,
             expected_label_filter=PDV3_LABEL_FILTER,

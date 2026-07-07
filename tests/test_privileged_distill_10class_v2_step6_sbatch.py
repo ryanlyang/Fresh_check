@@ -40,6 +40,7 @@ class PD10V2Step6SbatchTests(unittest.TestCase):
         self.assertIn("scripts/train_pd10_particle_dual_view_teacher.py", train)
         self.assertIn("--hlt-teacher-checkpoint", train)
         self.assertIn("--offline-teacher-checkpoint", train)
+        self.assertIn("--offline-cache-dir \"${PD10_OFFLINE_CACHE_DIR:-}\"", train)
         self.assertIn("--max-train-jets \"${PD10_MODEL_TRAIN_SIZE}\"", train)
         self.assertIn('fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"', train)
         self.assertIn("fresh_assert_json_ok \"${OUTPUT_DIR}/run_report.json\"", train)
@@ -49,6 +50,7 @@ class PD10V2Step6SbatchTests(unittest.TestCase):
         self.assertIn("scripts/cache_pd10_particle_dual_view_teacher.py", cache)
         self.assertIn("--logit-output-dir \"${PD10_V2_TEACHER_LOGITS_DIR}\"", cache)
         self.assertIn("--representation-output-dir \"${PD10_V2_TEACHER_REPRESENTATIONS_DIR}\"", cache)
+        self.assertIn("--offline-cache-dir \"${PD10_OFFLINE_CACHE_DIR:-}\"", cache)
         self.assertIn("particle_dual_view_cache_manifest.json", cache)
         self.assertIn("teacher_representation_manifest.json", cache)
 

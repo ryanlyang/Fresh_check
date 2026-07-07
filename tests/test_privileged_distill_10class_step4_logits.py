@@ -83,6 +83,7 @@ class PD10Step4TeacherLogitTests(unittest.TestCase):
             self.assertEqual(cfg.teacher_target, PD10_TEACHER_HLT)
             self.assertEqual(cfg.model_name, "hlt_part_teacher_10class")
             self.assertEqual(cfg.source_view, "fixed_hlt")
+            self.assertIsNone(cfg.offline_cache_dir)
             self.assertEqual(cfg.splits, PD10_TEACHER_LOGIT_SPLITS)
             self.assertEqual(cfg.teacher_output_dir, Path(cfg.output_dir) / cfg.model_name)
             self.assertEqual(
@@ -240,6 +241,7 @@ class PD10Step4TeacherLogitTests(unittest.TestCase):
         self.assertEqual(args.output_dir, str(layout.teacher_logits_dir))
         self.assertEqual(args.manifest, str(layout.split_manifest_path))
         self.assertEqual(args.hlt_cache_dir, str(layout.hlt_cache_dir))
+        self.assertIsNone(args.offline_cache_dir)
         self.assertEqual(args.splits, list(PD10_TEACHER_LOGIT_SPLITS))
         self.assertTrue(args.confirm_final_test)
         self.assertFalse(args.no_skip_existing)
@@ -258,6 +260,7 @@ class PD10Step4TeacherLogitTests(unittest.TestCase):
         self.assertIn("--teacher \"${TEACHER}\"", runner)
         self.assertIn("--checkpoint \"${CHECKPOINT}\"", runner)
         self.assertIn("--output-dir \"${PD10_TEACHER_LOGITS_DIR}\"", runner)
+        self.assertIn("--offline-cache-dir \"${PD10_OFFLINE_CACHE_DIR:-}\"", runner)
         self.assertIn("--splits \"${split_args[@]}\"", runner)
         self.assertIn("--max-model-train-jets \"${PD10_MODEL_TRAIN_SIZE}\"", runner)
         self.assertIn("--max-model-val-jets \"${PD10_MODEL_VAL_SIZE}\"", runner)
