@@ -8,6 +8,7 @@ from teacher_logit_reco.target_denoising_part import (
     TargetDenoisingTaggerTrainConfig,
     train_target_denoising_tagger,
 )
+from teacher_logit_reco.target_denoising_part.tagger_train import _validate_denoiser_checkpoint_compatibility
 
 
 class TinyRawTokenDataset:
@@ -39,6 +40,9 @@ class TinyRawTokenDataset:
             "metadata": {
                 "hlt_profile": "unit_test",
                 "hlt_degradation_strength": 0.0,
+                "hlt_content_hash": f"content-{self.split}",
+                "source_manifest_hash": "manifest-step6",
+                "jet_identity_hash": f"identity-{self.split}",
             },
         }
 
@@ -107,3 +111,104 @@ def test_step6_tagger_training_writes_complete_artifacts(tmp_path: Path):
     assert (output_dir / "final_test_report.json").exists()
     assert (output_dir / "training_curves.json").exists()
     assert (output_dir / "diagnostics" / "epoch_metrics.csv").exists()
+
+
+def test_step6_rejects_denoiser_checkpoint_without_dataset_metadata(tmp_path: Path):
+    config = TargetDenoisingTaggerTrainConfig(
+        output_dir=str(tmp_path / "tagger"),
+        manifest_path=str(tmp_path / "manifest.json.gz"),
+        hlt_cache_dir=str(tmp_path / "hlt_cache"),
+        variant="denoiser_features_frozen",
+        num_classes=2,
+        require_denoiser_checkpoint=True,
+    )
+    checkpoint_report = {
+        "config": {"alignment_mode": "aligned_direct"},
+        "model_config": {"use_pair_bias": True, "use_local_kernel": True},
+    }
+    train_dataset = TinyRawTokenDataset(split="model_train")
+    val_dataset = TinyRawTokenDataset(split="model_val")
+
+    try:
+        _validate_denoiser_checkpoint_compatibility(
+            checkpoint_report,
+            config,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+        )
+    except ValueError as exc:
+        assert "dataset metadata is missing" in str(exc)
+    else:
+        raise AssertionError("expected missing denoiser dataset metadata to be rejected")
+
+
+def _compatible_checkpoint_dataset(split: str, *, alignment_mode: str = "aligned_direct", content_hash: str | None = None):
+    return {
+        "split": split,
+        "n_jets": 8,
+        "alignment_mode": alignment_mode,
+        "metadata": {
+            "hlt_profile": "unit_test",
+            "hlt_degradation_strength": 0.0,
+            "hlt_content_hash": content_hash or f"content-{split}",
+            "source_manifest_hash": "manifest-step6",
+            "jet_identity_hash": f"identity-{split}",
+        },
+    }
+
+
+def test_step6_rejects_denoiser_checkpoint_with_stale_hlt_content_hash(tmp_path: Path):
+    config = TargetDenoisingTaggerTrainConfig(
+        output_dir=str(tmp_path / "tagger"),
+        manifest_path=str(tmp_path / "manifest.json.gz"),
+        hlt_cache_dir=str(tmp_path / "hlt_cache"),
+        variant="denoiser_features_frozen",
+        num_classes=2,
+    )
+    checkpoint_report = {
+        "config": {"alignment_mode": "aligned_direct"},
+        "model_config": {"use_pair_bias": True, "use_local_kernel": True},
+        "train_dataset": _compatible_checkpoint_dataset("model_train", content_hash="old-content"),
+        "model_val_dataset": _compatible_checkpoint_dataset("model_val"),
+    }
+
+    try:
+        _validate_denoiser_checkpoint_compatibility(
+            checkpoint_report,
+            config,
+            train_dataset=TinyRawTokenDataset(split="model_train"),
+            val_dataset=TinyRawTokenDataset(split="model_val"),
+        )
+    except ValueError as exc:
+        assert "hlt_content_hash" in str(exc)
+    else:
+        raise AssertionError("expected stale denoiser HLT content hash to be rejected")
+
+
+def test_step6_rejects_denoiser_checkpoint_with_wrong_alignment_mode(tmp_path: Path):
+    config = TargetDenoisingTaggerTrainConfig(
+        output_dir=str(tmp_path / "tagger"),
+        manifest_path=str(tmp_path / "manifest.json.gz"),
+        hlt_cache_dir=str(tmp_path / "hlt_cache"),
+        variant="denoiser_features_frozen",
+        num_classes=2,
+        alignment_mode="aligned_direct",
+    )
+    checkpoint_report = {
+        "config": {"alignment_mode": "rank_direct"},
+        "model_config": {"use_pair_bias": True, "use_local_kernel": True},
+        "train_dataset": _compatible_checkpoint_dataset("model_train", alignment_mode="rank_direct"),
+        "model_val_dataset": _compatible_checkpoint_dataset("model_val", alignment_mode="rank_direct"),
+    }
+
+    try:
+        _validate_denoiser_checkpoint_compatibility(
+            checkpoint_report,
+            config,
+            train_dataset=TinyRawTokenDataset(split="model_train"),
+            val_dataset=TinyRawTokenDataset(split="model_val"),
+        )
+    except ValueError as exc:
+        assert "alignment_mode" in str(exc)
+    else:
+        raise AssertionError("expected denoiser alignment mismatch to be rejected")

@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--tagger-root", default=None)
-    parser.add_argument("--denoiser-report", default=None)
+    parser.add_argument("--denoiser-report", action="append", default=[])
     parser.add_argument("--hlt-baseline-report", default=None)
     parser.add_argument("--offline-baseline-report", default=None)
     parser.add_argument("--tagger-report", action="append", default=[])
@@ -36,7 +36,7 @@ def main() -> int:
     config = TargetDenoisingReportConfig(
         output_dir=args.output_dir,
         tagger_root=args.tagger_root,
-        denoiser_report=args.denoiser_report,
+        denoiser_report_paths=tuple(args.denoiser_report or ()),
         hlt_baseline_report=args.hlt_baseline_report,
         offline_baseline_report=args.offline_baseline_report,
         tagger_report_paths=tuple(args.tagger_report or ()),

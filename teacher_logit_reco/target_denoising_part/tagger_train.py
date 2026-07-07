@@ -344,25 +344,24 @@ def _validate_hlt_metadata(
     split: str,
     manifest_sha: str | None,
 ) -> None:
-    if not bool(config.strict_hlt_metadata):
-        return
     problems: list[str] = []
-    if config.expected_hlt_profile is not None:
-        actual_profile = normalize_hlt_profile(metadata.get("hlt_profile"))
-        expected_profile = normalize_hlt_profile(config.expected_hlt_profile)
-        if actual_profile != expected_profile:
-            problems.append(f"hlt_profile={actual_profile!r}, expected {expected_profile!r}")
-    if config.expected_hlt_profile_version is not None:
-        actual_version = str(metadata.get("hlt_profile_version") or "")
-        expected_version = str(config.expected_hlt_profile_version)
-        if actual_version != expected_version:
-            problems.append(f"hlt_profile_version={actual_version!r}, expected {expected_version!r}")
-    if config.expected_hlt_degradation_strength is not None:
-        actual_strength = metadata.get("hlt_degradation_strength")
-        if actual_strength is None or abs(float(actual_strength) - float(config.expected_hlt_degradation_strength)) > 1.0e-12:
-            problems.append(
-                f"hlt_degradation_strength={actual_strength!r}, expected {float(config.expected_hlt_degradation_strength)!r}"
-            )
+    if bool(config.strict_hlt_metadata):
+        if config.expected_hlt_profile is not None:
+            actual_profile = normalize_hlt_profile(metadata.get("hlt_profile"))
+            expected_profile = normalize_hlt_profile(config.expected_hlt_profile)
+            if actual_profile != expected_profile:
+                problems.append(f"hlt_profile={actual_profile!r}, expected {expected_profile!r}")
+        if config.expected_hlt_profile_version is not None:
+            actual_version = str(metadata.get("hlt_profile_version") or "")
+            expected_version = str(config.expected_hlt_profile_version)
+            if actual_version != expected_version:
+                problems.append(f"hlt_profile_version={actual_version!r}, expected {expected_version!r}")
+        if config.expected_hlt_degradation_strength is not None:
+            actual_strength = metadata.get("hlt_degradation_strength")
+            if actual_strength is None or abs(float(actual_strength) - float(config.expected_hlt_degradation_strength)) > 1.0e-12:
+                problems.append(
+                    f"hlt_degradation_strength={actual_strength!r}, expected {float(config.expected_hlt_degradation_strength)!r}"
+                )
     if bool(config.require_same_manifest_hash) and manifest_sha is not None:
         actual_manifest_hash = metadata.get("source_manifest_hash")
         if actual_manifest_hash != manifest_sha:
@@ -666,6 +665,34 @@ def _nested_metadata_value(block: Mapping[str, Any], key: str) -> Any:
     return None
 
 
+def _first_nested_metadata_value(block: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    for key in keys:
+        value = _nested_metadata_value(block, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _compare_required_metadata(
+    problems: list[str],
+    *,
+    split_name: str,
+    label: str,
+    checkpoint_block: Mapping[str, Any],
+    current_block: Mapping[str, Any],
+    checkpoint_keys: Sequence[str],
+    current_keys: Sequence[str],
+) -> None:
+    expected = _first_nested_metadata_value(current_block, current_keys)
+    if expected is None:
+        return
+    actual = _first_nested_metadata_value(checkpoint_block, checkpoint_keys)
+    if actual is None:
+        problems.append(f"{split_name}.{label} is missing from denoiser checkpoint")
+    elif actual != expected:
+        problems.append(f"{split_name}.{label} checkpoint={actual!r}, current={expected!r}")
+
+
 def _validate_denoiser_checkpoint_compatibility(
     checkpoint_report: Mapping[str, Any] | None,
     config: TargetDenoisingTaggerTrainConfig,
@@ -686,14 +713,50 @@ def _validate_denoiser_checkpoint_compatibility(
         ("model_train", ckpt_train, current_train),
         ("model_val", ckpt_val, current_val),
     ):
+        if not ckpt_block:
+            problems.append(f"{split_name} dataset metadata is missing from denoiser checkpoint")
         for key in ("source_manifest_hash", "expected_manifest_hash", "hlt_profile", "hlt_profile_version", "hlt_degradation_strength"):
-            expected = _nested_metadata_value(current_block, key)
-            actual = _nested_metadata_value(ckpt_block, key)
-            if expected is not None and actual is not None and actual != expected:
-                problems.append(f"{split_name}.{key} checkpoint={actual!r}, current={expected!r}")
-        expected_alignment = current_block.get("alignment_mode")
+            _compare_required_metadata(
+                problems,
+                split_name=split_name,
+                label=key,
+                checkpoint_block=ckpt_block,
+                current_block=current_block,
+                checkpoint_keys=(key,),
+                current_keys=(key,),
+            )
+        _compare_required_metadata(
+            problems,
+            split_name=split_name,
+            label="hlt_content_hash",
+            checkpoint_block=ckpt_block,
+            current_block=current_block,
+            checkpoint_keys=("hlt_content_hash",),
+            current_keys=("hlt_content_hash",),
+        )
+        _compare_required_metadata(
+            problems,
+            split_name=split_name,
+            label="hlt_jet_identity_hash",
+            checkpoint_block=ckpt_block,
+            current_block=current_block,
+            checkpoint_keys=("hlt_jet_identity_hash", "jet_identity_hash"),
+            current_keys=("jet_identity_hash", "hlt_jet_identity_hash"),
+        )
+        _compare_required_metadata(
+            problems,
+            split_name=split_name,
+            label="offline_jet_identity_hash",
+            checkpoint_block=ckpt_block,
+            current_block=current_block,
+            checkpoint_keys=("offline_jet_identity_hash",),
+            current_keys=("offline_jet_identity_hash",),
+        )
+        expected_alignment = str(config.alignment_mode)
         actual_alignment = ckpt_block.get("alignment_mode") or ckpt_config.get("alignment_mode")
-        if expected_alignment is not None and actual_alignment is not None and str(actual_alignment) != str(expected_alignment):
+        if actual_alignment is None:
+            problems.append(f"{split_name}.alignment_mode is missing from denoiser checkpoint")
+        elif str(actual_alignment) != str(expected_alignment):
             problems.append(f"{split_name}.alignment_mode checkpoint={actual_alignment!r}, current={expected_alignment!r}")
 
     shuffle = bool(ckpt_config.get("shuffle_target_residuals", False))

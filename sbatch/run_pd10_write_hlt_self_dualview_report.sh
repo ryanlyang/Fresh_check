@@ -52,6 +52,9 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/summary.json"
   fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/hlt_self_dualview_report.json"
   fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/hlt_self_dualview_report.md"
+  fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/metric_table.csv"
+  fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/comparison_table.csv"
+  fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/binary_projection_table.csv"
   fresh_require_file "${PD10_HLT_SDV_FINAL_REPORT_DIR}/run_report.json"
   fresh_assert_json_ok "${PD10_HLT_SDV_FINAL_REPORT_DIR}/run_report.json"
 fi

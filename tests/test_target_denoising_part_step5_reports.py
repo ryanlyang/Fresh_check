@@ -84,13 +84,26 @@ class TargetDenoisingPartStep5ReportTests(unittest.TestCase):
                     "n_jets": 100,
                 },
             }
+            shuffled_denoiser_report = {
+                "variant": "target_conditioned_denoiser_shuffled_targets",
+                "best_epoch": 0,
+                "selection_metric": "normalized_rmse",
+                "best_model_val_metrics": {
+                    "normalized_rmse": 0.42,
+                    "nll_loss": 0.63,
+                    "smooth_l1_loss": 0.22,
+                    "n_jets": 100,
+                },
+            }
             _write_json(tagger_root / TARGET_DENOISING_VARIANT_HLT_PART_BASELINE / "run_report.json", hlt_report)
             _write_json(
                 tagger_root / TARGET_DENOISING_VARIANT_DENOISER_FEATURES_FROZEN / "run_report.json",
                 denoise_tagger_report,
             )
             denoiser_path = root / "denoiser" / "run_report.json"
+            shuffled_denoiser_path = root / "denoisers" / "shuffled_targets" / "run_report.json"
             _write_json(denoiser_path, denoiser_report)
+            _write_json(shuffled_denoiser_path, shuffled_denoiser_report)
 
             output_dir = root / "report"
             summary = write_target_denoising_report(
@@ -98,6 +111,7 @@ class TargetDenoisingPartStep5ReportTests(unittest.TestCase):
                     output_dir=str(output_dir),
                     tagger_root=str(tagger_root),
                     denoiser_report=str(denoiser_path),
+                    denoiser_report_paths=(str(shuffled_denoiser_path),),
                     variants=(
                         TARGET_DENOISING_VARIANT_HLT_PART_BASELINE,
                         TARGET_DENOISING_VARIANT_DENOISER_FEATURES_FROZEN,
@@ -132,7 +146,9 @@ class TargetDenoisingPartStep5ReportTests(unittest.TestCase):
             self.assertEqual(frozen_final["accuracy"], "0.71")
 
             denoising_rows = _read_csv(output_dir / "denoising_metrics.csv")
-            self.assertEqual(denoising_rows[0]["normalized_rmse"], "0.14")
+            self.assertEqual(len(denoising_rows), 2)
+            self.assertEqual({row["normalized_rmse"] for row in denoising_rows}, {"0.14", "0.42"})
+            self.assertIn("target_conditioned_denoiser_shuffled_targets", {row["variant"] for row in denoising_rows})
 
             diagnostic_rows = _read_csv(output_dir / "diagnostic_only_teacher_offline.csv")
             self.assertEqual(diagnostic_rows[0]["split_group"], "diagnostic_only_teacher_offline")

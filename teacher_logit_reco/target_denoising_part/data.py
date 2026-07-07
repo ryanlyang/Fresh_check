@@ -90,6 +90,7 @@ class TargetDenoisingDatasetConfig:
     require_same_labels: bool = True
     require_same_mask_for_rank_alignment: bool = False
     require_identical_masks_for_aligned_direct_without_provenance: bool = True
+    require_order_preserving_for_aligned_direct_without_provenance: bool = True
     allow_final_test_targets: bool = False
     verify_hlt_hash: bool = True
     verify_label_branches: bool = False
@@ -300,6 +301,59 @@ def _validate_paired_views(
             "Current fixed-HLT caches do not expose provenance, so realistic drop/merge caches fail closed. "
             "Use rank_direct only as an explicit debug control."
         )
+    if (
+        config.alignment_mode == ALIGNMENT_MODE_ALIGNED_DIRECT
+        and bool(config.require_order_preserving_for_aligned_direct_without_provenance)
+        and not _has_aligned_direct_order_guarantee(hlt_view.metadata)
+    ):
+        raise ValueError(
+            "aligned_direct target denoising requires a cache-level guarantee that HLT particle order is inherited "
+            "from the offline particle order. Current fixed-HLT caches sort particles after degradation and do not "
+            "store per-particle provenance, so same-mask identity swaps can silently corrupt residual targets. "
+            "Use rank_direct only as an explicit debug control, or build an identity/order-preserving target cache."
+        )
+
+
+def _truthy_metadata_flag(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _has_aligned_direct_order_guarantee(metadata: Mapping[str, Any]) -> bool:
+    """Return whether the cache explicitly supports same-rank residual targets."""
+
+    metadata = dict(metadata or {})
+    strength = metadata.get("hlt_degradation_strength")
+    try:
+        if strength is not None and abs(float(strength)) <= 1.0e-12:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for key in (
+        "target_denoising_order_preserving",
+        "hlt_preserves_offline_particle_order",
+        "particle_order_preserving",
+        "identity_order_preserving",
+        "same_rank_targets_safe",
+    ):
+        if _truthy_metadata_flag(metadata.get(key)):
+            return True
+    order_value = str(
+        metadata.get("hlt_particle_order")
+        or metadata.get("particle_order")
+        or metadata.get("hlt_output_order")
+        or ""
+    ).strip().lower()
+    return order_value in {
+        "offline",
+        "offline_order",
+        "input",
+        "input_order",
+        "identity",
+        "identity_preserving",
+        "order_preserving",
+    }
 
 
 def _limit_view(view: JetView, max_jets: int | None) -> JetView:

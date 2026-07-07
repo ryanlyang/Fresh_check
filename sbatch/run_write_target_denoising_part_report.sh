@@ -23,6 +23,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${TARGET_DENOISING_PART_TAGGER_ROOT:=${TARGET_DENOISING_PART_ROOT}/taggers}"
 : "${TARGET_DENOISING_PART_REPORT_DIR:=${TARGET_DENOISING_PART_ROOT}/final_report}"
 : "${TARGET_DENOISING_PART_DENOISER_REPORT:=${TARGET_DENOISING_PART_ROOT}/denoisers/real/run_report.json}"
+: "${TARGET_DENOISING_PART_DENOISER_REPORTS:=${TARGET_DENOISING_PART_DENOISER_REPORT}}"
 : "${TARGET_DENOISING_PART_HLT_BASELINE_REPORT:=}"
 : "${TARGET_DENOISING_PART_OFFLINE_BASELINE_REPORT:=}"
 : "${TARGET_DENOISING_PART_VARIANTS:=hlt_part_baseline feature_mlp_adapter_tag_only denoiser_features_frozen denoiser_features_joint denoiser_tag_only_same_arch denoiser_no_pair_bias}"
@@ -30,7 +31,10 @@ source "${SCRIPT_DIR}/common.sh"
 
 fresh_setup "$@"
 fresh_require_file "scripts/write_target_conditioned_denoising_part_report.py"
-fresh_require_file "${TARGET_DENOISING_PART_DENOISER_REPORT}"
+fresh_split_words denoiser_reports "${TARGET_DENOISING_PART_DENOISER_REPORTS}"
+for denoiser_report in "${denoiser_reports[@]}"; do
+  fresh_require_file "${denoiser_report}"
+done
 fresh_split_words report_variants "${TARGET_DENOISING_PART_VARIANTS}"
 if fresh_bool_enabled "${TARGET_DENOISING_PART_REQUIRE_VARIANTS}"; then
   for variant in "${report_variants[@]}"; do
@@ -43,9 +47,11 @@ cmd=(
   "${PYTHON_BIN}" "-u" "scripts/write_target_conditioned_denoising_part_report.py"
   --output-dir "${TARGET_DENOISING_PART_REPORT_DIR}"
   --tagger-root "${TARGET_DENOISING_PART_TAGGER_ROOT}"
-  --denoiser-report "${TARGET_DENOISING_PART_DENOISER_REPORT}"
   --variants "${report_variants[@]}"
 )
+for denoiser_report in "${denoiser_reports[@]}"; do
+  cmd+=(--denoiser-report "${denoiser_report}")
+done
 fresh_append_optional_arg cmd --hlt-baseline-report "${TARGET_DENOISING_PART_HLT_BASELINE_REPORT}"
 fresh_append_optional_arg cmd --offline-baseline-report "${TARGET_DENOISING_PART_OFFLINE_BASELINE_REPORT}"
 fresh_append_flag_if_enabled cmd --require-variants "${TARGET_DENOISING_PART_REQUIRE_VARIANTS}"

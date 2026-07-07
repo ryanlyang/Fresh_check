@@ -27,6 +27,7 @@ class TargetDenoisingReportConfig:
     output_dir: str
     tagger_root: str | None = None
     denoiser_report: str | None = None
+    denoiser_report_paths: tuple[str, ...] = ()
     hlt_baseline_report: str | None = None
     offline_baseline_report: str | None = None
     tagger_report_paths: tuple[str, ...] = ()
@@ -34,6 +35,7 @@ class TargetDenoisingReportConfig:
     require_variants: bool = False
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "denoiser_report_paths", tuple(str(path) for path in self.denoiser_report_paths))
         object.__setattr__(self, "tagger_report_paths", tuple(str(path) for path in self.tagger_report_paths))
         object.__setattr__(self, "variants", tuple(str(variant) for variant in self.variants))
         object.__setattr__(self, "require_variants", bool(self.require_variants))
@@ -197,6 +199,21 @@ def _load_tagger_reports(config: TargetDenoisingReportConfig, problems: list[str
         variant = _variant_from_report(path, payload)
         reports[variant] = {"path": str(path), **dict(payload)}
     return reports
+
+
+def _denoiser_report_paths(config: TargetDenoisingReportConfig) -> list[str]:
+    paths: list[str] = []
+    if config.denoiser_report:
+        paths.append(str(config.denoiser_report))
+    paths.extend(str(path) for path in config.denoiser_report_paths)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
 
 
 def _source_rows(
@@ -394,11 +411,22 @@ def write_target_denoising_report(config: TargetDenoisingReportConfig | Mapping[
             if entry is not None:
                 confusion_entries.append(entry)
 
-    for source_kind, variant, path_text in (
-        ("denoiser", "target_conditioned_denoiser", config.denoiser_report),
-        ("hlt_baseline", TARGET_DENOISING_VARIANT_HLT_PART_BASELINE, config.hlt_baseline_report),
-        ("offline_baseline", "offline_part_reference", config.offline_baseline_report),
-    ):
+    auxiliary_sources: list[tuple[str, str, str | None]] = []
+    for path_text in _denoiser_report_paths(config):
+        path = Path(path_text)
+        fallback_variant = (
+            "target_conditioned_denoiser"
+            if config.denoiser_report and str(path_text) == str(config.denoiser_report)
+            else f"target_conditioned_denoiser_{path.parent.name}"
+        )
+        auxiliary_sources.append(("denoiser", _variant_from_report(path, {}, fallback=fallback_variant), path_text))
+    auxiliary_sources.extend(
+        (
+            ("hlt_baseline", TARGET_DENOISING_VARIANT_HLT_PART_BASELINE, config.hlt_baseline_report),
+            ("offline_baseline", "offline_part_reference", config.offline_baseline_report),
+        )
+    )
+    for source_kind, variant, path_text in auxiliary_sources:
         if not path_text:
             continue
         path = Path(path_text)
@@ -406,6 +434,8 @@ def write_target_denoising_report(config: TargetDenoisingReportConfig | Mapping[
         if not isinstance(report, Mapping):
             problems.append(f"missing {source_kind} report: {path}")
             continue
+        if source_kind == "denoiser":
+            variant = _variant_from_report(path, report, fallback=variant)
         source_rows = _source_rows(source_kind=source_kind, variant=variant, report=report, path=str(path))
         if source_kind == "denoiser":
             denoising_rows.extend(source_rows)

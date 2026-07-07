@@ -392,6 +392,8 @@ def _checkpoint_payload(
     epoch: int,
     config: TargetDenoisingPretrainConfig,
     metrics: Mapping[str, Any],
+    train_dataset: TargetDenoisingPairedDataset,
+    val_dataset: TargetDenoisingPairedDataset,
 ) -> dict[str, Any]:
     return {
         "experiment_step": TARGET_DENOISING_STEP3,
@@ -402,6 +404,8 @@ def _checkpoint_payload(
         "config": asdict(config),
         "model_config": asdict(config.model_config()),
         "metrics": dict(metrics),
+        "train_dataset": train_dataset.to_metadata(),
+        "model_val_dataset": val_dataset.to_metadata(),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
     }
@@ -512,6 +516,8 @@ def train_target_conditioned_denoiser(
                     epoch=epoch,
                     config=config,
                     metrics=val_metrics,
+                    train_dataset=train_dataset,
+                    val_dataset=val_dataset,
                 ),
                 best_path,
             )
@@ -526,6 +532,8 @@ def train_target_conditioned_denoiser(
                 epoch=epoch,
                 config=config,
                 metrics=val_metrics,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
             ),
             last_path,
         )

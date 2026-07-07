@@ -56,6 +56,7 @@ def _view(tokens, mask, *, split, view, manifest_hash="manifest-step3", labels=N
                 "hlt_degradation_strength": 1.0,
                 "hlt_params": fixed_hlt_params_dict(params),
                 "hlt_content_hash": f"fake-hlt-{split}",
+                "target_denoising_order_preserving": True,
             }
         )
     return JetView(
@@ -172,6 +173,15 @@ class TargetDenoisingPartStep3TrainTests(unittest.TestCase):
 
             saved_report = json.loads((output_dir / "run_report.json").read_text(encoding="utf-8"))
             self.assertEqual(saved_report["checkpoint"], str(output_dir / "best_denoiser_model_val.pt"))
+            torch = require_torch()
+            checkpoint_payload = torch.load(
+                output_dir / "best_denoiser_model_val.pt",
+                map_location="cpu",
+                weights_only=False,
+            )
+            self.assertEqual(checkpoint_payload["train_dataset"]["split"], "model_train")
+            self.assertEqual(checkpoint_payload["model_val_dataset"]["split"], "model_val")
+            self.assertEqual(checkpoint_payload["train_dataset"]["source_manifest_hash"], "manifest-step3")
             curves = json.loads((output_dir / "training_curves.json").read_text(encoding="utf-8"))
             self.assertEqual(len(curves["epochs"]), 2)
             model_val = json.loads((output_dir / "model_val_diagnostics.json").read_text(encoding="utf-8"))

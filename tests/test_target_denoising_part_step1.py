@@ -32,7 +32,16 @@ def _tokens(n_jets=3, n_particles=5):
     return tokens
 
 
-def _view(tokens, mask, *, split="model_train", view="offline", manifest_hash="manifest-a", labels=None):
+def _view(
+    tokens,
+    mask,
+    *,
+    split="model_train",
+    view="offline",
+    manifest_hash="manifest-a",
+    labels=None,
+    order_preserving=True,
+):
     labels = np.arange(tokens.shape[0], dtype=np.int64) % 10 if labels is None else np.asarray(labels, dtype=np.int64)
     jet_ids = [
         JetIdentity(file=f"class_{int(label)}.root", entry=1000 + index, label=int(label))
@@ -53,6 +62,8 @@ def _view(tokens, mask, *, split="model_train", view="offline", manifest_hash="m
                 "hlt_content_hash": "fake-content-hash",
             }
         )
+        if order_preserving:
+            metadata["target_denoising_order_preserving"] = True
     return JetView(
         tokens=tokens.astype(np.float32),
         mask=mask.astype(bool),
@@ -136,6 +147,17 @@ class TargetDenoisingPartStep1Tests(unittest.TestCase):
         hlt_view.mask[0, 1] = False
         offline_view.mask[0, 1] = True
         with self.assertRaisesRegex(ValueError, "aligned_direct target denoising needs per-particle HLT provenance"):
+            TargetDenoisingPairedDataset(
+                hlt_view,
+                offline_view,
+                config=self.make_config(),
+                expected_manifest_hash="manifest-a",
+            )
+
+    def test_aligned_direct_rejects_uncertified_same_mask_hlt_without_provenance(self):
+        hlt_view, offline_view = self.make_views()
+        hlt_view.metadata.pop("target_denoising_order_preserving", None)
+        with self.assertRaisesRegex(ValueError, "requires a cache-level guarantee"):
             TargetDenoisingPairedDataset(
                 hlt_view,
                 offline_view,

@@ -332,7 +332,7 @@ IFS=$'\n\t'
 : "${DUALVIEW_PART_REPORT_COMPARISON_SPLIT:=final_test}"
 : "${DUALVIEW_PART_REPORT_REQUIRE_REAL_BEATS_SHUFFLED:=1}"
 : "${PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
-: "${PD10_ROOT:=${OUTPUT_ROOT}/privileged_distill_10class_5m}"
+: "${PD10_ROOT:=${OUTPUT_ROOT}/privileged_distill_10class_5m_hlt0p4_run1}"
 : "${PD10_SPLIT_MANIFEST_DIR:=${PD10_ROOT}/split_manifest}"
 : "${PD10_MANIFEST_PATH:=${PD10_SPLIT_MANIFEST_DIR}/split_manifest.json.gz}"
 : "${PD10_HLT_CACHE_DIR:=${PD10_ROOT}/hlt_cache}"
@@ -484,6 +484,10 @@ export PD10_HLT_DEGRADATION_STRENGTH
 : "${PD10_HLT_SDV_CONTROL_VARIANTS:=hlt2_only_part_s0p20 tta_hlt_part_hlt_plus_hlt2_s0p20}"
 : "${PD10_HLT_SDV_PRIMARY_STRENGTH:=0.20}"
 : "${PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT:=${PD10_TEACHERS_DIR}/hlt_part_teacher_10class/best_model_val.pt}"
+: "${PD10_HLT_SDV_SUBMIT_ANCHORS:=1}"
+: "${PD10_HLT_SDV_RETRAIN_ANCHORS:=0}"
+: "${PD10_HLT_SDV_WARM_CE_ANCHOR_SPEC:=warm_start|none|full_logits|2.0|0.5|3|pd10_student_warm_start_ce_only}"
+: "${PD10_HLT_SDV_WARM_DUAL_KD_ANCHOR_SPEC:=warm_start|dual_view|full_logits|2.0|0.5|3|pd10_student_warm_start_dual_view_full_logits_t2_a0p5}"
 : "${PD10_HLT_SDV_HLT2_SEED:=710053}"
 : "${PD10_HLT_SDV_HLT2_SHOW_PROGRESS:=0}"
 : "${PD10_HLT_SDV_SEED:=8801}"
@@ -538,7 +542,7 @@ export PD10_HLT_DEGRADATION_STRENGTH
 : "${PD10_HLT_TTA_MAX_FINAL_TEST_BATCHES:=}"
 : "${PD10_HLT_SDV_REPORT_SKIP_PREDICTION_METRICS:=0}"
 : "${PD10_HLT_SDV_REPORT_ALLOW_MISSING_SDV_VARIANTS:=0}"
-: "${PD10_HLT_SDV_REPORT_REQUIRE_ANCHORS:=0}"
+: "${PD10_HLT_SDV_REPORT_REQUIRE_ANCHORS:=1}"
 : "${PDV3_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
 : "${PDV3_ROOT:=${OUTPUT_ROOT}/privileged_distill_v3_av10_adapter_hlt0p2_5m}"
 : "${PDV3_INPUTS_DIR:=${PDV3_ROOT}/inputs}"
@@ -1804,6 +1808,10 @@ keys = [
     "PD10_HLT_SDV_CONTROL_VARIANTS",
     "PD10_HLT_SDV_PRIMARY_STRENGTH",
     "PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT",
+    "PD10_HLT_SDV_SUBMIT_ANCHORS",
+    "PD10_HLT_SDV_RETRAIN_ANCHORS",
+    "PD10_HLT_SDV_WARM_CE_ANCHOR_SPEC",
+    "PD10_HLT_SDV_WARM_DUAL_KD_ANCHOR_SPEC",
     "PD10_HLT_SDV_HLT2_SEED",
     "PD10_HLT_SDV_HLT2_SHOW_PROGRESS",
     "PD10_HLT_SDV_SEED",

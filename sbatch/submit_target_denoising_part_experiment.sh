@@ -175,6 +175,17 @@ archive_incomplete_output() {
   mv "${output_dir}" "${archived}"
 }
 
+archive_existing_output() {
+  local output_dir="$1"
+  local reason="$2"
+  if fresh_is_dry_run || [[ ! -d "${output_dir}" ]]; then
+    return 0
+  fi
+  local archived="${output_dir}_${reason}_$(date +%Y%m%d_%H%M%S)"
+  echo "found existing target-denoising output for ${reason}; moving ${output_dir} to ${archived}" >&2
+  mv "${output_dir}" "${archived}"
+}
+
 denoiser_type_for_variant() {
   local variant="$1"
   case "${variant}" in
@@ -268,6 +279,14 @@ for variant in "${variants[@]}"; do
     denoiser_types+=("${dtype}")
   fi
 done
+denoiser_report_paths=()
+for denoiser_type in "${denoiser_types[@]:-}"; do
+  denoiser_report_paths+=("$(denoiser_dir_for_type "${denoiser_type}")/run_report.json")
+done
+if [[ "${#denoiser_report_paths[@]}" -gt 0 ]]; then
+  TARGET_DENOISING_PART_DENOISER_REPORTS="$(fresh_join_by_space "${denoiser_report_paths[@]}")"
+  export TARGET_DENOISING_PART_DENOISER_REPORTS
+fi
 
 denoiser_job_ids=()
 if fresh_bool_enabled "${TARGET_DENOISING_PART_SUBMIT_DENOISER}"; then
@@ -326,14 +345,22 @@ if fresh_bool_enabled "${TARGET_DENOISING_PART_SUBMIT_TAGGERS}"; then
   done
 fi
 
-report_dependency="$(join_nonempty_by_colon "${tagger_job_ids[@]:-}")"
+report_dependency="$(join_nonempty_by_colon "${tagger_job_ids[@]:-}" "${denoiser_job_ids[@]:-}")"
 report_jid=""
 if fresh_bool_enabled "${TARGET_DENOISING_PART_SUBMIT_REPORT}"; then
-  if fresh_bool_enabled "${SKIP_EXISTING}" && ! fresh_is_dry_run && report_output_complete "${TARGET_DENOISING_PART_REPORT_DIR}"; then
+  report_inputs_submitted=0
+  if [[ "${#tagger_job_ids[@]}" -gt 0 ]] || [[ "${#denoiser_job_ids[@]}" -gt 0 ]]; then
+    report_inputs_submitted=1
+  fi
+  if fresh_bool_enabled "${SKIP_EXISTING}" && [[ "${report_inputs_submitted}" -eq 0 ]] && ! fresh_is_dry_run && report_output_complete "${TARGET_DENOISING_PART_REPORT_DIR}"; then
     echo "skipped target_denoising_report; found complete output: ${TARGET_DENOISING_PART_REPORT_DIR}" >&2
   else
     if fresh_bool_enabled "${SKIP_EXISTING}"; then
-      archive_incomplete_output "${TARGET_DENOISING_PART_REPORT_DIR}" report_output_complete
+      if [[ "${report_inputs_submitted}" -eq 1 ]]; then
+        archive_existing_output "${TARGET_DENOISING_PART_REPORT_DIR}" stale_report
+      else
+        archive_incomplete_output "${TARGET_DENOISING_PART_REPORT_DIR}" report_output_complete
+      fi
     fi
     mapfile -t report_args < <(afterok_args "${report_dependency}" "${SCRIPT_DIR}/run_write_target_denoising_part_report.sh")
     report_jid="$(submit_job target_denoising_report "${report_args[@]}")"
@@ -351,6 +378,7 @@ target_denoising_part_submission:
     final_report: ${report_jid:-skipped_or_existing}
   expected_jobs:
     denoiser_types: $(fresh_join_by_space "${denoiser_types[@]:-}")
+    denoiser_reports: ${TARGET_DENOISING_PART_DENOISER_REPORTS:-}
     tagger_variants: ${TARGET_DENOISING_PART_VARIANTS}
     taggers_submitted: ${#tagger_job_ids[@]}
     taggers_skipped_existing: ${tagger_skip_count}
