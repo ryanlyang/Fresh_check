@@ -12,6 +12,7 @@ from teacher_logit_reco.hlt_multiview_source_fusion import (
     HLT_MV_FINAL_REPORT_METRIC_TABLE_CSV,
     HLT_MV_FINAL_REPORT_RUN_JSON,
     HLT_MV_FINAL_REPORT_SUMMARY_JSON,
+    default_hlt_mv_experiment_config,
     default_hlt_mv_experiment_layout,
     write_hlt_mv_final_report,
 )
@@ -44,6 +45,20 @@ def _minimal_model_report(*, val_acc: float, test_acc: float) -> dict:
     }
 
 
+def _minimal_fusion_report() -> dict:
+    return {
+        "ok": True,
+        "methods": {
+            "uniform_logit_average": {
+                "metrics": {
+                    "model_val": {"accuracy": 0.75, "cross_entropy": 0.65},
+                    "final_test": {"accuracy": 0.74, "cross_entropy": 0.66},
+                }
+            }
+        },
+    }
+
+
 class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
     def test_final_report_writer_aggregates_available_rows_and_marks_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -54,7 +69,7 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
             )
             _write_json(
                 layout.source_model_dir("hlt_part_seed8801") / "run_report.json",
-                _minimal_model_report(val_acc=0.71, test_acc=0.70),
+                _minimal_model_report(val_acc=0.71, test_acc=0.80),
             )
             _write_json(
                 layout.source_model_dir("hlt2_part_s0p35_seed8831") / "run_report.json",
@@ -74,13 +89,78 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
             self.assertTrue(report["ok"])
             self.assertEqual(report["contract"], HLT_MV_FINAL_REPORT_CONTRACT)
             self.assertGreater(len(report["missing_artifacts"]), 0)
+            self.assertGreater(len(report["optional_missing_artifacts"]), 0)
             self.assertGreaterEqual(report["n_rows"], 2)
+            self.assertFalse(report["triview_required"])
+            self.assertEqual(report["best_by_model_val"]["model_name"], "hlt2_part_s0p35_seed8831")
             self.assertEqual(report["best_overall"]["model_name"], "hlt2_part_s0p35_seed8831")
+            self.assertEqual(report["best_overall_ranking"], "model_val_cross_entropy_then_model_val_accuracy")
+            self.assertEqual(report["posthoc_best_by_final_test"]["model_name"], "hlt_part_seed8801")
             self.assertTrue((layout.final_report_dir / HLT_MV_FINAL_REPORT_JSON).exists())
             self.assertTrue((layout.final_report_dir / HLT_MV_FINAL_REPORT_SUMMARY_JSON).exists())
             self.assertTrue((layout.final_report_dir / HLT_MV_FINAL_REPORT_RUN_JSON).exists())
             self.assertTrue((layout.final_report_dir / HLT_MV_FINAL_REPORT_METRIC_TABLE_CSV).exists())
             self.assertTrue((layout.final_report_dir / HLT_MV_FINAL_REPORT_MD).exists())
+
+    def test_final_report_writer_does_not_require_triview_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "checkpoints"
+            layout = default_hlt_mv_experiment_layout(
+                output_root=output_root,
+                pdv3_experiment_name=HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME,
+            )
+            cfg = default_hlt_mv_experiment_config()
+            for index, name in enumerate(cfg.source_model_names):
+                _write_json(
+                    layout.source_model_dir(name) / "run_report.json",
+                    _minimal_model_report(val_acc=0.70 + 0.001 * index, test_acc=0.69 + 0.001 * index),
+                )
+            for index, name in enumerate(cfg.random_hlt_source_names):
+                _write_json(
+                    layout.random_hlt_source_dir(name) / "run_report.json",
+                    _minimal_model_report(val_acc=0.68 + 0.001 * index, test_acc=0.67 + 0.001 * index),
+                )
+            for name in cfg.pretrained_dualview_names:
+                _write_json(
+                    layout.pretrained_dualview_model_dir(name) / "hlt_mv_pretrained_dualview_report.json",
+                    _minimal_model_report(val_acc=0.76, test_acc=0.75),
+                )
+            for name in cfg.scratch_dualview_names:
+                _write_json(
+                    layout.scratch_dualview_model_dir(name) / "hlt_mv_scratch_dualview_report.json",
+                    _minimal_model_report(val_acc=0.74, test_acc=0.73),
+                )
+            for name in cfg.control_names:
+                _write_json(
+                    layout.control_dir(name) / "run_report.json",
+                    _minimal_model_report(val_acc=0.69, test_acc=0.68),
+                )
+            for name in cfg.logit_fusion_names:
+                _write_json(layout.logit_fusion_dir(name) / "run_report.json", _minimal_fusion_report())
+
+            report = write_hlt_mv_final_report(
+                HLTMVFinalReportConfig(
+                    output_root=str(output_root),
+                    pdv3_experiment_name=HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME,
+                    output_dir=str(layout.final_report_dir),
+                    overwrite=True,
+                )
+            )
+
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["missing_artifacts"], [])
+            self.assertEqual(len(report["optional_missing_artifacts"]), 1)
+            self.assertIn("tri_hlt_hlt2_s0p35_s1p00", report["optional_missing_artifacts"][0])
+
+            with self.assertRaises(FileNotFoundError):
+                write_hlt_mv_final_report(
+                    HLTMVFinalReportConfig(
+                        output_root=str(output_root),
+                        pdv3_experiment_name=HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME,
+                        output_dir=str(layout.root / "strict_triview_report"),
+                        require_triview=True,
+                    )
+                )
 
     def test_final_report_writer_is_strict_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +184,7 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("#SBATCH --job-name=hlt_mv_report", text)
         self.assertIn("scripts/write_hlt_mv_final_report.py", text)
         self.assertIn("HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0", text)
+        self.assertIn("HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0", text)
         self.assertIn("hlt_part_seed8801", text)
         self.assertIn("hlt2_part_s0p10_seed8811", text)
         self.assertIn("hlt_part_seed9104", text)
@@ -114,6 +195,8 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("sdv_hlt_hlt_same_view", text)
         self.assertIn("tta_hlt_part_hlt_plus_hlt2_s1p00", text)
         self.assertIn("tri_hlt_hlt2_s0p35_s1p00/hlt_mv_triview_report.json", text)
+        self.assertIn('fresh_bool_enabled "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"', text)
+        self.assertIn("--require-triview", text)
         self.assertIn("source_5view hlt_random_4seed pretrained_dualview_4model scratch_dualview_4model", text)
         self.assertIn('fresh_require_file "${HLT_MV_FINAL_REPORT_DIR}/metric_table.csv"', text)
         self.assertNotIn("build_pd10_hlt2_cache.py", text)
@@ -147,13 +230,18 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("hlt_random_4seed", text)
         self.assertIn("pretrained_dualview_4model", text)
         self.assertIn("scratch_dualview_4model", text)
+        self.assertIn("HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0", text)
         self.assertIn("hlt2_s0p10_source_job_id", text)
         self.assertIn('sdv_hlt_hlt2_s0p10) hlt2_source_job_id="${hlt2_s0p10_source_job_id}"', text)
         self.assertIn('variant_dep="$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_source_job_id}")"', text)
         self.assertIn('"${variant_dep}"', text)
         self.assertIn('"${base_dep}" \\', text)
         self.assertIn('"${canonical_hlt_source_job_id}" "${hlt2_s0p35_source_job_id}" "${hlt2_s1p00_source_job_id}"', text)
+        self.assertIn("report_triview_dep=\"\"", text)
+        self.assertIn('if fresh_bool_enabled "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"; then', text)
+        self.assertIn('report_triview_dep="${triview_job_id}"', text)
         self.assertIn("final_dep=\"$(join_nonempty_by_colon", text)
+        self.assertIn('"${report_triview_dep}")"', text)
         self.assertIn("CONFIRM_FINAL_TEST", text)
         self.assertNotIn("run_pd10_build_hlt2_cache.sh", text)
         self.assertNotIn("build_pd10_hlt2_cache.py", text)

@@ -329,18 +329,29 @@ def run_epoch(
                 )
                 loss = criterion(logits, batch["labels"])
 
+            if not bool(torch.isfinite(logits).all()):
+                mode = "train" if is_train else "eval"
+                raise FloatingPointError(f"HLT epoch {mode} batch {batch_index} produced non-finite logits")
+            if not bool(torch.isfinite(loss).all()):
+                mode = "train" if is_train else "eval"
+                raise FloatingPointError(f"HLT epoch {mode} batch {batch_index} produced non-finite loss")
+
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
                     if grad_clip_norm and grad_clip_norm > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        if not bool(torch.isfinite(grad_norm).all()):
+                            raise FloatingPointError(f"HLT epoch train batch {batch_index} produced non-finite gradient norm")
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
                     if grad_clip_norm and grad_clip_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        if not bool(torch.isfinite(grad_norm).all()):
+                            raise FloatingPointError(f"HLT epoch train batch {batch_index} produced non-finite gradient norm")
                     optimizer.step()
 
             batch_size = int(batch["labels"].numel())

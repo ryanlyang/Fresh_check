@@ -55,6 +55,22 @@ HLT_SDV_HLT2_ONLY_MODEL_KIND = "hlt2_only_part"
 HLT_SDV_TTA_MODEL_KIND = "hlt_part_hlt_plus_hlt2_logit_average"
 
 
+def _require_finite_logits_array(logits: np.ndarray, *, context: str) -> None:
+    finite = np.isfinite(logits)
+    if bool(finite.all()):
+        return
+    bad_rows = np.where(~np.all(finite, axis=1))[0]
+    first_bad = int(bad_rows[0]) if bad_rows.size else None
+    finite_values = logits[finite]
+    finite_min = float(np.min(finite_values)) if finite_values.size else None
+    finite_max = float(np.max(finite_values)) if finite_values.size else None
+    raise FloatingPointError(
+        f"{context} produced non-finite logits: "
+        f"shape={tuple(logits.shape)}, first_bad_row={first_bad}, "
+        f"finite_min={finite_min}, finite_max={finite_max}"
+    )
+
+
 @dataclass(frozen=True)
 class HLT2OnlyTrainConfig:
     """Training/eval config for the HLT2-only ParT control."""
@@ -672,6 +688,7 @@ def _collect_tta_logits(
     num_workers: int,
     device,
     seed: int,
+    variant_name: str,
     max_batches: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[Any], dict[str, Any], dict[str, Any]]:
     torch = require_torch()
@@ -717,6 +734,9 @@ def _collect_tta_logits(
     hlt_logits_np = np.concatenate(hlt_chunks, axis=0).astype(np.float32)
     hlt2_logits_np = np.concatenate(hlt2_chunks, axis=0).astype(np.float32)
     labels = np.concatenate(labels_chunks, axis=0).astype(np.int64)
+    _require_finite_logits_array(logits, context=f"{variant_name}:averaged_tta")
+    _require_finite_logits_array(hlt_logits_np, context=f"{variant_name}:hlt_component")
+    _require_finite_logits_array(hlt2_logits_np, context=f"{variant_name}:hlt2_component")
     metrics = pd10_prediction_metrics_from_logits(logits, labels)
     component_metrics = {
         "hlt_only_component": pd10_prediction_metrics_from_logits(hlt_logits_np, labels),
@@ -800,6 +820,7 @@ def _save_tta_predictions(
         num_workers=config.num_workers,
         device=device,
         seed=seed,
+        variant_name=config.variant_name,
         max_batches=max_batches,
     )
     if validation_thresholds_by_class is not None or validation_binary_thresholds is not None:

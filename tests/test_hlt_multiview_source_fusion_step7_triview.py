@@ -75,6 +75,7 @@ class HLTMultiviewSourceFusionStep7TriViewTest(unittest.TestCase):
             self.layout.source_model_dir("hlt2_part_s1p00_seed8841") / "best_model_val.pt",
         )
         self.assertEqual(config.head_warmup_epochs, 1)
+        self.assertEqual(config.head_warmup_lr, 3.0e-4)
         self.assertFalse(config.amp)
         self.assertEqual(config.max_train_jets, 5_000_000)
         self.assertEqual(config.max_val_jets, 1_000_000)
@@ -133,6 +134,7 @@ class HLTMultiviewSourceFusionStep7TriViewTest(unittest.TestCase):
         self.assertIn("--hlt-checkpoint", text)
         self.assertIn("--hlt2-s0p35-checkpoint", text)
         self.assertIn("--hlt2-s1p00-checkpoint", text)
+        self.assertIn("HLT_MV_TRIVIEW_HEAD_WARMUP_LR:=0.0003", text)
         self.assertIn("hlt_mv_triview_report.json", text)
         self.assertNotIn("build_pd10_hlt2_cache.py", text)
         self.assertNotIn("build_fixed_hlt_cache.py", text)

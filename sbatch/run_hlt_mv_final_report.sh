@@ -30,6 +30,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_TRIVIEW_DIR:=${HLT_MV_ROOT}/triview}"
 : "${HLT_MV_FINAL_REPORT_DIR:=${HLT_MV_ROOT}/final_report}"
 : "${HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0}"
+: "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0}"
 
 fresh_setup "$@"
 if ! fresh_bool_enabled "${HLT_MV_FINAL_REPORT_ALLOW_MISSING}"; then
@@ -58,7 +59,9 @@ if ! fresh_bool_enabled "${HLT_MV_FINAL_REPORT_ALLOW_MISSING}"; then
     tta_hlt_part_hlt_plus_hlt2_s1p00; do
     fresh_require_file "${HLT_MV_CONTROLS_DIR}/${control_name}/run_report.json"
   done
-  fresh_require_file "${HLT_MV_TRIVIEW_DIR}/tri_hlt_hlt2_s0p35_s1p00/hlt_mv_triview_report.json"
+  if fresh_bool_enabled "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"; then
+    fresh_require_file "${HLT_MV_TRIVIEW_DIR}/tri_hlt_hlt2_s0p35_s1p00/hlt_mv_triview_report.json"
+  fi
   for fusion_name in source_5view hlt_random_4seed pretrained_dualview_4model scratch_dualview_4model; do
     fresh_require_file "${HLT_MV_LOGIT_FUSIONS_DIR}/${fusion_name}/run_report.json"
   done
@@ -72,6 +75,7 @@ cmd=(
   --output-dir "${HLT_MV_FINAL_REPORT_DIR}"
 )
 fresh_append_flag_if_enabled cmd --allow-missing "${HLT_MV_FINAL_REPORT_ALLOW_MISSING}"
+fresh_append_flag_if_enabled cmd --require-triview "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 
 fresh_write_run_config "${HLT_MV_FINAL_REPORT_DIR}" "hlt_mv_final_report" "${cmd[@]}"

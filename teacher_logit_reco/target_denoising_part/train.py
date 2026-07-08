@@ -330,6 +330,28 @@ def _tensor_diag_to_float(row: Mapping[str, Any]) -> dict[str, float]:
     return result
 
 
+def _clip_gradients_or_skip(model: Any, max_norm: float) -> tuple[bool, float]:
+    """Clip trainable gradients and report whether they are finite."""
+
+    torch = require_torch()
+    params = [parameter for parameter in model.parameters() if parameter.requires_grad and parameter.grad is not None]
+    if not params:
+        return True, 0.0
+    if float(max_norm) > 0.0:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            params,
+            float(max_norm),
+            error_if_nonfinite=False,
+        )
+    else:
+        grad_norm = torch.linalg.vector_norm(
+            torch.stack([torch.linalg.vector_norm(parameter.grad.detach(), ord=2) for parameter in params]),
+            ord=2,
+        )
+    finite = bool(torch.isfinite(grad_norm).detach().cpu().item())
+    return finite, float(grad_norm.detach().cpu().item()) if finite else float("nan")
+
+
 def run_target_denoising_epoch(
     model: Any,
     loader: Any,
@@ -346,6 +368,8 @@ def run_target_denoising_epoch(
     is_train = optimizer is not None
     model.train(is_train)
     rows: list[dict[str, float]] = []
+    skipped_nonfinite_batches = 0
+    skipped_nonfinite_jets = 0
     context = torch.enable_grad() if is_train else torch.no_grad()
     with context:
         for batch_index, batch in enumerate(loader):
@@ -367,29 +391,38 @@ def run_target_denoising_epoch(
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
+                    gradients_ok = True
+                    grad_norm = 0.0
                     if float(config.grad_clip_norm) > 0.0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(),
-                            float(config.grad_clip_norm),
-                            error_if_nonfinite=True,
-                        )
+                    gradients_ok, grad_norm = _clip_gradients_or_skip(model, float(config.grad_clip_norm))
+                    if not gradients_ok:
+                        skipped_nonfinite_batches += 1
+                        skipped_nonfinite_jets += int(batch["hlt_tokens"].shape[0])
+                        optimizer.zero_grad(set_to_none=True)
+                        scaler.update()
+                        continue
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
-                    if float(config.grad_clip_norm) > 0.0:
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(),
-                            float(config.grad_clip_norm),
-                            error_if_nonfinite=True,
-                        )
+                    gradients_ok, grad_norm = _clip_gradients_or_skip(model, float(config.grad_clip_norm))
+                    if not gradients_ok:
+                        skipped_nonfinite_batches += 1
+                        skipped_nonfinite_jets += int(batch["hlt_tokens"].shape[0])
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                     optimizer.step()
             row = _tensor_diag_to_float(diagnostics)
             row["n_jets"] = float(batch["hlt_tokens"].shape[0])
             row["target_shuffle_control"] = float(bool(config.shuffle_target_residuals))
+            if is_train:
+                row["grad_norm"] = float(grad_norm)
             rows.append(row)
-    return _summarize_rows(rows)
+    summary = _summarize_rows(rows)
+    summary["skipped_nonfinite_batches"] = float(skipped_nonfinite_batches)
+    summary["skipped_nonfinite_jets"] = float(skipped_nonfinite_jets)
+    return summary
 
 
 def _checkpoint_payload(

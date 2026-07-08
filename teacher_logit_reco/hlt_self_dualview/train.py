@@ -65,7 +65,7 @@ HLT_SDV_DEFAULT_BATCH_SIZE = 128
 HLT_SDV_DEFAULT_EVAL_BATCH_SIZE = 128
 HLT_SDV_DEFAULT_EPOCHS = 10
 HLT_SDV_DEFAULT_HEAD_WARMUP_EPOCHS = 1
-HLT_SDV_DEFAULT_HEAD_WARMUP_LR = 1.0e-3
+HLT_SDV_DEFAULT_HEAD_WARMUP_LR = 3.0e-4
 HLT_SDV_DEFAULT_BRANCH_LR = 3.0e-5
 HLT_SDV_DEFAULT_HEAD_LR = 3.0e-4
 HLT_SDV_DEFAULT_WEIGHT_DECAY = 1.0e-4
@@ -376,13 +376,21 @@ def run_hlt_sdv_epoch(
                     scaler.scale(loss).backward()
                     if float(grad_clip_norm) > 0.0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        if not bool(torch.isfinite(grad_norm).all()):
+                            raise FloatingPointError(
+                                f"HLT-SDV train batch {batch_index} produced non-finite gradient norm"
+                            )
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
                     if float(grad_clip_norm) > 0.0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        if not bool(torch.isfinite(grad_norm).all()):
+                            raise FloatingPointError(
+                                f"HLT-SDV train batch {batch_index} produced non-finite gradient norm"
+                            )
                     optimizer.step()
             labels = batch["labels"]
             batch_size = int(labels.numel())

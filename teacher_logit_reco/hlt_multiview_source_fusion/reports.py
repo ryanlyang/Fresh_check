@@ -51,6 +51,7 @@ class HLTMVFinalReportConfig:
     output_root: str = "checkpoints"
     pdv3_experiment_name: str = HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME
     allow_missing: bool = False
+    require_triview: bool = False
     overwrite: bool = False
 
 
@@ -173,12 +174,26 @@ def _add_model_rows(
         rows.append(_model_row(family=family, model_name=name, report_path=report_path, report=report))
 
 
-def _best_row(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+def _best_row_by_model_val(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     scored = [
         row
         for row in rows
-        if row.get("final_test_accuracy") is not None or row.get("model_val_accuracy") is not None
+        if row.get("model_val_cross_entropy") is not None or row.get("model_val_accuracy") is not None
     ]
+    if not scored:
+        return None
+    return min(
+        scored,
+        key=lambda row: (
+            float(row.get("model_val_cross_entropy") if row.get("model_val_cross_entropy") is not None else float("inf")),
+            -float(row.get("model_val_accuracy") if row.get("model_val_accuracy") is not None else -1.0),
+            -float(row.get("final_test_accuracy") if row.get("final_test_accuracy") is not None else -1.0),
+        ),
+    )
+
+
+def _posthoc_best_row_by_final_test(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    scored = [row for row in rows if row.get("final_test_accuracy") is not None]
     if not scored:
         return None
     return max(
@@ -222,8 +237,9 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         "",
         f"- ok: `{report.get('ok')}`",
         f"- pdv3_experiment: `{report.get('pdv3_experiment_name')}`",
-        f"- best_model: `{(report.get('best_overall') or {}).get('model_name')}`",
-        f"- best_family: `{(report.get('best_overall') or {}).get('family')}`",
+        f"- best_by_model_val: `{(report.get('best_by_model_val') or {}).get('model_name')}`",
+        f"- posthoc_best_by_final_test: `{(report.get('posthoc_best_by_final_test') or {}).get('model_name')}`",
+        f"- triview_required: `{report.get('triview_required')}`",
         "",
         "| family | model | method | val acc | test acc |",
         "|---|---|---:|---:|---:|",
@@ -257,6 +273,7 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
     )
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
+    optional_missing: list[str] = []
 
     _add_model_rows(
         rows,
@@ -300,15 +317,21 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
         path_for_name=layout.control_dir,
         allow_missing=config.allow_missing,
     )
+    triview_missing: list[str] = []
     _add_model_rows(
         rows,
-        missing,
+        triview_missing,
         family="triview_particle_fusion",
         names=(HLT_MV_TRIVIEW_MODEL_NAME,),
         path_for_name=layout.triview_model_dir,
         report_filename=HLT_MV_TRIVIEW_REPORT,
-        allow_missing=config.allow_missing,
+        allow_missing=bool(config.allow_missing or not config.require_triview),
     )
+    if triview_missing:
+        if bool(config.require_triview):
+            missing.extend(triview_missing)
+        else:
+            optional_missing.extend(triview_missing)
     for fusion_name in (
         HLT_MV_FUSION_SOURCE_5VIEW,
         HLT_MV_FUSION_HLT_RANDOM_4SEED,
@@ -329,7 +352,8 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
             )
         )
 
-    best = _best_row(rows)
+    best_by_model_val = _best_row_by_model_val(rows)
+    posthoc_best_by_final_test = _posthoc_best_row_by_final_test(rows)
     report = {
         "ok": not missing or bool(config.allow_missing),
         "contract": HLT_MV_FINAL_REPORT_CONTRACT,
@@ -337,10 +361,16 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
         "experiment_step": HLT_MV_FINAL_REPORT_EXPERIMENT_STEP,
         "pdv3_experiment_name": config.pdv3_experiment_name,
         "allow_missing": bool(config.allow_missing),
+        "triview_required": bool(config.require_triview),
         "missing_artifacts": missing,
+        "optional_missing_artifacts": optional_missing,
         "n_rows": int(len(rows)),
         "metric_rows": rows,
-        "best_overall": None if best is None else dict(best),
+        "best_by_model_val": None if best_by_model_val is None else dict(best_by_model_val),
+        "best_overall": None if best_by_model_val is None else dict(best_by_model_val),
+        "best_overall_ranking": "model_val_cross_entropy_then_model_val_accuracy",
+        "posthoc_best_by_final_test": None if posthoc_best_by_final_test is None else dict(posthoc_best_by_final_test),
+        "posthoc_best_by_final_test_ranking": "final_test_accuracy_then_model_val_accuracy",
         "outputs": {
             "report_json": str(output_dir / HLT_MV_FINAL_REPORT_JSON),
             "summary_json": str(output_dir / HLT_MV_FINAL_REPORT_SUMMARY_JSON),
@@ -355,7 +385,12 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
         "pdv3_experiment_name": config.pdv3_experiment_name,
         "n_rows": int(len(rows)),
         "missing_artifacts": missing,
+        "optional_missing_artifacts": optional_missing,
+        "triview_required": bool(config.require_triview),
+        "best_by_model_val": report["best_by_model_val"],
         "best_overall": report["best_overall"],
+        "best_overall_ranking": report["best_overall_ranking"],
+        "posthoc_best_by_final_test": report["posthoc_best_by_final_test"],
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(output_dir / HLT_MV_FINAL_REPORT_JSON, report)

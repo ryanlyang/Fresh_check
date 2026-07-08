@@ -2,6 +2,7 @@ import json
 import math
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,8 @@ from teacher_logit_reco.target_denoising_part import (
     TargetConditionedDenoiserConfig,
     TargetConditionedPairwiseDenoiser,
     collate_target_denoising_batch,
+    make_target_denoising_loader,
+    run_target_denoising_epoch,
     target_denoising_loss,
     train_target_conditioned_denoiser,
 )
@@ -186,6 +189,42 @@ class TargetDenoisingPartStep3TrainTests(unittest.TestCase):
             self.assertEqual(len(curves["epochs"]), 2)
             model_val = json.loads((output_dir / "model_val_diagnostics.json").read_text(encoding="utf-8"))
             self.assertEqual(model_val["split"], "model_val")
+
+    def test_train_epoch_skips_nonfinite_gradient_norm(self):
+        torch = require_torch()
+        dataset = _dataset("model_train")
+        loader = make_target_denoising_loader(dataset, batch_size=2, shuffle=False, num_workers=0, seed=12)
+        model = TargetConditionedPairwiseDenoiser(
+            TargetConditionedDenoiserConfig(embed_dim=16, num_heads=4, pair_hidden_dim=8, head_hidden_dim=16)
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+        config = TargetDenoisingPretrainConfig(
+            output_dir="unused",
+            manifest_path="unused.json.gz",
+            hlt_cache_dir="unused_cache",
+            device="cpu",
+            amp=False,
+            grad_clip_norm=1.0,
+            embed_dim=16,
+            num_heads=4,
+            pair_hidden_dim=8,
+            head_hidden_dim=16,
+        )
+        with mock.patch(
+            "torch.nn.utils.clip_grad_norm_",
+            return_value=torch.tensor(float("nan")),
+        ):
+            metrics = run_target_denoising_epoch(
+                model,
+                loader,
+                config,
+                device=torch.device("cpu"),
+                optimizer=optimizer,
+                max_batches=1,
+            )
+
+        self.assertEqual(metrics["skipped_nonfinite_batches"], 1.0)
+        self.assertEqual(metrics["skipped_nonfinite_jets"], 2.0)
 
     def test_shuffled_target_control_is_recorded_in_checkpoint_config(self):
         require_torch()

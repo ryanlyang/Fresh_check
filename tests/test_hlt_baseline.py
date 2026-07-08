@@ -65,6 +65,15 @@ if TORCH_AVAILABLE:
             return self.logits.unsqueeze(0).expand(batch_size, -1)
 
 
+    class NonFiniteLogitModel(torch.nn.Module):
+        def forward(self, points, features, lorentz_vectors, mask):
+            batch_size = features.shape[0]
+            del points, features, lorentz_vectors, mask
+            logits = torch.zeros((batch_size, 10), dtype=torch.float32)
+            logits[0, 0] = float("nan")
+            return logits
+
+
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
 class HLTBaselineStep5Tests(unittest.TestCase):
     def test_dataset_collate_builds_torch_part_inputs(self):
@@ -96,6 +105,22 @@ class HLTBaselineStep5Tests(unittest.TestCase):
         self.assertEqual(metrics["n_jets"], 4)
         self.assertEqual(metrics["accuracy"], 1.0)
         self.assertGreater(metrics["loss"], 0.0)
+
+    def test_run_epoch_rejects_nonfinite_logits_before_metrics(self):
+        dataset = JetViewTorchDataset(make_fixed_hlt_view(2))
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=2,
+            collate_fn=collate_particle_transformer_batch,
+        )
+
+        with self.assertRaises(FloatingPointError):
+            run_epoch(
+                NonFiniteLogitModel(),
+                loader,
+                device=torch.device("cpu"),
+                criterion=torch.nn.CrossEntropyLoss(),
+            )
 
     def test_train_hlt_baseline_smoke_with_injected_model(self):
         train_view = make_fixed_hlt_view(6)

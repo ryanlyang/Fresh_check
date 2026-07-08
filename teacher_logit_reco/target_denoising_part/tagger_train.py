@@ -428,6 +428,28 @@ def _diagnostics_from_output(output: TargetDenoisingAugmentedParTOutput) -> dict
     return flattened
 
 
+def _clip_gradients_or_skip(model: Any, max_norm: float) -> tuple[bool, float]:
+    """Clip trainable gradients and report whether they are finite."""
+
+    torch = require_torch()
+    params = [parameter for parameter in model.parameters() if parameter.requires_grad and parameter.grad is not None]
+    if not params:
+        return True, 0.0
+    if float(max_norm) > 0.0:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            params,
+            float(max_norm),
+            error_if_nonfinite=False,
+        )
+    else:
+        grad_norm = torch.linalg.vector_norm(
+            torch.stack([torch.linalg.vector_norm(parameter.grad.detach(), ord=2) for parameter in params]),
+            ord=2,
+        )
+    finite = bool(torch.isfinite(grad_norm).detach().cpu().item())
+    return finite, float(grad_norm.detach().cpu().item()) if finite else float("nan")
+
+
 def _merge_diagnostics(total: dict[str, float], batch_diag: Mapping[str, float], weight: int) -> None:
     for key, value in batch_diag.items():
         total[key] = total.get(key, 0.0) + float(value) * int(weight)
@@ -549,21 +571,21 @@ def run_target_denoising_tagger_epoch(
                 scaler.scale(mean_loss).backward()
                 if float(config.grad_clip_norm) > 0.0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        [parameter for parameter in model.parameters() if parameter.requires_grad],
-                        float(config.grad_clip_norm),
-                        error_if_nonfinite=True,
-                    )
+                gradients_ok, _ = _clip_gradients_or_skip(model, float(config.grad_clip_norm))
+                if not gradients_ok:
+                    skipped_nonfinite_batches += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    continue
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 mean_loss.backward()
-                if float(config.grad_clip_norm) > 0.0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [parameter for parameter in model.parameters() if parameter.requires_grad],
-                        float(config.grad_clip_norm),
-                        error_if_nonfinite=True,
-                    )
+                gradients_ok, _ = _clip_gradients_or_skip(model, float(config.grad_clip_norm))
+                if not gradients_ok:
+                    skipped_nonfinite_batches += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 optimizer.step()
         batch_size = int(labels.numel())
         loss_sum += float(loss.detach().cpu().item())

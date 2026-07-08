@@ -31,6 +31,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_SCRATCH_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10_scratch sdv_hlt_hlt2_s0p20_scratch sdv_hlt_hlt2_s0p35_scratch sdv_hlt_hlt2_s1p00_scratch}"
 : "${HLT_MV_TTA_STRENGTHS:=0.10 0.20 0.35 1.00}"
 : "${HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0}"
+: "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0}"
 
 export PROJECT_DIR DATA_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_ENV PYTHON_BIN
 export HLT_MV_PDV3_EXPERIMENT_NAME HLT_MV_PDV3_ROOT HLT_MV_ROOT
@@ -100,7 +101,7 @@ export HLT_MV_TRIVIEW_MAX_TRAIN_BATCHES HLT_MV_TRIVIEW_MAX_VAL_BATCHES
 export HLT_MV_TRIVIEW_MAX_FINAL_TEST_BATCHES HLT_MV_TRIVIEW_TRAIN_SIZE
 export HLT_MV_TRIVIEW_VAL_SIZE HLT_MV_TRIVIEW_FINAL_TEST_SIZE
 export HLT_MV_LOGIT_FUSION_SKIP_WEIGHTED_AVERAGE HLT_MV_LOGIT_FUSION_MAX_WEIGHT_STEPS
-export HLT_MV_LOGIT_FUSION_SPLITS HLT_MV_FINAL_REPORT_ALLOW_MISSING
+export HLT_MV_LOGIT_FUSION_SPLITS HLT_MV_FINAL_REPORT_ALLOW_MISSING HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW
 export CONFIRM_FINAL_TEST SKIP_EXISTING OVERWRITE DEVICE DRY_RUN PRINT_ONLY
 
 fresh_prepare_submitter
@@ -446,6 +447,7 @@ if ! fresh_is_dry_run; then
     echo "pretrained_dualview_names=${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
     echo "scratch_dualview_names=${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
     echo "tta_strengths=${HLT_MV_TTA_STRENGTHS}"
+    echo "final_report_require_triview=${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"
   } > "${submission_dir}/metadata.txt"
 fi
 
@@ -557,6 +559,11 @@ submit_model_job \
   "${SCRIPT_DIR}/run_hlt_mv_train_triview.sh"
 triview_job_id="${submitted_job_id}"
 
+report_triview_dep=""
+if fresh_bool_enabled "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"; then
+  report_triview_dep="${triview_job_id}"
+fi
+
 final_dep="$(join_nonempty_by_colon \
   "${base_dep}" \
   "${source_fusion_job_id}" \
@@ -564,7 +571,7 @@ final_dep="$(join_nonempty_by_colon \
   "${pretrained_fusion_job_id}" \
   "${scratch_fusion_job_id}" \
   "${control_dep}" \
-  "${triview_job_id}")"
+  "${report_triview_dep}")"
 
 if ! skip_existing_final_report; then
   refuse_partial_existing_output_dir "hlt_mv_final_report" "${HLT_MV_FINAL_REPORT_DIR}"

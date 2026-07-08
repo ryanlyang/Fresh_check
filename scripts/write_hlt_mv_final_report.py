@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdv3-experiment-name", default=HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--allow-missing", action="store_true")
+    parser.add_argument("--require-triview", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
@@ -41,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         output_root=str(Path(args.output_root)),
         pdv3_experiment_name=args.pdv3_experiment_name,
         allow_missing=bool(args.allow_missing),
+        require_triview=bool(args.require_triview),
         overwrite=bool(args.overwrite),
     )
     report = write_hlt_mv_final_report(config)
