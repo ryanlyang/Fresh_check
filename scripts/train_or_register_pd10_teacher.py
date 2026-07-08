@@ -29,6 +29,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--teacher", choices=PD10_PART_TEACHER_TARGETS, required=True)
     parser.add_argument("--manifest", default=str(layout.split_manifest_path))
     parser.add_argument("--hlt-cache-dir", default=str(layout.hlt_cache_dir))
+    parser.add_argument(
+        "--offline-cache-dir",
+        default=None,
+        help="Optional cached offline inputs for offline teacher training/evaluation.",
+    )
     parser.add_argument("--data-dir", default=None)
     parser.add_argument(
         "--output-dir",
@@ -94,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         manifest_path=args.manifest,
         cache_dir=args.hlt_cache_dir,
+        offline_cache_dir=args.offline_cache_dir,
         data_dir=args.data_dir,
         seed=args.seed,
         batch_size=args.batch_size,

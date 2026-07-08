@@ -81,6 +81,22 @@ class PDV3Step2TeacherTests(unittest.TestCase):
                 self.assertIn('source "${SCRIPT_DIR}/pdv3_pd10_env.sh"', text)
                 self.assertIn(f'exec bash "${{SCRIPT_DIR}}/{pd10_script}" "$@"', text)
 
+    def test_pd10_teacher_runner_can_train_offline_anchor_from_cached_offline_inputs(self):
+        text = (SBATCH_DIR / "run_pd10_train_teacher.sh").read_text(encoding="utf-8")
+
+        self.assertIn('PD10_ROOT}/inputs/offline_cache', text)
+        self.assertIn('model_train_offline_metadata.json', text)
+        self.assertIn('model_val_offline_metadata.json', text)
+        self.assertIn('final_test_offline_metadata.json', text)
+        self.assertIn('--offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"', text)
+
+        logits_text = (SBATCH_DIR / "run_pd10_cache_teacher_logits.sh").read_text(encoding="utf-8")
+        self.assertIn('PD10_ROOT}/inputs/offline_cache', logits_text)
+        self.assertIn('model_train_offline_metadata.json', logits_text)
+        self.assertIn('model_val_offline_metadata.json', logits_text)
+        self.assertIn('final_test_offline_metadata.json', logits_text)
+        self.assertIn('--offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"', logits_text)
+
     def test_step2_submitter_queues_teacher_graph_after_step1_contract(self):
         submitter = (SBATCH_DIR / "submit_pdv3_step2_teachers.sh").read_text(encoding="utf-8")
 

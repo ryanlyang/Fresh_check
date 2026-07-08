@@ -31,6 +31,9 @@ TEACHER_SEED="$(fresh_pd10_teacher_seed "${TEACHER}")"
 : "${PD10_TEACHER_SKIP_FINAL_TEST:=0}"
 
 DATA_DIR="${PD10_DATA_DIR}"
+if [[ -z "${PD10_OFFLINE_CACHE_DIR:-}" && -d "${PD10_ROOT}/inputs/offline_cache" ]]; then
+  PD10_OFFLINE_CACHE_DIR="${PD10_ROOT}/inputs/offline_cache"
+fi
 
 fresh_setup "$@"
 fresh_require_file "${PD10_MANIFEST_PATH}"
@@ -53,6 +56,12 @@ else
     fresh_require_file "${PD10_HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
     if ! fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
       fresh_require_file "${PD10_HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"
+    fi
+  elif [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
+    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_train_offline_metadata.json"
+    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_val_offline_metadata.json"
+    if ! fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
+      fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/final_test_offline_metadata.json"
     fi
   else
     fresh_require_data_dir
@@ -81,6 +90,9 @@ cmd=(
   --model-size "${PD10_TEACHER_MODEL_SIZE}"
   --read-chunk-size "${READ_CHUNK_SIZE}"
 )
+if [[ "${TEACHER}" == "offline" ]]; then
+  fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
+fi
 if fresh_bool_enabled "${PD10_TEACHER_SKIP_FINAL_TEST}"; then
   cmd+=(--skip-final-test)
 else

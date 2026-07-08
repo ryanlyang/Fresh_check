@@ -24,6 +24,9 @@ CHECKPOINT="${PD10_TEACHERS_DIR}/${MODEL_NAME}/best_model_val.pt"
 : "${READ_CHUNK_SIZE:=50000}"
 
 DATA_DIR="${PD10_DATA_DIR}"
+if [[ -z "${PD10_OFFLINE_CACHE_DIR:-}" && -d "${PD10_ROOT}/inputs/offline_cache" ]]; then
+  PD10_OFFLINE_CACHE_DIR="${PD10_ROOT}/inputs/offline_cache"
+fi
 
 fresh_setup "$@"
 fresh_require_file "${CHECKPOINT}"
@@ -32,7 +35,9 @@ if [[ "${TEACHER}" == "hlt" ]]; then
   fresh_require_dir "${PD10_HLT_CACHE_DIR}"
 else
   if [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
-    fresh_require_dir "${PD10_OFFLINE_CACHE_DIR}"
+    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_train_offline_metadata.json"
+    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_val_offline_metadata.json"
+    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/final_test_offline_metadata.json"
   else
     fresh_require_data_dir
   fi
@@ -61,7 +66,9 @@ cmd=(
   --read-chunk-size "${READ_CHUNK_SIZE}"
   --confirm-final-test
 )
-fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
+if [[ "${TEACHER}" == "offline" ]]; then
+  fresh_append_optional_arg cmd --offline-cache-dir "${PD10_OFFLINE_CACHE_DIR:-}"
+fi
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --no-skip-existing "${PD10_TEACHER_LOGIT_NO_SKIP_EXISTING}"
 fresh_append_flag_if_enabled cmd --verify-label-branches "${VERIFY_LABEL_BRANCHES}"

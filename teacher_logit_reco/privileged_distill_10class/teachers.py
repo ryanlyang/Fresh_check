@@ -26,6 +26,7 @@ from jetclass_fresh.hlt_cache import load_cached_hlt_view, load_hlt_metadata
 from jetclass_fresh.heterogeneous_hlt import balanced_limit_jet_view
 from jetclass_fresh.jetclass_data import LABEL_NAMES, load_offline_view, load_split_manifest, manifest_hash
 from jetclass_fresh.offline_teacher import OfflineTeacherTrainConfig, train_offline_teacher
+from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
 from .config import (
     PD10_EXPERIMENT_NAME,
@@ -96,6 +97,7 @@ class PD10PartTeacherTrainConfig:
     output_dir: str
     manifest_path: str
     cache_dir: str
+    offline_cache_dir: str | None = None
     data_dir: str | None = None
     train_split: str = "model_train"
     val_split: str = "model_val"
@@ -144,6 +146,10 @@ class PD10PartTeacherTrainConfig:
                 raise ValueError(f"max jets for {split} cannot exceed {PD10_SPLIT_SIZES[split]}")
         seed = default_pd10_teacher_seed(target) if self.seed is None else int(self.seed)
         object.__setattr__(self, "teacher_target", target)
+        offline_cache_dir = None if self.offline_cache_dir in (None, "") else str(self.offline_cache_dir)
+        if target != PD10_TEACHER_OFFLINE:
+            offline_cache_dir = None
+        object.__setattr__(self, "offline_cache_dir", offline_cache_dir)
         object.__setattr__(self, "seed", seed)
 
     @property
@@ -322,6 +328,37 @@ def _hlt_metadata_summary(config: PD10PartTeacherTrainConfig) -> dict[str, Any]:
     return summaries
 
 
+def _load_offline_teacher_view(config: PD10PartTeacherTrainConfig, split: str):
+    manifest = load_split_manifest(config.manifest_path)
+    expected_manifest_hash = manifest_hash(manifest)
+    if config.offline_cache_dir:
+        view = load_cached_offline_view(config.offline_cache_dir, split, verify_hash=True)
+        actual_manifest_hash = view.metadata.get("source_manifest_hash")
+        if actual_manifest_hash and expected_manifest_hash and str(actual_manifest_hash) != str(expected_manifest_hash):
+            raise ValueError(
+                f"offline cache source_manifest_hash mismatch for {split}: "
+                f"{actual_manifest_hash} != {expected_manifest_hash}"
+            )
+        return view
+    return load_offline_view(
+        manifest,
+        split,
+        data_dir=config.data_dir,
+        verify_label_branches=config.verify_label_branches,
+        read_chunk_size=config.read_chunk_size,
+    )
+
+
+def _offline_metadata_summary(config: PD10PartTeacherTrainConfig) -> dict[str, Any]:
+    if config.teacher_target != PD10_TEACHER_OFFLINE:
+        return {}
+    return {
+        "offline_source": "cached_offline" if config.offline_cache_dir else "raw_offline",
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
+        "uses_raw_offline_particles": config.offline_cache_dir is None,
+    }
+
+
 def _source_metadata(
     config: PD10PartTeacherTrainConfig,
     *,
@@ -342,6 +379,7 @@ def _source_metadata(
         "manifest_path": config.manifest_path,
         "manifest_hash": manifest_report.get("manifest_hash"),
         "cache_dir": config.cache_dir,
+        "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
         "data_dir": config.data_dir,
         "train_split": config.train_split,
         "val_split": config.val_split,
@@ -363,6 +401,7 @@ def _source_metadata(
         "expected_hlt_params": pd10_hlt_params_dict(),
         "manifest": manifest_report,
         "hlt_cache_metadata": _hlt_metadata_summary(config),
+        "offline_cache_metadata": _offline_metadata_summary(config),
     }
     if registration is not None:
         metadata["registration"] = dict(registration)
@@ -499,14 +538,7 @@ def evaluate_pd10_part_teacher_final_test(
         dataset = JetViewTorchDataset(view)
         source_view = "fixed_hlt"
     else:
-        manifest = load_split_manifest(config.manifest_path)
-        view = load_offline_view(
-            manifest,
-            config.final_test_split,
-            data_dir=config.data_dir,
-            verify_label_branches=config.verify_label_branches,
-            read_chunk_size=config.read_chunk_size,
-        )
+        view = _load_offline_teacher_view(config, config.final_test_split)
         view, selection_report = balanced_limit_jet_view(
             view,
             config.max_final_test_jets,
@@ -514,6 +546,7 @@ def evaluate_pd10_part_teacher_final_test(
         )
         dataset = ParticleViewTorchDataset(view, expected_view="offline")
         source_view = "offline"
+        offline_source = "cached_offline" if config.offline_cache_dir else "raw_offline"
 
     loader = make_data_loader(
         dataset,
@@ -554,6 +587,15 @@ def evaluate_pd10_part_teacher_final_test(
         "subset_selection": selection_report,
         "hlt_degradation_strength": float(PD10_HLT_DEGRADATION_STRENGTH),
     }
+    if config.teacher_target == PD10_TEACHER_OFFLINE:
+        report.update(
+            {
+                "offline_source": offline_source,
+                "offline_cache_dir": str(config.offline_cache_dir) if config.offline_cache_dir else None,
+                "offline_content_hash": view.metadata.get("offline_content_hash"),
+                "offline_jet_identity_hash": view.metadata.get("jet_identity_hash"),
+            }
+        )
     save_json(Path(config.output_dir) / "final_test_report.json", report)
     return report
 
@@ -619,9 +661,16 @@ def train_pd10_part_teacher(
             verify_label_branches=config.verify_label_branches,
             read_chunk_size=config.read_chunk_size,
         )
+        train_view = None
+        val_view = None
+        if config.offline_cache_dir:
+            train_view = _load_offline_teacher_view(config, config.train_split)
+            val_view = _load_offline_teacher_view(config, config.val_split)
         base_report = train_offline_teacher(
             base_config,
             model=model,
+            train_view=train_view,
+            val_view=val_view,
             max_train_jets=config.max_train_jets,
             max_val_jets=config.max_val_jets,
         )
