@@ -48,6 +48,7 @@ class TargetDenoisingPretrainConfig:
     output_dir: str
     manifest_path: str
     hlt_cache_dir: str
+    offline_cache_dir: str | None = None
     data_dir: str | None = None
     train_split: str = "model_train"
     val_split: str = "model_val"
@@ -124,6 +125,7 @@ class TargetDenoisingPretrainConfig:
         return TargetDenoisingDatasetConfig(
             manifest_path=self.manifest_path,
             hlt_cache_dir=self.hlt_cache_dir,
+            offline_cache_dir=self.offline_cache_dir,
             data_dir=self.data_dir,
             split=split,
             max_jets=max_jets,

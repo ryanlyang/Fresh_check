@@ -208,6 +208,12 @@ class HLTTriViewSourceConfig:
     evaluate_final_test: bool = True
     confirm_final_test: bool = False
     overwrite: bool = False
+    experiment_name: str = HLT_TRIVIEW_EXPERIMENT_NAME
+    experiment_step: str = HLT_TRIVIEW_STEP
+    source_contract: str = HLT_TRIVIEW_SOURCE_CONTRACT
+    prediction_contract: str = HLT_TRIVIEW_PREDICTION_CONTRACT
+    allowed_inputs: str = HLT_SDV_ALLOWED_INPUTS
+    deployment_inputs: str = HLT_TRIVIEW_DEPLOYMENT_INPUTS
 
     def __post_init__(self) -> None:
         if (self.train_split, self.val_split, self.final_test_split) != PD10_SPLIT_ORDER:
@@ -226,6 +232,18 @@ class HLTTriViewSourceConfig:
             raise ValueError("lr must be positive and weight_decay cannot be negative")
         if self.model_size not in {"tiny", "base", "large"}:
             raise ValueError("model_size must be 'tiny', 'base', or 'large'")
+        for field_name in (
+            "experiment_name",
+            "experiment_step",
+            "source_contract",
+            "prediction_contract",
+            "allowed_inputs",
+            "deployment_inputs",
+        ):
+            value = str(getattr(self, field_name)).strip()
+            if not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+            object.__setattr__(self, field_name, value)
         for split, value in (
             ("model_train", self.max_train_jets),
             ("model_val", self.max_val_jets),
@@ -279,9 +297,9 @@ def _source_checkpoint_payload(
 ) -> dict[str, Any]:
     checkpoint_model = getattr(model, "_orig_mod", model)
     return {
-        "contract": HLT_TRIVIEW_SOURCE_CONTRACT,
-        "experiment_name": HLT_TRIVIEW_EXPERIMENT_NAME,
-        "experiment_step": HLT_TRIVIEW_STEP,
+        "contract": config.source_contract,
+        "experiment_name": config.experiment_name,
+        "experiment_step": config.experiment_step,
         "source_name": config.source_name,
         "model_name": config.model_name,
         "model_kind": "single_view_part_source",
@@ -295,8 +313,8 @@ def _source_checkpoint_payload(
         "initialization": dict(initialization),
         "label_names": list(LABEL_NAMES),
         "pf_feature_names": list(PF_FEATURE_NAMES),
-        "allowed_inputs": HLT_SDV_ALLOWED_INPUTS,
-        "deployment_inputs": HLT_TRIVIEW_DEPLOYMENT_INPUTS,
+        "allowed_inputs": config.allowed_inputs,
+        "deployment_inputs": config.deployment_inputs,
         "requires_offline_inputs": False,
         "requires_teacher_features": False,
         "requires_deterministic_hlt2_transform": config.source_view == "hlt2",
@@ -405,9 +423,9 @@ def _save_source_predictions(
         labels=labels,
         jet_ids=jet_ids,
         metadata={
-            "contract": HLT_TRIVIEW_PREDICTION_CONTRACT,
-            "experiment_name": HLT_TRIVIEW_EXPERIMENT_NAME,
-            "experiment_step": HLT_TRIVIEW_STEP,
+            "contract": config.prediction_contract,
+            "experiment_name": config.experiment_name,
+            "experiment_step": config.experiment_step,
             "model_name": config.model_name,
             "model_kind": "single_view_part_source",
             "source_view": config.source_view,
@@ -419,8 +437,8 @@ def _save_source_predictions(
             "rich_metrics": dict(metrics),
             "view_content_hash": view.metadata.get("hlt2_content_hash") or view.metadata.get("hlt_content_hash"),
             "jet_identity_hash": jet_identity_hash(view.jet_ids),
-            "allowed_inputs": HLT_SDV_ALLOWED_INPUTS,
-            "deployment_inputs": HLT_TRIVIEW_DEPLOYMENT_INPUTS,
+            "allowed_inputs": config.allowed_inputs,
+            "deployment_inputs": config.deployment_inputs,
             "requires_offline_inputs": False,
             "requires_teacher_features": False,
             "requires_deterministic_hlt2_transform": config.source_view == "hlt2",
@@ -471,9 +489,9 @@ def train_hlt_triview_source(config: HLTTriViewSourceConfig, *, model=None) -> d
     scaler = amp_grad_scaler(bool(config.amp and device.type == "cuda"))
     run_metadata = {
         "ok": True,
-        "contract": HLT_TRIVIEW_SOURCE_CONTRACT,
-        "experiment_name": HLT_TRIVIEW_EXPERIMENT_NAME,
-        "experiment_step": HLT_TRIVIEW_STEP,
+        "contract": config.source_contract,
+        "experiment_name": config.experiment_name,
+        "experiment_step": config.experiment_step,
         "source_name": config.source_name,
         "model_name": config.model_name,
         "model_kind": "single_view_part_source",
@@ -485,8 +503,8 @@ def train_hlt_triview_source(config: HLTTriViewSourceConfig, *, model=None) -> d
         "val_n_jets": int(len(val_view.labels)),
         "train_content_hash": train_view.metadata.get("hlt2_content_hash") or train_view.metadata.get("hlt_content_hash"),
         "val_content_hash": val_view.metadata.get("hlt2_content_hash") or val_view.metadata.get("hlt_content_hash"),
-        "allowed_inputs": HLT_SDV_ALLOWED_INPUTS,
-        "deployment_inputs": HLT_TRIVIEW_DEPLOYMENT_INPUTS,
+        "allowed_inputs": config.allowed_inputs,
+        "deployment_inputs": config.deployment_inputs,
         "requires_offline_inputs": False,
         "requires_teacher_features": False,
         "requires_deterministic_hlt2_transform": config.source_view == "hlt2",
@@ -622,6 +640,115 @@ def train_hlt_triview_source(config: HLTTriViewSourceConfig, *, model=None) -> d
     save_json(output_dir / "run_report.json", report)
     if final_test_metrics is not None:
         save_json(output_dir / "final_test_report.json", {**report, "metrics": final_test_metrics})
+    return report
+
+
+def cache_hlt_triview_source_predictions(
+    config: HLTTriViewSourceConfig,
+    *,
+    splits: tuple[str, ...] = ("model_val", "final_test"),
+) -> dict[str, Any]:
+    """Cache prediction blocks for a selected single-view source checkpoint."""
+
+    requested_splits = tuple(str(split) for split in splits)
+    if not requested_splits:
+        raise ValueError("HLT tri-view source prediction split list cannot be empty.")
+    allowed_splits = {config.val_split, config.final_test_split}
+    unknown_splits = [split for split in requested_splits if split not in allowed_splits]
+    if unknown_splits:
+        raise ValueError(f"HLT tri-view source prediction splits must be {sorted(allowed_splits)}, got {unknown_splits}")
+    if len(set(requested_splits)) != len(requested_splits):
+        raise ValueError(f"HLT tri-view source prediction splits must be unique, got {requested_splits!r}")
+    if config.final_test_split in requested_splits and not bool(config.confirm_final_test):
+        raise ValueError("HLT tri-view source final-test prediction caching requires confirm_final_test=True")
+
+    require_torch()
+    set_training_seed(config.seed)
+    device = resolve_device(config.device)
+    if not config.checkpoint_path.exists():
+        raise FileNotFoundError(f"HLT tri-view source checkpoint is missing: {config.checkpoint_path}")
+    model, checkpoint_payload = load_hlt_model_from_checkpoint(config.checkpoint_path, device=device)
+    model.eval()
+
+    report: dict[str, Any] = {
+        "ok": True,
+        "contract": config.prediction_contract,
+        "experiment_name": config.experiment_name,
+        "experiment_step": config.experiment_step,
+        "source_name": config.source_name,
+        "model_name": config.model_name,
+        "model_kind": "single_view_part_source",
+        "source_view": config.source_view,
+        "checkpoint": str(config.checkpoint_path),
+        "checkpoint_sha256": sha256_file(config.checkpoint_path),
+        "checkpoint_epoch": checkpoint_payload.get("epoch"),
+        "requested_splits": list(requested_splits),
+        "cache_dir": str(config.cache_dir),
+        "prediction_dir": str(config.prediction_dir),
+        "allowed_inputs": config.allowed_inputs,
+        "deployment_inputs": config.deployment_inputs,
+        "requires_offline_inputs": False,
+        "requires_teacher_features": False,
+        "requires_deterministic_hlt2_transform": config.source_view == "hlt2",
+        "no_final_test_used_for_selection": True,
+        "split_metrics": {},
+        "split_prediction_metadata": {},
+    }
+
+    validation_thresholds = None
+    validation_binary_thresholds = None
+    need_val_for_thresholds = config.final_test_split in requested_splits
+    val_view = None
+    val_metrics = None
+    if config.val_split in requested_splits or need_val_for_thresholds:
+        val_view = _load_source_view(config, config.val_split)
+        if config.val_split in requested_splits:
+            val_metrics, val_metadata = _save_source_predictions(
+                model,
+                val_view,
+                config=config,
+                split=config.val_split,
+                checkpoint_payload=checkpoint_payload,
+                device=device,
+                batch_size=config.eval_batch_size,
+                max_batches=config.max_val_batches,
+                seed=int(config.seed) + 303,
+            )
+            report["split_metrics"][config.val_split] = val_metrics
+            report["split_prediction_metadata"][config.val_split] = val_metadata
+        else:
+            _logits, _labels, _jet_ids, val_metrics = _collect_source_logits(
+                model,
+                val_view,
+                config=config,
+                batch_size=config.eval_batch_size,
+                device=device,
+                seed=int(config.seed) + 303,
+                max_batches=config.max_val_batches,
+            )
+            report["model_val_metrics_for_final_test_thresholds"] = val_metrics
+        validation_thresholds = val_metrics.get("score_thresholds_by_class") if val_metrics is not None else None
+        validation_binary_thresholds = val_metrics.get("binary_score_thresholds") if val_metrics is not None else None
+
+    if config.final_test_split in requested_splits:
+        final_view = _load_source_view(config, config.final_test_split)
+        final_metrics, final_metadata = _save_source_predictions(
+            model,
+            final_view,
+            config=config,
+            split=config.final_test_split,
+            checkpoint_payload=checkpoint_payload,
+            device=device,
+            batch_size=config.eval_batch_size,
+            max_batches=config.max_final_test_batches,
+            seed=int(config.seed) + 404,
+            validation_thresholds_by_class=validation_thresholds,
+            validation_binary_thresholds=validation_binary_thresholds,
+        )
+        report["split_metrics"][config.final_test_split] = final_metrics
+        report["split_prediction_metadata"][config.final_test_split] = final_metadata
+
+    save_json(Path(config.output_dir) / "prediction_cache_report.json", report)
     return report
 
 
@@ -1508,6 +1635,7 @@ __all__ = [
     "HLT_TRIVIEW_MODEL_ARCHITECTURE",
     "HLT_TRIVIEW_MODEL_NAME",
     "HLT_TRIVIEW_SOURCE_CONTRACT",
+    "cache_hlt_triview_source_predictions",
     "collate_hlt_triview_batch",
     "initialize_hlt_triview_branches_from_checkpoints",
     "load_hlt_triview_dataset",

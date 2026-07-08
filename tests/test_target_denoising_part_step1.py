@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -15,6 +16,7 @@ from teacher_logit_reco.target_denoising_part import (
     TargetDenoisingPairedDataset,
     build_rank_aligned_residual_targets,
     collate_target_denoising_batch,
+    load_target_denoising_dataset,
     wrap_delta_phi_np,
 )
 
@@ -130,6 +132,24 @@ class TargetDenoisingPartStep1Tests(unittest.TestCase):
         self.assertEqual(metadata["hlt_profile"], HLT_PROFILE_V2_REALISTIC)
         self.assertTrue(metadata["target_summary"]["summary_is_preview"])
         self.assertGreater(metadata["target_summary"]["target_count"], 0)
+
+    def test_loader_uses_offline_cache_when_configured(self):
+        hlt_view, offline_view = self.make_views()
+        config = self.make_config(offline_cache_dir="offline_cache")
+        with (
+            mock.patch("teacher_logit_reco.target_denoising_part.data.load_split_manifest", return_value=object()),
+            mock.patch("teacher_logit_reco.target_denoising_part.data.manifest_hash", return_value="manifest-a"),
+            mock.patch("teacher_logit_reco.target_denoising_part.data.load_cached_hlt_view", return_value=hlt_view),
+            mock.patch("teacher_logit_reco.architecture_view_part.load_cached_offline_view", return_value=offline_view) as cached_offline,
+            mock.patch(
+                "teacher_logit_reco.target_denoising_part.data.load_offline_view",
+                side_effect=AssertionError("manifest ROOT loader should not be used"),
+            ),
+        ):
+            dataset = load_target_denoising_dataset(config)
+
+        self.assertEqual(len(dataset), len(hlt_view.labels))
+        cached_offline.assert_called_once_with("offline_cache", "model_train", verify_hash=True)
 
     def test_dataset_rejects_wrong_hlt_strength(self):
         hlt_view, offline_view = self.make_views()

@@ -77,6 +77,7 @@ class TargetDenoisingDatasetConfig:
 
     manifest_path: str
     hlt_cache_dir: str
+    offline_cache_dir: str | None = None
     split: str = "model_train"
     data_dir: str | None = None
     max_jets: int | None = None
@@ -619,13 +620,22 @@ def load_target_denoising_views(config: TargetDenoisingDatasetConfig) -> tuple[J
     manifest = load_split_manifest(config.manifest_path)
     manifest_sha = manifest_hash(manifest)
     hlt_view = load_cached_hlt_view(config.hlt_cache_dir, config.split, verify_hash=bool(config.verify_hlt_hash))
-    offline_view = load_offline_view(
-        manifest,
-        config.split,
-        data_dir=config.data_dir,
-        verify_label_branches=bool(config.verify_label_branches),
-        read_chunk_size=int(config.read_chunk_size),
-    )
+    if config.offline_cache_dir:
+        from teacher_logit_reco.architecture_view_part import load_cached_offline_view
+
+        offline_view = load_cached_offline_view(
+            config.offline_cache_dir,
+            config.split,
+            verify_hash=bool(config.verify_hlt_hash),
+        )
+    else:
+        offline_view = load_offline_view(
+            manifest,
+            config.split,
+            data_dir=config.data_dir,
+            verify_label_branches=bool(config.verify_label_branches),
+            read_chunk_size=int(config.read_chunk_size),
+        )
     _validate_paired_views(hlt_view, offline_view, config=config, expected_manifest_hash=manifest_sha)
     return hlt_view, offline_view, manifest_sha
 

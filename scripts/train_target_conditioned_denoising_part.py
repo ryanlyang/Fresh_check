@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--hlt-cache-dir", required=True)
+    parser.add_argument("--offline-cache-dir", default=None)
     parser.add_argument("--data-dir", default=None)
 
     parser.add_argument("--train-split", default="model_train")
@@ -86,6 +87,7 @@ def main() -> int:
         output_dir=args.output_dir,
         manifest_path=args.manifest_path,
         hlt_cache_dir=args.hlt_cache_dir,
+        offline_cache_dir=args.offline_cache_dir,
         data_dir=args.data_dir,
         train_split=args.train_split,
         val_split=args.val_split,

@@ -31,6 +31,7 @@ fi
 : "${TARGET_DENOISING_PART_OUTPUT_DIR:=${TARGET_DENOISING_PART_TAGGER_ROOT}/${variant}}"
 : "${TARGET_DENOISING_PART_MANIFEST_PATH:=${MANIFEST_PATH}}"
 : "${TARGET_DENOISING_PART_HLT_CACHE_DIR:=${HLT_CACHE_DIR}}"
+: "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR:=}"
 : "${TARGET_DENOISING_PART_DATA_DIR:=}"
 : "${TARGET_DENOISING_PART_DENOISER_CHECKPOINT:=${TARGET_DENOISING_PART_ROOT}/denoisers/real/best_denoiser_model_val.pt}"
 : "${TARGET_DENOISING_PART_SEED:=7307}"
@@ -94,6 +95,13 @@ fi
 : "${TARGET_DENOISING_PART_MAX_DELTA_PHI:=0.08}"
 : "${TARGET_DENOISING_PART_MAX_DELTA_LOG_ENERGY:=0.30}"
 
+if [[ -z "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}" && -n "${TARGET_DENOISING_PART_HLT_CACHE_DIR}" ]]; then
+  inferred_offline_cache_dir="$(dirname "${TARGET_DENOISING_PART_HLT_CACHE_DIR}")/offline_cache"
+  if [[ -d "${inferred_offline_cache_dir}" ]]; then
+    TARGET_DENOISING_PART_OFFLINE_CACHE_DIR="${inferred_offline_cache_dir}"
+  fi
+fi
+
 if [[ -z "${TARGET_DENOISING_PART_RECONSTRUCTION_ANCHOR_WEIGHT}" ]]; then
   case "${variant}" in
     denoiser_features_joint)
@@ -111,6 +119,10 @@ fresh_require_file "${TARGET_DENOISING_PART_MANIFEST_PATH}"
 for split in model_train model_val; do
   fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt.npz"
   fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
+  if [[ -n "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}" ]]; then
+    fresh_require_file "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}/${split}_offline.npz"
+    fresh_require_file "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}/${split}_offline_metadata.json"
+  fi
 done
 if fresh_bool_enabled "${TARGET_DENOISING_PART_EVALUATE_FINAL_TEST}"; then
   fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/final_test_fixed_hlt.npz"
@@ -180,6 +192,7 @@ cmd=(
   --max-delta-phi "${TARGET_DENOISING_PART_MAX_DELTA_PHI}"
   --max-delta-log-energy "${TARGET_DENOISING_PART_MAX_DELTA_LOG_ENERGY}"
 )
+fresh_append_optional_arg cmd --offline-cache-dir "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}"
 fresh_append_optional_arg cmd --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
 fresh_append_flag_if_enabled cmd --no-amp "${TARGET_DENOISING_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${TARGET_DENOISING_PART_COMPILE_MODEL}"

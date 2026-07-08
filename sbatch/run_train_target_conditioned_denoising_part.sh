@@ -24,6 +24,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${TARGET_DENOISING_PART_OUTPUT_DIR:=${TARGET_DENOISING_PART_DENOISER_OUTPUT_DIR:-${TARGET_DENOISING_PART_ROOT}/denoisers/real}}"
 : "${TARGET_DENOISING_PART_MANIFEST_PATH:=${MANIFEST_PATH}}"
 : "${TARGET_DENOISING_PART_HLT_CACHE_DIR:=${HLT_CACHE_DIR}}"
+: "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR:=}"
 : "${TARGET_DENOISING_PART_DATA_DIR:=}"
 : "${TARGET_DENOISING_PART_SEED:=7207}"
 : "${TARGET_DENOISING_PART_BATCH_SIZE:=128}"
@@ -73,12 +74,23 @@ source "${SCRIPT_DIR}/common.sh"
 : "${TARGET_DENOISING_PART_DELTA_L2_WEIGHT:=0.0001}"
 : "${TARGET_DENOISING_PART_PAIR_BIAS_L2_WEIGHT:=0.00001}"
 
+if [[ -z "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}" && -n "${TARGET_DENOISING_PART_HLT_CACHE_DIR}" ]]; then
+  inferred_offline_cache_dir="$(dirname "${TARGET_DENOISING_PART_HLT_CACHE_DIR}")/offline_cache"
+  if [[ -d "${inferred_offline_cache_dir}" ]]; then
+    TARGET_DENOISING_PART_OFFLINE_CACHE_DIR="${inferred_offline_cache_dir}"
+  fi
+fi
+
 fresh_setup "$@"
 fresh_require_file "scripts/train_target_conditioned_denoising_part.py"
 fresh_require_file "${TARGET_DENOISING_PART_MANIFEST_PATH}"
 for split in model_train model_val; do
   fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt.npz"
   fresh_require_file "${TARGET_DENOISING_PART_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
+  if [[ -n "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}" ]]; then
+    fresh_require_file "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}/${split}_offline.npz"
+    fresh_require_file "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}/${split}_offline_metadata.json"
+  fi
 done
 fresh_claim_new_dir "${TARGET_DENOISING_PART_OUTPUT_DIR}"
 
@@ -128,6 +140,7 @@ cmd=(
   --delta-l2-weight "${TARGET_DENOISING_PART_DELTA_L2_WEIGHT}"
   --pair-bias-l2-weight "${TARGET_DENOISING_PART_PAIR_BIAS_L2_WEIGHT}"
 )
+fresh_append_optional_arg cmd --offline-cache-dir "${TARGET_DENOISING_PART_OFFLINE_CACHE_DIR}"
 fresh_append_optional_arg cmd --data-dir "${TARGET_DENOISING_PART_DATA_DIR}"
 fresh_append_flag_if_enabled cmd --no-amp "${TARGET_DENOISING_PART_NO_AMP}"
 fresh_append_flag_if_enabled cmd --compile-model "${TARGET_DENOISING_PART_COMPILE_MODEL}"

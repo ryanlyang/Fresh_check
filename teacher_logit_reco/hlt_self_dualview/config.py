@@ -83,7 +83,10 @@ def hlt_sdv_strength_from_variant(variant: str, *, default: float | None = None)
     value = normalize_hlt_sdv_variant(variant)
     prefix = f"{HLT_SDV_VARIANT_HLT2_PREFIX}_"
     if value.startswith(prefix):
-        return normalize_hlt_sdv_strength(value.removeprefix(prefix))
+        strength_tag = value.removeprefix(prefix)
+        if strength_tag.endswith("_scratch"):
+            strength_tag = strength_tag.removesuffix("_scratch")
+        return normalize_hlt_sdv_strength(strength_tag)
     if value.startswith("hlt2_only_part_"):
         return normalize_hlt_sdv_strength(value.removeprefix("hlt2_only_part_"))
     if value.startswith("tta_hlt_part_hlt_plus_hlt2_"):
