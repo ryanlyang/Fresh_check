@@ -229,6 +229,11 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("run_hlt_mv_eval_tta_control.sh", text)
         self.assertIn("run_hlt_mv_train_triview.sh", text)
         self.assertIn("run_hlt_mv_final_report.sh", text)
+        self.assertIn("HLT_MV_SBATCH_PARTITION", text)
+        self.assertIn("HLT_MV_GPU_GRES", text)
+        self.assertIn("sbatch_resource_args()", text)
+        self.assertIn('mapfile -t resource_args < <(sbatch_resource_args gpu)', text)
+        self.assertIn('mapfile -t resource_args < <(sbatch_resource_args cpu)', text)
         self.assertIn("source_5view", text)
         self.assertIn("hlt_random_4seed", text)
         self.assertIn("pretrained_dualview_4model", text)
@@ -286,6 +291,18 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("ln -s", text)
         self.assertIn("HLT_MV_ALLOW_PENDING_HLT2_CACHES", text)
         self.assertIn("PD10_HLT_SDV_HLT2_CACHE_ROOT", text)
+
+    def test_tigris_heavy_submitter_sets_gh200_overrides(self):
+        text = _read_sbatch("submit_hlt_mv_heavy_source_fusion_tigris.sh")
+
+        self.assertIn("HLT_MV_SBATCH_PARTITION:=tigris", text)
+        self.assertIn("HLT_MV_GPU_GRES:=gpu:gh200:1", text)
+        self.assertIn("HLT_MV_GPU_CPUS_PER_TASK:=16", text)
+        self.assertIn("HLT_MV_GPU_MEM:=300G", text)
+        self.assertIn("HLT_MV_CPU_CPUS_PER_TASK:=16", text)
+        self.assertIn("HLT_MV_CPU_MEM:=220G", text)
+        self.assertIn("DEVICE:=cuda", text)
+        self.assertIn("submit_hlt_mv_heavy_source_fusion.sh", text)
 
     def test_control_wrappers_are_hlt_only_and_reuse_source_checkpoint(self):
         same_view = _read_sbatch("run_hlt_mv_train_same_view_control.sh")

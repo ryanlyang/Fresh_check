@@ -36,6 +36,14 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_TTA_STRENGTHS:=0.10 0.20 0.35 1.00}"
 : "${HLT_MV_TRIVIEW_MODEL_NAME:=tri_hlt_hlt2_s0p35_s1p00}"
 : "${HLT_MV_ALLOW_PENDING_HLT2_CACHES:=0}"
+: "${HLT_MV_SBATCH_PARTITION:=}"
+: "${HLT_MV_GPU_GRES:=}"
+: "${HLT_MV_GPU_CPUS_PER_TASK:=}"
+: "${HLT_MV_GPU_MEM:=}"
+: "${HLT_MV_GPU_TIME:=}"
+: "${HLT_MV_CPU_CPUS_PER_TASK:=}"
+: "${HLT_MV_CPU_MEM:=}"
+: "${HLT_MV_CPU_TIME:=}"
 : "${HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0}"
 : "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0}"
 
@@ -50,6 +58,8 @@ export HLT_MV_SOURCE_NAMES HLT_MV_RANDOM_HLT_SOURCE_NAMES
 export HLT_MV_PRETRAINED_DUALVIEW_NAMES HLT_MV_SCRATCH_DUALVIEW_NAMES
 export HLT_MV_TTA_STRENGTHS HLT_MV_TRIVIEW_MODEL_NAME
 export HLT_MV_ALLOW_PENDING_HLT2_CACHES
+export HLT_MV_SBATCH_PARTITION HLT_MV_GPU_GRES HLT_MV_GPU_CPUS_PER_TASK HLT_MV_GPU_MEM HLT_MV_GPU_TIME
+export HLT_MV_CPU_CPUS_PER_TASK HLT_MV_CPU_MEM HLT_MV_CPU_TIME
 export HLT_MV_SOURCE_EPOCHS HLT_MV_SOURCE_BATCH_SIZE HLT_MV_SOURCE_EVAL_BATCH_SIZE
 export HLT_MV_SOURCE_LR HLT_MV_SOURCE_WEIGHT_DECAY HLT_MV_SOURCE_EARLY_STOP_PATIENCE
 export HLT_MV_SOURCE_GRAD_CLIP_NORM HLT_MV_SOURCE_NUM_WORKERS HLT_MV_SOURCE_DEVICE
@@ -214,6 +224,37 @@ afterok_args() {
 
 job_export_arg() {
   printf '%s\n' "--export=ALL"
+}
+
+sbatch_resource_args() {
+  local profile="$1"
+  if [[ -n "${HLT_MV_SBATCH_PARTITION}" ]]; then
+    printf '%s\n' "--partition=${HLT_MV_SBATCH_PARTITION}"
+  fi
+  if [[ "${profile}" == "gpu" ]]; then
+    if [[ -n "${HLT_MV_GPU_GRES}" ]]; then
+      printf '%s\n' "--gres=${HLT_MV_GPU_GRES}"
+    fi
+    if [[ -n "${HLT_MV_GPU_CPUS_PER_TASK}" ]]; then
+      printf '%s\n' "--cpus-per-task=${HLT_MV_GPU_CPUS_PER_TASK}"
+    fi
+    if [[ -n "${HLT_MV_GPU_MEM}" ]]; then
+      printf '%s\n' "--mem=${HLT_MV_GPU_MEM}"
+    fi
+    if [[ -n "${HLT_MV_GPU_TIME}" ]]; then
+      printf '%s\n' "--time=${HLT_MV_GPU_TIME}"
+    fi
+  else
+    if [[ -n "${HLT_MV_CPU_CPUS_PER_TASK}" ]]; then
+      printf '%s\n' "--cpus-per-task=${HLT_MV_CPU_CPUS_PER_TASK}"
+    fi
+    if [[ -n "${HLT_MV_CPU_MEM}" ]]; then
+      printf '%s\n' "--mem=${HLT_MV_CPU_MEM}"
+    fi
+    if [[ -n "${HLT_MV_CPU_TIME}" ]]; then
+      printf '%s\n' "--time=${HLT_MV_CPU_TIME}"
+    fi
+  fi
 }
 
 json_ok_true() {
@@ -413,9 +454,12 @@ submit_source_model() {
     return 0
   fi
   refuse_partial_existing_output_dir "hlt_mv_source_${source_name}" "${output_dir}"
+  local resource_args=()
+  mapfile -t resource_args < <(sbatch_resource_args gpu)
   mapfile -t args < <(
     afterok_args "${dependency}" \
       "$(job_export_arg)" \
+      "${resource_args[@]}" \
       "${SCRIPT_DIR}/run_hlt_mv_train_source_model.sh" "${source_name}"
   )
   submit_job "hlt_mv_source_${source_name}" "${args[@]}"
@@ -434,9 +478,12 @@ submit_model_job() {
     return 0
   fi
   refuse_partial_existing_output_dir "${label}" "${output_dir}"
+  local resource_args=()
+  mapfile -t resource_args < <(sbatch_resource_args gpu)
   mapfile -t args < <(
     afterok_args "${dependency}" \
       "$(job_export_arg)" \
+      "${resource_args[@]}" \
       "$@"
   )
   submit_job "${label}" "${args[@]}"
@@ -455,9 +502,12 @@ submit_tta_job() {
     return 0
   fi
   refuse_partial_existing_output_dir "hlt_mv_tta_${tag}" "${output_dir}"
+  local resource_args=()
+  mapfile -t resource_args < <(sbatch_resource_args gpu)
   mapfile -t args < <(
     afterok_args "${dependency}" \
       "$(job_export_arg)" \
+      "${resource_args[@]}" \
       "${SCRIPT_DIR}/run_hlt_mv_eval_tta_control.sh" "${strength}" "${variant}"
   )
   submit_job "hlt_mv_tta_${tag}" "${args[@]}"
@@ -473,9 +523,12 @@ submit_fusion_job() {
     return 0
   fi
   refuse_partial_existing_output_dir "hlt_mv_fusion_${fusion_name}" "${output_dir}"
+  local resource_args=()
+  mapfile -t resource_args < <(sbatch_resource_args cpu)
   mapfile -t args < <(
     afterok_args "${dependency}" \
       "$(job_export_arg)" \
+      "${resource_args[@]}" \
       "${SCRIPT_DIR}/run_hlt_mv_logit_fusion.sh" "${fusion_name}"
   )
   submit_job "hlt_mv_fusion_${fusion_name}" "${args[@]}"
@@ -661,9 +714,12 @@ final_dep="$(join_nonempty_by_colon \
 
 if ! skip_existing_final_report; then
   refuse_partial_existing_output_dir "hlt_mv_final_report" "${HLT_MV_FINAL_REPORT_DIR}"
+  final_report_resource_args=()
+  mapfile -t final_report_resource_args < <(sbatch_resource_args cpu)
   mapfile -t args < <(
     afterok_args "${final_dep}" \
       "$(job_export_arg)" \
+      "${final_report_resource_args[@]}" \
       "${SCRIPT_DIR}/run_hlt_mv_final_report.sh"
   )
   submit_job "hlt_mv_final_report" "${args[@]}"

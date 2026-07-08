@@ -33,6 +33,14 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_HEAVY_CACHE_AUDIT_DIR:=${HLT_MV_ROOT}/audits/hlt2_cache_builds}"
 : "${HLT_MV_HEAVY_CACHE_SEED:=710053}"
 : "${HLT_MV_HEAVY_SUBMIT_GRAPH:=1}"
+: "${HLT_MV_SBATCH_PARTITION:=}"
+: "${HLT_MV_GPU_GRES:=}"
+: "${HLT_MV_GPU_CPUS_PER_TASK:=}"
+: "${HLT_MV_GPU_MEM:=}"
+: "${HLT_MV_GPU_TIME:=}"
+: "${HLT_MV_CPU_CPUS_PER_TASK:=}"
+: "${HLT_MV_CPU_MEM:=}"
+: "${HLT_MV_CPU_TIME:=}"
 
 export PROJECT_DIR DATA_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_ENV PYTHON_BIN
 export HLT_MV_PDV3_EXPERIMENT_NAME HLT_MV_PDV3_ROOT HLT_MV_ROOT HLT_MV_ROOT_DIRNAME
@@ -40,6 +48,8 @@ export HLT_MV_HLT_CACHE_DIR HLT_MV_HLT2_CACHE_ROOT HLT_MV_REUSE_HLT2_CACHE_ROOT
 export HLT_MV_STRENGTHS HLT_MV_HLT2_SOURCE_SEEDS HLT_MV_CANONICAL_HLT_SOURCE_NAME
 export HLT_MV_SOURCE_NAMES HLT_MV_RANDOM_HLT_SOURCE_NAMES HLT_MV_PRETRAINED_DUALVIEW_NAMES
 export HLT_MV_SCRATCH_DUALVIEW_NAMES HLT_MV_TTA_STRENGTHS HLT_MV_TRIVIEW_MODEL_NAME
+export HLT_MV_SBATCH_PARTITION HLT_MV_GPU_GRES HLT_MV_GPU_CPUS_PER_TASK HLT_MV_GPU_MEM HLT_MV_GPU_TIME
+export HLT_MV_CPU_CPUS_PER_TASK HLT_MV_CPU_MEM HLT_MV_CPU_TIME
 export CONFIRM_FINAL_TEST SKIP_EXISTING OVERWRITE DEVICE DRY_RUN PRINT_ONLY
 
 fresh_prepare_submitter
@@ -92,6 +102,37 @@ join_nonempty_by_colon() {
     return 0
   fi
   fresh_join_by_colon "${values[@]}"
+}
+
+sbatch_resource_args() {
+  local profile="$1"
+  if [[ -n "${HLT_MV_SBATCH_PARTITION}" ]]; then
+    printf '%s\n' "--partition=${HLT_MV_SBATCH_PARTITION}"
+  fi
+  if [[ "${profile}" == "gpu" ]]; then
+    if [[ -n "${HLT_MV_GPU_GRES}" ]]; then
+      printf '%s\n' "--gres=${HLT_MV_GPU_GRES}"
+    fi
+    if [[ -n "${HLT_MV_GPU_CPUS_PER_TASK}" ]]; then
+      printf '%s\n' "--cpus-per-task=${HLT_MV_GPU_CPUS_PER_TASK}"
+    fi
+    if [[ -n "${HLT_MV_GPU_MEM}" ]]; then
+      printf '%s\n' "--mem=${HLT_MV_GPU_MEM}"
+    fi
+    if [[ -n "${HLT_MV_GPU_TIME}" ]]; then
+      printf '%s\n' "--time=${HLT_MV_GPU_TIME}"
+    fi
+  else
+    if [[ -n "${HLT_MV_CPU_CPUS_PER_TASK}" ]]; then
+      printf '%s\n' "--cpus-per-task=${HLT_MV_CPU_CPUS_PER_TASK}"
+    fi
+    if [[ -n "${HLT_MV_CPU_MEM}" ]]; then
+      printf '%s\n' "--mem=${HLT_MV_CPU_MEM}"
+    fi
+    if [[ -n "${HLT_MV_CPU_TIME}" ]]; then
+      printf '%s\n' "--time=${HLT_MV_CPU_TIME}"
+    fi
+  fi
 }
 
 hlt2_cache_dir_for_strength() {
@@ -173,9 +214,11 @@ submit_cache_job() {
       return 2
     fi
   fi
+  local cache_resource_args=()
+  mapfile -t cache_resource_args < <(sbatch_resource_args cpu)
   if fresh_is_dry_run; then
     printf 'DRY_RUN sbatch hlt_mv_heavy_cache_%s: ' "${tag}" >&2
-    fresh_print_shell_command sbatch --parsable --export=ALL "${SCRIPT_DIR}/run_pd10_build_hlt2_cache.sh" "${strength}" >&2
+    fresh_print_shell_command sbatch --parsable --export=ALL "${cache_resource_args[@]}" "${SCRIPT_DIR}/run_pd10_build_hlt2_cache.sh" "${strength}" >&2
     printf '\n' >&2
     submitted_cache_job_id="DRYRUN_hlt_mv_heavy_cache_${tag}"
     return 0
@@ -191,7 +234,7 @@ submit_cache_job() {
     PD10_MODEL_VAL_SIZE=1000000 \
     PD10_FINAL_TEST_SIZE=1000000 \
     PD10_HLT_SPLITS="model_train model_val final_test" \
-    sbatch --parsable --export=ALL "${SCRIPT_DIR}/run_pd10_build_hlt2_cache.sh" "${strength}"
+    sbatch --parsable --export=ALL "${cache_resource_args[@]}" "${SCRIPT_DIR}/run_pd10_build_hlt2_cache.sh" "${strength}"
   )"
   if ! dependency_token_is_valid "${submitted_cache_job_id}"; then
     echo "Failed to submit heavy HLT2 cache ${tag}; got '${submitted_cache_job_id:-empty}'." >&2
