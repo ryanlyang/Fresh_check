@@ -270,6 +270,7 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("--hlt-cache-dir \"${HLT_MV_HLT_CACHE_DIR}\"", same_view)
         self.assertIn("hlt_part_seed8801/best_model_val.pt", same_view)
         self.assertIn("sdv_hlt_hlt_same_view", same_view)
+        self.assertIn("HLT_MV_SAME_VIEW_HEAD_WARMUP_LR:=0.0003", same_view)
         self.assertNotIn("teacher-logit", same_view.lower())
         self.assertNotIn("--offline", same_view.lower())
         self.assertNotIn("build_pd10_hlt2_cache.py", same_view)
