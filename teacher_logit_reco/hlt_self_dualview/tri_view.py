@@ -138,6 +138,41 @@ def _check_view(view: JetView, *, expected_view: str, label: str) -> None:
         raise ValueError(f"{label} mask shape does not match tokens")
 
 
+def _require_finite_metrics(metrics: Mapping[str, Any], *, context: str) -> None:
+    for key in ("loss", "cross_entropy", "accuracy"):
+        if key not in metrics:
+            continue
+        value = metrics.get(key)
+        if value is None:
+            continue
+        try:
+            finite = np.isfinite(float(value))
+        except (TypeError, ValueError):
+            finite = False
+        if not bool(finite):
+            raise FloatingPointError(f"{context} produced non-finite metric {key}={value!r}")
+
+
+def _require_finite_logits(logits: np.ndarray, *, context: str) -> None:
+    finite = np.isfinite(logits)
+    if bool(finite.all()):
+        return
+    bad_rows = np.where(~np.all(finite, axis=1))[0]
+    first_bad = int(bad_rows[0]) if int(bad_rows.shape[0]) else -1
+    finite_logits = logits[finite]
+    if finite_logits.size:
+        finite_min = float(np.min(finite_logits))
+        finite_max = float(np.max(finite_logits))
+    else:
+        finite_min = None
+        finite_max = None
+    raise FloatingPointError(
+        f"{context} produced non-finite logits: "
+        f"bad_rows={int(bad_rows.shape[0])}/{int(logits.shape[0])}, "
+        f"first_bad_row={first_bad}, finite_min={finite_min}, finite_max={finite_max}"
+    )
+
+
 @dataclass(frozen=True)
 class HLTTriViewSourceConfig:
     """Training config for one single-view source ParT branch."""
@@ -154,7 +189,7 @@ class HLTTriViewSourceConfig:
     batch_size: int = 128
     eval_batch_size: int = 128
     epochs: int = 10
-    lr: float = 3.0e-5
+    lr: float = 1.0e-3
     weight_decay: float = 1.0e-4
     num_workers: int = 0
     device: str = "auto"
@@ -325,6 +360,7 @@ def _collect_source_logits(
     if not logits_chunks:
         raise ValueError(f"No prediction batches were produced for {config.source_name}")
     logits_np = np.concatenate(logits_chunks, axis=0).astype(np.float32)
+    _require_finite_logits(logits_np, context=f"{config.source_name}:{view.split}:prediction")
     labels_np = np.concatenate(labels_chunks, axis=0).astype(np.int64)
     jet_ids = list(view.jet_ids[: int(labels_np.shape[0])])
     metrics = pd10_prediction_metrics_from_logits(logits_np, labels_np)
@@ -479,6 +515,7 @@ def train_hlt_triview_source(config: HLTTriViewSourceConfig, *, model=None) -> d
             grad_clip_norm=config.grad_clip_norm,
             max_batches=config.max_train_batches,
         )
+        _require_finite_metrics(train_metrics, context=f"{config.source_name}:epoch{epoch}:train")
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -487,6 +524,7 @@ def train_hlt_triview_source(config: HLTTriViewSourceConfig, *, model=None) -> d
             amp=False,
             max_batches=config.max_val_batches,
         )
+        _require_finite_metrics(val_metrics, context=f"{config.source_name}:epoch{epoch}:model_val")
         row = {"epoch": int(epoch), "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
         save_json(output_dir / "training_curves.json", {"epochs": curves, "selection_metric": "model_val_cross_entropy"})
@@ -1063,6 +1101,14 @@ def run_hlt_triview_epoch(
             with _amp_autocast_context(torch, autocast_enabled):
                 logits = model.forward_batch(batch)
                 loss = criterion(logits, batch["labels"])
+            if not bool(torch.isfinite(logits).all()):
+                raise FloatingPointError(
+                    f"HLT tri-view {'train' if is_train else 'eval'} batch {batch_index} produced non-finite logits"
+                )
+            if not bool(torch.isfinite(loss).all()):
+                raise FloatingPointError(
+                    f"HLT tri-view {'train' if is_train else 'eval'} batch {batch_index} produced non-finite loss"
+                )
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
@@ -1084,7 +1130,9 @@ def run_hlt_triview_epoch(
     if total_seen == 0:
         return {"loss": float("nan"), "cross_entropy": float("nan"), "accuracy": 0.0, "n_jets": 0}
     ce = total_loss / float(total_seen)
-    return {"loss": float(ce), "cross_entropy": float(ce), "accuracy": total_correct / float(total_seen), "n_jets": int(total_seen)}
+    metrics = {"loss": float(ce), "cross_entropy": float(ce), "accuracy": total_correct / float(total_seen), "n_jets": int(total_seen)}
+    _require_finite_metrics(metrics, context="HLT tri-view epoch")
+    return metrics
 
 
 def _triview_checkpoint_payload(
@@ -1175,6 +1223,7 @@ def collect_hlt_triview_outputs(
     if not logits_chunks:
         raise ValueError("No HLT tri-view prediction batches were produced")
     logits_np = np.concatenate(logits_chunks, axis=0).astype(np.float32)
+    _require_finite_logits(logits_np, context=f"HLT tri-view:{dataset.split}:prediction")
     labels_np = np.concatenate(labels_chunks, axis=0).astype(np.int64)
     return logits_np, labels_np, jet_ids, pd10_prediction_metrics_from_logits(logits_np, labels_np)
 

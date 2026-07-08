@@ -22,7 +22,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${PD10_HLT_TRIVIEW_VAL_SIZE:=250000}"
 : "${PD10_HLT_TRIVIEW_FINAL_TEST_SIZE:=500000}"
 : "${PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START:=0}"
-: "${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT=${PD10_HLT_SDV_HLT_TEACHER_CHECKPOINT:-}}"
+: "${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT:=}"
 : "${PD10_HLT_TRIVIEW_SOURCE_SKIP_FINAL_TEST:=0}"
 : "${PD10_HLT_TRIVIEW_SKIP_FINAL_TEST:=0}"
 
@@ -236,6 +236,10 @@ for cache_dir in "${PD10_HLT_CACHE_DIR}" "${PD10_HLT_TRIVIEW_HLT2_S0P35_CACHE_DI
   fresh_require_file_unless_deferred "${base_dep}" "${cache_dir}/model_val_fixed_hlt_metadata.json"
   fresh_require_file_unless_deferred "${base_dep}" "${cache_dir}/final_test_fixed_hlt_metadata.json"
 done
+if fresh_bool_enabled "${PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START}" && [[ -z "${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT}" ]]; then
+  echo "PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START=1 requires PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT." >&2
+  exit 2
+fi
 if fresh_bool_enabled "${PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START}"; then
   fresh_require_file_unless_deferred "${base_dep}" "${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT}"
 fi
@@ -256,6 +260,8 @@ if ! fresh_is_dry_run; then
     echo "train_size=${PD10_HLT_TRIVIEW_TRAIN_SIZE}"
     echo "val_size=${PD10_HLT_TRIVIEW_VAL_SIZE}"
     echo "final_test_size=${PD10_HLT_TRIVIEW_FINAL_TEST_SIZE}"
+    echo "source_warm_start_checkpoint=${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT:-none}"
+    echo "require_source_warm_start=${PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START}"
     echo "upstream_dependency=${PD10_HLT_TRIVIEW_UPSTREAM_DEPENDENCY}"
     echo "skip_existing=${SKIP_EXISTING}"
     echo "overwrite=${OVERWRITE}"
@@ -323,6 +329,8 @@ pd10_hlt_triview_debug_submission:
   conda_env: ${CONDA_ENV}
   partition: debug
   sizes: ${PD10_HLT_TRIVIEW_TRAIN_SIZE}/${PD10_HLT_TRIVIEW_VAL_SIZE}/${PD10_HLT_TRIVIEW_FINAL_TEST_SIZE}
+  source_warm_start_checkpoint: ${PD10_HLT_TRIVIEW_SOURCE_WARM_START_CHECKPOINT:-none}
+  require_source_warm_start: ${PD10_HLT_TRIVIEW_REQUIRE_SOURCE_WARM_START}
   upstream_dependency: ${PD10_HLT_TRIVIEW_UPSTREAM_DEPENDENCY:-none}
   submitted_jobs: ${submit_count}
   skipped_existing: ${skip_count}
