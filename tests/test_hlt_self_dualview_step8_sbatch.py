@@ -24,6 +24,7 @@ class HLTSDVStep8SlurmTest(unittest.TestCase):
         self.assertIn("PD10_HLT_SDV_REPORT_REQUIRE_ANCHORS:=1", text)
         self.assertIn("PD10_HLT_SDV_SUBMIT_ANCHORS:=1", text)
         self.assertIn("PD10_HLT_SDV_RETRAIN_ANCHORS:=0", text)
+        self.assertIn("PD10_HLT_SDV_NO_AMP:=1", text)
         self.assertIn(
             "PD10_HLT_SDV_WARM_CE_ANCHOR_SPEC:=warm_start|none|full_logits|2.0|0.5|3|pd10_student_warm_start_ce_only",
             text,

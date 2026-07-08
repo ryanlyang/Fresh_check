@@ -97,7 +97,7 @@ class HLTSDVTrainConfig:
     weight_decay: float = HLT_SDV_DEFAULT_WEIGHT_DECAY
     num_workers: int = 0
     device: str = "auto"
-    amp: bool = True
+    amp: bool = False
     grad_clip_norm: float = 1.0
     early_stop_patience: int = HLT_SDV_DEFAULT_EARLY_STOP_PATIENCE
     max_train_batches: int | None = None
@@ -298,6 +298,41 @@ def _amp_autocast_context(torch, enabled: bool):
     return torch.cuda.amp.autocast(enabled=True)
 
 
+def _require_finite_metrics(metrics: Mapping[str, Any], *, context: str) -> None:
+    for key in ("loss", "cross_entropy", "accuracy"):
+        if key not in metrics:
+            continue
+        value = metrics.get(key)
+        if value is None:
+            continue
+        try:
+            finite = np.isfinite(float(value))
+        except (TypeError, ValueError):
+            finite = False
+        if not bool(finite):
+            raise FloatingPointError(f"{context} produced non-finite metric {key}={value!r}")
+
+
+def _require_finite_logits(logits: np.ndarray, *, context: str) -> None:
+    finite = np.isfinite(logits)
+    if bool(finite.all()):
+        return
+    bad_rows = np.where(~np.all(finite, axis=1))[0]
+    first_bad = int(bad_rows[0]) if int(bad_rows.shape[0]) else -1
+    finite_logits = logits[finite]
+    if finite_logits.size:
+        finite_min = float(np.min(finite_logits))
+        finite_max = float(np.max(finite_logits))
+    else:
+        finite_min = None
+        finite_max = None
+    raise FloatingPointError(
+        f"{context} produced non-finite logits: "
+        f"bad_rows={int(bad_rows.shape[0])}/{int(logits.shape[0])}, "
+        f"first_bad_row={first_bad}, finite_min={finite_min}, finite_max={finite_max}"
+    )
+
+
 def run_hlt_sdv_epoch(
     model,
     loader,
@@ -328,6 +363,14 @@ def run_hlt_sdv_epoch(
             with _amp_autocast_context(torch, autocast_enabled):
                 logits = model(batch["hlt_inputs"], batch["hlt2_inputs"])
                 loss = criterion(logits, batch["labels"])
+            if not bool(torch.isfinite(logits).all()):
+                raise FloatingPointError(
+                    f"HLT-SDV {'train' if is_train else 'eval'} batch {batch_index} produced non-finite logits"
+                )
+            if not bool(torch.isfinite(loss).all()):
+                raise FloatingPointError(
+                    f"HLT-SDV {'train' if is_train else 'eval'} batch {batch_index} produced non-finite loss"
+                )
             if is_train:
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
@@ -349,12 +392,14 @@ def run_hlt_sdv_epoch(
     if total_seen == 0:
         return {"loss": float("nan"), "cross_entropy": float("nan"), "accuracy": 0.0, "n_jets": 0}
     ce = total_loss / float(total_seen)
-    return {
+    metrics = {
         "loss": float(ce),
         "cross_entropy": float(ce),
         "accuracy": total_correct / float(total_seen),
         "n_jets": int(total_seen),
     }
+    _require_finite_metrics(metrics, context="HLT-SDV epoch")
+    return metrics
 
 
 def _checkpoint_model(model):
@@ -457,6 +502,7 @@ def collect_hlt_sdv_outputs(
     if not logits_chunks:
         raise ValueError("No HLT-SDV prediction batches were produced")
     logits_np = np.concatenate(logits_chunks, axis=0).astype(np.float32)
+    _require_finite_logits(logits_np, context=f"HLT-SDV:{dataset.split}:prediction")
     labels_np = np.concatenate(labels_chunks, axis=0).astype(np.int64)
     metrics = pd10_prediction_metrics_from_logits(logits_np, labels_np)
     return logits_np, labels_np, jet_ids, metrics
@@ -681,6 +727,7 @@ def train_hlt_sdv_model(
             grad_clip_norm=config.grad_clip_norm,
             max_batches=config.max_train_batches,
         )
+        _require_finite_metrics(train_metrics, context=f"{config.variant_name}:epoch{epoch}:train")
         val_metrics = run_hlt_sdv_epoch(
             model,
             val_loader,
@@ -688,6 +735,7 @@ def train_hlt_sdv_model(
             amp=False,
             max_batches=config.max_val_batches,
         )
+        _require_finite_metrics(val_metrics, context=f"{config.variant_name}:epoch{epoch}:model_val")
         row = {"epoch": int(epoch), "stage": stage, "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
         save_json(output_dir / "training_curves.json", {"epochs": curves})
