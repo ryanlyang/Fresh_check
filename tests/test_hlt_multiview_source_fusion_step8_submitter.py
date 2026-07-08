@@ -128,6 +128,13 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn('fresh_require_dir "${HLT_MV_HLT_CACHE_DIR}"', text)
         self.assertIn('fresh_require_dir "${cache_dir}"', text)
         self.assertIn("hlt_second_degrade_mild_v1_${tag}", text)
+        self.assertIn('fresh_split_words tta_strengths "${HLT_MV_TTA_STRENGTHS}"', text)
+        self.assertIn('for strength in "${tta_strengths[@]}"; do', text)
+        self.assertLess(
+            text.index('fresh_split_words tta_strengths "${HLT_MV_TTA_STRENGTHS}"'),
+            text.index('for strength in "${tta_strengths[@]}"; do'),
+        )
+        self.assertNotIn("for strength in ${HLT_MV_TTA_STRENGTHS}; do", text)
         self.assertIn("run_hlt_mv_train_source_model.sh", text)
         self.assertIn("run_hlt_mv_logit_fusion.sh", text)
         self.assertIn("run_hlt_mv_train_pretrained_dualview.sh", text)
@@ -140,6 +147,12 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("hlt_random_4seed", text)
         self.assertIn("pretrained_dualview_4model", text)
         self.assertIn("scratch_dualview_4model", text)
+        self.assertIn("hlt2_s0p10_source_job_id", text)
+        self.assertIn('sdv_hlt_hlt2_s0p10) hlt2_source_job_id="${hlt2_s0p10_source_job_id}"', text)
+        self.assertIn('variant_dep="$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_source_job_id}")"', text)
+        self.assertIn('"${variant_dep}"', text)
+        self.assertIn('"${base_dep}" \\', text)
+        self.assertIn('"${canonical_hlt_source_job_id}" "${hlt2_s0p35_source_job_id}" "${hlt2_s1p00_source_job_id}"', text)
         self.assertIn("final_dep=\"$(join_nonempty_by_colon", text)
         self.assertIn("CONFIRM_FINAL_TEST", text)
         self.assertNotIn("run_pd10_build_hlt2_cache.sh", text)

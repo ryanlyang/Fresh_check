@@ -407,12 +407,18 @@ submit_fusion_job() {
 
 validate_dependency_list "HLT_MV_UPSTREAM_DEPENDENCY" "${HLT_MV_UPSTREAM_DEPENDENCY}"
 
+fresh_split_words source_names "${HLT_MV_SOURCE_NAMES}"
+fresh_split_words random_source_names "${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"
+fresh_split_words pretrained_names "${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
+fresh_split_words scratch_names "${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
+fresh_split_words tta_strengths "${HLT_MV_TTA_STRENGTHS}"
+
 base_dep="${HLT_MV_UPSTREAM_DEPENDENCY}"
 fresh_require_dir "${HLT_MV_HLT_CACHE_DIR}"
 for split in model_train model_val final_test; do
   fresh_require_file "${HLT_MV_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json"
 done
-for strength in ${HLT_MV_TTA_STRENGTHS}; do
+for strength in "${tta_strengths[@]}"; do
   tag="$(fresh_pd10_hlt_sdv_strength_tag "${strength}")"
   cache_dir="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${tag}"
   fresh_require_dir "${cache_dir}"
@@ -443,21 +449,23 @@ if ! fresh_is_dry_run; then
   } > "${submission_dir}/metadata.txt"
 fi
 
-fresh_split_words source_names "${HLT_MV_SOURCE_NAMES}"
-fresh_split_words random_source_names "${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"
-fresh_split_words pretrained_names "${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
-fresh_split_words scratch_names "${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
-fresh_split_words tta_strengths "${HLT_MV_TTA_STRENGTHS}"
-
 source_job_ids=()
 canonical_hlt_source_job_id=""
+hlt2_s0p10_source_job_id=""
+hlt2_s0p20_source_job_id=""
+hlt2_s0p35_source_job_id=""
+hlt2_s1p00_source_job_id=""
 for source_name in "${source_names[@]}"; do
   submit_source_model "${source_name}" "${base_dep}"
   if [[ -n "${submitted_job_id}" ]]; then
     source_job_ids+=("${submitted_job_id}")
-    if [[ "${source_name}" == "hlt_part_seed8801" ]]; then
-      canonical_hlt_source_job_id="${submitted_job_id}"
-    fi
+    case "${source_name}" in
+      hlt_part_seed8801) canonical_hlt_source_job_id="${submitted_job_id}" ;;
+      hlt2_part_s0p10_seed8811) hlt2_s0p10_source_job_id="${submitted_job_id}" ;;
+      hlt2_part_s0p20_seed8821) hlt2_s0p20_source_job_id="${submitted_job_id}" ;;
+      hlt2_part_s0p35_seed8831) hlt2_s0p35_source_job_id="${submitted_job_id}" ;;
+      hlt2_part_s1p00_seed8841) hlt2_s1p00_source_job_id="${submitted_job_id}" ;;
+    esac
   fi
 done
 source_dep="$(join_nonempty_by_colon "${base_dep}" "${source_job_ids[@]}")"
@@ -479,9 +487,17 @@ random_fusion_job_id="${submitted_job_id}"
 pretrained_job_ids=()
 for variant in "${pretrained_names[@]}"; do
   output_dir="${HLT_MV_PRETRAINED_DUALVIEW_DIR}/${variant}"
+  hlt2_source_job_id=""
+  case "${variant}" in
+    sdv_hlt_hlt2_s0p10) hlt2_source_job_id="${hlt2_s0p10_source_job_id}" ;;
+    sdv_hlt_hlt2_s0p20) hlt2_source_job_id="${hlt2_s0p20_source_job_id}" ;;
+    sdv_hlt_hlt2_s0p35) hlt2_source_job_id="${hlt2_s0p35_source_job_id}" ;;
+    sdv_hlt_hlt2_s1p00) hlt2_source_job_id="${hlt2_s1p00_source_job_id}" ;;
+  esac
+  variant_dep="$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_source_job_id}")"
   submit_model_job \
     "hlt_mv_pretrained_${variant}" \
-    "${source_dep}" \
+    "${variant_dep}" \
     "${output_dir}" \
     "${variant}" \
     "hlt_mv_pretrained_dualview_report.json" \
@@ -499,7 +515,7 @@ for variant in "${scratch_names[@]}"; do
   output_dir="${HLT_MV_SCRATCH_DUALVIEW_DIR}/${variant}"
   submit_model_job \
     "hlt_mv_scratch_${variant}" \
-    "${source_dep}" \
+    "${base_dep}" \
     "${output_dir}" \
     "${variant}" \
     "hlt_mv_scratch_dualview_report.json" \
@@ -534,7 +550,7 @@ control_dep="$(join_nonempty_by_colon "${base_dep}" "${control_job_ids[@]}")"
 
 submit_model_job \
   "hlt_mv_triview" \
-  "${source_dep}" \
+  "$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_s0p35_source_job_id}" "${hlt2_s1p00_source_job_id}")" \
   "${HLT_MV_TRIVIEW_DIR}/tri_hlt_hlt2_s0p35_s1p00" \
   "tri_hlt_hlt2_s0p35_s1p00" \
   "hlt_mv_triview_report.json" \
