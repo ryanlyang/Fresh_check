@@ -164,6 +164,37 @@ def _prepare_tokens_and_mask(
     return prepared, mask
 
 
+def _force_nonempty_particle_transformer_rows(
+    tokens: np.ndarray,
+    mask: np.ndarray,
+    *,
+    eps: float = EPS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Give all-empty jets one finite dummy particle for transformer attention.
+
+    The Particle Transformer reference implementation is not numerically safe
+    when a row has an entirely false key-padding mask.  HLT-like degradations can
+    legitimately remove every constituent from rare jets, so we encode those
+    jets as a deterministic epsilon-energy placeholder instead of letting an
+    all-masked attention row produce NaNs.
+    """
+
+    empty = np.sum(mask, axis=1) == 0
+    if not bool(np.any(empty)):
+        return tokens, mask, empty
+    if tokens.shape[1] == 0:
+        raise ValueError("cannot force a nonempty Particle Transformer row when n_constits is zero")
+    safe_tokens = np.array(tokens, dtype=np.float32, copy=True)
+    safe_mask = np.array(mask, dtype=bool, copy=True)
+    safe_mask[empty, 0] = True
+    safe_tokens[empty, :, :] = 0.0
+    safe_tokens[empty, 0, 0] = float(eps)
+    safe_tokens[empty, 0, 1] = 0.0
+    safe_tokens[empty, 0, 2] = 0.0
+    safe_tokens[empty, 0, 3] = float(eps)
+    return safe_tokens, safe_mask, empty
+
+
 def compute_view_jet_features(
     tokens: np.ndarray,
     mask: np.ndarray,
@@ -271,6 +302,7 @@ def build_particle_transformer_inputs_from_tokens(
         fold_weights=fold_weights,
         weight_threshold=weight_threshold,
     )
+    tokens, mask, forced_nonempty = _force_nonempty_particle_transformer_rows(tokens, mask)
     particle, jet_features = compute_view_jet_features(tokens, mask)
 
     pt = particle["pt"]
@@ -347,6 +379,10 @@ def build_particle_transformer_inputs_from_tokens(
             "jet_feature_names": list(JET_FEATURE_NAMES),
             "candidate_weights_folded": candidate_weights is not None,
             "weight_threshold": float(weight_threshold),
+            "forced_nonempty_particle_transformer_rows": int(np.sum(forced_nonempty)),
+            "forced_nonempty_particle_transformer_fraction": float(np.mean(forced_nonempty))
+            if forced_nonempty.size
+            else 0.0,
         },
     )
 

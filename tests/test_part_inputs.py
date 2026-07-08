@@ -108,6 +108,24 @@ class ParticleTransformerInputStep4Tests(unittest.TestCase):
         self.assertTrue(np.all(inputs.pf_features[:, :, 3] == 0.0))
         self.assertTrue(np.all(inputs.pf_vectors[:, :, 3] == 0.0))
 
+    def test_all_empty_jets_get_finite_dummy_particle_for_part_attention(self):
+        tokens = np.zeros((2, 4, 14), dtype=np.float32)
+        mask = np.zeros((2, 4), dtype=bool)
+        reference_tokens, reference_mask = base_tokens()
+        tokens[1], mask[1] = reference_tokens[1], reference_mask[1]
+
+        inputs = build_particle_transformer_inputs(make_view(tokens, mask, view_name="fixed_hlt"))
+
+        self.assertEqual(inputs.metadata["forced_nonempty_particle_transformer_rows"], 1)
+        self.assertAlmostEqual(inputs.metadata["forced_nonempty_particle_transformer_fraction"], 0.5)
+        self.assertTrue(bool(inputs.pf_mask[0, 0, 0]))
+        self.assertEqual(int(inputs.pf_mask[0, 0].sum()), 1)
+        self.assertEqual(int(inputs.pf_mask[1, 0].sum()), 3)
+        self.assertTrue(np.isfinite(inputs.pf_points).all())
+        self.assertTrue(np.isfinite(inputs.pf_features).all())
+        self.assertTrue(np.isfinite(inputs.pf_vectors).all())
+        self.assertGreater(float(inputs.pf_vectors[0, PF_VECTOR_NAMES.index("part_energy"), 0]), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
