@@ -1188,6 +1188,7 @@ fresh_print_context() {
   echo "MIRROR_DIAGNOSTICS=${MIRROR_DIAGNOSTICS}"
   echo "DIAGNOSTICS_MAX_FILE_MB=${DIAGNOSTICS_MAX_FILE_MB}"
   echo "CONDA_ENV=${CONDA_ENV}"
+  echo "CONDA_BASE=${CONDA_BASE:-unset}"
   echo "PYTHON_BIN=${PYTHON_BIN}"
   echo "DRY_RUN=${DRY_RUN}"
   echo "PRINT_ONLY=${PRINT_ONLY}"
@@ -1204,6 +1205,17 @@ fresh_activate_env() {
   if fresh_bool_enabled "${SKIP_CONDA:-0}"; then
     echo "SKIP_CONDA=1; not activating conda"
     return 0
+  fi
+  if [[ -n "${CONDA_BASE:-}" ]]; then
+    local explicit_conda_sh="${CONDA_BASE}/etc/profile.d/conda.sh"
+    if [[ -f "${explicit_conda_sh}" ]]; then
+      # shellcheck disable=SC1090
+      source "${explicit_conda_sh}"
+      conda activate "${CONDA_ENV}"
+      return 0
+    fi
+    echo "CONDA_BASE is set, but conda.sh was not found: ${explicit_conda_sh}" >&2
+    return 2
   fi
   if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
