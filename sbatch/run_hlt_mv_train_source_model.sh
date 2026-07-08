@@ -26,6 +26,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_HLT2_CACHE_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_self_dualview/hlt2_cache}"
 : "${HLT_MV_SOURCE_MODELS_DIR:=${HLT_MV_ROOT}/source_models}"
 : "${HLT_MV_RANDOM_HLT_CONTROLS_DIR:=${HLT_MV_ROOT}/hlt_random_seed_controls}"
+: "${HLT_MV_CANONICAL_HLT_SOURCE_NAME:=hlt_part_seed8801}"
 : "${HLT_MV_SOURCE_OUTPUT_DIR:=}"
 : "${HLT_MV_SOURCE_CACHE_DIR:=}"
 : "${HLT_MV_SOURCE_VIEW:=}"
@@ -56,48 +57,24 @@ CACHE_DIR_INFERRED=""
 OUTPUT_DIR_INFERRED=""
 SOURCE_SEED=""
 
-case "${SOURCE_NAME}" in
-  hlt_part_seed8801)
-    SOURCE_VIEW_INFERRED="fixed_hlt"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT_CACHE_DIR}"
+if [[ "${SOURCE_NAME}" =~ ^hlt_part_seed([0-9]+)$ ]]; then
+  SOURCE_VIEW_INFERRED="fixed_hlt"
+  CACHE_DIR_INFERRED="${HLT_MV_HLT_CACHE_DIR}"
+  SOURCE_SEED="${BASH_REMATCH[1]}"
+  if [[ "${SOURCE_NAME}" == "${HLT_MV_CANONICAL_HLT_SOURCE_NAME}" ]]; then
     OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="8801"
-    ;;
-  hlt_part_seed9101|hlt_part_seed9102|hlt_part_seed9103|hlt_part_seed9104)
-    SOURCE_VIEW_INFERRED="fixed_hlt"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT_CACHE_DIR}"
+  else
     OUTPUT_DIR_INFERRED="${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="${SOURCE_NAME#hlt_part_seed}"
-    ;;
-  hlt2_part_s0p10_seed8811)
-    SOURCE_VIEW_INFERRED="hlt2"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p10"
-    OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="8811"
-    ;;
-  hlt2_part_s0p20_seed8821)
-    SOURCE_VIEW_INFERRED="hlt2"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p20"
-    OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="8821"
-    ;;
-  hlt2_part_s0p35_seed8831)
-    SOURCE_VIEW_INFERRED="hlt2"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p35"
-    OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="8831"
-    ;;
-  hlt2_part_s1p00_seed8841)
-    SOURCE_VIEW_INFERRED="hlt2"
-    CACHE_DIR_INFERRED="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s1p00"
-    OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
-    SOURCE_SEED="8841"
-    ;;
-  *)
-    echo "Unknown HLT-MV source model: ${SOURCE_NAME}" >&2
-    exit 2
-    ;;
-esac
+  fi
+elif [[ "${SOURCE_NAME}" =~ ^hlt2_part_(s[0-9]+p[0-9]+)_seed([0-9]+)$ ]]; then
+  SOURCE_VIEW_INFERRED="hlt2"
+  CACHE_DIR_INFERRED="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${BASH_REMATCH[1]}"
+  OUTPUT_DIR_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${SOURCE_NAME}"
+  SOURCE_SEED="${BASH_REMATCH[2]}"
+else
+  echo "Unknown HLT-MV source model: ${SOURCE_NAME}" >&2
+  exit 2
+fi
 
 SOURCE_VIEW="${HLT_MV_SOURCE_VIEW:-${SOURCE_VIEW_INFERRED}}"
 CACHE_DIR="${HLT_MV_SOURCE_CACHE_DIR:-${CACHE_DIR_INFERRED}}"

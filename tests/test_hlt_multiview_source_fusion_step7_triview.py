@@ -86,13 +86,11 @@ class HLTMultiviewSourceFusionStep7TriViewTest(unittest.TestCase):
 
     def test_triview_rejects_wrong_name_and_missing_head_warmup(self):
         with self.assertRaises(ValueError):
-            normalize_hlt_mv_triview_name("tri_hlt_hlt2_s0p20_s1p00")
+            normalize_hlt_mv_triview_name("wrong_tri_view")
         with self.assertRaises(ValueError):
-            build_hlt_mv_triview_config(
-                model_name="tri_hlt_hlt2_s0p20_s1p00",
-                layout=self.layout,
-                confirm_final_test=True,
-            )
+            normalize_hlt_mv_triview_name("tri_hlt_hlt2_s0p20_s0p20")
+        with self.assertRaises(ValueError):
+            normalize_hlt_mv_triview_name("tri_hlt_hlt2_s0p50_s1p00")
         with self.assertRaises(ValueError):
             build_hlt_mv_triview_config(
                 layout=self.layout,
@@ -126,11 +124,12 @@ class HLTMultiviewSourceFusionStep7TriViewTest(unittest.TestCase):
         self.assertIn("#SBATCH --job-name=hlt_mv_tri", text)
         self.assertIn("scripts/train_hlt_mv_triview.py", text)
         self.assertIn("tri_hlt_hlt2_s0p35_s1p00", text)
-        self.assertIn("hlt_second_degrade_mild_v1_s0p35", text)
-        self.assertIn("hlt_second_degrade_mild_v1_s1p00", text)
-        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/hlt_part_seed8801/best_model_val.pt", text)
-        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p35_seed8831/best_model_val.pt", text)
-        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s1p00_seed8841/best_model_val.pt", text)
+        self.assertIn('^tri_hlt_hlt2_(s[0-9]+p[0-9]+)_(s[0-9]+p[0-9]+)$', text)
+        self.assertIn("hlt_second_degrade_mild_v1_${hlt2_first_tag}", text)
+        self.assertIn("hlt_second_degrade_mild_v1_${hlt2_second_tag}", text)
+        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/${HLT_MV_CANONICAL_HLT_SOURCE_NAME}/best_model_val.pt", text)
+        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/${hlt2_first_source_name}/best_model_val.pt", text)
+        self.assertIn("HLT_MV_SOURCE_MODELS_DIR}/${hlt2_second_source_name}/best_model_val.pt", text)
         self.assertIn("--hlt-checkpoint", text)
         self.assertIn("--hlt2-s0p35-checkpoint", text)
         self.assertIn("--hlt2-s1p00-checkpoint", text)

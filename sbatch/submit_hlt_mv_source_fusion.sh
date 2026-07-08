@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_PDV3_EXPERIMENT_NAME:=privileged_distill_v3_av10_adapter_fixed_hlt_v2_realistic_s1p0_highdata_20260705_190747}"
 : "${HLT_MV_PDV3_ROOT:=${OUTPUT_ROOT}/${HLT_MV_PDV3_EXPERIMENT_NAME}}"
 : "${HLT_MV_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_multiview_source_fusion}"
+: "${HLT_MV_ROOT_DIRNAME:=$(basename "${HLT_MV_ROOT}")}"
 : "${HLT_MV_HLT_CACHE_DIR:=${HLT_MV_PDV3_ROOT}/inputs/hlt_cache}"
 : "${HLT_MV_HLT2_CACHE_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_self_dualview/hlt2_cache}"
 : "${HLT_MV_SOURCE_MODELS_DIR:=${HLT_MV_ROOT}/source_models}"
@@ -25,20 +26,30 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_CONTROLS_DIR:=${HLT_MV_ROOT}/controls}"
 : "${HLT_MV_TRIVIEW_DIR:=${HLT_MV_ROOT}/triview}"
 : "${HLT_MV_FINAL_REPORT_DIR:=${HLT_MV_ROOT}/final_report}"
+: "${HLT_MV_CANONICAL_HLT_SOURCE_NAME:=hlt_part_seed8801}"
+: "${HLT_MV_STRENGTHS:=0.10 0.20 0.35 1.00}"
+: "${HLT_MV_HLT2_SOURCE_SEEDS:=0.10=8811 0.20=8821 0.35=8831 0.50=8851 1.00=8841 1.50=8861 2.00=8871}"
 : "${HLT_MV_SOURCE_NAMES:=hlt_part_seed8801 hlt2_part_s0p10_seed8811 hlt2_part_s0p20_seed8821 hlt2_part_s0p35_seed8831 hlt2_part_s1p00_seed8841}"
 : "${HLT_MV_RANDOM_HLT_SOURCE_NAMES:=hlt_part_seed9101 hlt_part_seed9102 hlt_part_seed9103 hlt_part_seed9104}"
 : "${HLT_MV_PRETRAINED_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10 sdv_hlt_hlt2_s0p20 sdv_hlt_hlt2_s0p35 sdv_hlt_hlt2_s1p00}"
 : "${HLT_MV_SCRATCH_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10_scratch sdv_hlt_hlt2_s0p20_scratch sdv_hlt_hlt2_s0p35_scratch sdv_hlt_hlt2_s1p00_scratch}"
 : "${HLT_MV_TTA_STRENGTHS:=0.10 0.20 0.35 1.00}"
+: "${HLT_MV_TRIVIEW_MODEL_NAME:=tri_hlt_hlt2_s0p35_s1p00}"
+: "${HLT_MV_ALLOW_PENDING_HLT2_CACHES:=0}"
 : "${HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0}"
 : "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0}"
 
 export PROJECT_DIR DATA_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_ENV PYTHON_BIN
-export HLT_MV_PDV3_EXPERIMENT_NAME HLT_MV_PDV3_ROOT HLT_MV_ROOT
+export HLT_MV_PDV3_EXPERIMENT_NAME HLT_MV_PDV3_ROOT HLT_MV_ROOT HLT_MV_ROOT_DIRNAME
 export HLT_MV_HLT_CACHE_DIR HLT_MV_HLT2_CACHE_ROOT HLT_MV_SOURCE_MODELS_DIR
 export HLT_MV_RANDOM_HLT_CONTROLS_DIR HLT_MV_LOGIT_FUSIONS_DIR
 export HLT_MV_PRETRAINED_DUALVIEW_DIR HLT_MV_SCRATCH_DUALVIEW_DIR
 export HLT_MV_CONTROLS_DIR HLT_MV_TRIVIEW_DIR HLT_MV_FINAL_REPORT_DIR
+export HLT_MV_CANONICAL_HLT_SOURCE_NAME HLT_MV_STRENGTHS HLT_MV_HLT2_SOURCE_SEEDS
+export HLT_MV_SOURCE_NAMES HLT_MV_RANDOM_HLT_SOURCE_NAMES
+export HLT_MV_PRETRAINED_DUALVIEW_NAMES HLT_MV_SCRATCH_DUALVIEW_NAMES
+export HLT_MV_TTA_STRENGTHS HLT_MV_TRIVIEW_MODEL_NAME
+export HLT_MV_ALLOW_PENDING_HLT2_CACHES
 export HLT_MV_SOURCE_EPOCHS HLT_MV_SOURCE_BATCH_SIZE HLT_MV_SOURCE_EVAL_BATCH_SIZE
 export HLT_MV_SOURCE_LR HLT_MV_SOURCE_WEIGHT_DECAY HLT_MV_SOURCE_EARLY_STOP_PATIENCE
 export HLT_MV_SOURCE_GRAD_CLIP_NORM HLT_MV_SOURCE_NUM_WORKERS HLT_MV_SOURCE_DEVICE
@@ -315,16 +326,81 @@ skip_existing_final_report() {
   return 0
 }
 
+name_in_words() {
+  local needle="$1"
+  local words="$2"
+  local names=()
+  local name
+  fresh_split_words names "${words}"
+  for name in "${names[@]}"; do
+    if [[ "${name}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+hlt_mv_hlt2_tag_from_pretrained_variant() {
+  local variant="$1"
+  if [[ "${variant}" =~ ^sdv_hlt_hlt2_(s[0-9]+p[0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  echo "Unknown HLT-MV pretrained dual-view variant: ${variant}" >&2
+  return 2
+}
+
+hlt_mv_hlt2_tag_from_scratch_variant() {
+  local variant="$1"
+  if [[ "${variant}" =~ ^sdv_hlt_hlt2_(s[0-9]+p[0-9]+)_scratch$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  echo "Unknown HLT-MV scratch dual-view variant: ${variant}" >&2
+  return 2
+}
+
+hlt_mv_hlt2_source_name_for_tag() {
+  local tag="$1"
+  local source_name
+  for source_name in "${source_names[@]}"; do
+    if [[ "${source_name}" =~ ^hlt2_part_${tag}_seed[0-9]+$ ]]; then
+      printf '%s\n' "${source_name}"
+      return 0
+    fi
+  done
+  echo "No HLT-MV source name configured for HLT2 tag ${tag}." >&2
+  return 2
+}
+
+hlt_mv_submitted_job_id_for_source() {
+  local source_name="$1"
+  local index
+  for index in "${!submitted_source_names[@]}"; do
+    if [[ "${submitted_source_names[$index]}" == "${source_name}" ]]; then
+      printf '%s\n' "${submitted_source_job_ids[$index]}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+hlt_mv_triview_tags() {
+  if [[ "${HLT_MV_TRIVIEW_MODEL_NAME}" =~ ^tri_hlt_hlt2_(s[0-9]+p[0-9]+)_(s[0-9]+p[0-9]+)$ ]]; then
+    printf '%s\n%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  echo "HLT-MV tri-view model must look like tri_hlt_hlt2_sXpYY_sXpYY; got ${HLT_MV_TRIVIEW_MODEL_NAME}" >&2
+  return 2
+}
+
 source_output_dir() {
   local source_name="$1"
-  case "${source_name}" in
-    hlt_part_seed9101|hlt_part_seed9102|hlt_part_seed9103|hlt_part_seed9104)
-      printf '%s\n' "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/${source_name}"
-      ;;
-    *)
-      printf '%s\n' "${HLT_MV_SOURCE_MODELS_DIR}/${source_name}"
-      ;;
-  esac
+  if name_in_words "${source_name}" "${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"; then
+    printf '%s\n' "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/${source_name}"
+  else
+    printf '%s\n' "${HLT_MV_SOURCE_MODELS_DIR}/${source_name}"
+  fi
 }
 
 submit_source_model() {
@@ -422,10 +498,15 @@ done
 for strength in "${tta_strengths[@]}"; do
   tag="$(fresh_pd10_hlt_sdv_strength_tag "${strength}")"
   cache_dir="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${tag}"
-  fresh_require_dir "${cache_dir}"
-  for split in model_train model_val final_test; do
-    fresh_require_file "${cache_dir}/${split}_fixed_hlt_metadata.json"
-  done
+  if [[ -d "${cache_dir}" ]]; then
+    for split in model_train model_val final_test; do
+      fresh_require_file "${cache_dir}/${split}_fixed_hlt_metadata.json"
+    done
+  elif fresh_bool_enabled "${HLT_MV_ALLOW_PENDING_HLT2_CACHES}"; then
+    echo "allowing pending HLT2 cache for ${tag}: ${cache_dir}" >&2
+  else
+    fresh_require_dir "${cache_dir}"
+  fi
 done
 
 submission_dir="${HLT_MV_ROOT}/submission_logs/hlt_mv_$(date +%Y%m%d_%H%M%S)"
@@ -438,38 +519,37 @@ if ! fresh_is_dry_run; then
     echo "source_status_hash=$(fresh_source_status_hash)"
     echo "pdv3_root=${HLT_MV_PDV3_ROOT}"
     echo "hlt_mv_root=${HLT_MV_ROOT}"
+    echo "hlt_mv_root_dirname=${HLT_MV_ROOT_DIRNAME}"
     echo "upstream_dependency=${HLT_MV_UPSTREAM_DEPENDENCY}"
     echo "skip_existing=${SKIP_EXISTING}"
     echo "overwrite=${OVERWRITE}"
     echo "confirm_final_test=${CONFIRM_FINAL_TEST}"
+    echo "strengths=${HLT_MV_STRENGTHS}"
+    echo "hlt2_source_seeds=${HLT_MV_HLT2_SOURCE_SEEDS}"
+    echo "canonical_hlt_source_name=${HLT_MV_CANONICAL_HLT_SOURCE_NAME}"
     echo "source_names=${HLT_MV_SOURCE_NAMES}"
     echo "random_hlt_source_names=${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"
     echo "pretrained_dualview_names=${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
     echo "scratch_dualview_names=${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
     echo "tta_strengths=${HLT_MV_TTA_STRENGTHS}"
+    echo "triview_model_name=${HLT_MV_TRIVIEW_MODEL_NAME}"
+    echo "allow_pending_hlt2_caches=${HLT_MV_ALLOW_PENDING_HLT2_CACHES}"
     echo "final_report_require_triview=${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"
   } > "${submission_dir}/metadata.txt"
 fi
 
 source_job_ids=()
-canonical_hlt_source_job_id=""
-hlt2_s0p10_source_job_id=""
-hlt2_s0p20_source_job_id=""
-hlt2_s0p35_source_job_id=""
-hlt2_s1p00_source_job_id=""
+submitted_source_names=()
+submitted_source_job_ids=()
 for source_name in "${source_names[@]}"; do
   submit_source_model "${source_name}" "${base_dep}"
   if [[ -n "${submitted_job_id}" ]]; then
     source_job_ids+=("${submitted_job_id}")
-    case "${source_name}" in
-      hlt_part_seed8801) canonical_hlt_source_job_id="${submitted_job_id}" ;;
-      hlt2_part_s0p10_seed8811) hlt2_s0p10_source_job_id="${submitted_job_id}" ;;
-      hlt2_part_s0p20_seed8821) hlt2_s0p20_source_job_id="${submitted_job_id}" ;;
-      hlt2_part_s0p35_seed8831) hlt2_s0p35_source_job_id="${submitted_job_id}" ;;
-      hlt2_part_s1p00_seed8841) hlt2_s1p00_source_job_id="${submitted_job_id}" ;;
-    esac
+    submitted_source_names+=("${source_name}")
+    submitted_source_job_ids+=("${submitted_job_id}")
   fi
 done
+canonical_hlt_source_job_id="$(hlt_mv_submitted_job_id_for_source "${HLT_MV_CANONICAL_HLT_SOURCE_NAME}")"
 source_dep="$(join_nonempty_by_colon "${base_dep}" "${source_job_ids[@]}")"
 
 random_job_ids=()
@@ -489,13 +569,9 @@ random_fusion_job_id="${submitted_job_id}"
 pretrained_job_ids=()
 for variant in "${pretrained_names[@]}"; do
   output_dir="${HLT_MV_PRETRAINED_DUALVIEW_DIR}/${variant}"
-  hlt2_source_job_id=""
-  case "${variant}" in
-    sdv_hlt_hlt2_s0p10) hlt2_source_job_id="${hlt2_s0p10_source_job_id}" ;;
-    sdv_hlt_hlt2_s0p20) hlt2_source_job_id="${hlt2_s0p20_source_job_id}" ;;
-    sdv_hlt_hlt2_s0p35) hlt2_source_job_id="${hlt2_s0p35_source_job_id}" ;;
-    sdv_hlt_hlt2_s1p00) hlt2_source_job_id="${hlt2_s1p00_source_job_id}" ;;
-  esac
+  hlt2_tag="$(hlt_mv_hlt2_tag_from_pretrained_variant "${variant}")"
+  hlt2_source_name="$(hlt_mv_hlt2_source_name_for_tag "${hlt2_tag}")"
+  hlt2_source_job_id="$(hlt_mv_submitted_job_id_for_source "${hlt2_source_name}")"
   variant_dep="$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_source_job_id}")"
   submit_model_job \
     "hlt_mv_pretrained_${variant}" \
@@ -514,6 +590,7 @@ pretrained_fusion_job_id="${submitted_job_id}"
 
 scratch_job_ids=()
 for variant in "${scratch_names[@]}"; do
+  hlt_mv_hlt2_tag_from_scratch_variant "${variant}" >/dev/null
   output_dir="${HLT_MV_SCRATCH_DUALVIEW_DIR}/${variant}"
   submit_model_job \
     "hlt_mv_scratch_${variant}" \
@@ -550,11 +627,20 @@ for strength in "${tta_strengths[@]}"; do
 done
 control_dep="$(join_nonempty_by_colon "${base_dep}" "${control_job_ids[@]}")"
 
+triview_tags=()
+mapfile -t triview_tags < <(hlt_mv_triview_tags)
+first_triview_source="$(hlt_mv_hlt2_source_name_for_tag "${triview_tags[0]}")"
+second_triview_source="$(hlt_mv_hlt2_source_name_for_tag "${triview_tags[1]}")"
+triview_dep="$(join_nonempty_by_colon \
+  "${base_dep}" \
+  "${canonical_hlt_source_job_id}" \
+  "$(hlt_mv_submitted_job_id_for_source "${first_triview_source}")" \
+  "$(hlt_mv_submitted_job_id_for_source "${second_triview_source}")")"
 submit_model_job \
   "hlt_mv_triview" \
-  "$(join_nonempty_by_colon "${base_dep}" "${canonical_hlt_source_job_id}" "${hlt2_s0p35_source_job_id}" "${hlt2_s1p00_source_job_id}")" \
-  "${HLT_MV_TRIVIEW_DIR}/tri_hlt_hlt2_s0p35_s1p00" \
-  "tri_hlt_hlt2_s0p35_s1p00" \
+  "${triview_dep}" \
+  "${HLT_MV_TRIVIEW_DIR}/${HLT_MV_TRIVIEW_MODEL_NAME}" \
+  "${HLT_MV_TRIVIEW_MODEL_NAME}" \
   "hlt_mv_triview_report.json" \
   "${SCRIPT_DIR}/run_hlt_mv_train_triview.sh"
 triview_job_id="${submitted_job_id}"

@@ -57,24 +57,12 @@ source "${SCRIPT_DIR}/common.sh"
 VARIANT_NAME="${1:?variant is required, e.g. sdv_hlt_hlt2_s0p20_scratch}"
 HLT2_CACHE_DIR=""
 
-case "${VARIANT_NAME}" in
-  sdv_hlt_hlt2_s0p10_scratch)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p10"
-    ;;
-  sdv_hlt_hlt2_s0p20_scratch)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p20"
-    ;;
-  sdv_hlt_hlt2_s0p35_scratch)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p35"
-    ;;
-  sdv_hlt_hlt2_s1p00_scratch)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s1p00"
-    ;;
-  *)
-    echo "Unknown HLT-MV scratch dual-view variant: ${VARIANT_NAME}" >&2
-    exit 2
-    ;;
-esac
+if [[ "${VARIANT_NAME}" =~ ^sdv_hlt_hlt2_(s[0-9]+p[0-9]+)_scratch$ ]]; then
+  HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${BASH_REMATCH[1]}"
+else
+  echo "Unknown HLT-MV scratch dual-view variant: ${VARIANT_NAME}" >&2
+  exit 2
+fi
 
 OUTPUT_DIR="${HLT_MV_SCRATCH_DUALVIEW_OUTPUT_DIR:-${HLT_MV_SCRATCH_DUALVIEW_DIR}/${VARIANT_NAME}}"
 

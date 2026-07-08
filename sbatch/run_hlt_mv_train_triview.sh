@@ -26,13 +26,15 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_HLT2_CACHE_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_self_dualview/hlt2_cache}"
 : "${HLT_MV_SOURCE_MODELS_DIR:=${HLT_MV_ROOT}/source_models}"
 : "${HLT_MV_TRIVIEW_DIR:=${HLT_MV_ROOT}/triview}"
+: "${HLT_MV_CANONICAL_HLT_SOURCE_NAME:=hlt_part_seed8801}"
+: "${HLT_MV_SOURCE_NAMES:=hlt_part_seed8801 hlt2_part_s0p10_seed8811 hlt2_part_s0p20_seed8821 hlt2_part_s0p35_seed8831 hlt2_part_s1p00_seed8841}"
 : "${HLT_MV_TRIVIEW_MODEL_NAME:=tri_hlt_hlt2_s0p35_s1p00}"
 : "${HLT_MV_TRIVIEW_OUTPUT_DIR:=}"
-: "${HLT_MV_TRIVIEW_HLT2_S0P35_CACHE_DIR:=${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p35}"
-: "${HLT_MV_TRIVIEW_HLT2_S1P00_CACHE_DIR:=${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s1p00}"
-: "${HLT_MV_TRIVIEW_HLT_CHECKPOINT:=${HLT_MV_SOURCE_MODELS_DIR}/hlt_part_seed8801/best_model_val.pt}"
-: "${HLT_MV_TRIVIEW_HLT2_S0P35_CHECKPOINT:=${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p35_seed8831/best_model_val.pt}"
-: "${HLT_MV_TRIVIEW_HLT2_S1P00_CHECKPOINT:=${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s1p00_seed8841/best_model_val.pt}"
+: "${HLT_MV_TRIVIEW_HLT2_S0P35_CACHE_DIR:=}"
+: "${HLT_MV_TRIVIEW_HLT2_S1P00_CACHE_DIR:=}"
+: "${HLT_MV_TRIVIEW_HLT_CHECKPOINT:=}"
+: "${HLT_MV_TRIVIEW_HLT2_S0P35_CHECKPOINT:=}"
+: "${HLT_MV_TRIVIEW_HLT2_S1P00_CHECKPOINT:=}"
 : "${HLT_MV_TRIVIEW_SEED:=9201}"
 : "${HLT_MV_TRIVIEW_EPOCHS:=10}"
 : "${HLT_MV_TRIVIEW_HEAD_WARMUP_EPOCHS:=1}"
@@ -63,11 +65,41 @@ source "${SCRIPT_DIR}/common.sh"
 
 OUTPUT_DIR="${HLT_MV_TRIVIEW_OUTPUT_DIR:-${HLT_MV_TRIVIEW_DIR}/${HLT_MV_TRIVIEW_MODEL_NAME}}"
 
-fresh_setup "$@"
-if [[ "${HLT_MV_TRIVIEW_MODEL_NAME}" != "tri_hlt_hlt2_s0p35_s1p00" ]]; then
-  echo "HLT-MV Step 7 only supports tri_hlt_hlt2_s0p35_s1p00; got ${HLT_MV_TRIVIEW_MODEL_NAME}" >&2
+hlt_mv_source_name_for_tag() {
+  local tag="$1"
+  local names=()
+  local source_name
+  fresh_split_words names "${HLT_MV_SOURCE_NAMES}"
+  for source_name in "${names[@]}"; do
+    if [[ "${source_name}" =~ ^hlt2_part_${tag}_seed[0-9]+$ ]]; then
+      printf '%s\n' "${source_name}"
+      return 0
+    fi
+  done
+  echo "No HLT-MV source name configured for HLT2 tag ${tag}." >&2
+  return 2
+}
+
+if [[ "${HLT_MV_TRIVIEW_MODEL_NAME}" =~ ^tri_hlt_hlt2_(s[0-9]+p[0-9]+)_(s[0-9]+p[0-9]+)$ ]]; then
+  hlt2_first_tag="${BASH_REMATCH[1]}"
+  hlt2_second_tag="${BASH_REMATCH[2]}"
+else
+  echo "HLT-MV tri-view model must look like tri_hlt_hlt2_sXpYY_sXpYY; got ${HLT_MV_TRIVIEW_MODEL_NAME}" >&2
   exit 2
 fi
+if [[ "${hlt2_first_tag}" == "${hlt2_second_tag}" ]]; then
+  echo "HLT-MV tri-view requires two distinct HLT2 strengths; got ${HLT_MV_TRIVIEW_MODEL_NAME}" >&2
+  exit 2
+fi
+hlt2_first_source_name="$(hlt_mv_source_name_for_tag "${hlt2_first_tag}")"
+hlt2_second_source_name="$(hlt_mv_source_name_for_tag "${hlt2_second_tag}")"
+HLT_MV_TRIVIEW_HLT2_S0P35_CACHE_DIR="${HLT_MV_TRIVIEW_HLT2_S0P35_CACHE_DIR:-${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${hlt2_first_tag}}"
+HLT_MV_TRIVIEW_HLT2_S1P00_CACHE_DIR="${HLT_MV_TRIVIEW_HLT2_S1P00_CACHE_DIR:-${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${hlt2_second_tag}}"
+HLT_MV_TRIVIEW_HLT_CHECKPOINT="${HLT_MV_TRIVIEW_HLT_CHECKPOINT:-${HLT_MV_SOURCE_MODELS_DIR}/${HLT_MV_CANONICAL_HLT_SOURCE_NAME}/best_model_val.pt}"
+HLT_MV_TRIVIEW_HLT2_S0P35_CHECKPOINT="${HLT_MV_TRIVIEW_HLT2_S0P35_CHECKPOINT:-${HLT_MV_SOURCE_MODELS_DIR}/${hlt2_first_source_name}/best_model_val.pt}"
+HLT_MV_TRIVIEW_HLT2_S1P00_CHECKPOINT="${HLT_MV_TRIVIEW_HLT2_S1P00_CHECKPOINT:-${HLT_MV_SOURCE_MODELS_DIR}/${hlt2_second_source_name}/best_model_val.pt}"
+
+fresh_setup "$@"
 fresh_require_dir "${HLT_MV_HLT_CACHE_DIR}"
 fresh_require_dir "${HLT_MV_TRIVIEW_HLT2_S0P35_CACHE_DIR}"
 fresh_require_dir "${HLT_MV_TRIVIEW_HLT2_S1P00_CACHE_DIR}"

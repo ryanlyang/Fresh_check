@@ -19,6 +19,7 @@ from .config import (
     HLT_MV_FUSION_PRETRAINED_DUALVIEW_4MODEL,
     HLT_MV_FUSION_SCRATCH_DUALVIEW_4MODEL,
     HLT_MV_FUSION_SOURCE_5VIEW,
+    HLT_MV_ROOT_DIRNAME,
     HLT_MV_TRIVIEW_MODEL_NAME,
     default_hlt_mv_experiment_config,
     default_hlt_mv_experiment_layout,
@@ -50,6 +51,8 @@ class HLTMVFinalReportConfig:
     output_dir: str
     output_root: str = "checkpoints"
     pdv3_experiment_name: str = HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME
+    root_dirname: str = HLT_MV_ROOT_DIRNAME
+    triview_model_name: str = HLT_MV_TRIVIEW_MODEL_NAME
     allow_missing: bool = False
     require_triview: bool = False
     overwrite: bool = False
@@ -270,6 +273,7 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
     layout = default_hlt_mv_experiment_layout(
         output_root=config.output_root,
         pdv3_experiment_name=config.pdv3_experiment_name,
+        root_dirname=config.root_dirname,
     )
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -322,7 +326,7 @@ def write_hlt_mv_final_report(config: HLTMVFinalReportConfig) -> dict[str, Any]:
         rows,
         triview_missing,
         family="triview_particle_fusion",
-        names=(HLT_MV_TRIVIEW_MODEL_NAME,),
+        names=(config.triview_model_name,),
         path_for_name=layout.triview_model_dir,
         report_filename=HLT_MV_TRIVIEW_REPORT,
         allow_missing=bool(config.allow_missing or not config.require_triview),

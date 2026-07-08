@@ -26,6 +26,10 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_PRETRAINED_DUALVIEW_DIR:=${HLT_MV_ROOT}/particle_dualview_pretrained}"
 : "${HLT_MV_SCRATCH_DUALVIEW_DIR:=${HLT_MV_ROOT}/particle_dualview_scratch}"
 : "${HLT_MV_LOGIT_FUSIONS_DIR:=${HLT_MV_ROOT}/logit_fusions}"
+: "${HLT_MV_SOURCE_NAMES:=hlt_part_seed8801 hlt2_part_s0p10_seed8811 hlt2_part_s0p20_seed8821 hlt2_part_s0p35_seed8831 hlt2_part_s1p00_seed8841}"
+: "${HLT_MV_RANDOM_HLT_SOURCE_NAMES:=hlt_part_seed9101 hlt_part_seed9102 hlt_part_seed9103 hlt_part_seed9104}"
+: "${HLT_MV_PRETRAINED_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10 sdv_hlt_hlt2_s0p20 sdv_hlt_hlt2_s0p35 sdv_hlt_hlt2_s1p00}"
+: "${HLT_MV_SCRATCH_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10_scratch sdv_hlt_hlt2_s0p20_scratch sdv_hlt_hlt2_s0p35_scratch sdv_hlt_hlt2_s1p00_scratch}"
 : "${HLT_MV_LOGIT_FUSION_OUTPUT_DIR:=}"
 : "${HLT_MV_LOGIT_FUSION_MODEL_SPECS:=}"
 : "${HLT_MV_LOGIT_FUSION_SKIP_WEIGHTED_AVERAGE:=0}"
@@ -47,29 +51,32 @@ if [[ -n "${HLT_MV_LOGIT_FUSION_MODEL_SPECS}" ]]; then
 else
   case "${FUSION_NAME}" in
     source_5view)
-      add_spec hlt_part_seed8801 "${HLT_MV_SOURCE_MODELS_DIR}/hlt_part_seed8801/predictions"
-      add_spec hlt2_part_s0p10_seed8811 "${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p10_seed8811/predictions"
-      add_spec hlt2_part_s0p20_seed8821 "${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p20_seed8821/predictions"
-      add_spec hlt2_part_s0p35_seed8831 "${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p35_seed8831/predictions"
-      add_spec hlt2_part_s1p00_seed8841 "${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s1p00_seed8841/predictions"
+      names=()
+      fresh_split_words names "${HLT_MV_SOURCE_NAMES}"
+      for name in "${names[@]}"; do
+        add_spec "${name}" "${HLT_MV_SOURCE_MODELS_DIR}/${name}/predictions"
+      done
       ;;
     hlt_random_4seed)
-      add_spec hlt_part_seed9101 "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/hlt_part_seed9101/predictions"
-      add_spec hlt_part_seed9102 "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/hlt_part_seed9102/predictions"
-      add_spec hlt_part_seed9103 "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/hlt_part_seed9103/predictions"
-      add_spec hlt_part_seed9104 "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/hlt_part_seed9104/predictions"
+      names=()
+      fresh_split_words names "${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"
+      for name in "${names[@]}"; do
+        add_spec "${name}" "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/${name}/predictions"
+      done
       ;;
     pretrained_dualview_4model)
-      add_spec sdv_hlt_hlt2_s0p10 "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p10/predictions"
-      add_spec sdv_hlt_hlt2_s0p20 "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p20/predictions"
-      add_spec sdv_hlt_hlt2_s0p35 "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p35/predictions"
-      add_spec sdv_hlt_hlt2_s1p00 "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/sdv_hlt_hlt2_s1p00/predictions"
+      names=()
+      fresh_split_words names "${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
+      for name in "${names[@]}"; do
+        add_spec "${name}" "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/${name}/predictions"
+      done
       ;;
     scratch_dualview_4model)
-      add_spec sdv_hlt_hlt2_s0p10_scratch "${HLT_MV_SCRATCH_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p10_scratch/predictions"
-      add_spec sdv_hlt_hlt2_s0p20_scratch "${HLT_MV_SCRATCH_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p20_scratch/predictions"
-      add_spec sdv_hlt_hlt2_s0p35_scratch "${HLT_MV_SCRATCH_DUALVIEW_DIR}/sdv_hlt_hlt2_s0p35_scratch/predictions"
-      add_spec sdv_hlt_hlt2_s1p00_scratch "${HLT_MV_SCRATCH_DUALVIEW_DIR}/sdv_hlt_hlt2_s1p00_scratch/predictions"
+      names=()
+      fresh_split_words names "${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
+      for name in "${names[@]}"; do
+        add_spec "${name}" "${HLT_MV_SCRATCH_DUALVIEW_DIR}/${name}/predictions"
+      done
       ;;
     *)
       echo "Unknown built-in HLT-MV logit fusion: ${FUSION_NAME}" >&2

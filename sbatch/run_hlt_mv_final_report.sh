@@ -21,6 +21,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_PDV3_EXPERIMENT_NAME:=privileged_distill_v3_av10_adapter_fixed_hlt_v2_realistic_s1p0_highdata_20260705_190747}"
 : "${HLT_MV_PDV3_ROOT:=${OUTPUT_ROOT}/${HLT_MV_PDV3_EXPERIMENT_NAME}}"
 : "${HLT_MV_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_multiview_source_fusion}"
+: "${HLT_MV_ROOT_DIRNAME:=$(basename "${HLT_MV_ROOT}")}"
 : "${HLT_MV_SOURCE_MODELS_DIR:=${HLT_MV_ROOT}/source_models}"
 : "${HLT_MV_RANDOM_HLT_CONTROLS_DIR:=${HLT_MV_ROOT}/hlt_random_seed_controls}"
 : "${HLT_MV_LOGIT_FUSIONS_DIR:=${HLT_MV_ROOT}/logit_fusions}"
@@ -29,38 +30,41 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_CONTROLS_DIR:=${HLT_MV_ROOT}/controls}"
 : "${HLT_MV_TRIVIEW_DIR:=${HLT_MV_ROOT}/triview}"
 : "${HLT_MV_FINAL_REPORT_DIR:=${HLT_MV_ROOT}/final_report}"
+: "${HLT_MV_SOURCE_NAMES:=hlt_part_seed8801 hlt2_part_s0p10_seed8811 hlt2_part_s0p20_seed8821 hlt2_part_s0p35_seed8831 hlt2_part_s1p00_seed8841}"
+: "${HLT_MV_RANDOM_HLT_SOURCE_NAMES:=hlt_part_seed9101 hlt_part_seed9102 hlt_part_seed9103 hlt_part_seed9104}"
+: "${HLT_MV_PRETRAINED_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10 sdv_hlt_hlt2_s0p20 sdv_hlt_hlt2_s0p35 sdv_hlt_hlt2_s1p00}"
+: "${HLT_MV_SCRATCH_DUALVIEW_NAMES:=sdv_hlt_hlt2_s0p10_scratch sdv_hlt_hlt2_s0p20_scratch sdv_hlt_hlt2_s0p35_scratch sdv_hlt_hlt2_s1p00_scratch}"
+: "${HLT_MV_TTA_STRENGTHS:=0.10 0.20 0.35 1.00}"
+: "${HLT_MV_TRIVIEW_MODEL_NAME:=tri_hlt_hlt2_s0p35_s1p00}"
 : "${HLT_MV_FINAL_REPORT_ALLOW_MISSING:=0}"
 : "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW:=0}"
 
 fresh_setup "$@"
 if ! fresh_bool_enabled "${HLT_MV_FINAL_REPORT_ALLOW_MISSING}"; then
-  for source_name in \
-    hlt_part_seed8801 \
-    hlt2_part_s0p10_seed8811 \
-    hlt2_part_s0p20_seed8821 \
-    hlt2_part_s0p35_seed8831 \
-    hlt2_part_s1p00_seed8841; do
+  fresh_split_words source_names "${HLT_MV_SOURCE_NAMES}"
+  fresh_split_words random_source_names "${HLT_MV_RANDOM_HLT_SOURCE_NAMES}"
+  fresh_split_words pretrained_names "${HLT_MV_PRETRAINED_DUALVIEW_NAMES}"
+  fresh_split_words scratch_names "${HLT_MV_SCRATCH_DUALVIEW_NAMES}"
+  fresh_split_words tta_strengths "${HLT_MV_TTA_STRENGTHS}"
+  for source_name in "${source_names[@]}"; do
     fresh_require_file "${HLT_MV_SOURCE_MODELS_DIR}/${source_name}/run_report.json"
   done
-  for source_name in hlt_part_seed9101 hlt_part_seed9102 hlt_part_seed9103 hlt_part_seed9104; do
+  for source_name in "${random_source_names[@]}"; do
     fresh_require_file "${HLT_MV_RANDOM_HLT_CONTROLS_DIR}/${source_name}/run_report.json"
   done
-  for variant in sdv_hlt_hlt2_s0p10 sdv_hlt_hlt2_s0p20 sdv_hlt_hlt2_s0p35 sdv_hlt_hlt2_s1p00; do
+  for variant in "${pretrained_names[@]}"; do
     fresh_require_file "${HLT_MV_PRETRAINED_DUALVIEW_DIR}/${variant}/hlt_mv_pretrained_dualview_report.json"
   done
-  for variant in sdv_hlt_hlt2_s0p10_scratch sdv_hlt_hlt2_s0p20_scratch sdv_hlt_hlt2_s0p35_scratch sdv_hlt_hlt2_s1p00_scratch; do
+  for variant in "${scratch_names[@]}"; do
     fresh_require_file "${HLT_MV_SCRATCH_DUALVIEW_DIR}/${variant}/hlt_mv_scratch_dualview_report.json"
   done
-  for control_name in \
-    sdv_hlt_hlt_same_view \
-    tta_hlt_part_hlt_plus_hlt2_s0p10 \
-    tta_hlt_part_hlt_plus_hlt2_s0p20 \
-    tta_hlt_part_hlt_plus_hlt2_s0p35 \
-    tta_hlt_part_hlt_plus_hlt2_s1p00; do
+  fresh_require_file "${HLT_MV_CONTROLS_DIR}/sdv_hlt_hlt_same_view/run_report.json"
+  for strength in "${tta_strengths[@]}"; do
+    control_name="tta_hlt_part_hlt_plus_hlt2_$(fresh_pd10_hlt_sdv_strength_tag "${strength}")"
     fresh_require_file "${HLT_MV_CONTROLS_DIR}/${control_name}/run_report.json"
   done
   if fresh_bool_enabled "${HLT_MV_FINAL_REPORT_REQUIRE_TRIVIEW}"; then
-    fresh_require_file "${HLT_MV_TRIVIEW_DIR}/tri_hlt_hlt2_s0p35_s1p00/hlt_mv_triview_report.json"
+    fresh_require_file "${HLT_MV_TRIVIEW_DIR}/${HLT_MV_TRIVIEW_MODEL_NAME}/hlt_mv_triview_report.json"
   fi
   for fusion_name in source_5view hlt_random_4seed pretrained_dualview_4model scratch_dualview_4model; do
     fresh_require_file "${HLT_MV_LOGIT_FUSIONS_DIR}/${fusion_name}/run_report.json"
@@ -72,6 +76,8 @@ cmd=(
   "${PYTHON_BIN}" "-u" "scripts/write_hlt_mv_final_report.py"
   --output-root "${OUTPUT_ROOT}"
   --pdv3-experiment-name "${HLT_MV_PDV3_EXPERIMENT_NAME}"
+  --root-dirname "${HLT_MV_ROOT_DIRNAME}"
+  --triview-model-name "${HLT_MV_TRIVIEW_MODEL_NAME}"
   --output-dir "${HLT_MV_FINAL_REPORT_DIR}"
 )
 fresh_append_flag_if_enabled cmd --allow-missing "${HLT_MV_FINAL_REPORT_ALLOW_MISSING}"

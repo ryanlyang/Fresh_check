@@ -26,6 +26,8 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_HLT2_CACHE_ROOT:=${HLT_MV_PDV3_ROOT}/hlt_self_dualview/hlt2_cache}"
 : "${HLT_MV_SOURCE_MODELS_DIR:=${HLT_MV_ROOT}/source_models}"
 : "${HLT_MV_PRETRAINED_DUALVIEW_DIR:=${HLT_MV_ROOT}/particle_dualview_pretrained}"
+: "${HLT_MV_CANONICAL_HLT_SOURCE_NAME:=hlt_part_seed8801}"
+: "${HLT_MV_SOURCE_NAMES:=hlt_part_seed8801 hlt2_part_s0p10_seed8811 hlt2_part_s0p20_seed8821 hlt2_part_s0p35_seed8831 hlt2_part_s1p00_seed8841}"
 : "${HLT_MV_PRETRAINED_DUALVIEW_OUTPUT_DIR:=}"
 : "${HLT_MV_PRETRAINED_DUALVIEW_HLT_CHECKPOINT:=}"
 : "${HLT_MV_PRETRAINED_DUALVIEW_HLT2_CHECKPOINT:=}"
@@ -58,32 +60,34 @@ source "${SCRIPT_DIR}/common.sh"
 : "${HLT_MV_PRETRAINED_DUALVIEW_FINAL_TEST_SIZE:=1000000}"
 
 VARIANT_NAME="${1:?variant is required, e.g. sdv_hlt_hlt2_s0p20}"
-HLT_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/hlt_part_seed8801/best_model_val.pt"
+HLT_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${HLT_MV_CANONICAL_HLT_SOURCE_NAME}/best_model_val.pt"
 HLT2_CACHE_DIR=""
 HLT2_CHECKPOINT_INFERRED=""
 
-case "${VARIANT_NAME}" in
-  sdv_hlt_hlt2_s0p10)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p10"
-    HLT2_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p10_seed8811/best_model_val.pt"
-    ;;
-  sdv_hlt_hlt2_s0p20)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p20"
-    HLT2_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p20_seed8821/best_model_val.pt"
-    ;;
-  sdv_hlt_hlt2_s0p35)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s0p35"
-    HLT2_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s0p35_seed8831/best_model_val.pt"
-    ;;
-  sdv_hlt_hlt2_s1p00)
-    HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_s1p00"
-    HLT2_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/hlt2_part_s1p00_seed8841/best_model_val.pt"
-    ;;
-  *)
-    echo "Unknown HLT-MV pretrained dual-view variant: ${VARIANT_NAME}" >&2
-    exit 2
-    ;;
-esac
+hlt_mv_source_name_for_tag() {
+  local tag="$1"
+  local names=()
+  local source_name
+  fresh_split_words names "${HLT_MV_SOURCE_NAMES}"
+  for source_name in "${names[@]}"; do
+    if [[ "${source_name}" =~ ^hlt2_part_${tag}_seed[0-9]+$ ]]; then
+      printf '%s\n' "${source_name}"
+      return 0
+    fi
+  done
+  echo "No HLT-MV source name configured for HLT2 tag ${tag}." >&2
+  return 2
+}
+
+if [[ "${VARIANT_NAME}" =~ ^sdv_hlt_hlt2_(s[0-9]+p[0-9]+)$ ]]; then
+  hlt2_tag="${BASH_REMATCH[1]}"
+  hlt2_source_name="$(hlt_mv_source_name_for_tag "${hlt2_tag}")"
+  HLT2_CACHE_DIR="${HLT_MV_HLT2_CACHE_ROOT}/hlt_second_degrade_mild_v1_${hlt2_tag}"
+  HLT2_CHECKPOINT_INFERRED="${HLT_MV_SOURCE_MODELS_DIR}/${hlt2_source_name}/best_model_val.pt"
+else
+  echo "Unknown HLT-MV pretrained dual-view variant: ${VARIANT_NAME}" >&2
+  exit 2
+fi
 
 OUTPUT_DIR="${HLT_MV_PRETRAINED_DUALVIEW_OUTPUT_DIR:-${HLT_MV_PRETRAINED_DUALVIEW_DIR}/${VARIANT_NAME}}"
 HLT_CHECKPOINT="${HLT_MV_PRETRAINED_DUALVIEW_HLT_CHECKPOINT:-${HLT_CHECKPOINT_INFERRED}}"

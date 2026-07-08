@@ -8,6 +8,7 @@ not disagree about model names or output locations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -48,7 +49,10 @@ HLT_MV_DEFAULT_HLT2_SOURCE_SEEDS: dict[float, int] = {
     0.10: 8811,
     0.20: 8821,
     0.35: 8831,
+    0.50: 8851,
     1.00: 8841,
+    1.50: 8861,
+    2.00: 8871,
 }
 HLT_MV_DEFAULT_HLT_RANDOM_SEEDS: tuple[int, ...] = (9101, 9102, 9103, 9104)
 
@@ -80,6 +84,33 @@ def normalize_hlt_mv_strengths(values: tuple[float, ...] | list[float]) -> tuple
     if any(strength <= 0.0 for strength in strengths):
         raise ValueError("HLT-MV model strengths must exclude the identity s0p00 cache.")
     return strengths
+
+
+def parse_hlt_mv_strengths_env(value: str | None) -> tuple[float, ...] | None:
+    """Parse optional whitespace/comma-separated HLT-MV strength overrides."""
+
+    if value is None or not str(value).strip():
+        return None
+    tokens = str(value).replace(",", " ").split()
+    return normalize_hlt_mv_strengths([float(token) for token in tokens])
+
+
+def parse_hlt_mv_hlt2_source_seeds_env(value: str | None) -> dict[float, int]:
+    """Parse optional strength-to-seed overrides like ``0.50=8851 s2p00=8871``."""
+
+    seeds = dict(HLT_MV_DEFAULT_HLT2_SOURCE_SEEDS)
+    if value is None or not str(value).strip():
+        return seeds
+    for token in str(value).replace(",", " ").split():
+        if "=" not in token:
+            raise ValueError(
+                "HLT_MV_HLT2_SOURCE_SEEDS entries must be strength=seed, "
+                f"got {token!r}."
+            )
+        strength_text, seed_text = token.split("=", 1)
+        strength = normalize_hlt_sdv_strength(strength_text)
+        seeds[strength] = int(seed_text)
+    return seeds
 
 
 def _seed_for_strength(strength: float | int | str, seeds_by_strength: Mapping[float, int]) -> int:
@@ -446,11 +477,17 @@ class HLTMVExperimentLayout:
 def default_hlt_mv_experiment_config(
     *,
     pdv3_experiment_name: str = HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME,
-    strengths: tuple[float, ...] = HLT_MV_DEFAULT_STRENGTHS,
+    strengths: tuple[float, ...] | None = None,
 ) -> HLTMVExperimentConfig:
+    normalized_strengths = (
+        parse_hlt_mv_strengths_env(os.environ.get("HLT_MV_STRENGTHS"))
+        if strengths is None
+        else normalize_hlt_mv_strengths(strengths)
+    )
     return HLTMVExperimentConfig(
         pdv3_experiment_name=pdv3_experiment_name,
-        strengths=strengths,
+        strengths=normalized_strengths or HLT_MV_DEFAULT_STRENGTHS,
+        hlt2_source_seeds=parse_hlt_mv_hlt2_source_seeds_env(os.environ.get("HLT_MV_HLT2_SOURCE_SEEDS")),
     )
 
 
@@ -458,10 +495,12 @@ def default_hlt_mv_experiment_layout(
     *,
     output_root: str | Path = "checkpoints",
     pdv3_experiment_name: str = HLT_MV_DEFAULT_PDV3_EXPERIMENT_NAME,
+    root_dirname: str = HLT_MV_ROOT_DIRNAME,
 ) -> HLTMVExperimentLayout:
     return HLTMVExperimentLayout(
         output_root=output_root,
         pdv3_experiment_name=pdv3_experiment_name,
+        root_dirname=root_dirname,
     )
 
 
@@ -517,4 +556,6 @@ __all__ = [
     "hlt_mv_tta_name",
     "normalize_hlt_mv_source_name",
     "normalize_hlt_mv_strengths",
+    "parse_hlt_mv_hlt2_source_seeds_env",
+    "parse_hlt_mv_strengths_env",
 ]

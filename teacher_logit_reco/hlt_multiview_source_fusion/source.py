@@ -77,6 +77,14 @@ def _require_known_source_name(name: str, config: HLTMVExperimentConfig | None =
     cfg = _config_for(config)
     valid_names = set(cfg.source_model_names) | set(cfg.random_hlt_source_names)
     if source_name not in valid_names:
+        hlt_match = _HLT_SOURCE_RE.match(source_name)
+        hlt2_match = _HLT2_SOURCE_RE.match(source_name)
+        if hlt_match:
+            return source_name
+        if hlt2_match:
+            strength = hlt_mv_strength_from_source_name(source_name)
+            if strength in cfg.hlt2_source_seeds:
+                return source_name
         known = ", ".join(sorted(valid_names))
         raise ValueError(f"Unknown HLT-MV source model {source_name!r}; expected one of: {known}")
     return source_name
@@ -225,7 +233,11 @@ def build_hlt_mv_source_config(
     if source_view is not None and str(source_view) != inferred_view:
         raise ValueError(f"source_view for {source_name} must be {inferred_view!r}, got {source_view!r}.")
     expected_strengths = normalize_hlt_mv_strengths(cfg.strengths)
-    if inferred_view == HLT_MV_SOURCE_VIEW_HLT2 and hlt_mv_strength_from_source_name(source_name) not in expected_strengths:
+    if (
+        inferred_view == HLT_MV_SOURCE_VIEW_HLT2
+        and hlt_mv_strength_from_source_name(source_name) not in expected_strengths
+        and cache_dir is None
+    ):
         raise ValueError(f"HLT2 source {source_name!r} is not in configured strength grid {expected_strengths!r}.")
     return HLTTriViewSourceConfig(
         output_dir=str(Path(output_dir) if output_dir is not None else hlt_mv_source_output_dir(lay, source_name, config=cfg)),

@@ -112,10 +112,9 @@ class HLTMultiviewSourceFusionStep6ScratchDualviewTest(unittest.TestCase):
 
         self.assertIn("#SBATCH --job-name=hlt_mv_sdv", text)
         self.assertIn("scripts/train_hlt_mv_scratch_dualview.py", text)
-        self.assertIn("sdv_hlt_hlt2_s0p10_scratch", text)
         self.assertIn("sdv_hlt_hlt2_s0p20_scratch", text)
-        self.assertIn("sdv_hlt_hlt2_s0p35_scratch", text)
-        self.assertIn("sdv_hlt_hlt2_s1p00_scratch", text)
+        self.assertIn('^sdv_hlt_hlt2_(s[0-9]+p[0-9]+)_scratch$', text)
+        self.assertIn("hlt_second_degrade_mild_v1_${BASH_REMATCH[1]}", text)
         self.assertIn("HLT_MV_SCRATCH_DUALVIEW_HEAD_WARMUP_EPOCHS:=0", text)
         self.assertIn("HLT_MV_SCRATCH_DUALVIEW_HEAD_WARMUP_LR:=0.0003", text)
         self.assertIn("--head-warmup-epochs", text)
