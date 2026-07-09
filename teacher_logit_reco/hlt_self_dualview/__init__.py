@@ -173,6 +173,21 @@ from .tri_view import (
     train_hlt_triview_model,
     train_hlt_triview_source,
 )
+from .multiview import (
+    HLTMultiViewSpec,
+    HLTMultiViewTrainConfig,
+    HLTSelfMultiViewFusionModel,
+    HLT_MULTIVIEW_FUSION_CONTRACT,
+    HLT_MULTIVIEW_MODEL_ARCHITECTURE,
+    HLT_MULTIVIEW_REPORT,
+    collate_hlt_multiview_batch,
+    load_hlt_multiview_dataset,
+    load_hlt_multiview_model_from_checkpoint,
+    make_hlt_multiview_data_loader,
+    move_hlt_multiview_batch_to_device,
+    run_hlt_multiview_epoch,
+    train_hlt_multiview_model,
+)
 
 __all__ = [
     "HLTSDVExperimentConfig",
@@ -332,4 +347,17 @@ __all__ = [
     "run_hlt_triview_epoch",
     "train_hlt_triview_model",
     "train_hlt_triview_source",
+    "HLTMultiViewSpec",
+    "HLTMultiViewTrainConfig",
+    "HLTSelfMultiViewFusionModel",
+    "HLT_MULTIVIEW_FUSION_CONTRACT",
+    "HLT_MULTIVIEW_MODEL_ARCHITECTURE",
+    "HLT_MULTIVIEW_REPORT",
+    "collate_hlt_multiview_batch",
+    "load_hlt_multiview_dataset",
+    "load_hlt_multiview_model_from_checkpoint",
+    "make_hlt_multiview_data_loader",
+    "move_hlt_multiview_batch_to_device",
+    "run_hlt_multiview_epoch",
+    "train_hlt_multiview_model",
 ]
