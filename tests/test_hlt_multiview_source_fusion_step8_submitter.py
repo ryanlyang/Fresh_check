@@ -304,6 +304,21 @@ class HLTMultiviewSourceFusionStep8SubmitterTest(unittest.TestCase):
         self.assertIn("DEVICE:=cuda", text)
         self.assertIn("submit_hlt_mv_heavy_source_fusion.sh", text)
 
+    def test_tigris_strong_submitter_reuses_s2p00_and_builds_s3_to_s5(self):
+        text = _read_sbatch("submit_hlt_mv_strong_source_fusion_tigris.sh")
+
+        self.assertIn("HLT_MV_HEAVY_REUSE_STRENGTHS:=2.00", text)
+        self.assertIn("HLT_MV_HEAVY_BUILD_STRENGTHS:=3.00 4.00 5.00", text)
+        self.assertIn("HLT_MV_STRENGTHS:=2.00 3.00 4.00 5.00", text)
+        self.assertIn("HLT_MV_TTA_STRENGTHS:=2.00 3.00 4.00 5.00", text)
+        self.assertIn("HLT_MV_HLT2_SOURCE_SEEDS:=2.00=8871 3.00=8881 4.00=8891 5.00=8901", text)
+        self.assertIn("hlt_multiview_source_fusion_strong_", text)
+        self.assertIn("hlt_multiview_source_fusion_heavy_20260708_185728/hlt2_cache", text)
+        self.assertIn("hlt2_part_s5p00_seed8901", text)
+        self.assertIn("sdv_hlt_hlt2_s5p00_scratch", text)
+        self.assertIn("tri_hlt_hlt2_s4p00_s5p00", text)
+        self.assertIn("submit_hlt_mv_heavy_source_fusion_tigris.sh", text)
+
     def test_control_wrappers_are_hlt_only_and_reuse_source_checkpoint(self):
         same_view = _read_sbatch("run_hlt_mv_train_same_view_control.sh")
         tta = _read_sbatch("run_hlt_mv_eval_tta_control.sh")

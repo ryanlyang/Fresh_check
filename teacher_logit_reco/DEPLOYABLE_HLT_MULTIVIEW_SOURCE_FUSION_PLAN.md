@@ -63,6 +63,33 @@ s1p00
 Do not include `s0p00` in the model grid. `s0p00` is an identity-cache audit
 tool, not a scientifically useful separate model.
 
+### Strong Old-HLT-Like Follow-Up Grid
+
+The light grid above tests mild deterministic HLT2 diversity. After comparing
+against the old HLT0.4 degradation, a stronger TIGRIS follow-up is also useful:
+
+```text
+s2p00
+s3p00
+s4p00
+s5p00
+```
+
+This grid is intended to test whether larger gains require a second view with
+old-HLT-like topology damage. The strong runner should reuse an existing
+`s2p00` HLT2 cache when available and build only the missing `s3p00`, `s4p00`,
+and `s5p00` caches. It writes to a separate timestamped root:
+
+```text
+$PDV3_ROOT/hlt_multiview_source_fusion_strong_YYYYmmdd_HHMMSS/
+```
+
+The strong-grid TIGRIS entry point is:
+
+```text
+sbatch/submit_hlt_mv_strong_source_fusion_tigris.sh
+```
+
 ## Output Layout
 
 Write all outputs under a new root so this redo does not overwrite the earlier
