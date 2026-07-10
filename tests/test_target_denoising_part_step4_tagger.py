@@ -17,6 +17,7 @@ from teacher_logit_reco.target_denoising_part import (
     TargetDenoisingAugmentedParTConfig,
     load_target_denoising_pretrained_checkpoint,
 )
+from teacher_logit_reco.target_denoising_part.tagger import _tensor_quantile
 
 
 class FakeParticleTransformerPart(require_torch().nn.Module):
@@ -86,6 +87,15 @@ def _tagger_config(variant, **kwargs):
 
 
 class TargetDenoisingPartStep4TaggerTests(unittest.TestCase):
+    def test_tensor_quantile_accepts_amp_half_tensors(self):
+        torch = require_torch()
+        values = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float16)
+
+        quantile = _tensor_quantile(values, 0.5)
+
+        self.assertEqual(quantile.dtype, torch.float32)
+        self.assertAlmostEqual(float(quantile.detach().cpu().item()), 1.5, places=5)
+
     def test_hlt_part_baseline_matches_direct_part_forward(self):
         torch = require_torch()
         torch.manual_seed(11)

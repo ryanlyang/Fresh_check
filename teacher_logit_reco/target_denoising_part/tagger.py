@@ -172,9 +172,9 @@ def _batch_first_from_embed_output(embed_output: Any, *, batch: int, particles: 
 
 def _tensor_quantile(value: Any, q: float) -> Any:
     torch = require_torch()
-    flat = value.reshape(-1)
+    flat = value.reshape(-1).float()
     if int(flat.numel()) == 0:
-        return torch.zeros((), dtype=value.dtype, device=value.device)
+        return torch.zeros((), dtype=flat.dtype, device=value.device)
     if hasattr(torch, "quantile"):
         return torch.quantile(flat, float(q))
     sorted_flat = torch.sort(flat).values
