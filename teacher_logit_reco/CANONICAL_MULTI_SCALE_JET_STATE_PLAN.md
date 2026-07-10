@@ -1478,6 +1478,597 @@ adapter gate values
 ParT fine-tuning magnitude
 ```
 
+## Fusion And Ensembling Strategy
+
+Fusion should be part of the experiment, not an afterthought.
+
+The reason is practical:
+
+```text
+different residual/state predictors may recover different failure modes
+```
+
+One predictor may be better at global energy/fraction corrections, another at
+subjet/anchor corrections, another at pure discriminative tagging. If their
+errors are not identical, fusion can turn small individual gains into a more
+stable result.
+
+There are three useful fusion levels.
+
+### Level 1: Logit Fusion
+
+This is the cheapest and should always be run.
+
+Train several deployable HLT-only models, then fit a small fusion model on
+`stack_train` / `stack_val`:
+
+```text
+inputs:
+  logits from HLT ParT baseline
+  logits from S4 residual state context
+  logits from S5 residual state + logit KD
+  logits from S6/S7 feature-MLP + residual state variants
+  optional logits from best AV10 feature/context models
+
+fusion:
+  logistic regression / ridge multinomial regression
+  temperature-scaled average
+  constrained convex weights
+```
+
+Use `stack_train` to fit fusion and `stack_val` to select:
+
+```text
+weighting
+regularization
+temperature
+which models to include
+```
+
+Then apply once to `final_test`.
+
+Advantages:
+
+```text
+cheap
+hard to break
+good diagnostic for complementary signal
+easy to compare to old HLT4 fusion baselines
+```
+
+Disadvantages:
+
+```text
+does not let particle-level reasoning use multiple views internally
+can overstate deployability if too many models are needed
+```
+
+### Level 2: State-Token Fusion
+
+This is the most natural fusion level for this plan.
+
+Instead of fusing only final logits, let the tagger consume multiple predicted
+state views:
+
+```text
+Phi_hlt
+Phi_pred_from_geometry_decoder
+Phi_pred_from_deepsets_predictor
+Phi_pred_from_feature_mlp_or_context_model
+optional uncertainty tokens
+```
+
+Represent each view as a separate state-token family:
+
+```text
+state_family_embedding:
+  observed_hlt_state
+  geom_decoder_residual
+  deepsets_residual
+  feature_adapter_residual
+  predicted_state_geom
+  predicted_state_deepsets
+```
+
+Then the state-conditioned ParT can attend to all of them:
+
+```text
+HLT particles -> ParT particle embeddings
+state views -> state encoder
+particles cross-attend to state views
+classifier -> logits
+```
+
+This is stronger than logit fusion because the model can use the state views
+while still reasoning over individual HLT particles.
+
+The first state-token fusion candidate should be:
+
+```text
+observed Phi_hlt
++ predicted Phi_pred from P0 geometry-biased decoder
++ predicted Phi_pred from P2 DeepSets predictor
++ optional delta tokens from both
+```
+
+This tests whether local geometry-aware and global pooled predictors recover
+different useful corrections.
+
+### Level 3: Particle-View Fusion
+
+Particle-view fusion means giving ParT multiple particle-level or
+particle-conditioned views, not only state tokens.
+
+Possible views:
+
+```text
+original HLT particles
+feature_mlp_adapter-adjusted particle embeddings
+state-conditioned particle embeddings
+local-compression adjusted features
+architecture/context adapter particle deltas
+```
+
+The cleanest implementation is not to duplicate the full particle sequence
+several times. Instead, use separate adapters that produce per-particle
+corrections:
+
+```text
+delta_h_feature_mlp
+delta_h_state_context
+delta_h_local_compression
+```
+
+Then fuse them with a gated mixture:
+
+```text
+h_fused = h_base
+  + gate_feature * delta_h_feature_mlp
+  + gate_state   * delta_h_state_context
+  + gate_local   * delta_h_local
+```
+
+Gates can be:
+
+```text
+global per-model learned scalars
+per-particle gates
+per-class/context gates
+```
+
+Start with global learned scalar gates initialized near zero. Per-particle
+gates are powerful but can overfit.
+
+This level is the highest-upside deep fusion, but it is also the easiest to
+make scientifically muddy. It should come after the state-token and logit
+fusion results are understood.
+
+## Recommended Fusion Ladder
+
+Run fusion in this order:
+
+### F0: Baseline Logit Fusion
+
+Fuse:
+
+```text
+HLT ParT baseline
+best old AV10 feature_mlp_adapter
+best old AV10 context/repeat model if available
+```
+
+Purpose:
+
+```text
+anchors against the previous fusion baseline
+```
+
+### F1: Canonical State Logit Fusion
+
+Fuse:
+
+```text
+HLT ParT baseline
+S4 residual state context
+S5 residual state + logit KD
+S6/S7 if trained
+```
+
+Purpose:
+
+```text
+tests whether canonical-state residual models add complementary score-level
+signal
+```
+
+### F2: Predictor Diversity Logit Fusion
+
+Fuse variants using different residual predictors:
+
+```text
+P0 geometry-biased decoder tagger
+P1 no-geometry decoder tagger
+P2 DeepSets predictor tagger
+P3 state-only predictor tagger
+```
+
+Purpose:
+
+```text
+tests whether different predictor inductive biases capture different residual
+information
+```
+
+### F3: State-Token View Fusion
+
+Train one tagger that consumes multiple predicted state views:
+
+```text
+Phi_hlt
+Phi_pred_P0
+Phi_pred_P2
+delta_Phi_P0
+delta_Phi_P2
+optional uncertainty/confidence
+```
+
+Purpose:
+
+```text
+lets ParT use complementary residual views before final classification
+```
+
+This is the most promising fusion strategy specific to the canonical-state
+idea.
+
+### F4: Particle-View Gated Adapter Fusion
+
+Fuse per-particle deltas:
+
+```text
+feature_mlp_adapter delta_h
+state_context_adapter delta_h
+optional local_compression delta_h
+```
+
+with learned gates:
+
+```text
+h_fused = h_base + sum_j gate_j * delta_h_j
+```
+
+Purpose:
+
+```text
+tests whether multiple internal particle-view corrections stack better than
+score fusion
+```
+
+This should be a second-stage experiment after F1/F3.
+
+## Fusion Controls
+
+Fusion needs controls because it is easy to win by capacity or leakage.
+
+Required controls:
+
+```text
+shuffle one model's logits across jets before logit fusion
+shuffle one state-view family across jets before state-token fusion
+random/noise state-view fusion
+equal-weight average vs learned fusion
+calibration-only baseline
+same-number-of-models seed ensemble baseline
+```
+
+The seed ensemble baseline is important:
+
+```text
+HLT ParT seed 1 + seed 2 + seed 3
+```
+
+If a fancy fusion only matches a simple seed ensemble, the new representation
+may not be adding unique information.
+
+## Best Ensemble Candidates
+
+The first ensemble should include models that are likely to make different
+mistakes:
+
+```text
+HLT ParT baseline:
+  strongest canonical baseline
+
+AV10 feature_mlp_adapter:
+  known strong embedding-adapter behavior
+
+S4/S5 canonical residual state model:
+  structured HLT -> offline state correction
+
+P2 DeepSets predictor model:
+  global/pooled residual style
+
+P0 geometry-biased predictor model:
+  local/anchor/ring residual style
+```
+
+Do not fuse every model blindly in the main claim. Use broad fusion as a
+diagnostic, but define a small deployable ensemble:
+
+```text
+2-model ensemble:
+  HLT ParT baseline + best canonical-state model
+
+3-model ensemble:
+  HLT ParT baseline + AV10 feature_mlp_adapter + best canonical-state model
+
+4-model diagnostic ensemble:
+  add best predictor-diversity model
+```
+
+The final report should show both:
+
+```text
+best single model
+best small deployable ensemble
+best diagnostic broad ensemble
+```
+
+## Training Models For Complementary Fusion
+
+Do not rely only on accidental diversity.
+
+The best fusion candidates should be trained so they remain strong individually
+but are nudged toward complementary information.
+
+There are two competing goals:
+
+```text
+each model must be accurate on its own
+models should make different useful corrections/errors
+```
+
+If the diversity pressure is too strong, models become weird and weak. If there
+is no diversity pressure, fusion may collapse into a seed ensemble.
+
+### Warm-Start Policy
+
+Most serious variants should warm-start from the same strong HLT ParT baseline.
+
+Use:
+
+```text
+HLT ParT baseline checkpoint selected on model_val
+same split
+same HLT cache
+same label mapping
+same optimizer family
+```
+
+Warm-starting matters because the question is:
+
+```text
+what additional structured correction/view improves an already strong ParT?
+```
+
+Not:
+
+```text
+can a randomly initialized model eventually learn a different solution?
+```
+
+Recommended default:
+
+```text
+warm-start ParT body and classifier head from HLT baseline
+zero-init all adapters/residual heads
+freeze most of ParT for a short warmup
+then unfreeze upper blocks
+then optionally gentle full unfreeze
+```
+
+This makes every variant start from the same strong baseline and lets the
+residual/context modules prove their value.
+
+### When Not To Warm-Start
+
+Include a small number of from-scratch controls only if compute allows:
+
+```text
+from-scratch canonical-state model
+from-scratch feature_mlp_adapter model
+from-scratch seed ensemble
+```
+
+These are not the mainline. They answer whether the gain is from architecture
+alone or from baseline-preserving adaptation.
+
+### Complementarity Without Hurting Accuracy
+
+The safest way to encourage complementarity is to diversify architecture and
+training objective, not to directly punish agreement too aggressively.
+
+Good diversity sources:
+
+```text
+different residual predictor inductive biases:
+  geometry-biased decoder vs DeepSets vs state-only
+
+different context insertion points:
+  state-token cross-attention vs feature MLP delta_h
+
+different auxiliary losses:
+  CE only vs CE + state residual vs CE + logit KD + state residual
+
+different freeze schedules:
+  frozen warmup -> upper unfreeze vs joint fine-tune
+
+different random seeds:
+  only as a baseline/control
+```
+
+Riskier diversity sources:
+
+```text
+explicitly penalizing same predictions too strongly
+forcing low correlation of logits
+training models to specialize on hard examples without guardrails
+```
+
+Those can reduce individual quality.
+
+### Recommended Complementary Training Ladder
+
+Train these as the first complementary pool:
+
+```text
+M0: HLT ParT baseline
+  warm-start anchor / no adapter
+
+M1: AV10 feature_mlp_adapter repeat
+  known strong per-particle embedding adapter
+
+M2: S4 canonical residual state context
+  geometry-biased decoder, CE + state residual
+
+M3: S5 canonical residual state context + logit KD
+  same as M2, plus offline teacher logit KD
+
+M4: P2 DeepSets residual state model
+  global/pooled residual predictor, different inductive bias
+
+M5: S7 full best bet
+  feature_mlp_adapter + canonical residual state + logit KD
+```
+
+Then evaluate:
+
+```text
+single-model performance
+pairwise error overlap
+pairwise logit correlation
+per-class complementarity
+fusion gain over best individual
+fusion gain over same-size seed ensemble
+```
+
+### Residual-Diversity Loss
+
+If ordinary architectural diversity is not enough, add a mild diversity loss.
+
+Use it only for second-round experiments.
+
+The safest version targets residuals, not logits:
+
+```text
+encourage delta_Phi_hat from predictor A and predictor B to explain different
+components of delta_Phi_true
+```
+
+Example:
+
+```text
+residual_error_A = delta_true - delta_hat_A
+residual_error_B = delta_true - delta_hat_B
+
+diversity term encourages:
+  delta_hat_B to improve examples/token-fields where A has high residual error
+```
+
+A practical version:
+
+```text
+train model B with state loss weights upweighted where model A has large
+model_val/token-family residual error
+```
+
+This is better than saying:
+
+```text
+make logits different
+```
+
+because it asks the second model to fix different canonical-state failures,
+not simply disagree.
+
+### Boundary/Hard-Example Complementarity
+
+Another second-round option is hard-example specialization.
+
+Train a complementary model with slightly higher weight on:
+
+```text
+model_train examples where baseline ParT is wrong
+examples near the decision boundary
+classes with large HLT/offline gap
+token families where Phi_hlt -> Phi_off residual is large
+```
+
+This must be done using model_train/model_val only.
+
+Do not use final_test to choose hard examples.
+
+Recommended form:
+
+```text
+sample_weight =
+  1
+  + a * baseline_error_indicator
+  + b * boundary_weight
+  + c * normalized_state_residual_magnitude
+```
+
+Keep weights mild:
+
+```text
+max weight 2x or 3x
+```
+
+### Fusion Selection Discipline
+
+Fusion models must be selected on stack/model validation data, not final test.
+
+Recommended:
+
+```text
+train base models on model_train
+select base checkpoints on model_val
+fit fusion on stack_train
+select fusion hyperparameters on stack_val
+evaluate final_test once
+```
+
+If stack splits are tiny or unavailable for a specific experiment, use
+model_val for fusion diagnostics only and clearly label it as not final-clean.
+
+### Best Expected Fusion Strategy
+
+The highest-probability path is:
+
+```text
+1. warm-start all serious models from HLT ParT
+2. train M1/M2/M3/M4/M5 with different architectures/objectives
+3. run logit fusion to measure complementarity
+4. if M2/M4 complement each other, train F3 state-token view fusion
+5. if M1 and M2 complement each other, train F4 particle-view gated adapter fusion
+```
+
+The best deployable ensemble is likely:
+
+```text
+HLT ParT baseline
++ AV10 feature_mlp_adapter
++ canonical residual state context model
+```
+
+The best single model is likely:
+
+```text
+feature_mlp_adapter
++ canonical residual state context
++ staged warm-start/unfreeze
+```
+
 ## Split Discipline
 
 Use the same split discipline as the AV10 experiments when comparing against
@@ -1546,37 +2137,97 @@ token layout mismatches
 
 ## Implementation Steps
 
-### Step 1: Canonical State Specification
+### Step 1: Input Split And HLT v2 Cache Contract
 
-Add a module defining:
+Implement the input contract for this campaign.
+
+Deliverables:
 
 ```text
-state token families
-token counts
-field names
-normalization rules
-feature scales
-token metadata contract
+split builder/reuse hooks for:
+  model_train = 5M
+  model_val   = 1M
+  stack_train = 3M
+  stack_val   = 1M
+  final_test  = 1M
+
+HLT cache builder locked to:
+  hlt_profile = fixed_hlt_v2_realistic
+  hlt_degradation_strength = 2.5
+
+cache audit that records:
+  source manifest hash
+  HLT profile/version/strength
+  per-split metadata hashes
+  label mapping
+  split sizes
 ```
+
+The trainer must fail if the cache is not `fixed_hlt_v2_realistic` at strength
+`2.5`.
+
+Tests:
+
+```text
+wrong profile rejected
+wrong strength rejected
+manifest mismatch rejected
+missing split rejected
+expected high-data split sizes recorded
+```
+
+### Step 2: Canonical Jet-State Layout
+
+Implement the canonical state specification.
 
 Deliverables:
 
 ```text
 CanonicalJetStateConfig
 CanonicalJetStateLayout
-field order tests
-token identity tests
+token families:
+  global
+  radial
+  angular
+  anchor_coarse
+  anchor_medium
+  anchor_fine
+
+field names and field order
+feature scales
+residual scales
+token metadata:
+  token_type_id
+  scale_id
+  slot/ring/sector id
+  geometry center/width
 ```
 
-### Step 2: Phi Builder
+The field contract should be frozen before large caches are built.
 
-Implement deterministic `Phi(particles)`:
+Tests:
 
 ```text
-build_global_tokens
-build_radial_tokens
-build_angular_tokens
-build_anchor_slot_tokens
+stable field order
+stable token order
+expected K_state and D_phi
+metadata roundtrip
+residual scale sanity
+```
+
+### Step 3: Deterministic Phi Builder
+
+Implement deterministic `Phi(particles)`.
+
+Builder components:
+
+```text
+global token builder
+radial ring token builder
+angular sector token builder
+soft anchor-slot token builder
+normalization/sanitization
+diagnostics
 ```
 
 Inputs:
@@ -1584,6 +2235,7 @@ Inputs:
 ```text
 canonical particle features
 particle mask
+optional source-view metadata
 ```
 
 Outputs:
@@ -1591,189 +2243,321 @@ Outputs:
 ```text
 phi_tokens: [batch, K_state, D_phi]
 state_mask: [batch, K_state]
-metadata
+token metadata
 diagnostics
 ```
 
 Tests:
 
 ```text
-shape checks
-mask checks
-field order checks
-identity/reproducibility
 finite values
+mask handling
+empty/padded particles
 simple hand-computed jets
+HLT/offline same builder path
+deterministic reproducibility
 ```
 
-### Step 3: State Cache Writer
+### Step 4: Phi Cache Writer And Audit
 
-Write caches for:
+Implement cache generation for canonical states.
+
+Required caches:
 
 ```text
-Phi_hlt for model_train/model_val/stack/final_test
-Phi_off for model_train/model_val
-optional Phi_off for final_test oracle diagnostics only
+Phi_hlt:
+  model_train
+  model_val
+  stack_train
+  stack_val
+  final_test
+
+Phi_off:
+  model_train
+  model_val
+  stack_train
+  stack_val
+
+Phi_off final_test:
+  optional oracle diagnostics only
 ```
 
-The cache writer must record manifest/cache provenance and reject mismatches.
-
-### Step 4: Residual Predictor
-
-Implement:
+Each cache must include:
 
 ```text
-CanonicalStateResidualPredictor
+phi_tokens
+state_mask
+token metadata
+field names
+normalization metadata
+source manifest hash
+source HLT/offline cache identity
+builder version
+```
+
+Tests:
+
+```text
+cache provenance checks
+field/layout mismatch rejection
+HLT/offline split alignment
+oracle final-test cache cannot be used by primary trainer
+```
+
+### Step 5: Residual Predictor Models
+
+Implement the residual predictor family.
+
+Mainline:
+
+```text
 GeometryBiasedStateResidualDecoder
 ```
 
-Inputs:
+Architecture:
 
 ```text
-Phi_hlt tokens
-state token metadata
-HLT particle features/mask
-optional HLT particle summary
-```
-
-Outputs:
-
-```text
-delta_Phi_hat
-Phi_pred
-diagnostics
-```
-
-Use:
-
-```text
-particle memory encoder
-state token query encoder
+HLT particles -> particle memory encoder
+Phi_hlt tokens + metadata -> state queries
 state self-attention
-geometry-biased cross-attention from state tokens to particles
-zero-init residual projection
-feature-wise residual scales
-token masks
+geometry-biased cross-attention to particle memory
+FFN
+zero-init bounded delta_Phi head
+Phi_pred = Phi_hlt + delta_Phi_hat
 ```
 
-The mainline implementation should be:
+Required predictor variants:
 
 ```text
-d_model = 128
-particle encoder layers = 1-2
-state decoder layers = 3
-heads = 4
-dropout = 0.05
-norm_first = true
-soft geometry bias enabled
-zero-init bounded residual head
+P0 geometry-biased decoder
+P1 no geometry bias
+P2 DeepSets/global pooled predictor
+P3 state-only predictor
+P4 particle-only learned-query predictor
+P5 hard-locality predictor
+P6 uncertainty predictor
+P7 no state self-attention
 ```
 
-The implementation must expose switches for first-round predictor ablations:
+Tests:
 
 ```text
-no geometry bias
-DeepSets pooled predictor
-state-only predictor
+shape/mask checks
+zero-init gives delta_Phi ~= 0
+geometry bias affects attention logits
+invalid particles masked
+variant switches are active
+diagnostics emitted
 ```
 
-Second-round switches:
+### Step 6: State-Conditioned ParT Tagger
+
+Implement the tagger that keeps HLT particles as the main input and feeds
+canonical state context into the classifier path.
+
+Mainline:
 
 ```text
-particle-only learned query predictor
-hard-locality attention masks
-uncertainty head
-no state self-attention
+HLT particles -> warm-started ParT particle pathway
+Phi_hlt / delta_Phi_hat / Phi_pred -> state token encoder
+particle embeddings cross-attend to state tokens
+state-conditioned particle embeddings -> ParT/classifier
 ```
 
-### Step 5: State-Conditioned Tagger
-
-Implement:
-
-```text
-HLT particles -> ParT embedding
-state tokens -> state encoder
-cross-attention adapter state -> particles
-ParT/classifier -> logits
-```
-
-The tagger must support:
+Supported modes:
 
 ```text
 particles only
-Phi_hlt only
-Phi_hlt + delta
-Phi_hlt + Phi_pred
-all state families
-shuffled/noise controls
-oracle Phi_off diagnostic mode
+Phi_hlt context only
+delta_Phi context
+Phi_pred context
+Phi_hlt + delta_Phi + Phi_pred
+state-only tagger
+shuffled/noise state controls
+oracle Phi_off diagnostic context
+feature_mlp_adapter + state context
 ```
 
-### Step 6: Losses And Training Schedule
-
-Implement:
+Tests:
 
 ```text
-state residual loss
-tagging CE
+warm-start compatibility
+zero-init adapter preserves baseline logits approximately
+state family embeddings work
+shuffled/noise controls actually break semantics
+oracle context blocked from primary final-test path
+```
+
+### Step 7: Losses And Training Schedules
+
+Implement the training objectives and schedules.
+
+Losses:
+
+```text
+10-class CE
+state residual Huber/L1 loss
 optional offline logit KD
 delta norm penalty
-smoothness penalty
-staged freeze/unfreeze schedule
+optional smoothness penalty
+optional uncertainty-weighted state loss
 ```
 
-Report phase metadata:
+Schedules:
 
 ```text
-which modules are trainable
+warm-start frozen warmup -> upper unfreeze
+warm-start joint from start
+full ParT frozen adapter/head training
+from-scratch canonical-state model
+from-scratch ParT baseline
+predictor pretrain -> tagger train
+joint end-to-end no pretraining
+```
+
+Report per phase:
+
+```text
+trainable module groups
 LR per group
 loss weights
+freeze/unfreeze state
 state cache identity
 teacher/cache identity
 ```
 
-### Step 7: Reports
+Tests:
 
-Report:
+```text
+loss terms active/inactive by variant
+freeze schedule changes trainable params
+from-scratch variants do not load warm start
+teacher-free final-test evaluation
+nonfinite batch guard
+```
+
+### Step 8: Variant Registry For A0-G3
+
+Add a registry for every planned run:
+
+```text
+A0 A1 A2 A3
+B0 B1 B2 B3
+C0 C1 C2 C3 C4 C5 C6
+D0 D1 D2 D3 D4 D5
+E0 E1 E2 E3 E4 E5 E6
+F0 F1 F2 F3 F4 Fseed Fshuffle
+G0 G1 G2 G3
+```
+
+Each spec should define:
+
+```text
+model components
+predictor variant
+state context families
+warm-start policy
+loss weights
+freeze schedule
+whether offline teacher logits are used
+whether oracle inputs are allowed
+primary-vs-diagnostic status
+```
+
+Tests:
+
+```text
+all run IDs registered
+oracle variants marked non-primary
+final-test restrictions enforced
+baseline/fusion dependencies declared
+```
+
+### Step 9: Metrics And Reports
+
+Implement reports that answer the scientific questions.
+
+Report tables:
 
 ```text
 tagging metrics
 state prediction metrics
+per-token-family residual metrics
+per-field residual metrics
+per-class metrics
 control gaps
-oracle Phi_off upper bound
-state attention diagnostics
-per-class residual diagnostics
-final-test primary metrics
+oracle gaps
+fusion comparison
+seed ensemble comparison
 ```
 
-The report should explicitly answer:
+Required comparisons:
 
 ```text
-Does Phi_hlt context help?
-Does predicted residual context help beyond Phi_hlt?
-Does Phi_pred beat shuffled/noise controls?
-How close is Phi_pred to oracle Phi_off performance?
-Does this stack with feature_mlp_adapter?
+D2/D3 vs A0/A1/A2/A3
+B0 vs A0
+D2/D3 vs B0
+D5 vs D2
+C0 vs C1/C2/C3
+E3 vs E4
+F1/F3/F4 vs Fseed
+G0/G1 vs D2/D3
 ```
 
-### Step 8: Slurm Submitter
-
-Add submitters for:
+Tests:
 
 ```text
-cache canonical states
-train baseline/control/main variants
+missing required run fails report unless explicitly allowed
+provenance consistency enforced
+oracle diagnostics separated
+fusion rows separated from single-model rows
+```
+
+### Step 10: Slurm Submitters
+
+Add submitters for pilot and high-data campaigns.
+
+Jobs:
+
+```text
+build/reuse splits
+build HLT v2 strength-2.5 cache
+cache Phi_hlt/Phi_off
+train A-E single-model variants
+cache predictions/logits
+run F fusion variants
+write G oracle diagnostics
 write final report
 ```
 
-Support:
+Submitter requirements:
 
 ```text
-reuse existing AV10 split/HLT cache
-high-data run
-pilot run
-strict provenance checks
-optional offline oracle diagnostics
+pilot and high-data modes
+strict cache/provenance checks
+dependency graph between caches, models, fusion, report
+optional skip-existing with completeness checks
+clear job names
+record source commit/status hash
+```
+
+High-data default:
+
+```text
+model_train = 5M
+model_val   = 1M
+stack_train = 3M
+stack_val   = 1M
+final_test  = 1M
+```
+
+Tests:
+
+```text
+sbatch dry-run includes all expected jobs
+wrong cache profile/strength rejected before queue
+skip-existing rejects incomplete outputs
+all A0-G3 run IDs appear in expected jobs/report
 ```
 
 ## Recommended First Run
@@ -1795,6 +2579,384 @@ Then, if S4/S5 beat the baseline and controls fail:
 ```text
 S6 feature_mlp_adapter + residual state context
 S7 full best bet
+```
+
+## Full Ablation Campaign
+
+If compute is available, run the full campaign below.
+
+The goal is not only to find the best number. The goal is to separate:
+
+```text
+canonical state information
+residual prediction quality
+tagger use of residual context
+training schedule effects
+warm-start vs from-scratch effects
+fusion complementarity
+oracle headroom
+```
+
+All runs should use the same split/cache and label mapping unless explicitly
+marked as an oracle diagnostic. The preferred comparison setting is the same
+AV10 10-class HLT0.6 high-data split/cache when comparing against the existing
+AV10 results.
+
+### Tier A: Anchors
+
+These runs define the ground truth for interpretation.
+
+```text
+A0: HLT ParT baseline
+  normal HLT particles only
+  canonical baseline
+  selected on model_val
+
+A1: HLT ParT fine-tune-only control
+  same warm-start/schedule budget as adapter models
+  no Phi tokens
+  no residual predictor
+  tests whether gains come from fine-tuning schedule alone
+
+A2: AV10 feature_mlp_adapter repeat
+  repeat known strong AV10 feature MLP adapter
+  same split/cache as canonical-state runs
+  anchors against previous best adapter behavior
+
+A3: HLT ParT seed ensemble baseline
+  same architecture as A0
+  multiple seeds/checkpoints
+  same number of models as small fusion comparisons
+  tests whether fusion gains beat ordinary seed diversity
+```
+
+Required outputs:
+
+```text
+single-model metrics
+training curves
+final-test metrics
+per-class accuracy/confusion
+seed ensemble fusion report for A3
+```
+
+### Tier B: Does Phi Help At All?
+
+These runs test whether canonical state tokens contain useful tagging
+information before residual prediction.
+
+```text
+B0: HLT particles + Phi_hlt context
+  no residual prediction
+  state-token encoder/cross-attention adapter active
+  tests whether observed canonical HLT state helps ParT
+
+B1: Phi_hlt-only tagger
+  no original HLT particle tokens
+  state tokens only
+  expected to underperform ParT
+  measures standalone information content of Phi
+
+B2: HLT particles + shuffled Phi_hlt
+  Phi_hlt state tokens shuffled across jets
+  same capacity as B0
+  tests whether semantic state conditioning matters
+
+B3: HLT particles + random/noise state tokens
+  learned/random state tokens independent of the jet
+  same adapter capacity
+  tests capacity/regularization-only explanation
+```
+
+Key interpretation:
+
+```text
+B0 > A0:
+  Phi_hlt observed state is useful.
+
+B2/B3 close to B0:
+  gain may be capacity/regularization, not meaningful state semantics.
+
+B1 close to A0:
+  Phi is surprisingly powerful by itself.
+```
+
+### Tier C: Residual Predictor Quality
+
+These runs train/evaluate the HLT -> offline canonical-state residual predictor
+independent of the final tagging claim.
+
+```text
+C0: geometry-biased decoder predictor
+  mainline P0 predictor
+  state queries attend HLT particles with geometry bias
+
+C1: no-geometry-bias decoder
+  same as C0, but no additive geometry bias
+  tests whether token geometry matters
+
+C2: DeepSets/global pooled predictor
+  particles -> pooled summary
+  Phi_hlt + pooled summary -> delta_Phi
+  tests whether full state-particle cross-attention is needed
+
+C3: state-only predictor
+  Phi_hlt -> delta_Phi
+  no particle evidence beyond Phi_hlt
+  tests how much residual is predictable from state alone
+
+C4: particle-only learned-query predictor
+  token identity/geometry queries + particles
+  no Phi_hlt values in state query
+  tests whether observed state values are needed
+
+C5: hard-locality predictor
+  hard local attention masks for ring/sector/anchor tokens
+  tests soft bias vs hard constraint
+
+C6: uncertainty predictor
+  predicts delta_Phi and log_sigma
+  uncertainty-weighted state residual loss
+  tests ambiguous residual calibration
+```
+
+Required outputs:
+
+```text
+Phi_hlt -> Phi_off baseline error
+Phi_pred -> Phi_off error
+relative improvement by token family
+relative improvement by field
+per-class residual error
+delta norm
+predicted-vs-true residual correlation
+attention diagnostics for C0/C1/C5
+uncertainty calibration for C6
+```
+
+Expected ordering:
+
+```text
+C0 > C1 > C2 > C3
+```
+
+But any deviation is informative.
+
+### Tier D: Does Predicted Residual Context Help Tagging?
+
+These are the main tagging experiments.
+
+```text
+D0: HLT particles + Phi_hlt + delta_Phi_hat
+  feed observed state and predicted residual
+  do not feed Phi_pred separately
+
+D1: HLT particles + Phi_hlt + Phi_pred
+  feed observed state and corrected predicted state
+  do not expose delta separately
+
+D2: HLT particles + Phi_hlt + delta_Phi_hat + Phi_pred
+  full state context
+  CE + state residual loss
+  main clean residual-state model
+
+D3: D2 + offline logit KD
+  adds teacher decision boundary guidance
+  likely stronger than D2 if teacher logits are useful
+
+D4: D2 with state residual loss only as auxiliary, no logit KD
+  isolates state supervision without teacher logits
+
+D5: D2 architecture, CE only, no state residual loss
+  same capacity but no explicit HLT -> offline state supervision
+  tests whether residual target matters
+```
+
+Key interpretation:
+
+```text
+D2 > B0 > A0:
+  predicted residual state adds real tagging value.
+
+D5 close to D2:
+  architecture/capacity may matter more than residual supervision.
+
+D3 > D2:
+  offline teacher logits help make state context tagger-relevant.
+
+D0 vs D1:
+  tells whether the tagger prefers explicit residuals or corrected states.
+```
+
+### Tier E: Training Schedule And Warm-Start Ablations
+
+These runs test whether the gain depends on warm-starting and staged training.
+
+```text
+E0: warm-start, frozen warmup -> upper-unfreeze
+  default stable schedule
+
+E1: warm-start, joint from start
+  all trainable modules active immediately
+  tests whether staged training is necessary
+
+E2: warm-start, full ParT frozen
+  train residual predictor + state adapter/head only
+  tests how much can be gained without moving ParT body
+
+E3: from-scratch canonical-state model
+  same architecture as main residual-state model
+  no HLT ParT warm start
+  tests whether architecture itself is better
+
+E4: from-scratch ParT baseline
+  matched schedule/epochs to E3
+  required comparison for E3
+
+E5: residual predictor pretrain -> tagger train
+  pretrain delta_Phi predictor on state loss
+  then train tagger with predictor initialized
+  tests whether stable predictor pretraining helps
+
+E6: joint end-to-end, no predictor pretraining
+  train predictor and tagger together from the beginning
+  comparison for E5
+```
+
+Key interpretation:
+
+```text
+E0 > E1:
+  staged training stabilizes residual use.
+
+E2 improves:
+  residual/context adapter can help without changing ParT body.
+
+E3 > E4:
+  canonical-state architecture helps even from scratch.
+
+E5 > E6:
+  predictor pretraining matters.
+```
+
+### Tier F: Fusion And Ensemble Runs
+
+These runs test complementarity.
+
+```text
+F0: logit fusion, HLT ParT + best canonical-state model
+  smallest deployable ensemble
+
+F1: logit fusion, HLT ParT + AV10 feature MLP + best canonical-state model
+  likely strongest small practical ensemble
+
+F2: predictor-diversity logit fusion
+  fuse C0/D-style geometry predictor model
+  + C2/D-style DeepSets predictor model
+  + optionally no-geometry/state-only variants
+  tests whether different predictors recover different signal
+
+F3: state-token view fusion
+  one tagger consumes multiple predicted state views:
+    Phi_hlt
+    Phi_pred_C0
+    Phi_pred_C2
+    delta_C0
+    delta_C2
+  lets ParT use residual views before logits
+
+F4: particle-view gated adapter fusion
+  fuse per-particle deltas:
+    feature_mlp_adapter delta_h
+    state_context_adapter delta_h
+    optional local_compression delta_h
+  learned gates initialized near zero
+
+Fseed: same-size HLT ParT seed ensemble
+  required advisor-facing control
+
+Fshuffle: fusion with one model/view shuffled across jets
+  required leakage/capacity control
+```
+
+Fusion discipline:
+
+```text
+train base models on model_train
+select base checkpoints on model_val
+fit fusion on stack_train
+select fusion hyperparameters on stack_val
+evaluate final_test once
+```
+
+If stack splits are unavailable, label the fusion diagnostic as model-val-only
+and do not use it as a primary final-test claim.
+
+### Tier G: Offline/Oracle Diagnostics
+
+These are not deployable. They measure headroom and failure mode.
+
+```text
+G0: oracle Phi_off context on model_val only
+  feed true offline canonical state to tagger
+  measures upper bound of canonical state usefulness
+
+G1: oracle delta_Phi_true context on model_val only
+  feed true Phi_off - Phi_hlt residual
+  tests whether residual form itself is useful
+
+G2: predicted Phi_pred vs oracle Phi_off gap
+  compare D/S models against oracle state-context performance
+  estimates predictor bottleneck
+
+G3: per-class/token-family residual error analysis
+  identify which classes and state fields are predictable/useful
+  guide second-round representation changes
+```
+
+Oracle rules:
+
+```text
+never use oracle Phi_off for training final-test decisions
+never report oracle as deployable
+keep oracle diagnostics separate from primary final-test tables
+```
+
+### Full Campaign Summary
+
+Run IDs:
+
+```text
+A0 A1 A2 A3
+B0 B1 B2 B3
+C0 C1 C2 C3 C4 C5 C6
+D0 D1 D2 D3 D4 D5
+E0 E1 E2 E3 E4 E5 E6
+F0 F1 F2 F3 F4 Fseed Fshuffle
+G0 G1 G2 G3
+```
+
+This is intentionally broad. The key primary comparisons are:
+
+```text
+D2/D3 vs A0/A1/A2/A3
+B0 vs A0
+D2/D3 vs B0
+D5 vs D2
+C0 vs C1/C2/C3
+E3 vs E4
+F1/F3/F4 vs Fseed
+G0/G1 vs D2/D3
+```
+
+The result we want:
+
+```text
+D2/D3 improve over HLT ParT and Phi_hlt-only context.
+Controls B2/B3/D5/Fshuffle do not explain the gain.
+C0 predicts residuals better than simpler predictors.
+Fusion beats same-size seed ensemble.
+Oracle diagnostics show remaining headroom.
 ```
 
 ## Expected Outcomes
@@ -1857,4 +3019,77 @@ The line in the sand:
 HLT particles remain the main input.
 Predicted canonical state residuals must be fed into the classifier path.
 Final-test primary evaluation must be HLT-only.
+```
+
+## Input HLT Cache Contract
+
+This experiment should use a fresh HLT cache built with the HLT v2 realistic
+degradation profile:
+
+```text
+hlt_profile = fixed_hlt_v2_realistic
+hlt_degradation_strength = 2.5
+```
+
+This should be treated as a new canonical input setting for this campaign.
+Do not silently reuse old AV10 `hlt0p6` / `fixed_hlt_v1` caches for the primary
+results.
+
+The HLT v2 cache should be built once per split family and then reused by every
+run in the A0-G3 campaign.
+
+Required cached splits:
+
+```text
+model_train
+model_val
+stack_train
+stack_val
+final_test
+```
+
+Primary comparison split sizes should match the high-data AV10-style regime
+unless a pilot is explicitly labeled:
+
+```text
+high-data:
+  model_train = 5M
+  model_val   = 1M
+  stack_train = 3M
+  stack_val   = 1M
+  final_test  = 1M
+
+pilot:
+  model_train = 500k
+  model_val   = 150k
+  stack_train = 500k
+  stack_val   = 150k
+  final_test  = 500k or 150k, clearly recorded
+```
+
+Every report must record:
+
+```text
+hlt_profile
+hlt_degradation_strength
+hlt_builder_version
+hlt_params
+source_manifest_hash
+per-split HLT cache metadata hash
+```
+
+The trainer and report writer must fail if:
+
+```text
+an HLT cache was built with fixed_hlt_v1
+the degradation strength is not 2.5
+the source manifest hash does not match
+the split sizes do not match the run contract
+```
+
+Old AV10 `hlt0p6` results can still be used as historical context, but the
+primary canonical-state campaign should be internally consistent on:
+
+```text
+fixed_hlt_v2_realistic, strength 2.5
 ```
