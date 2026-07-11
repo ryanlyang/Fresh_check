@@ -32,6 +32,7 @@ SOURCE_VIEW="${1:?Usage: sbatch run_canonical_state_cache_phi.sh <hlt|offline>}"
 : "${CANONICAL_STATE_STACK_TRAIN_SIZE:=3000000}"
 : "${CANONICAL_STATE_STACK_VAL_SIZE:=1000000}"
 : "${CANONICAL_STATE_FINAL_TEST_SIZE:=1000000}"
+: "${CANONICAL_STATE_PHI_CHUNK_SIZE:=32768}"
 
 fresh_setup "$@"
 fresh_require_file "${CANONICAL_STATE_MANIFEST_PATH}"
@@ -65,6 +66,7 @@ cmd=(
   --expected-stack-train "${CANONICAL_STATE_STACK_TRAIN_SIZE}"
   --expected-stack-val "${CANONICAL_STATE_STACK_VAL_SIZE}"
   --expected-final-test "${CANONICAL_STATE_FINAL_TEST_SIZE}"
+  --chunk-size "${CANONICAL_STATE_PHI_CHUNK_SIZE}"
 )
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"
 fresh_append_flag_if_enabled cmd --allow-final-test-offline-oracle "${CANONICAL_STATE_ALLOW_FINAL_TEST_OFFLINE_ORACLE}"

@@ -212,6 +212,35 @@ class CanonicalStateStep4PhiCacheTests(unittest.TestCase):
         for split in CANONICAL_STATE_PHI_OFFLINE_PRIMARY_SPLITS:
             self.assertTrue(pair["split_reports"][split]["ok"], pair["split_reports"][split]["problems"])
 
+    def test_chunked_phi_cache_matches_unchunked_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, hlt_cache_dir, _, _ = _write_raw_caches(root)
+            whole_dir = root / "phi_whole"
+            chunked_dir = root / "phi_chunked"
+
+            build_phi_cache_from_hlt_cache(hlt_cache_dir, whole_dir, splits=("model_train",))
+            build_phi_cache_from_hlt_cache(hlt_cache_dir, chunked_dir, splits=("model_train",), chunk_size=3)
+
+            whole = load_canonical_phi_cache(
+                whole_dir,
+                "model_train",
+                source_view=CANONICAL_STATE_PHI_HLT_SOURCE,
+            )
+            chunked = load_canonical_phi_cache(
+                chunked_dir,
+                "model_train",
+                source_view=CANONICAL_STATE_PHI_HLT_SOURCE,
+            )
+
+        np.testing.assert_allclose(chunked.phi_tokens, whole.phi_tokens, rtol=0.0, atol=0.0)
+        np.testing.assert_array_equal(chunked.state_mask, whole.state_mask)
+        np.testing.assert_array_equal(chunked.labels, whole.labels)
+        np.testing.assert_array_equal(chunked.valid_particle_counts, whole.valid_particle_counts)
+        np.testing.assert_array_equal(chunked.masked_particle_counts, whole.masked_particle_counts)
+        np.testing.assert_array_equal(chunked.state_valid_counts, whole.state_valid_counts)
+        np.testing.assert_allclose(chunked.finite_particle_fraction, whole.finite_particle_fraction, rtol=0.0, atol=0.0)
+
     def test_layout_and_field_mismatch_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

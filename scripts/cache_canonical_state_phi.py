@@ -64,6 +64,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-stack-train", type=int, default=None)
     parser.add_argument("--expected-stack-val", type=int, default=None)
     parser.add_argument("--expected-final-test", type=int, default=None)
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=0,
+        help="Build Phi tokens in chunks of this many jets. Use 0 to build each split in one batch.",
+    )
     return parser.parse_args(argv)
 
 
@@ -101,6 +107,7 @@ def main() -> int:
             args.output_cache_dir,
             splits=splits,
             overwrite=bool(args.overwrite),
+            chunk_size=int(args.chunk_size),
         )
     else:
         reports = build_phi_cache_from_offline_cache(
@@ -109,6 +116,7 @@ def main() -> int:
             splits=splits,
             overwrite=bool(args.overwrite),
             allow_final_test_offline_oracle=bool(args.allow_final_test_offline_oracle),
+            chunk_size=int(args.chunk_size),
         )
 
     audit = None

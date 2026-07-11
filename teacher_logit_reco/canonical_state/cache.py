@@ -19,7 +19,7 @@ from .layout import (
     CanonicalJetStateLayout,
     default_canonical_jet_state_layout,
 )
-from .phi import CANONICAL_STATE_PHI_BUILDER_VERSION, build_canonical_jet_state_phi_from_view
+from .phi import CANONICAL_STATE_PHI_BUILDER_VERSION, build_canonical_jet_state_phi, build_canonical_jet_state_phi_from_view
 
 
 CANONICAL_STATE_PHI_CACHE_CONTRACT = "canonical_state_phi_cache_v1"
@@ -170,6 +170,7 @@ def save_canonical_phi_cache(
     layout: CanonicalJetStateLayout | None = None,
     overwrite: bool = False,
     allow_final_test_offline_oracle: bool = False,
+    chunk_size: int | None = None,
 ) -> dict[str, Any]:
     """Build and persist one split's canonical Phi cache."""
 
@@ -182,19 +183,19 @@ def save_canonical_phi_cache(
     if not overwrite and (array_path.exists() or metadata_path.exists()):
         raise FileExistsError(f"canonical Phi cache already exists for {source}/{view.split}: {array_path}")
 
-    phi_output = build_canonical_jet_state_phi_from_view(
+    phi_tokens, state_mask, diagnostic_arrays = _build_phi_cache_arrays(
         view,
         layout=layout,
-        source_metadata={"source_view": source},
+        source_view=source,
+        chunk_size=chunk_size,
     )
     jet_files, file_indices, entries = _jet_identity_arrays(view.jet_ids)
     token_type_ids = np.asarray(layout.token_type_ids, dtype=np.int16)
     scale_ids = np.asarray(layout.scale_ids, dtype=np.int16)
     slot_ids = np.asarray(layout.slot_ids, dtype=np.int16)
-    diagnostic_arrays = _diagnostic_arrays(phi_output)
     arrays = {
-        "phi_tokens": np.asarray(phi_output.phi_tokens, dtype=np.float32),
-        "state_mask": np.asarray(phi_output.state_mask, dtype=bool),
+        "phi_tokens": phi_tokens,
+        "state_mask": state_mask,
         "labels": np.asarray(view.labels, dtype=np.int64),
         "jet_file_indices": file_indices,
         "jet_entries": entries,
@@ -251,6 +252,66 @@ def save_canonical_phi_cache(
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return metadata
+
+
+def _build_phi_cache_arrays(
+    view: JetView,
+    *,
+    layout: CanonicalJetStateLayout,
+    source_view: str,
+    chunk_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """Build Phi arrays for one split, optionally in bounded chunks.
+
+    The high-data splits are large enough that building all soft-anchor
+    assignment tensors at once can exceed CPU memory on Tigris.  Chunking keeps
+    the output contract identical while bounding temporary builder memory.
+    """
+
+    n_jets = int(view.tokens.shape[0])
+    if chunk_size is None or int(chunk_size) <= 0 or int(chunk_size) >= n_jets:
+        phi_output = build_canonical_jet_state_phi_from_view(
+            view,
+            layout=layout,
+            source_metadata={"source_view": source_view},
+        )
+        return (
+            np.asarray(phi_output.phi_tokens, dtype=np.float32),
+            np.asarray(phi_output.state_mask, dtype=bool),
+            _diagnostic_arrays(phi_output),
+        )
+
+    chunk = int(chunk_size)
+    phi_tokens = np.empty((n_jets, layout.k_state, layout.d_phi), dtype=np.float32)
+    state_mask = np.empty((n_jets, layout.k_state), dtype=bool)
+    valid_particle_counts = np.empty(n_jets, dtype=np.int32)
+    masked_particle_counts = np.empty(n_jets, dtype=np.int32)
+    state_valid_counts = np.empty(n_jets, dtype=np.int32)
+    finite_particle_fraction = np.empty(n_jets, dtype=np.float32)
+
+    for start in range(0, n_jets, chunk):
+        stop = min(start + chunk, n_jets)
+        phi_output = build_canonical_jet_state_phi(
+            view.tokens[start:stop],
+            view.mask[start:stop],
+            layout=layout,
+            source_metadata={"source_view": source_view, "split": view.split},
+        )
+        phi_tokens[start:stop] = np.asarray(phi_output.phi_tokens, dtype=np.float32)
+        state_mask[start:stop] = np.asarray(phi_output.state_mask, dtype=bool)
+        diagnostics = _diagnostic_arrays(phi_output)
+        valid_particle_counts[start:stop] = diagnostics["valid_particle_counts"]
+        masked_particle_counts[start:stop] = diagnostics["masked_particle_counts"]
+        state_valid_counts[start:stop] = diagnostics["state_valid_counts"]
+        finite_particle_fraction[start:stop] = diagnostics["finite_particle_fraction"]
+
+    diagnostic_arrays = {
+        "valid_particle_counts": valid_particle_counts,
+        "masked_particle_counts": masked_particle_counts,
+        "state_valid_counts": state_valid_counts,
+        "finite_particle_fraction": finite_particle_fraction,
+    }
+    return phi_tokens, state_mask, diagnostic_arrays
 
 
 def load_canonical_phi_cache(
@@ -356,6 +417,7 @@ def build_phi_cache_from_hlt_cache(
     splits: Sequence[str] = CANONICAL_STATE_PHI_HLT_SPLITS,
     overwrite: bool = False,
     layout: CanonicalJetStateLayout | None = None,
+    chunk_size: int | None = None,
 ) -> dict[str, Any]:
     reports: dict[str, Any] = {}
     for split in splits:
@@ -366,6 +428,7 @@ def build_phi_cache_from_hlt_cache(
             source_view=CANONICAL_STATE_PHI_HLT_SOURCE,
             layout=layout,
             overwrite=overwrite,
+            chunk_size=chunk_size,
         )
     return reports
 
@@ -378,6 +441,7 @@ def build_phi_cache_from_offline_cache(
     overwrite: bool = False,
     layout: CanonicalJetStateLayout | None = None,
     allow_final_test_offline_oracle: bool = False,
+    chunk_size: int | None = None,
 ) -> dict[str, Any]:
     reports: dict[str, Any] = {}
     for split in splits:
@@ -389,6 +453,7 @@ def build_phi_cache_from_offline_cache(
             layout=layout,
             overwrite=overwrite,
             allow_final_test_offline_oracle=allow_final_test_offline_oracle,
+            chunk_size=chunk_size,
         )
     return reports
 
