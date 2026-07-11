@@ -41,6 +41,7 @@ from teacher_logit_reco.canonical_state import (
     phi_cache_paths,
     save_canonical_phi_cache,
 )
+from teacher_logit_reco.canonical_state.run_variants import CanonicalStateCachedDataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +254,29 @@ class CanonicalStateStep4PhiCacheTests(unittest.TestCase):
         self.assertFalse(audit["ok"])
         self.assertTrue(any("source_manifest_hash" in problem for problem in audit["problems"]))
         self.assertTrue(any("missing source cache hash" in problem for problem in audit["problems"]))
+
+    def test_variant_dataset_rejects_phi_hlt_from_different_hlt_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, hlt_cache_dir, _, manifest = _write_raw_caches(root)
+            phi_hlt_dir = root / "phi_hlt"
+            build_phi_cache_from_hlt_cache(hlt_cache_dir, phi_hlt_dir, splits=("model_train",))
+            _, metadata_path = phi_cache_paths(phi_hlt_dir, "model_train", CANONICAL_STATE_PHI_HLT_SOURCE)
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["source_cache_hash"] = "stale-hlt-content"
+            metadata["hlt_content_hash"] = "stale-hlt-content"
+            metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Phi_hlt source_cache_hash"):
+                CanonicalStateCachedDataset(
+                    hlt_cache_dir=hlt_cache_dir,
+                    phi_hlt_cache_dir=phi_hlt_dir,
+                    phi_offline_cache_dir=None,
+                    split="model_train",
+                    max_jets=None,
+                    include_phi_off=False,
+                    expected_manifest_hash=manifest_hash(manifest),
+                )
 
     def test_hlt_offline_alignment_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

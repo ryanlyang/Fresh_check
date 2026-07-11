@@ -121,6 +121,28 @@ CANONICAL_STATE_ANCHOR_RADII: dict[str, float] = {
 }
 
 
+def _fixed_anchor_coordinates(family: str) -> tuple[tuple[float, float], ...]:
+    """Return frozen local eta/phi anchor centers for one anchor family."""
+
+    if family == "anchor_coarse":
+        radius = 0.20
+        return tuple(
+            (radius * math.cos(math.pi / 4.0 + index * math.pi / 2.0), radius * math.sin(math.pi / 4.0 + index * math.pi / 2.0))
+            for index in range(4)
+        )
+    if family == "anchor_medium":
+        radius = 0.18
+        ring = tuple(
+            (radius * math.cos(index * 2.0 * math.pi / 7.0), radius * math.sin(index * 2.0 * math.pi / 7.0))
+            for index in range(7)
+        )
+        return ((0.0, 0.0), *ring)
+    if family == "anchor_fine":
+        grid = (-0.18, -0.06, 0.06, 0.18)
+        return tuple((eta, phi) for eta in grid for phi in grid)
+    raise ValueError(f"unknown anchor family {family!r}")
+
+
 def _require_exact_mapping_keys(name: str, mapping: Mapping[str, Any], keys: tuple[str, ...]) -> None:
     actual = set(mapping.keys())
     expected = set(keys)
@@ -147,6 +169,8 @@ class CanonicalStateTokenSpec:
     angular_center: float | None = None
     angular_width: float | None = None
     anchor_radius: float | None = None
+    anchor_deta: float | None = None
+    anchor_dphi: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -167,6 +191,8 @@ class CanonicalStateTokenSpec:
             angular_center=None if payload.get("angular_center") is None else float(payload["angular_center"]),
             angular_width=None if payload.get("angular_width") is None else float(payload["angular_width"]),
             anchor_radius=None if payload.get("anchor_radius") is None else float(payload["anchor_radius"]),
+            anchor_deta=None if payload.get("anchor_deta") is None else float(payload["anchor_deta"]),
+            anchor_dphi=None if payload.get("anchor_dphi") is None else float(payload["anchor_dphi"]),
         )
 
 
@@ -377,6 +403,8 @@ def _token_spec(
     angular_center: float | None = None,
     angular_width: float | None = None,
     anchor_radius: float | None = None,
+    anchor_deta: float | None = None,
+    anchor_dphi: float | None = None,
 ) -> CanonicalStateTokenSpec:
     return CanonicalStateTokenSpec(
         index=int(index),
@@ -392,6 +420,8 @@ def _token_spec(
         angular_center=angular_center,
         angular_width=angular_width,
         anchor_radius=anchor_radius,
+        anchor_deta=anchor_deta,
+        anchor_dphi=anchor_dphi,
     )
 
 
@@ -432,7 +462,11 @@ def build_token_specs(config: CanonicalJetStateConfig | None = None) -> tuple[Ca
         )
 
     for family in ("anchor_coarse", "anchor_medium", "anchor_fine"):
+        coordinates = _fixed_anchor_coordinates(family)
+        if len(coordinates) != int(config.anchor_counts[family]):
+            raise ValueError(f"fixed coordinate count for {family} does not match anchor_counts")
         for slot_id in range(int(config.anchor_counts[family])):
+            anchor_deta, anchor_dphi = coordinates[slot_id]
             specs.append(
                 _token_spec(
                     index=len(specs),
@@ -440,6 +474,8 @@ def build_token_specs(config: CanonicalJetStateConfig | None = None) -> tuple[Ca
                     family=family,
                     slot_id=slot_id,
                     anchor_radius=float(config.anchor_radii[family]),
+                    anchor_deta=float(anchor_deta),
+                    anchor_dphi=float(anchor_dphi),
                 )
             )
 

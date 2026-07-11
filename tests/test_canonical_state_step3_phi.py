@@ -160,18 +160,18 @@ class CanonicalStateStep3PhiTests(unittest.TestCase):
         np.testing.assert_array_equal(first.state_mask[0], single.state_mask)
         self.assertTrue(single.diagnostics["squeezed_input"])
 
-    def test_anchor_tokens_are_top_pt_centered_and_masked_by_available_slots(self):
+    def test_anchor_tokens_use_fixed_soft_assignment_not_top_pt_slots(self):
         tokens, mask = _tokens(max_particles=4)
         _set_particle(tokens, mask, 0, 0, pt=1.0, eta=0.00, phi=0.00, energy=1.0, pid=6)
         _set_particle(tokens, mask, 0, 1, pt=5.0, eta=0.02, phi=0.01, energy=5.0, pid=7)
 
         out = build_canonical_jet_state_phi(tokens, mask)
         coarse0 = out.phi_tokens[0, 20]
-        coarse2_mask = out.state_mask[0, 22]
 
         self.assertTrue(out.state_mask[0, 20])
-        self.assertAlmostEqual(coarse0[_field("sum_pt_frac")], 1.0, places=6)
-        self.assertFalse(coarse2_mask)
+        self.assertTrue(out.state_mask[0, 22])
+        self.assertGreater(coarse0[_field("sum_pt_frac")], 0.0)
+        self.assertLess(coarse0[_field("sum_pt_frac")], 1.0)
 
 
 if __name__ == "__main__":

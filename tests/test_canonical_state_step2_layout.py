@@ -111,6 +111,12 @@ class CanonicalStateStep2LayoutTests(unittest.TestCase):
         self.assertEqual(anchors[0].anchor_radius, 0.30)
         self.assertEqual(anchors[4].anchor_radius, 0.18)
         self.assertEqual(anchors[12].anchor_radius, 0.10)
+        for spec in anchors:
+            self.assertIsNotNone(spec.anchor_deta)
+            self.assertIsNotNone(spec.anchor_dphi)
+        self.assertAlmostEqual(anchors[4].anchor_deta, 0.0)
+        self.assertAlmostEqual(anchors[4].anchor_dphi, 0.0)
+        self.assertEqual(len({(spec.anchor_deta, spec.anchor_dphi) for spec in anchors[-16:]}), 16)
 
     def test_metadata_roundtrip_is_lossless(self):
         layout = default_canonical_jet_state_layout()

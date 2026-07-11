@@ -137,6 +137,20 @@ semantics:
 These semantics are implemented numerically through token-type embeddings,
 scale embeddings, slot/ring/sector embeddings, and fixed feature ordering.
 
+## State Mask Semantics
+
+Primary deployable state-conditioned taggers should use the HLT state mask for
+`Phi_hlt`, `delta_Phi_hat`, and `Phi_pred` context. This is conservative: if a
+radial, sector, or anchor token is empty in HLT, the primary tagger should not
+depend on an offline-only valid token that will be unavailable at deployment
+time.
+
+Oracle diagnostics are different. `G0` may use the offline `Phi_off` mask for
+the oracle `Phi_off` context, and `G1` may use the offline-valid mask for the
+`delta_Phi_true = Phi_off - Phi_hlt` half of the context while keeping the
+`Phi_hlt` half on the HLT mask. This exposes HLT-empty but offline-valid bins
+only in explicitly non-deployable, non-final-test oracle diagnostics.
+
 ## Recommended Phi Layout
 
 Start with a compact but expressive state:
@@ -2897,11 +2911,11 @@ and do not use it as a primary final-test claim.
 These are not deployable. They measure headroom and failure mode.
 
 ```text
-G0: oracle Phi_off context on model_val only
+G0: oracle Phi_off context on non-final validation splits
   feed true offline canonical state to tagger
   measures upper bound of canonical state usefulness
 
-G1: oracle delta_Phi_true context on model_val only
+G1: oracle delta_Phi_true context on non-final validation splits
   feed true Phi_off - Phi_hlt residual
   tests whether residual form itself is useful
 

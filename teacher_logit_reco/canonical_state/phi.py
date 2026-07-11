@@ -108,11 +108,18 @@ def _summarize_selection(
 ) -> tuple[np.ndarray, np.ndarray]:
     batch_size = tokens.shape[0]
     raw = np.zeros((batch_size, layout.d_phi), dtype=np.float32)
-    selected_valid = selected & valid
-    selected_pt = np.where(selected_valid, np.clip(tokens[:, :, PT_INDEX], 0.0, None), 0.0).astype(np.float32)
-    selected_energy = np.where(selected_valid, np.clip(tokens[:, :, ENERGY_INDEX], 0.0, None), 0.0).astype(np.float32)
-    selected_count = selected_valid.sum(axis=1).astype(np.float32)
-    token_mask = selected_count > 0
+    if np.asarray(selected).dtype == bool:
+        selected_weight = np.where(np.asarray(selected, dtype=bool) & valid, 1.0, 0.0).astype(np.float32)
+    else:
+        selected_weight = np.where(valid, np.asarray(selected, dtype=np.float32), 0.0).astype(np.float32)
+    if np.asarray(base_selected).dtype == bool:
+        base_weight = np.where(np.asarray(base_selected, dtype=bool), 1.0, 0.0).astype(np.float32)
+    else:
+        base_weight = np.asarray(base_selected, dtype=np.float32)
+    selected_pt = (selected_weight * np.clip(tokens[:, :, PT_INDEX], 0.0, None)).astype(np.float32)
+    selected_energy = (selected_weight * np.clip(tokens[:, :, ENERGY_INDEX], 0.0, None)).astype(np.float32)
+    selected_count = selected_weight.sum(axis=1).astype(np.float32)
+    token_mask = selected_count > EPS
     safe_count = np.maximum(selected_count, 1.0)
     pt_sum = selected_pt.sum(axis=1)
     energy_sum = selected_energy.sum(axis=1)
@@ -145,9 +152,9 @@ def _summarize_selection(
     hadron_like = charged_like | neutral_like
 
     def pid_fraction(pid_mask: np.ndarray) -> np.ndarray:
-        return np.sum(np.where(selected_valid & pid_mask, selected_pt, 0.0), axis=1) / safe_pt_sum
+        return np.sum(np.where(pid_mask, selected_pt, 0.0), axis=1) / safe_pt_sum
 
-    base_count = np.maximum(base_selected.sum(axis=1).astype(np.float32), 1.0)
+    base_count = np.maximum(base_weight.sum(axis=1).astype(np.float32), 1.0)
     missing_fraction = 1.0 - selected_count / base_count
 
     raw[:, _field_index("sum_pt_frac")] = pt_sum / safe_total_pt
@@ -235,6 +242,30 @@ def _angular_selection(
     return base, base & valid
 
 
+def _soft_anchor_weights(
+    *,
+    eta: np.ndarray,
+    phi: np.ndarray,
+    valid: np.ndarray,
+    layout: CanonicalJetStateLayout,
+    family: str,
+) -> np.ndarray:
+    specs = [spec for spec in layout.token_specs if spec.family == family]
+    centers_eta = np.asarray([float(spec.anchor_deta or 0.0) for spec in specs], dtype=np.float32)
+    centers_phi = np.asarray([float(spec.anchor_dphi or 0.0) for spec in specs], dtype=np.float32)
+    sigma = np.asarray([float(spec.anchor_radius or 1.0) for spec in specs], dtype=np.float32)
+    deta = eta[:, None, :] - centers_eta[None, :, None]
+    dphi = _wrap_phi(phi[:, None, :] - centers_phi[None, :, None])
+    dist2 = deta * deta + dphi * dphi
+    logits = -dist2 / np.maximum(sigma[None, :, None] * sigma[None, :, None], EPS)
+    logits = np.where(valid[:, None, :], logits, -1.0e9)
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    weights = np.exp(logits).astype(np.float32)
+    weights = np.where(valid[:, None, :], weights, 0.0)
+    denom = np.maximum(weights.sum(axis=1, keepdims=True), EPS)
+    return weights / denom
+
+
 def build_canonical_jet_state_phi(
     tokens: np.ndarray,
     mask: np.ndarray | None = None,
@@ -261,12 +292,10 @@ def build_canonical_jet_state_phi(
     phi_tokens = np.zeros((safe_tokens.shape[0], layout.k_state, layout.d_phi), dtype=np.float32)
     state_mask = np.zeros((safe_tokens.shape[0], layout.k_state), dtype=bool)
 
-    max_anchor_count = max(int(value) for value in layout.config.anchor_counts.values())
-    topk, topk_available = _topk_indices(pt, valid, max_anchor_count)
-    rows = np.arange(safe_tokens.shape[0])[:, None]
-    topk_valid = valid[rows, topk] & topk_available
-    topk_eta = eta[rows, topk]
-    topk_phi = phi[rows, topk]
+    anchor_weights = {
+        family: _soft_anchor_weights(eta=eta, phi=phi, valid=valid, layout=layout, family=family)
+        for family in ("anchor_coarse", "anchor_medium", "anchor_fine")
+    }
 
     for spec in layout.token_specs:
         if spec.family == "global":
@@ -276,15 +305,9 @@ def build_canonical_jet_state_phi(
         elif spec.family == "angular":
             base_selected, selected = _angular_selection(spec, phi, base_mask, valid)
         elif spec.family.startswith("anchor_"):
-            slot = int(spec.slot_id)
-            anchor_valid = topk_valid[:, slot]
-            anchor_eta = topk_eta[:, slot]
-            anchor_phi = topk_phi[:, slot]
-            deta = eta - anchor_eta[:, None]
-            dphi = _wrap_phi(phi - anchor_phi[:, None])
-            dr = np.sqrt(np.maximum(deta * deta + dphi * dphi, 0.0))
-            base_selected = base_mask & anchor_valid[:, None] & (dr <= float(spec.anchor_radius))
-            selected = valid & anchor_valid[:, None] & (dr <= float(spec.anchor_radius))
+            weights = anchor_weights[spec.family][:, int(spec.slot_id), :]
+            base_selected = weights
+            selected = weights
         else:  # pragma: no cover - guarded by layout validation
             raise ValueError(f"unknown canonical state family {spec.family!r}")
         features, token_mask = _summarize_selection(
