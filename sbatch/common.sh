@@ -1212,6 +1212,7 @@ fresh_activate_env() {
       # shellcheck disable=SC1090
       source "${explicit_conda_sh}"
       conda activate "${CONDA_ENV}"
+      fresh_prepend_conda_library_paths
       return 0
     fi
     echo "CONDA_BASE is set, but conda.sh was not found: ${explicit_conda_sh}" >&2
@@ -1220,6 +1221,7 @@ fresh_activate_env() {
   if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
     conda activate "${CONDA_ENV}"
+    fresh_prepend_conda_library_paths
     return 0
   fi
   local conda_sh="${CONDA_BASE:-${HOME}/miniconda3}/etc/profile.d/conda.sh"
@@ -1227,10 +1229,30 @@ fresh_activate_env() {
     # shellcheck disable=SC1090
     source "${conda_sh}"
     conda activate "${CONDA_ENV}"
+    fresh_prepend_conda_library_paths
     return 0
   fi
   echo "Could not find conda. Set SKIP_CONDA=1 or CONDA_BASE=/path/to/miniconda." >&2
   return 2
+}
+
+fresh_prepend_conda_library_paths() {
+  if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    return 0
+  fi
+  local conda_lib_paths=()
+  if [[ -d "${CONDA_PREFIX}/lib" ]]; then
+    conda_lib_paths+=("${CONDA_PREFIX}/lib")
+  fi
+  if [[ -d "${CONDA_PREFIX}/lib64" ]]; then
+    conda_lib_paths+=("${CONDA_PREFIX}/lib64")
+  fi
+  if [[ "${#conda_lib_paths[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  local joined
+  joined="$(IFS=:; printf '%s' "${conda_lib_paths[*]}")"
+  export LD_LIBRARY_PATH="${joined}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 }
 
 fresh_setup() {
