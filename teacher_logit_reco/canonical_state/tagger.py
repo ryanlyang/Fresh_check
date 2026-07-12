@@ -743,9 +743,11 @@ class CanonicalStateConditionedParT(_ModuleBase):
             particles=int(self._pending_particle_mask.shape[1]),
             dim=int(self.config.part_embed_dim),
         )
+        hook_particle_count = int(particle_embeddings.shape[1])
+        particle_mask = self._pending_particle_mask[:, :hook_particle_count]
         state_delta_h, state_gate, state_diag = self.state_adapter(
             particle_embeddings,
-            self._pending_particle_mask,
+            particle_mask,
             self._pending_state_context,
             self._pending_state_mask,
         )
@@ -755,12 +757,14 @@ class CanonicalStateConditionedParT(_ModuleBase):
             total_delta = total_delta + self._pending_feature_delta_h[:, : int(total_delta.shape[1]), :]
             if self._pending_feature_gate is not None:
                 total_gate = 0.5 * (total_gate + self._pending_feature_gate[:, : int(total_gate.shape[1]), :])
-        total_delta = total_delta * self._pending_particle_mask[:, : int(total_delta.shape[1]), None].to(dtype=total_delta.dtype)
+        total_delta = total_delta * particle_mask[:, : int(total_delta.shape[1]), None].to(dtype=total_delta.dtype)
         self._last_delta_h = total_delta
         self._last_gate = total_gate
         self._last_injection_diagnostics = {
             "embed_module_name": str(self.embed_module_name),
             "injection_applied": True,
+            "hook_particle_count": hook_particle_count,
+            "input_particle_count": int(self._pending_particle_mask.shape[1]),
             "delta_h_shape": list(total_delta.shape),
             "state_adapter": state_diag,
         }

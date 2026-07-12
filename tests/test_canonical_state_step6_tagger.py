@@ -29,8 +29,10 @@ class _FakeParT(torch.nn.Module):
         feature_dim: int = len(LOCAL_COMPRESSION_CANONICAL_FEATURE_NAMES),
         embed_dim: int = 32,
         num_classes: int = 10,
+        trim_to: int | None = None,
     ) -> None:
         super().__init__()
+        self.trim_to = trim_to
         self.mod = torch.nn.Module()
         self.mod.embed = torch.nn.Linear(feature_dim, embed_dim)
         self.mod.fc = torch.nn.Linear(embed_dim, num_classes)
@@ -38,6 +40,9 @@ class _FakeParT(torch.nn.Module):
     def forward(self, points, features, lorentz_vectors, mask):  # noqa: ANN001
         del points, lorentz_vectors
         rows = features.transpose(1, 2).contiguous()
+        if self.trim_to is not None:
+            rows = rows[:, : self.trim_to, :]
+            mask = mask[:, :, : self.trim_to]
         embeddings = self.mod.embed(rows)
         valid = mask[:, 0, :].bool()[:, :, None].to(dtype=embeddings.dtype)
         pooled = (embeddings * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
@@ -261,6 +266,21 @@ def test_feature_mlp_plus_state_runs_both_zero_init_adapters() -> None:
     assert output.diagnostics["feature_mlp_adapter"]["feature_mlp_adapter_active"] is True
     assert output.diagnostics["feature_mlp_adapter"]["delta_h_norm_max"] == pytest.approx(0.0)
     assert output.diagnostics["injection"]["state_adapter"]["delta_h_norm_max"] == pytest.approx(0.0)
+
+
+def test_state_injection_aligns_mask_to_trimmed_part_embedding_rows() -> None:
+    tokens, mask, phi_hlt, _, _, _ = _sample_inputs(n_particles=7)
+    model = CanonicalStateConditionedParT(_config(STATE_CONTEXT_PHI_HLT), part_model=_FakeParT(trim_to=5))
+    model.eval()
+
+    with torch.no_grad():
+        output = model(tokens, mask, phi_hlt=phi_hlt)
+
+    assert output.logits.shape == (tokens.shape[0], 10)
+    assert output.delta_h is not None
+    assert output.delta_h.shape[1] == 5
+    assert output.diagnostics["injection"]["hook_particle_count"] == 5
+    assert output.diagnostics["injection"]["input_particle_count"] == tokens.shape[1]
 
 
 def test_state_tagger_mode_alias_and_config_validation() -> None:
