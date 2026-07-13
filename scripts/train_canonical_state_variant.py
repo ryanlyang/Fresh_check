@@ -55,6 +55,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-final-test-jets", type=int, default=None)
     parser.add_argument("--model-size", default="base", choices=("tiny", "base", "large"))
     parser.add_argument(
+        "--checkpoint-policy",
+        default="all",
+        choices=("all", "dependency", "none"),
+        help="Which best_model_val.pt checkpoints to keep. 'dependency' keeps only A0/C0.",
+    )
+    parser.add_argument(
+        "--no-save-last-checkpoint",
+        action="store_true",
+        help="Do not write last.pt after training; reports and prediction caches are still written.",
+    )
+    parser.add_argument(
         "--emit-planning-stub",
         action="store_true",
         help="Write a non-scientific planning run_report instead of training.",
@@ -122,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         max_stack_val_jets=args.max_stack_val_jets,
         max_final_test_jets=args.max_final_test_jets,
         model_size=str(args.model_size),
+        checkpoint_policy=str(args.checkpoint_policy),
+        save_last_checkpoint=not bool(args.no_save_last_checkpoint),
     )
     report = run_canonical_state_variant(config)
     print(json.dumps(report, indent=2, sort_keys=True))

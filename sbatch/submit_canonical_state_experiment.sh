@@ -74,6 +74,8 @@ fi
 : "${CANONICAL_STATE_GPU_MEM:=}"
 : "${CANONICAL_STATE_CPU_CPUS_PER_TASK:=}"
 : "${CANONICAL_STATE_CPU_MEM:=}"
+: "${CANONICAL_STATE_CHECKPOINT_POLICY:=all}"
+: "${CANONICAL_STATE_SAVE_LAST_CHECKPOINT:=1}"
 
 dependency_token_is_valid() {
   local token="$1"
@@ -242,6 +244,8 @@ if ! fresh_is_dry_run; then
     echo "gpu_mem=${CANONICAL_STATE_GPU_MEM}"
     echo "cpu_cpus_per_task=${CANONICAL_STATE_CPU_CPUS_PER_TASK}"
     echo "cpu_mem=${CANONICAL_STATE_CPU_MEM}"
+    echo "checkpoint_policy=${CANONICAL_STATE_CHECKPOINT_POLICY}"
+    echo "save_last_checkpoint=${CANONICAL_STATE_SAVE_LAST_CHECKPOINT}"
   } > "${submitter_log_dir}/metadata.txt"
 fi
 
@@ -258,6 +262,8 @@ fi
 if [[ -n "${CANONICAL_STATE_GPU_GRES}" ]]; then
   echo "  gpu_gres: ${CANONICAL_STATE_GPU_GRES}"
 fi
+echo "  checkpoint_policy: ${CANONICAL_STATE_CHECKPOINT_POLICY}"
+echo "  save_last_checkpoint: ${CANONICAL_STATE_SAVE_LAST_CHECKPOINT}"
 
 split_jid=""
 if fresh_bool_enabled "${CANONICAL_STATE_SUBMIT_SPLITS}"; then

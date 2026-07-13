@@ -19,6 +19,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${READ_CHUNK_SIZE:=50000}"
 : "${VERIFY_LABEL_BRANCHES:=0}"
 : "${SHOW_PROGRESS:=0}"
+: "${HLT_PROFILE:=fixed_hlt_v1}"
 : "${HLT_DEGRADATION_STRENGTH:=1.0}"
 : "${DATA_DIRS:=}"
 
@@ -51,6 +52,7 @@ cmd=(
   --cache-dir "${HLT_CACHE_DIR}"
   --splits "${split_args[@]}"
   --read-chunk-size "${READ_CHUNK_SIZE}"
+  --hlt-profile "${HLT_PROFILE}"
   --hlt-degradation-strength "${HLT_DEGRADATION_STRENGTH}"
 )
 fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE}"

@@ -80,6 +80,20 @@ from .variants import (
 
 CANONICAL_STATE_VARIANT_RUNNER_CONTRACT = "canonical_state_variant_real_runner_v1"
 PREDICTION_CACHE_CONTRACT = "canonical_state_prediction_cache_v1"
+CHECKPOINT_POLICY_ALL = "all"
+CHECKPOINT_POLICY_DEPENDENCY = "dependency"
+CHECKPOINT_POLICY_NONE = "none"
+CHECKPOINT_POLICIES = (CHECKPOINT_POLICY_ALL, CHECKPOINT_POLICY_DEPENDENCY, CHECKPOINT_POLICY_NONE)
+CHECKPOINT_DEPENDENCY_RUN_IDS = frozenset({"A0", "C0"})
+
+
+def _torch_load_checkpoint(path: str | Path, *, map_location: Any) -> Any:
+    """Load trusted runner-created checkpoints across PyTorch default changes."""
+    torch = require_torch()
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 @dataclass(frozen=True)
@@ -117,6 +131,8 @@ class CanonicalStateVariantRunConfig:
     max_stack_val_jets: int | None = None
     max_final_test_jets: int | None = None
     model_size: str = "base"
+    checkpoint_policy: str = CHECKPOINT_POLICY_ALL
+    save_last_checkpoint: bool = True
 
     def output_path(self) -> Path:
         return Path(self.output_dir)
@@ -515,8 +531,7 @@ def _load_checkpoint_if_available(model: Any, checkpoint: str | Path | None) -> 
     path = Path(checkpoint)
     if not path.exists():
         return {"loaded": False, "reason": f"missing_checkpoint:{path}"}
-    torch = require_torch()
-    payload = torch.load(path, map_location="cpu")
+    payload = _torch_load_checkpoint(path, map_location="cpu")
     state = payload.get("model_state_dict") if isinstance(payload, Mapping) else None
     if state is None and isinstance(payload, Mapping):
         state = payload.get("state_dict") or payload
@@ -561,8 +576,7 @@ def _load_predictor_checkpoint_if_available(model: Any, checkpoint: str | Path |
     predictor = getattr(model, "state_predictor", None)
     if predictor is None:
         return {"loaded": False, "reason": "model_has_no_state_predictor"}
-    torch = require_torch()
-    payload = torch.load(path, map_location="cpu")
+    payload = _torch_load_checkpoint(path, map_location="cpu")
     state = payload.get("model_state_dict") if isinstance(payload, Mapping) else None
     if state is None and isinstance(payload, Mapping):
         state = payload.get("state_dict") or payload
@@ -576,6 +590,36 @@ def _load_predictor_checkpoint_if_available(model: Any, checkpoint: str | Path |
         "missing_keys": list(result.missing_keys),
         "unexpected_keys": list(result.unexpected_keys),
     }
+
+
+def _validate_checkpoint_policy(policy: str) -> str:
+    value = str(policy).strip().lower()
+    if value not in CHECKPOINT_POLICIES:
+        raise ValueError(f"checkpoint_policy must be one of {CHECKPOINT_POLICIES}, got {policy!r}")
+    return value
+
+
+def _should_save_best_checkpoint(config: CanonicalStateVariantRunConfig, spec: CanonicalStateVariantSpec) -> bool:
+    policy = _validate_checkpoint_policy(config.checkpoint_policy)
+    if policy == CHECKPOINT_POLICY_ALL:
+        return True
+    if policy == CHECKPOINT_POLICY_DEPENDENCY:
+        return str(spec.run_id) in CHECKPOINT_DEPENDENCY_RUN_IDS
+    return False
+
+
+def _checkpoint_policy_report(config: CanonicalStateVariantRunConfig, spec: CanonicalStateVariantSpec) -> dict[str, Any]:
+    policy = _validate_checkpoint_policy(config.checkpoint_policy)
+    return {
+        "policy": policy,
+        "save_best_checkpoint": bool(_should_save_best_checkpoint(config, spec)),
+        "save_last_checkpoint": bool(config.save_last_checkpoint),
+        "dependency_checkpoint_run_ids": sorted(CHECKPOINT_DEPENDENCY_RUN_IDS),
+    }
+
+
+def _cpu_state_dict_copy(model: Any) -> dict[str, Any]:
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 def _stable_seed_offset(run_id: str) -> int:
@@ -756,6 +800,8 @@ def _train_tagger(config: CanonicalStateVariantRunConfig, spec: CanonicalStateVa
     best_metric = -float("inf")
     best_epoch = 0
     best_path = output_dir / "best_model_val.pt"
+    save_best_checkpoint = _should_save_best_checkpoint(config, spec)
+    best_state_dict: dict[str, Any] | None = None
     epoch_rows: list[dict[str, Any]] = []
     nonfinite_batches = 0
     patience_left = int(config.early_stop_patience)
@@ -838,35 +884,41 @@ def _train_tagger(config: CanonicalStateVariantRunConfig, spec: CanonicalStateVa
             best_metric = score
             best_epoch = epoch
             patience_left = int(config.early_stop_patience)
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "run_id": spec.run_id,
-                    "epoch": epoch,
-                    "model_val_metrics": val_metrics,
-                    "config": asdict(config),
-                    "spec": spec.to_dict(),
-                },
-                best_path,
-            )
+            best_state_dict = _cpu_state_dict_copy(model)
+            if save_best_checkpoint:
+                torch.save(
+                    {
+                        "model_state_dict": best_state_dict,
+                        "run_id": spec.run_id,
+                        "epoch": epoch,
+                        "model_val_metrics": val_metrics,
+                        "config": asdict(config),
+                        "spec": spec.to_dict(),
+                    },
+                    best_path,
+                )
         else:
             patience_left -= 1
             if patience_left <= 0:
                 break
 
     if best_path.exists():
-        payload = torch.load(best_path, map_location=device)
+        payload = _torch_load_checkpoint(best_path, map_location=device)
         model.load_state_dict(payload["model_state_dict"], strict=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "run_id": spec.run_id,
-            "epoch": int(epoch_rows[-1]["epoch"] if epoch_rows else 0),
-            "config": asdict(config),
-            "spec": spec.to_dict(),
-        },
-        output_dir / "last.pt",
-    )
+    elif best_state_dict is not None:
+        model.load_state_dict(best_state_dict, strict=True)
+    last_path = output_dir / "last.pt"
+    if bool(config.save_last_checkpoint):
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "run_id": spec.run_id,
+                "epoch": int(epoch_rows[-1]["epoch"] if epoch_rows else 0),
+                "config": asdict(config),
+                "spec": spec.to_dict(),
+            },
+            last_path,
+        )
 
     eval_splits = ["model_val", "stack_val"]
     if "final_test" in datasets and spec.allows_primary_final_test():
@@ -905,8 +957,11 @@ def _train_tagger(config: CanonicalStateVariantRunConfig, spec: CanonicalStateVa
             "prediction_caches": prediction_caches,
             "diagnostics": diagnostics_by_split,
             "disabled_loss_terms": sorted(disabled_loss_terms),
-            "checkpoint": str(best_path),
-            "last_checkpoint": str(output_dir / "last.pt"),
+            "checkpoint_policy": _checkpoint_policy_report(config, spec),
+            "checkpoint": str(best_path) if bool(save_best_checkpoint) else None,
+            "checkpoint_saved": bool(save_best_checkpoint and best_path.exists()),
+            "last_checkpoint": str(last_path) if bool(config.save_last_checkpoint) else None,
+            "last_checkpoint_saved": bool(config.save_last_checkpoint and last_path.exists()),
             "nonfinite_batches": int(nonfinite_batches),
             "final_test_evaluated": "final_test" in metrics_by_split,
         }
@@ -989,6 +1044,8 @@ def _train_predictor(config: CanonicalStateVariantRunConfig, spec: CanonicalStat
     best_metric = float("inf")
     best_epoch = 0
     best_path = output_dir / "best_model_val.pt"
+    save_best_checkpoint = _should_save_best_checkpoint(config, spec)
+    best_state_dict: dict[str, Any] | None = None
     epoch_rows: list[dict[str, Any]] = []
     nonfinite_batches = 0
     patience_left = int(config.early_stop_patience)
@@ -1046,31 +1103,37 @@ def _train_predictor(config: CanonicalStateVariantRunConfig, spec: CanonicalStat
             best_metric = score
             best_epoch = epoch
             patience_left = int(config.early_stop_patience)
-            torch.save(
-                {
-                    "model_state_dict": predictor.state_dict(),
-                    "run_id": spec.run_id,
-                    "epoch": epoch,
-                    "model_val_state_prediction_metrics": val_metrics,
-                    "config": asdict(config),
-                    "spec": spec.to_dict(),
-                },
-                best_path,
-            )
+            best_state_dict = _cpu_state_dict_copy(predictor)
+            if save_best_checkpoint:
+                torch.save(
+                    {
+                        "model_state_dict": best_state_dict,
+                        "run_id": spec.run_id,
+                        "epoch": epoch,
+                        "model_val_state_prediction_metrics": val_metrics,
+                        "config": asdict(config),
+                        "spec": spec.to_dict(),
+                    },
+                    best_path,
+                )
         else:
             patience_left -= 1
             if patience_left <= 0:
                 break
     if best_path.exists():
-        predictor.load_state_dict(torch.load(best_path, map_location=device)["model_state_dict"], strict=True)
+        predictor.load_state_dict(_torch_load_checkpoint(best_path, map_location=device)["model_state_dict"], strict=True)
+    elif best_state_dict is not None:
+        predictor.load_state_dict(best_state_dict, strict=True)
     state_metrics = {
         "model_val": _evaluate_predictor(predictor, datasets["model_val"], config=config, split="model_val", device=device),
         "stack_val": _evaluate_predictor(predictor, datasets["stack_val"], config=config, split="stack_val", device=device),
     }
-    torch.save(
-        {"model_state_dict": predictor.state_dict(), "run_id": spec.run_id, "config": asdict(config), "spec": spec.to_dict()},
-        output_dir / "last.pt",
-    )
+    last_path = output_dir / "last.pt"
+    if bool(config.save_last_checkpoint):
+        torch.save(
+            {"model_state_dict": predictor.state_dict(), "run_id": spec.run_id, "config": asdict(config), "spec": spec.to_dict()},
+            last_path,
+        )
     report = _common_provenance(config=config, spec=spec, datasets=datasets)
     report.update(
         {
@@ -1081,8 +1144,11 @@ def _train_predictor(config: CanonicalStateVariantRunConfig, spec: CanonicalStat
             "stack_val_state_prediction_metrics": state_metrics["stack_val"],
             "epoch_metrics": epoch_rows,
             "disabled_loss_terms": sorted(disabled_loss_terms),
-            "checkpoint": str(best_path),
-            "last_checkpoint": str(output_dir / "last.pt"),
+            "checkpoint_policy": _checkpoint_policy_report(config, spec),
+            "checkpoint": str(best_path) if bool(save_best_checkpoint) else None,
+            "checkpoint_saved": bool(save_best_checkpoint and best_path.exists()),
+            "last_checkpoint": str(last_path) if bool(config.save_last_checkpoint) else None,
+            "last_checkpoint_saved": bool(config.save_last_checkpoint and last_path.exists()),
             "nonfinite_batches": int(nonfinite_batches),
             "final_test_evaluated": False,
         }

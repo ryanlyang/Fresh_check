@@ -1,0 +1,687 @@
+"""Augmented Particle Transformer tagger for local residual-field features."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from jetclass_fresh.hlt_baseline import build_hlt_classifier, require_torch
+from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
+
+from .controls import (
+    CONTROL_RESIDUAL_FIELD_SOURCES,
+    LOCAL_RESIDUAL_FIELD_CONTROL_CONTRACT,
+    RESIDUAL_FIELD_SOURCE_CROSS_JET_SHUFFLE,
+    RESIDUAL_FIELD_SOURCE_LEARNED_NO_TARGET,
+    RESIDUAL_FIELD_SOURCE_RADIUS_PERMUTED,
+    RESIDUAL_FIELD_SOURCE_RANDOM,
+    RESIDUAL_FIELD_SOURCE_WITHIN_JET_SHUFFLE,
+    LocalResidualFieldControlConfig,
+    LocalResidualFieldControlGenerator,
+    apply_local_residual_field_control,
+    normalize_residual_field_control_source,
+)
+from .model import (
+    LOCAL_RESIDUAL_RECONSTRUCTOR_CONTRACT,
+    LocalResidualFieldReconstructorConfig,
+    LocalResidualFieldReconstructorOutput,
+    build_local_residual_field_reconstructor,
+)
+from .train import _torch_load_checkpoint
+
+try:  # Keep metadata/report imports cheap when PyTorch is unavailable.
+    import torch as _torch
+except ImportError:  # pragma: no cover - environment dependent
+    _torch = None
+
+if _torch is None:  # pragma: no cover - environment dependent
+    class _ModuleBase:
+        pass
+else:
+    _ModuleBase = _torch.nn.Module
+
+
+LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT = "local_particle_residual_field_augmented_part_v1"
+LOCAL_RESIDUAL_FIELD_TAGGER_STEP = "local_particle_residual_field_step5_augmented_part_tagger"
+
+RESIDUAL_FIELD_SOURCE_ZERO = "zero"
+RESIDUAL_FIELD_SOURCE_HLT_ONLY = "hlt_only"
+RESIDUAL_FIELD_SOURCE_ORACLE = "oracle"
+RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR = "frozen_reconstructor"
+RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR = "joint_reconstructor"
+RESIDUAL_FIELD_SOURCES = (
+    RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+    RESIDUAL_FIELD_SOURCE_ZERO,
+    RESIDUAL_FIELD_SOURCE_ORACLE,
+    RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+    RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+    *CONTROL_RESIDUAL_FIELD_SOURCES,
+)
+
+
+def normalize_residual_field_source(value: str) -> str:
+    clean = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "none": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "hlt": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "hlt_only": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "hlt_part": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "part": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "baseline": RESIDUAL_FIELD_SOURCE_HLT_ONLY,
+        "blank": RESIDUAL_FIELD_SOURCE_ZERO,
+        "zero": RESIDUAL_FIELD_SOURCE_ZERO,
+        "zero_augmented": RESIDUAL_FIELD_SOURCE_ZERO,
+        "oracle": RESIDUAL_FIELD_SOURCE_ORACLE,
+        "target": RESIDUAL_FIELD_SOURCE_ORACLE,
+        "targets": RESIDUAL_FIELD_SOURCE_ORACLE,
+        "frozen": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+        "frozen_reco": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+        "frozen_reconstructor": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+        "predicted": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+        "joint": RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+        "joint_reco": RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+        "joint_reconstructor": RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+    }
+    if clean in aliases:
+        return aliases[clean]
+    try:
+        return normalize_residual_field_control_source(clean)
+    except ValueError as exc:
+        raise ValueError(f"residual_field_source must be one of {RESIDUAL_FIELD_SOURCES}, got {value!r}")
+
+
+@dataclass(frozen=True)
+class LocalResidualFieldTaggerConfig:
+    """Configuration for the augmented residual-field ParT wrapper."""
+
+    num_classes: int = 10
+    field_dim: int = 50
+    base_feature_dim: int = len(PF_FEATURE_NAMES)
+    field_source: str = RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR
+    model_size: str = "base"
+    residual_field_scale: float = 1.0
+    field_dropout: float = 0.0
+    field_names: Sequence[str] = field(default_factory=tuple)
+    field_groups: Mapping[str, Sequence[int]] = field(default_factory=dict)
+    source_field_indices: Sequence[int] = field(default_factory=tuple)
+    reconstructor_config: LocalResidualFieldReconstructorConfig | Mapping[str, Any] | None = None
+    control_config: LocalResidualFieldControlConfig | Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        source = normalize_residual_field_source(self.field_source)
+        object.__setattr__(self, "field_source", source)
+        for name in ("num_classes", "base_feature_dim"):
+            value = int(getattr(self, name))
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+            object.__setattr__(self, name, value)
+        field_dim = int(self.field_dim)
+        if field_dim < 0 or (field_dim == 0 and source != RESIDUAL_FIELD_SOURCE_HLT_ONLY):
+            raise ValueError("field_dim must be positive except for hlt_only baselines")
+        object.__setattr__(self, "field_dim", field_dim)
+        scale = float(self.residual_field_scale)
+        if scale < 0.0:
+            raise ValueError("residual_field_scale must be non-negative")
+        dropout = float(self.field_dropout)
+        if dropout < 0.0 or dropout >= 1.0:
+            raise ValueError("field_dropout must be in [0, 1)")
+        object.__setattr__(self, "residual_field_scale", scale)
+        object.__setattr__(self, "field_dropout", dropout)
+        names = tuple(str(name) for name in self.field_names)
+        if names and len(names) != int(self.field_dim):
+            raise ValueError("field_names length must match field_dim")
+        object.__setattr__(self, "field_names", names)
+        groups = {
+            str(group): tuple(int(index) for index in indices)
+            for group, indices in dict(self.field_groups or {}).items()
+        }
+        for group, indices in groups.items():
+            for index in indices:
+                if index < 0 or index >= int(self.field_dim):
+                    raise ValueError(f"field group {group!r} index {index} outside field_dim={self.field_dim}")
+        object.__setattr__(self, "field_groups", groups)
+        source_indices = tuple(int(index) for index in self.source_field_indices)
+        for index in source_indices:
+            if index < 0:
+                raise ValueError("source_field_indices must be non-negative")
+        object.__setattr__(self, "source_field_indices", source_indices)
+        if self.control_config is not None and not isinstance(self.control_config, LocalResidualFieldControlConfig):
+            control_payload = dict(self.control_config)
+            control_payload.pop("contract", None)
+            control_payload.setdefault("field_names", names)
+            object.__setattr__(self, "control_config", LocalResidualFieldControlConfig(**control_payload))
+
+    @property
+    def augmented_feature_dim(self) -> int:
+        if self.field_source == RESIDUAL_FIELD_SOURCE_HLT_ONLY:
+            return int(self.base_feature_dim)
+        return int(self.base_feature_dim) + int(self.field_dim)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["contract"] = LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT
+        payload["augmented_feature_dim"] = int(self.augmented_feature_dim)
+        payload["field_names"] = list(self.field_names)
+        payload["field_groups"] = {
+            str(group): [int(index) for index in indices]
+            for group, indices in dict(self.field_groups).items()
+        }
+        payload["source_field_indices"] = [int(index) for index in self.source_field_indices]
+        if isinstance(self.reconstructor_config, LocalResidualFieldReconstructorConfig):
+            payload["reconstructor_config"] = self.reconstructor_config.to_dict()
+        if isinstance(self.control_config, LocalResidualFieldControlConfig):
+            payload["control_config"] = self.control_config.to_dict()
+        return payload
+
+
+@dataclass(frozen=True)
+class LocalResidualFieldTaggerOutput:
+    """Forward output from the augmented residual-field ParT."""
+
+    logits: Any
+    augmented_features: Any
+    residual_features: Any
+    residual_fields: Any
+    field_mask: Any
+    diagnostics: Mapping[str, Any]
+    reconstructor_output: LocalResidualFieldReconstructorOutput | None = None
+    control_diagnostics: Mapping[str, Any] | None = None
+
+
+def _coerce_reconstructor_config(
+    config: LocalResidualFieldTaggerConfig,
+) -> LocalResidualFieldReconstructorConfig:
+    if isinstance(config.reconstructor_config, LocalResidualFieldReconstructorConfig):
+        return config.reconstructor_config
+    payload = dict(config.reconstructor_config or {})
+    payload.pop("contract", None)
+    payload.setdefault("field_dim", int(config.field_dim))
+    payload.setdefault("field_names", tuple(config.field_names))
+    payload.setdefault("field_groups", dict(config.field_groups))
+    return LocalResidualFieldReconstructorConfig(**payload)
+
+
+def _masked_field_stats(fields: Any, mask: Any) -> dict[str, Any]:
+    if mask.ndim == 3:
+        mask = mask.squeeze(1)
+    valid = mask.bool()
+    if not bool(valid.any().detach().cpu().item()):
+        return {
+            "residual_abs_mean": 0.0,
+            "residual_l2_mean": 0.0,
+            "valid_particles": 0,
+        }
+    selected = fields[valid]
+    return {
+        "residual_abs_mean": float(selected.detach().abs().mean().cpu().item()),
+        "residual_l2_mean": float((selected.detach().square().sum(dim=-1) + 1.0e-12).sqrt().mean().cpu().item()),
+        "valid_particles": int(valid.detach().sum().cpu().item()),
+    }
+
+
+class LocalResidualFieldAugmentedParT(_ModuleBase):
+    """ParT classifier that receives HLT particle features plus residual fields."""
+
+    def __init__(
+        self,
+        config: LocalResidualFieldTaggerConfig | Mapping[str, Any] | None = None,
+        *,
+        part_model: Any | None = None,
+        reconstructor: Any | None = None,
+    ) -> None:
+        torch = require_torch()
+        super().__init__()
+        self.config = config if isinstance(config, LocalResidualFieldTaggerConfig) else LocalResidualFieldTaggerConfig(**dict(config or {}))
+        self.part_model = part_model or build_hlt_classifier(
+            num_classes=int(self.config.num_classes),
+            model_size=str(self.config.model_size),
+            overrides={"input_dim": int(self.config.augmented_feature_dim)},
+        )
+        self.field_dropout = torch.nn.Dropout(float(self.config.field_dropout))
+        if reconstructor is not None:
+            self.reconstructor = reconstructor
+        elif self.config.field_source in {
+            RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+            RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+        }:
+            self.reconstructor = build_local_residual_field_reconstructor(_coerce_reconstructor_config(self.config))
+        else:
+            self.reconstructor = None
+        if self.config.field_source == RESIDUAL_FIELD_SOURCE_LEARNED_NO_TARGET:
+            control_config = self.config.control_config
+            if not isinstance(control_config, LocalResidualFieldControlConfig):
+                control_config = LocalResidualFieldControlConfig(field_names=tuple(self.config.field_names))
+            self.control_generator = LocalResidualFieldControlGenerator(
+                field_dim=int(self.config.field_dim),
+                hidden_dim=int(control_config.learned_hidden_dim),
+                dropout=float(control_config.learned_dropout),
+            )
+        else:
+            self.control_generator = None
+        if self.config.field_source == RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR:
+            self.set_reconstructor_trainable(False)
+
+    def _select_source_fields(self, fields: Any) -> Any:
+        indices = tuple(int(index) for index in self.config.source_field_indices)
+        if not indices:
+            return fields
+        torch = require_torch()
+        index_tensor = torch.as_tensor(indices, device=fields.device, dtype=torch.long)
+        if int(index_tensor.max().detach().cpu().item()) >= int(fields.shape[-1]):
+            raise ValueError(
+                f"source_field_indices max {int(index_tensor.max().detach().cpu().item())} "
+                f"is outside source residual field dim {int(fields.shape[-1])}"
+            )
+        return fields.index_select(dim=-1, index=index_tensor)
+
+    def _select_reconstructor_output(
+        self,
+        output: LocalResidualFieldReconstructorOutput,
+    ) -> LocalResidualFieldReconstructorOutput:
+        selected = self._select_source_fields(output.predicted_fields)
+        if selected is output.predicted_fields:
+            return output
+        log_sigma = None if output.log_sigma is None else self._select_source_fields(output.log_sigma)
+        return LocalResidualFieldReconstructorOutput(
+            predicted_fields=selected,
+            field_mask=output.field_mask,
+            hidden=output.hidden,
+            diagnostics=dict(output.diagnostics),
+            log_sigma=log_sigma,
+        )
+
+    def set_reconstructor_trainable(self, trainable: bool) -> dict[str, int]:
+        total = 0
+        changed = 0
+        if self.reconstructor is not None:
+            for parameter in self.reconstructor.parameters():
+                total += 1
+                if bool(parameter.requires_grad) != bool(trainable):
+                    changed += 1
+                parameter.requires_grad_(bool(trainable))
+        return {"reconstructor_parameter_tensors": total, "changed": changed, "trainable": int(bool(trainable))}
+
+    def set_part_trainable(self, trainable: bool) -> dict[str, int]:
+        total = 0
+        changed = 0
+        for parameter in self.part_model.parameters():
+            total += 1
+            if bool(parameter.requires_grad) != bool(trainable):
+                changed += 1
+            parameter.requires_grad_(bool(trainable))
+        return {"part_parameter_tensors": total, "changed": changed, "trainable": int(bool(trainable))}
+
+    def residual_fields_from_batch(
+        self,
+        *,
+        features: Any,
+        mask: Any,
+        tokens: Any | None = None,
+        raw_mask: Any | None = None,
+        indices: Any | None = None,
+        residual_fields: Any | None = None,
+        residual_features: Any | None = None,
+        oracle_fields: Any | None = None,
+        target_fields: Any | None = None,
+    ) -> tuple[Any, Any, Any | None, Mapping[str, Any] | None]:
+        torch = require_torch()
+        batch_size, _, particles = features.shape
+        if residual_features is not None:
+            field_features = residual_features.to(device=features.device, dtype=features.dtype)
+            if field_features.ndim != 3:
+                raise ValueError("residual_features must have shape [B, F, P]")
+            fields = field_features.transpose(1, 2).contiguous()
+            fields = self._select_source_fields(fields)
+            field_features = fields.transpose(1, 2).contiguous()
+            return fields, field_features, None, None
+        if residual_fields is not None:
+            fields = residual_fields.to(device=features.device, dtype=features.dtype)
+            if fields.ndim != 3:
+                raise ValueError("residual_fields must have shape [B, P, F]")
+            fields = self._select_source_fields(fields)
+            return fields, fields.transpose(1, 2).contiguous(), None, None
+        source = self.config.field_source
+        if source == RESIDUAL_FIELD_SOURCE_ORACLE:
+            fields = oracle_fields if oracle_fields is not None else target_fields
+            if fields is None:
+                raise ValueError("oracle residual-field source requires oracle_fields or target_fields")
+            fields = fields.to(device=features.device, dtype=features.dtype)
+            fields = self._select_source_fields(fields)
+            return fields, fields.transpose(1, 2).contiguous(), None, None
+        if source == RESIDUAL_FIELD_SOURCE_ZERO:
+            fields = torch.zeros((batch_size, particles, int(self.config.field_dim)), device=features.device, dtype=features.dtype)
+            return fields, fields.transpose(1, 2).contiguous(), None, None
+        if source in CONTROL_RESIDUAL_FIELD_SOURCES:
+            control_config = self.config.control_config
+            if not isinstance(control_config, LocalResidualFieldControlConfig):
+                control_config = LocalResidualFieldControlConfig(field_names=tuple(self.config.field_names))
+            control_output = apply_local_residual_field_control(
+                source=source,
+                target_fields=None if target_fields is None else target_fields.to(device=features.device, dtype=features.dtype),
+                mask=raw_mask if raw_mask is not None else mask.squeeze(1),
+                field_names=tuple(self.config.field_names),
+                config=control_config,
+                tokens=None if tokens is None else tokens.to(device=features.device, dtype=features.dtype),
+                generator=self.control_generator,
+                indices=None if indices is None else indices.to(device=features.device),
+            )
+            fields = control_output.fields.to(device=features.device, dtype=features.dtype)
+            return fields, fields.transpose(1, 2).contiguous(), None, dict(control_output.diagnostics)
+        if self.reconstructor is None:
+            raise ValueError(f"residual-field source {source!r} requires a reconstructor")
+        if tokens is None:
+            raise ValueError("predicted residual-field sources require raw HLT tokens")
+        tokens = tokens.to(device=features.device, dtype=features.dtype)
+        raw_mask = raw_mask.to(device=features.device, dtype=torch.bool) if raw_mask is not None else None
+        if source == RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR:
+            with torch.no_grad():
+                reco_output = self.reconstructor(tokens, raw_mask)
+        else:
+            reco_output = self.reconstructor(tokens, raw_mask)
+        reco_output = self._select_reconstructor_output(reco_output)
+        fields = reco_output.predicted_fields.to(device=features.device, dtype=features.dtype)
+        return fields, fields.transpose(1, 2).contiguous(), reco_output, None
+
+    def augment_features(
+        self,
+        features: Any,
+        mask: Any,
+        *,
+        residual_fields: Any,
+        residual_features: Any | None = None,
+    ) -> tuple[Any, Any]:
+        torch = require_torch()
+        if features.ndim != 3:
+            raise ValueError("features must have shape [B, C, P]")
+        field_features = residual_features
+        if field_features is None:
+            if residual_fields.ndim != 3:
+                raise ValueError("residual_fields must have shape [B, P, F]")
+            field_features = residual_fields.transpose(1, 2).contiguous()
+        field_features = field_features.to(device=features.device, dtype=features.dtype)
+        if field_features.shape[0] != features.shape[0] or field_features.shape[2] != features.shape[2]:
+            raise ValueError(
+                f"residual field features shape {tuple(field_features.shape)} is incompatible with "
+                f"features shape {tuple(features.shape)}"
+            )
+        if int(field_features.shape[1]) != int(self.config.field_dim):
+            raise ValueError(f"residual field dim {field_features.shape[1]} != configured {self.config.field_dim}")
+        mask_features = mask
+        if mask_features.ndim == 2:
+            mask_features = mask_features[:, None, :]
+        mask_features = mask_features.to(device=features.device, dtype=torch.bool)
+        field_features = field_features * mask_features.to(dtype=field_features.dtype)
+        field_features = self.field_dropout(field_features) * float(self.config.residual_field_scale)
+        augmented = torch.cat([features, field_features], dim=1)
+        return augmented, field_features
+
+    def forward(
+        self,
+        points: Any,
+        features: Any,
+        lorentz_vectors: Any,
+        mask: Any,
+        *,
+        tokens: Any | None = None,
+        raw_mask: Any | None = None,
+        indices: Any | None = None,
+        residual_fields: Any | None = None,
+        residual_features: Any | None = None,
+        oracle_fields: Any | None = None,
+        target_fields: Any | None = None,
+        return_outputs: bool = False,
+    ) -> Any:
+        if self.config.field_source == RESIDUAL_FIELD_SOURCE_HLT_ONLY:
+            logits = self.part_model(points, features, lorentz_vectors, mask)
+            if not bool(return_outputs):
+                return logits
+            torch = require_torch()
+            batch_size = int(features.shape[0])
+            particles = int(features.shape[2])
+            empty_fields = torch.zeros((batch_size, particles, 0), device=features.device, dtype=features.dtype)
+            empty_features = torch.zeros((batch_size, 0, particles), device=features.device, dtype=features.dtype)
+            field_mask = raw_mask if raw_mask is not None else mask.squeeze(1)
+            diagnostics = {
+                "contract": LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+                "field_source": self.config.field_source,
+                "hlt_only": True,
+                "augmented_feature_dim": int(features.shape[1]),
+                "base_feature_dim": int(features.shape[1]),
+                "field_dim": 0,
+                "residual_abs_mean": 0.0,
+                "residual_l2_mean": 0.0,
+                "valid_particles": int(field_mask.bool().detach().sum().cpu().item()),
+            }
+            return LocalResidualFieldTaggerOutput(
+                logits=logits,
+                augmented_features=features,
+                residual_features=empty_features,
+                residual_fields=empty_fields,
+                field_mask=field_mask,
+                diagnostics=diagnostics,
+                reconstructor_output=None,
+                control_diagnostics=None,
+            )
+        fields, field_features, reco_output, control_diagnostics = self.residual_fields_from_batch(
+            features=features,
+            mask=mask,
+            tokens=tokens,
+            raw_mask=raw_mask,
+            indices=indices,
+            residual_fields=residual_fields,
+            residual_features=residual_features,
+            oracle_fields=oracle_fields,
+            target_fields=target_fields,
+        )
+        augmented, field_features = self.augment_features(
+            features,
+            mask,
+            residual_fields=fields,
+            residual_features=field_features,
+        )
+        logits = self.part_model(points, augmented, lorentz_vectors, mask)
+        if not bool(return_outputs):
+            return logits
+        field_mask = raw_mask if raw_mask is not None else mask.squeeze(1)
+        diagnostics = {
+            "contract": LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+            "field_source": self.config.field_source,
+            "augmented_feature_dim": int(augmented.shape[1]),
+            "base_feature_dim": int(features.shape[1]),
+            "field_dim": int(field_features.shape[1]),
+            **_masked_field_stats(fields, field_mask),
+        }
+        if isinstance(control_diagnostics, Mapping):
+            diagnostics["control_contract"] = LOCAL_RESIDUAL_FIELD_CONTROL_CONTRACT
+            diagnostics["control_diagnostics"] = dict(control_diagnostics)
+        if reco_output is not None:
+            diagnostics["reconstructor_contract"] = LOCAL_RESIDUAL_RECONSTRUCTOR_CONTRACT
+            diagnostics["reconstructor_variant"] = getattr(getattr(self.reconstructor, "config", None), "variant", None)
+        return LocalResidualFieldTaggerOutput(
+            logits=logits,
+            augmented_features=augmented,
+            residual_features=field_features,
+            residual_fields=fields,
+            field_mask=field_mask,
+            diagnostics=diagnostics,
+            reconstructor_output=reco_output,
+            control_diagnostics=control_diagnostics,
+        )
+
+
+def _extract_checkpoint_state_dict(payload: Any) -> Mapping[str, Any]:
+    if isinstance(payload, Mapping):
+        for key in ("model_state_dict", "state_dict", "model"):
+            value = payload.get(key)
+            if isinstance(value, Mapping):
+                return value
+        if payload and all(hasattr(value, "shape") for value in payload.values()):
+            return payload
+    raise ValueError("checkpoint does not contain a recognizable model state dict")
+
+
+def _strip_prefixes(key: str) -> str:
+    output = str(key)
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("module.", "model."):
+            if output.startswith(prefix):
+                output = output[len(prefix) :]
+                changed = True
+    return output
+
+
+def _part_warm_start_candidates(source_key: str) -> tuple[str, ...]:
+    clean = _strip_prefixes(source_key)
+    candidates: list[str] = []
+    if clean.startswith("part_model."):
+        candidates.append(clean)
+    else:
+        candidates.append(f"part_model.{clean}")
+    if clean.startswith("mod."):
+        candidates.append(f"part_model.{clean}")
+    if clean.startswith("model."):
+        candidates.append(f"part_model.{clean[len('model.'):]}")
+    output: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = _strip_prefixes(candidate)
+        if candidate not in seen:
+            seen.add(candidate)
+            output.append(candidate)
+    return tuple(output)
+
+
+def _can_partial_copy(source: Any, target: Any) -> bool:
+    if len(tuple(source.shape)) != len(tuple(target.shape)):
+        return False
+    return all(int(target_dim) >= int(source_dim) for source_dim, target_dim in zip(source.shape, target.shape)) and (
+        tuple(source.shape) != tuple(target.shape)
+    )
+
+
+def _partial_copy_tensor(source: Any, target: Any) -> Any:
+    updated = target.detach().clone()
+    updated.zero_()
+    slices = tuple(slice(0, int(dim)) for dim in source.shape)
+    updated[slices] = source.detach().to(device=target.device, dtype=target.dtype)
+    return updated
+
+
+def warm_start_local_residual_field_tagger_part(
+    model: LocalResidualFieldAugmentedParT,
+    checkpoint_path: str | Path,
+    *,
+    map_location: Any = "cpu",
+    require: bool = False,
+) -> dict[str, Any]:
+    """Load an HLT ParT checkpoint into the augmented ParT backbone.
+
+    Matching tensors are copied exactly.  If the target tensor is larger only
+    because the feature dimension expanded, the source tensor is copied into
+    the leading slice and the new residual-field slice is zeroed so the initial
+    model starts close to the baseline.
+    """
+
+    payload = _torch_load_checkpoint(checkpoint_path, map_location=map_location)
+    source_state = _extract_checkpoint_state_dict(payload)
+    target_state = model.state_dict()
+    updated_state = dict(target_state)
+    loaded: list[dict[str, str]] = []
+    partial: list[dict[str, Any]] = []
+    skipped_shape: list[dict[str, Any]] = []
+    unmatched: list[str] = []
+    non_tensor: list[str] = []
+    for source_key, source_value in source_state.items():
+        if not hasattr(source_value, "shape"):
+            non_tensor.append(str(source_key))
+            continue
+        matched = False
+        for candidate in _part_warm_start_candidates(str(source_key)):
+            if not candidate.startswith("part_model.") or candidate not in target_state:
+                continue
+            target_value = target_state[candidate]
+            if tuple(target_value.shape) == tuple(source_value.shape):
+                updated_state[candidate] = source_value.detach().to(device=target_value.device, dtype=target_value.dtype)
+                loaded.append({"source_key": str(source_key), "target_key": candidate})
+                matched = True
+                break
+            if _can_partial_copy(source_value, target_value):
+                updated_state[candidate] = _partial_copy_tensor(source_value, target_value)
+                partial.append(
+                    {
+                        "source_key": str(source_key),
+                        "target_key": candidate,
+                        "source_shape": list(source_value.shape),
+                        "target_shape": list(target_value.shape),
+                    }
+                )
+                matched = True
+                break
+            skipped_shape.append(
+                {
+                    "source_key": str(source_key),
+                    "target_key": candidate,
+                    "source_shape": list(source_value.shape),
+                    "target_shape": list(target_value.shape),
+                }
+            )
+        if not matched:
+            unmatched.append(str(source_key))
+    model.load_state_dict(updated_state, strict=True)
+    report = {
+        "contract": LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+        "step": LOCAL_RESIDUAL_FIELD_TAGGER_STEP,
+        "checkpoint": str(checkpoint_path),
+        "loaded_key_count": len(loaded),
+        "partial_loaded_key_count": len(partial),
+        "loaded_keys": loaded[:50],
+        "partial_loaded_keys": partial[:50],
+        "shape_mismatch_count": len(skipped_shape),
+        "shape_mismatches": skipped_shape[:50],
+        "unmatched_key_count": len(unmatched),
+        "unmatched_source_keys_sample": unmatched[:50],
+        "non_tensor_key_count": len(non_tensor),
+        "non_tensor_keys_sample": non_tensor[:50],
+        "required": bool(require),
+    }
+    if bool(require) and (len(loaded) + len(partial)) == 0:
+        raise ValueError(f"warm start loaded zero ParT keys from {checkpoint_path}")
+    return report
+
+
+def load_local_residual_reconstructor_from_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    map_location: Any = "cpu",
+) -> tuple[Any, Mapping[str, Any]]:
+    payload = _torch_load_checkpoint(checkpoint_path, map_location=map_location)
+    model_config = payload.get("model_config") if isinstance(payload, Mapping) else None
+    if not isinstance(model_config, Mapping):
+        raise ValueError("reconstructor checkpoint is missing model_config")
+    clean_config = dict(model_config)
+    clean_config.pop("contract", None)
+    model = build_local_residual_field_reconstructor(LocalResidualFieldReconstructorConfig(**clean_config))
+    model.load_state_dict(_extract_checkpoint_state_dict(payload))
+    return model, payload
+
+
+__all__ = [
+    "LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT",
+    "LOCAL_RESIDUAL_FIELD_TAGGER_STEP",
+    "RESIDUAL_FIELD_SOURCE_HLT_ONLY",
+    "RESIDUAL_FIELD_SOURCE_ZERO",
+    "RESIDUAL_FIELD_SOURCE_ORACLE",
+    "RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR",
+    "RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR",
+    "RESIDUAL_FIELD_SOURCES",
+    "LocalResidualFieldTaggerConfig",
+    "LocalResidualFieldTaggerOutput",
+    "LocalResidualFieldAugmentedParT",
+    "normalize_residual_field_source",
+    "warm_start_local_residual_field_tagger_part",
+    "load_local_residual_reconstructor_from_checkpoint",
+]

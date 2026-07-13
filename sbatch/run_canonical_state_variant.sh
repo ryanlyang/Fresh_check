@@ -50,6 +50,8 @@ RUN_ID="${1:?Usage: sbatch run_canonical_state_variant.sh <A0-G3 run_id>}"
 : "${CANONICAL_STATE_STACK_TRAIN_SIZE:=}"
 : "${CANONICAL_STATE_STACK_VAL_SIZE:=}"
 : "${CANONICAL_STATE_FINAL_TEST_SIZE:=}"
+: "${CANONICAL_STATE_CHECKPOINT_POLICY:=all}"
+: "${CANONICAL_STATE_SAVE_LAST_CHECKPOINT:=1}"
 
 OUTPUT_DIR="${CANONICAL_STATE_RUN_ROOT}/${RUN_ID}"
 
@@ -93,10 +95,12 @@ cmd=(
   --grad-clip-norm "${CANONICAL_STATE_GRAD_CLIP_NORM}"
   --early-stop-patience "${CANONICAL_STATE_EARLY_STOP_PATIENCE}"
   --model-size "${CANONICAL_STATE_MODEL_SIZE}"
+  --checkpoint-policy "${CANONICAL_STATE_CHECKPOINT_POLICY}"
 )
 fresh_append_flag_if_enabled cmd --confirm-final-test "${CONFIRM_FINAL_TEST}"
 fresh_append_flag_if_enabled cmd --emit-planning-stub "${CANONICAL_STATE_EMIT_PLANNING_STUB}"
 fresh_append_flag_if_enabled cmd --disable-amp "${CANONICAL_STATE_DISABLE_AMP}"
+if ! fresh_bool_enabled "${CANONICAL_STATE_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${CANONICAL_STATE_MODEL_TRAIN_SIZE}" ]]; then cmd+=(--max-train-jets "${CANONICAL_STATE_MODEL_TRAIN_SIZE}"); fi
 if [[ -n "${CANONICAL_STATE_MODEL_VAL_SIZE}" ]]; then cmd+=(--max-val-jets "${CANONICAL_STATE_MODEL_VAL_SIZE}"); fi
 if [[ -n "${CANONICAL_STATE_STACK_TRAIN_SIZE}" ]]; then cmd+=(--max-stack-train-jets "${CANONICAL_STATE_STACK_TRAIN_SIZE}"); fi
