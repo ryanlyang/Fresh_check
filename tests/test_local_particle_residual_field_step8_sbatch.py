@@ -27,6 +27,8 @@ def test_step8_submitter_queues_inputs_reconstructors_taggers_predictions_and_fu
     assert "run_train_local_residual_field_tagger.sh" in text
     assert "run_predict_local_residual_field_tagger.sh" in text
     assert "run_local_residual_field_fusion.sh" in text
+    assert "run_pd10_train_teacher.sh" in text
+    assert "run_pd10_cache_teacher_logits.sh" in text
     assert "G0:A0,D5" in text
     assert "G1:D5,D5_seed1,D5_seed2,D5_seed3" in text
     assert "G2:D5,D6" in text
@@ -35,6 +37,8 @@ def test_step8_submitter_queues_inputs_reconstructors_taggers_predictions_and_fu
     assert "LOCAL_RESIDUAL_FIELD_CACHE_SPLITS:=model_train model_val stack_train stack_val final_test" in text
     assert "LOCAL_RESIDUAL_FIELD_TARGET_SPLITS:=model_train model_val stack_val" in text
     assert "LOCAL_RESIDUAL_FIELD_OFFLINE_SPLITS:=${LOCAL_RESIDUAL_FIELD_TARGET_SPLITS}" in text
+    assert "LOCAL_RESIDUAL_FIELD_SUBMIT_TEACHER_LOGITS:=1" in text
+    assert "LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS:=model_train model_val stack_val" in text
 
 
 def test_step8_runner_scripts_call_expected_python_entrypoints():
@@ -101,8 +105,13 @@ def test_step8_submitter_preflights_baseline_kd_and_required_fusion_groups():
     assert '${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/best_model_val.pt' in text
     assert 'fresh_require_file "${LOCAL_RESIDUAL_FIELD_BASELINE_CHECKPOINT}"' in text
     assert "teacher_logits_complete" in text
+    assert "internal_teacher_logits_will_be_built" in text
+    assert 'PD10_TEACHER_SKIP_FINAL_TEST=1' in text
+    assert 'PD10_TEACHER_LOGIT_SPLITS="${LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS}"' in text
     assert '${split}_predictions.npz' in text
     assert 'offline_part_teacher_10class/${split}_predictions.npz' in text
+    assert 'local_residual_offline_kd_teacher' in text
+    assert 'local_residual_offline_kd_logits' in text
     assert 'LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID:=C5' in text
     assert '${reco_jobs[${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID}]:-}' in text
     assert 'use_d6_checkpoint() { use_recon_checkpoint "${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID}"; }' in runner
@@ -133,3 +142,11 @@ def test_step8_hlt_cache_runner_passes_hlt_profile_to_builder():
     text = _read("run_build_fresh_hlt_cache.sh")
     assert ": \"${HLT_PROFILE:=fixed_hlt_v1}\"" in text
     assert "--hlt-profile" in text
+
+
+def test_step8_pd10_teacher_logit_cache_only_requires_requested_offline_splits():
+    text = _read("run_pd10_cache_teacher_logits.sh")
+    assert 'fresh_split_words split_args "${PD10_TEACHER_LOGIT_SPLITS}"' in text
+    assert 'for split in "${split_args[@]}"; do' in text
+    assert '${PD10_OFFLINE_CACHE_DIR}/${split}_offline_metadata.json' in text
+    assert 'final_test_offline_metadata.json' not in text

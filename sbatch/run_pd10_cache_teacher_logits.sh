@@ -31,13 +31,14 @@ fi
 fresh_setup "$@"
 fresh_require_file "${CHECKPOINT}"
 fresh_require_file "${PD10_MANIFEST_PATH}"
+fresh_split_words split_args "${PD10_TEACHER_LOGIT_SPLITS}"
 if [[ "${TEACHER}" == "hlt" ]]; then
   fresh_require_dir "${PD10_HLT_CACHE_DIR}"
 else
   if [[ -n "${PD10_OFFLINE_CACHE_DIR:-}" ]]; then
-    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_train_offline_metadata.json"
-    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/model_val_offline_metadata.json"
-    fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/final_test_offline_metadata.json"
+    for split in "${split_args[@]}"; do
+      fresh_require_file "${PD10_OFFLINE_CACHE_DIR}/${split}_offline_metadata.json"
+    done
   else
     fresh_require_data_dir
   fi
@@ -46,7 +47,6 @@ if fresh_bool_enabled "${PD10_TEACHER_LOGIT_NO_SKIP_EXISTING}"; then
   fresh_refuse_existing_dir "${PD10_TEACHER_LOGITS_DIR}/${MODEL_NAME}"
 fi
 
-fresh_split_words split_args "${PD10_TEACHER_LOGIT_SPLITS}"
 cmd=(
   "${PYTHON_BIN}" "-u" "scripts/cache_pd10_teacher_logits.py"
   --teacher "${TEACHER}"

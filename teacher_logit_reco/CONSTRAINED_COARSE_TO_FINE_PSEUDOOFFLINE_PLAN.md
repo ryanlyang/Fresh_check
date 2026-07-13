@@ -1127,7 +1127,7 @@ stochastic diversity and seed diversity.
 
 ## Expected Best Model
 
-The original strongest single-view candidate remains:
+The original strongest stochastic multi-view candidate remains:
 
 ```text
 C6 reconstructor:

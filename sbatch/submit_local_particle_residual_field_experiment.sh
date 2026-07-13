@@ -45,6 +45,8 @@ fi
 : "${LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_INPUTS_DIR}/hlt_cache}"
 : "${LOCAL_RESIDUAL_FIELD_OFFLINE_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_INPUTS_DIR}/offline_cache}"
 : "${LOCAL_RESIDUAL_FIELD_TARGET_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/targets}"
+: "${LOCAL_RESIDUAL_FIELD_TEACHER_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/offline_teacher_kd}"
+: "${LOCAL_RESIDUAL_FIELD_INTERNAL_TEACHER_LOGITS_DIR:=${LOCAL_RESIDUAL_FIELD_TEACHER_ROOT}/teacher_logits}"
 : "${LOCAL_RESIDUAL_FIELD_RECON_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/reconstructors}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/taggers}"
 : "${LOCAL_RESIDUAL_FIELD_PREDICTION_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/predictions}"
@@ -59,6 +61,7 @@ fi
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_HLT_CACHE:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_OFFLINE_CACHE:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_TARGETS:=1}"
+: "${LOCAL_RESIDUAL_FIELD_SUBMIT_TEACHER_LOGITS:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_RECONSTRUCTORS:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_TAGGERS:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_PREDICTIONS:=1}"
@@ -72,6 +75,7 @@ fi
 : "${LOCAL_RESIDUAL_FIELD_REQUIRED_FUSION_GROUPS:=G0 G1 G2 G3}"
 : "${LOCAL_RESIDUAL_FIELD_BASELINE_CHECKPOINT:=}"
 : "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR:=}"
+: "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS:=model_train model_val stack_val}"
 : "${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID:=C5}"
 : "${LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION:=}"
 : "${LOCAL_RESIDUAL_FIELD_GPU_GRES:=}"
@@ -85,6 +89,8 @@ export LOCAL_RESIDUAL_FIELD_MANIFEST_PATH
 export LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR
 export LOCAL_RESIDUAL_FIELD_OFFLINE_CACHE_DIR
 export LOCAL_RESIDUAL_FIELD_TARGET_CACHE_DIR
+export LOCAL_RESIDUAL_FIELD_TEACHER_ROOT
+export LOCAL_RESIDUAL_FIELD_INTERNAL_TEACHER_LOGITS_DIR
 export LOCAL_RESIDUAL_FIELD_RECON_ROOT
 export LOCAL_RESIDUAL_FIELD_TAGGER_ROOT
 export LOCAL_RESIDUAL_FIELD_PREDICTION_DIR
@@ -93,7 +99,15 @@ export LOCAL_RESIDUAL_FIELD_REPORT_DIR
 export LOCAL_RESIDUAL_FIELD_PREDICT_SPLITS
 export LOCAL_RESIDUAL_FIELD_REQUIRED_TAGGER_RUN_IDS="${LOCAL_RESIDUAL_FIELD_TAGGER_RUN_IDS}"
 export LOCAL_RESIDUAL_FIELD_REQUIRED_FUSION_GROUPS
+if [[ -z "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR}" ]]; then
+  LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR="${LOCAL_RESIDUAL_FIELD_INTERNAL_TEACHER_LOGITS_DIR}"
+  LOCAL_RESIDUAL_FIELD_USE_INTERNAL_TEACHER_LOGITS=1
+else
+  LOCAL_RESIDUAL_FIELD_USE_INTERNAL_TEACHER_LOGITS=0
+fi
 export LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR
+export LOCAL_RESIDUAL_FIELD_USE_INTERNAL_TEACHER_LOGITS
+export LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS
 export LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID
 export CONFIRM_FINAL_TEST
 
@@ -116,6 +130,9 @@ submit_job() {
   for arg in "$@"; do
     case "${arg}" in
       */run_train_local_residual_reconstructor.sh|*/run_train_local_residual_field_tagger.sh|*/run_predict_local_residual_field_tagger.sh)
+        gpu_job=1
+        ;;
+      */run_pd10_train_teacher.sh|*/run_pd10_cache_teacher_logits.sh)
         gpu_job=1
         ;;
     esac
@@ -280,6 +297,11 @@ teacher_logits_complete() {
   return 0
 }
 
+internal_teacher_logits_will_be_built() {
+  fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_USE_INTERNAL_TEACHER_LOGITS}" \
+    && fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_SUBMIT_TEACHER_LOGITS}"
+}
+
 baseline_checkpoint_path_for_campaign() {
   if external_baseline_checkpoint_is_set; then
     printf '%s\n' "${LOCAL_RESIDUAL_FIELD_BASELINE_CHECKPOINT}"
@@ -330,9 +352,9 @@ preflight_campaign_requirements() {
       exit 2
     fi
   fi
-  if [[ "${needs_kd}" -eq 1 ]] && ! teacher_logits_complete; then
+  if [[ "${needs_kd}" -eq 1 ]] && ! teacher_logits_complete && ! internal_teacher_logits_will_be_built; then
     echo "Requested KD taggers require LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR with model_train/model_val/stack_val logits." >&2
-    echo "Expected one of <split>_teacher_logits.npz, <split>_logits.npz, or <split>.npz under: ${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR:-<empty>}" >&2
+    echo "Expected one of <split>_teacher_logits.npz, <split>_logits.npz, <split>.npz, or <split>_predictions.npz under: ${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR:-<empty>}" >&2
     exit 2
   fi
 }
@@ -453,6 +475,39 @@ if fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_SUBMIT_OFFLINE_CACHE}"; then
   fi
 fi
 
+teacher_jid=""
+teacher_logits_jid=""
+if internal_teacher_logits_will_be_built; then
+  export PD10_ROOT="${LOCAL_RESIDUAL_FIELD_TEACHER_ROOT}"
+  export PD10_MANIFEST_PATH="${LOCAL_RESIDUAL_FIELD_MANIFEST_PATH}"
+  export PD10_HLT_CACHE_DIR="${LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR}"
+  export PD10_OFFLINE_CACHE_DIR="${LOCAL_RESIDUAL_FIELD_OFFLINE_CACHE_DIR}"
+  export PD10_TEACHERS_DIR="${LOCAL_RESIDUAL_FIELD_TEACHER_ROOT}/teachers"
+  export PD10_TEACHER_LOGITS_DIR="${LOCAL_RESIDUAL_FIELD_INTERNAL_TEACHER_LOGITS_DIR}"
+  export PD10_DATA_DIR="${LOCAL_RESIDUAL_FIELD_DATA_DIR}"
+  export PD10_MODEL_TRAIN_SIZE="${LOCAL_RESIDUAL_FIELD_MODEL_TRAIN_SIZE}"
+  export PD10_MODEL_VAL_SIZE="${LOCAL_RESIDUAL_FIELD_MODEL_VAL_SIZE}"
+  export PD10_FINAL_TEST_SIZE="${LOCAL_RESIDUAL_FIELD_FINAL_TEST_SIZE}"
+  export PD10_TEACHER_SKIP_FINAL_TEST=1
+  export PD10_TEACHER_LOGIT_SPLITS="${LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS}"
+  teacher_dep="${offline_jid}"
+  if [[ -z "${teacher_dep}" ]]; then teacher_dep="${input_dep}"; fi
+  if fresh_bool_enabled "${SKIP_EXISTING}" \
+    && [[ -f "${PD10_TEACHERS_DIR}/offline_part_teacher_10class/best_model_val.pt" ]] \
+    && [[ -f "${PD10_TEACHERS_DIR}/offline_part_teacher_10class/run_report.json" ]]; then
+    echo "skip offline KD teacher: teacher exists"
+  else
+    mapfile -t args < <(afterok_args "${teacher_dep}" "${SCRIPT_DIR}/run_pd10_train_teacher.sh" offline)
+    teacher_jid="$(submit_job local_residual_offline_kd_teacher "${args[@]}")"
+  fi
+  if fresh_bool_enabled "${SKIP_EXISTING}" && teacher_logits_complete; then
+    echo "skip offline KD teacher logits: logits exist"
+  else
+    mapfile -t args < <(afterok_args "${teacher_jid:-${teacher_dep}}" "${SCRIPT_DIR}/run_pd10_cache_teacher_logits.sh" offline)
+    teacher_logits_jid="$(submit_job local_residual_offline_kd_logits "${args[@]}")"
+  fi
+fi
+
 cache_dep="$(join_nonempty_by_colon "${hlt_jid}" "${offline_jid}")"
 if [[ -z "${cache_dep}" ]]; then cache_dep="${input_dep}"; fi
 export LOCAL_RESIDUAL_FIELD_TARGET_SPLITS
@@ -486,13 +541,17 @@ declare -A tagger_jobs=()
 tagger_dependency_for() {
   local run_id="$1"
   local baseline_dep=""
+  local kd_dep=""
   if tagger_requires_baseline "${run_id}" && ! external_baseline_checkpoint_is_set && ! tagger_complete A0; then
     baseline_dep="${tagger_jobs[A0]:-}"
   fi
+  if tagger_requires_kd "${run_id}" && ! teacher_logits_complete; then
+    kd_dep="${teacher_logits_jid}"
+  fi
   case "${run_id}" in
     A1) join_nonempty_by_colon "${base_dep}" "${baseline_dep}" ;;
-    D0|D1|D2|D5|D5_seed*|E* ) join_nonempty_by_colon "${base_dep}" "${baseline_dep}" "${reco_jobs[C0]:-}" ;;
-    D6) join_nonempty_by_colon "${base_dep}" "${baseline_dep}" "${reco_jobs[${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID}]:-}" ;;
+    D0|D1|D2|D5|D5_seed*|E* ) join_nonempty_by_colon "${base_dep}" "${baseline_dep}" "${kd_dep}" "${reco_jobs[C0]:-}" ;;
+    D6) join_nonempty_by_colon "${base_dep}" "${baseline_dep}" "${kd_dep}" "${reco_jobs[${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID}]:-}" ;;
     *) printf '%s\n' "${base_dep}" ;;
   esac
 }
@@ -558,6 +617,8 @@ fi
   echo "  \"hlt_cache\": \"${hlt_jid}\","
   echo "  \"offline_cache\": \"${offline_jid}\","
   echo "  \"targets\": \"${target_jid}\","
+  echo "  \"offline_kd_teacher\": \"${teacher_jid}\","
+  echo "  \"offline_kd_logits\": \"${teacher_logits_jid}\","
   echo "  \"fusion\": \"${fusion_jid}\","
   echo "  \"report\": \"${report_jid}\""
   echo "}"
