@@ -831,10 +831,12 @@ def _checkpoint_payload(
     variant: str,
     metrics: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    checkpoint_role: str,
 ) -> dict[str, Any]:
     hierarchy_loss_config, slot_loss_config = _loss_configs(config, family, variant)
     return {
         "checkpoint_contract": COARSE_TO_FINE_TRAIN_CONTRACT,
+        "checkpoint_role": str(checkpoint_role),
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -960,6 +962,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     variant=variant,
                     metrics=val_metrics,
                     provenance=provenance,
+                    checkpoint_role="best_model_val",
                 ),
                 output_dir / "best_model_val.pt",
             )
@@ -976,6 +979,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     variant=variant,
                     metrics=val_metrics,
                     provenance=provenance,
+                    checkpoint_role="last",
                 ),
                 output_dir / "last.pt",
             )

@@ -139,6 +139,8 @@ def test_step8_cluster_wrappers_keep_sporcsubmit_and_tigris_settings_explicit():
     assert "LOCAL_RESIDUAL_FIELD_DATA_DIR:=${PD10_DATA_DIR}" in tigris
     assert "OUTPUT_ROOT:=${PROJECT_DIR}/checkpoints" in tigris
     assert "DEVICE:=cuda" in tigris
+    assert "PYTHONNOUSERSITE:=1" in tigris
+    assert "export CONDA_ENV CONDA_BASE PYTHONNOUSERSITE DEVICE" in tigris
     assert "SKIP_EXISTING:=0" in tigris
     assert "unset LOCAL_RESIDUAL_FIELD_ROOT" in tigris
     assert "CONDA_ENV:=atlas_kd_tigris" in tigris
