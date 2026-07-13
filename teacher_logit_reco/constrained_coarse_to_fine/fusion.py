@@ -655,3 +655,559 @@ class HierarchicalPseudoStreamEncoder(nn.Module):
                 "mean_cell_trust": cell_trust[cell_mask].mean().detach() if bool(cell_mask.any()) else cell_trust.new_zeros(()),
             },
         )
+
+
+class _CrossViewLayer(nn.Module):
+    def __init__(self, config: FusionTaggerConfig, *, num_views: int, gated: bool) -> None:
+        super().__init__()
+        self.num_views = int(num_views)
+        self.gated = bool(gated)
+        hidden = int(round(config.ffn_multiplier * config.d_model))
+        self.hlt_norm = nn.LayerNorm(config.d_model)
+        self.pseudo_norms = nn.ModuleList(nn.LayerNorm(config.d_model) for _ in range(num_views))
+        self.hlt_to_pseudo = nn.ModuleList(
+            nn.MultiheadAttention(
+                config.d_model,
+                config.num_heads,
+                dropout=config.attention_dropout,
+                batch_first=True,
+            )
+            for _ in range(num_views)
+        )
+        self.pseudo_to_hlt = nn.ModuleList(
+            nn.MultiheadAttention(
+                config.d_model,
+                config.num_heads,
+                dropout=config.attention_dropout,
+                batch_first=True,
+            )
+            for _ in range(num_views)
+        )
+        self.hlt_update_norm = nn.LayerNorm(config.d_model)
+        self.pseudo_update_norms = nn.ModuleList(nn.LayerNorm(config.d_model) for _ in range(num_views))
+        self.hlt_ffn = nn.Sequential(
+            nn.LayerNorm(config.d_model),
+            nn.Linear(config.d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(hidden, config.d_model),
+            nn.Dropout(config.dropout),
+        )
+        self.pseudo_ffns = nn.ModuleList(
+            nn.Sequential(
+                nn.LayerNorm(config.d_model),
+                nn.Linear(config.d_model, hidden),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(hidden, config.d_model),
+                nn.Dropout(config.dropout),
+            )
+            for _ in range(num_views)
+        )
+        self.token_gate = (
+            nn.ModuleList(
+                nn.Sequential(
+                    nn.LayerNorm(2 * config.d_model + 2),
+                    nn.Linear(2 * config.d_model + 2, config.d_model),
+                    nn.GELU(),
+                    nn.Linear(config.d_model, 1),
+                )
+                for _ in range(num_views)
+            )
+            if gated
+            else None
+        )
+
+    def forward(
+        self,
+        hlt: torch.Tensor,
+        hlt_mask: torch.Tensor,
+        pseudo_tokens: Sequence[torch.Tensor],
+        pseudo_masks: Sequence[torch.Tensor],
+        pseudo_trust: Sequence[torch.Tensor],
+        pseudo_uncertainty: Sequence[torch.Tensor],
+        view_available: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor, Mapping[str, Any]]:
+        hlt_updates = []
+        pseudo_updates = []
+        gate_logits = []
+        attended_trust_rows = []
+        attended_uncertainty_rows = []
+        normalized_hlt = self.hlt_norm(hlt)
+        for index in range(self.num_views):
+            normalized_pseudo = self.pseudo_norms[index](pseudo_tokens[index])
+            hlt_update, attention = self.hlt_to_pseudo[index](
+                normalized_hlt,
+                normalized_pseudo,
+                normalized_pseudo,
+                key_padding_mask=~pseudo_masks[index],
+                need_weights=True,
+                average_attn_weights=False,
+            )
+            pseudo_update, _ = self.pseudo_to_hlt[index](
+                normalized_pseudo,
+                normalized_hlt,
+                normalized_hlt,
+                key_padding_mask=~hlt_mask,
+                need_weights=False,
+            )
+            mean_attention = attention.mean(dim=1)
+            attended_trust = torch.einsum("bqp,bp->bq", mean_attention, pseudo_trust[index])
+            attended_uncertainty = torch.einsum("bqp,bp->bq", mean_attention, pseudo_uncertainty[index])
+            hlt_updates.append(hlt_update)
+            pseudo_updates.append(
+                self.pseudo_update_norms[index](pseudo_tokens[index] + pseudo_update)
+                + self.pseudo_ffns[index](pseudo_tokens[index] + pseudo_update)
+            )
+            attended_trust_rows.append(attended_trust)
+            attended_uncertainty_rows.append(attended_uncertainty)
+            if self.gated:
+                gate_logits.append(
+                    self.token_gate[index](
+                        torch.cat(
+                            (
+                                hlt,
+                                hlt_update,
+                                attended_trust.unsqueeze(-1),
+                                torch.log1p(attended_uncertainty).unsqueeze(-1),
+                            ),
+                            dim=-1,
+                        )
+                    ).squeeze(-1)
+                )
+        if self.gated:
+            stacked_logits = torch.stack(gate_logits, dim=-1)
+            stacked_logits = stacked_logits.masked_fill(~view_available[:, None, :], -1.0e4)
+            skip_logits = torch.zeros_like(stacked_logits[..., :1])
+            normalized_gates = torch.softmax(torch.cat((skip_logits, stacked_logits), dim=-1), dim=-1)[..., 1:]
+        else:
+            denominator = view_available.sum(dim=-1, keepdim=True).clamp_min(1).to(dtype=hlt.dtype)
+            normalized_gates = view_available[:, None, :].to(dtype=hlt.dtype) / denominator[:, None, :]
+            normalized_gates = normalized_gates.expand(-1, hlt.shape[1], -1)
+        stacked_updates = torch.stack(hlt_updates, dim=-2)
+        combined_update = (stacked_updates * normalized_gates.unsqueeze(-1)).sum(dim=-2)
+        next_hlt = self.hlt_update_norm(hlt + combined_update)
+        next_hlt = (next_hlt + self.hlt_ffn(next_hlt)) * hlt_mask.unsqueeze(-1).float()
+        next_pseudo = tuple(
+            value * pseudo_masks[index].unsqueeze(-1).float()
+            for index, value in enumerate(pseudo_updates)
+        )
+        return next_hlt, next_pseudo, normalized_gates, {
+            "attended_trust": torch.stack(attended_trust_rows, dim=-1),
+            "attended_uncertainty": torch.stack(attended_uncertainty_rows, dim=-1),
+        }
+
+
+def _fixed_permutation(indices: torch.Tensor, seed: int) -> torch.Tensor:
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    permutation = torch.randperm(int(indices.numel()), generator=generator)
+    return indices[permutation.to(device=indices.device)]
+
+
+def _rebuild_view_from_raw(view: PseudoParticleViewInput, raw: torch.Tensor) -> PseudoParticleViewInput:
+    mask = _mask_2d(view.mask)
+    inputs = build_part_inputs_torch(raw, mask, max_constits=int(raw.shape[1]))
+    result = replace(
+        view,
+        raw_tokens=raw,
+        points=inputs["points"],
+        features=inputs["features"],
+        lorentz_vectors=inputs["lorentz_vectors"],
+        mask=inputs["mask"],
+    )
+    result.validate()
+    return result
+
+
+def apply_fusion_control(
+    view: PseudoParticleViewInput,
+    control: str,
+    *,
+    seed: int,
+) -> PseudoParticleViewInput:
+    """Apply one declared E-tier intervention without changing unrelated channels."""
+
+    if control == CONTROL_NONE:
+        return view
+    if control == CONTROL_NO_UNCERTAINTY:
+        return replace(
+            view,
+            candidate_weights=view.existence_probability * _mask_2d(view.mask).float(),
+            reliability=torch.ones_like(view.reliability),
+            slot_log_sigma=torch.zeros_like(view.slot_log_sigma),
+            uncertainty_mask=torch.zeros_like(view.uncertainty_mask),
+        )
+    if control == CONTROL_SHUFFLED_CELLS:
+        permutation = torch.roll(torch.arange(view.num_particles, device=view.cell_indices.device), shifts=1)
+        return replace(
+            view,
+            cell_indices=view.cell_indices[permutation],
+            parent_accounting=view.parent_accounting[:, permutation],
+        )
+    raw = view.raw_tokens.clone()
+    for cell in range(int(view.cell_indices.max().item()) + 1):
+        selected = torch.nonzero(view.cell_indices == cell, as_tuple=False).flatten()
+        if int(selected.numel()) <= 1:
+            continue
+        source = _fixed_permutation(selected, int(seed) + 97 * cell)
+        if control == CONTROL_RANDOM_COORDINATES:
+            raw[:, selected, 1:3] = view.raw_tokens[:, source, 1:3]
+        elif control == CONTROL_SHUFFLED_COMPOSITION:
+            raw[:, selected, 4:10] = view.raw_tokens[:, source, 4:10]
+        else:
+            raise ValueError(f"unsupported fusion control {control!r}")
+    return _rebuild_view_from_raw(view, raw)
+
+
+class ConstrainedDualStreamTagger(nn.Module):
+    """D/E-tier tagger with an ungated HLT identity path and structured pseudo streams."""
+
+    def __init__(self, config: FusionTaggerConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.spec = config.variant_spec
+        hlt_config = _encoder_config(
+            config,
+            feature_dim=config.feature_dim,
+            encoder_layers=config.hlt_encoder_layers,
+        )
+        self.hlt_encoder = ParTStyleHLTEncoder(hlt_config)
+        self.view_names = config.resolved_view_names
+        self.pseudo_encoders = nn.ModuleDict(
+            {
+                name: HierarchicalPseudoStreamEncoder(config, view_index=index)
+                for index, name in enumerate(self.view_names)
+            }
+        )
+        self.shadow_hlt_encoder = (
+            ParTStyleHLTEncoder(hlt_config)
+            if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL
+            else None
+        )
+        self.cross_layers = nn.ModuleList(
+            _CrossViewLayer(
+                config,
+                num_views=len(self.view_names),
+                gated=self.spec.architecture == ARCH_GATED_CROSS_ATTENTION,
+            )
+            for _ in range(config.fusion_layers)
+        )
+        self.pooled_gate = (
+            nn.ModuleList(
+                nn.Sequential(
+                    nn.LayerNorm(2 * config.d_model + 2),
+                    nn.Linear(2 * config.d_model + 2, config.d_model),
+                    nn.GELU(),
+                    nn.Linear(config.d_model, 1),
+                )
+                for _ in self.view_names
+            )
+            if self.spec.architecture == ARCH_GATED_CROSS_ATTENTION
+            else None
+        )
+        self.hlt_head = nn.Linear(config.d_model, config.num_classes)
+        self.pseudo_head = nn.Linear(config.d_model, config.num_classes)
+        if self.spec.architecture == ARCH_REPRESENTATION or self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
+            classifier_dim = 4 * config.d_model
+        elif self.spec.architecture in {ARCH_CROSS_ATTENTION, ARCH_GATED_CROSS_ATTENTION}:
+            classifier_dim = 5 * config.d_model
+        else:
+            classifier_dim = config.d_model
+        hidden = 2 * config.d_model
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(classifier_dim),
+            nn.Linear(classifier_dim, hidden),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(hidden, config.d_model),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.d_model, config.num_classes),
+        )
+
+    def _validate_views(self, pseudo_views: Sequence[PseudoParticleViewInput]) -> tuple[PseudoParticleViewInput, ...]:
+        if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
+            if pseudo_views:
+                raise ValueError("E6 must not receive pseudo views")
+            return ()
+        if len(pseudo_views) != len(self.view_names):
+            raise ValueError(
+                f"{self.config.variant} expects {len(self.view_names)} pseudo views {self.view_names}, "
+                f"got {len(pseudo_views)}"
+            )
+        by_name = {view.name: view for view in pseudo_views}
+        if set(by_name) != set(self.view_names):
+            raise ValueError(f"pseudo view names {tuple(by_name)} do not match configured names {self.view_names}")
+        ordered = tuple(by_name[name] for name in self.view_names)
+        if self.spec.requires_grid_tokens and any(view.view_kind != "grid" for view in ordered):
+            raise ValueError("D7 requires grid-token input")
+        if not self.spec.requires_grid_tokens and any(view.view_kind != "particle" for view in ordered):
+            raise ValueError(f"{self.config.variant} requires pseudo-particle input")
+        return tuple(
+            apply_fusion_control(view, self.spec.control, seed=self.config.control_seed + index)
+            for index, view in enumerate(ordered)
+        )
+
+    def _view_availability(self, batch: int, device: torch.device) -> torch.Tensor:
+        available = torch.ones(batch, len(self.view_names), dtype=torch.bool, device=device)
+        if self.training and self.config.pseudo_view_dropout > 0.0 and len(self.view_names):
+            available = torch.rand(batch, len(self.view_names), device=device) >= self.config.pseudo_view_dropout
+        return available
+
+    @staticmethod
+    def _mean_tokens(tokens: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return _masked_weighted_mean(tokens, mask.float())
+
+    def forward_detailed(
+        self,
+        hlt: ParticleStreamInput,
+        pseudo_views: Sequence[PseudoParticleViewInput] = (),
+    ) -> FusionTaggerOutput:
+        views = self._validate_views(tuple(pseudo_views))
+        hlt_output = self.hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
+        hlt_tokens = hlt_output.particle_embeddings
+        hlt_mask = hlt_output.particle_mask
+        zero = hlt_tokens.new_zeros(())
+        if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
+            shadow = self.shadow_hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
+            fused = torch.cat(
+                (
+                    hlt_output.jet_embedding,
+                    shadow.jet_embedding,
+                    torch.abs(hlt_output.jet_embedding - shadow.jet_embedding),
+                    hlt_output.jet_embedding * shadow.jet_embedding,
+                ),
+                dim=-1,
+            )
+            logits = self.classifier(fused)
+            return FusionTaggerOutput(
+                logits=logits,
+                hlt_logits=self.hlt_head(hlt_output.jet_embedding),
+                pseudo_logits=None,
+                hlt_representation=hlt_output.jet_embedding,
+                pseudo_representations={},
+                token_gates=None,
+                pooled_gates=None,
+                gate_entropy_regularizer=zero,
+                diagnostics={"contract": DUAL_STREAM_FUSION_CONTRACT, "variant": self.config.variant, "hlt_skip_ungated": True},
+            )
+        encoded = tuple(self.pseudo_encoders[name](view) for name, view in zip(self.view_names, views))
+        pseudo_jets = torch.stack([row.jet_embedding for row in encoded], dim=1)
+        pseudo_mean = pseudo_jets.mean(dim=1)
+        hlt_logits = self.hlt_head(hlt_output.jet_embedding)
+        pseudo_logits = self.pseudo_head(pseudo_mean)
+        if self.spec.architecture == ARCH_PSEUDO_ONLY:
+            logits = self.classifier(pseudo_mean)
+            return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
+        if self.spec.architecture == ARCH_LATE_LOGIT:
+            logits = 0.5 * (hlt_logits + pseudo_logits)
+            return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
+        if self.spec.architecture == ARCH_REPRESENTATION:
+            fused = torch.cat(
+                (
+                    hlt_output.jet_embedding,
+                    pseudo_mean,
+                    torch.abs(hlt_output.jet_embedding - pseudo_mean),
+                    hlt_output.jet_embedding * pseudo_mean,
+                ),
+                dim=-1,
+            )
+            logits = self.classifier(fused)
+            return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
+        pseudo_tokens = tuple(row.token_embeddings for row in encoded)
+        pseudo_masks = tuple(row.token_mask for row in encoded)
+        view_available = self._view_availability(hlt.batch_size, hlt_tokens.device)
+        token_gates = None
+        layer_diagnostics = []
+        for layer in self.cross_layers:
+            hlt_tokens, pseudo_tokens, token_gates, diagnostics = layer(
+                hlt_tokens,
+                hlt_mask,
+                pseudo_tokens,
+                pseudo_masks,
+                tuple(row.token_trust for row in encoded),
+                tuple(row.token_uncertainty for row in encoded),
+                view_available,
+            )
+            layer_diagnostics.append(diagnostics)
+        fused_hlt = hlt_output.jet_embedding + self._mean_tokens(hlt_tokens, hlt_mask)
+        updated_pseudo_jets = torch.stack(
+            [self._mean_tokens(tokens, mask) for tokens, mask in zip(pseudo_tokens, pseudo_masks)],
+            dim=1,
+        )
+        mean_trust = torch.stack(
+            [
+                (row.token_trust * row.token_mask.float()).sum(dim=1)
+                / row.token_mask.float().sum(dim=1).clamp_min(1.0)
+                for row in encoded
+            ],
+            dim=1,
+        )
+        mean_uncertainty = torch.stack(
+            [
+                (row.token_uncertainty * row.token_mask.float()).sum(dim=1)
+                / row.token_mask.float().sum(dim=1).clamp_min(1.0)
+                for row in encoded
+            ],
+            dim=1,
+        )
+        if self.pooled_gate is not None:
+            pooled_logits = torch.stack(
+                [
+                    gate(
+                        torch.cat(
+                            (
+                                hlt_output.jet_embedding,
+                                updated_pseudo_jets[:, index],
+                                mean_trust[:, index : index + 1],
+                                torch.log1p(mean_uncertainty[:, index : index + 1]),
+                            ),
+                            dim=-1,
+                        )
+                    ).squeeze(-1)
+                    for index, gate in enumerate(self.pooled_gate)
+                ],
+                dim=-1,
+            )
+            pooled_logits = pooled_logits.masked_fill(~view_available, -1.0e4)
+            pooled_gates = torch.softmax(
+                torch.cat((torch.zeros_like(pooled_logits[:, :1]), pooled_logits), dim=-1),
+                dim=-1,
+            )[:, 1:]
+        else:
+            pooled_gates = view_available.float() / view_available.float().sum(dim=1, keepdim=True).clamp_min(1.0)
+        pooled_pseudo = (updated_pseudo_jets * pooled_gates.unsqueeze(-1)).sum(dim=1)
+        fused = torch.cat(
+            (
+                hlt_output.jet_embedding,
+                fused_hlt,
+                pooled_pseudo,
+                torch.abs(fused_hlt - pooled_pseudo),
+                fused_hlt * pooled_pseudo,
+            ),
+            dim=-1,
+        )
+        logits = self.classifier(fused)
+        gate_probabilities = pooled_gates.clamp_min(1.0e-8)
+        gate_entropy = -(gate_probabilities * gate_probabilities.log()).sum(dim=-1).mean()
+        return FusionTaggerOutput(
+            logits=logits,
+            hlt_logits=hlt_logits,
+            pseudo_logits=pseudo_logits,
+            hlt_representation=fused_hlt,
+            pseudo_representations={name: updated_pseudo_jets[:, index] for index, name in enumerate(self.view_names)},
+            token_gates=token_gates,
+            pooled_gates=pooled_gates,
+            gate_entropy_regularizer=-gate_entropy,
+            diagnostics={
+                "contract": DUAL_STREAM_FUSION_CONTRACT,
+                "variant": self.config.variant,
+                "architecture": self.spec.architecture,
+                "hlt_skip_ungated": True,
+                "view_names": self.view_names,
+                "view_available": view_available,
+                "pooled_gate_mean": pooled_gates.mean(dim=0).detach(),
+                "mean_view_trust": mean_trust.detach(),
+                "mean_view_uncertainty": mean_uncertainty.detach(),
+                "pseudo_streams": {name: row.diagnostics for name, row in zip(self.view_names, encoded)},
+                "cross_layers": layer_diagnostics,
+            },
+        )
+
+    def _simple_output(
+        self,
+        logits: torch.Tensor,
+        hlt_logits: torch.Tensor,
+        pseudo_logits: torch.Tensor,
+        hlt_output: HLTEncoderOutput,
+        encoded: Sequence[PseudoStreamEncoding],
+        zero: torch.Tensor,
+    ) -> FusionTaggerOutput:
+        return FusionTaggerOutput(
+            logits=logits,
+            hlt_logits=hlt_logits,
+            pseudo_logits=pseudo_logits,
+            hlt_representation=hlt_output.jet_embedding,
+            pseudo_representations={name: row.jet_embedding for name, row in zip(self.view_names, encoded)},
+            token_gates=None,
+            pooled_gates=None,
+            gate_entropy_regularizer=zero,
+            diagnostics={
+                "contract": DUAL_STREAM_FUSION_CONTRACT,
+                "variant": self.config.variant,
+                "architecture": self.spec.architecture,
+                "hlt_skip_ungated": self.spec.architecture != ARCH_PSEUDO_ONLY,
+                "view_names": self.view_names,
+                "pseudo_streams": {name: row.diagnostics for name, row in zip(self.view_names, encoded)},
+            },
+        )
+
+    def forward(
+        self,
+        hlt: ParticleStreamInput,
+        pseudo_views: Sequence[PseudoParticleViewInput] = (),
+    ) -> torch.Tensor:
+        return self.forward_detailed(hlt, pseudo_views).logits
+
+
+def build_dual_stream_fusion_tagger(
+    variant: str,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> ConstrainedDualStreamTagger:
+    return ConstrainedDualStreamTagger(FusionTaggerConfig(variant=variant, **dict(overrides or {})))
+
+
+__all__ = [
+    "ARCH_CROSS_ATTENTION",
+    "ARCH_GATED_CROSS_ATTENTION",
+    "ARCH_HLT_CAPACITY_CONTROL",
+    "ARCH_LATE_LOGIT",
+    "ARCH_PSEUDO_ONLY",
+    "ARCH_REPRESENTATION",
+    "CONTROL_NONE",
+    "CONTROL_NO_UNCERTAINTY",
+    "CONTROL_RANDOM_COORDINATES",
+    "CONTROL_SHUFFLED_CELLS",
+    "CONTROL_SHUFFLED_COMPOSITION",
+    "D0_PSEUDO_ONLY",
+    "D1_LATE_LOGIT_FUSION",
+    "D2_REPRESENTATION_FUSION",
+    "D3_CROSS_ATTENTION",
+    "D4_UNCERTAINTY_GATED",
+    "D5_END_TO_END",
+    "D5_B1",
+    "D5_B2",
+    "D5_B3",
+    "D6_MULTIVIEW",
+    "D7_GRID_ONLY",
+    "D8_MULTIDEPTH",
+    "D_TIER_VARIANTS",
+    "DUAL_STREAM_FUSION_CONTRACT",
+    "E0_SHUFFLED_CELLS",
+    "E1_RANDOM_COORDINATES",
+    "E2_SHUFFLED_COMPOSITION",
+    "E3_NO_UNCERTAINTY",
+    "E4_UNCONSTRAINED_SOURCE",
+    "E5_NO_SLOT_LOSS_SOURCE",
+    "E6_CAPACITY_MATCHED_HLT",
+    "E_TIER_VARIANTS",
+    "FUSION_VARIANTS",
+    "FusionTaggerConfig",
+    "FusionTaggerOutput",
+    "FusionVariantSpec",
+    "HierarchicalPseudoStreamEncoder",
+    "PSEUDO_SIDE_FEATURE_NAMES",
+    "PSEUDO_VIEW_INPUT_CONTRACT",
+    "ParticleStreamInput",
+    "PseudoParticleViewInput",
+    "PseudoStreamEncoding",
+    "ConstrainedDualStreamTagger",
+    "apply_fusion_control",
+    "build_dual_stream_fusion_tagger",
+    "fusion_variant_spec",
+    "grid_view_from_arrays",
+    "normalize_fusion_variant",
+    "particle_stream_from_tokens",
+    "pseudo_particle_views_from_arrays",
+]
