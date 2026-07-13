@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pattern", default="*.root", help="ROOT filename glob searched recursively")
     parser.add_argument("--tree-name", default="tree", help="ROOT tree name")
+    parser.add_argument(
+        "--skip-unreadable-files",
+        action="store_true",
+        help="Skip ROOT files that uproot cannot open. Off by default so corrupt data is visible.",
+    )
     parser.add_argument("--max-constits", type=int, default=128)
     parser.add_argument("--model-train", type=int, default=DEFAULT_SPLIT_TOTALS["model_train"])
     parser.add_argument("--model-val", type=int, default=DEFAULT_SPLIT_TOTALS["model_val"])
@@ -59,6 +64,7 @@ def main() -> int:
         pattern=args.pattern,
         tree_name=args.tree_name,
         require_all_classes=True,
+        skip_unreadable=bool(args.skip_unreadable_files),
     )
     manifest = build_split_manifest_from_records(
         records,

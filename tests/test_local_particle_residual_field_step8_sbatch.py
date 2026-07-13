@@ -42,12 +42,15 @@ def test_step8_submitter_queues_inputs_reconstructors_taggers_predictions_and_fu
 
 
 def test_step8_runner_scripts_call_expected_python_entrypoints():
+    split_builder = _read("run_build_fresh_splits.sh")
     assert "scripts/cache_local_particle_residual_fields.py" in _read("run_cache_local_particle_residual_fields.sh")
     assert "scripts/train_local_residual_reconstructor.py" in _read("run_train_local_residual_reconstructor.sh")
     assert "scripts/train_local_residual_field_tagger.py" in _read("run_train_local_residual_field_tagger.sh")
     assert "scripts/predict_local_residual_field_tagger.py" in _read("run_predict_local_residual_field_tagger.sh")
     assert "scripts/run_local_residual_field_fusion.py" in _read("run_local_residual_field_fusion.sh")
     assert "scripts/write_local_residual_field_report.py" in _read("run_write_local_residual_field_report.sh")
+    assert "SKIP_UNREADABLE_ROOT_FILES" in split_builder
+    assert "--skip-unreadable-files" in split_builder
     assert "LOCAL_RESIDUAL_FIELD_TARGET_DTYPE:=float16" in _read("run_cache_local_particle_residual_fields.sh")
     assert "LOCAL_RESIDUAL_FIELD_INCLUDE_FINAL_TEST_TARGETS:=0" in _read("run_cache_local_particle_residual_fields.sh")
 
@@ -90,6 +93,8 @@ def test_step8_submitter_preflights_baseline_kd_and_required_fusion_groups():
     runner = _read("run_train_local_residual_field_tagger.sh")
 
     assert "preflight_campaign_requirements" in text
+    assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=}" in text
+    assert 'sbatch_args+=(--account="${LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT}")' in text
     assert "tagger_requires_baseline" in text
     assert "tagger_requires_kd" in text
     assert "tagger_reconstructor_run_id" in text
@@ -127,6 +132,8 @@ def test_step8_cluster_wrappers_keep_sporcsubmit_and_tigris_settings_explicit():
     assert "LOCAL_RESIDUAL_FIELD_CAMPAIGN_MODE=pilot" in sporc
     assert "LOCAL_RESIDUAL_FIELD_CAMPAIGN_MODE=highdata" in sporc
     assert "LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION:=tigris" in tigris
+    assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=reu-aisoc" in tigris
+    assert "export LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT" in tigris
     assert "LOCAL_RESIDUAL_FIELD_GPU_GRES:=gpu:gh200:1" in tigris
     assert "PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data" in tigris
     assert "LOCAL_RESIDUAL_FIELD_DATA_DIR:=${PD10_DATA_DIR}" in tigris

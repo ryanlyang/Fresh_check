@@ -193,11 +193,14 @@ def assign_hierarchy_cells(
 
     extent = float(layout.coordinate_extent)
     upper = np.nextafter(1.0, 0.0)
-    eta_unit = np.clip((deta_arr + extent) / (2.0 * extent), 0.0, upper)
-    phi_unit = np.clip((dphi_arr + extent) / (2.0 * extent), 0.0, upper)
+    bounded_high = np.nextafter(extent, -np.inf)
+    bounded_deta = np.clip(deta_arr, -extent, bounded_high)
+    bounded_dphi = np.clip(dphi_arr, -extent, bounded_high)
+    eta_unit = np.clip((bounded_deta + extent) / (2.0 * extent), 0.0, upper)
+    phi_unit = np.clip((bounded_dphi + extent) / (2.0 * extent), 0.0, upper)
     eta_bin = np.floor(8.0 * eta_unit).astype(np.int16)
     phi_bin = np.floor(8.0 * phi_unit).astype(np.int16)
-    radius = np.sqrt(deta_arr * deta_arr + dphi_arr * dphi_arr)
+    radius = np.sqrt(bounded_deta * bounded_deta + bounded_dphi * bounded_dphi)
     radial_bin = (radius >= float(layout.radial_boundary)).astype(np.int16)
 
     eta_bit0 = eta_bin >> 2
@@ -322,8 +325,10 @@ def build_hierarchy_targets(
     token_rows = offline[jet_indices, particle_indices]
     pt = np.maximum(token_rows[:, 0], 0.0).astype(np.float64)
     energy = np.maximum(token_rows[:, 3], 0.0).astype(np.float64)
-    local_deta = deta[jet_indices, particle_indices].astype(np.float64)
-    local_dphi = dphi[jet_indices, particle_indices].astype(np.float64)
+    extent = float(layout.coordinate_extent)
+    bounded_high = np.nextafter(extent, -np.inf)
+    local_deta = np.clip(deta[jet_indices, particle_indices], -extent, bounded_high).astype(np.float64)
+    local_dphi = np.clip(dphi[jet_indices, particle_indices], -extent, bounded_high).astype(np.float64)
     local_radius = radius[jet_indices, particle_indices].astype(np.float64)
 
     pid_scores = token_rows[:, PID_TOKEN_SLICE]
@@ -529,4 +534,3 @@ def require_hierarchy_consistency(
         raise ValueError("hierarchy targets contain nonfinite values")
     if float(output.diagnostics["minimum_accounting_value"]) < -float(atol):
         raise ValueError("hierarchy targets contain negative additive accounting values")
-

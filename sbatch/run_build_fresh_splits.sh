@@ -23,6 +23,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${ROOT_PATTERN:=*.root}"
 : "${TREE_NAME:=tree}"
 : "${MAX_CONSTITS:=128}"
+: "${SKIP_UNREADABLE_ROOT_FILES:=0}"
 
 fresh_setup "$@"
 fresh_require_data_dir
@@ -42,6 +43,7 @@ cmd=(
   --final-test "${FINAL_TEST_SIZE}"
   --pretty
 )
+fresh_append_flag_if_enabled cmd --skip-unreadable-files "${SKIP_UNREADABLE_ROOT_FILES}"
 
 fresh_write_run_config "$(dirname "${MANIFEST_PATH}")" "build_splits" "${cmd[@]}"
 fresh_run "${cmd[@]}"

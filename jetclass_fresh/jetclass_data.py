@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
+import warnings
 
 import numpy as np
 
@@ -324,6 +325,7 @@ def discover_file_records(
     tree_name: str = "tree",
     require_all_classes: bool = True,
     ignore_unknown: bool = True,
+    skip_unreadable: bool = False,
 ) -> List[FileRecord]:
     """Find JetClass ROOT files and count entries without loading jet arrays."""
 
@@ -350,16 +352,26 @@ def discover_file_records(
                     continue
                 raise
 
-            with uproot.open(path) as handle:
-                tree = handle[tree_name]
-                record_path = path.resolve().as_posix() if multi_root else _relative_path(path, root)
-                records.append(
-                    FileRecord(
-                        path=record_path,
-                        label=label,
-                        num_entries=int(tree.num_entries),
+            try:
+                with uproot.open(path) as handle:
+                    tree = handle[tree_name]
+                    record_path = path.resolve().as_posix() if multi_root else _relative_path(path, root)
+                    records.append(
+                        FileRecord(
+                            path=record_path,
+                            label=label,
+                            num_entries=int(tree.num_entries),
+                        )
                     )
+            except Exception as exc:
+                message = (
+                    f"Failed to read JetClass ROOT file {path.as_posix()} "
+                    f"with tree {tree_name!r}: {type(exc).__name__}: {exc}"
                 )
+                if skip_unreadable:
+                    warnings.warn(message, RuntimeWarning, stacklevel=2)
+                    continue
+                raise RuntimeError(message) from exc
 
     if not records:
         roots_text = ", ".join(root.as_posix() for root in roots)

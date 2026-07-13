@@ -1,6 +1,8 @@
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from jetclass_fresh.jetclass_data import (
     DEFAULT_SPLIT_SEEDS,
@@ -8,6 +10,7 @@ from jetclass_fresh.jetclass_data import (
     LABEL_NAMES,
     audit_split_manifest,
     build_split_manifest_from_records,
+    discover_file_records,
     label_from_filename,
     load_split_manifest,
     manifest_hash,
@@ -87,6 +90,58 @@ class JetClassDataStep2Tests(unittest.TestCase):
             save_split_manifest(manifest, path)
             loaded = load_split_manifest(path)
         self.assertEqual(manifest_hash(manifest), manifest_hash(loaded))
+
+    def test_discover_file_records_reports_unreadable_root_path(self):
+        class FakeUproot:
+            @staticmethod
+            def open(path):
+                raise OverflowError("fake corrupted ROOT payload")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad = root / "ZJetsToNuNu_bad.root"
+            bad.touch()
+            with patch.dict(sys.modules, {"uproot": FakeUproot}):
+                with self.assertRaisesRegex(RuntimeError, "ZJetsToNuNu_bad.root"):
+                    discover_file_records(root, require_all_classes=False)
+
+    def test_discover_file_records_can_skip_unreadable_roots_explicitly(self):
+        class FakeTree:
+            num_entries = 12
+
+        class FakeHandle:
+            def __init__(self, path):
+                self.path = Path(path)
+
+            def __enter__(self):
+                if "bad" in self.path.name:
+                    raise OverflowError("fake corrupted ROOT payload")
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __getitem__(self, _tree_name):
+                return FakeTree()
+
+        class FakeUproot:
+            @staticmethod
+            def open(path):
+                return FakeHandle(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ZJetsToNuNu_bad.root").touch()
+            (root / "HToBB_good.root").touch()
+            with patch.dict(sys.modules, {"uproot": FakeUproot}):
+                with self.assertWarnsRegex(RuntimeWarning, "ZJetsToNuNu_bad.root"):
+                    records = discover_file_records(
+                        root,
+                        require_all_classes=False,
+                        skip_unreadable=True,
+                    )
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].path, "HToBB_good.root")
 
 
 if __name__ == "__main__":

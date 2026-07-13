@@ -77,6 +77,7 @@ fi
 : "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR:=}"
 : "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGIT_SPLITS:=model_train model_val stack_val}"
 : "${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID:=C5}"
+: "${LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=}"
 : "${LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION:=}"
 : "${LOCAL_RESIDUAL_FIELD_GPU_GRES:=}"
 : "${LOCAL_RESIDUAL_FIELD_GPU_CPUS_PER_TASK:=}"
@@ -122,6 +123,9 @@ submit_job() {
   local label="$1"
   shift
   local sbatch_args=()
+  if [[ -n "${LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT}" ]]; then
+    sbatch_args+=(--account="${LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT}")
+  fi
   if [[ -n "${LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION}" ]]; then
     sbatch_args+=(--partition="${LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION}")
   fi
