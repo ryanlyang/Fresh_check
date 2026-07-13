@@ -132,7 +132,7 @@ def test_step8_cluster_wrappers_keep_sporcsubmit_and_tigris_settings_explicit():
     assert "LOCAL_RESIDUAL_FIELD_CAMPAIGN_MODE=pilot" in sporc
     assert "LOCAL_RESIDUAL_FIELD_CAMPAIGN_MODE=highdata" in sporc
     assert "LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION:=tigris" in tigris
-    assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=reu-aisoc" in tigris
+    assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=}" in tigris
     assert "export LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT" in tigris
     assert "LOCAL_RESIDUAL_FIELD_GPU_GRES:=gpu:gh200:1" in tigris
     assert "PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data" in tigris
