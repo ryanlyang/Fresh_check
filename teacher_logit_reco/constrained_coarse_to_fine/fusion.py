@@ -838,11 +838,19 @@ def apply_fusion_control(
             uncertainty_mask=torch.zeros_like(view.uncertainty_mask),
         )
     if control == CONTROL_SHUFFLED_CELLS:
-        permutation = torch.roll(torch.arange(view.num_particles, device=view.cell_indices.device), shifts=1)
+        cells = int(view.cell_indices.max().item()) + 1
+        remapped_cells = torch.remainder(view.cell_indices + 1, cells)
+        parent_by_cell = torch.stack(
+            [
+                view.parent_accounting[:, torch.nonzero(view.cell_indices == cell, as_tuple=False)[0, 0]]
+                for cell in range(cells)
+            ],
+            dim=1,
+        )
         return replace(
             view,
-            cell_indices=view.cell_indices[permutation],
-            parent_accounting=view.parent_accounting[:, permutation],
+            cell_indices=remapped_cells,
+            parent_accounting=parent_by_cell[:, remapped_cells],
         )
     raw = view.raw_tokens.clone()
     for cell in range(int(view.cell_indices.max().item()) + 1):
@@ -857,6 +865,39 @@ def apply_fusion_control(
         else:
             raise ValueError(f"unsupported fusion control {control!r}")
     return _rebuild_view_from_raw(view, raw)
+
+
+class _CapacityResidualBank(nn.Module):
+    """Use an exact number of additional HLT-only parameters as residual refiners."""
+
+    def __init__(self, d_model: int, parameter_count: int) -> None:
+        super().__init__()
+        if int(parameter_count) < 0:
+            raise ValueError("capacity residual parameter_count must be nonnegative")
+        self.d_model = int(d_model)
+        self.parameter_count = int(parameter_count)
+        self.bank = nn.Parameter(torch.zeros(self.parameter_count))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if self.parameter_count == 0:
+            return value
+        cursor = 0
+        block_size = self.d_model * self.d_model + self.d_model
+        while self.parameter_count - cursor >= block_size:
+            weight = self.bank[cursor : cursor + self.d_model * self.d_model].reshape(
+                self.d_model, self.d_model
+            )
+            cursor += self.d_model * self.d_model
+            bias = self.bank[cursor : cursor + self.d_model]
+            cursor += self.d_model
+            value = value + torch.nn.functional.gelu(torch.nn.functional.linear(value, weight, bias))
+        remaining = self.bank[cursor:]
+        if int(remaining.numel()) >= self.d_model:
+            value = value + remaining[: self.d_model]
+            remaining = remaining[self.d_model :]
+        if int(remaining.numel()):
+            value = value + torch.tanh(remaining.mean()) * torch.tanh(value)
+        return value
 
 
 class ConstrainedDualStreamTagger(nn.Module):
@@ -924,6 +965,18 @@ class ConstrainedDualStreamTagger(nn.Module):
             nn.Dropout(config.dropout),
             nn.Linear(config.d_model, config.num_classes),
         )
+        self.capacity_residual = None
+        self.parameter_match_reference = None
+        if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
+            with torch.random.fork_rng(devices=[]):
+                reference = ConstrainedDualStreamTagger(
+                    replace(config, variant=D4_UNCERTAINTY_GATED, view_names=("canonical",))
+                )
+            target = sum(parameter.numel() for parameter in reference.parameters())
+            del reference
+            current = sum(parameter.numel() for parameter in self.parameters())
+            self.capacity_residual = _CapacityResidualBank(config.d_model, target - current)
+            self.parameter_match_reference = D4_UNCERTAINTY_GATED
 
     def _validate_views(self, pseudo_views: Sequence[PseudoParticleViewInput]) -> tuple[PseudoParticleViewInput, ...]:
         if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
@@ -970,12 +1023,13 @@ class ConstrainedDualStreamTagger(nn.Module):
         zero = hlt_tokens.new_zeros(())
         if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
             shadow = self.shadow_hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
+            shadow_jet = self.capacity_residual(shadow.jet_embedding)
             fused = torch.cat(
                 (
                     hlt_output.jet_embedding,
-                    shadow.jet_embedding,
-                    torch.abs(hlt_output.jet_embedding - shadow.jet_embedding),
-                    hlt_output.jet_embedding * shadow.jet_embedding,
+                    shadow_jet,
+                    torch.abs(hlt_output.jet_embedding - shadow_jet),
+                    hlt_output.jet_embedding * shadow_jet,
                 ),
                 dim=-1,
             )
@@ -989,7 +1043,13 @@ class ConstrainedDualStreamTagger(nn.Module):
                 token_gates=None,
                 pooled_gates=None,
                 gate_entropy_regularizer=zero,
-                diagnostics={"contract": DUAL_STREAM_FUSION_CONTRACT, "variant": self.config.variant, "hlt_skip_ungated": True},
+                diagnostics={
+                    "contract": DUAL_STREAM_FUSION_CONTRACT,
+                    "variant": self.config.variant,
+                    "hlt_skip_ungated": True,
+                    "parameter_match_reference": self.parameter_match_reference,
+                    "capacity_residual_parameter_count": self.capacity_residual.parameter_count,
+                },
             )
         encoded = tuple(self.pseudo_encoders[name](view) for name, view in zip(self.view_names, views))
         pseudo_jets = torch.stack([row.jet_embedding for row in encoded], dim=1)
