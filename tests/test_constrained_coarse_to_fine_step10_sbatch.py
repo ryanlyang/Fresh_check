@@ -409,6 +409,7 @@ def test_step10_campaign_is_staged_and_final_test_is_separate() -> None:
 
 def test_step10_cluster_wrappers_set_correct_environments_and_resources() -> None:
     tigris = _read("submit_constrained_coarse_to_fine_tigris_pilot_and_highdata.sh")
+    assert "PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data/jetclass_part1" in tigris
     assert "atlas_kd_tigris" in tigris
     assert "miniforge3-aarch64" in tigris
     assert "gpu:gh200:1" in tigris

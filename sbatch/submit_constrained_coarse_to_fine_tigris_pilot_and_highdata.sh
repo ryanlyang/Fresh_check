@@ -2,7 +2,7 @@
 # Submit both campaigns on RIT Tigris GH200 nodes.
 set -euo pipefail
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
-: "${PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
+: "${PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data/jetclass_part1}"
 : "${OUTPUT_ROOT:=${PROJECT_DIR}/checkpoints}"
 : "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
 : "${CONDA_ENV:=atlas_kd_tigris}"
