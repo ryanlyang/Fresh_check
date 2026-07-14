@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,58 @@ SBATCH = ROOT / "sbatch"
 
 def _read(name: str) -> str:
     return (SBATCH / name).read_text(encoding="utf-8")
+
+
+def _bash_executable() -> str | None:
+    resolved = shutil.which("bash")
+    if resolved:
+        return resolved
+    for candidate in (
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _bash_path(path: Path) -> str:
+    resolved = path.resolve().as_posix()
+    if len(resolved) >= 3 and resolved[1:3] == ":/":
+        return f"/{resolved[0].lower()}/{resolved[3:]}"
+    return resolved
+
+
+def _run_canonical_submitter(root: Path, overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    bash = _bash_executable()
+    if bash is None:
+        raise RuntimeError("bash is required for constrained submitter regression tests")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PROJECT_DIR": _bash_path(ROOT),
+            "OUTPUT_ROOT": _bash_path(root / "outputs"),
+            "DIAGNOSTICS_ROOT": _bash_path(root / "diagnostics"),
+            "LOG_DIR": _bash_path(root / "logs"),
+            "DATA_DIR": _bash_path(ROOT),
+            "PD10_DATA_DIR": _bash_path(ROOT),
+            "CONSTRAINED_C2F_ROOT": _bash_path(root / "campaign"),
+            "DRY_RUN": "1",
+            "PRINT_ONLY": "0",
+            "SKIP_CONDA": "1",
+            "SKIP_EXISTING": "0",
+            "OVERWRITE": "0",
+            "PYTHON_BIN": sys.executable,
+        }
+    )
+    env.update(overrides)
+    return subprocess.run(
+        [bash, _bash_path(SBATCH / "submit_constrained_coarse_to_fine_experiment.sh")],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _write_active_input_metadata(
@@ -321,7 +375,9 @@ def test_step10_graph_uses_hlt_v2_s2p5_and_protocol_sizes() -> None:
 
 
 def test_step10_graph_queues_complete_reconstructor_and_depth_families() -> None:
-    text = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    text = _read("submit_constrained_coarse_to_fine_experiment.sh") + _read(
+        "constrained_coarse_to_fine_claim_contract.sh"
+    )
     assert "A0 A1 A2 A4" in text
     assert "B0 B1 B2 B3 B4 B5 B6 B7" in text
     assert "C0 C1 C2 C3 C4 C5 C6 C5-B1 C5-B2 C5-B3 C5-no-slot" in text
@@ -357,7 +413,9 @@ def test_step10_submitter_is_dependency_aware_and_records_job_ids() -> None:
 
 
 def test_step10_reuse_and_posthoc_paths_fail_closed() -> None:
-    text = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    text = _read("submit_constrained_coarse_to_fine_experiment.sh") + _read(
+        "constrained_coarse_to_fine_claim_contract.sh"
+    )
     assert "Required HLT cache is incomplete" in text
     assert "Required hierarchy target cache is incomplete" in text
     assert "requires incomplete reconstructor" in text
@@ -393,11 +451,16 @@ def test_step10_campaign_is_staged_and_final_test_is_separate() -> None:
     standalone = _read("submit_constrained_coarse_to_fine_highdata.sh")
     assert "submit_constrained_coarse_to_fine_experiment.sh" in standalone
     final = _read("submit_constrained_coarse_to_fine_final_claims.sh")
-    assert "CONSTRAINED_C2F_APPROVE_FINAL_TEST" in final
+    assert "constrained_coarse_to_fine_claim_contract.sh" in final
     assert "CONSTRAINED_C2F_STAGE_MODE=final_claims" in final
     assert "CONSTRAINED_C2F_CAMPAIGN_MODE=highdata" in final
-    assert "final_test_claim_receipt.json" in final
-    assert 'claim_ids=("${predict_ids[@]}" F0 F1 F2 F3 F4 F5)' in final
+    assert 'CONSTRAINED_C2F_TAGGER_RUN_IDS="${C2F_FROZEN_TAGGER_RUN_IDS}"' in final
+    canonical = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    assert "c2f_validate_final_claim_contract" in canonical
+    contract = _read("constrained_coarse_to_fine_claim_contract.sh")
+    assert "CONSTRAINED_C2F_APPROVE_FINAL_TEST" in contract
+    assert "final_test_claim_receipt.json" in contract
+    assert "selection report tagger membership differs" in contract
     for runner in (
         "run_cache_constrained_coarse_to_fine_predictions.sh",
         "run_alias_constrained_coarse_to_fine_predictions.sh",
@@ -407,9 +470,103 @@ def test_step10_campaign_is_staged_and_final_test_is_separate() -> None:
         assert "CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val final_test}" not in runner_text
 
 
+def test_direct_canonical_final_claim_requires_approval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_canonical_submitter(
+            Path(tmp),
+            {
+                "CONSTRAINED_C2F_CAMPAIGN_MODE": "highdata",
+                "CONSTRAINED_C2F_STAGE_MODE": "final_claims",
+                "CONFIRM_FINAL_TEST": "1",
+                "CONSTRAINED_C2F_APPROVE_FINAL_TEST": "0",
+            },
+        )
+    assert result.returncode != 0
+    assert "Refusing final test" in result.stderr
+
+
+def test_direct_final_claim_rejects_model_or_fusion_membership_override() -> None:
+    for name, value in (
+        ("CONSTRAINED_C2F_TAGGER_RUN_IDS", "A0"),
+        ("CONSTRAINED_C2F_FUSION_GROUPS", "F0:mean_logits:A0,D0"),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run_canonical_submitter(
+                Path(tmp),
+                {
+                    "CONSTRAINED_C2F_CAMPAIGN_MODE": "highdata",
+                    "CONSTRAINED_C2F_STAGE_MODE": "final_claims",
+                    "CONFIRM_FINAL_TEST": "1",
+                    "CONSTRAINED_C2F_APPROVE_FINAL_TEST": "1",
+                    name: value,
+                },
+            )
+        assert result.returncode != 0
+        assert f"forbids overriding {name}" in result.stderr
+
+
+def test_prediction_reuse_is_rejected_during_upstream_rebuild_without_taggers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_canonical_submitter(
+            Path(tmp),
+            {
+                "CONSTRAINED_C2F_CAMPAIGN_MODE": "pilot",
+                "CONSTRAINED_C2F_STAGE_MODE": "full",
+                "CONSTRAINED_C2F_SUBMIT_SPLITS": "0",
+                "CONSTRAINED_C2F_SUBMIT_HLT_CACHE": "1",
+                "CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE": "0",
+                "CONSTRAINED_C2F_SUBMIT_TARGETS": "0",
+                "CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS": "0",
+                "CONSTRAINED_C2F_SUBMIT_TAGGERS": "0",
+                "CONSTRAINED_C2F_SUBMIT_PREDICTIONS": "1",
+                "CONSTRAINED_C2F_SUBMIT_FUSION": "0",
+                "CONSTRAINED_C2F_SUBMIT_REPORT": "0",
+            },
+        )
+    assert result.returncode != 0
+    assert "reuse stale taggers" in result.stderr
+
+
+def test_prediction_jobs_depend_on_all_active_training_inputs() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_canonical_submitter(
+            Path(tmp),
+            {
+                "CONSTRAINED_C2F_CAMPAIGN_MODE": "pilot",
+                "CONSTRAINED_C2F_STAGE_MODE": "full",
+                "CONSTRAINED_C2F_RECON_RUN_IDS": "C5-B3",
+                "CONSTRAINED_C2F_TAGGER_RUN_IDS": "A0 D5",
+                "CONSTRAINED_C2F_PREDICT_RUN_IDS": "A0 D5",
+                "CONSTRAINED_C2F_REPORT_RECON_RUN_IDS": "C5-B3",
+                "CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS": "A0 D5",
+                "CONSTRAINED_C2F_SUBMIT_FUSION": "0",
+                "CONSTRAINED_C2F_SUBMIT_REPORT": "0",
+            },
+        )
+    assert result.returncode == 0, result.stderr
+    prediction_lines = [
+        line for line in result.stderr.splitlines()
+        if "run_cache_constrained_coarse_to_fine_predictions.sh" in line
+    ]
+    assert len(prediction_lines) == 2
+    a0_line = next(line for line in prediction_lines if line.rstrip().endswith(" A0"))
+    d5_line = next(line for line in prediction_lines if line.rstrip().endswith(" D5"))
+    for token in ("DRYRUN_c2f_hlt_cache", "DRYRUN_c2f_targets", "DRYRUN_c2f_tagger_A0"):
+        assert token in a0_line
+    for token in (
+        "DRYRUN_c2f_hlt_cache",
+        "DRYRUN_c2f_targets",
+        "DRYRUN_c2f_reco_C5_B3",
+        "DRYRUN_c2f_tagger_D5",
+    ):
+        assert token in d5_line
+
+
 def test_step10_cluster_wrappers_set_correct_environments_and_resources() -> None:
     tigris = _read("submit_constrained_coarse_to_fine_tigris_pilot_and_highdata.sh")
     assert "PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data/jetclass_part1" in tigris
+    assert "CONSTRAINED_C2F_TIGRIS_ACCOUNT:=reu-aisocial" in tigris
+    assert 'CONSTRAINED_C2F_SBATCH_ACCOUNT="${CONSTRAINED_C2F_TIGRIS_ACCOUNT}"' in tigris
     assert "atlas_kd_tigris" in tigris
     assert "miniforge3-aarch64" in tigris
     assert "gpu:gh200:1" in tigris

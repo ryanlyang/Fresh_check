@@ -10,6 +10,8 @@ export CONDA_ENV
 SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
+# shellcheck source=constrained_coarse_to_fine_claim_contract.sh
+source "${SCRIPT_DIR}/constrained_coarse_to_fine_claim_contract.sh"
 
 fresh_prepare_submitter
 
@@ -31,6 +33,17 @@ case "${CONSTRAINED_C2F_CAMPAIGN_MODE}" in
     ;;
   *) echo "CONSTRAINED_C2F_CAMPAIGN_MODE must be pilot or highdata" >&2; exit 2 ;;
 esac
+
+if [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]] \
+  && fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}" \
+  && ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}" \
+  && { fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}"; }; then
+  echo "Cannot rebuild caches/targets/reconstructors and reuse stale taggers for new predictions." >&2
+  exit 2
+fi
 
 if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" ]]; then
   : "${CONSTRAINED_C2F_RECO_NUM_WORKERS:=0}"
@@ -63,14 +76,16 @@ fi
 : "${CONSTRAINED_C2F_OFFLINE_SPLITS:=model_train model_val stack_train stack_val}"
 : "${CONSTRAINED_C2F_TARGET_SPLITS:=model_train model_val stack_val}"
 : "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val}"
-: "${CONSTRAINED_C2F_RECON_RUN_IDS:=B0 B1 B2 B3 B4 B5 B6 B7 C0 C1 C2 C3 C4 C5 C6 C5-B1 C5-B2 C5-B3 C5-no-slot Cdirect-unconstrained}"
-: "${CONSTRAINED_C2F_TAGGER_RUN_IDS:=A0 A1 A2 A4 D0 D1 D2 D3 D4 D5 D5-B1 D5-B2 D5-B3 D6 D7 D8 D0-seed1 D0-seed2 D1-seed1 D1-seed2 D2-seed1 D2-seed2 D3-seed1 D3-seed2 D4-seed1 D4-seed2 D5-seed1 D5-seed2 D5-B1-seed1 D5-B1-seed2 D5-B2-seed1 D5-B2-seed2 D6-seed1 D6-seed2 D7-seed1 D7-seed2 D8-seed1 D8-seed2 E0 E1 E2 E3 E4 E5 E6}"
+: "${CONSTRAINED_C2F_RECON_RUN_IDS:=${C2F_FROZEN_RECON_RUN_IDS}}"
+: "${CONSTRAINED_C2F_TAGGER_RUN_IDS:=${C2F_FROZEN_TAGGER_RUN_IDS}}"
 : "${CONSTRAINED_C2F_PREDICT_RUN_IDS:=${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
-: "${CONSTRAINED_C2F_FUSION_GROUPS:=F0:mean_logits:A0,BEST_D F1:simplex_logits:A0,BEST_D F2:representation_stacker:D3,D4,D5,D6,D8 F3:simplex_logits:A0,BEST_D F4:mean_logits:BEST_D,BEST_D_SEED1,BEST_D_SEED2 F5:linear_stacker:D8,D6,BEST_D,BEST_D_SEED1,BEST_D_SEED2}"
-: "${CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS:=F0 F1 F2 F3 F4 F5}"
+: "${CONSTRAINED_C2F_FUSION_GROUPS:=${C2F_FROZEN_FUSION_GROUPS}}"
+: "${CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS:=${C2F_FROZEN_REQUIRED_FUSION_GROUPS}}"
 : "${CONSTRAINED_C2F_REPORT_RECON_RUN_IDS:=${CONSTRAINED_C2F_RECON_RUN_IDS}}"
 : "${CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS:=${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
 : "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT:=${CONSTRAINED_C2F_TAGGER_ROOT}/A0/best_model_val.pt}"
+: "${CONSTRAINED_C2F_APPROVE_FINAL_TEST:=0}"
+: "${CONSTRAINED_C2F_SELECTION_REPORT_PATH:=${CONSTRAINED_C2F_ROOT}/final_report/final_report.json}"
 
 if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" && "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]]; then
   fresh_bool_enabled "${CONSTRAINED_C2F_APPROVE_HIGHDATA}" || {
@@ -128,10 +143,13 @@ case "${CONSTRAINED_C2F_STAGE_MODE}" in
     CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
     ;;
   final_claims)
-    fresh_bool_enabled "${CONFIRM_FINAL_TEST}" || {
-      echo "final_claims requires CONFIRM_FINAL_TEST=1" >&2
-      exit 2
-    }
+    CONSTRAINED_C2F_FUSION_DIR="${CONSTRAINED_C2F_ROOT}/fusion_final_claim"
+    CONSTRAINED_C2F_REPORT_DIR="${CONSTRAINED_C2F_ROOT}/final_claim_report"
+    CONSTRAINED_C2F_SELECTION_REPORT_SHA256="$(c2f_validate_final_claim_contract \
+      "${CONSTRAINED_C2F_SELECTION_REPORT_PATH}" \
+      "${CONSTRAINED_C2F_PREDICTION_DIR}" \
+      "${CONSTRAINED_C2F_FUSION_DIR}" \
+      "${CONSTRAINED_C2F_REPORT_DIR}")"
     CONSTRAINED_C2F_PREDICT_SPLITS="final_test"
     CONSTRAINED_C2F_OFFLINE_SPLITS="final_test"
     CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=1
@@ -175,6 +193,7 @@ export CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT CONSTRAINED_C2F_FUSION_GROUPS
 export CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS CONSTRAINED_C2F_REPORT_RECON_RUN_IDS
 export CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS CONFIRM_FINAL_TEST
 export CONSTRAINED_C2F_RECO_NUM_WORKERS CONSTRAINED_C2F_TAGGER_NUM_WORKERS
+export CONSTRAINED_C2F_SELECTION_REPORT_PATH CONSTRAINED_C2F_SELECTION_REPORT_SHA256
 
 dependency_token_is_valid() {
   [[ "$1" =~ ^[0-9]+$ ]] || { fresh_is_dry_run && [[ "$1" =~ ^DRYRUN_[A-Za-z0-9_]+$ ]]; }
@@ -457,6 +476,10 @@ if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; then
     while IFS= read -r source_id; do
       [[ -z "${source_id}" ]] && continue
       if [[ -n "${recon_jids[${source_id}]:-}" ]]; then dep_rows+=("${recon_jids[${source_id}]}"); else
+        if [[ -n "${target_jid}" ]]; then
+          echo "${run_id} requires ${source_id} to be retrained after the active target-cache rebuild." >&2
+          exit 2
+        fi
         recon_complete "${source_id}" || { echo "${run_id} requires incomplete reconstructor ${source_id}" >&2; exit 2; }
       fi
     done < <(tagger_reconstructors "${run_id}")
@@ -476,18 +499,38 @@ fresh_split_words predict_ids "${CONSTRAINED_C2F_PREDICT_RUN_IDS}"
 if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}"; then
   for run_id in "${predict_ids[@]}"; do
     if fresh_bool_enabled "${SKIP_EXISTING}" \
-      && [[ -z "${hlt_jid}" && -z "${offline_jid}" && "${#tagger_jids[@]}" -eq 0 ]] \
+      && [[ -z "${hlt_jid}" && -z "${offline_jid}" && -z "${target_jid}" \
+        && "${#recon_jids[@]}" -eq 0 && "${#tagger_jids[@]}" -eq 0 ]] \
       && prediction_complete "${run_id}"; then echo "skip predictions ${run_id}: complete"; continue; fi
     if [[ "${run_id}" == "D5-B3" ]]; then
-      if [[ -z "${prediction_jids[D5]:-}" ]]; then prediction_complete D5 || { echo "D5-B3 prediction alias requires complete or queued D5 predictions" >&2; exit 2; }; fi
+      if [[ -z "${prediction_jids[D5]:-}" ]]; then
+        if [[ -n "${hlt_jid}" || -n "${target_jid}" || "${#recon_jids[@]}" -gt 0 || "${#tagger_jids[@]}" -gt 0 ]]; then
+          echo "D5-B3 prediction alias cannot reuse stale D5 predictions during an active rebuild." >&2
+          exit 2
+        fi
+        prediction_complete D5 || { echo "D5-B3 prediction alias requires complete or queued D5 predictions" >&2; exit 2; }
+      fi
       prediction_jids["${run_id}"]="$(submit_afterok c2f_predict_D5-B3_alias "${prediction_jids[D5]:-}" "${SCRIPT_DIR}/run_alias_constrained_coarse_to_fine_predictions.sh" D5 D5-B3)"
       continue
     fi
-    if [[ -z "${tagger_jids[${run_id}]:-}" ]]; then tagger_complete "${run_id}" || { echo "Predictions require incomplete tagger ${run_id}" >&2; exit 2; }; fi
-    prediction_dep="${tagger_jids[${run_id}]:-}"
-    if [[ "${run_id}" == "A2" && -n "${offline_jid}" ]]; then
-      prediction_dep="$(join_dependencies "${prediction_dep}" "${offline_jid}")"
+    prediction_dep_rows=()
+    [[ -n "${tagger_jids[${run_id}]:-}" ]] && prediction_dep_rows+=("${tagger_jids[${run_id}]}")
+    [[ -n "${hlt_jid}" ]] && prediction_dep_rows+=("${hlt_jid}")
+    [[ -n "${target_jid}" ]] && prediction_dep_rows+=("${target_jid}")
+    if [[ "${run_id}" == "A2" && -n "${offline_jid}" ]]; then prediction_dep_rows+=("${offline_jid}"); fi
+    while IFS= read -r source_id; do
+      [[ -z "${source_id}" ]] && continue
+      [[ -n "${recon_jids[${source_id}]:-}" ]] && prediction_dep_rows+=("${recon_jids[${source_id}]}")
+    done < <(tagger_reconstructors "${run_id}")
+    if [[ -z "${tagger_jids[${run_id}]:-}" ]]; then
+      if [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" \
+        && ( -n "${hlt_jid}" || -n "${target_jid}" || "${#prediction_dep_rows[@]}" -gt 0 ) ]]; then
+        echo "Predictions for ${run_id} cannot reuse a stale tagger while its active inputs are rebuilding." >&2
+        exit 2
+      fi
+      tagger_complete "${run_id}" || { echo "Predictions require incomplete tagger ${run_id}" >&2; exit 2; }
     fi
+    prediction_dep="$(join_dependencies "${prediction_dep_rows[@]}")"
     prediction_jids["${run_id}"]="$(submit_afterok "c2f_predict_${run_id}" "${prediction_dep}" "${SCRIPT_DIR}/run_cache_constrained_coarse_to_fine_predictions.sh" "${run_id}")"
   done
 fi
