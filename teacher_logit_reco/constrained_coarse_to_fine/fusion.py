@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import math
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -15,6 +15,9 @@ from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 
 from .layout import ACCOUNTING_FIELD_NAMES, PID_CATEGORY_NAMES, default_hierarchy_target_layout
 from .model import B3_FULL_HIERARCHY, CoarseToFineReconstructorConfig, HLTEncoderOutput, ParTStyleHLTEncoder
+
+if TYPE_CHECKING:
+    from .pseudo import PseudoParticleRenderOutput
 
 
 DUAL_STREAM_FUSION_CONTRACT = "constrained_coarse_to_fine_dual_stream_fusion_v1"
@@ -392,6 +395,72 @@ def pseudo_particle_views_from_arrays(
     return tuple(result)
 
 
+def pseudo_particle_views_from_rendered(
+    rendered: "PseudoParticleRenderOutput",
+    *,
+    view_names: Sequence[str],
+    source_variant: str,
+    view_indices: Sequence[int] | None = None,
+) -> tuple[PseudoParticleViewInput, ...]:
+    """Build differentiable pseudo streams directly from a live slot render.
+
+    Unlike :func:`pseudo_particle_views_from_arrays`, this path never converts
+    tensors through NumPy. Gradients from the tagger therefore reach the slot
+    decoder and, when unfrozen, the upper accounting hierarchy.
+    """
+
+    names = tuple(str(name) for name in view_names)
+    indices = tuple(range(rendered.num_views)) if view_indices is None else tuple(int(row) for row in view_indices)
+    if len(names) != len(indices):
+        raise ValueError("view_names and view_indices must have equal length")
+    if any(index < 0 or index >= rendered.num_views for index in indices):
+        raise ValueError(f"view_indices must be within a {rendered.num_views}-view render")
+    if len(names) != len(set(names)):
+        raise ValueError("rendered view names must be unique")
+    raw = rendered.tokens.float()
+    mask = rendered.mask.bool()
+    if raw.ndim != 4 or int(raw.shape[-1]) != RAW_TOKEN_DIM:
+        raise ValueError(f"rendered tokens must have shape [B,V,P,{RAW_TOKEN_DIM}]")
+    batch, views, particles, _ = raw.shape
+    hierarchy = rendered.hierarchy
+    if not hierarchy.levels:
+        raise ValueError("particle renders require a terminal hierarchy level")
+    terminal = hierarchy.levels[-1]
+    terminal_level = int(terminal.level)
+    parent_accounting = terminal.accounting[:, rendered.token_cell_indices.long()]
+    result: list[PseudoParticleViewInput] = []
+    for view_index, name in zip(indices, names):
+        view_tokens = raw[:, view_index]
+        view_mask = mask[:, view_index]
+        part = build_part_inputs_torch(view_tokens, view_mask, max_constits=particles)
+        view = PseudoParticleViewInput(
+            name=name,
+            raw_tokens=view_tokens,
+            points=part["points"],
+            features=part["features"],
+            lorentz_vectors=part["lorentz_vectors"],
+            mask=part["mask"],
+            candidate_weights=rendered.candidate_weights[:, view_index].float(),
+            existence_probability=rendered.existence_probability[:, view_index].float(),
+            reliability=rendered.reliability[:, view_index].float(),
+            expected_count=rendered.expected_count[:, view_index].float(),
+            slot_log_sigma=rendered.slot_log_sigma[:, view_index].float(),
+            uncertainty_mask=rendered.uncertainty_mask[:, view_index].bool(),
+            cell_indices=rendered.token_cell_indices.long(),
+            slot_indices=rendered.token_slot_indices.long(),
+            is_dust=rendered.token_is_dust.bool(),
+            parent_accounting=parent_accounting,
+            terminal_level=terminal_level,
+            view_kind="particle",
+            source_variant=str(source_variant),
+        )
+        view.validate()
+        result.append(view)
+    if len(result) != len(names) or any(row.batch_size != batch for row in result):
+        raise AssertionError("rendered pseudo streams are internally misaligned")
+    return tuple(result)
+
+
 def grid_view_from_arrays(
     arrays: Mapping[str, Any],
     metadata: Mapping[str, Any],
@@ -542,7 +611,11 @@ class HierarchicalPseudoStreamEncoder(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.local_encoder = nn.TransformerEncoder(local_layer, num_layers=config.pseudo_local_layers)
+        self.local_encoder = nn.TransformerEncoder(
+            local_layer,
+            num_layers=config.pseudo_local_layers,
+            enable_nested_tensor=False,
+        )
         global_layer = nn.TransformerEncoderLayer(
             d_model=config.d_model,
             nhead=config.num_heads,
@@ -552,7 +625,11 @@ class HierarchicalPseudoStreamEncoder(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.global_encoder = nn.TransformerEncoder(global_layer, num_layers=config.pseudo_global_layers)
+        self.global_encoder = nn.TransformerEncoder(
+            global_layer,
+            num_layers=config.pseudo_global_layers,
+            enable_nested_tensor=False,
+        )
         self.slot_norm = nn.LayerNorm(config.d_model)
         self.cell_norm = nn.LayerNorm(config.d_model)
         self.jet_norm = nn.LayerNorm(config.d_model)
@@ -912,7 +989,11 @@ class ConstrainedDualStreamTagger(nn.Module):
             feature_dim=config.feature_dim,
             encoder_layers=config.hlt_encoder_layers,
         )
-        self.hlt_encoder = ParTStyleHLTEncoder(hlt_config)
+        self.hlt_encoder = (
+            None
+            if self.spec.architecture == ARCH_PSEUDO_ONLY
+            else ParTStyleHLTEncoder(hlt_config)
+        )
         self.view_names = config.resolved_view_names
         self.pseudo_encoders = nn.ModuleDict(
             {
@@ -925,13 +1006,17 @@ class ConstrainedDualStreamTagger(nn.Module):
             if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL
             else None
         )
+        uses_cross_attention = self.spec.architecture in {
+            ARCH_CROSS_ATTENTION,
+            ARCH_GATED_CROSS_ATTENTION,
+        }
         self.cross_layers = nn.ModuleList(
             _CrossViewLayer(
                 config,
                 num_views=len(self.view_names),
                 gated=self.spec.architecture == ARCH_GATED_CROSS_ATTENTION,
             )
-            for _ in range(config.fusion_layers)
+            for _ in range(config.fusion_layers if uses_cross_attention else 0)
         )
         self.pooled_gate = (
             nn.ModuleList(
@@ -946,8 +1031,16 @@ class ConstrainedDualStreamTagger(nn.Module):
             if self.spec.architecture == ARCH_GATED_CROSS_ATTENTION
             else None
         )
-        self.hlt_head = nn.Linear(config.d_model, config.num_classes)
-        self.pseudo_head = nn.Linear(config.d_model, config.num_classes)
+        self.hlt_head = (
+            None
+            if self.spec.architecture == ARCH_PSEUDO_ONLY
+            else nn.Linear(config.d_model, config.num_classes)
+        )
+        self.pseudo_head = (
+            None
+            if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL
+            else nn.Linear(config.d_model, config.num_classes)
+        )
         if self.spec.architecture == ARCH_REPRESENTATION or self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
             classifier_dim = 4 * config.d_model
         elif self.spec.architecture in {ARCH_CROSS_ATTENTION, ARCH_GATED_CROSS_ATTENTION}:
@@ -955,15 +1048,19 @@ class ConstrainedDualStreamTagger(nn.Module):
         else:
             classifier_dim = config.d_model
         hidden = 2 * config.d_model
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(classifier_dim),
-            nn.Linear(classifier_dim, hidden),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(hidden, config.d_model),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_model, config.num_classes),
+        self.classifier = (
+            nn.Identity()
+            if self.spec.architecture in {ARCH_PSEUDO_ONLY, ARCH_LATE_LOGIT}
+            else nn.Sequential(
+                nn.LayerNorm(classifier_dim),
+                nn.Linear(classifier_dim, hidden),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(hidden, config.d_model),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.d_model, config.num_classes),
+            )
         )
         self.capacity_residual = None
         self.parameter_match_reference = None
@@ -1001,7 +1098,20 @@ class ConstrainedDualStreamTagger(nn.Module):
             for index, view in enumerate(ordered)
         )
 
-    def _view_availability(self, batch: int, device: torch.device) -> torch.Tensor:
+    def _view_availability(
+        self,
+        batch: int,
+        device: torch.device,
+        override: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if override is not None:
+            available = torch.as_tensor(override, device=device, dtype=torch.bool)
+            if tuple(available.shape) != (batch, len(self.view_names)):
+                raise ValueError(
+                    f"view availability override must have shape {(batch, len(self.view_names))}, "
+                    f"got {tuple(available.shape)}"
+                )
+            return available
         available = torch.ones(batch, len(self.view_names), dtype=torch.bool, device=device)
         if self.training and self.config.pseudo_view_dropout > 0.0 and len(self.view_names):
             available = torch.rand(batch, len(self.view_names), device=device) >= self.config.pseudo_view_dropout
@@ -1015,8 +1125,22 @@ class ConstrainedDualStreamTagger(nn.Module):
         self,
         hlt: ParticleStreamInput,
         pseudo_views: Sequence[PseudoParticleViewInput] = (),
+        *,
+        view_availability_override: torch.Tensor | None = None,
     ) -> FusionTaggerOutput:
         views = self._validate_views(tuple(pseudo_views))
+        if self.spec.architecture == ARCH_PSEUDO_ONLY:
+            encoded = tuple(self.pseudo_encoders[name](view) for name, view in zip(self.view_names, views))
+            pseudo_mean = torch.stack([row.jet_embedding for row in encoded], dim=1).mean(dim=1)
+            pseudo_logits = self.pseudo_head(pseudo_mean)
+            return self._simple_output(
+                pseudo_logits,
+                None,
+                pseudo_logits,
+                None,
+                encoded,
+                pseudo_mean.new_zeros(()),
+            )
         hlt_output = self.hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
         hlt_tokens = hlt_output.particle_embeddings
         hlt_mask = hlt_output.particle_mask
@@ -1056,9 +1180,6 @@ class ConstrainedDualStreamTagger(nn.Module):
         pseudo_mean = pseudo_jets.mean(dim=1)
         hlt_logits = self.hlt_head(hlt_output.jet_embedding)
         pseudo_logits = self.pseudo_head(pseudo_mean)
-        if self.spec.architecture == ARCH_PSEUDO_ONLY:
-            logits = self.classifier(pseudo_mean)
-            return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
         if self.spec.architecture == ARCH_LATE_LOGIT:
             logits = 0.5 * (hlt_logits + pseudo_logits)
             return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
@@ -1076,7 +1197,11 @@ class ConstrainedDualStreamTagger(nn.Module):
             return self._simple_output(logits, hlt_logits, pseudo_logits, hlt_output, encoded, zero)
         pseudo_tokens = tuple(row.token_embeddings for row in encoded)
         pseudo_masks = tuple(row.token_mask for row in encoded)
-        view_available = self._view_availability(hlt.batch_size, hlt_tokens.device)
+        view_available = self._view_availability(
+            hlt.batch_size,
+            hlt_tokens.device,
+            override=view_availability_override,
+        )
         token_gates = None
         layer_diagnostics = []
         for layer in self.cross_layers:
@@ -1177,9 +1302,9 @@ class ConstrainedDualStreamTagger(nn.Module):
     def _simple_output(
         self,
         logits: torch.Tensor,
-        hlt_logits: torch.Tensor,
-        pseudo_logits: torch.Tensor,
-        hlt_output: HLTEncoderOutput,
+        hlt_logits: torch.Tensor | None,
+        pseudo_logits: torch.Tensor | None,
+        hlt_output: HLTEncoderOutput | None,
         encoded: Sequence[PseudoStreamEncoding],
         zero: torch.Tensor,
     ) -> FusionTaggerOutput:
@@ -1187,7 +1312,11 @@ class ConstrainedDualStreamTagger(nn.Module):
             logits=logits,
             hlt_logits=hlt_logits,
             pseudo_logits=pseudo_logits,
-            hlt_representation=hlt_output.jet_embedding,
+            hlt_representation=(
+                hlt_output.jet_embedding
+                if hlt_output is not None
+                else logits.new_zeros(logits.shape[0], self.config.d_model)
+            ),
             pseudo_representations={name: row.jet_embedding for name, row in zip(self.view_names, encoded)},
             token_gates=None,
             pooled_gates=None,
@@ -1270,4 +1399,5 @@ __all__ = [
     "normalize_fusion_variant",
     "particle_stream_from_tokens",
     "pseudo_particle_views_from_arrays",
+    "pseudo_particle_views_from_rendered",
 ]

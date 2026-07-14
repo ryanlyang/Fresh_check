@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# Submit one constrained coarse-to-fine pseudo-offline campaign graph.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONDA_ENV:=atlas_kd}"
+export CONDA_ENV
+SCRIPT_DIR="${PROJECT_DIR}/sbatch"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+fresh_prepare_submitter
+
+: "${CONSTRAINED_C2F_CAMPAIGN_MODE:=pilot}"
+case "${CONSTRAINED_C2F_CAMPAIGN_MODE}" in
+  pilot)
+    : "${CONSTRAINED_C2F_MODEL_TRAIN_SIZE:=500000}"
+    : "${CONSTRAINED_C2F_MODEL_VAL_SIZE:=150000}"
+    : "${CONSTRAINED_C2F_STACK_TRAIN_SIZE:=300000}"
+    : "${CONSTRAINED_C2F_STACK_VAL_SIZE:=150000}"
+    : "${CONSTRAINED_C2F_FINAL_TEST_SIZE:=150000}"
+    ;;
+  highdata)
+    : "${CONSTRAINED_C2F_MODEL_TRAIN_SIZE:=5000000}"
+    : "${CONSTRAINED_C2F_MODEL_VAL_SIZE:=1000000}"
+    : "${CONSTRAINED_C2F_STACK_TRAIN_SIZE:=2000000}"
+    : "${CONSTRAINED_C2F_STACK_VAL_SIZE:=1000000}"
+    : "${CONSTRAINED_C2F_FINAL_TEST_SIZE:=1000000}"
+    ;;
+  *) echo "CONSTRAINED_C2F_CAMPAIGN_MODE must be pilot or highdata" >&2; exit 2 ;;
+esac
+
+: "${CONSTRAINED_C2F_STAGE_MODE:=full}"
+: "${CONSTRAINED_C2F_DATA_DIR:=${PD10_DATA_DIR:-${DATA_DIR}}}"
+if [[ -z "${CONSTRAINED_C2F_ROOT:-}" ]]; then
+  CONSTRAINED_C2F_ROOT="${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_${CONSTRAINED_C2F_CAMPAIGN_MODE}_$(date +%Y%m%d_%H%M%S)"
+fi
+: "${CONSTRAINED_C2F_INPUTS_DIR:=${CONSTRAINED_C2F_ROOT}/inputs}"
+: "${CONSTRAINED_C2F_MANIFEST_PATH:=${CONSTRAINED_C2F_INPUTS_DIR}/split_manifest/split_manifest.json.gz}"
+: "${CONSTRAINED_C2F_HLT_CACHE_DIR:=${CONSTRAINED_C2F_INPUTS_DIR}/hlt_cache}"
+: "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR:=${CONSTRAINED_C2F_INPUTS_DIR}/offline_cache}"
+: "${CONSTRAINED_C2F_TARGET_CACHE_DIR:=${CONSTRAINED_C2F_ROOT}/targets}"
+: "${CONSTRAINED_C2F_RECON_ROOT:=${CONSTRAINED_C2F_ROOT}/reconstructors}"
+: "${CONSTRAINED_C2F_TAGGER_ROOT:=${CONSTRAINED_C2F_ROOT}/taggers}"
+: "${CONSTRAINED_C2F_PREDICTION_DIR:=${CONSTRAINED_C2F_ROOT}/predictions}"
+: "${CONSTRAINED_C2F_FUSION_DIR:=${CONSTRAINED_C2F_ROOT}/fusion}"
+: "${CONSTRAINED_C2F_REPORT_DIR:=${CONSTRAINED_C2F_ROOT}/final_report}"
+: "${CONSTRAINED_C2F_HLT_PROFILE:=fixed_hlt_v2_realistic}"
+: "${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH:=2.5}"
+: "${CONSTRAINED_C2F_CACHE_SPLITS:=model_train model_val stack_train stack_val final_test}"
+: "${CONSTRAINED_C2F_OFFLINE_SPLITS:=model_train model_val stack_val}"
+: "${CONSTRAINED_C2F_TARGET_SPLITS:=model_train model_val stack_val}"
+: "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val final_test}"
+: "${CONSTRAINED_C2F_RECON_RUN_IDS:=B0 B1 B2 B3 B4 B5 B6 B7 C0 C1 C2 C3 C4 C5 C6 C5-B1 C5-B2 C5-B3 C5-no-slot}"
+: "${CONSTRAINED_C2F_TAGGER_RUN_IDS:=D0 D1 D2 D3 D4 D5 D5-B1 D5-B2 D5-B3 D6 D8 D8-seed1 D8-seed2 E0 E1 E2 E3 E5}"
+: "${CONSTRAINED_C2F_PREDICT_RUN_IDS:=${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
+: "${CONSTRAINED_C2F_FUSION_GROUPS:=F0:mean_logits:A0,D8 F1:simplex_logits:A0,D8 F2:external:F2-trained F3:simplex_logits:A0,D8 F4:mean_logits:D8,D8-seed1,D8-seed2 F5:linear_stacker:D8,D6,D8-seed1,D8-seed2}"
+: "${CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS:=F0 F1 F2 F3 F4 F5}"
+: "${CONSTRAINED_C2F_REPORT_RECON_RUN_IDS:=${CONSTRAINED_C2F_RECON_RUN_IDS}}"
+: "${CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS:=A0 ${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
+: "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT:=}"
+
+: "${CONSTRAINED_C2F_SUBMIT_SPLITS:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_TARGETS:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_TAGGERS:=1}"
+: "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS:=1}"
+# F0-F5 need external A0 and F2-trained prediction blocks. Keep posthoc opt-in
+# so a fresh core campaign is self-contained and cannot mislabel substitutes.
+: "${CONSTRAINED_C2F_SUBMIT_FUSION:=0}"
+: "${CONSTRAINED_C2F_SUBMIT_REPORT:=0}"
+
+: "${CONSTRAINED_C2F_SBATCH_ACCOUNT:=}"
+: "${CONSTRAINED_C2F_SBATCH_PARTITION:=}"
+: "${CONSTRAINED_C2F_GPU_GRES:=}"
+: "${CONSTRAINED_C2F_GPU_CPUS_PER_TASK:=}"
+: "${CONSTRAINED_C2F_GPU_MEM:=}"
+: "${CONSTRAINED_C2F_CPU_CPUS_PER_TASK:=}"
+: "${CONSTRAINED_C2F_CPU_MEM:=}"
+
+case "${CONSTRAINED_C2F_STAGE_MODE}" in
+  full) ;;
+  targets_only)
+    CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=0
+    CONSTRAINED_C2F_SUBMIT_PREDICTIONS=0; CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  reconstructors_only)
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=1; CONSTRAINED_C2F_SUBMIT_TAGGERS=0
+    CONSTRAINED_C2F_SUBMIT_PREDICTIONS=0; CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  taggers_only)
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=1
+    CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  depth_d5)
+    CONSTRAINED_C2F_RECON_RUN_IDS="C5-B1 C5-B2 C5-B3"
+    CONSTRAINED_C2F_TAGGER_RUN_IDS="D5 D5-B1 D5-B2 D5-B3"
+    CONSTRAINED_C2F_PREDICT_RUN_IDS="${CONSTRAINED_C2F_TAGGER_RUN_IDS}"
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=1
+    CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  d8_only)
+    CONSTRAINED_C2F_RECON_RUN_IDS="C5-B1 C5-B2 C5-B3"
+    CONSTRAINED_C2F_TAGGER_RUN_IDS="D8"
+    CONSTRAINED_C2F_PREDICT_RUN_IDS="D8"
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=1
+    CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  fusion_only)
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=0
+    CONSTRAINED_C2F_SUBMIT_PREDICTIONS=0; CONSTRAINED_C2F_SUBMIT_FUSION=1; CONSTRAINED_C2F_SUBMIT_REPORT=0
+    ;;
+  report_only)
+    CONSTRAINED_C2F_SUBMIT_SPLITS=0; CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0; CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE=0
+    CONSTRAINED_C2F_SUBMIT_TARGETS=0; CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS=0; CONSTRAINED_C2F_SUBMIT_TAGGERS=0
+    CONSTRAINED_C2F_SUBMIT_PREDICTIONS=0; CONSTRAINED_C2F_SUBMIT_FUSION=0; CONSTRAINED_C2F_SUBMIT_REPORT=1
+    ;;
+  *) echo "Unknown CONSTRAINED_C2F_STAGE_MODE: ${CONSTRAINED_C2F_STAGE_MODE}" >&2; exit 2 ;;
+esac
+
+export CONSTRAINED_C2F_ROOT CONSTRAINED_C2F_MANIFEST_PATH CONSTRAINED_C2F_HLT_CACHE_DIR
+export CONSTRAINED_C2F_OFFLINE_CACHE_DIR CONSTRAINED_C2F_TARGET_CACHE_DIR CONSTRAINED_C2F_RECON_ROOT
+export CONSTRAINED_C2F_TAGGER_ROOT CONSTRAINED_C2F_PREDICTION_DIR CONSTRAINED_C2F_FUSION_DIR
+export CONSTRAINED_C2F_REPORT_DIR CONSTRAINED_C2F_TARGET_SPLITS CONSTRAINED_C2F_PREDICT_SPLITS
+export CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT CONSTRAINED_C2F_FUSION_GROUPS
+export CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS CONSTRAINED_C2F_REPORT_RECON_RUN_IDS
+export CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS CONFIRM_FINAL_TEST
+
+dependency_token_is_valid() {
+  [[ "$1" =~ ^[0-9]+$ ]] || { fresh_is_dry_run && [[ "$1" =~ ^DRYRUN_[A-Za-z0-9_]+$ ]]; }
+}
+
+submit_job() {
+  local label="$1"; shift
+  local args=()
+  [[ -n "${CONSTRAINED_C2F_SBATCH_ACCOUNT}" ]] && args+=(--account="${CONSTRAINED_C2F_SBATCH_ACCOUNT}")
+  [[ -n "${CONSTRAINED_C2F_SBATCH_PARTITION}" ]] && args+=(--partition="${CONSTRAINED_C2F_SBATCH_PARTITION}")
+  local gpu=0 arg
+  for arg in "$@"; do
+    case "${arg}" in
+      */run_train_constrained_coarse_to_fine_reconstructor.sh|*/run_train_constrained_coarse_to_fine_tagger.sh|*/run_cache_constrained_coarse_to_fine_predictions.sh) gpu=1 ;;
+    esac
+  done
+  if [[ "${gpu}" -eq 1 ]]; then
+    [[ -n "${CONSTRAINED_C2F_GPU_GRES}" ]] && args+=(--gres="${CONSTRAINED_C2F_GPU_GRES}")
+    [[ -n "${CONSTRAINED_C2F_GPU_CPUS_PER_TASK}" ]] && args+=(--cpus-per-task="${CONSTRAINED_C2F_GPU_CPUS_PER_TASK}")
+    [[ -n "${CONSTRAINED_C2F_GPU_MEM}" ]] && args+=(--mem="${CONSTRAINED_C2F_GPU_MEM}")
+  else
+    [[ -n "${CONSTRAINED_C2F_CPU_CPUS_PER_TASK}" ]] && args+=(--cpus-per-task="${CONSTRAINED_C2F_CPU_CPUS_PER_TASK}")
+    [[ -n "${CONSTRAINED_C2F_CPU_MEM}" ]] && args+=(--mem="${CONSTRAINED_C2F_CPU_MEM}")
+  fi
+  if fresh_is_dry_run; then
+    fresh_print_shell_command sbatch "${args[@]}" "$@" >&2; printf '\n' >&2
+    printf 'DRYRUN_%s\n' "${label//[^A-Za-z0-9_]/_}"; return 0
+  fi
+  local output job_id
+  output="$(sbatch "${args[@]}" "$@")" || { echo "Failed to submit ${label}" >&2; return 2; }
+  echo "${output}" >&2
+  job_id="$(awk '{print $NF}' <<<"${output}")"
+  dependency_token_is_valid "${job_id}" || { echo "Invalid Slurm job id for ${label}: ${job_id}" >&2; return 2; }
+  printf '%s\n' "${job_id}"
+}
+
+join_dependencies() {
+  local rows=() row
+  for row in "$@"; do [[ -n "${row}" ]] && rows+=("${row}"); done
+  [[ "${#rows[@]}" -gt 0 ]] && fresh_join_by_colon "${rows[@]}"
+  return 0
+}
+
+submit_afterok() {
+  local label="$1" dependency="$2"; shift 2
+  if [[ -n "${dependency}" ]]; then submit_job "${label}" --dependency="afterok:${dependency}" "$@"; else submit_job "${label}" "$@"; fi
+}
+
+hlt_cache_complete() {
+  local rows=() split; fresh_split_words rows "${CONSTRAINED_C2F_CACHE_SPLITS}"
+  for split in "${rows[@]}"; do
+    [[ -f "${CONSTRAINED_C2F_HLT_CACHE_DIR}/${split}_fixed_hlt.npz" ]] || return 1
+    [[ -f "${CONSTRAINED_C2F_HLT_CACHE_DIR}/${split}_fixed_hlt_metadata.json" ]] || return 1
+  done
+}
+offline_cache_complete() {
+  local rows=() split; fresh_split_words rows "${CONSTRAINED_C2F_OFFLINE_SPLITS}"
+  for split in "${rows[@]}"; do
+    [[ -f "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}/${split}_offline.npz" ]] || return 1
+    [[ -f "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}/${split}_offline_metadata.json" ]] || return 1
+  done
+}
+target_complete() { [[ -f "${CONSTRAINED_C2F_TARGET_CACHE_DIR}/hierarchy_target_cache_manifest.json" ]]; }
+recon_complete() { [[ -f "${CONSTRAINED_C2F_RECON_ROOT}/$1/best_model_val.pt" && -f "${CONSTRAINED_C2F_RECON_ROOT}/$1/run_report.json" ]]; }
+tagger_complete() { [[ -f "${CONSTRAINED_C2F_TAGGER_ROOT}/$1/best_model_val.pt" && -f "${CONSTRAINED_C2F_TAGGER_ROOT}/$1/run_report.json" ]]; }
+prediction_complete() {
+  local rows=() split; fresh_split_words rows "${CONSTRAINED_C2F_PREDICT_SPLITS}"
+  for split in "${rows[@]}"; do [[ -f "${CONSTRAINED_C2F_PREDICTION_DIR}/$1/${split}_predictions.npz" ]] || return 1; done
+  [[ -f "${CONSTRAINED_C2F_PREDICTION_DIR}/$1/prediction_run_report.json" ]]
+}
+
+tagger_reconstructors() {
+  case "$1" in
+    D0|D1|D2|D3|D4|E0|E1|E2|E3) printf '%s\n' C5-B3 ;;
+    D5|D5-B3) printf '%s\n' C5-B3 ;;
+    D5-B1) printf '%s\n' C5-B1 ;;
+    D5-B2) printf '%s\n' C5-B2 ;;
+    D6) printf '%s\n' C6 ;;
+    D8|D8-seed1|D8-seed2) printf '%s\n' C5-B1 C5-B2 C5-B3 ;;
+    E5) printf '%s\n' C5-no-slot ;;
+    *) echo "Unsupported tagger run ID in submitter: $1" >&2; return 2 ;;
+  esac
+}
+
+preflight_reused_inputs() {
+  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_SPLITS}"; then fresh_require_file "${CONSTRAINED_C2F_MANIFEST_PATH}"; fi
+  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}"; then hlt_cache_complete || { echo "Required HLT cache is incomplete: ${CONSTRAINED_C2F_HLT_CACHE_DIR}" >&2; exit 2; }; fi
+  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}"; then offline_cache_complete || { echo "Required offline cache is incomplete: ${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" >&2; exit 2; }; fi
+  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" && { fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}" || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; }; then
+    target_complete || { echo "Required hierarchy target cache is incomplete: ${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >&2; exit 2; }
+  fi
+  if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; then
+    local rows=() run_id needs_hlt=0
+    fresh_split_words rows "${CONSTRAINED_C2F_TAGGER_RUN_IDS}"
+    for run_id in "${rows[@]}"; do [[ "${run_id}" != "D0" ]] && needs_hlt=1; done
+    if [[ "${needs_hlt}" -eq 1 ]]; then
+      [[ -n "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]] || { echo "Taggers other than D0 require CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT." >&2; exit 2; }
+      fresh_require_file "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}"
+    fi
+  fi
+}
+
+preflight_posthoc() {
+  if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_FUSION}"; then
+    local external
+    for external in A0 F2-trained; do
+      prediction_complete "${external}" || {
+        echo "F0-F5 fusion requires external ${external} predictions for ${CONSTRAINED_C2F_PREDICT_SPLITS}." >&2
+        echo "Populate ${CONSTRAINED_C2F_PREDICTION_DIR}/${external} or leave CONSTRAINED_C2F_SUBMIT_FUSION=0." >&2
+        exit 2
+      }
+    done
+  fi
+  if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_REPORT}" && ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_FUSION}"; then
+    fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_report.json"
+  fi
+  if [[ "${CONSTRAINED_C2F_STAGE_MODE}" == "report_only" ]]; then
+    local rows=() run_id
+    fresh_split_words rows "${CONSTRAINED_C2F_REPORT_RECON_RUN_IDS}"
+    for run_id in "${rows[@]}"; do
+      fresh_require_file "${CONSTRAINED_C2F_RECON_ROOT}/${run_id}/run_report.json"
+    done
+    fresh_split_words rows "${CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS}"
+    for run_id in "${rows[@]}"; do
+      fresh_require_file "${CONSTRAINED_C2F_TAGGER_ROOT}/${run_id}/run_report.json"
+      prediction_complete "${run_id}" || {
+        echo "Report-only rerun requires complete predictions for ${run_id}." >&2
+        exit 2
+      }
+    done
+  fi
+}
+
+preflight_reused_inputs
+preflight_posthoc
+
+submitter_log_dir="${CONSTRAINED_C2F_ROOT}/submission_logs/c2f_${CONSTRAINED_C2F_STAGE_MODE}_$(date +%Y%m%d_%H%M%S)"
+fresh_claim_new_dir "${submitter_log_dir}"
+if ! fresh_is_dry_run; then
+  {
+    echo "created_at=$(date -Is)"
+    echo "source_commit=$(fresh_source_commit)"
+    echo "source_status_hash=$(fresh_source_status_hash)"
+    echo "root=${CONSTRAINED_C2F_ROOT}"
+    echo "campaign_mode=${CONSTRAINED_C2F_CAMPAIGN_MODE}"
+    echo "stage_mode=${CONSTRAINED_C2F_STAGE_MODE}"
+    echo "hlt_profile=${CONSTRAINED_C2F_HLT_PROFILE}"
+    echo "hlt_strength=${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH}"
+    echo "sizes=${CONSTRAINED_C2F_MODEL_TRAIN_SIZE}/${CONSTRAINED_C2F_MODEL_VAL_SIZE}/${CONSTRAINED_C2F_STACK_TRAIN_SIZE}/${CONSTRAINED_C2F_STACK_VAL_SIZE}/${CONSTRAINED_C2F_FINAL_TEST_SIZE}"
+    echo "reconstructors=${CONSTRAINED_C2F_RECON_RUN_IDS}"
+    echo "taggers=${CONSTRAINED_C2F_TAGGER_RUN_IDS}"
+  } > "${submitter_log_dir}/metadata.txt"
+fi
+
+echo "constrained_c2f_submission_start:"
+echo "  root: ${CONSTRAINED_C2F_ROOT}"
+echo "  campaign_mode: ${CONSTRAINED_C2F_CAMPAIGN_MODE}"
+echo "  stage_mode: ${CONSTRAINED_C2F_STAGE_MODE}"
+echo "  hlt: ${CONSTRAINED_C2F_HLT_PROFILE} strength=${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH}"
+
+split_jid=""; hlt_jid=""; offline_jid=""; target_jid=""
+export DATA_DIR="${CONSTRAINED_C2F_DATA_DIR}" MANIFEST_PATH="${CONSTRAINED_C2F_MANIFEST_PATH}"
+export MODEL_TRAIN_SIZE="${CONSTRAINED_C2F_MODEL_TRAIN_SIZE}" MODEL_VAL_SIZE="${CONSTRAINED_C2F_MODEL_VAL_SIZE}"
+export STACK_TRAIN_SIZE="${CONSTRAINED_C2F_STACK_TRAIN_SIZE}" STACK_VAL_SIZE="${CONSTRAINED_C2F_STACK_VAL_SIZE}"
+export FINAL_TEST_SIZE="${CONSTRAINED_C2F_FINAL_TEST_SIZE}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_SPLITS}"; then
+  if fresh_bool_enabled "${SKIP_EXISTING}" && [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]]; then echo "skip splits: complete"; else
+    split_jid="$(submit_job c2f_splits "${SCRIPT_DIR}/run_build_fresh_splits.sh")"
+  fi
+fi
+
+export HLT_CACHE_DIR="${CONSTRAINED_C2F_HLT_CACHE_DIR}" HLT_SPLITS="${CONSTRAINED_C2F_CACHE_SPLITS}"
+export HLT_PROFILE="${CONSTRAINED_C2F_HLT_PROFILE}" HLT_DEGRADATION_STRENGTH="${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}"; then
+  if fresh_bool_enabled "${SKIP_EXISTING}" && hlt_cache_complete; then echo "skip HLT cache: complete"; else
+    hlt_jid="$(submit_afterok c2f_hlt_cache "${split_jid}" "${SCRIPT_DIR}/run_build_fresh_hlt_cache.sh")"
+  fi
+fi
+
+export ARCHITECTURE_VIEW_10CLASS_OFFLINE_MANIFEST_PATH="${CONSTRAINED_C2F_MANIFEST_PATH}"
+export ARCHITECTURE_VIEW_10CLASS_OFFLINE_CACHE_DIR="${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
+export ARCHITECTURE_VIEW_10CLASS_OFFLINE_SPLITS="${CONSTRAINED_C2F_OFFLINE_SPLITS}"
+export ARCHITECTURE_VIEW_10CLASS_OFFLINE_DATA_DIRS="${CONSTRAINED_C2F_DATA_DIR}"
+export ARCHITECTURE_VIEW_10CLASS_OFFLINE_OVERWRITE="${OVERWRITE}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}"; then
+  if fresh_bool_enabled "${SKIP_EXISTING}" && offline_cache_complete; then echo "skip offline cache: complete"; else
+    offline_jid="$(submit_afterok c2f_offline_cache "${split_jid}" "${SCRIPT_DIR}/run_cache_architecture_view_offline_inputs.sh")"
+  fi
+fi
+
+cache_dep="$(join_dependencies "${hlt_jid}" "${offline_jid}")"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}"; then
+  if fresh_bool_enabled "${SKIP_EXISTING}" && target_complete; then echo "skip targets: complete"; else
+    target_jid="$(submit_afterok c2f_targets "${cache_dep}" "${SCRIPT_DIR}/run_cache_constrained_coarse_to_fine_targets.sh")"
+  fi
+fi
+
+declare -A recon_jids=()
+declare -a recon_ids=()
+fresh_split_words recon_ids "${CONSTRAINED_C2F_RECON_RUN_IDS}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}"; then
+  for run_id in "${recon_ids[@]}"; do
+    if fresh_bool_enabled "${SKIP_EXISTING}" && recon_complete "${run_id}"; then echo "skip reconstructor ${run_id}: complete"; else
+      recon_jids["${run_id}"]="$(submit_afterok "c2f_reco_${run_id}" "${target_jid}" "${SCRIPT_DIR}/run_train_constrained_coarse_to_fine_reconstructor.sh" "${run_id}")"
+    fi
+  done
+fi
+
+declare -A tagger_jids=()
+declare -a tagger_ids=()
+fresh_split_words tagger_ids "${CONSTRAINED_C2F_TAGGER_RUN_IDS}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; then
+  for run_id in "${tagger_ids[@]}"; do
+    if fresh_bool_enabled "${SKIP_EXISTING}" && tagger_complete "${run_id}"; then echo "skip tagger ${run_id}: complete"; continue; fi
+    if [[ "${run_id}" == "D5-B3" ]]; then
+      if [[ -z "${tagger_jids[D5]:-}" ]]; then tagger_complete D5 || { echo "D5-B3 alias requires complete or queued D5" >&2; exit 2; }; fi
+      tagger_jids["${run_id}"]="$(submit_afterok c2f_tagger_D5-B3_alias "${tagger_jids[D5]:-}" "${SCRIPT_DIR}/run_alias_constrained_coarse_to_fine_tagger.sh" D5 D5-B3)"
+      continue
+    fi
+    dep_rows=(); while IFS= read -r source_id; do
+      [[ -z "${source_id}" ]] && continue
+      if [[ -n "${recon_jids[${source_id}]:-}" ]]; then dep_rows+=("${recon_jids[${source_id}]}"); else
+        recon_complete "${source_id}" || { echo "${run_id} requires incomplete reconstructor ${source_id}" >&2; exit 2; }
+      fi
+    done < <(tagger_reconstructors "${run_id}")
+    tagger_dep="$(join_dependencies "${dep_rows[@]}")"
+    tagger_jids["${run_id}"]="$(submit_afterok "c2f_tagger_${run_id}" "${tagger_dep}" "${SCRIPT_DIR}/run_train_constrained_coarse_to_fine_tagger.sh" "${run_id}")"
+  done
+fi
+
+declare -A prediction_jids=()
+declare -a predict_ids=()
+fresh_split_words predict_ids "${CONSTRAINED_C2F_PREDICT_RUN_IDS}"
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}"; then
+  for run_id in "${predict_ids[@]}"; do
+    if fresh_bool_enabled "${SKIP_EXISTING}" && prediction_complete "${run_id}"; then echo "skip predictions ${run_id}: complete"; continue; fi
+    if [[ "${run_id}" == "D5-B3" ]]; then
+      if [[ -z "${prediction_jids[D5]:-}" ]]; then prediction_complete D5 || { echo "D5-B3 prediction alias requires complete or queued D5 predictions" >&2; exit 2; }; fi
+      prediction_jids["${run_id}"]="$(submit_afterok c2f_predict_D5-B3_alias "${prediction_jids[D5]:-}" "${SCRIPT_DIR}/run_alias_constrained_coarse_to_fine_predictions.sh" D5 D5-B3)"
+      continue
+    fi
+    if [[ -z "${tagger_jids[${run_id}]:-}" ]]; then tagger_complete "${run_id}" || { echo "Predictions require incomplete tagger ${run_id}" >&2; exit 2; }; fi
+    prediction_jids["${run_id}"]="$(submit_afterok "c2f_predict_${run_id}" "${tagger_jids[${run_id}]:-}" "${SCRIPT_DIR}/run_cache_constrained_coarse_to_fine_predictions.sh" "${run_id}")"
+  done
+fi
+
+fusion_jid=""
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_FUSION}"; then
+  fusion_deps=(); for run_id in D8 D8-seed1 D8-seed2 D6; do
+    if [[ -n "${prediction_jids[${run_id}]:-}" ]]; then fusion_deps+=("${prediction_jids[${run_id}]}"); else prediction_complete "${run_id}" || { echo "Fusion requires incomplete predictions ${run_id}" >&2; exit 2; }; fi
+  done
+  fusion_jid="$(submit_afterok c2f_fusion "$(join_dependencies "${fusion_deps[@]}")" "${SCRIPT_DIR}/run_constrained_coarse_to_fine_fusion.sh")"
+fi
+
+report_jid=""
+if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_REPORT}"; then
+  report_dep="${fusion_jid}"
+  [[ -n "${report_dep}" ]] || fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_report.json"
+  report_jid="$(submit_afterok c2f_report "${report_dep}" "${SCRIPT_DIR}/run_write_constrained_coarse_to_fine_report.sh")"
+fi
+
+if ! fresh_is_dry_run; then
+  {
+    echo -e "stage\trun_id\tjob_id"
+    [[ -n "${split_jid}" ]] && echo -e "input\tsplits\t${split_jid}"
+    [[ -n "${hlt_jid}" ]] && echo -e "input\thlt_cache\t${hlt_jid}"
+    [[ -n "${offline_jid}" ]] && echo -e "input\toffline_cache\t${offline_jid}"
+    [[ -n "${target_jid}" ]] && echo -e "target\thierarchy\t${target_jid}"
+    for run_id in "${!recon_jids[@]}"; do echo -e "reconstructor\t${run_id}\t${recon_jids[${run_id}]}"; done
+    for run_id in "${!tagger_jids[@]}"; do echo -e "tagger\t${run_id}\t${tagger_jids[${run_id}]}"; done
+    for run_id in "${!prediction_jids[@]}"; do echo -e "prediction\t${run_id}\t${prediction_jids[${run_id}]}"; done
+    [[ -n "${fusion_jid}" ]] && echo -e "posthoc\tfusion\t${fusion_jid}"
+    [[ -n "${report_jid}" ]] && echo -e "posthoc\treport\t${report_jid}"
+  } > "${submitter_log_dir}/job_ids.tsv"
+fi
+
+cat <<SUMMARY
+constrained_c2f_submission_complete:
+  root: ${CONSTRAINED_C2F_ROOT}
+  stage_mode: ${CONSTRAINED_C2F_STAGE_MODE}
+  submission_log: ${submitter_log_dir}
+  fusion_queued: ${CONSTRAINED_C2F_SUBMIT_FUSION}
+  report_queued: ${CONSTRAINED_C2F_SUBMIT_REPORT}
+SUMMARY

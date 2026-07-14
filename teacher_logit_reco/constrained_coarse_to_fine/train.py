@@ -7,7 +7,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import subprocess
 from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -49,6 +51,27 @@ from .slots import (
 
 COARSE_TO_FINE_TRAIN_CONTRACT = "constrained_coarse_to_fine_reconstructor_training_v1"
 COARSE_TO_FINE_ALLOWED_TRAIN_SPLITS = ("model_train", "model_val", "stack_val")
+
+
+def _source_state() -> dict[str, Any]:
+    commit = os.environ.get("SOURCE_COMMIT") or os.environ.get("GIT_COMMIT")
+    status_hash = os.environ.get("SOURCE_STATUS_HASH")
+    try:
+        if not commit:
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+        if not status_hash:
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            status_hash = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"source_commit": commit, "source_status_hash": status_hash}
 
 
 @dataclass(frozen=True)
@@ -166,6 +189,7 @@ class _ShardDataset(Dataset):
         offline_tokens: np.ndarray | None,
         offline_mask: np.ndarray | None,
         split: str,
+        row_indices: np.ndarray | None = None,
     ) -> None:
         inputs = build_particle_transformer_inputs_from_tokens(
             np.asarray(hlt_tokens, dtype=np.float32),
@@ -179,6 +203,13 @@ class _ShardDataset(Dataset):
         self.vectors = torch.from_numpy(np.asarray(inputs.pf_vectors, dtype=np.float32))
         self.mask = torch.from_numpy(np.asarray(inputs.pf_mask, dtype=bool))
         self.labels = torch.from_numpy(np.asarray(labels, dtype=np.int64))
+        self.row_indices = torch.from_numpy(
+            np.arange(len(labels), dtype=np.int64)
+            if row_indices is None
+            else np.asarray(row_indices, dtype=np.int64)
+        )
+        if int(self.row_indices.shape[0]) != int(self.labels.shape[0]):
+            raise ValueError("row_indices must align with labels")
         self.targets = {
             name: torch.from_numpy(np.asarray(value, dtype=np.float32 if name != "final_cell_indices" else np.int64))
             for name, value in target_arrays.items()
@@ -198,6 +229,7 @@ class _ShardDataset(Dataset):
             "vectors": self.vectors[index],
             "mask": self.mask[index],
             "labels": self.labels[index],
+            "row_index": self.row_indices[index],
             **{name: value[index] for name, value in self.targets.items()},
         }
         if self.offline_tokens is not None and self.offline_mask is not None:
@@ -423,6 +455,7 @@ def _iter_split_loaders(
                 if require_offline_particles and source.offline_view is not None
                 else None
             ),
+            row_indices=np.arange(start, stop, dtype=np.int64),
             split=source.split,
         )
         generator = torch.Generator().manual_seed(int(config.seed) + int(epoch) * 1009 + shard_index)
@@ -832,6 +865,7 @@ def _checkpoint_payload(
     metrics: Mapping[str, Any],
     provenance: Mapping[str, Any],
     checkpoint_role: str,
+    source_state: Mapping[str, Any],
 ) -> dict[str, Any]:
     hierarchy_loss_config, slot_loss_config = _loss_configs(config, family, variant)
     return {
@@ -846,6 +880,7 @@ def _checkpoint_payload(
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
         "metrics": _jsonable(metrics),
         "provenance": _jsonable(provenance),
+        "source_state": _jsonable(source_state),
     }
 
 
@@ -907,6 +942,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             for group in optimizer.param_groups
         ],
         "trainable_parameter_count": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
+        "source_state": _source_state(),
     }
     _save_json(output_dir / "source_metadata.json", source_metadata)
     _save_json(output_dir / "config.json", config.to_dict())
@@ -963,6 +999,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     metrics=val_metrics,
                     provenance=provenance,
                     checkpoint_role="best_model_val",
+                    source_state=source_metadata["source_state"],
                 ),
                 output_dir / "best_model_val.pt",
             )
@@ -980,6 +1017,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     metrics=val_metrics,
                     provenance=provenance,
                     checkpoint_role="last",
+                    source_state=source_metadata["source_state"],
                 ),
                 output_dir / "last.pt",
             )
@@ -1057,6 +1095,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
         "provenance": provenance,
         "final_test_loaded": False,
+        "source_state": source_metadata["source_state"],
     }
     _save_json(output_dir / "run_report.json", report)
     return report

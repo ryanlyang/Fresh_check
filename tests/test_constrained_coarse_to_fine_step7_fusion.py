@@ -237,7 +237,7 @@ class ConstrainedCoarseToFineStep7FusionTests(unittest.TestCase):
         d6 = _small_tagger(D6_MULTIVIEW).eval().forward_detailed(self.hlt, c6_views)
         self.assertEqual(len(d6.pseudo_representations), 4)
         self.assertEqual(d6.pooled_gates.shape, (2, 4))
-        self.assertLessEqual(float(d6.pooled_gates.sum(dim=1).max()), 1.0)
+        self.assertLessEqual(float(d6.pooled_gates.sum(dim=1).max().detach()), 1.0)
 
         names = ("best_c", "c5_b1", "c5_b2", "c5_b3")
         depth_views = tuple(replace(self.canonical, name=name, terminal_level=index + 1) for index, name in enumerate(names))
@@ -300,6 +300,17 @@ class ConstrainedCoarseToFineStep7FusionTests(unittest.TestCase):
             FusionTaggerConfig(variant=D8_MULTIDEPTH, view_names=("only",))
         with self.assertRaisesRegex(ValueError, "grid-token"):
             _small_tagger(D7_GRID_ONLY).eval().forward_detailed(self.hlt, (replace(self.canonical, name="grid"),))
+
+    def test_remaining_d5_depth_and_external_source_recipes_have_runnable_architectures(self):
+        for variant in (D5_END_TO_END, E4_UNCONSTRAINED_SOURCE, E5_NO_SLOT_LOSS_SOURCE):
+            with self.subTest(variant=variant):
+                output = _small_tagger(variant).eval().forward_detailed(self.hlt, (self.canonical,))
+                self.assertEqual(output.logits.shape, (2, 10))
+        for variant, name in ((D5_B1, "c5_b1"), (D5_B2, "c5_b2"), (D5_B3, "c5_b3")):
+            with self.subTest(variant=variant):
+                view = replace(self.canonical, name=name)
+                output = _small_tagger(variant).eval().forward_detailed(self.hlt, (view,))
+                self.assertEqual(output.logits.shape, (2, 10))
 
 
 if __name__ == "__main__":
