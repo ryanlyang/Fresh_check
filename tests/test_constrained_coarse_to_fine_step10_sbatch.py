@@ -10,7 +10,12 @@ import tempfile
 import numpy as np
 
 from jetclass_fresh.hlt_cache import hash_arrays
-from scripts.validate_constrained_coarse_to_fine_artifact import _npz_logical_hash
+from scripts.validate_constrained_coarse_to_fine_artifact import (
+    _TARGET_SHARD_ARRAY_KEYS,
+    _json_hash,
+    _npz_logical_hash,
+    _target_content_hash_payload,
+)
 
 from teacher_logit_reco.constrained_coarse_to_fine import (
     D4_UNCERTAINTY_GATED,
@@ -27,6 +32,60 @@ def _read(name: str) -> str:
     return (SBATCH / name).read_text(encoding="utf-8")
 
 
+def _write_active_input_metadata(
+    root: Path,
+    manifest_sha: str,
+    splits: tuple[str, ...] = ("model_train", "model_val"),
+) -> tuple[Path, Path, Path, dict[str, dict[str, object]]]:
+    hlt_root = root / "hlt"
+    offline_root = root / "offline"
+    target_root = root / "targets"
+    for path in (hlt_root, offline_root, target_root):
+        path.mkdir()
+    provenance: dict[str, dict[str, object]] = {}
+    for split in splits:
+        hlt_hash = f"hlt-{split}"
+        offline_hash = f"offline-{split}"
+        target_hash = f"target-{split}"
+        identity_hash = f"ids-{split}"
+        hlt = {
+            "source_manifest_hash": manifest_sha,
+            "hlt_profile": "fixed_hlt_v2_realistic",
+            "hlt_profile_version": "v1",
+            "hlt_degradation_strength": 2.5,
+            "hlt_content_hash": hlt_hash,
+            "jet_identity_hash": identity_hash,
+        }
+        offline = {
+            "source_manifest_hash": manifest_sha,
+            "offline_content_hash": offline_hash,
+            "jet_identity_hash": identity_hash,
+        }
+        target = {
+            **hlt,
+            "cache_contract": "constrained_coarse_to_fine_hierarchy_target_cache_v1",
+            "offline_content_hash": offline_hash,
+            "target_content_hash": target_hash,
+        }
+        (hlt_root / f"{split}_fixed_hlt_metadata.json").write_text(json.dumps(hlt), encoding="utf-8")
+        (offline_root / f"{split}_offline_metadata.json").write_text(json.dumps(offline), encoding="utf-8")
+        (target_root / f"{split}_hierarchy_targets_metadata.json").write_text(json.dumps(target), encoding="utf-8")
+        provenance[split] = {
+            **hlt,
+            "offline_content_hash": offline_hash,
+            "target_content_hash": target_hash,
+        }
+    return hlt_root, offline_root, target_root, provenance
+
+
+def _active_input_args(hlt_root: Path, offline_root: Path, target_root: Path) -> tuple[str, ...]:
+    return (
+        "--hlt-cache-dir", str(hlt_root),
+        "--offline-cache-dir", str(offline_root),
+        "--target-cache-dir", str(target_root),
+    )
+
+
 def test_streaming_npz_hash_matches_project_logical_hash() -> None:
     arrays = {
         "tokens": np.arange(48, dtype=np.float32).reshape(2, 3, 8),
@@ -39,6 +98,171 @@ def test_streaming_npz_hash_matches_project_logical_hash() -> None:
         path = Path(tmp) / "cache.npz"
         np.savez_compressed(path, **arrays)
         assert _npz_logical_hash(path, tuple(arrays)) == hash_arrays(arrays)
+
+
+def test_target_validator_recomputes_split_and_cache_set_aggregate_hashes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "manifest.json"
+        payload = {"splits": {"model_train": []}}
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        manifest_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        hlt_root, offline_root, target_root, _ = _write_active_input_metadata(
+            root, manifest_sha, ("model_train",)
+        )
+        shard_root = target_root / "model_train_hierarchy_targets"
+        shard_root.mkdir()
+        arrays = {name: np.zeros((1,), dtype=np.float32) for name in _TARGET_SHARD_ARRAY_KEYS}
+        shard_path = shard_root / "shard_00000.npz"
+        np.savez_compressed(shard_path, **arrays)
+        shard_hash = hash_arrays(arrays)
+        metadata = {
+            "cache_contract": "constrained_coarse_to_fine_hierarchy_target_cache_v1",
+            "builder_version": "test-v1",
+            "split": "model_train",
+            "n_jets": 1,
+            "target_dtype": "float32",
+            "source_manifest_hash": manifest_sha,
+            "hlt_profile": "fixed_hlt_v2_realistic",
+            "hlt_profile_version": "v1",
+            "hlt_degradation_strength": 2.5,
+            "hlt_content_hash": "hlt-model_train",
+            "offline_content_hash": "offline-model_train",
+            "jet_identity_hash": "ids-model_train",
+            "layout": {"layout_version": "test"},
+            "shards": [
+                {
+                    "filename": shard_path.name,
+                    "shard_index": 0,
+                    "start": 0,
+                    "stop": 1,
+                    "n_jets": 1,
+                    "content_hash": shard_hash,
+                }
+            ],
+        }
+        metadata["target_content_hash"] = _json_hash(_target_content_hash_payload(metadata))
+        metadata_path = target_root / "model_train_hierarchy_targets_metadata.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        cache_set = {
+            "cache_set_contract": "constrained_coarse_to_fine_hierarchy_target_cache_set_v1",
+            "builder_version": "test-v1",
+            "source_manifest_hash": manifest_sha,
+            "hlt_profile": "fixed_hlt_v2_realistic",
+            "hlt_profile_version": "v1",
+            "hlt_degradation_strength": 2.5,
+            "splits": ["model_train"],
+            "split_target_content_hashes": {"model_train": metadata["target_content_hash"]},
+        }
+        cache_set["cache_set_content_hash"] = _json_hash(cache_set)
+        cache_set_path = target_root / "hierarchy_target_cache_manifest.json"
+        cache_set_path.write_text(json.dumps(cache_set), encoding="utf-8")
+        command = (
+            sys.executable,
+            str(ROOT / "scripts" / "validate_constrained_coarse_to_fine_artifact.py"),
+            "--kind", "target-cache", "--path", str(target_root),
+            "--manifest", str(manifest), "--splits", "model_train",
+            "--hlt-cache-dir", str(hlt_root), "--offline-cache-dir", str(offline_root),
+        )
+        result = subprocess.run(command, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        cache_set["cache_set_content_hash"] = "stale-aggregate"
+        cache_set_path.write_text(json.dumps(cache_set), encoding="utf-8")
+        failed = subprocess.run(command, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "target cache set aggregate content mismatch" in failed.stderr
+
+
+def test_prediction_validator_binds_reuse_to_active_input_and_tagger_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "manifest.json"
+        payload = {"splits": {"model_val": []}}
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        manifest_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        hlt_root, offline_root, target_root, provenance = _write_active_input_metadata(
+            root, manifest_sha, ("model_train", "model_val")
+        )
+        tagger_root = root / "taggers"
+        active_tagger = tagger_root / "A0"
+        active_tagger.mkdir(parents=True)
+        checkpoint = active_tagger / "best_model_val.pt"
+        checkpoint.write_bytes(b"active checkpoint")
+        checkpoint_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        (active_tagger / "run_report.json").write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "variant": "A0",
+                    "checkpoint_sha256": checkpoint_hash,
+                    "provenance": provenance,
+                }
+            ),
+            encoding="utf-8",
+        )
+        prediction_root = root / "predictions" / "A0"
+        prediction_root.mkdir(parents=True)
+        arrays = {
+            "logits": np.zeros((1, 10), dtype=np.float32),
+            "probs": np.full((1, 10), 0.1, dtype=np.float32),
+            "labels": np.zeros((1,), dtype=np.int64),
+            "jet_file_indices": np.zeros((1,), dtype=np.int32),
+            "jet_entries": np.zeros((1,), dtype=np.int64),
+        }
+        np.savez_compressed(prediction_root / "model_val_predictions.npz", **arrays)
+        representation = prediction_root / "model_val_representations.npz"
+        np.savez_compressed(representation, representation=np.zeros((1, 4), dtype=np.float32))
+        representation_hash = hashlib.sha256(representation.read_bytes()).hexdigest()
+        metadata = {
+            "run_id": "A0",
+            "source_manifest_hash": manifest_sha,
+            "hlt_profile": "fixed_hlt_v2_realistic",
+            "hlt_profile_version": "v1",
+            "hlt_degradation_strength": 2.5,
+            "deployable_hlt_only": True,
+            "hlt_content_hash": "hlt-model_val",
+            "jet_identity_hash": "ids-model_val",
+            "prediction_content_hash": hash_arrays(arrays),
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_sha256": checkpoint_hash,
+            "fusion_representation_sha256": representation_hash,
+        }
+        (prediction_root / "model_val_predictions_metadata.json").write_text(
+            json.dumps(metadata), encoding="utf-8"
+        )
+        (prediction_root / "prediction_run_report.json").write_text(
+            json.dumps({"ok": True, "splits": {"model_val": metadata}}), encoding="utf-8"
+        )
+        command = (
+            sys.executable,
+            str(ROOT / "scripts" / "validate_constrained_coarse_to_fine_artifact.py"),
+            "--kind", "prediction", "--path", str(prediction_root), "--run-id", "A0",
+            "--manifest", str(manifest), "--splits", "model_val",
+            "--hlt-cache-dir", str(hlt_root), "--offline-cache-dir", str(offline_root),
+            "--target-cache-dir", str(target_root),
+            "--tagger-root", str(tagger_root),
+        )
+        result = subprocess.run(command, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        active_hlt_path = hlt_root / "model_val_fixed_hlt_metadata.json"
+        active_hlt = json.loads(active_hlt_path.read_text(encoding="utf-8"))
+        active_hlt["hlt_content_hash"] = "replacement-hlt-model_val"
+        active_hlt_path.write_text(json.dumps(active_hlt), encoding="utf-8")
+        active_target_path = target_root / "model_val_hierarchy_targets_metadata.json"
+        active_target = json.loads(active_target_path.read_text(encoding="utf-8"))
+        active_target["hlt_content_hash"] = "replacement-hlt-model_val"
+        active_target_path.write_text(json.dumps(active_target), encoding="utf-8")
+        tagger_report_path = active_tagger / "run_report.json"
+        tagger_report = json.loads(tagger_report_path.read_text(encoding="utf-8"))
+        tagger_report["provenance"]["model_val"]["hlt_content_hash"] = "replacement-hlt-model_val"
+        tagger_report_path.write_text(json.dumps(tagger_report), encoding="utf-8")
+        failed = subprocess.run(command, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "active input content mismatch" in failed.stderr
 
 
 RUNNERS = (
@@ -142,6 +366,12 @@ def test_step10_reuse_and_posthoc_paths_fail_closed() -> None:
     assert "F4:mean_logits:BEST_D,BEST_D_SEED1,BEST_D_SEED2" in text
     assert "F5:linear_stacker:D8,D6,BEST_D,BEST_D_SEED1,BEST_D_SEED2" in text
     assert "validate_constrained_coarse_to_fine_artifact.py" in text
+    assert '--hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"' in text
+    assert '--offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"' in text
+    assert '--target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}"' in text
+    assert '--tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}"' in text
+    assert "Cannot reuse hierarchy targets while active HLT/offline caches are being rebuilt." in text
+    assert '[[ -z "${hlt_jid}" && -z "${offline_jid}" && -z "${target_jid}" ]]' in text
     assert "Report-only rerun requires complete predictions" in text
     assert "CONSTRAINED_C2F_SUBMIT_FUSION:=1" in text
     assert "CONSTRAINED_C2F_SUBMIT_REPORT:=1" in text
@@ -153,10 +383,19 @@ def test_step10_campaign_is_staged_and_final_test_is_separate() -> None:
     assert "CONSTRAINED_C2F_CAMPAIGN_MODE=highdata" in text
     assert "--dependency" not in text
     assert "CONSTRAINED_C2F_APPROVE_HIGHDATA" in text
+    assert "CONSTRAINED_C2F_PILOT_REPORT_PATH" in text
     assert "pilot final report is not ok" in text
+    canonical = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    assert '"${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata"' in canonical
+    assert "High-data submission requires CONSTRAINED_C2F_APPROVE_HIGHDATA=1" in canonical
+    assert "High-data submission requires CONSTRAINED_C2F_PILOT_REPORT_PATH" in canonical
+    assert "pilot final report is not ok" in canonical
+    standalone = _read("submit_constrained_coarse_to_fine_highdata.sh")
+    assert "submit_constrained_coarse_to_fine_experiment.sh" in standalone
     final = _read("submit_constrained_coarse_to_fine_final_claims.sh")
     assert "CONSTRAINED_C2F_APPROVE_FINAL_TEST" in final
     assert "CONSTRAINED_C2F_STAGE_MODE=final_claims" in final
+    assert "CONSTRAINED_C2F_CAMPAIGN_MODE=highdata" in final
     assert "final_test_claim_receipt.json" in final
     assert 'claim_ids=("${predict_ids[@]}" F0 F1 F2 F3 F4 F5)' in final
     for runner in (
@@ -190,6 +429,17 @@ def test_step10_saves_only_selected_checkpoints_by_default() -> None:
     assert "--no-save-last-checkpoint" in tagger
 
 
+def test_step10_end_to_end_memory_preflight_matches_sequential_split_loading() -> None:
+    tagger = _read("run_train_constrained_coarse_to_fine_tagger.sh")
+    assert "--loading-mode sequential" in tagger
+    source = (ROOT / "teacher_logit_reco" / "constrained_coarse_to_fine" / "end_to_end.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"split_loading": "sequential_reload_per_epoch"' in source
+    assert "del train_source" in source
+    assert "del val_source" in source
+
+
 def test_completion_validator_rejects_stale_manifest_provenance() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -199,6 +449,7 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
         manifest_sha = hashlib.sha256(
             json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        hlt_root, offline_root, target_root, active_provenance = _write_active_input_metadata(root, manifest_sha)
         run = root / "A0"
         run.mkdir()
         (run / "best_model_val.pt").write_bytes(b"checkpoint")
@@ -206,15 +457,8 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
 
         def report(source_manifest_hash: str) -> dict:
             provenance = {
-                split: {
-                    "source_manifest_hash": source_manifest_hash,
-                    "hlt_profile": "fixed_hlt_v2_realistic",
-                    "hlt_profile_version": "v1",
-                    "hlt_degradation_strength": 2.5,
-                    "hlt_content_hash": f"hlt-{split}",
-                    "jet_identity_hash": f"ids-{split}",
-                }
-                for split in ("model_train", "model_val")
+                split: {**row, "source_manifest_hash": source_manifest_hash}
+                for split, row in active_provenance.items()
             }
             return {
                 "ok": True,
@@ -236,8 +480,24 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
             "A0",
             "--manifest",
             str(manifest),
+            *_active_input_args(hlt_root, offline_root, target_root),
         )
         assert subprocess.run(command, capture_output=True, text=True).returncode == 0
+        hlt_path = hlt_root / "model_train_fixed_hlt_metadata.json"
+        target_path = target_root / "model_train_hierarchy_targets_metadata.json"
+        hlt_metadata = json.loads(hlt_path.read_text(encoding="utf-8"))
+        target_metadata = json.loads(target_path.read_text(encoding="utf-8"))
+        hlt_metadata["hlt_content_hash"] = "replacement-hlt-model_train"
+        target_metadata["hlt_content_hash"] = "replacement-hlt-model_train"
+        hlt_path.write_text(json.dumps(hlt_metadata), encoding="utf-8")
+        target_path.write_text(json.dumps(target_metadata), encoding="utf-8")
+        failed = subprocess.run(command, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "active hlt_content_hash mismatch" in failed.stderr
+        hlt_metadata["hlt_content_hash"] = "hlt-model_train"
+        target_metadata["hlt_content_hash"] = "hlt-model_train"
+        hlt_path.write_text(json.dumps(hlt_metadata), encoding="utf-8")
+        target_path.write_text(json.dumps(target_metadata), encoding="utf-8")
         report_path.write_text(json.dumps(report("stale-manifest")), encoding="utf-8")
         failed = subprocess.run(command, capture_output=True, text=True)
         assert failed.returncode != 0
@@ -253,17 +513,7 @@ def test_completion_validator_accepts_normalized_control_and_seed_variants() -> 
         manifest_sha = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        provenance = {
-            split: {
-                "source_manifest_hash": manifest_sha,
-                "hlt_profile": "fixed_hlt_v2_realistic",
-                "hlt_profile_version": "v1",
-                "hlt_degradation_strength": 2.5,
-                "hlt_content_hash": f"hlt-{split}",
-                "jet_identity_hash": f"ids-{split}",
-            }
-            for split in ("model_train", "model_val")
-        }
+        hlt_root, offline_root, target_root, provenance = _write_active_input_metadata(root, manifest_sha)
         cases = (
             (
                 "reconstructor",
@@ -304,6 +554,7 @@ def test_completion_validator_accepts_normalized_control_and_seed_variants() -> 
                 run_id,
                 "--manifest",
                 str(manifest),
+                *_active_input_args(hlt_root, offline_root, target_root),
             )
             result = subprocess.run(command, capture_output=True, text=True)
             assert result.returncode == 0, result.stderr
@@ -318,17 +569,7 @@ def test_completion_validator_rejects_wrong_no_slot_attestation_and_modified_che
         manifest_sha = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        provenance = {
-            split: {
-                "source_manifest_hash": manifest_sha,
-                "hlt_profile": "fixed_hlt_v2_realistic",
-                "hlt_profile_version": "v1",
-                "hlt_degradation_strength": 2.5,
-                "hlt_content_hash": f"hlt-{split}",
-                "jet_identity_hash": f"ids-{split}",
-            }
-            for split in ("model_train", "model_val")
-        }
+        hlt_root, offline_root, target_root, provenance = _write_active_input_metadata(root, manifest_sha)
         run = root / "C5-no-slot"
         run.mkdir()
         checkpoint = run / "best_model_val.pt"
@@ -347,6 +588,7 @@ def test_completion_validator_rejects_wrong_no_slot_attestation_and_modified_che
             str(ROOT / "scripts" / "validate_constrained_coarse_to_fine_artifact.py"),
             "--kind", "reconstructor", "--path", str(run), "--run-id", "C5-no-slot",
             "--manifest", str(manifest),
+            *_active_input_args(hlt_root, offline_root, target_root),
         )
         failed = subprocess.run(command, capture_output=True, text=True)
         assert failed.returncode != 0

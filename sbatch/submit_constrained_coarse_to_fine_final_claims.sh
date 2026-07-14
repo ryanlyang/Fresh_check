@@ -44,6 +44,7 @@ for run_id in "${claim_ids[@]}"; do
 done
 
 export CONSTRAINED_C2F_STAGE_MODE=final_claims
+export CONSTRAINED_C2F_CAMPAIGN_MODE=highdata
 export CONSTRAINED_C2F_PREDICT_RUN_IDS
 export CONSTRAINED_C2F_PREDICT_SPLITS=final_test
 export CONSTRAINED_C2F_OFFLINE_SPLITS=final_test

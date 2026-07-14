@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -32,6 +33,7 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     hungarian_slot_diagnostic,
     prepare_cell_slot_targets,
 )
+from teacher_logit_reco.constrained_coarse_to_fine.slots import _select_local_hlt_memory
 
 
 def _particle(pt: float, eta: float, phi: float, pid: int, charge: float = 0.0) -> np.ndarray:
@@ -128,6 +130,28 @@ def _targets_for(output, offline, offline_mask, hlt, hlt_mask):
 
 
 class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
+    def test_cell_local_memory_masks_cross_cell_particles_and_uses_only_zero_dummy(self):
+        embedding = torch.tensor([[[3.0, -2.0]]])
+        hierarchy = SimpleNamespace(
+            hlt=SimpleNamespace(
+                particle_embeddings=embedding,
+                particle_mask=torch.tensor([[True]]),
+            )
+        )
+        vectors = torch.tensor([[[1.0, 0.0, 0.0, 1.0]]])
+        empty_cell = torch.tensor([[0.20, 0.30, 0.20, 0.30]])
+        radial_bounds = torch.tensor([[0.0, 1.0]])
+        selected, selected_mask = _select_local_hlt_memory(
+            hierarchy,
+            vectors,
+            empty_cell,
+            radial_bounds,
+            1,
+            coordinate_extent=0.8,
+        )
+        self.assertTrue(bool(selected_mask[0, 0, 0]))
+        self.assertTrue(torch.equal(selected[0, 0, 0], torch.zeros_like(selected[0, 0, 0])))
+
     def test_c_variant_registry_and_shared_depth_control_spec(self):
         self.assertEqual(len(C_TIER_VARIANTS), 10)
         depth_specs = [c_tier_variant_spec(name) for name in (C5_B1, C5_B2, C5_B3)]

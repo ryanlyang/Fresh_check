@@ -205,13 +205,17 @@ def _active_split_provenance(
     _require_equal(target.get("offline_content_hash"), offline_hash, f"active target/{split} offline")
     _require_equal(target.get("jet_identity_hash"), hlt.get("jet_identity_hash"), f"active target/{split} HLT identity")
     _require_equal(target.get("jet_identity_hash"), offline.get("jet_identity_hash"), f"active target/{split} offline identity")
-    return {
+    active = {
         "source_manifest_hash": manifest_sha,
         "hlt_content_hash": hlt.get("hlt_content_hash"),
         "offline_content_hash": offline_hash,
         "target_content_hash": target.get("target_content_hash"),
         "jet_identity_hash": target.get("jet_identity_hash"),
     }
+    for field, value in active.items():
+        if value in (None, ""):
+            raise ValueError(f"active provenance/{split} lacks {field}")
+    return active
 
 
 def _require_active_training_provenance(
@@ -415,8 +419,18 @@ def _validate_predictions(
     *,
     hlt_cache_dir: Path,
     offline_cache_dir: Path,
+    target_cache_dir: Path,
     tagger_root: Path,
 ) -> None:
+    _validate_training(
+        tagger_root / run_id,
+        run_id,
+        manifest_sha,
+        tagger=True,
+        hlt_cache_dir=hlt_cache_dir,
+        offline_cache_dir=offline_cache_dir,
+        target_cache_dir=target_cache_dir,
+    )
     report = _read_json(root / "prediction_run_report.json")
     if report.get("ok") is not True:
         raise ValueError(f"{run_id} prediction_run_report is not successful")
@@ -436,12 +450,18 @@ def _validate_predictions(
             if metadata.get("offline_content_hash") in (None, ""):
                 raise ValueError(f"prediction/{run_id}/{split} lacks offline_content_hash")
             active = _read_json(offline_cache_dir / f"{split}_offline_metadata.json")
+            _require_equal(
+                active.get("source_manifest_hash"),
+                manifest_sha,
+                f"active offline cache/{split} source_manifest_hash",
+            )
             active_content_hash = active.get("offline_content_hash") or active.get("content_hash")
         else:
             _require_hlt_contract(metadata, manifest_sha, f"prediction/{run_id}/{split}")
             if metadata.get("deployable_hlt_only") is not True:
                 raise ValueError(f"prediction/{run_id}/{split} is not deployable_hlt_only")
             active = _read_json(hlt_cache_dir / f"{split}_fixed_hlt_metadata.json")
+            _require_hlt_contract(active, manifest_sha, f"active HLT cache/{split}")
             active_content_hash = active.get("hlt_content_hash")
         _require_equal(
             metadata.get("offline_content_hash" if offline_reference else "hlt_content_hash"),
@@ -562,8 +582,11 @@ def main() -> int:
     else:
         if not splits:
             raise ValueError("prediction validation requires --splits")
-        if not args.hlt_cache_dir or not args.offline_cache_dir or not args.tagger_root:
-            raise ValueError("prediction validation requires active --hlt-cache-dir, --offline-cache-dir, and --tagger-root")
+        if not args.hlt_cache_dir or not args.offline_cache_dir or not args.target_cache_dir or not args.tagger_root:
+            raise ValueError(
+                "prediction validation requires active --hlt-cache-dir, --offline-cache-dir, "
+                "--target-cache-dir, and --tagger-root"
+            )
         _validate_predictions(
             root,
             str(args.run_id),
@@ -571,6 +594,7 @@ def main() -> int:
             manifest_sha,
             hlt_cache_dir=Path(args.hlt_cache_dir),
             offline_cache_dir=Path(args.offline_cache_dir),
+            target_cache_dir=Path(args.target_cache_dir),
             tagger_root=Path(args.tagger_root),
         )
     print(f"valid {args.kind}: {root}")

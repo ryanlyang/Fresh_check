@@ -72,7 +72,7 @@ fi
 : "${CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS:=${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
 : "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT:=${CONSTRAINED_C2F_TAGGER_ROOT}/A0/best_model_val.pt}"
 
-if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" ]]; then
+if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" && "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]]; then
   fresh_bool_enabled "${CONSTRAINED_C2F_APPROVE_HIGHDATA}" || {
     echo "High-data submission requires CONSTRAINED_C2F_APPROVE_HIGHDATA=1 after pilot review." >&2
     exit 2
@@ -272,6 +272,7 @@ prediction_complete() {
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
+    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" \
     --tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}" >/dev/null
 }
 
@@ -296,7 +297,12 @@ preflight_reused_inputs() {
   if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_SPLITS}"; then fresh_require_file "${CONSTRAINED_C2F_MANIFEST_PATH}"; fi
   if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}"; then hlt_cache_complete || { echo "Required HLT cache is incomplete: ${CONSTRAINED_C2F_HLT_CACHE_DIR}" >&2; exit 2; }; fi
   if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}"; then offline_cache_complete || { echo "Required offline cache is incomplete: ${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" >&2; exit 2; }; fi
-  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" && { fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}" || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; }; then
+  if ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" && {
+    fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}" \
+      || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}" \
+      || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}" \
+      || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_REPORT}"
+  }; then
     target_complete || { echo "Required hierarchy target cache is incomplete: ${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >&2; exit 2; }
   fi
   if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}"; then
