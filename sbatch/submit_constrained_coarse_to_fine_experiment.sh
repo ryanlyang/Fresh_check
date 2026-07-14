@@ -34,17 +34,6 @@ case "${CONSTRAINED_C2F_CAMPAIGN_MODE}" in
   *) echo "CONSTRAINED_C2F_CAMPAIGN_MODE must be pilot or highdata" >&2; exit 2 ;;
 esac
 
-if [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]] \
-  && fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}" \
-  && ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}" \
-  && { fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}" \
-    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}" \
-    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" \
-    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}"; }; then
-  echo "Cannot rebuild caches/targets/reconstructors and reuse stale taggers for new predictions." >&2
-  exit 2
-fi
-
 if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" ]]; then
   : "${CONSTRAINED_C2F_RECO_NUM_WORKERS:=0}"
   : "${CONSTRAINED_C2F_TAGGER_NUM_WORKERS:=0}"
@@ -184,6 +173,17 @@ case "${CONSTRAINED_C2F_STAGE_MODE}" in
     ;;
   *) echo "Unknown CONSTRAINED_C2F_STAGE_MODE: ${CONSTRAINED_C2F_STAGE_MODE}" >&2; exit 2 ;;
 esac
+
+if [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]] \
+  && fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}" \
+  && ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}" \
+  && { fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_HLT_CACHE}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TARGETS}" \
+    || fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_RECONSTRUCTORS}"; }; then
+  echo "Cannot rebuild caches/targets/reconstructors and reuse stale taggers for new predictions." >&2
+  exit 2
+fi
 
 export CONSTRAINED_C2F_ROOT CONSTRAINED_C2F_MANIFEST_PATH CONSTRAINED_C2F_HLT_CACHE_DIR
 export CONSTRAINED_C2F_OFFLINE_CACHE_DIR CONSTRAINED_C2F_TARGET_CACHE_DIR CONSTRAINED_C2F_RECON_ROOT

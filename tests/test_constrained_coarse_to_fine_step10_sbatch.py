@@ -58,6 +58,11 @@ def _run_canonical_submitter(root: Path, overrides: dict[str, str]) -> subproces
     bash = _bash_executable()
     if bash is None:
         raise RuntimeError("bash is required for constrained submitter regression tests")
+    bash_env = root / "submitter_test_env.sh"
+    # Git Bash inside the Windows sandbox can read the workspace but cannot make
+    # directories beneath it. Dry-run submission only needs this harmless setup
+    # call, so stub mkdir while preserving the submitter's real control flow.
+    bash_env.write_text("mkdir() { :; }\n", encoding="utf-8")
     env = os.environ.copy()
     env.update(
         {
@@ -74,6 +79,7 @@ def _run_canonical_submitter(root: Path, overrides: dict[str, str]) -> subproces
             "SKIP_EXISTING": "0",
             "OVERWRITE": "0",
             "PYTHON_BIN": sys.executable,
+            "BASH_ENV": _bash_path(bash_env),
         }
     )
     env.update(overrides)
@@ -471,7 +477,7 @@ def test_step10_campaign_is_staged_and_final_test_is_separate() -> None:
 
 
 def test_direct_canonical_final_claim_requires_approval() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
         result = _run_canonical_submitter(
             Path(tmp),
             {
@@ -490,7 +496,7 @@ def test_direct_final_claim_rejects_model_or_fusion_membership_override() -> Non
         ("CONSTRAINED_C2F_TAGGER_RUN_IDS", "A0"),
         ("CONSTRAINED_C2F_FUSION_GROUPS", "F0:mean_logits:A0,D0"),
     ):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             result = _run_canonical_submitter(
                 Path(tmp),
                 {
@@ -506,7 +512,7 @@ def test_direct_final_claim_rejects_model_or_fusion_membership_override() -> Non
 
 
 def test_prediction_reuse_is_rejected_during_upstream_rebuild_without_taggers() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
         result = _run_canonical_submitter(
             Path(tmp),
             {
@@ -528,7 +534,7 @@ def test_prediction_reuse_is_rejected_during_upstream_rebuild_without_taggers() 
 
 
 def test_prediction_jobs_depend_on_all_active_training_inputs() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
         result = _run_canonical_submitter(
             Path(tmp),
             {
