@@ -35,7 +35,7 @@ from .targets import hlt_reference_axis
 
 
 COARSE_TO_FINE_PREDICTION_CONTRACT = "constrained_coarse_to_fine_prediction_cache_v1"
-DEFAULT_PREDICTION_SPLITS = ("model_val", "stack_train", "stack_val", "final_test")
+DEFAULT_PREDICTION_SPLITS = ("model_val", "stack_train", "stack_val")
 
 
 def _file_sha256(path: str | Path) -> str:
@@ -67,6 +67,13 @@ def _jsonable(value: Any) -> Any:
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> Mapping[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ValueError(f"expected JSON object at {path}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -281,6 +288,13 @@ def cache_end_to_end_prediction_split(
 
     if split == "final_test" and not config.confirm_final_test:
         raise ValueError("final_test prediction requires explicit confirmation")
+    model_dir = Path(config.prediction_dir) / config.model_name
+    final_receipt = model_dir / "final_test_claim_receipt.json"
+    final_prediction = model_dir / "final_test_predictions.npz"
+    if split == "final_test" and (final_receipt.exists() or final_prediction.exists()):
+        raise FileExistsError(
+            "final_test claim already exists; overwrite is forbidden for immutable final claims"
+        )
     view, manifest_sha = _validate_hlt_split(config, split)
     device = resolve_device(config.device)
     model, payload, resolved = model_bundle or load_end_to_end_tagger_checkpoint(
@@ -304,6 +318,7 @@ def cache_end_to_end_prediction_split(
     gate_rows: list[np.ndarray] = []
     uncertainty_rows: list[np.ndarray] = []
     cosine_rows: list[np.ndarray] = []
+    representation_rows: list[np.ndarray] = []
     ablation_logits: dict[str, list[np.ndarray]] = {}
     masks = _view_masks(model.tagger.view_names) if str(payload.get("variant")) == D8_MULTIDEPTH else {}
     ablation_limit = limit if config.d8_view_ablation_max_jets is None else min(limit, int(config.d8_view_ablation_max_jets))
@@ -325,6 +340,7 @@ def cache_end_to_end_prediction_split(
                 )
             tagger = output.tagger
             logits_rows.append(tagger.logits.float().cpu().numpy())
+            representation_rows.append(tagger.fusion_representation.float().cpu().numpy())
             if tagger.hlt_logits is not None:
                 hlt_rows.append(tagger.hlt_logits.float().cpu().numpy())
             if model.tagger.pseudo_head is not None and tagger.pseudo_representations:
@@ -367,6 +383,7 @@ def cache_end_to_end_prediction_split(
     gates = np.concatenate(gate_rows, axis=0) if gate_rows else None
     uncertainties = np.concatenate(uncertainty_rows, axis=0) if uncertainty_rows else None
     cosines = np.concatenate(cosine_rows, axis=0) if cosine_rows else None
+    representations = np.concatenate(representation_rows, axis=0)
     ablation_metrics = {
         name: _detailed_metrics(np.concatenate(rows, axis=0), labels[:ablation_limit])
         for name, rows in ablation_logits.items()
@@ -394,6 +411,16 @@ def cache_end_to_end_prediction_split(
         }
         for name, row in resolved.source_metadata.items()
     }
+    representation_path = model_dir / f"{split}_representations.npz"
+    if representation_path.exists() and (split == "final_test" or not config.overwrite):
+        raise FileExistsError(f"refusing to overwrite representation cache: {representation_path}")
+    representation_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        representation_path,
+        representation=representations.astype(np.float16),
+        labels=labels,
+    )
+    representation_hash = _file_sha256(representation_path)
     metadata = {
         "ok": True,
         "contract": COARSE_TO_FINE_PREDICTION_CONTRACT,
@@ -414,6 +441,9 @@ def cache_end_to_end_prediction_split(
         "reconstructor_aliases": dict(resolved.aliases),
         "source_state": payload.get("source_state"),
         "active_view_names": list(model.tagger.view_names),
+        "fusion_representation_path": str(representation_path),
+        "fusion_representation_sha256": representation_hash,
+        "fusion_representation_shape": list(representations.shape),
         "metrics": metrics,
         "mechanism_diagnostics": mechanism,
         "d8_model_val_view_ablations": ablation_metrics if split == "model_val" else {},
@@ -440,6 +470,21 @@ def cache_end_to_end_prediction_split(
     saved["d8_model_val_view_ablations"] = metadata["d8_model_val_view_ablations"]
     metadata_path = Path(config.prediction_dir) / config.model_name / f"{split}_predictions_metadata.json"
     _write_json(metadata_path, saved)
+    if split == "final_test":
+        _write_json(
+            final_receipt,
+            {
+                "contract": COARSE_TO_FINE_PREDICTION_CONTRACT,
+                "immutable_final_claim": True,
+                "run_id": config.model_name,
+                "checkpoint_sha256": checkpoint_hash,
+                "source_manifest_hash": manifest_sha,
+                "hlt_content_hash": view.metadata.get("hlt_content_hash"),
+                "jet_identity_hash": metadata["jet_identity_hash"],
+                "prediction_path": str(final_prediction),
+                "representation_sha256": representation_hash,
+            },
+        )
     return saved
 
 
@@ -450,17 +495,24 @@ def cache_end_to_end_predictions(config: EndToEndPredictionConfig) -> dict[str, 
         split: cache_end_to_end_prediction_split(config, split, model_bundle=bundle)
         for split in config.splits
     }
+    report_path = Path(config.prediction_dir) / config.model_name / "prediction_run_report.json"
+    existing_report = _read_json(report_path) if report_path.is_file() else {}
+    existing_splits = existing_report.get("splits") if isinstance(existing_report.get("splits"), Mapping) else {}
     report = {
         "ok": True,
         "contract": COARSE_TO_FINE_PREDICTION_CONTRACT,
         "config": asdict(config),
-        "splits": rows,
+        "splits": {**existing_splits, **rows},
         "selection_split": "model_val",
         "fusion_fit_split": "stack_train",
-        "final_test_loaded_once": "final_test" in config.splits,
+        "final_test_claim_receipt": (
+            str(Path(config.prediction_dir) / config.model_name / "final_test_claim_receipt.json")
+            if "final_test" in config.splits
+            else None
+        ),
         "offline_inputs_loaded": False,
     }
-    _write_json(Path(config.prediction_dir) / config.model_name / "prediction_run_report.json", report)
+    _write_json(report_path, report)
     return report
 
 
@@ -475,7 +527,12 @@ def cache_prediction_alias(
     """Preserve an aliased campaign row without pretending it was retrained."""
 
     from jetclass_fresh.fusion import load_prediction_block
+    import os
+    import shutil
 
+    report_path = Path(prediction_dir) / alias_name / "prediction_run_report.json"
+    existing_report = _read_json(report_path) if report_path.is_file() else {}
+    existing_splits = existing_report.get("splits") if isinstance(existing_report.get("splits"), Mapping) else {}
     rows = {}
     for split in splits:
         source = load_prediction_block(prediction_dir, source_name, split)
@@ -489,6 +546,33 @@ def cache_prediction_alias(
         }
         alias = PredictionBlock(alias_name, split, source.logits, source.probs, source.labels, source.jet_ids, metadata)
         rows[split] = save_prediction_block(alias, prediction_dir, overwrite=overwrite)
+        source_representation = Path(prediction_dir) / source_name / f"{split}_representations.npz"
+        alias_representation = Path(prediction_dir) / alias_name / f"{split}_representations.npz"
+        if not source_representation.is_file():
+            raise FileNotFoundError(f"source prediction alias lacks representations: {source_representation}")
+        if alias_representation.exists():
+            if not overwrite:
+                raise FileExistsError(f"alias representation already exists: {alias_representation}")
+            alias_representation.unlink()
+        try:
+            os.link(source_representation, alias_representation)
+        except OSError:
+            shutil.copy2(source_representation, alias_representation)
+        rows[split]["fusion_representation_path"] = str(alias_representation)
+        rows[split]["fusion_representation_sha256"] = _file_sha256(alias_representation)
+        metadata_path = Path(prediction_dir) / alias_name / f"{split}_predictions_metadata.json"
+        _write_json(metadata_path, rows[split])
+        if split == "final_test":
+            source_receipt = _read_json(Path(prediction_dir) / source_name / "final_test_claim_receipt.json")
+            _write_json(
+                Path(prediction_dir) / alias_name / "final_test_claim_receipt.json",
+                {
+                    **source_receipt,
+                    "run_id": alias_name,
+                    "alias_of": source_name,
+                    "prediction_path": str(Path(prediction_dir) / alias_name / "final_test_predictions.npz"),
+                },
+            )
     report = {
         "ok": True,
         "contract": COARSE_TO_FINE_PREDICTION_CONTRACT,
@@ -496,9 +580,9 @@ def cache_prediction_alias(
         "alias_of": source_name,
         "shared_checkpoint_sha256": next(iter(rows.values())).get("checkpoint_sha256") if rows else None,
         "shared_configuration_hash": next(iter(rows.values())).get("configuration_hash") if rows else None,
-        "splits": rows,
+        "splits": {**existing_splits, **rows},
     }
-    _write_json(Path(prediction_dir) / alias_name / "prediction_run_report.json", report)
+    _write_json(report_path, report)
     return report
 
 

@@ -23,13 +23,20 @@ REQUIRED_RECONSTRUCTOR_RUNS = (
     "C5-B1",
     "C5-B2",
     "C5-B3",
+    "C5-no-slot",
+    "Cdirect-unconstrained",
 )
 REQUIRED_TAGGER_RUNS = (
-    *(f"A{index}" for index in range(5)),
+    "A0",
     *(f"D{index}" for index in range(9)),
     "D5-B1",
     "D5-B2",
     "D5-B3",
+    *(
+        f"{run_id}-seed{seed}"
+        for run_id in (*tuple(f"D{index}" for index in range(9)), "D5-B1", "D5-B2")
+        for seed in (1, 2)
+    ),
     *(f"E{index}" for index in range(7)),
 )
 REPORT_SPLITS = ("model_val", "stack_val", "final_test")
@@ -84,8 +91,8 @@ class CampaignReportConfig:
     confirm_final_test: bool = False
 
     def __post_init__(self) -> None:
-        if self.require_all_runs and not self.confirm_final_test:
-            raise ValueError("strict final campaign reporting requires confirm_final_test=True")
+        if not self.reconstructor_runs or not self.tagger_runs:
+            raise ValueError("campaign reports require non-empty reconstructor and tagger run lists")
 
 
 def _training_report_path(root: Path, run_id: str) -> Path | None:
@@ -253,6 +260,7 @@ def write_campaign_report(config: CampaignReportConfig) -> dict[str, Any]:
     mechanism_rows: list[dict[str, Any]] = []
     d8_rows: list[dict[str, Any]] = []
     prediction_metadata: dict[tuple[str, str], Mapping[str, Any]] = {}
+    report_splits = REPORT_SPLITS if config.confirm_final_test else ("model_val", "stack_val")
     for run_id in config.tagger_runs:
         train_path = _training_report_path(root, run_id)
         train_report = _read_json(train_path) if train_path is not None else None
@@ -260,7 +268,7 @@ def write_campaign_report(config: CampaignReportConfig) -> dict[str, Any]:
             problems.append(f"missing required tagger run_report for {run_id}")
         elif isinstance(train_report, Mapping) and train_report.get("ok") is False:
             problems.append(f"{run_id} tagger run_report has ok=false")
-        for split in REPORT_SPLITS:
+        for split in report_splits:
             metadata = _prediction_metadata(prediction_dir, run_id, split)
             if not isinstance(metadata, Mapping):
                 if config.require_all_runs:
@@ -352,14 +360,36 @@ def write_campaign_report(config: CampaignReportConfig) -> dict[str, Any]:
             problems.append(f"fusion report is missing required groups {missing}")
         for group in config.required_fusion_groups:
             row = fusion_groups.get(group)
-            final = row.get("splits", {}).get("final_test") if isinstance(row, Mapping) else None
-            metrics = final.get("metrics") if isinstance(final, Mapping) else None
+            claim_split = "final_test" if config.confirm_final_test else "model_val"
+            claim = row.get("splits", {}).get(claim_split) if isinstance(row, Mapping) else None
+            metrics = claim.get("metrics") if isinstance(claim, Mapping) else None
             if _metric(metrics, "accuracy") is None:
-                problems.append(f"fusion group {group} lacks available final_test metrics")
+                problems.append(f"fusion group {group} lacks available {claim_split} metrics")
         f2 = fusion_groups.get("F2")
-        if isinstance(f2, Mapping) and f2.get("spec", {}).get("method") != "external":
-            problems.append("F2 is not identified as a trained external representation fusion model")
-    for split in REPORT_SPLITS:
+        if isinstance(f2, Mapping) and f2.get("spec", {}).get("method") != "representation_stacker":
+            problems.append("F2 is not identified as learned D-tier representation fusion")
+        selected_best_d = fusion_report.get("selected_best_d")
+        if any(group in fusion_groups for group in ("F0", "F1", "F3", "F4", "F5")):
+            if not isinstance(selected_best_d, str) or not selected_best_d:
+                problems.append("fusion report does not declare the model_val-selected best D run")
+            if fusion_report.get("best_d_selection_metric") != "model_val.cross_entropy":
+                problems.append("best D selection is not based on model_val cross-entropy")
+        if isinstance(selected_best_d, str) and selected_best_d:
+            expected_f4 = (selected_best_d, f"{selected_best_d}-seed1", f"{selected_best_d}-seed2")
+            f4 = fusion_groups.get("F4")
+            if isinstance(f4, Mapping):
+                observed_f4 = tuple(f4.get("spec", {}).get("members", ()))
+                if observed_f4 != expected_f4:
+                    problems.append(f"F4 is not the selected best-D seed ensemble: {observed_f4}")
+            expected_f5 = tuple(
+                dict.fromkeys(("D8", "D6", selected_best_d, *expected_f4[1:]))
+            )
+            f5 = fusion_groups.get("F5")
+            if isinstance(f5, Mapping):
+                observed_f5 = tuple(f5.get("spec", {}).get("members", ()))
+                if observed_f5 != expected_f5:
+                    problems.append(f"F5 lacks the planned D8/D6/selected-seed composition: {observed_f5}")
+    for split in report_splits:
         for field in ("source_manifest_hash", "hlt_content_hash", "jet_identity_hash"):
             observed = {
                 run_id: metadata.get(field)

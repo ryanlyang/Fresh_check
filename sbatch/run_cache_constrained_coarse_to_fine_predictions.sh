@@ -24,7 +24,7 @@ RUN_ID="${1:?Usage: sbatch run_cache_constrained_coarse_to_fine_predictions.sh <
 : "${CONSTRAINED_C2F_HLT_CACHE_DIR:=${CONSTRAINED_C2F_ROOT}/inputs/hlt_cache}"
 : "${CONSTRAINED_C2F_TAGGER_ROOT:=${CONSTRAINED_C2F_ROOT}/taggers}"
 : "${CONSTRAINED_C2F_PREDICTION_DIR:=${CONSTRAINED_C2F_ROOT}/predictions}"
-: "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val final_test}"
+: "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val}"
 : "${CONSTRAINED_C2F_PREDICT_BATCH_SIZE:=128}"
 : "${CONSTRAINED_C2F_PREDICT_MAX_JETS_PER_SPLIT:=}"
 
@@ -34,7 +34,11 @@ fresh_setup "$@"
 fresh_require_file "${CONSTRAINED_C2F_MANIFEST_PATH}"
 fresh_require_dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"
 fresh_require_file "${CHECKPOINT}"
-fresh_claim_new_dir "${OUTPUT_DIR}"
+if fresh_bool_enabled "${CONFIRM_FINAL_TEST}"; then
+  fresh_require_dir "${OUTPUT_DIR}"
+else
+  fresh_claim_new_dir "${OUTPUT_DIR}"
+fi
 fresh_split_words split_args "${CONSTRAINED_C2F_PREDICT_SPLITS}"
 
 cmd=(

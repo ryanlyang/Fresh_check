@@ -21,12 +21,16 @@ SOURCE_NAME="${1:?Usage: sbatch run_alias_constrained_coarse_to_fine_predictions
 ALIAS_NAME="${2:?Usage: sbatch run_alias_constrained_coarse_to_fine_predictions.sh <source> <alias>}"
 : "${CONSTRAINED_C2F_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine}"
 : "${CONSTRAINED_C2F_PREDICTION_DIR:=${CONSTRAINED_C2F_ROOT}/predictions}"
-: "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val final_test}"
+: "${CONSTRAINED_C2F_PREDICT_SPLITS:=model_val stack_train stack_val}"
 
 OUTPUT_DIR="${CONSTRAINED_C2F_PREDICTION_DIR}/${ALIAS_NAME}"
 fresh_setup "$@"
 fresh_require_dir "${CONSTRAINED_C2F_PREDICTION_DIR}/${SOURCE_NAME}"
-fresh_claim_new_dir "${OUTPUT_DIR}"
+if fresh_bool_enabled "${CONFIRM_FINAL_TEST}"; then
+  fresh_require_dir "${OUTPUT_DIR}"
+else
+  fresh_claim_new_dir "${OUTPUT_DIR}"
+fi
 fresh_split_words split_args "${CONSTRAINED_C2F_PREDICT_SPLITS}"
 
 cmd=(

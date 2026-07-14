@@ -6,7 +6,7 @@ set -euo pipefail
 : "${OUTPUT_ROOT:=${PROJECT_DIR}/checkpoints}"
 : "${CONDA_ENV:=atlas_kd}"
 : "${DEVICE:=cuda}"
-: "${CONFIRM_FINAL_TEST:=1}"
+: "${CONFIRM_FINAL_TEST:=0}"
 
 if [[ "${CONDA_BASE:-}" == *miniforge3-aarch64* ]]; then unset CONDA_BASE; fi
 export PROJECT_DIR PD10_DATA_DIR OUTPUT_ROOT CONDA_ENV DEVICE CONFIRM_FINAL_TEST

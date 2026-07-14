@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -16,12 +18,15 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     COARSE_TO_FINE_TRAIN_CONTRACT,
     D8_MULTIDEPTH,
     CampaignReportConfig,
+    EndToEndPredictionConfig,
     FusionGroupSpec,
     ParticleStreamInput,
     ReconstructorSourceSpec,
     Step9FusionConfig,
     build_c_tier_reconstructor,
     build_end_to_end_tagger,
+    cache_end_to_end_predictions,
+    cache_prediction_alias,
     default_hierarchy_target_layout,
     load_end_to_end_tagger_checkpoint,
     run_step9_fusion,
@@ -116,7 +121,77 @@ def _prediction_block(name: str, split: str, *, shift: float = 0.0, offline: boo
     return PredictionBlock(name, split, logits, np.empty_like(logits), labels, ids, metadata)
 
 
+def _save_prediction_with_representation(
+    block: PredictionBlock,
+    prediction_dir: Path,
+    *,
+    shift: float = 0.0,
+) -> None:
+    metadata = save_prediction_block(block, prediction_dir)
+    path = prediction_dir / block.model_name / f"{block.split}_representations.npz"
+    representation = block.logits + np.float32(shift)
+    np.savez_compressed(path, representation=representation.astype(np.float16), labels=block.labels)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    metadata["fusion_representation_path"] = str(path)
+    metadata["fusion_representation_sha256"] = digest
+    (prediction_dir / block.model_name / f"{block.split}_predictions_metadata.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+
+
 class ConstrainedCoarseToFineStep9Tests(unittest.TestCase):
+    def test_prediction_report_runtime_path_merges_split_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = EndToEndPredictionConfig(
+                prediction_dir=str(root),
+                model_name="D5",
+                manifest_path="manifest.json",
+                hlt_cache_dir="hlt",
+                checkpoint_path="checkpoint.pt",
+                splits=("model_val",),
+                device="cpu",
+            )
+            second = EndToEndPredictionConfig(**{**first.__dict__, "splits": ("stack_val",)})
+            with patch(
+                "teacher_logit_reco.constrained_coarse_to_fine.evaluation.load_end_to_end_tagger_checkpoint",
+                return_value=object(),
+            ), patch(
+                "teacher_logit_reco.constrained_coarse_to_fine.evaluation.cache_end_to_end_prediction_split",
+                side_effect=lambda _config, split, model_bundle: {"split": split, "metrics": {"accuracy": 0.5}},
+            ):
+                cache_end_to_end_predictions(first)
+                report = cache_end_to_end_predictions(second)
+            self.assertEqual(set(report["splits"]), {"model_val", "stack_val"})
+            saved = json.loads((root / "D5" / "prediction_run_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(saved["splits"]), {"model_val", "stack_val"})
+
+    def test_prediction_alias_runtime_path_writes_complete_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for split in ("model_val", "stack_val"):
+                block = _prediction_block("D5", split)
+                save_prediction_block(block, root)
+                representation = root / "D5" / f"{split}_representations.npz"
+                np.savez_compressed(representation, representation=block.logits, labels=block.labels)
+            cache_prediction_alias(
+                root,
+                source_name="D5",
+                alias_name="D5-B3",
+                splits=("model_val",),
+            )
+            report = cache_prediction_alias(
+                root,
+                source_name="D5",
+                alias_name="D5-B3",
+                splits=("stack_val",),
+            )
+            self.assertEqual(set(report["splits"]), {"model_val", "stack_val"})
+            self.assertEqual(report["alias_of"], "D5")
+            self.assertTrue((root / "D5-B3" / "model_val_representations.npz").is_file())
+            saved = json.loads((root / "D5-B3" / "prediction_run_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["run_id"], "D5-B3")
+
     def test_selected_checkpoint_is_self_contained_and_d8_masks_views(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -182,25 +257,57 @@ class ConstrainedCoarseToFineStep9Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             predictions = root / "predictions"
-            for name, shift in (("A0", 0.0), ("D8", 0.2), ("F2-trained", 0.1)):
+            for name, shift in (
+                ("A0", 0.0),
+                ("D3", 0.1),
+                ("D4", 0.2),
+                ("D3-seed1", 0.08),
+                ("D3-seed2", 0.09),
+                ("D4-seed1", 0.18),
+                ("D4-seed2", 0.19),
+                ("D6", 0.12),
+                ("D8", 0.13),
+            ):
                 for split in ("model_val", "stack_train", "stack_val", "final_test"):
-                    save_prediction_block(_prediction_block(name, split, shift=shift), predictions)
+                    _save_prediction_with_representation(
+                        _prediction_block(name, split, shift=shift), predictions, shift=shift
+                    )
             report = run_step9_fusion(
                 Step9FusionConfig(
                     prediction_dir=str(predictions),
                     output_dir=str(root / "fusion"),
                     groups=(
-                        FusionGroupSpec("F0", ("A0", "D8"), "mean_logits"),
-                        FusionGroupSpec("F2", ("F2-trained",), "external"),
+                        FusionGroupSpec("F0", ("A0", "BEST_D"), "mean_logits"),
+                        FusionGroupSpec("F2", ("D3", "D4"), "representation_stacker"),
+                        FusionGroupSpec("F4", ("BEST_D", "BEST_D_SEED1", "BEST_D_SEED2"), "mean_logits"),
+                        FusionGroupSpec(
+                            "F5",
+                            ("D8", "D6", "BEST_D", "BEST_D_SEED1", "BEST_D_SEED2"),
+                            "linear_stacker",
+                        ),
                     ),
-                    required_groups=("F0", "F2"),
+                    required_groups=("F0", "F2", "F4", "F5"),
                     simplex_samples=16,
+                    c_grid=(1.0,),
+                    max_iter=100,
                     confirm_final_test=True,
+                    best_d_candidates=("D3", "D4"),
                 )
             )
             self.assertTrue(report["ok"])
             self.assertIsNone(report["groups"]["F0"]["fit"]["fit_split"])
-            self.assertEqual(report["groups"]["F2"]["spec"]["method"], "external")
+            self.assertEqual(report["groups"]["F2"]["spec"]["method"], "representation_stacker")
+            self.assertEqual(report["groups"]["F2"]["fit"]["fit_split"], "stack_train")
+            self.assertEqual(report["best_d_selection_metric"], "model_val.cross_entropy")
+            self.assertEqual(report["selected_best_d"], "D4")
+            self.assertEqual(
+                report["groups"]["F4"]["spec"]["members"],
+                ("D4", "D4-seed1", "D4-seed2"),
+            )
+            self.assertEqual(
+                report["groups"]["F5"]["spec"]["members"],
+                ("D8", "D6", "D4", "D4-seed1", "D4-seed2"),
+            )
 
     def test_strict_report_preserves_alias_and_d8_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,7 +366,7 @@ class ConstrainedCoarseToFineStep9Tests(unittest.TestCase):
                         "contract": COARSE_TO_FINE_FUSION_CONTRACT,
                         "groups": {
                             "F2": {
-                                "spec": {"method": "external"},
+                                "spec": {"method": "representation_stacker"},
                                 "splits": {"final_test": {"metrics": {"accuracy": 1.0}}},
                             }
                         },

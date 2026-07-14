@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -113,6 +114,9 @@ class CoarseToFineTrainConfig:
     pair_hidden_dim: int = 64
     dropout: float = 0.05
     attention_dropout: float = 0.05
+    constrain_slot_accounting: bool = True
+    direct_particle_decoding: bool = False
+    hierarchy_loss_weight: float = 1.0
     slot_loss_weight: float = 1.0
     hierarchy_global_weight: float = 1.0
     hierarchy_grid_weight: float = 1.0
@@ -151,12 +155,16 @@ class CoarseToFineTrainConfig:
             "hlt_encoder_lr_scale",
             "grad_clip_norm",
             "ffn_multiplier",
-            "slot_loss_weight",
             "hierarchy_global_weight",
             "hierarchy_grid_weight",
         ):
             if float(getattr(self, name)) <= 0.0:
                 raise ValueError(f"{name} must be positive")
+        for name in ("hierarchy_loss_weight", "slot_loss_weight"):
+            if float(getattr(self, name)) < 0.0:
+                raise ValueError(f"{name} must be nonnegative")
+        if bool(self.direct_particle_decoding) and bool(self.constrain_slot_accounting):
+            raise ValueError("direct particle decoding requires unconstrained slot accounting")
         if float(self.weight_decay) < 0.0:
             raise ValueError("weight_decay must be nonnegative")
         _normalize_variant(self.variant)
@@ -506,6 +514,8 @@ def _build_model(config: CoarseToFineTrainConfig, layout: HierarchyTargetLayout)
                 "ffn_multiplier": float(config.ffn_multiplier),
                 "dropout": float(config.dropout),
                 "attention_dropout": float(config.attention_dropout),
+                "constrain_accounting": bool(config.constrain_slot_accounting),
+                "direct_particle_decoding": bool(config.direct_particle_decoding),
             },
             layout=layout,
         )
@@ -594,7 +604,12 @@ def _loss_configs(config: CoarseToFineTrainConfig, family: str, variant: str):
     )
     slot_config = None
     if family == "C":
-        slot_config = ParticleSlotLossConfig(matching_mode=c_tier_variant_spec(variant).slot_spec.matching_mode)
+        slot_kwargs: dict[str, Any] = {
+            "matching_mode": c_tier_variant_spec(variant).slot_spec.matching_mode,
+        }
+        if config.direct_particle_decoding:
+            slot_kwargs.update(accounting_consistency_weight=0.0, dust_weight=0.0)
+        slot_config = ParticleSlotLossConfig(**slot_kwargs)
     return hierarchy_config, slot_config
 
 
@@ -603,6 +618,7 @@ def _batch_losses(
     batch: Mapping[str, torch.Tensor],
     hierarchy_config: HierarchyReconstructionLossConfig,
     slot_config: ParticleSlotLossConfig | None,
+    hierarchy_loss_weight: float,
     slot_loss_weight: float,
     coordinate_extent: float,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -619,7 +635,7 @@ def _batch_losses(
         "level3_accounting": batch["level3_accounting"],
     }
     hierarchy_loss = compute_hierarchy_reconstruction_loss(hierarchy, target_mapping, hierarchy_config)
-    total = hierarchy_loss.loss
+    total = float(hierarchy_loss_weight) * hierarchy_loss.loss
     hierarchy_selection = (
         float(hierarchy_config.global_weight)
         * (
@@ -641,6 +657,7 @@ def _batch_losses(
         hierarchy_selection = hierarchy_selection + float(hierarchy_config.grid_weight) * torch.stack(
             grid_selection_rows
         ).mean()
+    hierarchy_selection = float(hierarchy_loss_weight) * hierarchy_selection
     selection_score = hierarchy_selection
     metrics: dict[str, Any] = {
         "loss.total": total,
@@ -769,6 +786,7 @@ def _run_epoch(
                         batch,
                         hierarchy_config,
                         slot_config,
+                        float(config.hierarchy_loss_weight),
                         float(config.slot_loss_weight),
                         float(source.layout.coordinate_extent),
                     )
@@ -911,16 +929,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     )
     if train_source.layout.to_dict() != val_source.layout.to_dict():
         raise ValueError("model_train and model_val hierarchy layouts differ")
-    stack_source = None
-    if config.stack_val_split:
-        stack_source = _load_split_source(
-            config,
-            config.stack_val_split,
-            require_offline_particles=require_offline_particles,
-        )
-        if train_source.layout.to_dict() != stack_source.layout.to_dict():
-            raise ValueError("stack_val hierarchy layout differs from model_train")
-    model, family, variant = _build_model(config, train_source.layout)
+    train_layout = train_source.layout
+    model, family, variant = _build_model(config, train_layout)
     model.to(device)
     optimizer = _optimizer(model, config)
     scaler = amp_grad_scaler(amp_enabled)
@@ -928,7 +938,6 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     provenance = {
         "model_train": train_source.provenance,
         "model_val": val_source.provenance,
-        **({"stack_val": stack_source.provenance} if stack_source is not None else {}),
     }
     source_metadata = {
         "contract": COARSE_TO_FINE_TRAIN_CONTRACT,
@@ -1034,8 +1043,23 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         raise RuntimeError("training did not produce a finite model_val checkpoint")
     payload = _load_checkpoint(checkpoint_path, device)
     model.load_state_dict(payload["model_state_dict"])
+    # stack_val is diagnostic only. Release model_train before opening it so
+    # high-data runs never retain all three large cache views simultaneously.
+    del train_source
+    gc.collect()
+    stack_source = None
     stack_metrics = None
-    if stack_source is not None:
+    if config.stack_val_split:
+        stack_source = _load_split_source(
+            config,
+            config.stack_val_split,
+            require_offline_particles=require_offline_particles,
+        )
+        if train_layout.to_dict() != stack_source.layout.to_dict():
+            raise ValueError("stack_val hierarchy layout differs from model_train")
+        provenance["stack_val"] = stack_source.provenance
+        source_metadata["provenance"] = provenance
+        _save_json(output_dir / "source_metadata.json", source_metadata)
         with torch.no_grad():
             stack_metrics = _run_epoch(
                 model,

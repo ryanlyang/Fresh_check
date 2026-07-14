@@ -185,7 +185,8 @@ class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
         inputs, *_ = _torch_inputs()
         model = _build(C5_B2).eval()
         with torch.no_grad():
-            slots = model(*inputs).slots
+            output = model(*inputs)
+            slots = output.slots
         geometry = model.hierarchy.layout.cell_geometry(2)
         bounds = torch.tensor(
             [[row["eta_min"], row["eta_max"], row["phi_min"], row["phi_max"]] for row in geometry]
@@ -195,6 +196,26 @@ class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
         self.assertTrue(torch.all(coordinates[..., 0] <= bounds[None, None, :, None, 1]))
         self.assertTrue(torch.all(coordinates[..., 1] >= bounds[None, None, :, None, 2]))
         self.assertTrue(torch.all(coordinates[..., 1] <= bounds[None, None, :, None, 3]))
+        radial = torch.tensor([[row["radial_min"], row["radial_max"]] for row in geometry])
+        radius = torch.linalg.vector_norm(coordinates, dim=-1)
+        active = slots.total_pt > 1.0e-8
+        self.assertTrue(torch.all(radius[active] >= radial[None, None, :, None, 0].expand_as(radius)[active] - 2.0e-5))
+        self.assertTrue(torch.all(radius[active] <= radial[None, None, :, None, 1].expand_as(radius)[active] + 2.0e-5))
+
+        terminal = output.hierarchy.levels[-1].accounting
+        feasible = []
+        for row in geometry:
+            nearest_eta = 0.0 if row["eta_min"] <= 0.0 <= row["eta_max"] else min(abs(row["eta_min"]), abs(row["eta_max"]))
+            nearest_phi = 0.0 if row["phi_min"] <= 0.0 <= row["phi_max"] else min(abs(row["phi_min"]), abs(row["phi_max"]))
+            minimum = (nearest_eta**2 + nearest_phi**2) ** 0.5
+            maximum = max(
+                (eta**2 + phi**2) ** 0.5
+                for eta in (row["eta_min"], row["eta_max"])
+                for phi in (row["phi_min"], row["phi_max"])
+            )
+            feasible.append(maximum + 1.0e-12 >= row["radial_min"] and minimum <= row["radial_max"] + 1.0e-12)
+        invalid = ~torch.tensor(feasible, dtype=torch.bool)
+        self.assertTrue(torch.equal(terminal[:, invalid], torch.zeros_like(terminal[:, invalid])))
 
     def test_no_dust_and_k8_variants_have_expected_physical_shapes(self):
         inputs, *_ = _torch_inputs()
@@ -207,6 +228,38 @@ class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
         self.assertIsNone(c2.dust_total_pt)
         target_pt = c2.terminal_accounting[:, None, :, ACCOUNTING_FIELD_NAMES.index("total_pT")]
         self.assertTrue(torch.allclose(c2.total_pt.sum(dim=-1), target_pt, atol=2.0e-6))
+
+    def test_direct_unconstrained_decoder_does_not_scale_slots_from_hierarchy_accounting(self):
+        inputs, *_ = _torch_inputs()
+        hierarchy, slots = _small_overrides()
+        slots.update({"constrain_accounting": False, "direct_particle_decoding": True})
+        model = build_c_tier_reconstructor(
+            C5_UNCERTAINTY,
+            hierarchy_overrides=hierarchy,
+            slot_overrides=slots,
+            layout=default_hierarchy_target_layout(radial_boundary=0.16),
+        ).eval()
+        with torch.no_grad():
+            output = model(*inputs).slots
+        self.assertTrue(output.diagnostics["direct_particle_decoding"])
+        self.assertFalse(output.diagnostics["accounting_constraints_enabled"])
+        hierarchy_pt = output.terminal_accounting[:, None, :, ACCOUNTING_FIELD_NAMES.index("total_pT")]
+        rendered_pt = output.total_pt.sum(dim=-1) + output.dust_total_pt
+        self.assertFalse(torch.allclose(rendered_pt, hierarchy_pt, atol=1.0e-4, rtol=1.0e-4))
+        geometry = model.hierarchy.layout.cell_geometry(3)
+        feasible = []
+        for row in geometry:
+            nearest_eta = 0.0 if row["eta_min"] <= 0.0 <= row["eta_max"] else min(abs(row["eta_min"]), abs(row["eta_max"]))
+            nearest_phi = 0.0 if row["phi_min"] <= 0.0 <= row["phi_max"] else min(abs(row["phi_min"]), abs(row["phi_max"]))
+            minimum = (nearest_eta**2 + nearest_phi**2) ** 0.5
+            maximum = max(
+                (eta**2 + phi**2) ** 0.5
+                for eta in (row["eta_min"], row["eta_max"])
+                for phi in (row["phi_min"], row["phi_max"])
+            )
+            feasible.append(maximum >= row["radial_min"] and minimum <= row["radial_max"])
+        invalid = ~torch.tensor(feasible, dtype=torch.bool)
+        self.assertTrue(torch.equal(rendered_pt[:, :, invalid], torch.zeros_like(rendered_pt[:, :, invalid])))
 
     def test_multiview_uses_explicit_latents_and_preserves_constraints_per_view(self):
         inputs, *_ = _torch_inputs()

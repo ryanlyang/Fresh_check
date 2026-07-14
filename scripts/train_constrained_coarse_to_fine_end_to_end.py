@@ -18,6 +18,8 @@ from teacher_logit_reco.constrained_coarse_to_fine import (  # noqa: E402
     EndToEndTrainConfig,
     ReconstructorSourceSpec,
     train_end_to_end_tagger,
+    fusion_variant_spec,
+    normalize_fusion_variant,
 )
 
 
@@ -139,7 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not args.reconstructor_source:
+    normalized_variant = normalize_fusion_variant(args.variant)
+    if not args.reconstructor_source and fusion_variant_spec(normalized_variant).architecture != "hlt_capacity_control":
         raise SystemExit("at least one --reconstructor-source is required")
     sources = _sources(args.reconstructor_source, args.reconstructor_alias, args.reconstructor_variant)
     schedule = EndToEndScheduleConfig(

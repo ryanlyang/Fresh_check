@@ -20,6 +20,7 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     PositiveNegativeMomentReconstructor,
     SoftmaxAccountingAllocator,
     canonicalize_accounting,
+    default_hierarchy_target_layout,
 )
 
 
@@ -182,6 +183,57 @@ class ConstrainedCoarseToFineStep2Tests(unittest.TestCase):
         bad_bounds = torch.tensor([0.5, -0.5, -1.0, 1.0])
         with self.assertRaisesRegex(ValueError, "max >= min"):
             CellBoundCoordinateTransform()(torch.zeros(2), bad_bounds)
+
+    def test_radial_projection_is_exact_for_configurable_level3_layout(self):
+        torch.manual_seed(31)
+        layout = default_hierarchy_target_layout(radial_boundary=0.2, coordinate_extent=0.8)
+        geometry = layout.cell_geometry(3)
+        bounds = torch.tensor(
+            [[row["eta_min"], row["eta_max"], row["phi_min"], row["phi_max"]] for row in geometry],
+            dtype=torch.float32,
+        )
+        radial = torch.tensor(
+            [[row["radial_min"], row["radial_max"]] for row in geometry], dtype=torch.float32
+        )
+        raw = torch.randn(4, len(geometry), 7, 2, requires_grad=True)
+        coordinates = CellBoundCoordinateTransform()(
+            raw,
+            bounds[None, :, None, :],
+            radial[None, :, None, :],
+        )
+        radius = torch.linalg.vector_norm(coordinates, dim=-1)
+        feasible = []
+        for row in geometry:
+            nearest_eta = 0.0 if row["eta_min"] <= 0.0 <= row["eta_max"] else min(abs(row["eta_min"]), abs(row["eta_max"]))
+            nearest_phi = 0.0 if row["phi_min"] <= 0.0 <= row["phi_max"] else min(abs(row["phi_min"]), abs(row["phi_max"]))
+            minimum = (nearest_eta**2 + nearest_phi**2) ** 0.5
+            maximum = max(
+                (eta**2 + phi**2) ** 0.5
+                for eta in (row["eta_min"], row["eta_max"])
+                for phi in (row["phi_min"], row["phi_max"])
+            )
+            feasible.append(maximum >= row["radial_min"] and minimum <= row["radial_max"])
+        active = torch.tensor(feasible, dtype=torch.bool)[None, :, None].expand_as(radius)
+        radial_min = radial[None, :, None, 0].expand_as(radius)
+        radial_max = radial[None, :, None, 1].expand_as(radius)
+        self.assertTrue(torch.all(radius[active] >= radial_min[active] - 2.0e-6))
+        self.assertTrue(torch.all(radius[active] <= radial_max[active] + 2.0e-6))
+        expanded_bounds = bounds[None, :, None, :].expand(4, -1, 7, -1)
+        self.assertTrue(torch.all(coordinates[..., 0] >= expanded_bounds[..., 0] - 2.0e-6))
+        self.assertTrue(torch.all(coordinates[..., 0] <= expanded_bounds[..., 1] + 2.0e-6))
+        self.assertTrue(torch.all(coordinates[..., 1] >= expanded_bounds[..., 2] - 2.0e-6))
+        self.assertTrue(torch.all(coordinates[..., 1] <= expanded_bounds[..., 3] + 2.0e-6))
+        coordinates.square().mean().backward()
+        self.assertTrue(torch.isfinite(raw.grad).all())
+        half_coordinates = CellBoundCoordinateTransform()(
+            raw.detach().half(),
+            bounds[None, :, None, :],
+            radial[None, :, None, :],
+        )
+        half_radius = torch.linalg.vector_norm(half_coordinates, dim=-1)
+        self.assertEqual(half_coordinates.dtype, torch.float32)
+        self.assertTrue(torch.all(half_radius[active] >= radial_min[active] - 2.0e-5))
+        self.assertTrue(torch.all(half_radius[active] <= radial_max[active] + 2.0e-5))
 
     def test_malformed_allocation_shapes_fail_closed(self):
         parent = PositiveAccountingParameterization()(torch.zeros(2, len(PRIMITIVE_ACCOUNTING_FIELD_NAMES)))

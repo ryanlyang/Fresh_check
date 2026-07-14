@@ -712,6 +712,28 @@ def _geometry_tensor(layout: HierarchyTargetLayout, level: int) -> torch.Tensor:
     return torch.tensor(values, dtype=torch.float32)
 
 
+def _geometry_feasibility(layout: HierarchyTargetLayout, level: int) -> torch.Tensor:
+    """Identify rectangle/radial-shell intersections used by physical cells."""
+
+    feasible = []
+    for row in layout.cell_geometry(level):
+        eta_min, eta_max = float(row["eta_min"]), float(row["eta_max"])
+        phi_min, phi_max = float(row["phi_min"]), float(row["phi_max"])
+        nearest_eta = 0.0 if eta_min <= 0.0 <= eta_max else min(abs(eta_min), abs(eta_max))
+        nearest_phi = 0.0 if phi_min <= 0.0 <= phi_max else min(abs(phi_min), abs(phi_max))
+        minimum_radius = math.hypot(nearest_eta, nearest_phi)
+        maximum_radius = max(
+            math.hypot(eta, phi)
+            for eta in (eta_min, eta_max)
+            for phi in (phi_min, phi_max)
+        )
+        feasible.append(
+            maximum_radius + 1.0e-12 >= float(row["radial_min"])
+            and minimum_radius <= float(row["radial_max"]) + 1.0e-12
+        )
+    return torch.as_tensor(feasible, dtype=torch.bool)
+
+
 class _CellQueryBlock(nn.Module):
     def __init__(self, config: CoarseToFineReconstructorConfig) -> None:
         super().__init__()
@@ -772,6 +794,7 @@ class _GridLevelDecoder(nn.Module):
         parent_indices = torch.as_tensor(layout.parent_indices(level), dtype=torch.long)
         self.register_buffer("parent_indices", parent_indices, persistent=True)
         self.register_buffer("geometry", _geometry_tensor(layout, level), persistent=True)
+        self.register_buffer("feasible_cells", _geometry_feasibility(layout, level), persistent=True)
         self.query = nn.Parameter(torch.zeros(1, self.num_cells, config.d_model))
         nn.init.trunc_normal_(self.query, std=0.02)
         self.geometry_projection = nn.Sequential(
@@ -824,6 +847,15 @@ class _GridLevelDecoder(nn.Module):
             len(PRIMITIVE_ACCOUNTING_FIELD_NAMES),
         )
         if policy.spec.hard_allocation:
+            grouped_feasible = self.feasible_cells.reshape(
+                self.num_parents, self.children_per_parent
+            )
+            parent_has_feasible_child = grouped_feasible.any(dim=-1, keepdim=True)
+            allocation_mask = grouped_feasible | ~parent_has_feasible_child
+            grouped_logits = grouped_logits.masked_fill(
+                ~allocation_mask[None, :, :, None],
+                float("-inf"),
+            )
             allocated: AccountingAllocationOutput = self.allocator(parent_accounting, grouped_logits)
             accounting = allocated.children.reshape(batch, self.num_cells, len(ACCOUNTING_FIELD_NAMES))
             fractions = allocated.primitive_fractions.reshape(

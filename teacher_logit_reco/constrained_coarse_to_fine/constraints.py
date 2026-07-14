@@ -354,12 +354,90 @@ class PositiveNegativeMomentReconstructor(nn.Module):
         return MomentReconstructionOutput(values=values)
 
 
-class CellBoundCoordinateTransform(nn.Module):
-    """Map unconstrained local coordinates into each cell's eta/phi rectangle."""
+def _project_to_circle_rectangle(
+    point: torch.Tensor,
+    *,
+    eta_min: torch.Tensor,
+    eta_max: torch.Tensor,
+    phi_min: torch.Tensor,
+    phi_max: torch.Tensor,
+    radius: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select the nearest exact circle point contained in an axis-aligned cell."""
 
-    def forward(self, raw_coordinates: torch.Tensor, cell_bounds: torch.Tensor) -> torch.Tensor:
+    dtype = point.dtype
+    tolerance = 8.0 * torch.finfo(dtype).eps * torch.maximum(torch.ones_like(radius), radius)
+    candidates: list[torch.Tensor] = []
+    validities: list[torch.Tensor] = []
+
+    def add(x: torch.Tensor, y: torch.Tensor, geometric: torch.Tensor | None = None) -> None:
+        candidate = torch.stack((x, y), dim=-1)
+        inside = (
+            (x >= eta_min - tolerance)
+            & (x <= eta_max + tolerance)
+            & (y >= phi_min - tolerance)
+            & (y <= phi_max + tolerance)
+        )
+        if geometric is not None:
+            inside = inside & geometric
+        candidates.append(candidate)
+        validities.append(inside & torch.isfinite(candidate).all(dim=-1))
+
+    norm = torch.linalg.vector_norm(point, dim=-1)
+    default_direction = torch.stack((torch.ones_like(radius), torch.zeros_like(radius)), dim=-1)
+    direction = torch.where(
+        (norm > tolerance).unsqueeze(-1),
+        point / norm.clamp_min(torch.finfo(dtype).tiny).unsqueeze(-1),
+        default_direction,
+    )
+    radial = direction * radius.unsqueeze(-1)
+    add(radial[..., 0], radial[..., 1])
+    add(radius, torch.zeros_like(radius))
+    add(-radius, torch.zeros_like(radius))
+    add(torch.zeros_like(radius), radius)
+    add(torch.zeros_like(radius), -radius)
+
+    radius_sq = radius.square()
+    for fixed_eta in (eta_min, eta_max):
+        discriminant = radius_sq - fixed_eta.square()
+        root = torch.sqrt(discriminant.clamp_min(0.0))
+        feasible = discriminant >= -tolerance
+        add(fixed_eta, root, feasible)
+        add(fixed_eta, -root, feasible)
+    for fixed_phi in (phi_min, phi_max):
+        discriminant = radius_sq - fixed_phi.square()
+        root = torch.sqrt(discriminant.clamp_min(0.0))
+        feasible = discriminant >= -tolerance
+        add(root, fixed_phi, feasible)
+        add(-root, fixed_phi, feasible)
+
+    candidate_tensor = torch.stack(candidates, dim=-2)
+    valid_tensor = torch.stack(validities, dim=-1)
+    distance = (candidate_tensor - point.unsqueeze(-2)).square().sum(dim=-1)
+    distance = torch.where(valid_tensor, distance, torch.full_like(distance, torch.inf))
+    selected_index = distance.argmin(dim=-1)
+    gather_index = selected_index[..., None, None].expand(*selected_index.shape, 1, 2)
+    selected = candidate_tensor.gather(-2, gather_index).squeeze(-2)
+    has_candidate = valid_tensor.any(dim=-1)
+    return torch.where(has_candidate.unsqueeze(-1), selected, point), has_candidate
+
+
+class CellBoundCoordinateTransform(nn.Module):
+    """Map coordinates into the intersection of a cell rectangle and radial shell."""
+
+    def forward(
+        self,
+        raw_coordinates: torch.Tensor,
+        cell_bounds: torch.Tensor,
+        radial_bounds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         _require_last_dim(raw_coordinates, 2, name="raw_coordinates")
         _require_last_dim(cell_bounds, 4, name="cell_bounds")
+        if raw_coordinates.dtype in (torch.float16, torch.bfloat16):
+            raw_coordinates = raw_coordinates.float()
+            cell_bounds = cell_bounds.float()
+            if radial_bounds is not None:
+                radial_bounds = radial_bounds.float()
         if cell_bounds.ndim < raw_coordinates.ndim:
             # Bounds normally omit the slot dimension: [B, C, 4] or [C, 4]
             # accompanies coordinates [B, C, K, 2]. Standard broadcasting can
@@ -377,4 +455,41 @@ class CellBoundCoordinateTransform(nn.Module):
         unit = torch.sigmoid(raw_coordinates)
         eta = eta_min + unit[..., 0] * (eta_max - eta_min)
         phi = phi_min + unit[..., 1] * (phi_max - phi_min)
-        return torch.stack((eta, phi), dim=-1)
+        coordinates = torch.stack((eta, phi), dim=-1)
+        if radial_bounds is None:
+            return coordinates
+        _require_last_dim(radial_bounds, 2, name="radial_bounds")
+        if radial_bounds.ndim < coordinates.ndim:
+            radial_bounds = radial_bounds.unsqueeze(-2)
+        try:
+            radial_bounds = radial_bounds.expand(*coordinates.shape[:-1], 2)
+        except RuntimeError as exc:
+            raise ValueError("radial_bounds are not broadcast-compatible with coordinates") from exc
+        radial_min, radial_max = radial_bounds.unbind(dim=-1)
+        if torch.any(radial_min < 0.0) or torch.any(radial_max < radial_min):
+            raise ValueError("radial bounds must satisfy 0 <= min <= max")
+
+        current_radius = torch.linalg.vector_norm(coordinates, dim=-1)
+        below = current_radius < radial_min
+        lower_projection, lower_exists = _project_to_circle_rectangle(
+            coordinates,
+            eta_min=eta_min,
+            eta_max=eta_max,
+            phi_min=phi_min,
+            phi_max=phi_max,
+            radius=radial_min,
+        )
+        coordinates = torch.where((below & lower_exists).unsqueeze(-1), lower_projection, coordinates)
+
+        current_radius = torch.linalg.vector_norm(coordinates, dim=-1)
+        above = current_radius > radial_max
+        upper_projection, upper_exists = _project_to_circle_rectangle(
+            coordinates,
+            eta_min=eta_min,
+            eta_max=eta_max,
+            phi_min=phi_min,
+            phi_max=phi_max,
+            radius=radial_max,
+        )
+        coordinates = torch.where((above & upper_exists).unsqueeze(-1), upper_projection, coordinates)
+        return coordinates

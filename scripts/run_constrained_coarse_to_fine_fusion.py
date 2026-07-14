@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         type=_group,
         required=True,
-        help="Repeat NAME:METHOD:MEMBER[,MEMBER...]; F2 must use method external.",
+        help="Repeat NAME:METHOD:MEMBER[,MEMBER...]; F2 uses representation_stacker.",
     )
     parser.add_argument("--required-groups", nargs="+", default=list(REQUIRED_FUSION_GROUPS))
     parser.add_argument("--c-grid", nargs="+", type=float, default=None)

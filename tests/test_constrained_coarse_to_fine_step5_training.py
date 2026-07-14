@@ -24,6 +24,7 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
 )
 from teacher_logit_reco.constrained_coarse_to_fine.train import (
     _grad_norm_if_finite,
+    _loss_configs,
     _write_curves_csv,
 )
 
@@ -194,6 +195,23 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
             CoarseToFineTrainConfig(**base, stack_val_split="final_test")
         config = CoarseToFineTrainConfig(**base, variant="C5-B2", amp=False)
         self.assertEqual(config.to_dict()["resolved_variant"], "C5-B2")
+        no_slot = CoarseToFineTrainConfig(**base, variant="C5", slot_loss_weight=0.0, amp=False)
+        self.assertEqual(no_slot.slot_loss_weight, 0.0)
+        direct = CoarseToFineTrainConfig(
+            **base,
+            variant="C5",
+            constrain_slot_accounting=False,
+            direct_particle_decoding=True,
+            hierarchy_loss_weight=0.0,
+            amp=False,
+        )
+        self.assertTrue(direct.direct_particle_decoding)
+        self.assertEqual(direct.hierarchy_loss_weight, 0.0)
+        _, direct_slot_loss = _loss_configs(direct, "C", "C5_uncertainty")
+        self.assertEqual(direct_slot_loss.accounting_consistency_weight, 0.0)
+        self.assertEqual(direct_slot_loss.dust_weight, 0.0)
+        with self.assertRaisesRegex(ValueError, "direct particle decoding"):
+            CoarseToFineTrainConfig(**base, variant="C5", direct_particle_decoding=True, amp=False)
 
     def test_diagnostic_csv_flattens_train_and_model_val_metrics(self):
         curves = [

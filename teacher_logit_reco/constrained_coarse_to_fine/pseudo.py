@@ -39,7 +39,7 @@ from .targets import hlt_reference_axis, wrap_phi
 from .train import COARSE_TO_FINE_TRAIN_CONTRACT
 
 
-PSEUDO_PARTICLE_CACHE_CONTRACT = "constrained_coarse_to_fine_pseudo_particle_cache_v1"
+PSEUDO_PARTICLE_CACHE_CONTRACT = "constrained_coarse_to_fine_pseudo_particle_cache_v2"
 PSEUDO_PARTICLE_CACHE_SET_CONTRACT = "constrained_coarse_to_fine_pseudo_particle_cache_set_v1"
 PSEUDO_PARTICLE_RENDER_CONTRACT = "constrained_coarse_to_fine_pseudo_particle_render_v1"
 PSEUDO_PARTICLE_ALLOWED_SPLITS = (
@@ -61,6 +61,7 @@ _PSEUDO_SHARD_HASH_KEYS = (
     "expected_count",
     "slot_log_sigma",
     "uncertainty_mask",
+    "rendered_accounting",
     "global_accounting",
     "global_log_sigma",
     "level1_accounting",
@@ -91,6 +92,7 @@ class PseudoParticleRenderOutput:
     expected_count: torch.Tensor
     slot_log_sigma: torch.Tensor
     uncertainty_mask: torch.Tensor
+    rendered_accounting: torch.Tensor
     token_cell_indices: torch.Tensor
     token_slot_indices: torch.Tensor
     token_is_dust: torch.Tensor
@@ -275,9 +277,15 @@ def load_coarse_to_fine_reconstructor_checkpoint(
 
 def _cell_centers(model: CTierParticleReconstructor, level: int, reference: torch.Tensor) -> torch.Tensor:
     geometry = model.hierarchy.layout.cell_geometry(level)
-    return reference.new_tensor(
-        [[0.5 * (row["eta_min"] + row["eta_max"]), 0.5 * (row["phi_min"] + row["phi_max"])] for row in geometry]
+    bounds = reference.new_tensor(
+        [[row["eta_min"], row["eta_max"], row["phi_min"], row["phi_max"]] for row in geometry]
     )
+    radial = reference.new_tensor([[row["radial_min"], row["radial_max"]] for row in geometry])
+    return model.slot_decoder.coordinate_transform(
+        reference.new_zeros(len(geometry), 1, 2),
+        bounds[:, None, :],
+        radial[:, None, :],
+    ).squeeze(-2)
 
 
 def render_pseudo_particle_batch(
@@ -420,6 +428,7 @@ def render_pseudo_particle_batch(
         expected_count=rendered_count,
         slot_log_sigma=rendered_uncertainty,
         uncertainty_mask=rendered_uncertainty_mask,
+        rendered_accounting=slots.rendered_accounting,
         token_cell_indices=token_cell_indices,
         token_slot_indices=token_slot_indices,
         token_is_dust=token_is_dust,
@@ -496,6 +505,7 @@ def _render_arrays(rendered: PseudoParticleRenderOutput, dtype: np.dtype) -> dic
         "expected_count": _as_numpy(rendered.expected_count, dtype),
         "slot_log_sigma": _as_numpy(rendered.slot_log_sigma, dtype),
         "uncertainty_mask": _as_numpy(rendered.uncertainty_mask, bool),
+        "rendered_accounting": _as_numpy(rendered.rendered_accounting, dtype),
         "token_cell_indices": _as_numpy(rendered.token_cell_indices, np.int16),
         "token_slot_indices": _as_numpy(rendered.token_slot_indices, np.int16),
         "token_is_dust": _as_numpy(rendered.token_is_dust, bool),
@@ -517,6 +527,7 @@ def _combine_render_groups(groups: Sequence[PseudoParticleRenderOutput], num_vie
         "expected_count",
         "slot_log_sigma",
         "uncertainty_mask",
+        "rendered_accounting",
     )
     combined = {
         name: torch.cat([getattr(group, name) for group in groups], dim=1)[:, :num_views]
@@ -1038,6 +1049,7 @@ def _closure_diagnostics(shard: PseudoParticleShard, max_rows: int) -> dict[str,
         level for level in (1, 2, 3) if arrays[f"level{level}_accounting"].shape[1] > 0
     )
     target = arrays[f"level{terminal_level}_accounting"][:rows].astype(np.float64)
+    slot_accounting = arrays["rendered_accounting"][:rows].astype(np.float64)
     batch, views, _, _ = tokens.shape
     cells = int(target.shape[1])
     reconstructed = np.zeros((batch, views, cells, len(ACCOUNTING_FIELD_NAMES)), dtype=np.float64)
@@ -1073,12 +1085,23 @@ def _closure_diagnostics(shard: PseudoParticleShard, max_rows: int) -> dict[str,
     primitive_indices = [ACCOUNTING_INDEX["total_pT"], ACCOUNTING_INDEX["total_energy"], ACCOUNTING_INDEX["expected_constituent_count"], *PID_PT_INDICES]
     error = np.abs(reconstructed[..., primitive_indices] - target_expanded[..., primitive_indices])
     scale = np.maximum(np.abs(target_expanded[..., primitive_indices]), 1.0)
+    hard_indices = [
+        ACCOUNTING_INDEX["total_pT"],
+        ACCOUNTING_INDEX["total_energy"],
+        ACCOUNTING_INDEX["expected_constituent_count"],
+        *PID_PT_INDICES,
+        *[ACCOUNTING_INDEX[f"{name}_count"] for name in PID_CATEGORY_NAMES],
+    ]
+    slot_error = np.abs(slot_accounting[..., hard_indices] - target_expanded[..., hard_indices])
+    slot_scale = np.maximum(np.abs(target_expanded[..., hard_indices]), 1.0)
     moment_indices = [ACCOUNTING_INDEX[name] for name in MOMENT_FIELD_NAMES]
     moment_error = np.abs(reconstructed[..., moment_indices] - target_expanded[..., moment_indices])
     moment_scale = np.maximum(np.abs(target_expanded[..., moment_indices]), 1.0)
     return {
         "additive_closure_abs_max": float(error.max(initial=0.0)),
         "additive_closure_relative_max": float((error / scale).max(initial=0.0)),
+        "hard_slot_accounting_closure_abs_max": float(slot_error.max(initial=0.0)),
+        "hard_slot_accounting_closure_relative_max": float((slot_error / slot_scale).max(initial=0.0)),
         "moment_relative_mae": float(np.mean(moment_error / moment_scale)),
     }
 
@@ -1092,7 +1115,7 @@ def audit_pseudo_particle_cache(
     hlt_cache_dir: str | Path | None = None,
     checkpoint_path: str | Path | None = None,
     verify_hash: bool = True,
-    max_closure_jets: int = 4096,
+    max_closure_jets: int | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_c_tier_variant(variant)
     _, metadata = _load_metadata(cache_dir, normalized, split)
@@ -1131,7 +1154,8 @@ def audit_pseudo_particle_cache(
             problems.append("HLT row ordering mismatch")
     observed_ids: list[JetIdentity] = []
     expected_start = 0
-    closure_rows = int(max_closure_jets)
+    closure_rows = None if max_closure_jets is None else int(max_closure_jets)
+    audited_closure_rows = 0
     closure_reports: list[Mapping[str, float]] = []
     try:
         for shard in iter_pseudo_particle_shards(
@@ -1141,10 +1165,12 @@ def audit_pseudo_particle_cache(
                 problems.append(f"shard {shard.shard_index} starts at {shard.start}, expected {expected_start}")
             observed_ids.extend(shard.jet_ids)
             expected_start = shard.stop
-            if closure_rows > 0:
-                take = min(closure_rows, shard.stop - shard.start)
+            if closure_rows is None or closure_rows > 0:
+                take = shard.stop - shard.start if closure_rows is None else min(closure_rows, shard.stop - shard.start)
                 closure_reports.append(_closure_diagnostics(shard, take))
-                closure_rows -= take
+                audited_closure_rows += take
+                if closure_rows is not None:
+                    closure_rows -= take
     except Exception as exc:
         problems.append(str(exc))
     if tuple(observed_ids) != expected_ids:
@@ -1153,9 +1179,15 @@ def audit_pseudo_particle_cache(
         (report.get("additive_closure_relative_max", 0.0) for report in closure_reports),
         default=0.0,
     )
-    tolerance = 0.03 if metadata.get("cache_dtype") == "float16" else 2.0e-4
+    max_slot_relative = max(
+        (report.get("hard_slot_accounting_closure_relative_max", 0.0) for report in closure_reports),
+        default=0.0,
+    )
+    tolerance = 0.005 if metadata.get("cache_dtype") == "float16" else 2.0e-4
     if max_relative > tolerance:
         problems.append(f"additive pseudo-particle closure {max_relative} exceeds tolerance {tolerance}")
+    if max_slot_relative > tolerance:
+        problems.append(f"hard slot-accounting closure {max_slot_relative} exceeds tolerance {tolerance}")
     return {
         "ok": not problems,
         "cache_contract": PSEUDO_PARTICLE_CACHE_CONTRACT,
@@ -1165,6 +1197,16 @@ def audit_pseudo_particle_cache(
         "num_views": metadata.get("num_views"),
         "num_tokens": metadata.get("num_tokens"),
         "cache_content_hash": metadata.get("cache_content_hash"),
+        "hard_conserved_accounting_fields": [
+            "total_pT",
+            "total_energy",
+            "expected_constituent_count",
+            *[f"{name}_pT" for name in PID_CATEGORY_NAMES],
+            *[f"{name}_count" for name in PID_CATEGORY_NAMES],
+        ],
+        "loss_matched_moment_fields": list(MOMENT_FIELD_NAMES),
+        "closure_jets_audited": audited_closure_rows,
+        "full_cache_closure_audit": audited_closure_rows == int(metadata.get("n_jets", -1)),
         "closure_diagnostics": closure_reports,
         "problems": problems,
     }

@@ -18,17 +18,19 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_tagger.sh <D0-D6|D8|D5-B1/B2/B3|E0-E3|E5|D8-seedN>}"
+RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_tagger.sh <D0-D8|D5-B1/B2/B3|E0-E6|D*-seedN>}"
 variant="${RUN_ID}"
 seed_offset=0
 case "${RUN_ID}" in
-  D[0-6]|D8|D5-B1|D5-B2|D5-B3|E[0-3]|E5) ;;
-  D8-seed1) variant=D8; seed_offset=101 ;;
-  D8-seed2) variant=D8; seed_offset=202 ;;
+  A0|D[0-8]|D5-B1|D5-B2|D5-B3|E[0-6]) ;;
   *)
-    echo "Unsupported staged tagger RUN_ID: ${RUN_ID}" >&2
-    echo "The live-particle trainer excludes grid-only D7, unconstrained E4, and HLT-only E6." >&2
-    exit 2
+    if [[ "${RUN_ID}" =~ ^(D[0-8]|D5-B[12])-seed([12])$ ]]; then
+      variant="${BASH_REMATCH[1]}"
+      seed_offset="$((101 * BASH_REMATCH[2]))"
+    else
+      echo "Unsupported staged tagger RUN_ID: ${RUN_ID}" >&2
+      exit 2
+    fi
     ;;
 esac
 
@@ -49,7 +51,7 @@ esac
 : "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_TAGGER_MAX_VAL_JETS:=}"
 
-if [[ "${variant}" != "D0" && -z "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
+if [[ "${variant}" != "A0" && "${variant}" != "D0" && -z "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
   echo "CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT is required for schedule-matched taggers." >&2
   exit 2
 fi
@@ -60,13 +62,25 @@ fresh_require_file "${CONSTRAINED_C2F_MANIFEST_PATH}"
 fresh_require_dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"
 fresh_require_dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
 fresh_require_file "${CONSTRAINED_C2F_TARGET_CACHE_DIR}/hierarchy_target_cache_manifest.json"
-if [[ "${variant}" != "D0" ]]; then fresh_require_file "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}"; fi
+if [[ "${variant}" != "A0" && "${variant}" != "D0" ]]; then fresh_require_file "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}"; fi
 fresh_claim_new_dir "${OUTPUT_DIR}"
+
+memory_cmd=(
+  "${PYTHON_BIN}" scripts/audit_constrained_coarse_to_fine_memory.py
+  --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"
+  --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
+  --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}"
+  --splits model_train model_val
+  --allocated-memory-mb "${SLURM_MEM_PER_NODE:-0}"
+  --output "${OUTPUT_DIR}/memory_preflight.json"
+)
+fresh_run "${memory_cmd[@]}"
 
 source_args=()
 variant_args=()
 alias_args=()
 case "${variant}" in
+  A0) ;;
   D0|D1|D2|D3|D4|E0|E1|E2|E3)
     source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/C5-B3/best_model_val.pt")
     variant_args+=(--reconstructor-variant canonical=C5-B3)
@@ -93,6 +107,10 @@ case "${variant}" in
       variant_args+=(--reconstructor-variant "stochastic_${index}=C6")
     done
     ;;
+  D7)
+    source_args+=(--reconstructor-source "grid=${CONSTRAINED_C2F_RECON_ROOT}/C5-B3/best_model_val.pt")
+    variant_args+=(--reconstructor-variant grid=C5-B3)
+    ;;
   D8)
     source_args+=(
       --reconstructor-source "best_c=${CONSTRAINED_C2F_RECON_ROOT}/C5-B3/best_model_val.pt"
@@ -114,6 +132,11 @@ case "${variant}" in
     source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/C5-no-slot/best_model_val.pt")
     variant_args+=(--reconstructor-variant canonical=C5)
     ;;
+  E4)
+    source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/Cdirect-unconstrained/best_model_val.pt")
+    variant_args+=(--reconstructor-variant canonical=C5)
+    ;;
+  E6) ;;
 esac
 
 for value in "${source_args[@]}"; do
@@ -138,7 +161,9 @@ cmd=(
   --num-workers "${CONSTRAINED_C2F_TAGGER_NUM_WORKERS}"
   --device "${DEVICE}"
 )
-if [[ "${variant}" != "D0" && -n "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
+if [[ "${variant}" == "A0" ]]; then
+  cmd+=(--allow-random-hlt-start)
+elif [[ "${variant}" != "D0" && -n "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
   cmd+=(--hlt-warm-start-checkpoint "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}")
 fi
 if ! fresh_bool_enabled "${CONSTRAINED_C2F_TAGGER_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi

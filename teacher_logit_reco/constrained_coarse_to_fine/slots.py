@@ -8,11 +8,13 @@ from typing import Any, Mapping
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .constraints import (
     ACCOUNTING_INDEX,
     CategoryCountSlotAllocator,
     CategoryPtSlotAllocator,
+    CategorySlotAllocationOutput,
     CellBoundCoordinateTransform,
     TOTAL_ENERGY_INDEX,
     assemble_accounting,
@@ -189,6 +191,8 @@ class ParticleSlotDecoderConfig:
     attention_dropout: float = 0.05
     uncertainty_min: float = -8.0
     uncertainty_max: float = 8.0
+    constrain_accounting: bool = True
+    direct_particle_decoding: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "variant", normalize_c_tier_variant(self.variant))
@@ -204,6 +208,8 @@ class ParticleSlotDecoderConfig:
                 raise ValueError(f"{name} must be in [0, 1)")
         if float(self.uncertainty_min) >= float(self.uncertainty_max):
             raise ValueError("uncertainty bounds are reversed")
+        if bool(self.direct_particle_decoding) and bool(self.constrain_accounting):
+            raise ValueError("direct particle decoding cannot use hierarchical accounting constraints")
 
     @property
     def variant_spec(self) -> CTierVariantSpec:
@@ -379,12 +385,18 @@ def _cell_geometry(
     *,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rows = layout.cell_geometry(level)
+    geometry_dtype = torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
     bounds = torch.tensor(
         [[row["eta_min"], row["eta_max"], row["phi_min"], row["phi_max"]] for row in rows],
         device=device,
-        dtype=dtype,
+        dtype=geometry_dtype,
+    )
+    radial_bounds = torch.tensor(
+        [[row["radial_min"], row["radial_max"]] for row in rows],
+        device=device,
+        dtype=geometry_dtype,
     )
     features = []
     radial_scale = math.sqrt(2.0) * float(layout.coordinate_extent)
@@ -401,18 +413,72 @@ def _cell_geometry(
                 float(level) / 3.0,
             ]
         )
-    return bounds, torch.tensor(features, device=device, dtype=dtype)
+    return bounds, radial_bounds, torch.tensor(features, device=device, dtype=geometry_dtype)
+
+
+def _geometry_feasibility(bounds: torch.Tensor, radial_bounds: torch.Tensor) -> torch.Tensor:
+    eta_min, eta_max, phi_min, phi_max = bounds.unbind(dim=-1)
+    nearest_eta = torch.where(
+        (eta_min <= 0.0) & (eta_max >= 0.0), torch.zeros_like(eta_min), torch.minimum(eta_min.abs(), eta_max.abs())
+    )
+    nearest_phi = torch.where(
+        (phi_min <= 0.0) & (phi_max >= 0.0), torch.zeros_like(phi_min), torch.minimum(phi_min.abs(), phi_max.abs())
+    )
+    minimum_radius = torch.sqrt(nearest_eta.square() + nearest_phi.square())
+    maximum_radius = torch.sqrt(
+        torch.maximum(eta_min.abs(), eta_max.abs()).square()
+        + torch.maximum(phi_min.abs(), phi_max.abs()).square()
+    )
+    return (maximum_radius >= radial_bounds[..., 0]) & (minimum_radius <= radial_bounds[..., 1])
+
+
+def _hlt_axis_relative_coordinates(
+    lorentz_vectors: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    coordinate_extent: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    vectors = _batch_first(lorentz_vectors, 4, name="lorentz_vectors")
+    valid = mask.bool()
+    px, py, pz, _ = vectors.unbind(dim=-1)
+    pt = torch.sqrt(px.square() + py.square())
+    eta = torch.asinh(pz / pt.clamp_min(1.0e-12))
+    phi = torch.atan2(py, px)
+    valid = valid & torch.isfinite(vectors).all(dim=-1) & (pt > 0.0)
+    weight = torch.where(valid, pt, torch.zeros_like(pt))
+    denominator = weight.sum(dim=1).clamp_min(1.0e-12)
+    reference_eta = (weight * torch.where(valid, eta, torch.zeros_like(eta))).sum(dim=1) / denominator
+    reference_phi = torch.atan2(
+        (weight * torch.sin(torch.where(valid, phi, torch.zeros_like(phi)))).sum(dim=1),
+        (weight * torch.cos(torch.where(valid, phi, torch.zeros_like(phi)))).sum(dim=1),
+    )
+    deta = eta - reference_eta[:, None]
+    dphi = torch.remainder(phi - reference_phi[:, None] + math.pi, 2.0 * math.pi) - math.pi
+    extent = float(coordinate_extent)
+    coordinates = torch.stack(
+        (deta.clamp(-extent, extent), dphi.clamp(-extent, extent)),
+        dim=-1,
+    )
+    coordinates = torch.where(valid.unsqueeze(-1), coordinates, torch.zeros_like(coordinates))
+    return coordinates, valid
 
 
 def _select_local_hlt_memory(
     hierarchy: CoarseToFineReconstructorOutput,
-    points: torch.Tensor,
+    lorentz_vectors: torch.Tensor,
     cell_bounds: torch.Tensor,
+    radial_bounds: torch.Tensor,
     max_particles: int,
+    *,
+    coordinate_extent: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     particles = hierarchy.hlt.particle_embeddings
-    mask = hierarchy.hlt.particle_mask
-    point_rows = _batch_first(points, 2, name="points").to(device=particles.device, dtype=particles.dtype)
+    point_rows, mask = _hlt_axis_relative_coordinates(
+        lorentz_vectors,
+        hierarchy.hlt.particle_mask,
+        coordinate_extent=coordinate_extent,
+    )
+    point_rows = point_rows.to(device=particles.device, dtype=particles.dtype)
     centers = torch.stack(
         (
             0.5 * (cell_bounds[:, 0] + cell_bounds[:, 1]),
@@ -426,6 +492,16 @@ def _select_local_hlt_memory(
         2.0 * math.pi,
     ) - math.pi
     distance = deta.square() + dphi.square()
+    radius = torch.linalg.vector_norm(point_rows, dim=-1)
+    inside = (
+        (point_rows[:, None, :, 0] >= cell_bounds[None, :, None, 0])
+        & (point_rows[:, None, :, 0] <= cell_bounds[None, :, None, 1])
+        & (point_rows[:, None, :, 1] >= cell_bounds[None, :, None, 2])
+        & (point_rows[:, None, :, 1] <= cell_bounds[None, :, None, 3])
+        & (radius[:, None, :] >= radial_bounds[None, :, None, 0])
+        & (radius[:, None, :] <= radial_bounds[None, :, None, 1])
+    )
+    distance = distance + (~inside).to(distance.dtype) * 1.0e4
     distance = distance.masked_fill(~mask[:, None, :], float("inf"))
     selected_count = min(int(max_particles), int(particles.shape[1]))
     indices = torch.topk(distance, k=selected_count, dim=-1, largest=False).indices
@@ -547,7 +623,7 @@ class ParticleSlotDecoder(nn.Module):
     def forward(
         self,
         hierarchy: CoarseToFineReconstructorOutput,
-        points: torch.Tensor,
+        lorentz_vectors: torch.Tensor,
         *,
         stochastic_latent: torch.Tensor | None = None,
     ) -> ParticleSlotDecoderOutput:
@@ -559,17 +635,20 @@ class ParticleSlotDecoder(nn.Module):
             )
         batch, cells, _ = accounting.shape
         views = int(self.spec.num_views)
-        bounds, geometry = _cell_geometry(
+        bounds, radial_bounds, geometry = _cell_geometry(
             self.layout,
             terminal_level,
             device=accounting.device,
             dtype=accounting.dtype,
         )
+        geometry_feasible = _geometry_feasibility(bounds, radial_bounds)
         local_hlt, local_hlt_mask = _select_local_hlt_memory(
             hierarchy,
-            points,
+            lorentz_vectors,
             bounds,
+            radial_bounds,
             self.spec.max_hlt_particles_per_cell,
+            coordinate_extent=float(self.layout.coordinate_extent),
         )
         if stochastic_latent is None and views > 1:
             stochastic_latent = torch.randn(
@@ -586,9 +665,13 @@ class ParticleSlotDecoder(nn.Module):
             stochastic_latent = stochastic_latent.to(device=accounting.device, dtype=accounting.dtype)
         total_queries = self.spec.num_real_slots + int(self.spec.include_dust)
         slots = self.slot_queries.expand(batch, cells, -1, -1)
-        conditioning = self.cell_projection(cell_tokens)
-        conditioning = conditioning + self.accounting_projection(torch.log1p(accounting.clamp_min(0.0)))
-        conditioning = conditioning + self.geometry_projection(geometry)[None, :, :]
+        if self.config.direct_particle_decoding:
+            conditioning = self.cell_projection(hierarchy.global_token)[:, None, :].expand(-1, cells, -1)
+            conditioning = conditioning + self.geometry_projection(geometry)[None, :, :]
+        else:
+            conditioning = self.cell_projection(cell_tokens)
+            conditioning = conditioning + self.accounting_projection(torch.log1p(accounting.clamp_min(0.0)))
+            conditioning = conditioning + self.geometry_projection(geometry)[None, :, :]
         slots = slots[:, None, :, :, :].expand(-1, views, -1, -1, -1)
         slots = slots + conditioning[:, None, :, None, :]
         view_ids = torch.arange(views, device=accounting.device)
@@ -603,9 +686,13 @@ class ParticleSlotDecoder(nn.Module):
         hlt_mask = local_hlt_mask[:, None, :, :].expand(-1, views, -1, -1).reshape(
             batch * views * cells, local_hlt_mask.shape[2]
         )
-        ancestor_memory = ancestors[:, None, :, :, :].expand(-1, views, -1, -1, -1).reshape(
-            batch * views * cells, ancestors.shape[2], self.config.d_model
-        )
+        if self.config.direct_particle_decoding:
+            ancestor_memory = hierarchy.global_token[:, None, None, :].expand(-1, views, cells, -1)
+            ancestor_memory = ancestor_memory.reshape(batch * views * cells, 1, self.config.d_model)
+        else:
+            ancestor_memory = ancestors[:, None, :, :, :].expand(-1, views, -1, -1, -1).reshape(
+                batch * views * cells, ancestors.shape[2], self.config.d_model
+            )
         for block in self.blocks:
             flat_slots = block(flat_slots, hlt_memory, hlt_mask, ancestor_memory)
         hidden_all = self.output_norm(flat_slots).reshape(
@@ -615,21 +702,67 @@ class ParticleSlotDecoder(nn.Module):
 
         expanded_accounting = accounting[:, None, :, :].expand(-1, views, -1, -1)
         category_pt_logits = self.category_pt_head(hidden_all)
-        pt_allocation = self.pt_allocator(expanded_accounting, category_pt_logits)
         category_count_logits = self.category_count_head(real_hidden)
-        count_allocation = self.count_allocator(expanded_accounting, category_count_logits)
         energy_logits = self.energy_head(hidden_all).squeeze(-1)
-        energy_fractions = torch.softmax(energy_logits, dim=-1)
-        energy_all = expanded_accounting[..., TOTAL_ENERGY_INDEX].unsqueeze(-1) * energy_fractions
+        if self.config.constrain_accounting:
+            pt_allocation = self.pt_allocator(expanded_accounting, category_pt_logits)
+            count_allocation = self.count_allocator(expanded_accounting, category_count_logits)
+            energy_fractions = torch.softmax(energy_logits, dim=-1)
+            energy_all = expanded_accounting[..., TOTAL_ENERGY_INDEX].unsqueeze(-1) * energy_fractions
+        else:
+            if self.config.direct_particle_decoding:
+                category_per_slot = F.softplus(category_pt_logits)
+                category_per_slot = category_per_slot * geometry_feasible[None, None, :, None, None]
+            else:
+                pt_scale = expanded_accounting[..., ACCOUNTING_INDEX["total_pT"]].unsqueeze(-1).unsqueeze(-1)
+                pt_scale = pt_scale / float(total_queries * len(PID_CATEGORY_NAMES))
+                category_per_slot = F.softplus(category_pt_logits) * (pt_scale / math.log(2.0))
+            total_per_slot = category_per_slot.sum(dim=-1)
+            category_probabilities = category_per_slot / total_per_slot.unsqueeze(-1).clamp_min(1.0e-8)
+            pt_allocation = CategorySlotAllocationOutput(
+                category_per_slot=category_per_slot,
+                total_per_slot=total_per_slot,
+                category_probabilities=category_probabilities,
+                fractions=category_per_slot
+                / category_per_slot.sum(dim=-2, keepdim=True).clamp_min(1.0e-8),
+            )
+            if self.config.direct_particle_decoding:
+                category_count = F.softplus(category_count_logits)
+                category_count = category_count * geometry_feasible[None, None, :, None, None]
+            else:
+                count_scale = expanded_accounting[..., ACCOUNTING_INDEX["expected_constituent_count"]]
+                count_scale = count_scale.unsqueeze(-1).unsqueeze(-1) / float(
+                    self.spec.num_real_slots * len(PID_CATEGORY_NAMES)
+                )
+                category_count = F.softplus(category_count_logits) * (count_scale / math.log(2.0))
+            count_total = category_count.sum(dim=-1)
+            count_allocation = CategorySlotAllocationOutput(
+                category_per_slot=category_count,
+                total_per_slot=count_total,
+                category_probabilities=category_count / count_total.unsqueeze(-1).clamp_min(1.0e-8),
+                fractions=category_count
+                / category_count.sum(dim=-2, keepdim=True).clamp_min(1.0e-8),
+            )
+            if self.config.direct_particle_decoding:
+                energy_all = F.softplus(energy_logits)
+                energy_all = energy_all * geometry_feasible[None, None, :, None]
+            else:
+                energy_scale = expanded_accounting[..., TOTAL_ENERGY_INDEX].unsqueeze(-1) / float(total_queries)
+                energy_all = F.softplus(energy_logits) * (energy_scale / math.log(2.0))
 
         raw_coordinates = self.coordinate_head(real_hidden)
         coordinates = self.coordinate_transform(
             raw_coordinates,
             bounds[None, None, :, None, :],
+            radial_bounds[None, None, :, None, :],
         )
         pid_logits = self.pid_head(real_hidden)
         charge_logits = self.charge_head(real_hidden)
         existence_logits = self.existence_head(real_hidden).squeeze(-1)
+        if self.config.direct_particle_decoding:
+            existence_logits = existence_logits.masked_fill(
+                ~geometry_feasible[None, None, :, None], -20.0
+            )
         reliability = torch.sigmoid(self.reliability_head(real_hidden).squeeze(-1))
         log_sigma = None
         if self.spec.use_uncertainty:
@@ -643,13 +776,11 @@ class ParticleSlotDecoder(nn.Module):
             dust_category_pt = pt_allocation.category_per_slot[..., -1, :]
             real_energy = energy_all[..., :-1]
             dust_energy = energy_all[..., -1]
-            center = torch.stack(
-                (
-                    0.5 * (bounds[:, 0] + bounds[:, 1]),
-                    0.5 * (bounds[:, 2] + bounds[:, 3]),
-                ),
-                dim=-1,
-            )
+            center = self.coordinate_transform(
+                torch.zeros(cells, 1, 2, device=bounds.device, dtype=bounds.dtype),
+                bounds[:, None, :],
+                radial_bounds[:, None, :],
+            ).squeeze(-2)
             coordinates_all = torch.cat(
                 (
                     coordinates,
@@ -681,6 +812,9 @@ class ParticleSlotDecoder(nn.Module):
             "num_views": views,
             "dust_enabled": self.spec.include_dust,
             "uncertainty_enabled": self.spec.use_uncertainty,
+            "accounting_constraints_enabled": bool(self.config.constrain_accounting),
+            "direct_particle_decoding": bool(self.config.direct_particle_decoding),
+            "geometrically_feasible_cells": int(geometry_feasible.sum().detach().cpu().item()),
             "local_hlt_memory_size": int(local_hlt.shape[2]),
             "category_pt_closure_abs_max": (
                 pt_allocation.category_per_slot.sum(dim=-2)
@@ -749,7 +883,7 @@ class CTierParticleReconstructor(nn.Module):
         hierarchy_output = self.hierarchy(points, features, lorentz_vectors, mask)
         slot_output = self.slot_decoder(
             hierarchy_output,
-            points,
+            lorentz_vectors,
             stochastic_latent=stochastic_latent,
         )
         return CTierReconstructorOutput(hierarchy=hierarchy_output, slots=slot_output)
@@ -774,4 +908,3 @@ def build_c_tier_reconstructor(
     slot_config = ParticleSlotDecoderConfig(**slot_payload)
     decoder = ParticleSlotDecoder(slot_config, layout=hierarchy.layout)
     return CTierParticleReconstructor(hierarchy, decoder)
-

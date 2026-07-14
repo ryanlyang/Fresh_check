@@ -26,15 +26,16 @@ from jetclass_fresh.hlt_baseline import (
 
 from .fusion import (
     ARCH_HLT_CAPACITY_CONTROL,
+    ARCH_HLT_ONLY,
     ARCH_PSEUDO_ONLY,
     D5_END_TO_END,
     D8_MULTIDEPTH,
     ConstrainedDualStreamTagger,
     FusionTaggerOutput,
     ParticleStreamInput,
-    apply_fusion_control,
     build_dual_stream_fusion_tagger,
     fusion_variant_spec,
+    grid_view_from_hierarchy_output,
     normalize_fusion_variant,
     pseudo_particle_views_from_rendered,
 )
@@ -375,6 +376,22 @@ class EndToEndCoarseToFineTagger(nn.Module):
                 hlt.mask,
                 stochastic_latent=latent,
             )
+            source_bindings = self._source_bindings(module_key)
+            if self.tagger.spec.requires_grid_tokens:
+                if len(source_bindings) != 1:
+                    raise ValueError("D7 requires exactly one live hierarchy source")
+                binding = source_bindings[0]
+                pseudo_by_name[binding.view_name] = grid_view_from_hierarchy_output(
+                    output.hierarchy,
+                    reference_eta=reference_eta,
+                    reference_phi=reference_phi,
+                    name=binding.view_name,
+                    radial_boundary=float(reconstructor.hierarchy.layout.radial_boundary),
+                    coordinate_extent=float(reconstructor.hierarchy.layout.coordinate_extent),
+                    source_variant=binding.source_variant,
+                )
+                reconstructor_outputs[module_key] = output
+                continue
             rendered = render_pseudo_particle_batch(
                 output,
                 reference_eta=reference_eta,
@@ -383,7 +400,6 @@ class EndToEndCoarseToFineTagger(nn.Module):
                 min_particle_pt=self.min_particle_pt,
                 dust_reliability=self.dust_reliability,
             )
-            source_bindings = self._source_bindings(module_key)
             views = pseudo_particle_views_from_rendered(
                 rendered,
                 view_names=tuple(row.view_name for row in source_bindings),
@@ -394,15 +410,6 @@ class EndToEndCoarseToFineTagger(nn.Module):
             renders[module_key] = rendered
             pseudo_by_name.update({view.name: view for view in views})
         pseudo_views = tuple(pseudo_by_name[name] for name in self.tagger.view_names)
-        if self.tagger.spec.control != "none":
-            pseudo_views = tuple(
-                apply_fusion_control(
-                    view,
-                    self.tagger.spec.control,
-                    seed=int(self.tagger.config.control_seed) + index,
-                )
-                for index, view in enumerate(pseudo_views)
-            )
         return EndToEndForwardOutput(
             tagger=self.tagger.forward_detailed(
                 hlt,
@@ -437,11 +444,14 @@ def build_end_to_end_tagger(
     fusion_overrides: Mapping[str, Any] | None = None,
     device: torch.device | str = "cpu",
 ) -> tuple[EndToEndCoarseToFineTagger, ResolvedReconstructorSources]:
-    resolved = resolve_reconstructor_sources(sources, device=device)
     normalized = normalize_fusion_variant(variant)
     spec = fusion_variant_spec(normalized)
-    if spec.requires_grid_tokens or spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
-        raise ValueError(f"{normalized} is not a live particle-reconstructor tagger variant")
+    if spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}:
+        if sources:
+            raise ValueError(f"{normalized} is HLT-only and cannot declare reconstructor sources")
+        resolved = ResolvedReconstructorSources(nn.ModuleDict(), (), {}, {})
+    else:
+        resolved = resolve_reconstructor_sources(sources, device=device)
     overrides = dict(fusion_overrides or {})
     overrides["view_names"] = resolved.view_names
     tagger = build_dual_stream_fusion_tagger(normalized, overrides=overrides)
@@ -530,7 +540,11 @@ def load_end_to_end_tagger_checkpoint(
         )
         bindings.append(binding)
         source_for_module.setdefault(binding.module_key, binding.source_name)
-    if not bindings:
+    variant = normalize_fusion_variant(str(payload.get("variant")))
+    if not bindings and fusion_variant_spec(variant).architecture not in {
+        ARCH_HLT_ONLY,
+        ARCH_HLT_CAPACITY_CONTROL,
+    }:
         raise ValueError("end-to-end checkpoint exposes no active pseudo views")
     for module_key, source_name in source_for_module.items():
         metadata = source_rows.get(source_name)
@@ -1016,8 +1030,6 @@ class EndToEndTrainConfig:
     def __post_init__(self) -> None:
         variant = normalize_fusion_variant(self.variant)
         spec = fusion_variant_spec(variant)
-        if spec.requires_grid_tokens or spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
-            raise ValueError(f"{variant} is not supported by the live particle-reconstructor trainer")
         object.__setattr__(self, "variant", variant)
         object.__setattr__(self, "reconstructor_sources", tuple(self.reconstructor_sources))
         if str(self.train_split) != "model_train" or str(self.val_split) != "model_val":
@@ -1030,7 +1042,7 @@ class EndToEndTrainConfig:
         if float(self.weight_decay) < 0.0 or float(self.grad_clip_norm) <= 0.0:
             raise ValueError("weight_decay must be nonnegative and grad_clip_norm positive")
         if (
-            spec.architecture != ARCH_PSEUDO_ONLY
+            spec.architecture not in {ARCH_PSEUDO_ONLY, ARCH_HLT_ONLY}
             and not self.hlt_warm_start_checkpoint
             and not self.allow_random_hlt_start
         ):
@@ -1424,6 +1436,8 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
         "checkpoint_sha256": _file_sha256(checkpoint),
         "configuration_hash": configuration_hash,
         "reconstructors": resolved.to_dict(),
+        "provenance": source_metadata["provenance"],
+        "trusted_hlt_warm_start": warm_start,
         "phase_history": [row["phase"] for row in curves],
         "selection_split": "model_val",
         "final_test_evaluated": False,

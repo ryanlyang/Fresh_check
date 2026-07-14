@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 DUAL_STREAM_FUSION_CONTRACT = "constrained_coarse_to_fine_dual_stream_fusion_v1"
 PSEUDO_VIEW_INPUT_CONTRACT = "constrained_coarse_to_fine_pseudo_view_input_v1"
 
+A0_HLT_BASELINE = "A0"
 D0_PSEUDO_ONLY = "D0"
 D1_LATE_LOGIT_FUSION = "D1"
 D2_REPRESENTATION_FUSION = "D2"
@@ -45,6 +46,7 @@ E5_NO_SLOT_LOSS_SOURCE = "E5"
 E6_CAPACITY_MATCHED_HLT = "E6"
 
 ARCH_PSEUDO_ONLY = "pseudo_only"
+ARCH_HLT_ONLY = "hlt_only"
 ARCH_LATE_LOGIT = "late_logit"
 ARCH_REPRESENTATION = "representation"
 ARCH_CROSS_ATTENTION = "cross_attention"
@@ -102,6 +104,7 @@ class FusionVariantSpec:
 def _variant_specs() -> tuple[FusionVariantSpec, ...]:
     canonical = ("canonical",)
     return (
+        FusionVariantSpec(A0_HLT_BASELINE, ARCH_HLT_ONLY, (), "hlt_only", description="Clean HLT ParT-style baseline used for exact warm starts."),
         FusionVariantSpec(D0_PSEUDO_ONLY, ARCH_PSEUDO_ONLY, canonical, "best_c", description="Pseudo-only ParT-style tagger."),
         FusionVariantSpec(D1_LATE_LOGIT_FUSION, ARCH_LATE_LOGIT, canonical, "best_c", description="Mean of jointly trained HLT and pseudo branch logits."),
         FusionVariantSpec(D2_REPRESENTATION_FUSION, ARCH_REPRESENTATION, canonical, "best_c", description="Pre-classifier HLT/pseudo representation fusion."),
@@ -191,13 +194,13 @@ class FusionTaggerConfig:
                 raise ValueError(f"{name} must be in [0, 1)")
         spec = self.variant_spec
         resolved = self.resolved_view_names
-        if spec.architecture == ARCH_HLT_CAPACITY_CONTROL and resolved:
-            raise ValueError("E6 cannot declare pseudo views")
+        if spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL} and resolved:
+            raise ValueError(f"{self.variant} cannot declare pseudo views")
         if spec.requires_multiview and len(resolved) < 2:
             raise ValueError("D6 requires multiple stochastic pseudo views")
         if spec.requires_multidepth and len(resolved) < 2:
             raise ValueError("D8 requires at least two unique structural views")
-        if spec.architecture != ARCH_HLT_CAPACITY_CONTROL and not resolved:
+        if spec.architecture not in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL} and not resolved:
             raise ValueError(f"{self.variant} requires at least one pseudo view")
 
     @property
@@ -304,6 +307,7 @@ class FusionTaggerOutput:
     pseudo_logits: torch.Tensor | None
     hlt_representation: torch.Tensor
     pseudo_representations: Mapping[str, torch.Tensor]
+    fusion_representation: torch.Tensor
     token_gates: torch.Tensor | None
     pooled_gates: torch.Tensor | None
     gate_entropy_regularizer: torch.Tensor
@@ -548,6 +552,46 @@ def grid_view_from_arrays(
     )
     view.validate()
     return view
+
+
+def grid_view_from_hierarchy_output(
+    hierarchy: Any,
+    *,
+    reference_eta: torch.Tensor,
+    reference_phi: torch.Tensor,
+    name: str = "grid",
+    radial_boundary: float,
+    coordinate_extent: float,
+    source_variant: str,
+) -> PseudoParticleViewInput:
+    """Build a differentiable D7 grid stream from a live hierarchy output."""
+
+    if not hierarchy.levels:
+        raise ValueError("D7 requires at least one predicted hierarchy level")
+    terminal = hierarchy.levels[-1]
+    batch = int(terminal.accounting.shape[0])
+    field_dim = len(ACCOUNTING_FIELD_NAMES)
+    arrays: dict[str, torch.Tensor] = {
+        "reference_eta": reference_eta,
+        "reference_phi": reference_phi,
+    }
+    for level in (1, 2, 3):
+        if int(terminal.level) == level:
+            arrays[f"level{level}_accounting"] = terminal.accounting
+            arrays[f"level{level}_log_sigma"] = terminal.log_sigma
+        else:
+            arrays[f"level{level}_accounting"] = terminal.accounting.new_zeros(batch, 0, field_dim)
+            arrays[f"level{level}_log_sigma"] = terminal.log_sigma.new_zeros(batch, 0, field_dim)
+    metadata = {
+        "variant": str(source_variant),
+        "source_checkpoint_model": {
+            "hierarchy_config": {
+                "radial_boundary": float(radial_boundary),
+                "coordinate_extent": float(coordinate_extent),
+            }
+        },
+    }
+    return grid_view_from_arrays(arrays, metadata, name=name, device=terminal.accounting.device)
 
 
 def _mask_2d(mask: torch.Tensor) -> torch.Tensor:
@@ -881,6 +925,15 @@ def _fixed_permutation(indices: torch.Tensor, seed: int) -> torch.Tensor:
     return indices[permutation.to(device=indices.device)]
 
 
+def _fixed_derangement(size: int, seed: int, *, device: torch.device) -> torch.Tensor:
+    if int(size) <= 1:
+        return torch.arange(int(size), device=device)
+    order = _fixed_permutation(torch.arange(int(size), device=device), int(seed))
+    mapping = torch.empty_like(order)
+    mapping[order] = torch.roll(order, shifts=1)
+    return mapping
+
+
 def _rebuild_view_from_raw(view: PseudoParticleViewInput, raw: torch.Tensor) -> PseudoParticleViewInput:
     mask = _mask_2d(view.mask)
     inputs = build_part_inputs_torch(raw, mask, max_constits=int(raw.shape[1]))
@@ -916,7 +969,12 @@ def apply_fusion_control(
         )
     if control == CONTROL_SHUFFLED_CELLS:
         cells = int(view.cell_indices.max().item()) + 1
-        remapped_cells = torch.remainder(view.cell_indices + 1, cells)
+        cell_mapping = _fixed_derangement(
+            cells,
+            int(seed) + 1301,
+            device=view.cell_indices.device,
+        )
+        remapped_cells = cell_mapping[view.cell_indices]
         parent_by_cell = torch.stack(
             [
                 view.parent_accounting[:, torch.nonzero(view.cell_indices == cell, as_tuple=False)[0, 0]]
@@ -930,7 +988,8 @@ def apply_fusion_control(
             parent_accounting=parent_by_cell[:, remapped_cells],
         )
     raw = view.raw_tokens.clone()
-    for cell in range(int(view.cell_indices.max().item()) + 1):
+    cells = int(view.cell_indices.max().item()) + 1
+    for cell in range(cells):
         selected = torch.nonzero(view.cell_indices == cell, as_tuple=False).flatten()
         if int(selected.numel()) <= 1:
             continue
@@ -941,7 +1000,30 @@ def apply_fusion_control(
             raw[:, selected, 4:10] = view.raw_tokens[:, source, 4:10]
         else:
             raise ValueError(f"unsupported fusion control {control!r}")
-    return _rebuild_view_from_raw(view, raw)
+    rebuilt = _rebuild_view_from_raw(view, raw)
+    if control == CONTROL_SHUFFLED_COMPOSITION:
+        accounting_index = {name: index for index, name in enumerate(ACCOUNTING_FIELD_NAMES)}
+        cell_mapping = _fixed_derangement(
+            cells,
+            int(seed) + 2903,
+            device=view.cell_indices.device,
+        )
+        parent = rebuilt.parent_accounting.clone()
+        for cell in range(cells):
+            selected = torch.nonzero(view.cell_indices == cell, as_tuple=False).flatten()
+            source_selected = torch.nonzero(
+                view.cell_indices == cell_mapping[cell],
+                as_tuple=False,
+            ).flatten()
+            if not int(selected.numel()) or not int(source_selected.numel()):
+                continue
+            source_parent = view.parent_accounting[:, source_selected[0]]
+            for category in PID_CATEGORY_NAMES:
+                for suffix in ("pT", "count"):
+                    index = accounting_index[f"{category}_{suffix}"]
+                    parent[:, selected, index] = source_parent[:, index].unsqueeze(1)
+        rebuilt = replace(rebuilt, parent_accounting=parent)
+    return rebuilt
 
 
 class _CapacityResidualBank(nn.Module):
@@ -1038,7 +1120,7 @@ class ConstrainedDualStreamTagger(nn.Module):
         )
         self.pseudo_head = (
             None
-            if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL
+            if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}
             else nn.Linear(config.d_model, config.num_classes)
         )
         if self.spec.architecture == ARCH_REPRESENTATION or self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
@@ -1050,7 +1132,7 @@ class ConstrainedDualStreamTagger(nn.Module):
         hidden = 2 * config.d_model
         self.classifier = (
             nn.Identity()
-            if self.spec.architecture in {ARCH_PSEUDO_ONLY, ARCH_LATE_LOGIT}
+            if self.spec.architecture in {ARCH_PSEUDO_ONLY, ARCH_HLT_ONLY, ARCH_LATE_LOGIT}
             else nn.Sequential(
                 nn.LayerNorm(classifier_dim),
                 nn.Linear(classifier_dim, hidden),
@@ -1076,9 +1158,9 @@ class ConstrainedDualStreamTagger(nn.Module):
             self.parameter_match_reference = D4_UNCERTAINTY_GATED
 
     def _validate_views(self, pseudo_views: Sequence[PseudoParticleViewInput]) -> tuple[PseudoParticleViewInput, ...]:
-        if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
+        if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}:
             if pseudo_views:
-                raise ValueError("E6 must not receive pseudo views")
+                raise ValueError(f"{self.config.variant} must not receive pseudo views")
             return ()
         if len(pseudo_views) != len(self.view_names):
             raise ValueError(
@@ -1145,6 +1227,9 @@ class ConstrainedDualStreamTagger(nn.Module):
         hlt_tokens = hlt_output.particle_embeddings
         hlt_mask = hlt_output.particle_mask
         zero = hlt_tokens.new_zeros(())
+        if self.spec.architecture == ARCH_HLT_ONLY:
+            logits = self.hlt_head(hlt_output.jet_embedding)
+            return self._simple_output(logits, logits, None, hlt_output, (), zero)
         if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
             shadow = self.shadow_hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
             shadow_jet = self.capacity_residual(shadow.jet_embedding)
@@ -1164,6 +1249,7 @@ class ConstrainedDualStreamTagger(nn.Module):
                 pseudo_logits=None,
                 hlt_representation=hlt_output.jet_embedding,
                 pseudo_representations={},
+                fusion_representation=0.5 * (hlt_output.jet_embedding + shadow_jet),
                 token_gates=None,
                 pooled_gates=None,
                 gate_entropy_regularizer=zero,
@@ -1281,6 +1367,7 @@ class ConstrainedDualStreamTagger(nn.Module):
             pseudo_logits=pseudo_logits,
             hlt_representation=fused_hlt,
             pseudo_representations={name: updated_pseudo_jets[:, index] for index, name in enumerate(self.view_names)},
+            fusion_representation=0.5 * (fused_hlt + pooled_pseudo),
             token_gates=token_gates,
             pooled_gates=pooled_gates,
             gate_entropy_regularizer=-gate_entropy,
@@ -1308,6 +1395,19 @@ class ConstrainedDualStreamTagger(nn.Module):
         encoded: Sequence[PseudoStreamEncoding],
         zero: torch.Tensor,
     ) -> FusionTaggerOutput:
+        pseudo_mean = (
+            torch.stack([row.jet_embedding for row in encoded], dim=1).mean(dim=1)
+            if encoded
+            else None
+        )
+        if hlt_output is not None and pseudo_mean is not None:
+            fusion_representation = 0.5 * (hlt_output.jet_embedding + pseudo_mean)
+        elif hlt_output is not None:
+            fusion_representation = hlt_output.jet_embedding
+        elif pseudo_mean is not None:
+            fusion_representation = pseudo_mean
+        else:
+            fusion_representation = logits.new_zeros(logits.shape[0], self.config.d_model)
         return FusionTaggerOutput(
             logits=logits,
             hlt_logits=hlt_logits,
@@ -1318,6 +1418,7 @@ class ConstrainedDualStreamTagger(nn.Module):
                 else logits.new_zeros(logits.shape[0], self.config.d_model)
             ),
             pseudo_representations={name: row.jet_embedding for name, row in zip(self.view_names, encoded)},
+            fusion_representation=fusion_representation,
             token_gates=None,
             pooled_gates=None,
             gate_entropy_regularizer=zero,
@@ -1348,8 +1449,10 @@ def build_dual_stream_fusion_tagger(
 
 
 __all__ = [
+    "A0_HLT_BASELINE",
     "ARCH_CROSS_ATTENTION",
     "ARCH_GATED_CROSS_ATTENTION",
+    "ARCH_HLT_ONLY",
     "ARCH_HLT_CAPACITY_CONTROL",
     "ARCH_LATE_LOGIT",
     "ARCH_PSEUDO_ONLY",
@@ -1396,6 +1499,7 @@ __all__ = [
     "build_dual_stream_fusion_tagger",
     "fusion_variant_spec",
     "grid_view_from_arrays",
+    "grid_view_from_hierarchy_output",
     "normalize_fusion_variant",
     "particle_stream_from_tokens",
     "pseudo_particle_views_from_arrays",

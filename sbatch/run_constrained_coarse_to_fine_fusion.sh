@@ -20,7 +20,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${CONSTRAINED_C2F_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine}"
 : "${CONSTRAINED_C2F_PREDICTION_DIR:=${CONSTRAINED_C2F_ROOT}/predictions}"
 : "${CONSTRAINED_C2F_FUSION_DIR:=${CONSTRAINED_C2F_ROOT}/fusion}"
-: "${CONSTRAINED_C2F_FUSION_GROUPS:=F0:mean_logits:A0,D8 F1:simplex_logits:A0,D8 F2:external:F2-trained F3:simplex_logits:A0,D8 F4:mean_logits:D8,D8-seed1,D8-seed2 F5:linear_stacker:D8,D6,D8-seed1,D8-seed2}"
+: "${CONSTRAINED_C2F_FUSION_GROUPS:=F0:mean_logits:A0,BEST_D F1:simplex_logits:A0,BEST_D F2:representation_stacker:D3,D4,D5,D6,D8 F3:simplex_logits:A0,BEST_D F4:mean_logits:BEST_D,BEST_D_SEED1,BEST_D_SEED2 F5:linear_stacker:D8,D6,BEST_D,BEST_D_SEED1,BEST_D_SEED2}"
 : "${CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS:=F0 F1 F2 F3 F4 F5}"
 
 fresh_setup "$@"
@@ -43,6 +43,10 @@ fresh_write_run_config "${CONSTRAINED_C2F_FUSION_DIR}" constrained_c2f_fusion "$
 fresh_run "${cmd[@]}"
 
 if ! fresh_is_dry_run; then
-  fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_report.json"
+  if fresh_bool_enabled "${CONFIRM_FINAL_TEST}"; then
+    fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_final_claim_report.json"
+  else
+    fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_report.json"
+  fi
   fresh_require_file "${CONSTRAINED_C2F_FUSION_DIR}/fusion_metrics.csv"
 fi

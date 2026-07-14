@@ -18,12 +18,21 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_reconstructor.sh <B0-B7|C0-C6|C5-B1|C5-B2|C5-B3|C5-no-slot>}"
+RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_reconstructor.sh <B0-B7|C0-C6|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained>}"
 variant="${RUN_ID}"
 slot_loss_weight="1.0"
+unconstrained_slot_accounting=0
+direct_particle_decoding=0
+hierarchy_loss_weight="1.0"
 case "${RUN_ID}" in
   B[0-7]|C[0-6]|C5-B1|C5-B2|C5-B3) ;;
   C5-no-slot) variant=C5; slot_loss_weight="0.0" ;;
+  C5-unconstrained|Cdirect-unconstrained)
+    variant=C5
+    unconstrained_slot_accounting=1
+    direct_particle_decoding=1
+    hierarchy_loss_weight="0.0"
+    ;;
   *) echo "Unsupported constrained coarse-to-fine reconstructor RUN_ID: ${RUN_ID}" >&2; exit 2 ;;
 esac
 
@@ -51,6 +60,17 @@ fresh_require_dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
 fresh_require_file "${CONSTRAINED_C2F_TARGET_CACHE_DIR}/hierarchy_target_cache_manifest.json"
 fresh_claim_new_dir "${OUTPUT_DIR}"
 
+memory_cmd=(
+  "${PYTHON_BIN}" scripts/audit_constrained_coarse_to_fine_memory.py
+  --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"
+  --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
+  --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}"
+  --splits model_train model_val
+  --allocated-memory-mb "${SLURM_MEM_PER_NODE:-0}"
+  --output "${OUTPUT_DIR}/memory_preflight.json"
+)
+fresh_run "${memory_cmd[@]}"
+
 cmd=(
   "${PYTHON_BIN}" -u scripts/train_constrained_coarse_to_fine.py
   --output-dir "${OUTPUT_DIR}"
@@ -59,6 +79,7 @@ cmd=(
   --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
   --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}"
   --variant "${variant}"
+  --hierarchy-loss-weight "${hierarchy_loss_weight}"
   --slot-loss-weight "${slot_loss_weight}"
   --stack-val-split stack_val
   --seed "${CONSTRAINED_C2F_RECO_SEED}"
@@ -68,6 +89,8 @@ cmd=(
   --num-workers "${CONSTRAINED_C2F_RECO_NUM_WORKERS}"
   --device "${DEVICE}"
 )
+if fresh_bool_enabled "${unconstrained_slot_accounting}"; then cmd+=(--unconstrained-slot-accounting); fi
+if fresh_bool_enabled "${direct_particle_decoding}"; then cmd+=(--direct-particle-decoding); fi
 if ! fresh_bool_enabled "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS}"); fi
 if [[ -n "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS}" ]]; then cmd+=(--max-val-jets "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS}"); fi

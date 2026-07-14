@@ -166,6 +166,7 @@ from .pseudo import (
     render_pseudo_particle_batch,
 )
 from .fusion import (
+    A0_HLT_BASELINE,
     D0_PSEUDO_ONLY,
     D1_LATE_LOGIT_FUSION,
     D2_REPRESENTATION_FUSION,
@@ -201,6 +202,7 @@ from .fusion import (
     build_dual_stream_fusion_tagger,
     fusion_variant_spec,
     grid_view_from_arrays,
+    grid_view_from_hierarchy_output,
     normalize_fusion_variant,
     particle_stream_from_tokens,
     pseudo_particle_views_from_arrays,
@@ -406,6 +408,7 @@ __all__ = [
     "load_pseudo_particle_shard",
     "pseudo_particle_cache_paths",
     "render_pseudo_particle_batch",
+    "A0_HLT_BASELINE",
     "D0_PSEUDO_ONLY",
     "D1_LATE_LOGIT_FUSION",
     "D2_REPRESENTATION_FUSION",
@@ -441,6 +444,7 @@ __all__ = [
     "build_dual_stream_fusion_tagger",
     "fusion_variant_spec",
     "grid_view_from_arrays",
+    "grid_view_from_hierarchy_output",
     "normalize_fusion_variant",
     "particle_stream_from_tokens",
     "pseudo_particle_views_from_arrays",
