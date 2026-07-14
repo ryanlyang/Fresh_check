@@ -30,7 +30,7 @@ if report.get("final_test_policy", {}).get("confirmed") is True:
     raise SystemExit("selection report already consumed final_test")
 PY
 
-: "${CONSTRAINED_C2F_TAGGER_RUN_IDS:=A0 D0 D1 D2 D3 D4 D5 D5-B1 D5-B2 D5-B3 D6 D7 D8 D0-seed1 D0-seed2 D1-seed1 D1-seed2 D2-seed1 D2-seed2 D3-seed1 D3-seed2 D4-seed1 D4-seed2 D5-seed1 D5-seed2 D5-B1-seed1 D5-B1-seed2 D5-B2-seed1 D5-B2-seed2 D6-seed1 D6-seed2 D7-seed1 D7-seed2 D8-seed1 D8-seed2 E0 E1 E2 E3 E4 E5 E6}"
+: "${CONSTRAINED_C2F_TAGGER_RUN_IDS:=A0 A1 A2 A4 D0 D1 D2 D3 D4 D5 D5-B1 D5-B2 D5-B3 D6 D7 D8 D0-seed1 D0-seed2 D1-seed1 D1-seed2 D2-seed1 D2-seed2 D3-seed1 D3-seed2 D4-seed1 D4-seed2 D5-seed1 D5-seed2 D5-B1-seed1 D5-B1-seed2 D5-B2-seed1 D5-B2-seed2 D6-seed1 D6-seed2 D7-seed1 D7-seed2 D8-seed1 D8-seed2 E0 E1 E2 E3 E4 E5 E6}"
 : "${CONSTRAINED_C2F_PREDICT_RUN_IDS:=${CONSTRAINED_C2F_TAGGER_RUN_IDS}}"
 
 IFS=' ' read -r -a predict_ids <<< "${CONSTRAINED_C2F_PREDICT_RUN_IDS}"
@@ -46,6 +46,7 @@ done
 export CONSTRAINED_C2F_STAGE_MODE=final_claims
 export CONSTRAINED_C2F_PREDICT_RUN_IDS
 export CONSTRAINED_C2F_PREDICT_SPLITS=final_test
+export CONSTRAINED_C2F_OFFLINE_SPLITS=final_test
 export CONSTRAINED_C2F_FUSION_DIR="${CONSTRAINED_C2F_ROOT}/fusion_final_claim"
 export CONSTRAINED_C2F_REPORT_DIR="${CONSTRAINED_C2F_ROOT}/final_claim_report"
 export CONFIRM_FINAL_TEST=1

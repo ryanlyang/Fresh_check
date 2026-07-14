@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     normalized_variant = normalize_fusion_variant(args.variant)
-    if not args.reconstructor_source and fusion_variant_spec(normalized_variant).architecture != "hlt_capacity_control":
+    if not args.reconstructor_source and fusion_variant_spec(normalized_variant).num_pseudo_views:
         raise SystemExit("at least one --reconstructor-source is required")
     sources = _sources(args.reconstructor_source, args.reconstructor_alias, args.reconstructor_variant)
     schedule = EndToEndScheduleConfig(

@@ -509,7 +509,8 @@ def _select_local_hlt_memory(
     selected = expanded_particles.gather(
         2, indices.unsqueeze(-1).expand(-1, -1, -1, int(particles.shape[-1]))
     )
-    selected_mask = mask[:, None, :].expand(-1, int(cell_bounds.shape[0]), -1).gather(2, indices)
+    local_mask = inside & mask[:, None, :]
+    selected_mask = local_mask.gather(2, indices)
     empty = ~selected_mask.any(dim=-1)
     if bool(empty.any()):
         selected = selected.clone()

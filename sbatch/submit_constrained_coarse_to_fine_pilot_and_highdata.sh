@@ -37,6 +37,8 @@ if not bool(report.get("ok")):
 PY
     CONSTRAINED_C2F_CAMPAIGN_MODE=highdata \
     CONSTRAINED_C2F_ROOT="${CONSTRAINED_C2F_HIGHDATA_ROOT}" \
+    CONSTRAINED_C2F_APPROVE_HIGHDATA="${CONSTRAINED_C2F_APPROVE_HIGHDATA}" \
+    CONSTRAINED_C2F_PILOT_REPORT_PATH="${pilot_report}" \
       bash "${SCRIPT_DIR}/submit_constrained_coarse_to_fine_experiment.sh"
     ;;
   *) echo "CONSTRAINED_C2F_CAMPAIGN_STAGE must be pilot or highdata" >&2; exit 2 ;;

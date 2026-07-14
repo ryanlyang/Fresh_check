@@ -19,6 +19,7 @@ from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view, no
 from jetclass_fresh.independent_fusion import metrics_from_logits
 from jetclass_fresh.jetclass_data import LABEL_NAMES, load_split_manifest, manifest_hash
 from teacher_logit_reco.set_matching.five_view_train import classification_metrics_from_predictions
+from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
 from .cache import (
     HIERARCHY_TARGET_EXPECTED_HLT_PROFILE,
@@ -31,6 +32,7 @@ from .end_to_end import (
     load_end_to_end_tagger_checkpoint,
 )
 from .fusion import D8_MULTIDEPTH, particle_stream_from_tokens
+from .fusion import A2_OFFLINE_REFERENCE
 from .targets import hlt_reference_axis
 
 
@@ -83,6 +85,7 @@ class EndToEndPredictionConfig:
     manifest_path: str
     hlt_cache_dir: str
     checkpoint_path: str
+    offline_cache_dir: str | None = None
     splits: tuple[str, ...] = DEFAULT_PREDICTION_SPLITS
     batch_size: int = 128
     device: str = "auto"
@@ -132,12 +135,33 @@ def _validate_hlt_split(config: EndToEndPredictionConfig, split: str) -> tuple[A
     return view, manifest_sha
 
 
+def _validate_offline_split(config: EndToEndPredictionConfig, split: str) -> tuple[Any, str]:
+    if not config.offline_cache_dir:
+        raise ValueError("A2 offline-reference prediction requires offline_cache_dir")
+    manifest = load_split_manifest(config.manifest_path)
+    manifest_sha = manifest_hash(manifest)
+    if split not in manifest.splits:
+        raise ValueError(f"split {split!r} is absent from the active manifest")
+    view = load_cached_offline_view(config.offline_cache_dir, split, verify_hash=bool(config.verify_hash))
+    expected_ids = tuple(manifest.splits[split])
+    if tuple(view.jet_ids) != expected_ids:
+        raise ValueError(f"offline jet identities do not match the active manifest for {split}")
+    if view.metadata.get("source_manifest_hash") != manifest_sha:
+        raise ValueError(f"offline source_manifest_hash mismatch for {split}")
+    content_hash = view.metadata.get("offline_content_hash") or view.metadata.get("content_hash")
+    if not content_hash:
+        raise ValueError(f"offline cache for {split} lacks offline_content_hash")
+    return view, manifest_sha
+
+
 def _require_checkpoint_provenance(
     payload: Mapping[str, Any],
     *,
     split: str,
     manifest_sha: str,
     hlt_hash: str,
+    offline_hash: str | None = None,
+    offline_reference: bool = False,
 ) -> None:
     provenance = payload.get("provenance")
     row = provenance.get(split) if isinstance(provenance, Mapping) else None
@@ -148,8 +172,10 @@ def _require_checkpoint_provenance(
             raise ValueError(f"checkpoint lacks required {split} provenance")
         if row.get("source_manifest_hash") != manifest_sha:
             raise ValueError(f"checkpoint {split} manifest hash mismatch")
-        if row.get("hlt_content_hash") != hlt_hash:
-            raise ValueError(f"checkpoint {split} HLT content hash mismatch")
+        field = "offline_content_hash" if offline_reference else "hlt_content_hash"
+        expected = offline_hash if offline_reference else hlt_hash
+        if row.get(field) != expected:
+            raise ValueError(f"checkpoint {split} {field} mismatch")
 
 
 def _detailed_metrics(logits: np.ndarray, labels: np.ndarray) -> dict[str, Any]:
@@ -284,7 +310,7 @@ def cache_end_to_end_prediction_split(
     *,
     model_bundle: tuple[EndToEndCoarseToFineTagger, Mapping[str, Any], Any] | None = None,
 ) -> dict[str, Any]:
-    """Cache one split while refusing all offline/target inputs."""
+    """Cache one split from HLT, except the explicitly non-deployable A2 reference."""
 
     if split == "final_test" and not config.confirm_final_test:
         raise ValueError("final_test prediction requires explicit confirmation")
@@ -295,18 +321,26 @@ def cache_end_to_end_prediction_split(
         raise FileExistsError(
             "final_test claim already exists; overwrite is forbidden for immutable final claims"
         )
-    view, manifest_sha = _validate_hlt_split(config, split)
     device = resolve_device(config.device)
     model, payload, resolved = model_bundle or load_end_to_end_tagger_checkpoint(
         config.checkpoint_path, device=device
     )
     if payload.get("checkpoint_contract") != END_TO_END_TRAIN_CONTRACT:
         raise ValueError("prediction checkpoint is not a Step 8 end-to-end model")
+    offline_reference = str(payload.get("variant")) == A2_OFFLINE_REFERENCE
+    view, manifest_sha = (
+        _validate_offline_split(config, split)
+        if offline_reference
+        else _validate_hlt_split(config, split)
+    )
+    offline_hash = view.metadata.get("offline_content_hash") or view.metadata.get("content_hash")
     _require_checkpoint_provenance(
         payload,
         split=split,
         manifest_sha=manifest_sha,
-        hlt_hash=str(view.metadata["hlt_content_hash"]),
+        hlt_hash=str(view.metadata.get("hlt_content_hash") or ""),
+        offline_hash=None if offline_hash is None else str(offline_hash),
+        offline_reference=offline_reference,
     )
     model.eval()
     limit = len(view.labels) if config.max_jets_per_split is None else min(len(view.labels), int(config.max_jets_per_split))
@@ -432,10 +466,11 @@ def cache_end_to_end_prediction_split(
         "configuration_hash": configuration_hash,
         "variant": payload.get("variant"),
         "source_manifest_hash": manifest_sha,
-        "hlt_content_hash": view.metadata.get("hlt_content_hash"),
-        "hlt_profile": HIERARCHY_TARGET_EXPECTED_HLT_PROFILE,
-        "hlt_profile_version": HIERARCHY_TARGET_EXPECTED_HLT_PROFILE_VERSION,
-        "hlt_degradation_strength": HIERARCHY_TARGET_EXPECTED_HLT_STRENGTH,
+        "hlt_content_hash": None if offline_reference else view.metadata.get("hlt_content_hash"),
+        "offline_content_hash": offline_hash if offline_reference else None,
+        "hlt_profile": None if offline_reference else HIERARCHY_TARGET_EXPECTED_HLT_PROFILE,
+        "hlt_profile_version": None if offline_reference else HIERARCHY_TARGET_EXPECTED_HLT_PROFILE_VERSION,
+        "hlt_degradation_strength": None if offline_reference else HIERARCHY_TARGET_EXPECTED_HLT_STRENGTH,
         "jet_identity_hash": jet_identity_hash(view.jet_ids[:limit]),
         "reconstructor_sources": source_hashes,
         "reconstructor_aliases": dict(resolved.aliases),
@@ -448,9 +483,10 @@ def cache_end_to_end_prediction_split(
         "mechanism_diagnostics": mechanism,
         "d8_model_val_view_ablations": ablation_metrics if split == "model_val" else {},
         "d8_view_ablation_selection_only": bool(ablation_metrics),
-        "offline_inputs_loaded": False,
+        "offline_inputs_loaded": offline_reference,
         "target_cache_loaded": False,
-        "deployable_hlt_only": True,
+        "deployable_hlt_only": not offline_reference,
+        "input_view": "offline" if offline_reference else "fixed_hlt_v2_realistic",
         "final_test_confirmed": split == "final_test" and bool(config.confirm_final_test),
     }
     block = PredictionBlock(
@@ -479,7 +515,8 @@ def cache_end_to_end_prediction_split(
                 "run_id": config.model_name,
                 "checkpoint_sha256": checkpoint_hash,
                 "source_manifest_hash": manifest_sha,
-                "hlt_content_hash": view.metadata.get("hlt_content_hash"),
+                "hlt_content_hash": None if offline_reference else view.metadata.get("hlt_content_hash"),
+                "offline_content_hash": offline_hash if offline_reference else None,
                 "jet_identity_hash": metadata["jet_identity_hash"],
                 "prediction_path": str(final_prediction),
                 "representation_sha256": representation_hash,
@@ -510,7 +547,7 @@ def cache_end_to_end_predictions(config: EndToEndPredictionConfig) -> dict[str, 
             if "final_test" in config.splits
             else None
         ),
-        "offline_inputs_loaded": False,
+        "offline_inputs_loaded": config.model_name == A2_OFFLINE_REFERENCE,
     }
     _write_json(report_path, report)
     return report

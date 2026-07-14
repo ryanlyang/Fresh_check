@@ -28,6 +28,9 @@ REQUIRED_RECONSTRUCTOR_RUNS = (
 )
 REQUIRED_TAGGER_RUNS = (
     "A0",
+    "A1",
+    "A2",
+    "A4",
     *(f"D{index}" for index in range(9)),
     "D5-B1",
     "D5-B2",
@@ -454,9 +457,18 @@ def write_campaign_report(config: CampaignReportConfig) -> dict[str, Any]:
         "fusion_report_path": config.fusion_report_path,
         "final_test_policy": {
             "confirmed": bool(config.confirm_final_test),
-            "deployable_predictions_hlt_only": True,
+            "primary_predictions_hlt_only": True,
+            "offline_reference_run_id": config.offline_run_id,
+            "offline_reference_excluded_from_deployable_claims": True,
             "selection_split": "model_val",
             "fusion_fit_split": "stack_train",
+        },
+        "optional_references": {
+            "A3": {
+                "required": False,
+                "present": ("A3", "model_val") in prediction_metadata,
+                "description": "Prior AV10 feature-MLP reference, included only when exact split/cache provenance is available.",
+            }
         },
     }
     _write_json(output_dir / "final_report.json", report)

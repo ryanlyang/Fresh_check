@@ -219,11 +219,11 @@ def save_prediction_block(block: PredictionBlock, prediction_dir: str | Path, *,
     )
     probs = softmax_np(logits)
     arrays = {
-        "logits": logits.astype(np.float32, copy=False),
-        "probs": probs.astype(np.float32, copy=False),
-        "labels": block.labels.astype(np.int64, copy=False),
-        "jet_file_indices": file_indices,
-        "jet_entries": entries,
+        "logits": np.ascontiguousarray(logits, dtype=np.float32),
+        "probs": np.ascontiguousarray(probs, dtype=np.float32),
+        "labels": np.ascontiguousarray(block.labels, dtype=np.int64),
+        "jet_file_indices": np.ascontiguousarray(file_indices),
+        "jet_entries": np.ascontiguousarray(entries),
     }
     np.savez_compressed(npz_path, **arrays)
     content_hash = hash_arrays(arrays)

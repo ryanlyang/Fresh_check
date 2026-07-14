@@ -372,6 +372,7 @@ def build_hierarchy_target_cache(
             file_indices=all_file_indices[start:stop],
             entries=all_entries[start:stop],
         )
+        arrays = {name: np.ascontiguousarray(value) for name, value in arrays.items()}
         filename = f"shard_{shard_index:05d}.npz"
         shard_path = shard_dir / filename
         np.savez_compressed(shard_path, **arrays)

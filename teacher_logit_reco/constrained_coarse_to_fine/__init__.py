@@ -167,6 +167,9 @@ from .pseudo import (
 )
 from .fusion import (
     A0_HLT_BASELINE,
+    A1_LARGE_HLT_BASELINE,
+    A2_OFFLINE_REFERENCE,
+    A4_EXTRA_ATTENTION_HLT,
     D0_PSEUDO_ONLY,
     D1_LATE_LOGIT_FUSION,
     D2_REPRESENTATION_FUSION,
@@ -409,6 +412,9 @@ __all__ = [
     "pseudo_particle_cache_paths",
     "render_pseudo_particle_batch",
     "A0_HLT_BASELINE",
+    "A1_LARGE_HLT_BASELINE",
+    "A2_OFFLINE_REFERENCE",
+    "A4_EXTRA_ATTENTION_HLT",
     "D0_PSEUDO_ONLY",
     "D1_LATE_LOGIT_FUSION",
     "D2_REPRESENTATION_FUSION",

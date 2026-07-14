@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--manifest", dest="manifest_path", required=True)
     parser.add_argument("--hlt-cache-dir", required=True)
+    parser.add_argument("--offline-cache-dir", default=None)
     parser.add_argument("--checkpoint", dest="checkpoint_path", required=True)
     parser.add_argument("--splits", nargs="+", default=list(DEFAULT_PREDICTION_SPLITS))
     parser.add_argument("--batch-size", type=int, default=128)
@@ -47,6 +48,7 @@ def main() -> int:
             model_name=args.model_name,
             manifest_path=args.manifest_path,
             hlt_cache_dir=args.hlt_cache_dir,
+            offline_cache_dir=args.offline_cache_dir,
             checkpoint_path=args.checkpoint_path,
             splits=tuple(args.splits),
             batch_size=args.batch_size,

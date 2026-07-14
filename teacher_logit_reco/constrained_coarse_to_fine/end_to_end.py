@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -26,8 +27,10 @@ from jetclass_fresh.hlt_baseline import (
 
 from .fusion import (
     ARCH_HLT_CAPACITY_CONTROL,
+    ARCH_HLT_EXTRA_ATTENTION,
     ARCH_HLT_ONLY,
     ARCH_PSEUDO_ONLY,
+    A2_OFFLINE_REFERENCE,
     D5_END_TO_END,
     D8_MULTIDEPTH,
     ConstrainedDualStreamTagger,
@@ -37,6 +40,7 @@ from .fusion import (
     fusion_variant_spec,
     grid_view_from_hierarchy_output,
     normalize_fusion_variant,
+    particle_stream_from_tokens,
     pseudo_particle_views_from_rendered,
 )
 from .losses import HierarchyReconstructionLossConfig, compute_hierarchy_reconstruction_loss
@@ -446,7 +450,7 @@ def build_end_to_end_tagger(
 ) -> tuple[EndToEndCoarseToFineTagger, ResolvedReconstructorSources]:
     normalized = normalize_fusion_variant(variant)
     spec = fusion_variant_spec(normalized)
-    if spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}:
+    if spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL, ARCH_HLT_EXTRA_ATTENTION}:
         if sources:
             raise ValueError(f"{normalized} is HLT-only and cannot declare reconstructor sources")
         resolved = ResolvedReconstructorSources(nn.ModuleDict(), (), {}, {})
@@ -544,6 +548,7 @@ def load_end_to_end_tagger_checkpoint(
     if not bindings and fusion_variant_spec(variant).architecture not in {
         ARCH_HLT_ONLY,
         ARCH_HLT_CAPACITY_CONTROL,
+        ARCH_HLT_EXTRA_ATTENTION,
     }:
         raise ValueError("end-to-end checkpoint exposes no active pseudo views")
     for module_key, source_name in source_for_module.items():
@@ -1189,7 +1194,12 @@ def _run_end_to_end_epoch(
             batch = _move_batch(raw_batch, device)
             if teacher_logits is not None:
                 batch["teacher_logits"] = teacher_logits.index_select(0, raw_batch["row_index"].long()).to(device)
-            hlt = ParticleStreamInput(batch["points"], batch["features"], batch["vectors"], batch["mask"])
+            if train_config.variant == A2_OFFLINE_REFERENCE:
+                if "offline_tokens" not in batch or "offline_mask" not in batch:
+                    raise ValueError("A2 requires aligned offline particle inputs")
+                hlt = particle_stream_from_tokens(batch["offline_tokens"], batch["offline_mask"])
+            else:
+                hlt = ParticleStreamInput(batch["points"], batch["features"], batch["vectors"], batch["mask"])
             if training:
                 optimizer.zero_grad(set_to_none=True)
             try:
@@ -1294,9 +1304,8 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     data_config = _data_config(config)
     train_source = _load_split_source(data_config, config.train_split, require_offline_particles=True)
-    val_source = _load_split_source(data_config, config.val_split, require_offline_particles=True)
-    if train_source.layout.to_dict() != val_source.layout.to_dict():
-        raise ValueError("model_train/model_val hierarchy layouts differ")
+    train_layout = train_source.layout.to_dict()
+    train_provenance = dict(train_source.provenance)
     model, resolved = build_end_to_end_tagger(
         config.variant,
         config.reconstructor_sources,
@@ -1305,8 +1314,17 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
     )
     _validate_source_provenance(
         resolved,
-        {config.train_split: train_source, config.val_split: val_source},
+        {config.train_split: train_source},
     )
+    del train_source
+    gc.collect()
+    val_source = _load_split_source(data_config, config.val_split, require_offline_particles=True)
+    if train_layout != val_source.layout.to_dict():
+        raise ValueError("model_train/model_val hierarchy layouts differ")
+    val_provenance = dict(val_source.provenance)
+    _validate_source_provenance(resolved, {config.val_split: val_source})
+    del val_source
+    gc.collect()
     warm_start = None
     if config.hlt_warm_start_checkpoint and model.tagger.hlt_encoder is not None:
         warm_start = load_hlt_stream_warm_start(model.tagger, config.hlt_warm_start_checkpoint)
@@ -1316,17 +1334,18 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
             "not_loaded": True,
             "reason": "selected pseudo-only tagger has no HLT stream",
         }
-    train_teacher = _teacher_logits(config.teacher_logits_train_path, train_source, model.tagger.config.num_classes)
-    val_teacher = _teacher_logits(config.teacher_logits_val_path, val_source, model.tagger.config.num_classes)
     source_metadata = {
         "contract": END_TO_END_TRAIN_CONTRACT,
         "config": config.to_dict(),
         "reconstructors": resolved.to_dict(),
         "trusted_hlt_warm_start": warm_start,
-        "provenance": {"model_train": train_source.provenance, "model_val": val_source.provenance},
+        "provenance": {"model_train": train_provenance, "model_val": val_provenance},
+        "split_loading": "sequential_reload_per_epoch",
+        "simultaneously_resident_source_splits": 1,
         "selection_split": "model_val",
         "final_test_loaded": False,
-        "offline_inputs_used_by_deployable_forward": False,
+        "input_view": "offline" if config.variant == A2_OFFLINE_REFERENCE else "fixed_hlt_v2_realistic",
+        "offline_inputs_used_by_deployable_forward": config.variant == A2_OFFLINE_REFERENCE,
         "source_state": _source_state(),
     }
     _write_json(output_dir / "config.json", config.to_dict())
@@ -1354,6 +1373,14 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
             )
             last_phase_name = phase.name
         assert optimizer is not None
+        train_source = _load_split_source(data_config, config.train_split, require_offline_particles=True)
+        if dict(train_source.provenance) != train_provenance:
+            raise ValueError("model_train provenance changed during sequential epoch loading")
+        train_teacher = _teacher_logits(
+            config.teacher_logits_train_path,
+            train_source,
+            model.tagger.config.num_classes,
+        )
         train_metrics = _run_end_to_end_epoch(
             model,
             train_source,
@@ -1367,6 +1394,17 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
             epoch=epoch,
             max_jets=config.max_train_jets,
             amp_enabled=amp_enabled,
+        )
+        del train_teacher
+        del train_source
+        gc.collect()
+        val_source = _load_split_source(data_config, config.val_split, require_offline_particles=True)
+        if dict(val_source.provenance) != val_provenance:
+            raise ValueError("model_val provenance changed during sequential epoch loading")
+        val_teacher = _teacher_logits(
+            config.teacher_logits_val_path,
+            val_source,
+            model.tagger.config.num_classes,
         )
         with torch.no_grad():
             val_metrics = _run_end_to_end_epoch(
@@ -1383,6 +1421,9 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
                 max_jets=config.max_val_jets,
                 amp_enabled=amp_enabled,
             )
+        del val_teacher
+        del val_source
+        gc.collect()
         row = {"epoch": epoch, "phase": phase.name, "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
         val_ce = float(val_metrics.get("loss.total_ce", float("nan")))
@@ -1442,6 +1483,8 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
         "selection_split": "model_val",
         "final_test_evaluated": False,
         "source_state": source_metadata["source_state"],
+        "input_view": source_metadata["input_view"],
+        "deployable_hlt_only": config.variant != A2_OFFLINE_REFERENCE,
     }
     _write_json(output_dir / "run_report.json", report)
     return report

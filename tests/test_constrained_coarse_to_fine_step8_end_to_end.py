@@ -3,11 +3,17 @@ from __future__ import annotations
 from dataclasses import replace
 import tempfile
 from pathlib import Path
+import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from teacher_logit_reco.constrained_coarse_to_fine import (
+    A0_HLT_BASELINE,
+    A1_LARGE_HLT_BASELINE,
+    A2_OFFLINE_REFERENCE,
+    A4_EXTRA_ATTENTION_HLT,
     C5_B1,
     COARSE_TO_FINE_TRAIN_CONTRACT,
     D5_B1,
@@ -107,6 +113,57 @@ def _toy_hlt() -> tuple[ParticleStreamInput, torch.Tensor, torch.Tensor]:
 
 
 class ConstrainedCoarseToFineStep8Tests(unittest.TestCase):
+    def test_a0_cli_accepts_an_empty_reconstructor_source_list(self):
+        from scripts import train_constrained_coarse_to_fine_end_to_end as cli
+
+        argv = [
+            "train_constrained_coarse_to_fine_end_to_end.py",
+            "--output-dir", "out",
+            "--manifest", "manifest.json.gz",
+            "--hlt-cache-dir", "hlt",
+            "--offline-cache-dir", "offline",
+            "--target-cache-dir", "targets",
+            "--variant", "A0",
+            "--allow-random-hlt-start",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            cli,
+            "train_end_to_end_tagger",
+            return_value={"ok": True},
+        ) as mocked:
+            self.assertEqual(cli.main(), 0)
+        config = mocked.call_args.args[0]
+        self.assertEqual(config.variant, A0_HLT_BASELINE)
+        self.assertEqual(config.reconstructor_sources, ())
+
+    def test_a_tier_controls_are_source_free_and_architecturally_explicit(self):
+        overrides = {
+            "d_model": 32,
+            "num_heads": 4,
+            "hlt_encoder_layers": 1,
+            "hlt_pool_layers": 1,
+            "pair_hidden_dim": 8,
+            "ffn_multiplier": 2.0,
+            "dropout": 0.0,
+            "attention_dropout": 0.0,
+        }
+        models = {
+            variant: build_end_to_end_tagger(variant, (), fusion_overrides=overrides)[0]
+            for variant in (
+                A0_HLT_BASELINE,
+                A1_LARGE_HLT_BASELINE,
+                A2_OFFLINE_REFERENCE,
+                A4_EXTRA_ATTENTION_HLT,
+            )
+        }
+        self.assertTrue(all(not model.reconstructors for model in models.values()))
+        self.assertIsNone(models[A0_HLT_BASELINE].tagger.extra_hlt_attention)
+        self.assertIsNotNone(models[A4_EXTRA_ATTENTION_HLT].tagger.extra_hlt_attention)
+        self.assertGreater(
+            sum(parameter.numel() for parameter in models[A4_EXTRA_ATTENTION_HLT].parameters()),
+            sum(parameter.numel() for parameter in models[A0_HLT_BASELINE].parameters()),
+        )
+
     def test_training_config_requires_explicit_trusted_or_random_hlt_start(self):
         kwargs = dict(
             output_dir="out",

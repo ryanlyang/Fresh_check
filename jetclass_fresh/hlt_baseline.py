@@ -309,6 +309,8 @@ def run_epoch(
     total_loss = 0.0
     total_correct = 0
     total_seen = 0
+    skipped_nonfinite_batches = 0
+    skipped_nonfinite_jets = 0
 
     context = torch.enable_grad() if is_train else torch.no_grad()
     with context:
@@ -331,9 +333,19 @@ def run_epoch(
 
             if not bool(torch.isfinite(logits).all()):
                 mode = "train" if is_train else "eval"
+                if is_train:
+                    skipped_nonfinite_batches += 1
+                    skipped_nonfinite_jets += int(batch["labels"].numel())
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 raise FloatingPointError(f"HLT epoch {mode} batch {batch_index} produced non-finite logits")
             if not bool(torch.isfinite(loss).all()):
                 mode = "train" if is_train else "eval"
+                if is_train:
+                    skipped_nonfinite_batches += 1
+                    skipped_nonfinite_jets += int(batch["labels"].numel())
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 raise FloatingPointError(f"HLT epoch {mode} batch {batch_index} produced non-finite loss")
 
             if is_train:
@@ -343,7 +355,11 @@ def run_epoch(
                         scaler.unscale_(optimizer)
                         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                         if not bool(torch.isfinite(grad_norm).all()):
-                            raise FloatingPointError(f"HLT epoch train batch {batch_index} produced non-finite gradient norm")
+                            skipped_nonfinite_batches += 1
+                            skipped_nonfinite_jets += int(batch["labels"].numel())
+                            optimizer.zero_grad(set_to_none=True)
+                            scaler.update()
+                            continue
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -351,7 +367,10 @@ def run_epoch(
                     if grad_clip_norm and grad_clip_norm > 0:
                         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
                         if not bool(torch.isfinite(grad_norm).all()):
-                            raise FloatingPointError(f"HLT epoch train batch {batch_index} produced non-finite gradient norm")
+                            skipped_nonfinite_batches += 1
+                            skipped_nonfinite_jets += int(batch["labels"].numel())
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
                     optimizer.step()
 
             batch_size = int(batch["labels"].numel())
@@ -361,11 +380,19 @@ def run_epoch(
             total_seen += seen
 
     if total_seen == 0:
-        return {"loss": float("nan"), "accuracy": 0.0, "n_jets": 0}
+        return {
+            "loss": float("nan"),
+            "accuracy": 0.0,
+            "n_jets": 0,
+            "skipped_nonfinite_batches": int(skipped_nonfinite_batches),
+            "skipped_nonfinite_jets": int(skipped_nonfinite_jets),
+        }
     return {
         "loss": total_loss / float(total_seen),
         "accuracy": total_correct / float(total_seen),
         "n_jets": int(total_seen),
+        "skipped_nonfinite_batches": int(skipped_nonfinite_batches),
+        "skipped_nonfinite_jets": int(skipped_nonfinite_jets),
     }
 
 

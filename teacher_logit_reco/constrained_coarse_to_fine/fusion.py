@@ -13,6 +13,7 @@ from torch import nn
 from jetclass_fresh.dual_view import build_part_inputs_torch
 from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 
+from .constraints import CellBoundCoordinateTransform
 from .layout import ACCOUNTING_FIELD_NAMES, PID_CATEGORY_NAMES, default_hierarchy_target_layout
 from .model import B3_FULL_HIERARCHY, CoarseToFineReconstructorConfig, HLTEncoderOutput, ParTStyleHLTEncoder
 
@@ -24,6 +25,9 @@ DUAL_STREAM_FUSION_CONTRACT = "constrained_coarse_to_fine_dual_stream_fusion_v1"
 PSEUDO_VIEW_INPUT_CONTRACT = "constrained_coarse_to_fine_pseudo_view_input_v1"
 
 A0_HLT_BASELINE = "A0"
+A1_LARGE_HLT_BASELINE = "A1"
+A2_OFFLINE_REFERENCE = "A2"
+A4_EXTRA_ATTENTION_HLT = "A4"
 D0_PSEUDO_ONLY = "D0"
 D1_LATE_LOGIT_FUSION = "D1"
 D2_REPRESENTATION_FUSION = "D2"
@@ -52,6 +56,7 @@ ARCH_REPRESENTATION = "representation"
 ARCH_CROSS_ATTENTION = "cross_attention"
 ARCH_GATED_CROSS_ATTENTION = "uncertainty_gated_cross_attention"
 ARCH_HLT_CAPACITY_CONTROL = "hlt_capacity_control"
+ARCH_HLT_EXTRA_ATTENTION = "hlt_extra_attention"
 
 CONTROL_NONE = "none"
 CONTROL_SHUFFLED_CELLS = "shuffled_cells"
@@ -105,6 +110,9 @@ def _variant_specs() -> tuple[FusionVariantSpec, ...]:
     canonical = ("canonical",)
     return (
         FusionVariantSpec(A0_HLT_BASELINE, ARCH_HLT_ONLY, (), "hlt_only", description="Clean HLT ParT-style baseline used for exact warm starts."),
+        FusionVariantSpec(A1_LARGE_HLT_BASELINE, ARCH_HLT_ONLY, (), "hlt_large", description="Larger from-scratch HLT ParT capacity control."),
+        FusionVariantSpec(A2_OFFLINE_REFERENCE, ARCH_HLT_ONLY, (), "offline_only", description="Same-family Offline ParT reference; never deployable from HLT."),
+        FusionVariantSpec(A4_EXTRA_ATTENTION_HLT, ARCH_HLT_EXTRA_ATTENTION, (), "hlt_only", description="A0 plus one post-encoder HLT self-attention block, with no pseudo view."),
         FusionVariantSpec(D0_PSEUDO_ONLY, ARCH_PSEUDO_ONLY, canonical, "best_c", description="Pseudo-only ParT-style tagger."),
         FusionVariantSpec(D1_LATE_LOGIT_FUSION, ARCH_LATE_LOGIT, canonical, "best_c", description="Mean of jointly trained HLT and pseudo branch logits."),
         FusionVariantSpec(D2_REPRESENTATION_FUSION, ARCH_REPRESENTATION, canonical, "best_c", description="Pre-classifier HLT/pseudo representation fusion."),
@@ -194,13 +202,14 @@ class FusionTaggerConfig:
                 raise ValueError(f"{name} must be in [0, 1)")
         spec = self.variant_spec
         resolved = self.resolved_view_names
-        if spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL} and resolved:
+        source_free_architectures = {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL, ARCH_HLT_EXTRA_ATTENTION}
+        if spec.architecture in source_free_architectures and resolved:
             raise ValueError(f"{self.variant} cannot declare pseudo views")
         if spec.requires_multiview and len(resolved) < 2:
             raise ValueError("D6 requires multiple stochastic pseudo views")
         if spec.requires_multidepth and len(resolved) < 2:
             raise ValueError("D8 requires at least two unique structural views")
-        if spec.architecture not in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL} and not resolved:
+        if spec.architecture not in source_free_architectures and not resolved:
             raise ValueError(f"{self.variant} requires at least one pseudo view")
 
     @property
@@ -489,9 +498,26 @@ def grid_view_from_arrays(
     geometry = layout.cell_geometry(level)
     if len(geometry) != cells:
         raise ValueError(f"terminal accounting has {cells} cells, layout level {level} has {len(geometry)}")
-    centers = accounting.new_tensor(
-        [[0.5 * (row["eta_min"] + row["eta_max"]), 0.5 * (row["phi_min"] + row["phi_max"])] for row in geometry]
+    cell_bounds = accounting.new_tensor(
+        [[row["eta_min"], row["eta_max"], row["phi_min"], row["phi_max"]] for row in geometry]
     )
+    radial_bounds = accounting.new_tensor(
+        [[row["radial_min"], row["radial_max"]] for row in geometry]
+    )
+    # raw=0 maps to the rectangle centre before the exact shell projection.
+    # This keeps D7 coordinates inside both the rectangular accounting cell and
+    # its radial shell, including cells whose rectangle centre is inadmissible.
+    centers = CellBoundCoordinateTransform()(
+        accounting.new_zeros(cells, 2),
+        cell_bounds,
+        radial_bounds,
+    ).to(dtype=accounting.dtype)
+    center_radius = torch.linalg.vector_norm(centers.float(), dim=-1)
+    geometry_feasible = (
+        (center_radius >= radial_bounds[:, 0].float() - 1.0e-6)
+        & (center_radius <= radial_bounds[:, 1].float() + 1.0e-6)
+    )
+    centers = torch.where(geometry_feasible[:, None], centers, torch.zeros_like(centers))
     reference_eta = _tensor(arrays["reference_eta"], device=accounting.device, dtype=torch.float32)
     reference_phi = _tensor(arrays["reference_phi"], device=accounting.device, dtype=torch.float32)
     field = {field_name: index for index, field_name in enumerate(ACCOUNTING_FIELD_NAMES)}
@@ -516,7 +542,7 @@ def grid_view_from_arrays(
     raw[..., 2] = absolute_phi
     raw[..., 3] = energy
     raw[..., 5:10] = pid
-    mask = pt > 0.0
+    mask = (pt > 0.0) & geometry_feasible[None, :]
     selected_uncertainty = torch.stack(
         (
             log_sigma[..., field["total_pT"]],
@@ -1088,6 +1114,24 @@ class ConstrainedDualStreamTagger(nn.Module):
             if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL
             else None
         )
+        self.extra_hlt_attention = (
+            nn.TransformerEncoderLayer(
+                d_model=config.d_model,
+                nhead=config.num_heads,
+                dim_feedforward=int(config.ffn_multiplier * config.d_model),
+                dropout=config.dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            if self.spec.architecture == ARCH_HLT_EXTRA_ATTENTION
+            else None
+        )
+        self.extra_hlt_norm = (
+            nn.LayerNorm(config.d_model)
+            if self.spec.architecture == ARCH_HLT_EXTRA_ATTENTION
+            else None
+        )
         uses_cross_attention = self.spec.architecture in {
             ARCH_CROSS_ATTENTION,
             ARCH_GATED_CROSS_ATTENTION,
@@ -1120,7 +1164,7 @@ class ConstrainedDualStreamTagger(nn.Module):
         )
         self.pseudo_head = (
             None
-            if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}
+            if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL, ARCH_HLT_EXTRA_ATTENTION}
             else nn.Linear(config.d_model, config.num_classes)
         )
         if self.spec.architecture == ARCH_REPRESENTATION or self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
@@ -1158,7 +1202,7 @@ class ConstrainedDualStreamTagger(nn.Module):
             self.parameter_match_reference = D4_UNCERTAINTY_GATED
 
     def _validate_views(self, pseudo_views: Sequence[PseudoParticleViewInput]) -> tuple[PseudoParticleViewInput, ...]:
-        if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL}:
+        if self.spec.architecture in {ARCH_HLT_ONLY, ARCH_HLT_CAPACITY_CONTROL, ARCH_HLT_EXTRA_ATTENTION}:
             if pseudo_views:
                 raise ValueError(f"{self.config.variant} must not receive pseudo views")
             return ()
@@ -1230,6 +1274,34 @@ class ConstrainedDualStreamTagger(nn.Module):
         if self.spec.architecture == ARCH_HLT_ONLY:
             logits = self.hlt_head(hlt_output.jet_embedding)
             return self._simple_output(logits, logits, None, hlt_output, (), zero)
+        if self.spec.architecture == ARCH_HLT_EXTRA_ATTENTION:
+            extra_tokens = self.extra_hlt_attention(
+                hlt_tokens,
+                src_key_padding_mask=~hlt_mask,
+            )
+            extra_tokens = self.extra_hlt_norm(hlt_tokens + extra_tokens)
+            extra_tokens = extra_tokens * hlt_mask.unsqueeze(-1).to(dtype=extra_tokens.dtype)
+            denominator = hlt_mask.sum(dim=1, keepdim=True).clamp_min(1).to(dtype=extra_tokens.dtype)
+            extra_jet = extra_tokens.sum(dim=1) / denominator
+            representation = hlt_output.jet_embedding + extra_jet
+            logits = self.hlt_head(representation)
+            return FusionTaggerOutput(
+                logits=logits,
+                hlt_logits=logits,
+                pseudo_logits=None,
+                hlt_representation=representation,
+                pseudo_representations={},
+                fusion_representation=representation,
+                token_gates=None,
+                pooled_gates=None,
+                gate_entropy_regularizer=zero,
+                diagnostics={
+                    "contract": DUAL_STREAM_FUSION_CONTRACT,
+                    "variant": self.config.variant,
+                    "hlt_skip_ungated": True,
+                    "extra_hlt_attention_layers": 1,
+                },
+            )
         if self.spec.architecture == ARCH_HLT_CAPACITY_CONTROL:
             shadow = self.shadow_hlt_encoder(hlt.points, hlt.features, hlt.lorentz_vectors, hlt.mask)
             shadow_jet = self.capacity_residual(shadow.jet_embedding)
@@ -1450,6 +1522,9 @@ def build_dual_stream_fusion_tagger(
 
 __all__ = [
     "A0_HLT_BASELINE",
+    "A1_LARGE_HLT_BASELINE",
+    "A2_OFFLINE_REFERENCE",
+    "A4_EXTRA_ATTENTION_HLT",
     "ARCH_CROSS_ATTENTION",
     "ARCH_GATED_CROSS_ATTENTION",
     "ARCH_HLT_ONLY",

@@ -18,11 +18,11 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_tagger.sh <D0-D8|D5-B1/B2/B3|E0-E6|D*-seedN>}"
+RUN_ID="${1:?Usage: sbatch run_train_constrained_coarse_to_fine_tagger.sh <A0/A1/A2/A4|D0-D8|D5-B1/B2/B3|E0-E6|D*-seedN>}"
 variant="${RUN_ID}"
 seed_offset=0
 case "${RUN_ID}" in
-  A0|D[0-8]|D5-B1|D5-B2|D5-B3|E[0-6]) ;;
+  A0|A1|A2|A4|D[0-8]|D5-B1|D5-B2|D5-B3|E[0-6]) ;;
   *)
     if [[ "${RUN_ID}" =~ ^(D[0-8]|D5-B[12])-seed([12])$ ]]; then
       variant="${BASH_REMATCH[1]}"
@@ -51,7 +51,7 @@ esac
 : "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_TAGGER_MAX_VAL_JETS:=}"
 
-if [[ "${variant}" != "A0" && "${variant}" != "D0" && -z "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
+if [[ ! "${variant}" =~ ^(A0|A1|A2|D0)$ && -z "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
   echo "CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT is required for schedule-matched taggers." >&2
   exit 2
 fi
@@ -62,7 +62,7 @@ fresh_require_file "${CONSTRAINED_C2F_MANIFEST_PATH}"
 fresh_require_dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}"
 fresh_require_dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
 fresh_require_file "${CONSTRAINED_C2F_TARGET_CACHE_DIR}/hierarchy_target_cache_manifest.json"
-if [[ "${variant}" != "A0" && "${variant}" != "D0" ]]; then fresh_require_file "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}"; fi
+if [[ ! "${variant}" =~ ^(A0|A1|A2|D0)$ ]]; then fresh_require_file "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}"; fi
 fresh_claim_new_dir "${OUTPUT_DIR}"
 
 memory_cmd=(
@@ -71,6 +71,7 @@ memory_cmd=(
   --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}"
   --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}"
   --splits model_train model_val
+  --loading-mode sequential
   --allocated-memory-mb "${SLURM_MEM_PER_NODE:-0}"
   --output "${OUTPUT_DIR}/memory_preflight.json"
 )
@@ -80,7 +81,7 @@ source_args=()
 variant_args=()
 alias_args=()
 case "${variant}" in
-  A0) ;;
+  A0|A1|A2|A4) ;;
   D0|D1|D2|D3|D4|E0|E1|E2|E3)
     source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/C5-B3/best_model_val.pt")
     variant_args+=(--reconstructor-variant canonical=C5-B3)
@@ -161,10 +162,13 @@ cmd=(
   --num-workers "${CONSTRAINED_C2F_TAGGER_NUM_WORKERS}"
   --device "${DEVICE}"
 )
-if [[ "${variant}" == "A0" ]]; then
+if [[ "${variant}" =~ ^(A0|A1|A2)$ ]]; then
   cmd+=(--allow-random-hlt-start)
 elif [[ "${variant}" != "D0" && -n "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}" ]]; then
   cmd+=(--hlt-warm-start-checkpoint "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT}")
+fi
+if [[ "${variant}" == "A1" ]]; then
+  cmd+=(--d-model 320 --num-heads 10 --hlt-encoder-layers 8 --fusion-layers 4)
 fi
 if ! fresh_bool_enabled "${CONSTRAINED_C2F_TAGGER_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS}"); fi

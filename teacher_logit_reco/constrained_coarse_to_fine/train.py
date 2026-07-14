@@ -945,6 +945,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "model": _model_description(model, family, variant),
         "hierarchy_loss_config": hierarchy_loss_config.to_dict(),
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
+        "training_config": config.to_dict(),
         "provenance": provenance,
         "optimizer_groups": [
             {"group_name": group.get("group_name"), "lr": group["lr"], "parameter_count": sum(p.numel() for p in group["params"])}
@@ -1117,6 +1118,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "model": _model_description(model, family, variant),
         "hierarchy_loss_config": hierarchy_loss_config.to_dict(),
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
+        "training_config": config.to_dict(),
         "provenance": provenance,
         "final_test_loaded": False,
         "source_state": source_metadata["source_state"],

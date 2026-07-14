@@ -374,14 +374,14 @@ def save_hlt_cache(
         raise ValueError("Metadata jet_files do not match HLT view jet identities")
 
     arrays: Dict[str, np.ndarray] = {
-        "tokens": hlt_view.tokens.astype(np.float32, copy=False),
-        "mask": hlt_view.mask.astype(bool, copy=False),
-        "labels": hlt_view.labels.astype(np.int64, copy=False),
-        "jet_file_indices": file_indices,
-        "jet_entries": entries,
+        "tokens": np.ascontiguousarray(hlt_view.tokens, dtype=np.float32),
+        "mask": np.ascontiguousarray(hlt_view.mask, dtype=bool),
+        "labels": np.ascontiguousarray(hlt_view.labels, dtype=np.int64),
+        "jet_file_indices": np.ascontiguousarray(file_indices),
+        "jet_entries": np.ascontiguousarray(entries),
     }
     for key, value in diagnostics.items():
-        arrays[f"diag_{key}"] = np.asarray(value, dtype=np.float32)
+        arrays[f"diag_{key}"] = np.ascontiguousarray(value, dtype=np.float32)
 
     np.savez_compressed(array_path, **arrays)
     saved_metadata = dict(_metadata_jsonable(metadata))

@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--target-cache-dir", required=True)
     parser.add_argument("--splits", nargs="+", default=("model_train", "model_val", "stack_val"))
     parser.add_argument("--allocated-memory-mb", type=int, default=0)
+    parser.add_argument("--loading-mode", choices=("concurrent", "sequential"), default="concurrent")
     parser.add_argument("--safety-factor", type=float, default=1.35)
     parser.add_argument("--model-reserve-gb", type=float, default=20.0)
     parser.add_argument("--output", required=True)
@@ -34,12 +35,13 @@ def main() -> int:
     offline_root = Path(args.offline_cache_dir)
     target_root = Path(args.target_cache_dir)
     rows = {}
-    resident = 0
+    split_resident = []
     for split in args.splits:
         hlt = _npz_uncompressed_bytes(hlt_root / f"{split}_fixed_hlt.npz")
         offline = _npz_uncompressed_bytes(offline_root / f"{split}_offline.npz")
         rows[split] = {"hlt_uncompressed_bytes": hlt, "offline_uncompressed_bytes": offline}
-        resident += hlt + offline
+        split_resident.append(hlt + offline)
+    resident = sum(split_resident) if args.loading_mode == "concurrent" else max(split_resident, default=0)
     target_candidates = tuple(target_root.rglob("*.npz"))
     largest_target = max((_npz_uncompressed_bytes(path) for path in target_candidates), default=0)
     reserve = int(float(args.model_reserve_gb) * 1024**3)
@@ -50,6 +52,8 @@ def main() -> int:
         "ok": ok,
         "splits": rows,
         "resident_cache_bytes": resident,
+        "loading_mode": args.loading_mode,
+        "simultaneously_resident_source_splits": len(split_resident) if args.loading_mode == "concurrent" else min(1, len(split_resident)),
         "largest_target_shard_bytes": largest_target,
         "model_reserve_bytes": reserve,
         "safety_factor": float(args.safety_factor),

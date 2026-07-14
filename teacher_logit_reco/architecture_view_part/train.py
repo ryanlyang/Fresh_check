@@ -662,11 +662,11 @@ def save_cached_offline_view(view: JetView, cache_dir: str | Path, *, overwrite:
         file_indices.append(file_to_index[file_name])
         entries.append(int(identity.entry))
     arrays = {
-        "tokens": np.asarray(view.tokens, dtype=np.float32),
-        "mask": np.asarray(view.mask, dtype=bool),
-        "labels": np.asarray(view.labels, dtype=np.int64),
-        "jet_file_indices": np.asarray(file_indices, dtype=np.int32),
-        "jet_entries": np.asarray(entries, dtype=np.int64),
+        "tokens": np.ascontiguousarray(view.tokens, dtype=np.float32),
+        "mask": np.ascontiguousarray(view.mask, dtype=bool),
+        "labels": np.ascontiguousarray(view.labels, dtype=np.int64),
+        "jet_file_indices": np.ascontiguousarray(file_indices, dtype=np.int32),
+        "jet_entries": np.ascontiguousarray(entries, dtype=np.int64),
     }
     np.savez_compressed(array_path, **arrays)
     content_hash = hash_arrays(arrays)

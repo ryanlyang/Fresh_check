@@ -7,6 +7,11 @@ import subprocess
 import sys
 import tempfile
 
+import numpy as np
+
+from jetclass_fresh.hlt_cache import hash_arrays
+from scripts.validate_constrained_coarse_to_fine_artifact import _npz_logical_hash
+
 from teacher_logit_reco.constrained_coarse_to_fine import (
     D4_UNCERTAINTY_GATED,
     EndToEndScheduleConfig,
@@ -20,6 +25,20 @@ SBATCH = ROOT / "sbatch"
 
 def _read(name: str) -> str:
     return (SBATCH / name).read_text(encoding="utf-8")
+
+
+def test_streaming_npz_hash_matches_project_logical_hash() -> None:
+    arrays = {
+        "tokens": np.arange(48, dtype=np.float32).reshape(2, 3, 8),
+        "mask": np.asarray([[True, False, True], [True, True, False]], dtype=bool),
+        "labels": np.asarray([1, 2], dtype=np.int64),
+        "jet_file_indices": np.asarray([0, 1], dtype=np.int32),
+        "jet_entries": np.asarray([4, 9], dtype=np.int64),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cache.npz"
+        np.savez_compressed(path, **arrays)
+        assert _npz_logical_hash(path, tuple(arrays)) == hash_arrays(arrays)
 
 
 RUNNERS = (
@@ -79,6 +98,7 @@ def test_step10_graph_uses_hlt_v2_s2p5_and_protocol_sizes() -> None:
 
 def test_step10_graph_queues_complete_reconstructor_and_depth_families() -> None:
     text = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    assert "A0 A1 A2 A4" in text
     assert "B0 B1 B2 B3 B4 B5 B6 B7" in text
     assert "C0 C1 C2 C3 C4 C5 C6 C5-B1 C5-B2 C5-B3 C5-no-slot" in text
     assert "Cdirect-unconstrained" in text
@@ -99,6 +119,7 @@ def test_step10_graph_queues_complete_reconstructor_and_depth_families() -> None
     assert "--direct-particle-decoding" in reconstructor
     assert 'hierarchy_loss_weight="0.0"' in reconstructor
     assert "Cdirect-unconstrained/best_model_val.pt" in tagger
+    assert "--d-model 320 --num-heads 10 --hlt-encoder-layers 8" in tagger
 
 
 def test_step10_submitter_is_dependency_aware_and_records_job_ids() -> None:
@@ -181,6 +202,7 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
         run = root / "A0"
         run.mkdir()
         (run / "best_model_val.pt").write_bytes(b"checkpoint")
+        checkpoint_sha = hashlib.sha256(b"checkpoint").hexdigest()
 
         def report(source_manifest_hash: str) -> dict:
             provenance = {
@@ -197,7 +219,7 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
             return {
                 "ok": True,
                 "variant": "A0",
-                "checkpoint_sha256": "hash",
+                "checkpoint_sha256": checkpoint_sha,
                 "provenance": provenance,
             }
 
@@ -243,7 +265,12 @@ def test_completion_validator_accepts_normalized_control_and_seed_variants() -> 
             for split in ("model_train", "model_val")
         }
         cases = (
-            ("reconstructor", "C5-no-slot", "C5_uncertainty", {}),
+            (
+                "reconstructor",
+                "C5-no-slot",
+                "C5_uncertainty",
+                {"training_config": {"slot_loss_weight": 0.0}},
+            ),
             (
                 "reconstructor",
                 "Cdirect-unconstrained",
@@ -257,10 +284,11 @@ def test_completion_validator_accepts_normalized_control_and_seed_variants() -> 
             run = root / run_id
             run.mkdir()
             (run / "best_model_val.pt").write_bytes(b"checkpoint")
+            checkpoint_sha = hashlib.sha256(b"checkpoint").hexdigest()
             report = {
                 "ok": True,
                 "variant": variant,
-                "checkpoint_sha256": "hash",
+                "checkpoint_sha256": checkpoint_sha,
                 "provenance": provenance,
                 **extra,
             }
@@ -279,6 +307,56 @@ def test_completion_validator_accepts_normalized_control_and_seed_variants() -> 
             )
             result = subprocess.run(command, capture_output=True, text=True)
             assert result.returncode == 0, result.stderr
+
+
+def test_completion_validator_rejects_wrong_no_slot_attestation_and_modified_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "manifest.json"
+        payload = {"splits": {"model_train": [], "model_val": []}}
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        manifest_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        provenance = {
+            split: {
+                "source_manifest_hash": manifest_sha,
+                "hlt_profile": "fixed_hlt_v2_realistic",
+                "hlt_profile_version": "v1",
+                "hlt_degradation_strength": 2.5,
+                "hlt_content_hash": f"hlt-{split}",
+                "jet_identity_hash": f"ids-{split}",
+            }
+            for split in ("model_train", "model_val")
+        }
+        run = root / "C5-no-slot"
+        run.mkdir()
+        checkpoint = run / "best_model_val.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        report = {
+            "ok": True,
+            "variant": "C5_uncertainty",
+            "checkpoint_sha256": hashlib.sha256(b"checkpoint").hexdigest(),
+            "training_config": {"slot_loss_weight": 1.0},
+            "provenance": provenance,
+        }
+        report_path = run / "run_report.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        command = (
+            sys.executable,
+            str(ROOT / "scripts" / "validate_constrained_coarse_to_fine_artifact.py"),
+            "--kind", "reconstructor", "--path", str(run), "--run-id", "C5-no-slot",
+            "--manifest", str(manifest),
+        )
+        failed = subprocess.run(command, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "slot_loss_weight == 0" in failed.stderr
+        report["training_config"]["slot_loss_weight"] = 0.0
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        checkpoint.write_bytes(b"modified checkpoint")
+        failed = subprocess.run(command, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "checkpoint_sha256 mismatch" in failed.stderr
 
 
 def test_frozen_tagger_sweep_never_unfreezes_reconstructor() -> None:

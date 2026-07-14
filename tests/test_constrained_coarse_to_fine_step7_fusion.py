@@ -10,6 +10,7 @@ from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from teacher_logit_reco.constrained_coarse_to_fine import (
     C5_B1,
+    C5_B3,
     C6_MULTIVIEW,
     D0_PSEUDO_ONLY,
     D1_LATE_LOGIT_FUSION,
@@ -264,6 +265,29 @@ class ConstrainedCoarseToFineStep7FusionTests(unittest.TestCase):
         self.assertEqual(e6.diagnostics["parameter_match_reference"], D4_UNCERTAINTY_GATED)
         with self.assertRaisesRegex(ValueError, "must not receive"):
             _small_tagger(E6_CAPACITY_MATCHED_HLT).eval().forward_detailed(self.hlt, (self.canonical,))
+
+    def test_level3_grid_tokens_respect_active_radial_shells(self):
+        _, _, arrays, metadata = _pseudo_arrays(C5_B3)
+        grid = grid_view_from_arrays(arrays, metadata, name="grid")
+        geometry = default_hierarchy_target_layout(radial_boundary=0.16).cell_geometry(grid.terminal_level)
+        reference_eta = torch.as_tensor(arrays["reference_eta"]).float()
+        reference_phi = torch.as_tensor(arrays["reference_phi"]).float()
+        deta = grid.raw_tokens[..., 1] - reference_eta[:, None]
+        dphi = torch.remainder(
+            grid.raw_tokens[..., 2] - reference_phi[:, None] + torch.pi,
+            2.0 * torch.pi,
+        ) - torch.pi
+        radius = torch.sqrt(deta.square() + dphi.square())
+        active = grid.mask[:, 0]
+        for cell, row in enumerate(geometry):
+            selected = active[:, cell]
+            if selected.any():
+                self.assertTrue(
+                    torch.all(radius[selected, cell] >= float(row["radial_min"]) - 1.0e-5)
+                )
+                self.assertTrue(
+                    torch.all(radius[selected, cell] <= float(row["radial_max"]) + 1.0e-5)
+                )
 
     def test_e_tier_interventions_are_channel_specific(self):
         view = self.canonical
