@@ -14,6 +14,8 @@ source "${SCRIPT_DIR}/common.sh"
 source "${SCRIPT_DIR}/constrained_coarse_to_fine_claim_contract.sh"
 
 fresh_prepare_submitter
+fresh_activate_env
+echo "submitter_python=$(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
 
 : "${CONSTRAINED_C2F_CAMPAIGN_MODE:=pilot}"
 case "${CONSTRAINED_C2F_CAMPAIGN_MODE}" in
@@ -247,14 +249,14 @@ hlt_cache_complete() {
   local rows=(); fresh_split_words rows "${CONSTRAINED_C2F_CACHE_SPLITS}"
   "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_artifact.py \
     --kind hlt-cache --path "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
-    --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" >/dev/null
+    --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" >/dev/null 2>&1
 }
 offline_cache_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
   local rows=(); fresh_split_words rows "${CONSTRAINED_C2F_OFFLINE_SPLITS}"
   "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_artifact.py \
     --kind offline-cache --path "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
-    --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" >/dev/null
+    --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" >/dev/null 2>&1
 }
 target_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
@@ -263,7 +265,7 @@ target_complete() {
     --kind target-cache --path "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" \
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
-    --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" >/dev/null
+    --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" >/dev/null 2>&1
 }
 recon_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
@@ -272,7 +274,7 @@ recon_complete() {
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
-    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null
+    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null 2>&1
 }
 tagger_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
@@ -281,7 +283,7 @@ tagger_complete() {
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
-    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null
+    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null 2>&1
 }
 prediction_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
@@ -292,7 +294,7 @@ prediction_complete() {
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
     --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" \
-    --tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}" >/dev/null
+    --tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}" >/dev/null 2>&1
 }
 
 tagger_reconstructors() {

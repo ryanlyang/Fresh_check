@@ -586,6 +586,14 @@ def test_step10_cluster_wrappers_set_correct_environments_and_resources() -> Non
     assert "300G" in sporc
 
 
+def test_step10_submitter_uses_conda_for_reuse_validation_without_probe_tracebacks() -> None:
+    submitter = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    assert "fresh_prepare_submitter\nfresh_activate_env" in submitter
+    assert "submitter_python=$(${PYTHON_BIN}" in submitter
+    assert "--kind reconstructor" in submitter
+    assert "--target-cache-dir \"${CONSTRAINED_C2F_TARGET_CACHE_DIR}\" >/dev/null 2>&1" in submitter
+
+
 def test_step10_saves_only_selected_checkpoints_by_default() -> None:
     recon = _read("run_train_constrained_coarse_to_fine_reconstructor.sh")
     tagger = _read("run_train_constrained_coarse_to_fine_tagger.sh")
