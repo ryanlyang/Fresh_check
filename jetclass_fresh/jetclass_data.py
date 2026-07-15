@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 import warnings
 
@@ -23,6 +24,8 @@ import numpy as np
 DEFAULT_DATA_DIR = "/home/ryreu/atlas/PracticeTagging/data/jetclass_part0"
 MAX_CONSTITUENTS = 128
 RAW_TOKEN_DIM = 14
+ROOT_OPEN_ATTEMPTS = 3
+ROOT_OPEN_RETRY_SECONDS = 1.0
 
 LABEL_NAMES = [
     "QCD",
@@ -311,6 +314,31 @@ def _resolve_data_file(data_dir: DataDirLike, file_name: str) -> Path:
     return candidates[0]
 
 
+def _open_root_file_with_retry(uproot_module: Any, source: Path):
+    """Open a ROOT file with a bounded retry for transient shared-filesystem reads.
+
+    A persistent failure remains fatal. Retrying here prevents a short NFS read
+    from turning a deterministic manifest/cache build into a failed campaign,
+    while always naming the affected file if the problem is real.
+    """
+
+    last_error: Exception | None = None
+    for attempt in range(1, ROOT_OPEN_ATTEMPTS + 1):
+        try:
+            return uproot_module.open(source)
+        except (EOFError, OSError, OverflowError, RuntimeError, ValueError) as exc:
+            last_error = exc
+            if attempt < ROOT_OPEN_ATTEMPTS:
+                time.sleep(ROOT_OPEN_RETRY_SECONDS * attempt)
+
+    assert last_error is not None
+    raise RuntimeError(
+        f"Failed to open JetClass ROOT file {source.as_posix()} after "
+        f"{ROOT_OPEN_ATTEMPTS} attempts; the file may be unavailable or corrupt: "
+        f"{type(last_error).__name__}: {last_error}"
+    ) from last_error
+
+
 def _require_split_names(mapping: Mapping[str, Any], name: str) -> None:
     missing = [split for split in SPLIT_ORDER if split not in mapping]
     extra = [split for split in mapping if split not in SPLIT_ORDER]
@@ -353,7 +381,7 @@ def discover_file_records(
                 raise
 
             try:
-                with uproot.open(path) as handle:
+                with _open_root_file_with_retry(uproot, path) as handle:
                     tree = handle[tree_name]
                     record_path = path.resolve().as_posix() if multi_root else _relative_path(path, root)
                     records.append(
@@ -733,7 +761,7 @@ def load_offline_view(
             raise ValueError(f"Selected entries for {source} contain multiple labels")
         expected_label = int(expected_labels[0])
 
-        with uproot.open(source) as handle:
+        with _open_root_file_with_retry(uproot, source) as handle:
             tree = handle[tree_name]
             missing = [branch for branch in read_branches if branch not in tree.keys()]
             if missing:

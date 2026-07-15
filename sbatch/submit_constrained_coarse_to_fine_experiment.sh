@@ -428,7 +428,8 @@ if [[ "${CONSTRAINED_C2F_STAGE_MODE}" == "final_claims" ]]; then
 fi
 if fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_OFFLINE_CACHE}"; then
   if fresh_bool_enabled "${SKIP_EXISTING}" && offline_cache_complete; then echo "skip offline cache: complete"; else
-    offline_jid="$(submit_afterok c2f_offline_cache "${split_jid}" "${SCRIPT_DIR}/run_cache_architecture_view_offline_inputs.sh")"
+    offline_cache_dep="$(join_dependencies "${split_jid}" "${hlt_jid}")"
+    offline_jid="$(submit_afterok c2f_offline_cache "${offline_cache_dep}" "${SCRIPT_DIR}/run_cache_architecture_view_offline_inputs.sh")"
   fi
 fi
 

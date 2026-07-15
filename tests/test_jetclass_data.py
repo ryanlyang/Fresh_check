@@ -91,6 +91,41 @@ class JetClassDataStep2Tests(unittest.TestCase):
             loaded = load_split_manifest(path)
         self.assertEqual(manifest_hash(manifest), manifest_hash(loaded))
 
+    def test_discover_file_records_retries_transient_root_open_failure(self):
+        class FakeTree:
+            num_entries = 12
+
+        class FakeHandle:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __getitem__(self, _tree_name):
+                return FakeTree()
+
+        class FakeUproot:
+            attempts = 0
+
+            @classmethod
+            def open(cls, _path):
+                cls.attempts += 1
+                if cls.attempts == 1:
+                    raise OverflowError("transient incomplete ROOT read")
+                return FakeHandle()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "ZJetsToNuNu_good.root"
+            good.touch()
+            with patch.dict(sys.modules, {"uproot": FakeUproot}):
+                with patch("jetclass_fresh.jetclass_data.time.sleep") as sleep:
+                    records = discover_file_records(root, require_all_classes=False)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(FakeUproot.attempts, 2)
+        sleep.assert_called_once()
+
     def test_discover_file_records_reports_unreadable_root_path(self):
         class FakeUproot:
             @staticmethod
@@ -102,8 +137,9 @@ class JetClassDataStep2Tests(unittest.TestCase):
             bad = root / "ZJetsToNuNu_bad.root"
             bad.touch()
             with patch.dict(sys.modules, {"uproot": FakeUproot}):
-                with self.assertRaisesRegex(RuntimeError, "ZJetsToNuNu_bad.root"):
-                    discover_file_records(root, require_all_classes=False)
+                with patch("jetclass_fresh.jetclass_data.time.sleep"):
+                    with self.assertRaisesRegex(RuntimeError, "ZJetsToNuNu_bad.root"):
+                        discover_file_records(root, require_all_classes=False)
 
     def test_discover_file_records_can_skip_unreadable_roots_explicitly(self):
         class FakeTree:
