@@ -13,6 +13,8 @@ IFS=$'\n\t'
 : "${DIAGNOSTICS_MAX_FILE_MB:=25}"
 : "${CONDA_ENV:=weaver}"
 : "${PYTHON_BIN:=python}"
+: "${PYTHONNOUSERSITE:=1}"
+export PYTHONNOUSERSITE
 : "${DRY_RUN:=0}"
 : "${SKIP_EXISTING:=0}"
 : "${CONFIRM_FINAL_TEST:=0}"
@@ -1190,6 +1192,7 @@ fresh_print_context() {
   echo "CONDA_ENV=${CONDA_ENV}"
   echo "CONDA_BASE=${CONDA_BASE:-unset}"
   echo "PYTHON_BIN=${PYTHON_BIN}"
+  echo "PYTHONNOUSERSITE=${PYTHONNOUSERSITE}"
   echo "DRY_RUN=${DRY_RUN}"
   echo "PRINT_ONLY=${PRINT_ONLY}"
   echo "OVERWRITE=${OVERWRITE}"
@@ -1266,6 +1269,34 @@ fresh_setup() {
   fresh_activate_env
   "${PYTHON_BIN}" --version
   fresh_install_diagnostics_trap
+}
+
+fresh_require_conda_python_package() {
+  local package="$1"
+  if fresh_is_dry_run; then
+    return 0
+  fi
+  "${PYTHON_BIN}" - "${package}" <<'PY'
+import importlib
+import os
+from pathlib import Path
+import sys
+
+package = sys.argv[1]
+module = importlib.import_module(package)
+module_path = Path(module.__file__).resolve()
+conda_prefix = os.environ.get("CONDA_PREFIX")
+if conda_prefix:
+    prefix_path = Path(conda_prefix).resolve()
+    try:
+        module_path.relative_to(prefix_path)
+    except ValueError as exc:
+        raise SystemExit(
+            f"{package} resolved outside the active Conda environment: {module_path} "
+            f"(CONDA_PREFIX={prefix_path})"
+        ) from exc
+print(f"python_package={package} version={getattr(module, '__version__', 'unknown')} path={module_path}")
+PY
 }
 
 fresh_prepare_submitter() {

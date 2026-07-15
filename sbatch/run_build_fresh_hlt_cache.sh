@@ -24,6 +24,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${DATA_DIRS:=}"
 
 fresh_setup "$@"
+fresh_require_conda_python_package uproot
 data_dir_args=()
 if [[ -n "${DATA_DIRS}" ]]; then
   fresh_split_words data_dir_args "${DATA_DIRS}"

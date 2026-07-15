@@ -32,6 +32,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_APPEND:=0}"
 
 fresh_setup "$@"
+fresh_require_conda_python_package uproot
 fresh_require_file "scripts/cache_architecture_view_offline_inputs.py"
 fresh_require_file "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_MANIFEST_PATH}"
 if fresh_bool_enabled "${ARCHITECTURE_VIEW_10CLASS_OFFLINE_APPEND}"; then

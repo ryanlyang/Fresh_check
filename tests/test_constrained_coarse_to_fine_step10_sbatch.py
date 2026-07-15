@@ -577,6 +577,8 @@ def test_step10_cluster_wrappers_set_correct_environments_and_resources() -> Non
     assert "miniforge3-aarch64" in tigris
     assert "gpu:gh200:1" in tigris
     assert "220G" in tigris
+    assert "PYTHONNOUSERSITE:=1" in tigris
+    assert "CONDA_ENV PYTHONNOUSERSITE DEVICE" in tigris
     sporc = _read("submit_constrained_coarse_to_fine_sporcsubmit_pilot_and_highdata.sh")
     assert "atlas_kd" in sporc
     assert "tier3" in sporc
