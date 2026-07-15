@@ -144,6 +144,12 @@ from .train import (
     CoarseToFineTrainConfig,
     train_coarse_to_fine_reconstructor,
 )
+from .runtime import (
+    TORCH_NATIVE_TRITON_COMPAT_CONTRACT,
+    TORCH_NATIVE_TRITON_MODE_ENV,
+    TORCH_NATIVE_TRITON_PROBE_ENV,
+    configure_torch_native_triton_fallback,
+)
 from .pseudo import (
     PSEUDO_PARTICLE_ALLOWED_SPLITS,
     PSEUDO_PARTICLE_CACHE_CONTRACT,
@@ -391,6 +397,10 @@ __all__ = [
     "render_slot_accounting",
     "require_hierarchy_consistency",
     "train_coarse_to_fine_reconstructor",
+    "TORCH_NATIVE_TRITON_COMPAT_CONTRACT",
+    "TORCH_NATIVE_TRITON_MODE_ENV",
+    "TORCH_NATIVE_TRITON_PROBE_ENV",
+    "configure_torch_native_triton_fallback",
     "wrap_phi",
     "PSEUDO_PARTICLE_ALLOWED_SPLITS",
     "PSEUDO_PARTICLE_CACHE_CONTRACT",

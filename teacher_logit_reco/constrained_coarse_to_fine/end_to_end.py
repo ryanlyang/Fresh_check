@@ -44,6 +44,7 @@ from .fusion import (
     pseudo_particle_views_from_rendered,
 )
 from .losses import HierarchyReconstructionLossConfig, compute_hierarchy_reconstruction_loss
+from .runtime import configure_torch_native_triton_fallback
 from .pseudo import (
     PseudoParticleRenderOutput,
     load_coarse_to_fine_reconstructor_checkpoint,
@@ -1301,6 +1302,8 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(config.device)
+    runtime_compatibility = configure_torch_native_triton_fallback(device)
+    print(json.dumps({"runtime_compatibility": runtime_compatibility}, sort_keys=True))
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     data_config = _data_config(config)
     train_source = _load_split_source(data_config, config.train_split, require_offline_particles=True)
@@ -1346,6 +1349,7 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
         "final_test_loaded": False,
         "input_view": "offline" if config.variant == A2_OFFLINE_REFERENCE else "fixed_hlt_v2_realistic",
         "offline_inputs_used_by_deployable_forward": config.variant == A2_OFFLINE_REFERENCE,
+        "runtime_compatibility": runtime_compatibility,
         "source_state": _source_state(),
     }
     _write_json(output_dir / "config.json", config.to_dict())
@@ -1485,6 +1489,7 @@ def train_end_to_end_tagger(config: EndToEndTrainConfig) -> dict[str, Any]:
         "source_state": source_metadata["source_state"],
         "input_view": source_metadata["input_view"],
         "deployable_hlt_only": config.variant != A2_OFFLINE_REFERENCE,
+        "runtime_compatibility": runtime_compatibility,
     }
     _write_json(output_dir / "run_report.json", report)
     return report

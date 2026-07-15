@@ -41,6 +41,7 @@ from .model import (
     build_coarse_to_fine_reconstructor,
     normalize_b_tier_variant,
 )
+from .runtime import configure_torch_native_triton_fallback
 from .slot_loss import ParticleSlotLossConfig, compute_particle_slot_loss, prepare_cell_slot_targets
 from .slots import (
     CTierReconstructorOutput,
@@ -918,6 +919,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(config.device)
+    runtime_compatibility = configure_torch_native_triton_fallback(device)
+    print(json.dumps({"runtime_compatibility": runtime_compatibility}, sort_keys=True))
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     requested_family, _ = _normalize_variant(config.variant)
     require_offline_particles = requested_family == "C"
@@ -952,6 +955,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             for group in optimizer.param_groups
         ],
         "trainable_parameter_count": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
+        "runtime_compatibility": runtime_compatibility,
         "source_state": _source_state(),
     }
     _save_json(output_dir / "source_metadata.json", source_metadata)
@@ -1120,6 +1124,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
         "training_config": config.to_dict(),
         "provenance": provenance,
+        "runtime_compatibility": runtime_compatibility,
         "final_test_loaded": False,
         "source_state": source_metadata["source_state"],
     }
