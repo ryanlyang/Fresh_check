@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from jetclass_fresh.jetclass_data import (
+    BALANCED_SPLIT_ROW_ORDERING,
     DEFAULT_SPLIT_SEEDS,
     FileRecord,
     LABEL_NAMES,
@@ -66,6 +67,45 @@ class JetClassDataStep2Tests(unittest.TestCase):
         for split, counts in summary["class_counts"].items():
             expected_per_class = split_sizes[split] // len(LABEL_NAMES)
             self.assertTrue(all(value == expected_per_class for value in counts.values()))
+
+        self.assertEqual(manifest.metadata["row_ordering"], BALANCED_SPLIT_ROW_ORDERING)
+
+    def test_balanced_manifest_globally_mixes_rows_after_classwise_sampling(self):
+        prefixes = [
+            "ZJetsToNuNu",
+            "HToBB",
+            "HToCC",
+            "HToGG",
+            "HToWW4Q",
+            "HToWW2Q1L",
+            "ZToQQ",
+            "WToQQ",
+            "TTBar",
+            "TTBarLep",
+        ]
+        records = [
+            FileRecord(path=f"{prefix}_000.root", label=label, num_entries=6_000)
+            for label, prefix in enumerate(prefixes)
+        ]
+        split_sizes = {split: 10_000 for split in DEFAULT_SPLIT_SEEDS}
+        first = build_split_manifest_from_records(
+            records,
+            data_dir="/tmp/jetclass",
+            split_sizes=split_sizes,
+            split_seeds=DEFAULT_SPLIT_SEEDS,
+        )
+        second = build_split_manifest_from_records(
+            records,
+            data_dir="/tmp/jetclass",
+            split_sizes=split_sizes,
+            split_seeds=DEFAULT_SPLIT_SEEDS,
+        )
+
+        self.assertEqual(manifest_hash(first), manifest_hash(second))
+        for split, rows in first.splits.items():
+            labels = [row.label for row in rows]
+            self.assertGreater(len(set(labels[:8192])), 1, split)
+            self.assertGreater(len(set(labels[-8192:])), 1, split)
 
     def test_manifest_save_load_roundtrip_json_gz(self):
         records = [

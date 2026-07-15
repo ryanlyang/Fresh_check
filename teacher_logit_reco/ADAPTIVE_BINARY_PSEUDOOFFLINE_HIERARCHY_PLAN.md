@@ -86,12 +86,13 @@ root predictor:
 reconstructor:
   parent-conditioned binary transformer decoder
   every stage can cross-attend to all HLT particles
-  exact accounting projection at every split
+  one jointly feasible hard-state compiler at every split
 
 hypotheses:
+  one shared deterministic compiled root state
   one deterministic conditional mean
   four coherent stochastic pseudo-offline hypotheses
-  one jet-level latent propagated through the complete tree per hypothesis
+  one below-root latent propagated through each complete hierarchy hypothesis
 
 particle rendering:
   variable-length local set decoder
@@ -104,7 +105,7 @@ tagger:
   ancestry and tree-distance attention biases
   geometry-aware bidirectional cross-attention
   learned uncertainty/trust gates
-  zero-initialized residual correction around the HLT baseline
+  small nonzero ReZero residual correction around the HLT baseline
 
 primary tagger objective:
   label CE
@@ -113,13 +114,13 @@ primary tagger objective:
 ```
 
 A second complementary target hierarchy based on Cambridge/Aachen is trained
-for ablation and fusion. The expected absolute best campaign model fuses the
-best exclusive-kT and Cambridge/Aachen pseudo views while retaining one trusted
-HLT stream.
+for ablation and fusion. The expected strongest predeclared campaign model
+fuses the exclusive-kT and Cambridge/Aachen pseudo views while retaining one
+trusted HLT stream.
 
 ### 3.1 Locked Primary Dimensions
 
-The maximum-performance configuration uses the existing `large` ParT family
+The predeclared performance-first configuration uses the existing `large` ParT family
 for both particle branches:
 
 ```text
@@ -197,6 +198,32 @@ Microbatch size is hardware-dependent and is recorded. Effective batch size is
 fixed by accumulation. All primary runs use three independent training seeds;
 pilot debugging may begin with one seed, but a selected claim requires three.
 
+### 3.3 First-Campaign Scope
+
+This campaign tests the mechanism, not a broad hyperparameter search. The
+dimensions, four stochastic views, accounting weights, gate initialization,
+and primary training schedule above are frozen before model-val results are
+seen.
+
+Fairness is established with:
+
+```text
+canonical-base HLT ParT
+large HLT ParT matching the trusted branch
+parameter-matched expanded HLT-only ParT
+one predeclared XL HLT-only ParT
+schedule-matched HLT-only fine-tuning
+```
+
+There is no fused-model capacity sweep and no model-validation search over loss
+weights in the first campaign. Hierarchy-depth runs remain scientific
+ablations of the mechanism; they are not used to retune every other component.
+The primary claim candidate remains the predeclared depth-32 model. A different
+depth that looks better is reported as exploratory until it is confirmed by a
+new frozen run. If the predeclared model shows a credible gain, capacity and
+loss tuning become a separate follow-up campaign with a newly frozen selection
+protocol.
+
 ## 4. Non-Negotiable Contracts
 
 ### 4.1 Deployment Contract
@@ -240,8 +267,9 @@ does not load reconstruction targets
 does not receive zero-padded reconstruction fields
 ```
 
-The fused model is initialized to reproduce this baseline before fusion
-training begins.
+The trusted HLT branch exactly reproduces this baseline. The enabled fused
+model begins within the explicit near-baseline tolerance in Section 14.8 while
+retaining nonzero first-step gradients through every fusion block.
 
 ### 4.4 Coordinate Contract
 
@@ -428,7 +456,77 @@ constituent-membership transport distance where available
 Matching is performed within each parent. A child may never match a target
 belonging to another parent.
 
-### 7.6 Group Geometry and Support
+### 7.6 Rollout Frontier Alignment
+
+Local sibling matching applies when predicted and target topology agree. Full
+rollout additionally uses an ancestry-constrained frontier loss so topology
+mistakes remain trainable after teacher forcing is removed.
+
+At every depth, align the complete predicted active frontier to the target
+frontier with unbalanced Sinkhorn transport restricted to descendants of the
+last aligned parent. The transport cost uses the group matching features in
+Section 7.5 plus explicit unmatched-node mass.
+
+Handle mismatches as follows:
+
+```text
+correct split:
+  apply local two-sibling matching and normal child losses
+
+false stop where target splits:
+  collapse the complete target descendant subtree into one aggregate target
+  compare the predicted terminal node to that aggregate
+  add split/stop CE and an unresolved-substructure cost based on the collapsed
+  subtree's count, covariance, and local particle transport
+
+false split where target is terminal:
+  compare the union of predicted children to the target terminal aggregate
+  send unmatched predicted count/four-momentum support to a null OT sink
+  add split/stop CE and a false-positive-child cost
+
+different frontier cardinality after an earlier error:
+  use ancestry-constrained unbalanced OT; never drop unmatched nodes silently
+```
+
+The aggregate target state is compiled from all offline descendants, so a
+false stop still receives meaningful physical gradients. A false split of a
+singleton also receives count/type/four-momentum gradients rather than only a
+binary topology label.
+
+Frontier alignment must also emit the particle-level target measure consumed
+by the renderer. It is not sufficient to align groups and then recover the
+teacher-forced target microgroup for particle supervision. For every predicted
+terminal node, construct a `RendererTargetMap` containing target particle
+indices, nonnegative transport weights, and explicit null mass:
+
+```text
+matched predicted/target terminal:
+  use that target microgroup's offline constituents with unit weights
+
+false stop over a target subtree:
+  use the union of every offline constituent below the collapsed target node
+
+false split of a target terminal:
+  ancestry-constrained unbalanced particle OT partitions the target particle
+  measure across predicted children; unmatched predicted capacity and
+  unmatched target mass are assigned to explicit null sinks
+
+cardinality mismatch inherited from an earlier topology error:
+  propagate the frontier transport weights into the descendant particle
+  measures instead of choosing a nearest teacher-forced microgroup
+```
+
+The soft map is used for differentiable training. Evaluation additionally
+records a deterministic hard assignment derived from the same transport for
+interpretable diagnostics. Every rolled-out particle-renderer batch uses this
+map, so there is no hidden assumption that each predicted terminal node has a
+unique target microgroup after a topology mistake.
+
+`L_frontier_rollout` is evaluated on every rolled-out training batch and on
+zero-teacher-forcing model-val. It is not evaluated only when masks happen to
+match.
+
+### 7.7 Group Geometry and Support
 
 Each target group records:
 
@@ -482,16 +580,26 @@ targets:
 pT_root   = pT_hlt * exp(delta_log_pT)
 eta_root  = eta_hlt + delta_eta
 phi_root  = wrap(phi_hlt + delta_phi)
-mass_root = (mass_hlt + epsilon) * exp(delta_log_mass)
 ```
 
-The root four-vector is deterministically compiled from these quantities.
-Use robust clipping only outside a wide physically observed range and record
-the clip fraction as a diagnostic.
+Compile multiplicity, type counts, and charge before mass. These discrete
+budgets imply a minimum feasible rest-mass budget `M_min`. Parameterize root
+mass as a positive residual above that floor:
 
-Multiplicity is a distribution over the bounded integer `N_offline`, with an
-auxiliary residual view `delta_N = N_offline - N_hlt`. Use categorical or
-ordinal likelihood, not rounded scalar regression.
+```text
+base_excess = max(mass_hlt - M_min, epsilon)
+mass_root = M_min
+          + softplus(softplus_inverse(base_excess) + delta_mass_excess)
+```
+
+The root four-vector is then deterministically compiled from `pT_root`,
+`eta_root`, `phi_root`, and `mass_root`. This ordering prevents the model from
+predicting a mass that cannot contain its own count/type assignment.
+
+Multiplicity is a categorical distribution over the exact cache-bounded
+integer support `1..128`, with an auxiliary residual view
+`delta_N = N_offline - N_hlt`. The primary deployable root uses the MAP count;
+root-count sampling is an explicit ablation.
 
 Composition heads predict:
 
@@ -508,18 +616,19 @@ type-scalar-pT simplex over the same categories
 ```
 
 Count fractions are compiled into exact integer type counts that sum to the
-sampled or selected root constituent count. Use differentiable soft counts in
-training and deterministic largest-remainder or minimum-cost allocation for
-hard inference.
+selected root constituent count. Charge is compiled next under the allowed
+charges of those type counts. Use differentiable soft allocations in training
+and deterministic minimum-cost allocation for hard inference.
 
 Shape heads predict residual log widths, a bounded correlation, radial
-quantiles, and pT-dispersion statistics. The authoritative covariance uses a
+quantiles, and pT-dispersion statistics. The auxiliary covariance head uses a
 positive-semidefinite parameterization.
 
-### 8.3 Canonical Root Ledger
+### 8.3 Canonical Feasible Root State
 
-The typed physical heads are compiled into one versioned accounting schema.
-The primary hard ledger contains:
+The typed heads feed one ordered feasibility compiler. The primary hard state
+contains only quantities that the compiler jointly guarantees can be realized
+by a physical pseudo-particle set:
 
 ```text
 four-momentum:
@@ -530,24 +639,35 @@ discrete accounting:
   count by particle type
   total integer charge
 
-positive scalar accounting:
-  scalar sum_pT
-  scalar energy by particle type
-  scalar pT by particle type
-  absolute-charge sum
-
-geometric accounting:
-  pT-weighted first moments in HLT-centered eta and wrapped phi
-  pT-weighted eta/phi second moments and cross moment
-  pT-weighted radial first and second moments
+feasibility metadata:
+  type-conditioned minimum rest-mass budget
+  valid charge-allocation bounds
 ```
 
-Derived quantities such as jet mass, axis, type fractions, covariance, and
-width are computed from this ledger. A derived quantity cannot be separately
-treated as another authoritative prediction.
+The following quantities remain important, but are a strongly supervised
+auxiliary state rather than independent hard budgets:
 
-The ledger schema, transform parameters, feature order, units, and training
-normalization statistics are saved and hashed.
+```text
+scalar sum_pT
+scalar energy and pT by particle type
+absolute-charge sum
+pT-weighted first and second angular moments
+eta/phi covariance and radial moments
+leading-particle and radial-profile summaries
+```
+
+Auxiliary quantities are derived from compiled groups and rendered particles
+where possible. Their predicted heads receive direct target losses and
+parent-child consistency losses, but they cannot force a second projection
+that changes the hard four-vector/count/type/charge solution.
+
+Jet mass, axis, type fractions, covariance, and width are derived from the
+hard state plus auxiliary observables. A derived quantity is never treated as
+a competing authoritative prediction.
+
+The hard-state schema, auxiliary-state schema, compiler order, transform
+parameters, feature order, units, and normalization statistics are saved and
+hashed.
 
 ### 8.4 Root Losses
 
@@ -569,31 +689,28 @@ Learned loss balancing may operate within bounded ranges, but cannot drive a
 required accounting channel's weight to zero. Every required head has a fixed
 minimum weight and a reported gradient norm.
 
-## 9. Exact Binary Accounting
+## 9. Jointly Feasible Binary Accounting
 
-### 9.1 Four-Momentum Split
+### 9.1 One Ordered Feasibility Compiler
 
-Every active binary split conserves the parent four-vector exactly.
+Every active split uses one compiler in this fixed order:
 
-The primary implementation is a differentiable two-body phase-space layer:
+1. Decide split or terminal topology under the parent count budget.
+2. Allocate total child counts.
+3. Allocate per-type child counts.
+4. Allocate integer child charge under the selected type counts.
+5. Compute each child's minimum feasible rest-mass budget.
+6. Generate child four-vectors subject to those mass lower bounds.
+7. Derive child scalar-pT, type-energy, and angular observables from the
+   compiled hard state and auxiliary heads.
+8. Pass the complete feasible state to the next level or particle renderer.
 
-1. Transform the parent four-vector to its rest frame.
-2. Predict valid child mass fractions with `m1 + m2 <= M_parent`.
-3. Predict a unit split direction in the parent rest frame.
-4. Compute the child momentum magnitude from two-body kinematics.
-5. Construct back-to-back child four-vectors.
-6. Boost both children to the HLT frame.
+There is no late repair path in the primary model. A state that cannot satisfy
+the count/type/charge/mass constraints is prevented by parameterization. A
+numerically infeasible state fails closed and increments an explicit compiler
+failure counter.
 
-Therefore, up to floating-point tolerance:
-
-```text
-P_child_1 + P_child_2 = P_parent
-```
-
-Near-massless numerical cases require an explicit collinear-safe branch and
-tests. Silently replacing the split with unconstrained vectors is forbidden.
-
-### 9.2 Count and Composition Split
+### 9.2 Count, Type, and Charge Allocation
 
 For a parent with integer count `N`, predict a distribution over valid child
 counts:
@@ -605,8 +722,7 @@ N2 = N - N1
 
 For terminal `N=1`, no split occurs.
 
-Type counts are allocated conditionally on the total child counts. The final
-integer allocations must satisfy:
+Type counts are allocated conditionally on the child totals and satisfy:
 
 ```text
 N1_type + N2_type = N_parent_type for every type
@@ -614,55 +730,102 @@ sum_type N1_type = N1
 sum_type N2_type = N2
 ```
 
-Use a differentiable relaxed allocation during training and an exact
-minimum-cost integer allocator for evaluation and pseudo-particle rendering.
-
-### 9.3 Positive Scalar Budgets
-
-For each nonnegative additive scalar channel `A`, predict sibling logits and
-compile:
+Charge is allocated only after type counts are known. The compiler masks
+charges that cannot be realized by each child's particle types and enforces:
 
 ```text
-f1, f2 = softmax(logit1, logit2)
-A1 = f1 * A_parent
-A2 = f2 * A_parent
+Q1 + Q2 = Q_parent
+Q_child lies inside its type-conditioned feasible charge set
 ```
 
-This applies to scalar-pT, type-specific scalar momentum, energy summaries,
-and absolute-charge accounting.
+Use differentiable relaxed dynamic programming or transport during training
+and an exact minimum-cost integer allocator for evaluation and rendering.
 
-### 9.4 Signed Moment Budgets
+### 9.3 Mass Floors and Four-Momentum Split
 
-Signed additive channels use a parent-preserving center-plus-residual form:
+Every particle type has a versioned minimum effective mass used only for
+feasibility. The primary GeV table is:
 
 ```text
-A1 = w * A_parent + r
-A2 = (1 - w) * A_parent - r
+charged_hadron: 0.13957
+neutral_hadron: 0.0
+photon: 0.0
+electron: 0.000511
+muon: 0.105658
+other: 0.0
 ```
 
-The residual is bounded by a physically derived scale. The exact sum is
-independent of the learned residual.
+Allowed integer charge sets are `{-1,+1}` for charged hadrons, electrons, and
+muons; `{0}` for neutral hadrons and photons; and `{-1,0,+1}` for `other`.
+The allocated type counts determine `M_min_1` and `M_min_2`.
 
-Second-moment and covariance outputs must remain physically valid. Use the law
-of total covariance to divide parent spread into within-child and between-child
-components. Parameterize all within-child covariance matrices as PSD.
+The binary decoder predicts nonnegative mass excesses that are compiled so:
 
-### 9.5 Hard Accounting Audit
+```text
+m1 >= M_min_1
+m2 >= M_min_2
+m1 + m2 <= M_parent
+```
 
-Every forward pass exposes maximum and mean residuals for:
+The differentiable two-body phase-space layer then:
+
+1. Transforms the parent four-vector to its rest frame.
+2. Uses the feasible child masses above.
+3. Predicts a unit split direction in the parent rest frame.
+4. Computes the child momentum magnitude from two-body kinematics.
+5. Constructs back-to-back child four-vectors.
+6. Boosts both children to the HLT frame.
+
+Therefore, up to floating-point tolerance:
+
+```text
+P_child_1 + P_child_2 = P_parent
+```
+
+Near-massless numerical cases use one tested collinear-safe phase-space branch.
+Silently replacing the split with unconstrained vectors is forbidden.
+
+### 9.4 Strong Auxiliary Accounting
+
+Scalar sum-pT, type-specific energy/pT, covariance, and higher angular moments
+are predicted because they are useful for hierarchy tokens and tagging. They
+are not independently hard-projected.
+
+At every split, apply direct child-target losses and consistency losses:
+
+```text
+sum child auxiliary prediction versus parent auxiliary prediction
+compiled child-derived observable versus child auxiliary prediction
+compiled descendant-particle observable versus every ancestor target
+```
+
+These losses remain required in the primary objective. Their role is to make
+the hierarchy informative without creating a second set of constraints that
+can contradict the physical hard state.
+
+### 9.5 Accounting Audit
+
+Every forward pass exposes maximum and mean residuals for the hard guarantees:
 
 ```text
 four-momentum conservation
 total count conservation
 per-type count conservation
-positive scalar conservation
-first-moment conservation
-second-moment consistency
+integer charge conservation and feasibility
+mass-floor feasibility
 ```
 
-Training fails closed on nonfinite values or residuals above a configured
-numerical tolerance. Reports must not call a model constrained if these audits
-are absent.
+It separately reports soft consistency errors for:
+
+```text
+scalar-pT and type-energy
+first and second moments
+covariance and radial summaries
+```
+
+Training fails closed on nonfinite values or hard residuals above tolerance.
+Reports must distinguish exact hard closure from strongly supervised auxiliary
+consistency.
 
 ## 10. Multi-Hypothesis Conditional Reconstruction
 
@@ -675,17 +838,29 @@ low-information pseudo particles.
 The best model predicts a conditional distribution, while the deterministic
 mean remains a required control.
 
-### 10.2 Coherent Jet-Level Latent
+### 10.2 Shared Root and Coherent Below-Root Latent
 
-For hypothesis `h`, sample one latent `z_h` from a learned conditional prior:
+The primary model predicts and compiles the root state exactly once. All mean
+and stochastic pseudo views share the same root four-vector, count, type
+counts, and charge. Root heads still predict calibrated uncertainty, but that
+uncertainty is not sampled in the primary four-hypothesis rollout.
+
+This contract spans hierarchy definitions as well as stochastic hypotheses.
+For the primary dual-hierarchy model, exclusive-kT and C/A receive the exact
+same compiled `S_root` tensor from one semantic root predictor. Grouping choice
+may change only the structure below that root. There are no hierarchy-specific
+root heads, independently normalized root copies, or separately selected root
+checkpoints in E7.
+
+For hierarchy hypothesis `h`, sample one latent `z_h` from:
 
 ```text
-p(z | H_hlt, z_hlt, semantic_root_queries)
+p(z | H_hlt, z_hlt, semantic_root_queries, shared_root_state)
 ```
 
-The same latent is supplied to the root heads, every hierarchy split, and the
-particle renderer for that hypothesis. Independent noise at every node is not
-the primary design because it can create globally incoherent trees.
+The latent is supplied to every group split and the particle renderer below
+the root. It is not supplied to the primary root heads. Independent noise at
+every node is also excluded because it can create globally incoherent trees.
 
 Primary hypothesis set:
 
@@ -698,35 +873,39 @@ The stochastic model is a conditional variational hierarchy with:
 
 ```text
 training-only posterior q(z | HLT evidence, offline target hierarchy)
-deployable prior p(z | HLT evidence)
+deployable prior p(z | HLT evidence, shared root)
 64-dimensional z
 8 rational-quadratic-spline coupling layers in the conditional prior
 ```
 
-The posterior encoder is used only to train the conditional latent model and
-is absent from deployable prediction. At inference, the mean view uses the
-deterministic root path and the four stochastic views sample only from the
-HLT-conditioned prior.
+The posterior encoder is used only to train the below-root conditional model
+and is absent from deployable prediction. At inference, the mean view uses the
+conditional latent mean and the four stochastic views sample from the
+HLT-conditioned prior. Every view receives the same compiled root.
+
+Sampling the root ledger is reserved for `B3_root_sampled_ablation`; it is not
+part of ABPH-KT32-MH4-DUALCROSS.
 
 ### 10.3 Training the Distribution
 
 Use a proper conditional likelihood or variational objective, plus bounded
 anti-collapse terms. Do not rely only on best-of-K reconstruction loss.
 
-Recommended components:
+Required components:
 
 ```text
-root and split negative log-likelihood
+shared-root supervised NLL outside the latent objective
+split and particle conditional negative log-likelihood
 conditional latent KL or flow likelihood
 energy score across complete pseudo views
 small diversity reward in uncertain fine structure
-penalty for diversity in hard-conserved totals
 calibration loss for predicted intervals
 ```
 
-Hypotheses may differ in fine structure but cannot violate the same sampled
-root ledger. Diversity must not be created by changing energy or count outside
-the predicted root uncertainty distribution.
+Hypotheses may differ in group partitioning and fine particle structure, but
+their root hard state is identical by construction. Root four-momentum, count,
+type counts, and charge therefore have exactly zero across-hypothesis variance
+in the primary model.
 
 ### 10.4 Hypothesis Selection Is Forbidden
 
@@ -866,9 +1045,12 @@ The number of active local particle slots is fixed by the compiled integer
 count budget, not by an unconstrained existence threshold. A maximum of 128
 particles is supported.
 
-If the predicted root count exceeds the model maximum, the compiler applies a
-documented overflow policy that preserves the highest expected pT content and
-records the truncated count and budget. Overflow must be rare and reported.
+Offline and HLT source views are deterministically cache-trimmed to the same
+128-constituent contract before target construction. The root count head has
+support only on `1..128`; therefore a deployable prediction cannot overflow and
+no renderer truncation path exists. Cache metadata records the pre-trim source
+count for diagnostics, but all baseline and reconstruction comparisons use the
+same trimmed information contract.
 
 ### 12.3 Particle Features
 
@@ -925,11 +1107,11 @@ sum_i P_particle_i = P_microgroup
 ```
 
 The solver must be differentiable, bracketed, numerically tested, and fail
-closed on infeasible mass assignments. Raw effective masses are compiled
-through a simplex allocation of at most `(1 - epsilon) * M_microgroup`, so the
-sum of particle masses cannot exceed the parent invariant mass. Target masses
-remain directly supervised. A massless renderer is a named ablation, not an
-automatic fallback.
+closed on infeasible mass assignments. The type allocation supplies a minimum
+mass for every particle. The mass head distributes only the remaining feasible
+mass excess through a simplex, keeping the total below
+`(1 - epsilon) * M_microgroup`. Target masses remain directly supervised. A
+massless renderer is a named ablation, not an automatic fallback.
 
 ### 12.5 Exact Discrete Accounting
 
@@ -944,14 +1126,28 @@ allowed charge for selected particle type
 sum particle charges = microgroup integer charge
 ```
 
-If a predicted budget is infeasible under allowed particle types, the root or
-group compiler must repair it before rendering and record the repair. The
-renderer cannot silently violate the budget.
+The ordered feasibility compiler guarantees that the renderer receives a valid
+type/charge/mass budget. Encountering an infeasible budget is a hard error; the
+primary model has no post-hoc repair that changes learned predictions.
 
 ### 12.6 Local Particle Matching Loss
 
-Because target membership is known, match predicted particles only to the
-offline constituents inside their target microgroup.
+The particle target for each predicted terminal node is supplied by the
+`RendererTargetMap` from Section 7.6. On a topology-matched path, this reduces
+to the offline constituents inside the corresponding target microgroup. Under
+rollout topology errors it remains well-defined:
+
+```text
+collapsed false-stop node:
+  match against the union of particles in all target descendants
+
+false-split children:
+  match each child against its transported weighted share of the target
+  particle measure, with explicit null sinks for unmatched mass/capacity
+
+earlier frontier mismatch:
+  inherit ancestry-constrained soft target weights from frontier transport
+```
 
 Use entropically regularized optimal transport or Hungarian matching with a
 cost containing:
@@ -966,8 +1162,15 @@ track-feature error where supervised
 uncertainty-normalized residual
 ```
 
-Local matching is substantially easier and more stable than one global
-128-by-128 assignment.
+Hungarian matching is allowed only for a topology-matched, unweighted local
+target. Any weighted, collapsed, or null-bearing target uses unbalanced OT.
+Losses are normalized by transported real-particle mass, while null-source and
+null-sink penalties are reported separately. The renderer never falls back to
+teacher-forced topology to obtain a particle target.
+
+This remains substantially easier and more stable than one global 128-by-128
+assignment while preserving valid supervision when predicted topology differs
+from the target hierarchy.
 
 ### 12.7 Particle-Level Auxiliary Observables
 
@@ -998,6 +1201,7 @@ L_reco =
     lambda_root * L_root
   + sum_l lambda_group[l] * L_group[l]
   + lambda_topology * L_topology
+  + lambda_frontier * L_frontier_rollout
   + lambda_particle * L_particle_OT
   + lambda_feature * L_particle_features
   + lambda_distribution * L_conditional_distribution
@@ -1015,6 +1219,7 @@ lambda_group[8]: 0.75
 lambda_group[16]: 0.50
 lambda_group[32]: 0.50
 lambda_topology: 0.50
+lambda_frontier: 1.00
 lambda_particle: 1.00
 lambda_feature: 0.50
 lambda_distribution: 0.25
@@ -1024,8 +1229,8 @@ lambda_aux: 0.25
 
 For probabilistic training, `lambda_distribution` begins at `0.05` for the
 first 10% of updates and linearly rises to `0.25`. The bounded diversity term
-inside `L_conditional_distribution` has weight `0.05`; hard-total diversity
-penalties have weight `1.0` after normalization.
+inside `L_conditional_distribution` has weight `0.05`. Shared root hard totals
+are identical by construction and receive no diversity loss.
 
 During joint tagger fine-tuning:
 
@@ -1104,10 +1309,12 @@ Use a separate ParT encoder for pseudo particles. Do not share all weights with
 the HLT stream because measured HLT particles and predicted particles have
 different noise and uncertainty semantics.
 
-When feature contracts permit, initialize the pseudo encoder from a strong
-offline ParT. Add an input adapter for uncertainty, soft PID, source identity,
-and hypothesis metadata. The offline warm start is an initialization only; the
-deployable pseudo stream still receives HLT-generated particles.
+The primary model initializes the pseudo encoder from the large A4 offline
+ParT. Its canonical particle-feature projection is loaded exactly. New
+uncertainty, soft-PID, source, and hypothesis channels enter through a separate
+zero-initialized residual input adapter, so epoch-zero canonical embeddings
+match the offline warm start. The offline checkpoint is an initialization only;
+the deployable pseudo stream receives HLT-generated particles.
 
 ### 14.4 Ancestor Injection
 
@@ -1130,7 +1337,7 @@ Pseudo-pseudo attention receives a learned bias based on the deepest shared
 ancestor. Particles sharing a recent microgroup can interact differently from
 particles that meet only at the root.
 
-Recommended relation features:
+The primary relation features are:
 
 ```text
 deepest shared depth
@@ -1146,9 +1353,9 @@ Insert cross-attention after multiple ParT stages rather than only at logits.
 The primary configuration uses three fusion locations:
 
 ```text
-after early particle embedding refinement
-after a middle particle-attention block
-before final jet pooling/classification
+after particle-attention layer 4
+after particle-attention layer 8
+immediately before final class pooling/classification
 ```
 
 At each location:
@@ -1182,8 +1389,10 @@ hierarchy depth
 current HLT token
 ```
 
-The gate is initialized near zero. The model begins as the trusted HLT
-baseline and learns where pseudo information is useful.
+Trust-gate output projections use ordinary Xavier initialization and gate
+logits use zero bias, giving an initial sigmoid gate of `0.5`. Baseline
+preservation is handled only by the ReZero scales in Section 14.8. The gate and
+projection are not independently zeroed.
 
 ### 14.8 Baseline-Preserving Residual Classifier
 
@@ -1196,9 +1405,20 @@ z_fused = z_base + alpha * delta_z
 logits_fused = HLTClassifier(z_fused) + beta * delta_logits
 ```
 
-Initialize `alpha`, `beta`, and the final fusion projections to zero or a very
-small value. Verify numerically before training that the fused model matches
-the baseline logits within tolerance.
+Initialize every cross-view ReZero scale and the final `alpha` and `beta` to
+`1e-3`. Initialize fusion output projections normally; never zero both a scale
+and its upstream projection.
+
+Before training, require on a fixed calibration batch:
+
+```text
+mean absolute fused-versus-A0 logit difference <= 1e-3
+no top-1 prediction changes
+nonzero first-backward gradient norm in every cross-attention stack
+```
+
+The exact HLT baseline remains available by setting ReZero scales to zero for
+diagnostics, but trainable primary fusion starts at `1e-3`.
 
 ### 14.9 Multiple-Hypothesis Aggregation
 
@@ -1219,12 +1439,29 @@ The HLT stream remains available during this aggregation.
 
 ### 14.10 Dual-Hierarchy Fusion
 
-The maximum-performance candidate uses one trusted HLT stream plus selected
-exclusive-kT and C/A pseudo streams. The two reconstructors may share the HLT
-evidence encoder but have separate target-specific hierarchy decoders.
+The strongest predeclared candidate uses one trusted HLT stream plus both the
+fixed exclusive-kT and C/A pseudo streams. E7 uses one HLT evidence encoder and
+one semantic root predictor to produce and compile `S_root` exactly once:
+
+```text
+HLT evidence -> one root predictor -> one compiled S_root
+                                     |-> exclusive-kT below-root decoder
+                                     `-> C/A below-root decoder
+```
+
+Both hierarchy decoders receive the exact same root tensor, root uncertainty,
+and root provenance hash. They have separate grouping-specific parameters only
+below the root. During joint training, gradients from both decoders update the
+same root predictor. A run is invalid if the two branches report different
+root values or root hashes for the same jet.
 
 Use a view-type embedding and view-level transformer to combine them. Train
 with view dropout so the model remains stable when one pseudo family is weak.
+
+An independent-root dual-hierarchy model is retained only as
+`E11_independent_root_dual_hierarchy_diagnostic`. It tests whether sharing the
+global state matters, but it is not eligible to replace E7 as the primary
+candidate without a separately declared campaign amendment.
 
 ## 15. Tagging Objectives and Ablations
 
@@ -1357,8 +1594,9 @@ patience of 15 evaluations.
 
 ### Phase 4: Probabilistic Multi-Hypothesis Training
 
-Initialize from the deterministic hierarchy. Add the conditional latent prior,
-probabilistic heads, and four stochastic hypotheses.
+Initialize from the deterministic hierarchy. Keep one shared compiled root and
+add the below-root conditional latent prior, hierarchy/particle probabilistic
+heads, and four stochastic hypotheses.
 
 Train complete coherent rollouts. Monitor mode collapse, calibration, and
 hypothesis diversity in class-independent physical observables.
@@ -1373,13 +1611,13 @@ Freeze the reconstructor. Initialize:
 
 ```text
 HLT stream from the clean HLT baseline
-pseudo stream from the offline ParT when compatible
+pseudo stream from the large A4 offline ParT through the residual input adapter
 fusion modules near zero
 ```
 
 Train the pseudo input adapter, hierarchy memory, cross-attention, trust gates,
-view aggregator, and residual classifier. Confirm epoch zero reproduces the
-HLT baseline.
+view aggregator, and residual classifier. Confirm the pretraining calibration
+batch satisfies the Section 14.8 near-baseline and gradient checks.
 
 Train for at most 120,000 updates with model-validation every 1,000 updates and
 patience of 15 evaluations.
@@ -1446,7 +1684,7 @@ reconstruction caches are required by its dataset or forward path.
 
 Canonical base HLT ParT using `[128, 512, 128]`, eight particle-attention
 layers, and two class-attention layers. This preserves comparison to older HLT
-campaigns but is not the trusted branch of the maximum-performance model.
+campaigns but is not the trusted branch of the predeclared primary model.
 
 `A1_hlt_schedule_control`:
 
@@ -1469,6 +1707,22 @@ Same clean HLT model trained from scratch.
 Offline ParT trained and evaluated on offline particles. It is a ceiling, not
 a deployable baseline.
 
+`A5_hlt_part_xl`:
+
+One predeclared larger HLT-only control:
+
+```text
+embed_dims: [256, 1024, 256]
+pair_embed_dims: [128, 128, 128]
+num_heads: 8
+num_layers: 16
+num_cls_layers: 4
+```
+
+It uses the clean HLT-only dataset, the same label objective, and the same
+model-validation stopping rule. This is a fairness control, not the beginning
+of a capacity sweep.
+
 ### Tier B: Root Prediction
 
 `B0_pooled_mlp_root`:
@@ -1481,11 +1735,13 @@ Primary typed semantic-query deterministic root predictor.
 
 `B2_semantic_query_probabilistic`:
 
-Probabilistic semantic root with calibrated uncertainty.
+Probabilistic semantic root heads with calibrated uncertainty and one MAP
+compiled root state.
 
-`B3_root_multi_hypothesis`:
+`B3_root_sampled_ablation`:
 
-One mean plus four coherent stochastic root states.
+Sample four calibrated root states before hierarchy rollout. This explicitly
+tests the shared-root decision and is not part of the primary model.
 
 `B4_oracle_root_diagnostic`:
 
@@ -1544,11 +1800,12 @@ Deterministic particle renderer from C5.
 
 `D1_kt32_mh4_particles`:
 
-Primary C5 hierarchy with one mean and four stochastic pseudo views.
+Primary C5 hierarchy with one mean and four stochastic pseudo views sharing
+one compiled root state.
 
 `D2_ca32_mh4_particles`:
 
-C/A counterpart to D1.
+C/A counterpart to D1 with the same shared-root contract.
 
 `D3_global_particle_set`:
 
@@ -1601,8 +1858,9 @@ C/A counterpart to E5.
 
 `E7_dual_hierarchy_dualcross`:
 
-One HLT stream fused with selected exclusive-kT and C/A pseudo streams. This
-is the expected maximum-performance single model.
+One HLT stream fused with the fixed exclusive-kT and C/A pseudo streams. Both
+below-root decoders consume one exactly shared compiled root state from one
+root predictor. This is the expected strongest predeclared single model.
 
 `E8_no_hierarchy_tokens`:
 
@@ -1614,7 +1872,12 @@ E5 with fixed ungated pseudo updates.
 
 `E10_no_baseline_residual_init`:
 
-E5 without zero-initialized baseline-preserving fusion.
+E5 without the small `1e-3` ReZero baseline-preserving initialization.
+
+`E11_independent_root_dual_hierarchy_diagnostic`:
+
+E7 topology and fusion with separate exclusive-kT and C/A root predictors.
+This is a mechanism diagnostic, not a primary or final-claim candidate.
 
 ### Tier F: Training Objective and Initialization
 
@@ -1688,7 +1951,7 @@ Three independently seeded F0 models with frozen stack-train fusion.
 
 `G5_best_complementary_ensemble`:
 
-Predeclared maximum-performance ensemble using diversity-aware membership from
+Predeclared strongest ensemble using diversity-aware membership from
 E5, E6, E7, and selected objective/seed variants. Membership is chosen without
 final test.
 
@@ -1709,7 +1972,7 @@ G5_best_complementary_ensemble
 Most important comparisons:
 
 ```text
-A0 vs A1/A2:
+A0/A0b vs A1/A2/A5:
   separate reconstruction gain from schedule and capacity gain
 
 C0 vs C3/C5:
@@ -1799,7 +2062,7 @@ coverage of the true offline set
 calibration of root and local intervals
 best-of-K oracle diagnostic on model-val
 mean aggregation versus learned aggregation
-diversity in hard totals, which should remain bounded
+across-hypothesis variance in root hard totals, which must be exactly zero
 diversity in fine structure, which should be nonzero
 ```
 
@@ -1812,7 +2075,7 @@ accuracy and loss
 macro one-vs-rest AUC
 per-class accuracy and AUC
 confusion matrix
-gap versus A0, A1, A2, and A4
+gap versus A0, A0b, A1, A2, A5, and the A4 offline ceiling
 HLT-only, pseudo-only, hierarchy-only, and fused logits
 top-1 agreement between branches
 uncertainty-binned accuracy
@@ -1863,10 +2126,15 @@ Final-test deployable reports additionally attest:
 
 ```text
 offline inputs loaded: false
-teacher logits loaded: false unless an explicitly approved training-only cache
+teacher logits loaded: false
 hypothesis selection used offline target: false
 fusion fitted on final_test: false
 ```
+
+Teacher-logit caches are permitted only in explicitly declared `model_train`
+or `model_val` training diagnostics. They must not be mounted, opened, or
+referenced by a final-test prediction job, including KD-trained model
+evaluation.
 
 Any missing required provenance field makes the campaign report fail.
 
@@ -1960,25 +2228,33 @@ no offline input is required for deployable root prediction
 
 ### Step 4: Exact Binary Accounting Layers
 
-Implement two-body four-vector splitting, integer count/type allocation,
-positive scalar allocation, signed moment partition, PSD covariance handling,
-and hard accounting audits.
+Implement the ordered feasibility compiler: topology, integer count/type,
+charge, minimum mass, and two-body four-vector splitting. Add separately
+reported soft auxiliary heads for scalar-pT, type-energy, and angular moments.
+The real-target acceptance harness is a reusable campaign preflight, not only
+a synthetic unit test.
 
 Acceptance tests:
 
 ```text
 random valid parents conserve all hard channels
+actual cached offline hierarchy targets compile through the complete
+  root/binary/renderer feasibility path with zero failures
+the real-target preflight covers every class plus singleton, largest-count,
+  near-massless, boundary-geometry, and rare-particle-type examples
+compiled real targets exactly recover their hard four-vector, count, type,
+  charge, and mass-budget ledgers
 gradients are finite
 near-massless parents use the documented safe branch
-infeasible inputs fail or are explicitly repaired and counted
+infeasible inputs fail closed; no post-hoc repair changes the hard state
 mixed precision remains within tolerance
 ```
 
 ### Step 5: Recursive Hierarchy Decoder
 
 Implement level-specific parent transformers, global/local HLT cross-attention,
-support bias, local sibling matching, topology masks, teacher forcing, and
-predicted rollout.
+support bias, local sibling matching, topology masks, ancestry-constrained
+frontier alignment, teacher forcing, and predicted rollout.
 
 Acceptance tests:
 
@@ -1987,6 +2263,11 @@ shapes and masks are correct at every capacity
 padding cannot receive attention or contribute loss
 children only match within their parent
 every level can access original HLT embeddings
+false stops and false splits receive physical frontier losses
+unequal predicted/target frontier cardinalities cannot be silently dropped
+every predicted terminal receives a complete RendererTargetMap
+collapsed and false-split maps conserve target particle measure plus explicit
+  null mass
 teacher-forced and rollout modes are separately reported
 ```
 
@@ -2000,7 +2281,7 @@ Acceptance tests:
 
 ```text
 same fixed seed reproduces hypotheses
-different hypotheses preserve sampled hard root budgets
+all primary hypotheses preserve one identical compiled hard root state
 offline targets never select deployment hypotheses
 mean and stochastic outputs have distinct report identities
 ```
@@ -2018,6 +2299,9 @@ local particle four-vectors sum to parent
 complete pseudo jet sums to root
 counts, types, and charges close exactly
 local matching cannot cross group boundaries
+topology-matched targets reduce to ordinary local particle matching
+collapsed and soft frontier targets train without teacher-forced topology
+false-split unmatched capacity produces a nonzero null-sink penalty
 final-test rendering uses HLT inputs only
 ```
 
@@ -2057,16 +2341,19 @@ high-data generation is streaming and memory audited
 
 Implement separate ParT streams, offline-compatible pseudo warm start,
 ancestor injection, tree biases, hierarchy memory, multi-location bidirectional
-cross-attention, uncertainty gates, view aggregation, and zero-init residual
+cross-attention, uncertainty gates, view aggregation, and `1e-3` ReZero residual
 classification.
 
 Acceptance tests:
 
 ```text
-zero-init logits reproduce A0
+initial fused logits satisfy the Section 14.8 near-baseline tolerance
+every fusion stack receives nonzero first-backward gradients
 masked pseudo/hierarchy inputs cannot affect logits
 tree relations are permutation-equivariant
 hypothesis order does not affect aggregate output
+E7 exclusive-kT and C/A branches receive the identical compiled root tensor
+E7 reports one shared root provenance hash; only E11 may report two roots
 HLT-only final-test path plus generated pseudo views remains deployable
 ```
 
@@ -2082,6 +2369,8 @@ Acceptance tests:
 KD variants fail if teacher logits are missing
 non-KD primary variants never load teacher logits
 all required A0-G variants are checked
+E7 reports prove exact shared-root identity across both hierarchy branches
+final-test reports attest unconditionally that teacher logits were not loaded
 final metrics require successful run reports
 frozen fusion membership cannot be overridden
 ```
@@ -2097,6 +2386,7 @@ The graph must support an empty checkpoint root and submit in this order:
 splits
 -> HLT/offline caches
 -> baselines and target hierarchies
+-> actual-target feasibility preflight (hard gate)
 -> root/hierarchy reconstructors
 -> particle renderers
 -> deployable pseudo predictions
@@ -2107,6 +2397,10 @@ splits
 
 Acceptance tests execute representative environment combinations, including
 partial rebuilds, rather than only searching submitter source text.
+
+No reconstructor GPU job is submitted until the preflight has compiled a
+stratified sample of actual cached offline hierarchy targets through the hard
+root, binary-split, and renderer-budget contracts with zero failures.
 
 High-data and final-test stages require approval inside the canonical
 submitter, not only in convenience wrappers.
@@ -2122,7 +2416,7 @@ error growth by depth
 particle closure
 hypothesis calibration
 whether hierarchy tokens are used
-whether E5 beats A0/A1/A2
+whether E5 beats A0/A0b/A1/A2/A5
 ```
 
 The high-data campaign may run concurrently when explicitly approved, but its
@@ -2151,7 +2445,7 @@ reports fail closed on missing or stale artifacts
 Before claiming improvement:
 
 ```text
-E5 or E7 beats A0, A1, and A2 on model_val and stack_val
+E5 or E7 beats A0, A0b, A1, A2, and A5 on model_val and stack_val
 gain persists across at least three seeds for the selected recipe
 gain is not reproduced by the schedule/capacity controls
 pseudo shuffle and zeroing remove the expected portion of the gain

@@ -90,6 +90,12 @@ DEFAULT_SPLIT_SEEDS = {
     "final_test": 558,
 }
 
+# Class-balanced sampling is performed independently per label.  The resulting
+# rows must then be globally permuted before view/target caches are sharded;
+# otherwise each cache shard becomes class-homogeneous and a shard-streaming
+# trainer can catastrophically forget earlier classes within an epoch.
+BALANCED_SPLIT_ROW_ORDERING = "deterministic_global_shuffle_after_balanced_classwise_sampling"
+
 PARTICLE_READ_BRANCHES = [
     "part_px",
     "part_py",
@@ -429,7 +435,8 @@ def build_split_manifest_from_records(
     Sampling is class-wise and sequential over the protocol split order. Each
     split uses its own seed and removes selected jets from the per-class pool,
     which guarantees that a stable `(file, entry)` identity appears in at most
-    one split.
+    one split. The selected rows are then globally shuffled within each split
+    so bounded cache shards remain class-mixed for streaming trainers.
     """
 
     split_sizes = dict(DEFAULT_SPLIT_TOTALS if split_sizes is None else split_sizes)
@@ -485,9 +492,25 @@ def build_split_manifest_from_records(
                 entry = int(global_index - file_starts[int(file_index)])
                 splits[split].append(JetIdentity(file=record.path, entry=entry, label=label))
 
+    row_ordering_seeds: Dict[str, int] = {}
+    for split_index, split in enumerate(SPLIT_ORDER):
+        # This preserves the exact selected identities and per-class balance,
+        # while ensuring the persisted row order is suitable for bounded
+        # sharded training loaders.
+        ordering_seed = (
+            int(base_seed) * 1_000_003
+            + int(split_seeds[split])
+            + (split_index + 1) * 97_409
+        ) % (2**32)
+        row_ordering_seeds[split] = int(ordering_seed)
+        permutation = np.random.RandomState(ordering_seed).permutation(len(splits[split]))
+        splits[split] = [splits[split][int(index)] for index in permutation]
+
     metadata = {
         "base_seed": int(base_seed),
-        "sampling": "balanced_classwise_sequential_without_replacement",
+        "sampling": "balanced_classwise_without_replacement",
+        "row_ordering": BALANCED_SPLIT_ROW_ORDERING,
+        "row_ordering_seeds": row_ordering_seeds,
         "jet_identity": "relative_source_file_path_plus_entry_index",
         "file_level_separation_claimed": False,
         "notes": "No HLT arrays or model inputs are generated in Step 2.",

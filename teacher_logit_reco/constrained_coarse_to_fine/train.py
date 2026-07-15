@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 from jetclass_fixed_hlt import HLT_PROFILE_V2_REALISTIC, HLT_PROFILE_V2_REALISTIC_VERSION
 from jetclass_fresh.hlt_baseline import amp_autocast_context, amp_grad_scaler, resolve_device, set_training_seed
 from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view, normalize_hlt_profile
-from jetclass_fresh.jetclass_data import load_split_manifest, manifest_hash
+from jetclass_fresh.jetclass_data import BALANCED_SPLIT_ROW_ORDERING, load_split_manifest, manifest_hash
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
@@ -338,6 +338,13 @@ def _load_split_source(
         raise ValueError("final_test reconstruction supervision is forbidden")
     manifest = load_split_manifest(config.manifest_path)
     manifest_sha = manifest_hash(manifest)
+    sampling = manifest.metadata.get("sampling")
+    row_ordering = manifest.metadata.get("row_ordering")
+    if sampling is not None and row_ordering != BALANCED_SPLIT_ROW_ORDERING:
+        raise ValueError(
+            "constrained coarse-to-fine training requires a globally mixed split row order; "
+            "rebuild the manifest and every derived cache with the current split builder"
+        )
     expected_ids = tuple(manifest.splits[str(split)])
     hlt_view = load_cached_hlt_view(config.hlt_cache_dir, split, verify_hash=bool(config.verify_hash))
     offline_view = (
@@ -450,6 +457,16 @@ def _iter_split_loaders(
             raise ValueError(f"target shard identities do not match HLT rows for {source.split}/{shard_index}")
         if not np.array_equal(shard.labels[:take], source.hlt_view.labels[shard.start : shard.start + take]):
             raise ValueError(f"target shard labels do not match HLT rows for {source.split}/{shard_index}")
+        # The C2F trainer streams one target shard at a time.  Do not allow a
+        # large class-homogeneous shard to turn a balanced dataset into long
+        # single-class optimization runs, even if a legacy/custom manifest
+        # bypassed the production manifest-order contract above.
+        minimum_guarded_rows = max(512, 4 * int(config.batch_size))
+        if train and take >= minimum_guarded_rows and np.unique(shard.labels[:take]).size < 2:
+            raise ValueError(
+                f"{source.split}/{shard_index} is a class-homogeneous target shard; "
+                "rebuild the manifest and derived caches with globally mixed row ordering"
+            )
         start = int(shard.start)
         stop = start + take
         dataset = _ShardDataset(

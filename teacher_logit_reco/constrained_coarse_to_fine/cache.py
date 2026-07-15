@@ -13,7 +13,13 @@ import numpy as np
 
 from jetclass_fixed_hlt import HLT_PROFILE_V2_REALISTIC, HLT_PROFILE_V2_REALISTIC_VERSION
 from jetclass_fresh.hlt_cache import hash_arrays, jet_identity_hash, load_cached_hlt_view, normalize_hlt_profile
-from jetclass_fresh.jetclass_data import JetIdentity, LABEL_NAMES, load_split_manifest, manifest_hash
+from jetclass_fresh.jetclass_data import (
+    BALANCED_SPLIT_ROW_ORDERING,
+    JetIdentity,
+    LABEL_NAMES,
+    load_split_manifest,
+    manifest_hash,
+)
 from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
 from .layout import (
@@ -175,6 +181,13 @@ def _validate_source_pair(
 ) -> tuple[str, tuple[JetIdentity, ...]]:
     manifest = load_split_manifest(manifest_path)
     manifest_sha = manifest_hash(manifest)
+    sampling = manifest.metadata.get("sampling")
+    row_ordering = manifest.metadata.get("row_ordering")
+    if sampling is not None and row_ordering != BALANCED_SPLIT_ROW_ORDERING:
+        raise ValueError(
+            "constrained coarse-to-fine targets require a globally mixed split row order; "
+            "rebuild the split manifest and all derived caches with the current split builder"
+        )
     if str(split) not in manifest.splits:
         raise ValueError(f"split {split!r} is missing from split manifest")
     expected_ids = tuple(manifest.splits[str(split)])
