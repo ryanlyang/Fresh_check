@@ -532,6 +532,8 @@ If pure noise fails but contextual adapters work:
 
 ## Experiment Family B: Offline Teacher Residual Representation Distillation
 
+r4_delta_z_full_gentle_unfreeze_repkd
+
 This is the best version of the offline teacher embedding idea.
 
 The goal is not to reconstruct offline particles. The goal is to learn the

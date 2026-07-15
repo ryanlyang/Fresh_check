@@ -389,7 +389,7 @@ class _FieldGroupHeads(torch.nn.Module):
         output = hidden.new_zeros((*hidden.shape[:2], self.field_dim))
         for group, indices in self.groups.items():
             values = self.heads[group](hidden)
-            output[..., list(indices)] = values
+            output[..., list(indices)] = values.to(dtype=output.dtype)
         return output
 
 

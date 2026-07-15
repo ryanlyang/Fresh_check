@@ -33,6 +33,7 @@ from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 from .config import (
     PD10_EXPERIMENT_NAME,
     PD10_HLT_DEGRADATION_STRENGTH,
+    PD10_MANIFEST_SPLIT_ORDER,
     PD10_NUM_CLASSES,
     PD10_SPLIT_ORDER,
     PD10_SPLIT_SIZES,
@@ -55,7 +56,7 @@ PD10_STEP4_EXPERIMENT_STEP = "pd10_step4_teacher_logit_cache"
 PD10_TEACHER_LOGIT_CACHE_CONTRACT = "pd10_teacher_logit_cache_v1"
 PD10_TEACHER_LOGIT_CACHE_MANIFEST = "teacher_logit_manifest.json"
 PD10_TEACHER_LOGIT_CACHE_REPORT = "teacher_logit_cache_report.json"
-PD10_TEACHER_LOGIT_SPLITS: tuple[str, ...] = PD10_SPLIT_ORDER
+PD10_TEACHER_LOGIT_SPLITS: tuple[str, ...] = PD10_MANIFEST_SPLIT_ORDER
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,12 @@ def _max_jets_for_split(config: PD10TeacherLogitCacheConfig, split: str) -> int 
     if split == "final_test":
         return config.max_final_test_jets
     return None
+
+
+def _expected_size_for_split(split: str, view: JetView) -> int:
+    if split in PD10_SPLIT_SIZES:
+        return int(PD10_SPLIT_SIZES[split])
+    return int(len(view.labels))
 
 
 def pd10_teacher_logit_selection_seed(config: PD10TeacherLogitCacheConfig, split: str) -> int:
@@ -318,7 +325,7 @@ def build_pd10_teacher_logit_block(
         "source_view": config.source_view,
         "allowed_inputs": PD10_TEACHER_ALLOWED_INPUTS[config.teacher_target],
         "split": split,
-        "split_expected_size": int(PD10_SPLIT_SIZES[split]),
+        "split_expected_size": _expected_size_for_split(split, view),
         "max_jets": _max_jets_for_split(config, split),
         "checkpoint": str(config.checkpoint),
         "checkpoint_sha256": sha256_file(config.checkpoint),
@@ -478,7 +485,10 @@ def cache_pd10_teacher_logits(config: PD10TeacherLogitCacheConfig) -> dict[str, 
         "output_dir": str(config.output_dir),
         "teacher_logit_dir": str(config.teacher_output_dir),
         "splits": list(config.splits),
-        "split_sizes": {split: int(PD10_SPLIT_SIZES[split]) for split in PD10_SPLIT_ORDER},
+        "split_sizes": {
+            str(row.get("split")): int(row.get("split_expected_size", row.get("n_jets", 0)))
+            for row in prediction_rows
+        },
         "prediction_rows": prediction_rows,
         "config": asdict(config),
     }
