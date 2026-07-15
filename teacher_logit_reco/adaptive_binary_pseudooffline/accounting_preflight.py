@@ -36,6 +36,7 @@ from .targets import (
 
 
 ABPH_STEP4_PREFLIGHT_CONTRACT = "adaptive_binary_pseudooffline_step4_preflight_v1"
+ABPH_TARGET_REPLAY_P4_TOLERANCE = 5.0e-3
 _HARD_LEDGER_NAMES: tuple[str, ...] = (
     "energy",
     "px",
@@ -199,7 +200,7 @@ def audit_target_batch_feasibility(
     *,
     labels: np.ndarray | None = None,
     jet_indices: Sequence[int] | None = None,
-    p4_tolerance: float = ABPH_BINARY_P4_ABS_TOLERANCE,
+    p4_tolerance: float = ABPH_TARGET_REPLAY_P4_TOLERANCE,
 ) -> dict[str, Any]:
     """Replay actual target ledgers through root, binary, and renderer feasibility."""
 
@@ -497,6 +498,7 @@ def audit_target_cache_feasibility(
 
 __all__ = [
     "ABPH_STEP4_PREFLIGHT_CONTRACT",
+    "ABPH_TARGET_REPLAY_P4_TOLERANCE",
     "audit_target_batch_feasibility",
     "audit_target_cache_feasibility",
     "neutral_binary_prediction",

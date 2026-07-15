@@ -39,6 +39,7 @@ from .cache import (
 )
 from .accounting_preflight import (
     ABPH_STEP4_PREFLIGHT_CONTRACT,
+    ABPH_TARGET_REPLAY_P4_TOLERANCE,
     audit_target_batch_feasibility,
     audit_target_cache_feasibility,
     neutral_binary_prediction,
@@ -51,6 +52,8 @@ from .binary_accounting import (
     ABPH_BINARY_COUNT_SUPPORT,
     ABPH_BINARY_P4_ABS_TOLERANCE,
     ABPH_BINARY_P4_REL_TOLERANCE,
+    ABPH_MASS_PRECISION_ABS_TOLERANCE,
+    ABPH_MASS_PRECISION_ENERGY_FACTOR,
     ABPH_NEAR_MASSLESS_THRESHOLD_GEV,
     AccountingState,
     BinarySplitPrediction,

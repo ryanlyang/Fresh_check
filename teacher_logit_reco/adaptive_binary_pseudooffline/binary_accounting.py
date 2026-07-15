@@ -33,6 +33,11 @@ ABPH_BINARY_COUNT_SUPPORT = ABPH_MAX_PARTICLES - 1
 ABPH_BINARY_P4_ABS_TOLERANCE = 2.5e-4
 ABPH_BINARY_P4_REL_TOLERANCE = 3.0e-6
 ABPH_NEAR_MASSLESS_THRESHOLD_GEV = 1.0e-5
+ABPH_MASS_PRECISION_ABS_TOLERANCE = 3.0e-5
+# Float32 (E, p) loses low invariant masses through E^2-p^2 cancellation for
+# highly boosted particles. The ledger floor remains exact; this tolerance is
+# only for auditing the p4 representation of that already-compiled state.
+ABPH_MASS_PRECISION_ENERGY_FACTOR = 5.0e-5
 ABPH_AUXILIARY_ADDITIVE_NAMES: tuple[str, ...] = (
     "scalar_sum_pt",
     *(f"energy_{name}" for name in ABPH_PID_CATEGORIES),
@@ -216,7 +221,11 @@ def accounting_state_audit(state: AccountingState) -> dict[str, Any]:
     if not bool((in_support & charge_valid).all()):
         problems.append("integer charge is infeasible for the type counts")
     mass = _invariant_mass(state.four_vector)
-    if bool((mass + 3.0e-5 < expected_floor).any()):
+    mass_tolerance = (
+        ABPH_MASS_PRECISION_ABS_TOLERANCE
+        + ABPH_MASS_PRECISION_ENERGY_FACTOR * state.four_vector[:, 0].abs()
+    )
+    if bool((mass + mass_tolerance < expected_floor).any()):
         problems.append("four-vector mass lies below the minimum-mass budget")
     finite = (
         state.four_vector,
@@ -637,7 +646,11 @@ def compile_binary_split(
         parent_p4 = parent.four_vector[split_indices]
         parent_mass = _invariant_mass(parent_p4)
         available = parent_mass - floors.sum(dim=-1)
-        if bool((available < -3.0e-5).any()):
+        parent_mass_tolerance = (
+            ABPH_MASS_PRECISION_ABS_TOLERANCE
+            + ABPH_MASS_PRECISION_ENERGY_FACTOR * parent_p4[:, 0].abs()
+        )
+        if bool((available < -parent_mass_tolerance).any()):
             raise ValueError("child type allocations imply mass floors above the parent mass")
         available = available.clamp_min(0.0)
         mass_fractions = prediction.mass_allocation_logits[split_indices].softmax(dim=-1)
@@ -659,11 +672,17 @@ def compile_binary_split(
             if bool((closure > tolerance).any()):
                 raise ValueError("child four-vector override does not conserve the parent")
             target_masses = _invariant_mass(target_p4)
-            if bool((target_masses + 3.0e-5 < floors).any()) or bool(
-                (target_masses.sum(dim=-1) > parent_mass + 3.0e-5).any()
+            target_mass_tolerance = (
+                ABPH_MASS_PRECISION_ABS_TOLERANCE
+                + ABPH_MASS_PRECISION_ENERGY_FACTOR * target_p4[:, :, 0].abs()
+            )
+            if bool((target_masses + target_mass_tolerance < floors).any()) or bool(
+                (target_masses.sum(dim=-1) > parent_mass + parent_mass_tolerance).any()
             ):
                 raise ValueError("child four-vector override violates mass feasibility")
-            masses = target_masses
+            # Cached float32 p4 components can lose sub-MeV invariant mass through
+            # cancellation. The discrete ledger remains the authoritative floor.
+            masses = torch.maximum(target_masses, floors)
             rest_spatial = _inverse_boost_spatial(target_p4[:, 0], parent_p4)
             direction = rest_spatial
             collinear_fraction = (
@@ -808,9 +827,17 @@ def binary_accounting_audit(
             problems.append("child type counts do not conserve the parent")
         if bool((charge_residual != 0).any()):
             problems.append("child charges do not conserve the parent")
-        if bool((mass_floor_margin < -3.0e-5).any()):
+        child_mass_tolerance = (
+            ABPH_MASS_PRECISION_ABS_TOLERANCE
+            + ABPH_MASS_PRECISION_ENERGY_FACTOR * child_four_vector[split, :, 0].abs()
+        )
+        parent_mass_tolerance = (
+            ABPH_MASS_PRECISION_ABS_TOLERANCE
+            + ABPH_MASS_PRECISION_ENERGY_FACTOR * parent.four_vector[split, 0].abs()
+        )
+        if bool((mass_floor_margin < -child_mass_tolerance).any()):
             problems.append("child mass lies below its minimum budget")
-        if bool((mass_sum_margin < -3.0e-5).any()):
+        if bool((mass_sum_margin < -parent_mass_tolerance).any()):
             problems.append("child masses exceed the parent mass")
         max_p4 = float(p4_residual.abs().max().detach().cpu())
         mean_p4 = float(p4_residual.abs().mean().detach().cpu())
@@ -873,6 +900,8 @@ __all__ = [
     "ABPH_BINARY_P4_ABS_TOLERANCE",
     "ABPH_BINARY_P4_REL_TOLERANCE",
     "ABPH_NEAR_MASSLESS_THRESHOLD_GEV",
+    "ABPH_MASS_PRECISION_ABS_TOLERANCE",
+    "ABPH_MASS_PRECISION_ENERGY_FACTOR",
     "AccountingState",
     "BinarySplitPrediction",
     "CompiledBinarySplit",

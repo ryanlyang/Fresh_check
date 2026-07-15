@@ -311,7 +311,9 @@ def test_infeasible_overrides_fail_closed_without_repair():
             topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
             child_one_count_override=torch.tensor((4,)),
         )
-    bad_p4 = torch.tensor(([[20.0, 0.0, 0.0, 0.0], [20.0, 0.0, 0.0, 0.0]]))
+    bad_p4 = torch.tensor(
+        [[[20.0, 0.0, 0.0, 0.0], [20.0, 0.0, 0.0, 0.0]]]
+    )
     with pytest.raises(ValueError, match="does not conserve"):
         compile_binary_split(
             parent,
@@ -381,4 +383,3 @@ def test_parent_ledger_validation_rejects_inconsistent_mass_budget():
     assert not report["ok"]
     with pytest.raises(ValueError, match="minimum-mass"):
         AccountingState.from_ledger(row)
-
