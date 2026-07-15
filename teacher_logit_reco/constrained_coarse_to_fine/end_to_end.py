@@ -1023,7 +1023,9 @@ class EndToEndTrainConfig:
     grad_clip_norm: float = 1.0
     max_nonfinite_batches: int = 8
     device: str = "auto"
-    amp: bool = True
+    # See CoarseToFineTrainConfig: constrained accounting objectives are more
+    # stable in full precision. AMP is supported as an explicit opt-in.
+    amp: bool = False
     verify_hash: bool = True
     pin_memory: bool = True
     max_train_jets: int | None = None
@@ -1203,6 +1205,7 @@ def _run_end_to_end_epoch(
                 hlt = ParticleStreamInput(batch["points"], batch["features"], batch["vectors"], batch["mask"])
             if training:
                 optimizer.zero_grad(set_to_none=True)
+            gradients_unscaled = False
             try:
                 with amp_autocast_context(bool(amp_enabled)):
                     output = model.forward_detailed(
@@ -1211,11 +1214,19 @@ def _run_end_to_end_epoch(
                         reference_phi=batch["reference_phi"],
                         stochastic_seed=None if training else int(train_config.seed) + batch_number,
                     )
+                # The normal campaign runs the entire path in FP32. Exit the
+                # forward autocast scope before constructing the objective so
+                # an explicit AMP run still has a clearly isolated loss path.
+                with amp_autocast_context(False):
                     loss_output = compute_end_to_end_loss(output, batch, phase, train_config.loss)
                 if training:
                     assert scaler is not None
-                    scaler.scale(loss_output.loss).backward()
-                    scaler.unscale_(optimizer)
+                    if amp_enabled:
+                        scaler.scale(loss_output.loss).backward()
+                        scaler.unscale_(optimizer)
+                        gradients_unscaled = True
+                    else:
+                        loss_output.loss.backward()
                     norm = torch.nn.utils.clip_grad_norm_(
                         [parameter for parameter in model.parameters() if parameter.requires_grad],
                         float(train_config.grad_clip_norm),
@@ -1223,13 +1234,22 @@ def _run_end_to_end_epoch(
                     )
                     if not bool(torch.isfinite(norm)):
                         raise FloatingPointError("end-to-end gradients are non-finite")
-                    scaler.step(optimizer)
-                    scaler.update()
+                    if amp_enabled:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
                 metric_rows.append((int(batch["labels"].shape[0]), loss_output.metrics))
             except FloatingPointError:
                 skipped += 1
                 if training:
                     optimizer.zero_grad(set_to_none=True)
+                    # GradScaler records that an optimizer was unscaled. A
+                    # rejected batch must advance it, otherwise the following
+                    # batch raises "unscale_() has already been called".
+                    if amp_enabled and gradients_unscaled:
+                        assert scaler is not None
+                        scaler.update()
                 if skipped > int(train_config.max_nonfinite_batches):
                     raise
             batch_number += 1

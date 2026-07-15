@@ -109,7 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--max-nonfinite-batches", type=int, default=8)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable CUDA AMP. Full precision is the stable default for constrained accounting losses.",
+    )
     parser.add_argument("--no-verify-hash", action="store_true")
     parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--max-train-jets", type=int, default=None)
@@ -193,7 +198,7 @@ def main() -> int:
         grad_clip_norm=args.grad_clip_norm,
         max_nonfinite_batches=args.max_nonfinite_batches,
         device=args.device,
-        amp=not args.no_amp,
+        amp=bool(args.amp),
         verify_hash=not args.no_verify_hash,
         pin_memory=not args.no_pin_memory,
         max_train_jets=args.max_train_jets,

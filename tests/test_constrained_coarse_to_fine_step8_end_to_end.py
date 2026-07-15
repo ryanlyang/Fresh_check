@@ -135,6 +135,7 @@ class ConstrainedCoarseToFineStep8Tests(unittest.TestCase):
         config = mocked.call_args.args[0]
         self.assertEqual(config.variant, A0_HLT_BASELINE)
         self.assertEqual(config.reconstructor_sources, ())
+        self.assertFalse(config.amp)
 
     def test_a_tier_controls_are_source_free_and_architecturally_explicit(self):
         overrides = {

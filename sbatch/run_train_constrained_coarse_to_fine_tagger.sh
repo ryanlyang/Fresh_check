@@ -50,6 +50,7 @@ esac
 : "${CONSTRAINED_C2F_TAGGER_SAVE_LAST_CHECKPOINT:=0}"
 : "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_TAGGER_MAX_VAL_JETS:=}"
+: "${CONSTRAINED_C2F_TAGGER_AMP:=0}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON:=auto}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE:=1}"
 export CONSTRAINED_C2F_TORCH_NATIVE_TRITON CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE
@@ -173,6 +174,7 @@ fi
 if [[ "${variant}" == "A1" ]]; then
   cmd+=(--d-model 320 --num-heads 10 --hlt-encoder-layers 8 --fusion-layers 4)
 fi
+if fresh_bool_enabled "${CONSTRAINED_C2F_TAGGER_AMP}"; then cmd+=(--amp); else cmd+=(--no-amp); fi
 if ! fresh_bool_enabled "${CONSTRAINED_C2F_TAGGER_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${CONSTRAINED_C2F_TAGGER_MAX_TRAIN_JETS}"); fi
 if [[ -n "${CONSTRAINED_C2F_TAGGER_MAX_VAL_JETS}" ]]; then cmd+=(--max-val-jets "${CONSTRAINED_C2F_TAGGER_MAX_VAL_JETS}"); fi

@@ -6,6 +6,8 @@ import unittest
 
 import torch
 
+from scripts import train_constrained_coarse_to_fine as training_cli
+
 from teacher_logit_reco.constrained_coarse_to_fine import (
     ACCOUNTING_FIELD_NAMES,
     B1_GLOBAL_8,
@@ -212,6 +214,27 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
         self.assertEqual(direct_slot_loss.dust_weight, 0.0)
         with self.assertRaisesRegex(ValueError, "direct particle decoding"):
             CoarseToFineTrainConfig(**base, variant="C5", direct_particle_decoding=True, amp=False)
+
+    def test_full_precision_is_the_default_and_amp_is_explicit(self):
+        base = dict(
+            output_dir="out",
+            manifest_path="manifest.json.gz",
+            hlt_cache_dir="hlt",
+            offline_cache_dir="offline",
+            target_cache_dir="targets",
+        )
+        self.assertFalse(CoarseToFineTrainConfig(**base).amp)
+        parser = training_cli.build_parser()
+        required = [
+            "--output-dir", "out",
+            "--manifest", "manifest.json.gz",
+            "--hlt-cache-dir", "hlt",
+            "--offline-cache-dir", "offline",
+            "--target-cache-dir", "targets",
+        ]
+        self.assertFalse(parser.parse_args(required).amp)
+        self.assertTrue(parser.parse_args([*required, "--amp"]).amp)
+        self.assertFalse(parser.parse_args([*required, "--no-amp"]).amp)
 
     def test_diagnostic_csv_flattens_train_and_model_val_metrics(self):
         curves = [

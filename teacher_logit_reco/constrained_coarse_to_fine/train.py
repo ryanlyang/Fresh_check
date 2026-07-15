@@ -99,7 +99,10 @@ class CoarseToFineTrainConfig:
     early_stop_patience: int = 6
     max_nonfinite_batches: int = 8
     device: str = "auto"
-    amp: bool = True
+    # The hierarchy uncertainty objective can legitimately amplify gradients by
+    # exp(8). Keeping this path in full precision is the reliable default on
+    # the GH200 workers; AMP remains an explicit opt-in for controlled tests.
+    amp: bool = False
     verify_hash: bool = True
     pin_memory: bool = True
     max_train_jets: int | None = None
@@ -782,6 +785,10 @@ def _run_epoch(
                     output = model(batch["points"], batch["features"], batch["vectors"], batch["mask"])
                     if not _all_finite(output):
                         raise FloatingPointError("model output is non-finite")
+                # The normal campaign runs the entire path in FP32. Exit the
+                # forward autocast scope before constructing the objective so
+                # an explicit AMP run still has a clearly isolated loss path.
+                with amp_autocast_context(False):
                     loss, batch_metrics = _batch_losses(
                         output,
                         batch,
@@ -795,16 +802,22 @@ def _run_epoch(
                     raise FloatingPointError("total loss is non-finite")
                 if optimizer is not None:
                     assert scaler is not None
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    gradients_unscaled = True
+                    if amp_enabled:
+                        scaler.scale(loss).backward()
+                        scaler.unscale_(optimizer)
+                        gradients_unscaled = True
+                    else:
+                        loss.backward()
                     grad_norm = _grad_norm_if_finite(model)
                     if grad_norm is None:
                         raise FloatingPointError("gradients are absent or non-finite")
                     if float(config.grad_clip_norm) > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.grad_clip_norm))
-                    scaler.step(optimizer)
-                    scaler.update()
+                    if amp_enabled:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
                     batch_metrics["train.grad_norm_before_clip"] = grad_norm
             except FloatingPointError:
                 nonfinite_batches += 1

@@ -41,7 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--early-stop-patience", type=int, default=6)
     parser.add_argument("--max-nonfinite-batches", type=int, default=8)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable CUDA AMP. Full precision is the stable default for constrained accounting losses.",
+    )
     parser.add_argument("--no-verify-hash", action="store_true")
     parser.add_argument("--no-pin-memory", action="store_true")
     parser.add_argument("--max-train-jets", type=int, default=None)
@@ -72,7 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = vars(build_parser().parse_args())
-    args["amp"] = not args.pop("no_amp")
     args["verify_hash"] = not args.pop("no_verify_hash")
     args["pin_memory"] = not args.pop("no_pin_memory")
     args["save_last_checkpoint"] = not args.pop("no_save_last_checkpoint")

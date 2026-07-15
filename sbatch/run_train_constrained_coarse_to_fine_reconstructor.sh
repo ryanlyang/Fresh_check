@@ -51,6 +51,7 @@ esac
 : "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS:=}"
 : "${CONSTRAINED_C2F_RECO_MAX_STACK_VAL_JETS:=}"
+: "${CONSTRAINED_C2F_RECO_AMP:=0}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON:=auto}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE:=1}"
 export CONSTRAINED_C2F_TORCH_NATIVE_TRITON CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE
@@ -94,6 +95,7 @@ cmd=(
 )
 if fresh_bool_enabled "${unconstrained_slot_accounting}"; then cmd+=(--unconstrained-slot-accounting); fi
 if fresh_bool_enabled "${direct_particle_decoding}"; then cmd+=(--direct-particle-decoding); fi
+if fresh_bool_enabled "${CONSTRAINED_C2F_RECO_AMP}"; then cmd+=(--amp); else cmd+=(--no-amp); fi
 if ! fresh_bool_enabled "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS}"); fi
 if [[ -n "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS}" ]]; then cmd+=(--max-val-jets "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS}"); fi
