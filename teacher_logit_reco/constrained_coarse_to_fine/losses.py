@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import torch
 from torch.nn import functional as F
 
-from .constraints import ACCOUNTING_INDEX, PID_PT_INDICES
+from .constraints import ACCOUNTING_INDEX, PID_PT_INDICES, nonnegative_sqrt_with_zero_gradient
 from .layout import ACCOUNTING_FIELD_NAMES, DERIVED_DIAGNOSTIC_FIELD_NAMES, MOMENT_FIELD_NAMES
 from .model import CoarseToFineReconstructorOutput
 
@@ -104,7 +104,10 @@ def accounting_diagnostics_torch(
             width_eta,
             width_phi,
             accounting[..., ACCOUNTING_INDEX["sum_pT_r"]] / safe_pt,
-            torch.sqrt((accounting[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt).clamp_min(0.0)),
+            nonnegative_sqrt_with_zero_gradient(
+                (accounting[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt).clamp_min(0.0),
+                epsilon=epsilon,
+            ),
             total_pt / safe_count,
             accounting[..., ACCOUNTING_INDEX["total_energy"]] / safe_pt,
         ),

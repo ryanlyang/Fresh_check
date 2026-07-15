@@ -26,6 +26,7 @@ from .constraints import (
     PositiveAccountingParameterization,
     SoftmaxAccountingAllocator,
     assemble_accounting,
+    nonnegative_sqrt_with_zero_gradient,
     primitive_accounting,
 )
 from .layout import (
@@ -326,7 +327,9 @@ def _accounting_diagnostics(accounting: torch.Tensor, *, epsilon: float = 1.0e-8
             width_eta,
             width_phi,
             accounting[..., ACCOUNTING_INDEX["sum_pT_r"]] / safe_pt,
-            torch.sqrt((accounting[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt).clamp_min(0.0)),
+            nonnegative_sqrt_with_zero_gradient(
+                (accounting[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt).clamp_min(0.0)
+            ),
             total_pt / safe_count,
             accounting[..., ACCOUNTING_INDEX["total_energy"]] / safe_pt,
         ),

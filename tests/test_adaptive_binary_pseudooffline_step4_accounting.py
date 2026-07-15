@@ -10,12 +10,14 @@ import torch
 from jetclass_fresh.jetclass_data import JetIdentity, RAW_TOKEN_DIM
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_AUXILIARY_ADDITIVE_NAMES,
+    ABPH_MIN_REQUIRED_BINARY_LOSS_WEIGHT,
     ABPH_MAX_PARTICLES,
     ABPH_PID_CATEGORIES,
     ROOT_FEATURE_INDEX,
     ROOT_FEATURE_NAMES,
     AccountingState,
     AdaptiveBinaryHierarchyLayout,
+    BinaryAccountingLossWeights,
     BinarySplitPrediction,
     accounting_state_audit,
     allocate_child_type_counts,
@@ -23,6 +25,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     binary_accounting_manifest,
     build_adaptive_binary_targets,
     compile_binary_split,
+    compute_binary_accounting_losses,
     feasible_charge_mask,
     minimum_mass_budget,
     neutral_binary_prediction,
@@ -279,6 +282,8 @@ def test_actual_target_hierarchy_and_renderer_replay_with_zero_failures():
     assert report["n_terminal_carries"] > 0
     assert report["n_renderer_groups"] > 0
     assert report["n_rendered_particles"] == int(targets.particle_mask.sum())
+    assert report["max_hard_target_residual"] <= 5.0e-3
+    assert report["max_renderer_four_vector_residual"] <= 5.0e-3
     assert report["coverage"]["all_classes_present"] is True
     assert report["coverage"]["singleton_examples"] == 1
     assert all(
@@ -350,6 +355,47 @@ def test_all_relaxed_paths_have_finite_gradients():
         gradient = getattr(prediction, field.name).grad
         assert gradient is not None, field.name
         assert bool(torch.isfinite(gradient).all()), field.name
+
+
+def test_required_direct_and_auxiliary_binary_losses_are_finite_and_weighted():
+    parent = AccountingState.from_ledger(
+        _ledger((90.0, 4.0, -3.0, 2.0), (2, 5, 2, 1, 1, 1), 0)
+    )
+    prediction = _random_prediction(1, requires_grad=True)
+    compiled = compile_binary_split(
+        parent,
+        prediction,
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+    )
+    output = compute_binary_accounting_losses(
+        prediction,
+        compiled,
+        parent,
+        compiled.child_ledger.detach(),
+        compiled.child_mask,
+        torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+    )
+    assert torch.isfinite(output.total)
+    assert set(output.components) == {
+        "topology_nll",
+        "count_nll",
+        "type_count_huber",
+        "charge_nll",
+        "four_vector_huber",
+        "scalar_pt_huber",
+        "type_energy_huber",
+        "type_pt_huber",
+        "shape_huber",
+        "auxiliary_consistency",
+    }
+    assert all(
+        float(value) >= ABPH_MIN_REQUIRED_BINARY_LOSS_WEIGHT
+        for value in BinaryAccountingLossWeights().to_dict().values()
+        if isinstance(value, float)
+    )
+    output.total.backward()
+    assert prediction.topology_logits.grad is not None
+    assert bool(torch.isfinite(prediction.topology_logits.grad).all())
 
 
 def test_mixed_precision_inputs_compile_in_float32_within_hard_tolerance():

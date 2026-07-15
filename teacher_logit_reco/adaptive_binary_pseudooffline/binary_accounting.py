@@ -369,7 +369,8 @@ def _inverse_boost_spatial(child: Any, parent: Any) -> Any:
     beta_dot_p = (beta * child[:, 1:]).sum(dim=-1)
     coefficient = torch.where(
         beta_squared > 1.0e-14,
-        (gamma - 1.0) * beta_dot_p / beta_squared - gamma * child[:, 0],
+        (gamma - 1.0) * beta_dot_p / beta_squared.clamp_min(1.0e-14)
+        - gamma * child[:, 0],
         torch.zeros_like(beta_squared),
     )
     return child[:, 1:] + coefficient[:, None] * beta
@@ -430,7 +431,8 @@ def two_body_phase_space_split(
     energy_one_lab = gamma * (energy_one_rest + beta_dot_p)
     coefficient = torch.where(
         beta_squared > 1.0e-14,
-        (gamma - 1.0) * beta_dot_p / beta_squared + gamma * energy_one_rest,
+        (gamma - 1.0) * beta_dot_p / beta_squared.clamp_min(1.0e-14)
+        + gamma * energy_one_rest,
         torch.zeros_like(beta_squared),
     )
     spatial_one_lab = momentum_one_rest + coefficient[:, None] * beta

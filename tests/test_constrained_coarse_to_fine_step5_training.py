@@ -187,6 +187,34 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
         first.grad.flatten()[0] = float("nan")
         self.assertIsNone(_grad_norm_if_finite(model))
 
+    def test_b4_zero_moment_diagnostics_have_finite_backward_gradients(self):
+        """B4's exact zero moments must not expose sqrt(0)'s infinite derivative."""
+
+        _, inputs = _toy_model_and_inputs()
+        config = CoarseToFineReconstructorConfig(
+            variant=B4_NO_MOMENTS,
+            d_model=32,
+            num_heads=4,
+            encoder_layers=1,
+            pool_layers=1,
+            decoder_layers_per_level=1,
+            pair_hidden_dim=16,
+            ffn_multiplier=2.0,
+            dropout=0.0,
+            attention_dropout=0.0,
+        )
+        model = build_coarse_to_fine_reconstructor(config)
+        output = model(*inputs)
+        targets = {"global_accounting": output.global_accounting.detach() * 1.2 + 0.01}
+        for level in output.levels:
+            targets[f"level{level.level}_accounting"] = level.accounting.detach() * 1.2 + 0.01
+        loss = compute_hierarchy_reconstruction_loss(output, targets).loss
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        norm = _grad_norm_if_finite(model)
+        self.assertIsNotNone(norm)
+        self.assertTrue(torch.isfinite(norm))
+
     def test_config_forbids_final_test_supervision(self):
         base = dict(
             output_dir="out",

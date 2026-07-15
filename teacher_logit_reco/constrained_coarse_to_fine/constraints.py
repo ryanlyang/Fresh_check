@@ -53,6 +53,24 @@ def _index_tensor(indices: Sequence[int], reference: torch.Tensor) -> torch.Tens
     return torch.as_tensor(tuple(int(index) for index in indices), dtype=torch.long, device=reference.device)
 
 
+def nonnegative_sqrt_with_zero_gradient(value: torch.Tensor, *, epsilon: float = DEFAULT_POSITIVE_FLOOR) -> torch.Tensor:
+    """Compute ``sqrt(value)`` while giving exact zeros a finite backward path.
+
+    Accounting ablations can deliberately force a nonnegative moment to zero.
+    ``sqrt(0)`` has an infinite derivative, which can turn a masked diagnostic
+    gradient into NaN even when its forward value is perfectly valid.
+    """
+
+    if float(epsilon) <= 0.0:
+        raise ValueError("epsilon must be positive")
+    floor = float(epsilon)
+    return torch.where(
+        value > floor,
+        torch.sqrt(value.clamp_min(floor)),
+        torch.zeros_like(value),
+    )
+
+
 def primitive_accounting(accounting: torch.Tensor) -> torch.Tensor:
     """Select the independently predicted nonnegative accounting channels."""
 
@@ -343,8 +361,9 @@ class PositiveNegativeMomentReconstructor(nn.Module):
             min=0.0,
         )
         mean_r = canonical[..., ACCOUNTING_INDEX["sum_pT_r"]] / safe_pt
-        r_rms = torch.sqrt(
-            torch.clamp(canonical[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt, min=0.0)
+        r_rms = nonnegative_sqrt_with_zero_gradient(
+            torch.clamp(canonical[..., ACCOUNTING_INDEX["sum_pT_r2"]] / safe_pt, min=0.0),
+            epsilon=self.epsilon,
         )
         values = torch.stack(
             (signed_deta, signed_dphi, axis_deta, axis_dphi, width_eta, width_phi, mean_r, r_rms),

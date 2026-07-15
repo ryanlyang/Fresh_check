@@ -365,6 +365,7 @@ def schema_from_dict(payload: Mapping[str, Any]) -> VersionedTensorSchema:
 
 
 __all__ = [
+    "ABPH_EFFECTIVE_MASS_GEV",
     "ABPH_MAX_PARTICLES",
     "ABPH_PID_CATEGORIES",
     "ABPH_SCHEMA_CONTRACT",
