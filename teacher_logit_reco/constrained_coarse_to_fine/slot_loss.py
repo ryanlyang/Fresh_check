@@ -56,7 +56,9 @@ class ParticleSlotLossConfig:
     accounting_consistency_weight: float = 0.50
     dust_weight: float = 0.10
     missing_target_weight: float = 1.0
-    uncertainty_weight: float = 1.0
+    # The matching losses remain primary.  This bounded calibration term is
+    # intentionally auxiliary so it cannot destabilize slot reconstruction.
+    uncertainty_weight: float = 0.05
     reliability_weight: float = 0.05
     sinkhorn_temperature: float = 0.12
     sinkhorn_iterations: int = 30

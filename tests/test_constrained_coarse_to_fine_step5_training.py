@@ -21,6 +21,8 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     CoarseToFineTrainConfig,
     HIERARCHY_RECONSTRUCTION_LOSS_CONTRACT,
     HierarchyReconstructionLossConfig,
+    ParticleSlotDecoderConfig,
+    ParticleSlotLossConfig,
     build_coarse_to_fine_reconstructor,
     compute_hierarchy_reconstruction_loss,
 )
@@ -235,6 +237,17 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
         self.assertFalse(parser.parse_args(required).amp)
         self.assertTrue(parser.parse_args([*required, "--amp"]).amp)
         self.assertFalse(parser.parse_args([*required, "--no-amp"]).amp)
+
+    def test_uncertainty_precision_is_bounded_for_stable_real_batch_training(self):
+        config = HierarchyReconstructionLossConfig()
+        self.assertEqual(config.uncertainty_log_sigma_floor, -2.0)
+        self.assertEqual(config.uncertainty_weight, 0.01)
+        self.assertLessEqual(
+            float(torch.exp(torch.tensor(-2.0 * config.uncertainty_log_sigma_floor))),
+            55.0,
+        )
+        self.assertEqual(ParticleSlotDecoderConfig().uncertainty_min, -2.0)
+        self.assertEqual(ParticleSlotLossConfig().uncertainty_weight, 0.05)
 
     def test_diagnostic_csv_flattens_train_and_model_val_metrics(self):
         curves = [

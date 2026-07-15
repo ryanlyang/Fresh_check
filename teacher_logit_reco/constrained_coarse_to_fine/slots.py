@@ -189,7 +189,9 @@ class ParticleSlotDecoderConfig:
     ffn_multiplier: float = 4.0
     dropout: float = 0.05
     attention_dropout: float = 0.05
-    uncertainty_min: float = -8.0
+    # exp(-2 * log_sigma) is used by the slot NLL.  Bound overconfidence so a
+    # single poorly matched cell cannot dominate a full C-tier update.
+    uncertainty_min: float = -2.0
     uncertainty_max: float = 8.0
     constrain_accounting: bool = True
     direct_particle_decoding: bool = False

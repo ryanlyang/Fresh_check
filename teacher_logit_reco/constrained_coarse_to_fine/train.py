@@ -99,9 +99,9 @@ class CoarseToFineTrainConfig:
     early_stop_patience: int = 6
     max_nonfinite_batches: int = 8
     device: str = "auto"
-    # The hierarchy uncertainty objective can legitimately amplify gradients by
-    # exp(8). Keeping this path in full precision is the reliable default on
-    # the GH200 workers; AMP remains an explicit opt-in for controlled tests.
+    # The bounded hierarchy uncertainty objective is still best run in full
+    # precision on the GH200 workers; AMP remains an explicit opt-in for
+    # controlled tests.
     amp: bool = False
     verify_hash: bool = True
     pin_memory: bool = True
@@ -127,7 +127,7 @@ class CoarseToFineTrainConfig:
     hierarchy_relative_weight: float = 0.25
     hierarchy_auxiliary_weight: float = 0.25
     hierarchy_allocation_kl_weight: float = 0.10
-    hierarchy_uncertainty_weight: float = 0.05
+    hierarchy_uncertainty_weight: float = 0.01
 
     def __post_init__(self) -> None:
         if str(self.train_split) != "model_train" or str(self.val_split) != "model_val":

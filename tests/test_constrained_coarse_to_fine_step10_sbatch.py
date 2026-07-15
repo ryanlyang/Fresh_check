@@ -408,6 +408,13 @@ def test_step10_graph_queues_complete_reconstructor_and_depth_families() -> None
     assert "--d-model 320 --num-heads 10 --hlt-encoder-layers 8" in tagger
 
 
+def test_step10_reconstructor_runner_uses_multiview_safe_batch_defaults() -> None:
+    runner = _read("run_train_constrained_coarse_to_fine_reconstructor.sh")
+    assert "C6) CONSTRAINED_C2F_RECO_BATCH_SIZE=8" in runner
+    assert "C6) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=16" in runner
+    assert "CONSTRAINED_C2F_RECO_BATCH_SIZE=16" in runner
+
+
 def test_step10_submitter_is_dependency_aware_and_records_job_ids() -> None:
     text = _read("submit_constrained_coarse_to_fine_experiment.sh")
     assert '--dependency="afterok:${dependency}"' in text

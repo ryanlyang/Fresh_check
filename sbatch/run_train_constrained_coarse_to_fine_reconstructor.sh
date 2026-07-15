@@ -44,8 +44,8 @@ esac
 : "${CONSTRAINED_C2F_RECON_ROOT:=${CONSTRAINED_C2F_ROOT}/reconstructors}"
 : "${CONSTRAINED_C2F_RECO_SEED:=22031}"
 : "${CONSTRAINED_C2F_RECO_EPOCHS:=30}"
-: "${CONSTRAINED_C2F_RECO_BATCH_SIZE:=64}"
-: "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE:=128}"
+: "${CONSTRAINED_C2F_RECO_BATCH_SIZE:=}"
+: "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE:=}"
 : "${CONSTRAINED_C2F_RECO_NUM_WORKERS:=4}"
 : "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT:=0}"
 : "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS:=}"
@@ -55,6 +55,29 @@ esac
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON:=auto}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE:=1}"
 export CONSTRAINED_C2F_TORCH_NATIVE_TRITON CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE
+
+# The slot decoder retains one decoded particle view per requested view.  The
+# C6 four-view variant therefore has a substantially larger activation peak
+# than B-tier or single-view C-tier models.  Preserve explicit operator
+# settings, but select resource-aware defaults for unattended campaign runs.
+if [[ -z "${CONSTRAINED_C2F_RECO_BATCH_SIZE}" ]]; then
+  case "${RUN_ID}" in
+    C6) CONSTRAINED_C2F_RECO_BATCH_SIZE=8 ;;
+    C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+      CONSTRAINED_C2F_RECO_BATCH_SIZE=16
+      ;;
+    *) CONSTRAINED_C2F_RECO_BATCH_SIZE=64 ;;
+  esac
+fi
+if [[ -z "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE}" ]]; then
+  case "${RUN_ID}" in
+    C6) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=16 ;;
+    C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+      CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=32
+      ;;
+    *) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=128 ;;
+  esac
+fi
 
 OUTPUT_DIR="${CONSTRAINED_C2F_RECON_ROOT}/${RUN_ID}"
 fresh_setup "$@"

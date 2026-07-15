@@ -23,10 +23,16 @@ class HierarchyReconstructionLossConfig:
     relative_weight: float = 0.25
     auxiliary_weight: float = 0.25
     allocation_kl_weight: float = 0.10
-    uncertainty_weight: float = 0.05
+    # This is auxiliary calibration, not the primary accounting objective.  A
+    # modest weight keeps an initially overconfident uncertainty head from
+    # overwhelming the deterministic reconstruction gradients.
+    uncertainty_weight: float = 0.01
     high_pt_cell_weight: float = 0.75
     huber_beta: float = 0.20
-    uncertainty_log_sigma_floor: float = -4.0
+    # exp(-2 * sigma) is the learned precision.  -2 caps that multiplier at
+    # exp(4) ~= 55, avoiding the exp(8) ~= 3,000 amplification that made the
+    # B4 no-moment ablation numerically unstable on real batches.
+    uncertainty_log_sigma_floor: float = -2.0
     epsilon: float = 1.0e-8
 
     def __post_init__(self) -> None:

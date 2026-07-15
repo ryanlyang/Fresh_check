@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hierarchy-relative-weight", type=float, default=0.25)
     parser.add_argument("--hierarchy-auxiliary-weight", type=float, default=0.25)
     parser.add_argument("--hierarchy-allocation-kl-weight", type=float, default=0.10)
-    parser.add_argument("--hierarchy-uncertainty-weight", type=float, default=0.05)
+    parser.add_argument("--hierarchy-uncertainty-weight", type=float, default=0.01)
     return parser
 
 

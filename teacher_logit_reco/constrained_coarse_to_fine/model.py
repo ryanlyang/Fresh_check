@@ -137,7 +137,9 @@ class CoarseToFineReconstructorConfig:
     dropout: float = 0.05
     attention_dropout: float = 0.05
     allocation_temperature: float = 1.0
-    uncertainty_min: float = -8.0
+    # Keep learned accounting precision in the range used by the hierarchy
+    # objective.  Values below -2 would only create unstable overconfidence.
+    uncertainty_min: float = -2.0
     uncertainty_max: float = 8.0
     radial_boundary: float = 0.16
     coordinate_extent: float = 0.8
