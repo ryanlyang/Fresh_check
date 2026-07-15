@@ -559,6 +559,17 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "target_field_dim",
     "field_names",
 )
+HLT_ONLY_PROVENANCE_FIELDS: tuple[str, ...] = (
+    "source_manifest_hash",
+    "hlt_content_hash",
+    "jet_identity_hash",
+    "hlt_profile",
+    "hlt_profile_version",
+    "hlt_degradation_strength",
+)
+TARGET_PROVENANCE_FIELDS: tuple[str, ...] = tuple(
+    field for field in PROVENANCE_FIELDS if field not in HLT_ONLY_PROVENANCE_FIELDS
+)
 
 FINAL_TEST_REQUIRED_PROVENANCE_FIELDS: tuple[str, ...] = (
     "source_manifest_hash",
@@ -574,6 +585,29 @@ def _required_provenance_fields_for_split(split: str) -> tuple[str, ...]:
     if str(split) == "final_test":
         return FINAL_TEST_REQUIRED_PROVENANCE_FIELDS
     return PROVENANCE_FIELDS
+
+
+def _report_uses_target_fields(report: Mapping[str, Any]) -> bool:
+    """Return whether a run report should be bound to target/offline field caches."""
+
+    if str(report.get("field_source") or "") == "hlt_only":
+        return False
+    selected_names = report.get("selected_field_names")
+    selected_indices = report.get("selected_field_indices")
+    if isinstance(selected_names, Sequence) and not isinstance(selected_names, (str, bytes)):
+        if len(selected_names) == 0:
+            return False
+    if isinstance(selected_indices, Sequence) and not isinstance(selected_indices, (str, bytes)):
+        if len(selected_indices) == 0:
+            return False
+    return True
+
+
+def _provenance_fields_for_report(report: Mapping[str, Any], split: str) -> tuple[str, ...]:
+    base_fields = _required_provenance_fields_for_split(split)
+    if _report_uses_target_fields(report):
+        return base_fields
+    return tuple(field for field in base_fields if field in HLT_ONLY_PROVENANCE_FIELDS)
 
 
 def _dataset_metadata_for_split(report: Mapping[str, Any], split: str) -> Mapping[str, Any] | None:
@@ -674,22 +708,22 @@ def _provenance_audit(
     }
     target_cache = _target_cache_provenance(target_cache_dir)
     for split in REPORT_SPLITS:
-        required_fields = set(_required_provenance_fields_for_split(split))
         split_values: dict[str, dict[str, Any]] = {}
+        required_fields_by_run: dict[str, set[str]] = {}
         if split in target_cache:
             split_values["target_cache"] = target_cache[split]
         for run_name, report in all_reports.items():
+            report_fields = set(_provenance_fields_for_report(report, split))
+            if run_name in required_report_names:
+                required_fields_by_run[run_name] = report_fields
             metadata = _dataset_metadata_for_split(report, split)
             if not isinstance(metadata, Mapping):
-                if (
-                    run_name in required_report_names
-                    and (split != "final_test" or (require_final_test and run_name.startswith("tagger:")))
-                ):
+                if run_name in required_report_names and split != "final_test":
                     problems.append(f"{run_name} missing dataset_metadata for {split}")
                 continue
             split_values[run_name] = {
                 field: _dataset_provenance_value(metadata, field)
-                for field in PROVENANCE_FIELDS
+                for field in report_fields
                 if _dataset_provenance_value(metadata, field) is not None
             }
         for field in PROVENANCE_FIELDS:
@@ -701,7 +735,7 @@ def _provenance_audit(
                 raw_values[run_name] = value
                 stable = _stable_value(value)
                 if stable is None:
-                    if run_name in required_report_names and field in required_fields:
+                    if field in required_fields_by_run.get(run_name, set()):
                         missing_required.append(run_name)
                 else:
                     values[run_name] = stable
