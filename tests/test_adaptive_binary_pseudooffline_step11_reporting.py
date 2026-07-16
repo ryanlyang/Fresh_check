@@ -185,6 +185,34 @@ def test_stack_fusion_freezes_member_identity_and_never_fits_final_test() -> Non
         fit_frozen_stack_fusion("G2_kt_ca_logit_fusion", members, final, val, updates=2)
 
 
+def test_prediction_block_accepts_model_val_without_permitting_fusion_fit() -> None:
+    labels = np.arange(12, dtype=np.int64) % 3
+    members = ("A0_hlt_part", "E5_kt32_mh4_dualcross")
+    blocks = tuple(
+        _block(
+            member,
+            "model_val",
+            np.zeros((12, 3), dtype=np.float64),
+            labels,
+        )
+        for member in members
+    )
+    for block in blocks:
+        block.validate()
+        assert block.prediction_hash
+    with pytest.raises(ValueError, match="expected stack_train"):
+        fit_frozen_stack_fusion(
+            "G2_kt_ca_logit_fusion",
+            members,
+            blocks,
+            tuple(
+                _block(member, "stack_val", block.logits, labels)
+                for member, block in zip(members, blocks)
+            ),
+            updates=2,
+        )
+
+
 def test_pseudo_diagnostic_ablation_preserves_internal_root_contract() -> None:
     batch, views, particles, root_dim = 3, 2, 128, 7
     root = torch.randn(batch, root_dim)

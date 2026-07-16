@@ -21,6 +21,10 @@ ABPH_FUSION_APPLICATION_SPLITS: tuple[str, ...] = (
     "stack_val",
     "final_test",
 )
+ABPH_LOGIT_PREDICTION_SPLITS: tuple[str, ...] = (
+    "model_val",
+    *ABPH_FUSION_APPLICATION_SPLITS,
+)
 
 
 def _array_hash(value: np.ndarray) -> str:
@@ -80,7 +84,7 @@ class LogitPredictionBlock:
         logits = np.asarray(self.logits)
         labels = np.asarray(self.labels)
         jet_ids = np.asarray(self.jet_ids)
-        if not self.member or self.split not in ABPH_FUSION_APPLICATION_SPLITS:
+        if not self.member or self.split not in ABPH_LOGIT_PREDICTION_SPLITS:
             raise ValueError("fusion block has an invalid member or split")
         if logits.ndim != 2 or logits.shape[1] < 2:
             raise ValueError("fusion logits must have shape [jets,classes]")
@@ -384,6 +388,7 @@ __all__ = [
     "ABPH_FUSION_APPLICATION_SPLITS",
     "ABPH_FUSION_FIT_SPLIT",
     "ABPH_FUSION_SELECTION_SPLIT",
+    "ABPH_LOGIT_PREDICTION_SPLITS",
     "FrozenFusionArtifact",
     "LogitPredictionBlock",
     "apply_frozen_fusion",
