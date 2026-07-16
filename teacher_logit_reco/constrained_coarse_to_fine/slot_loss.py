@@ -309,6 +309,99 @@ def _pairwise_components(
     }
 
 
+def _pairwise_components_batched(
+    *,
+    pred_pt: torch.Tensor,
+    pred_energy: torch.Tensor,
+    pred_coordinates: torch.Tensor,
+    pred_pid: torch.Tensor,
+    pred_charge_logits: torch.Tensor,
+    target_pt: torch.Tensor,
+    target_energy: torch.Tensor,
+    target_coordinates: torch.Tensor,
+    target_pid: torch.Tensor,
+    target_charge: torch.Tensor,
+    config: ParticleSlotLossConfig,
+) -> dict[str, torch.Tensor]:
+    """Return pair costs for a same-target-count batch of cell/view pairs.
+
+    All tensors use a leading ``[N, ...]`` axis, where each row is one
+    ``(jet, view, terminal-cell)`` pairing.  Keeping this path batched avoids
+    building thousands of tiny Sinkhorn autograd graphs in every C-tier batch.
+    """
+
+    if pred_pt.ndim != 2 or target_pt.ndim != 2:
+        raise ValueError("batched slot pT tensors must have shape [N, slots/targets]")
+    pairs, slots = pred_pt.shape
+    if tuple(pred_energy.shape) != (pairs, slots) or tuple(pred_coordinates.shape) != (pairs, slots, 2):
+        raise ValueError("batched predicted slot tensors do not align")
+    targets_count = int(target_pt.shape[1])
+    if tuple(target_energy.shape) != (pairs, targets_count) or tuple(target_coordinates.shape) != (
+        pairs,
+        targets_count,
+        2,
+    ):
+        raise ValueError("batched target slot tensors do not align")
+    if tuple(pred_pid.shape[:2]) != (pairs, slots) or tuple(pred_charge_logits.shape[:2]) != (pairs, slots):
+        raise ValueError("batched categorical slot tensors do not align")
+    if tuple(target_pid.shape) != (pairs, targets_count) or tuple(target_charge.shape) != (
+        pairs,
+        targets_count,
+    ):
+        raise ValueError("batched categorical targets do not align")
+
+    pred_pid = pred_pid.clamp_min(config.epsilon)
+    pred_charge = F.log_softmax(pred_charge_logits, dim=-1)
+    log_pt = (torch.log1p(pred_pt)[:, :, None] - torch.log1p(target_pt)[:, None, :]).abs()
+    deta = (pred_coordinates[:, :, None, 0] - target_coordinates[:, None, :, 0]).abs()
+    dphi = _wrap_phi(pred_coordinates[:, :, None, 1] - target_coordinates[:, None, :, 1]).abs()
+    coordinate = torch.sqrt(deta.square() + dphi.square() + 1.0e-12)
+    log_energy = (torch.log1p(pred_energy)[:, :, None] - torch.log1p(target_energy)[:, None, :]).abs()
+    pid = -torch.log(
+        torch.gather(
+            pred_pid[:, :, None, :].expand(-1, -1, targets_count, -1),
+            -1,
+            target_pid[:, None, :, None].expand(-1, slots, -1, -1),
+        ).squeeze(-1)
+    )
+    charge = -torch.gather(
+        pred_charge[:, :, None, :].expand(-1, -1, targets_count, -1),
+        -1,
+        target_charge[:, None, :, None].expand(-1, slots, -1, -1),
+    ).squeeze(-1)
+    total = (
+        config.log_pt_weight * log_pt
+        + config.coordinate_weight * coordinate
+        + config.pid_weight * pid
+        + config.charge_weight * charge
+        + config.log_energy_weight * log_energy
+    )
+    return {
+        "total": total,
+        "log_pt": log_pt,
+        "deta": deta,
+        "dphi": dphi,
+        "coordinate": coordinate,
+        "pid": pid,
+        "charge": charge,
+        "log_energy": log_energy,
+    }
+
+
+def _packed_target_indices(mask: torch.Tensor) -> torch.Tensor:
+    """Return valid target positions first, preserving their original order."""
+
+    if mask.ndim != 3:
+        raise ValueError("cell target mask must have shape [B, cells, targets]")
+    width = int(mask.shape[-1])
+    positions = torch.arange(width, device=mask.device, dtype=torch.long)
+    positions = positions.view(1, 1, width).expand_as(mask)
+    # Valid entries receive keys [0, width); padded entries [width, 2 * width),
+    # so sorting provides packed valid positions without assuming the cache is
+    # already compacted.
+    return torch.argsort((~mask).to(torch.long) * width + positions, dim=-1)
+
+
 def _weighted_mean(matrix: torch.Tensor, weights: torch.Tensor, epsilon: float) -> torch.Tensor:
     return (matrix * weights).sum() / weights.sum().clamp_min(epsilon)
 
@@ -317,6 +410,8 @@ def compute_particle_slot_loss(
     output: ParticleSlotDecoderOutput,
     targets: CellSlotTargets,
     config: ParticleSlotLossConfig | Mapping[str, Any] | None = None,
+    *,
+    return_assignments: bool = True,
 ) -> ParticleSlotLossOutput:
     """Compute differentiable cell-local matching and consistency losses."""
 
@@ -340,65 +435,31 @@ def compute_particle_slot_loss(
     reliability_rows: list[torch.Tensor] = []
     assignments: list[SlotAssignment] = []
     matched_count = zero
-    target_count_total = zero
+    target_counts = targets.mask.sum(dim=-1).to(dtype=output.total_pt.dtype)
+    target_count_total = target_counts.sum()
+    existence_targets = torch.zeros_like(output.existence_logits)
 
-    for batch_index in range(batch):
-        for cell_index in range(cells):
-            target_indices = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten()
-            target_count = int(target_indices.numel())
-            target_count_total = target_count_total + float(target_count)
-            for view_index in range(views):
-                existence_target = torch.zeros(slots, device=output.total_pt.device, dtype=output.total_pt.dtype)
-                if target_count > 0:
-                    pair = _pairwise_components(
-                        output,
-                        targets,
-                        batch_index,
-                        view_index,
-                        cell_index,
-                        target_indices,
-                        config,
-                    )
-                    if config.matching_mode == "sinkhorn":
-                        size = max(slots, target_count)
-                        square = pair["total"].new_zeros(size, size)
-                        square[:slots, :target_count] = pair["total"]
-                        if target_count < size:
-                            square[:slots, target_count:] = F.softplus(
-                                output.existence_logits[batch_index, view_index, cell_index]
-                            )[:, None]
-                        if slots < size:
-                            square[slots:, :target_count] = float(config.missing_target_weight)
-                        transport = _sinkhorn_square(square, config) * float(size)
-                        real_transport = transport[:slots, :target_count]
-                        existence_target = real_transport.sum(dim=-1).clamp(0.0, 1.0).detach()
-                        pred_indices, target_local = torch.nonzero(
-                            real_transport > (0.5 / float(size)), as_tuple=True
+    if config.matching_mode == "hungarian":
+        # This is an intentionally expensive hard-assignment control.  Keep
+        # its independent SciPy implementation rather than silently changing
+        # the experimental definition, while the normal ordered/Sinkhorn
+        # variants take the batched path below.
+        for batch_index in range(batch):
+            for cell_index in range(cells):
+                target_indices = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten()
+                target_count = int(target_indices.numel())
+                for view_index in range(views):
+                    existence_target = torch.zeros(slots, device=output.total_pt.device, dtype=output.total_pt.dtype)
+                    if target_count > 0:
+                        pair = _pairwise_components(
+                            output,
+                            targets,
+                            batch_index,
+                            view_index,
+                            cell_index,
+                            target_indices,
+                            config,
                         )
-                        method = "sinkhorn"
-                        for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
-                            component_rows[name].append(
-                                _weighted_mean(pair[name], real_transport, config.epsilon)
-                            )
-                        missing_rows.append(transport[slots:, :target_count].sum() / max(1, target_count))
-                        if output.log_sigma is not None:
-                            sigma = output.log_sigma[batch_index, view_index, cell_index]
-                            error_vector = torch.stack(
-                                (
-                                    pair["log_pt"],
-                                    pair["deta"],
-                                    pair["dphi"],
-                                    pair["log_energy"],
-                                    pair["pid"],
-                                ),
-                                dim=-1,
-                            )
-                            log_sigma = sigma[:, None, :].expand_as(error_vector)
-                            nll = 0.5 * error_vector.square() * torch.exp(-2.0 * log_sigma) + log_sigma
-                            component_rows["uncertainty"].append(
-                                _weighted_mean(nll.mean(dim=-1), real_transport, config.epsilon)
-                            )
-                    elif config.matching_mode == "hungarian":
                         pred_indices, target_local, method = _linear_sum_assignment(
                             pair["total"], config.brute_force_limit
                         )
@@ -406,41 +467,172 @@ def compute_particle_slot_loss(
                         for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
                             component_rows[name].append(pair[name][pred_indices, target_local].mean())
                         missing_rows.append(pair["total"].new_tensor(float(max(0, target_count - slots))))
-                    else:
-                        matched = min(slots, target_count)
-                        pred_indices = torch.arange(matched, device=output.total_pt.device)
-                        target_local = torch.arange(matched, device=output.total_pt.device)
-                        method = "ordered"
-                        existence_target[pred_indices] = 1.0
-                        for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
-                            component_rows[name].append(pair[name][pred_indices, target_local].mean())
-                        missing_rows.append(pair["total"].new_tensor(float(max(0, target_count - slots))))
-                    matched_count = matched_count + float(min(slots, target_count))
-                    assignments.append(
-                        SlotAssignment(
-                            batch_index=batch_index,
-                            view_index=view_index,
-                            cell_index=cell_index,
-                            pred_indices=pred_indices.detach(),
-                            target_indices=target_indices.index_select(0, target_local).detach(),
-                            method=method,
+                        matched_count = matched_count + float(min(slots, target_count))
+                        if return_assignments:
+                            assignments.append(
+                                SlotAssignment(
+                                    batch_index=batch_index,
+                                    view_index=view_index,
+                                    cell_index=cell_index,
+                                    pred_indices=pred_indices.detach(),
+                                    target_indices=target_indices.index_select(0, target_local).detach(),
+                                    method=method,
+                                )
+                            )
+                    logits = output.existence_logits[batch_index, view_index, cell_index]
+                    existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
+                    count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
+                    realized_error = (
+                        torch.sigmoid(logits).sum() - float(target_count)
+                    ).abs().detach() / max(1.0, float(target_count))
+                    reliability_rows.append(
+                        F.smooth_l1_loss(
+                            output.reliability[batch_index, view_index, cell_index].mean(),
+                            (1.0 - realized_error.clamp(0.0, 1.0)),
                         )
                     )
-                logits = output.existence_logits[batch_index, view_index, cell_index]
-                existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
-                count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
-                realized_error = (
-                    torch.sigmoid(logits).sum() - float(target_count)
-                ).abs().detach() / max(1.0, float(target_count))
-                reliability_rows.append(
-                    F.smooth_l1_loss(
-                        output.reliability[batch_index, view_index, cell_index].mean(),
-                        (1.0 - realized_error.clamp(0.0, 1.0)),
+    else:
+        packed_indices = _packed_target_indices(targets.mask)
+        flat_batch = torch.arange(batch, device=output.total_pt.device).view(batch, 1, 1).expand(
+            batch, cells, views
+        ).reshape(-1)
+        flat_cell = torch.arange(cells, device=output.total_pt.device).view(1, cells, 1).expand(
+            batch, cells, views
+        ).reshape(-1)
+        flat_view = torch.arange(views, device=output.total_pt.device).view(1, 1, views).expand(
+            batch, cells, views
+        ).reshape(-1)
+        flat_counts = target_counts.to(dtype=torch.long)[:, :, None].expand(-1, -1, views).reshape(-1)
+        max_targets = int(flat_counts.max().detach().cpu().item()) if int(flat_counts.numel()) else 0
+        for target_count in range(1, max_targets + 1):
+            selected = torch.nonzero(flat_counts == target_count, as_tuple=False).flatten()
+            if not int(selected.numel()):
+                continue
+            batch_indices = flat_batch.index_select(0, selected)
+            cell_indices = flat_cell.index_select(0, selected)
+            view_indices = flat_view.index_select(0, selected)
+            target_indices = packed_indices[batch_indices, cell_indices, :target_count]
+            target_pt = targets.pt[batch_indices, cell_indices].gather(-1, target_indices)
+            target_energy = targets.energy[batch_indices, cell_indices].gather(-1, target_indices)
+            target_coordinates = targets.local_coordinates[batch_indices, cell_indices].gather(
+                1,
+                target_indices[:, :, None].expand(-1, -1, 2),
+            )
+            target_pid = targets.pid_index[batch_indices, cell_indices].gather(-1, target_indices)
+            target_charge = targets.charge_index[batch_indices, cell_indices].gather(-1, target_indices)
+            pred_pt = output.total_pt[batch_indices, view_indices, cell_indices]
+            pred_energy = output.total_energy[batch_indices, view_indices, cell_indices]
+            pred_coordinates = output.local_coordinates[batch_indices, view_indices, cell_indices]
+            pred_pid = output.pid_probabilities[batch_indices, view_indices, cell_indices]
+            pred_charge_logits = output.charge_logits[batch_indices, view_indices, cell_indices]
+            pair = _pairwise_components_batched(
+                pred_pt=pred_pt,
+                pred_energy=pred_energy,
+                pred_coordinates=pred_coordinates,
+                pred_pid=pred_pid,
+                pred_charge_logits=pred_charge_logits,
+                target_pt=target_pt,
+                target_energy=target_energy,
+                target_coordinates=target_coordinates,
+                target_pid=target_pid,
+                target_charge=target_charge,
+                config=config,
+            )
+            pairs = int(selected.numel())
+            if config.matching_mode == "sinkhorn":
+                size = max(slots, target_count)
+                square = pair["total"].new_zeros(pairs, size, size)
+                square[:, :slots, :target_count] = pair["total"]
+                if target_count < size:
+                    square[:, :slots, target_count:] = F.softplus(
+                        output.existence_logits[batch_indices, view_indices, cell_indices]
+                    )[:, :, None]
+                if slots < size:
+                    square[:, slots:, :target_count] = float(config.missing_target_weight)
+                transport = _sinkhorn_square(square, config) * float(size)
+                real_transport = transport[:, :slots, :target_count]
+                existence_target = real_transport.sum(dim=-1).clamp(0.0, 1.0).detach()
+                existence_targets[batch_indices, view_indices, cell_indices] = existence_target
+                for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
+                    component_rows[name].append(
+                        (pair[name] * real_transport).sum(dim=(-2, -1))
+                        / real_transport.sum(dim=(-2, -1)).clamp_min(config.epsilon)
                     )
+                missing_rows.append(
+                    transport[:, slots:, :target_count].sum(dim=(-2, -1)) / float(max(1, target_count))
                 )
+                if output.log_sigma is not None:
+                    sigma = output.log_sigma[batch_indices, view_indices, cell_indices]
+                    error_vector = torch.stack(
+                        (
+                            pair["log_pt"],
+                            pair["deta"],
+                            pair["dphi"],
+                            pair["log_energy"],
+                            pair["pid"],
+                        ),
+                        dim=-1,
+                    )
+                    log_sigma = sigma[:, :, None, :].expand_as(error_vector)
+                    nll = 0.5 * error_vector.square() * torch.exp(-2.0 * log_sigma) + log_sigma
+                    component_rows["uncertainty"].append(
+                        (nll.mean(dim=-1) * real_transport).sum(dim=(-2, -1))
+                        / real_transport.sum(dim=(-2, -1)).clamp_min(config.epsilon)
+                    )
+                if return_assignments:
+                    for row in range(pairs):
+                        pred_indices, target_local = torch.nonzero(
+                            real_transport[row] > (0.5 / float(size)), as_tuple=True
+                        )
+                        assignments.append(
+                            SlotAssignment(
+                                batch_index=int(batch_indices[row].detach().cpu().item()),
+                                view_index=int(view_indices[row].detach().cpu().item()),
+                                cell_index=int(cell_indices[row].detach().cpu().item()),
+                                pred_indices=pred_indices.detach(),
+                                target_indices=target_indices[row].index_select(0, target_local).detach(),
+                                method="sinkhorn",
+                            )
+                        )
+            else:
+                matched = min(slots, target_count)
+                diagonal = torch.arange(matched, device=output.total_pt.device)
+                existence_target = torch.zeros_like(pred_pt)
+                existence_target[:, :matched] = 1.0
+                existence_targets[batch_indices, view_indices, cell_indices] = existence_target
+                for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
+                    component_rows[name].append(pair[name][:, diagonal, diagonal].mean(dim=-1))
+                missing_rows.append(pair["total"].new_full((pairs,), float(max(0, target_count - slots))))
+                if return_assignments:
+                    for row in range(pairs):
+                        assignments.append(
+                            SlotAssignment(
+                                batch_index=int(batch_indices[row].detach().cpu().item()),
+                                view_index=int(view_indices[row].detach().cpu().item()),
+                                cell_index=int(cell_indices[row].detach().cpu().item()),
+                                pred_indices=diagonal.detach(),
+                                target_indices=target_indices[row, :matched].detach(),
+                                method="ordered",
+                            )
+                        )
+            matched_count = matched_count + float(min(slots, target_count) * pairs)
+
+        existence_rows.append(
+            F.binary_cross_entropy_with_logits(output.existence_logits, existence_targets)
+        )
+        expected_counts = torch.sigmoid(output.existence_logits).sum(dim=-1)
+        target_counts_by_view = target_counts[:, None, :].expand(-1, views, -1)
+        count_rows.append((expected_counts - target_counts_by_view).abs().mean())
+        realized_error = (expected_counts - target_counts_by_view).abs().detach() / target_counts_by_view.clamp_min(1.0)
+        reliability_rows.append(
+            F.smooth_l1_loss(
+                output.reliability.mean(dim=-1),
+                1.0 - realized_error.clamp(0.0, 1.0),
+            )
+        )
 
     def mean(rows: list[torch.Tensor]) -> torch.Tensor:
-        return torch.stack(rows).mean() if rows else zero
+        return torch.cat([row.reshape(-1) for row in rows]).mean() if rows else zero
 
     pid_raw = F.log_softmax(output.raw_pid_logits, dim=-1)
     constrained_pid = output.pid_probabilities.detach().clamp_min(config.epsilon)

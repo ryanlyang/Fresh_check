@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+from jetclass_fresh.jetclass_data import JetIdentity
+
+from scripts.train_adaptive_binary_pseudooffline_variant import (
+    _load_selected_hlt_encoder,
+    _selected_classifier_metrics,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
+    _joint_reconstruction_loss,
+)
+
+from teacher_logit_reco.adaptive_binary_pseudooffline import (
+    AdaptiveBinaryReconstructorModel,
+    AdaptiveBinaryHierarchyLayout,
+    PseudoViewInputs,
+    CurriculumState,
+    ReconstructorStepContext,
+    CurriculumController,
+    ReconstructorCurriculumConfig,
+    build_adaptive_binary_targets,
+    build_variant_hierarchy_aware_tagger,
+    package_trainable_pseudo_views,
+    reconstructor_step,
+    resolve_variant_config,
+)
+
+
+def _hlt_batch() -> tuple[torch.Tensor, torch.Tensor]:
+    tokens = torch.zeros(2, 128, 14)
+    mask = torch.zeros(2, 128, dtype=torch.bool)
+    for batch_index, count in enumerate((5, 7)):
+        mask[batch_index, :count] = True
+        tokens[batch_index, :count, 0] = torch.linspace(28.0, 4.0, count)
+        tokens[batch_index, :count, 1] = torch.linspace(-0.25, 0.25, count)
+        tokens[batch_index, :count, 2] = torch.linspace(-0.3, 0.3, count)
+        momentum = tokens[batch_index, :count, 0] * torch.cosh(
+            tokens[batch_index, :count, 1]
+        )
+        tokens[batch_index, :count, 3] = torch.sqrt(momentum.square() + 0.13957**2)
+        tokens[batch_index, :count, 4] = 1.0
+        tokens[batch_index, :count, 5] = 1.0
+    return tokens, mask
+
+
+def _reconstruction_batch(grouping: str = "exclusive_kt") -> dict:
+    hlt, hlt_mask = _hlt_batch()
+    offline = hlt.clone()
+    offline_mask = hlt_mask.clone()
+    for batch_index, start in enumerate((5, 7)):
+        for particle_index in range(start, start + 3):
+            offline_mask[batch_index, particle_index] = True
+            offline[batch_index, particle_index, 0] = 3.0 + particle_index
+            offline[batch_index, particle_index, 1] = 0.03 * particle_index
+            offline[batch_index, particle_index, 2] = -0.04 * particle_index
+            momentum = offline[batch_index, particle_index, 0] * torch.cosh(
+                offline[batch_index, particle_index, 1]
+            )
+            offline[batch_index, particle_index, 3] = torch.sqrt(
+                momentum.square() + 0.13957**2
+            )
+            offline[batch_index, particle_index, 4] = 1.0
+            offline[batch_index, particle_index, 5] = 1.0
+    identities = tuple(
+        JetIdentity(file=f"HToBB_{index:03d}.root", entry=index, label=1)
+        for index in range(2)
+    )
+    targets = build_adaptive_binary_targets(
+        hlt.numpy(),
+        hlt_mask.numpy(),
+        offline.numpy(),
+        offline_mask.numpy(),
+        jet_ids=identities,
+        layout=AdaptiveBinaryHierarchyLayout(grouping=grouping),
+    )
+    return {"hlt_tokens": hlt, "hlt_mask": hlt_mask, "targets": targets}
+
+
+def _phase2_context(capacity: int, supervised_capacities: tuple[int, ...]):
+    return ReconstructorStepContext(
+        curriculum=CurriculumState(
+            stage_index=1,
+            stage_key=f"phase2_hierarchy_{capacity}",
+            phase=2,
+            phase_name="progressive_hierarchy",
+            global_update=1,
+            stage_update=1,
+            stage_maximum_updates=2,
+            active_capacity=capacity,
+            stage_progress=0.5,
+            teacher_forcing_probability=1.0,
+            distribution_weight=0.0,
+            supervised_capacities=supervised_capacities,
+        ),
+        split="model_train",
+        mode="teacher_forced",
+        validation=False,
+        teacher_forcing_probability=1.0,
+    )
+
+
+def test_c0_is_one_shot_and_skips_progressive_two_and_four_stages():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="C0_direct_8_group_set", smoke=True
+    )
+    assert model.direct_group_set is True
+    assert model.direct_set_decoder is not None
+    config = ReconstructorCurriculumConfig(
+        root_updates=1,
+        hierarchy_updates_per_depth=1,
+        renderer_updates=1,
+        distribution_updates=1,
+        evaluation_interval=1,
+        maximum_capacity=8,
+        hierarchy_capacities=(8,),
+        renderer_enabled=False,
+        distribution_enabled=False,
+    )
+    controller = CurriculumController(config)
+    assert [stage.active_capacity for stage in controller.stages] == [1, 8]
+
+
+def test_c8_has_independent_raw_child_heads_outside_compiler_parameters():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="C8_unconstrained_split_control", smoke=True
+    )
+    assert model.constrained_hierarchy is False
+    assert len(model.unconstrained_child_heads) == 5
+    groups = model.module_groups()
+    head_parameter = next(model.unconstrained_child_heads[2].parameters())
+    assert any(parameter is head_parameter for parameter in groups["hierarchy_8"].parameters())
+
+
+def test_c0_and_c8_training_losses_reach_their_distinct_heads():
+    batch = _reconstruction_batch()
+    direct = AdaptiveBinaryReconstructorModel(
+        variant_name="C0_direct_8_group_set", smoke=True
+    )
+    direct_result = reconstructor_step(
+        direct, batch, _phase2_context(8, (8,))
+    )
+    assert direct_result.metrics["mode"] == "direct_set"
+    direct_result.loss_terms["group_8"].backward()
+    assert any(
+        parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
+        for parameter in direct.direct_set_decoder.parameters()
+    )
+
+    unconstrained = AdaptiveBinaryReconstructorModel(
+        variant_name="C8_unconstrained_split_control", smoke=True
+    )
+    unconstrained_result = reconstructor_step(
+        unconstrained, batch, _phase2_context(2, (2, 4, 8, 16, 32))
+    )
+    assert unconstrained_result.metrics["hierarchy_constraints_in_loss"] is False
+    unconstrained_result.loss_terms["group_2"].backward()
+    assert any(
+        parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
+        for parameter in unconstrained.unconstrained_child_heads[0].parameters()
+    )
+
+
+def test_b3_draws_four_distinct_compiled_root_states_from_hlt_only():
+    resolved = resolve_variant_config("B3_root_sampled_ablation")
+    assert resolved["model"]["distribution"]["enabled"] is False
+    assert resolved["model"]["distribution"]["sample_root"] is True
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="B3_root_sampled_ablation", smoke=True
+    ).eval()
+    tokens, mask = _hlt_batch()
+    with torch.no_grad():
+        roots = model.sample_compiled_roots(tokens, mask, count=4, seed=27191)
+    ledgers = torch.stack([root.root_ledger for root in roots], dim=1)
+    assert ledgers.shape[1] == 4
+    assert float(ledgers.var(dim=1, unbiased=False).max()) > 0.0
+    assert resolved["evaluation"]["sampled_root_downstream_rollout"] is False
+
+
+def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
+    resolved = resolve_variant_config("F0_ce_reco_primary")
+    assert resolved["model"]["fusion"]["dual_hierarchy"] is True
+    assert "E7_dual_hierarchy_dualcross" in resolved["variant"]["dependencies"]
+    model = AdaptiveBinaryReconstructorModel(
+        hierarchy_names=("exclusive_kt", "cambridge_aachen"),
+        variant_name="F0_ce_reco_primary",
+        smoke=True,
+    )
+    for renderer in model.renderers.values():
+        renderer.config = replace(renderer.config, exact_nbody_projection=False)
+    kt_batch = _reconstruction_batch("exclusive_kt")
+    ca_batch = _reconstruction_batch("cambridge_aachen")
+    loss = _joint_reconstruction_loss(
+        model,
+        {
+            **kt_batch,
+            "targets_by_hierarchy": {
+                "exclusive_kt": kt_batch["targets"],
+                "cambridge_aachen": ca_batch["targets"],
+            },
+        },
+        split="model_train",
+        validation=False,
+    )
+    loss.backward()
+    for hierarchy_name in ("exclusive_kt", "cambridge_aachen"):
+        assert any(
+            parameter.grad is not None
+            and bool(torch.isfinite(parameter.grad).all())
+            and float(parameter.grad.abs().sum()) > 0.0
+            for parameter in model.hierarchy_reconstructor.decoders[
+                hierarchy_name
+            ].parameters()
+        )
+
+
+def test_d3_deploys_one_true_global_particle_set():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="D3_global_particle_set", smoke=True
+    ).eval()
+    model.renderer.config = replace(
+        model.renderer.config, exact_nbody_projection=False
+    )
+    tokens, mask = _hlt_batch()
+    with torch.no_grad():
+        output = model.deploy(tokens, mask, evaluation_seed=24731)
+    rendered = output.rendered_views["exclusive_kt"][0]
+    assert not bool(rendered.diagnostics["group_local_self_attention"])
+    assert rendered.diagnostics["renderer_grouping"] == "single_global_root_set"
+    assert bool((rendered.group_indices[rendered.mask] == 0).all())
+
+
+def test_e7_root_hashes_are_computed_from_each_branch_independently():
+    batch = 2
+    views = 5
+    root = torch.randn(batch, 30)
+    uncertainty = torch.zeros(batch, views, 1)
+    frontier_mask = torch.ones(batch, views, 1, dtype=torch.bool)
+    arrays = {"shared_root_ledger": root}
+    for hierarchy_name in ("exclusive_kt", "cambridge_aachen"):
+        prefix = f"frontier__{hierarchy_name}__depth_00__"
+        arrays[prefix + "ledger"] = root[:, None, None].expand(
+            -1, views, 1, -1
+        ).contiguous()
+        arrays[prefix + "uncertainty"] = uncertainty.clone()
+        arrays[prefix + "mask"] = frontier_mask.clone()
+    pseudo = PseudoViewInputs(
+        arrays=arrays,
+        view_names=tuple(f"view_{index}" for index in range(views)),
+        hierarchy_names=("exclusive_kt", "cambridge_aachen"),
+        frontier_depths={"exclusive_kt": 1, "cambridge_aachen": 1},
+        diagnostics={},
+    )
+    tagger = build_variant_hierarchy_aware_tagger(
+        "E7_dual_hierarchy_dualcross", smoke=True
+    ).eval()
+    root = tagger._root_provenance(pseudo, None, compute_hashes=True)
+    assert root["branch_hashes_computed_independently"] is True
+    assert root["root_hash_count"] == 1
+    assert len(root["branch_root_hashes"]) == 2
+    assert set(root["branch_root_hashes"].values()) == {root["root_hash"]}
+
+
+def test_capacity_controls_are_distinct_and_make_no_exact_match_claim():
+    a2 = resolve_variant_config("A2_hlt_capacity_control")
+    a5 = resolve_variant_config("A5_hlt_part_xl")
+    assert a2["model"]["hlt_part"]["num_layers"] == 20
+    assert a5["model"]["hlt_part"]["num_layers"] == 16
+    assert a2["model"]["hlt_part"] != a5["model"]["hlt_part"]
+
+
+def test_e3_is_one_unidirectional_cross_attention_block():
+    model = build_variant_hierarchy_aware_tagger(
+        "E3_single_cross_attention", smoke=True
+    )
+    assert len(model.fusion_stacks) == 1
+    assert len(model.fusion_stacks[0]) == 1
+    assert model.fusion_stacks[0][0].update_pseudo_stream is False
+
+
+def test_selected_baseline_metrics_are_computed_from_the_saved_checkpoint(tmp_path):
+    class _FixedClassifier(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.zeros(10))
+
+        def forward(self, points, features, vectors, mask):
+            del points, vectors, mask
+            raw_pt = torch.exp(features[:, 0, 0] / 0.7 + 1.7)
+            labels = (raw_pt.round().long() - 1).clamp(0, 9)
+            logits = torch.full(
+                (features.shape[0], 10),
+                -8.0,
+                dtype=features.dtype,
+                device=features.device,
+            )
+            logits.scatter_(1, labels[:, None], 8.0)
+            return logits + self.bias
+
+    model = _FixedClassifier()
+    checkpoint = tmp_path / "best_model_val.pt"
+    torch.save({"model_state_dict": model.state_dict()}, checkpoint)
+    tokens = np.zeros((10, 128, 14), dtype=np.float32)
+    mask = np.zeros((10, 128), dtype=np.bool_)
+    mask[:, 0] = True
+    # The dummy classifier exactly inverts build_part_inputs_torch's first
+    # log-pT feature, making every class deterministically recoverable.
+    tokens[:, 0, 0] = np.arange(1, 11, dtype=np.float32)
+    tokens[:, 0, 3] = np.arange(1, 11, dtype=np.float32) + 1.0
+    view = SimpleNamespace(
+        tokens=tokens,
+        mask=mask,
+        labels=np.arange(10, dtype=np.int64),
+    )
+    metrics = _selected_classifier_metrics(
+        model,
+        checkpoint,
+        view,
+        device="cpu",
+        batch_size=4,
+        smoke=False,
+    )
+    assert metrics["accuracy"] == 1.0
+    assert metrics["macro_ovr_auc"] == 1.0
+    assert len(metrics["per_class"]) == 10
+    assert np.asarray(metrics["confusion_matrix"]).shape == (10, 10)
+
+
+def test_primary_root_models_require_and_load_the_selected_a0_encoder(tmp_path):
+    for name in (
+        "B0_pooled_mlp_root",
+        "B1_semantic_query_root",
+        "B2_semantic_query_probabilistic",
+    ):
+        assert "A0_hlt_part" in resolve_variant_config(name)["variant"]["dependencies"]
+
+    source = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        source.weight.fill_(0.25)
+        source.bias.fill_(-0.5)
+    checkpoint = tmp_path / "best_model_val.pt"
+    torch.save({"model_state_dict": source.state_dict()}, checkpoint)
+    target = torch.nn.Linear(3, 2)
+    model = SimpleNamespace(
+        hlt_encoder=SimpleNamespace(reference_model=target),
+        smoke=False,
+    )
+    report = _load_selected_hlt_encoder(model, checkpoint)
+    assert report["loaded"] is True
+    assert report["source_variant"] == "A0_hlt_part"
+    assert torch.equal(target.weight, source.weight)
+    assert torch.equal(target.bias, source.bias)

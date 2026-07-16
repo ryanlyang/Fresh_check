@@ -65,6 +65,8 @@ class ParticleRendererConfig:
     phase_space_mass_epsilon: float = 1.0e-5
     near_massless_threshold: float = 1.0e-6
     maximum_local_attention_bias: float = 5.0
+    exact_nbody_projection: bool = True
+    local_matching: bool = True
 
     def __post_init__(self) -> None:
         if not self.hlt_input_dims or any(int(value) <= 0 for value in self.hlt_input_dims):
@@ -629,6 +631,13 @@ def _gather_slots(values: Any, group_indices: Any) -> Any:
 def _ancestor_path(output: RecursiveHierarchyOutput, group_indices: Any, slot_mask: Any) -> Any:
     torch = require_torch()
     indices = torch.as_tensor(group_indices).clamp_min(0)
+    if not output.levels:
+        root_indices = torch.zeros_like(indices)
+        root_hidden = _gather_slots(output.root_frontier.hidden, root_indices)
+        return (
+            root_hidden.unsqueeze(2)
+            * torch.as_tensor(slot_mask).unsqueeze(-1).unsqueeze(-1)
+        )
     paths = []
     for depth in reversed(range(len(output.levels))):
         frontier = output.levels[depth].next_frontier
@@ -960,14 +969,41 @@ class ConstrainedParticleRenderer(_ModuleBase):
                         * group_fraction
                         * mass_logits[batch_index, member].softmax(dim=0)
                     )
-                local_p4, phase = project_n_body_phase_space(
-                    parent_p4,
-                    raw_spatial[batch_index, member],
-                    local_mass,
-                    energy_fraction_logits[batch_index, member],
-                    iterations=self.config.phase_space_iterations,
-                    near_massless_threshold=self.config.near_massless_threshold,
-                )
+                if self.config.exact_nbody_projection:
+                    local_p4, phase = project_n_body_phase_space(
+                        parent_p4,
+                        raw_spatial[batch_index, member],
+                        local_mass,
+                        energy_fraction_logits[batch_index, member],
+                        iterations=self.config.phase_space_iterations,
+                        near_massless_threshold=self.config.near_massless_threshold,
+                    )
+                else:
+                    direction = torch.nn.functional.normalize(
+                        raw_spatial[batch_index, member], dim=-1, eps=1.0e-8
+                    )
+                    energy = (
+                        torch.nn.functional.softplus(
+                            energy_fraction_logits[batch_index, member]
+                        )
+                        + local_mass
+                    )
+                    momentum = torch.sqrt(
+                        (energy.square() - local_mass.square()).clamp_min(0.0)
+                    )
+                    local_p4 = torch.cat(
+                        (energy[:, None], direction * momentum[:, None]), dim=-1
+                    )
+                    phase = {
+                        "branch": "unconstrained_no_nbody_projection",
+                        "closure_max_residual": float(
+                            (local_p4.sum(dim=0) - parent_p4)
+                            .abs()
+                            .max()
+                            .detach()
+                            .cpu()
+                        ),
+                    }
                 four_vector[batch_index, member] = local_p4
                 mass[batch_index, member] = local_mass
                 phase_branches[phase["branch"]] = phase_branches.get(phase["branch"], 0) + 1
@@ -1033,7 +1069,10 @@ class ConstrainedParticleRenderer(_ModuleBase):
             raise RuntimeError("rendered particle charges do not close to the root")
         relative_scale = root_p4[:, 0].abs().clamp_min(1.0)
         root_relative = root_residual.max(dim=-1).values / relative_scale
-        if float(root_relative.max().detach().cpu()) > 2.0e-5:
+        if (
+            self.config.exact_nbody_projection
+            and float(root_relative.max().detach().cpu()) > 2.0e-5
+        ):
             raise RuntimeError("complete rendered pseudo jet does not close to the root four-vector")
         return RenderedParticleBatch(
             four_vector=four_vector,
@@ -1063,12 +1102,17 @@ class ConstrainedParticleRenderer(_ModuleBase):
                 "local_p4_maximum_residual": maximum_local_residual,
                 "root_p4_maximum_absolute_residual": float(root_residual.max().detach().cpu()),
                 "root_p4_maximum_relative_residual": float(root_relative.max().detach().cpu()),
+                "exact_nbody_projection": bool(self.config.exact_nbody_projection),
+                "local_matching_objective": bool(self.config.local_matching),
                 "count_closes_exactly": bool(
                     (layout.mask.sum(dim=1) == root_state.constituent_count).all()
                 ),
                 "types_close_exactly": True,
                 "charges_close_exactly": True,
-                "group_local_self_attention": True,
+                "group_local_self_attention": bool(hierarchy.levels),
+                "renderer_grouping": (
+                    "hierarchy_local" if hierarchy.levels else "single_global_root_set"
+                ),
                 "source_flag": "pseudo",
                 "side_channel_names": list(ABPH_RENDERED_SIDE_CHANNEL_NAMES),
             },

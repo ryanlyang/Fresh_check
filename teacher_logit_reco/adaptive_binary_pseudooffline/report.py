@@ -14,6 +14,7 @@ from .config import (
     ABPH_HLT_PROFILE_VERSION,
     canonical_hash,
 )
+from .diagnostics import ABPH_TAGGER_DIAGNOSTIC_CONTRACT
 from .fusion import (
     ABPH_FUSION_FIT_SPLIT,
     ABPH_FUSION_SELECTION_SPLIT,
@@ -66,6 +67,10 @@ ABPH_FINAL_TEST_ATTESTATIONS: Mapping[str, bool] = {
     "hypothesis_selection_used_offline_target": False,
     "fusion_fitted_on_final_test": False,
 }
+ABPH_REQUIRED_DIAGNOSTIC_VARIANTS: tuple[str, ...] = (
+    "E5_kt32_mh4_dualcross",
+    "E7_dual_hierarchy_dualcross",
+)
 
 
 def _read_json(path: Path) -> Mapping[str, Any] | None:
@@ -329,12 +334,43 @@ def write_adaptive_binary_campaign_report(
     output_dir = Path(config.output_dir) if config.output_dir is not None else root / "report"
     problems: list[str] = []
     metric_rows: list[dict[str, Any]] = []
+    per_class_rows: list[dict[str, Any]] = []
+    confusion_matrices: dict[str, Any] = {}
     provenance_rows: list[dict[str, Any]] = []
     root_rows: list[dict[str, Any]] = []
     fusion_rows: list[dict[str, Any]] = []
     reports: dict[str, Mapping[str, Any]] = {}
     report_paths: dict[str, str] = {}
     common_values: dict[tuple[str, str], dict[str, Any]] = {}
+
+    diagnostic_path = root / "diagnostics" / "tagger_use_report.json"
+    diagnostic_report = _read_json(diagnostic_path)
+    if diagnostic_report is None:
+        problems.append("missing required non-selection tagger-use diagnostics")
+    else:
+        if diagnostic_report.get("contract") != ABPH_TAGGER_DIAGNOSTIC_CONTRACT:
+            problems.append("tagger-use diagnostic contract mismatch")
+        if diagnostic_report.get("ok") is not True:
+            problems.append("tagger-use diagnostics have ok!=true")
+        if diagnostic_report.get("selection_eligible") is not False:
+            problems.append("tagger-use diagnostics must be selection-ineligible")
+        if diagnostic_report.get("split") != "model_val":
+            problems.append("tagger-use diagnostics must use model_val only")
+        if diagnostic_report.get("final_test_loaded") is not False:
+            problems.append("tagger-use diagnostics accessed final_test")
+        variants = tuple(str(value) for value in diagnostic_report.get("variants", ()))
+        if variants != ABPH_REQUIRED_DIAGNOSTIC_VARIANTS:
+            problems.append(
+                "tagger-use diagnostic membership differs from the frozen E5/E7 contract"
+            )
+        rows = diagnostic_report.get("rows")
+        covered = {
+            str(row.get("variant"))
+            for row in rows
+            if isinstance(row, Mapping)
+        } if isinstance(rows, list) else set()
+        if not set(ABPH_REQUIRED_DIAGNOSTIC_VARIANTS).issubset(covered):
+            problems.append("tagger-use diagnostics contain no rows for every required model")
 
     for variant_name in config.required_variants:
         path, report = _find_run_report(root, variant_name)
@@ -391,6 +427,22 @@ def write_adaptive_binary_campaign_report(
                     "n_jets": _metric(split_metrics, "n_jets"),
                 }
             )
+            per_class = split_metrics.get("per_class")
+            if not isinstance(per_class, list):
+                per_class = split_metrics.get("per_class_accuracy")
+            if isinstance(per_class, list):
+                per_class_rows.extend(
+                    {
+                        "variant": variant_name,
+                        "split": split,
+                        **dict(row),
+                    }
+                    for row in per_class
+                    if isinstance(row, Mapping)
+                )
+            confusion = split_metrics.get("confusion_matrix")
+            if isinstance(confusion, list):
+                confusion_matrices[f"{variant_name}/{split}"] = confusion
 
         provenance_splits = [expected_metric_split]
         if _split_metrics(report, "final_test") is not None:
@@ -403,7 +455,11 @@ def write_adaptive_binary_campaign_report(
                     problems.append(f"{variant_name}/{split} lacks provenance {field}")
                 else:
                     common_values.setdefault((split, field), {})[variant_name] = value
-            if bool(resolved["data"].get("requires_offline_targets")) and split != "final_test":
+            if (
+                bool(resolved["data"].get("requires_offline_targets"))
+                and variant_spec(variant_name).tier != "A"
+                and split != "final_test"
+            ):
                 for field in ABPH_TARGET_PROVENANCE_FIELDS:
                     if provenance.get(field) in (None, ""):
                         problems.append(f"{variant_name}/{split} lacks target provenance {field}")
@@ -456,6 +512,8 @@ def write_adaptive_binary_campaign_report(
 
     outputs = {
         "metrics_csv": str(output_dir / "metrics.csv"),
+        "per_class_metrics_csv": str(output_dir / "per_class_metrics.csv"),
+        "confusion_matrices_json": str(output_dir / "confusion_matrices.json"),
         "provenance_csv": str(output_dir / "provenance.csv"),
         "root_identity_csv": str(output_dir / "root_identity.csv"),
         "fusion_membership_csv": str(output_dir / "fusion_membership.csv"),
@@ -481,15 +539,26 @@ def write_adaptive_binary_campaign_report(
             "attestations": dict(ABPH_FINAL_TEST_ATTESTATIONS),
         },
         "metrics": metric_rows,
+        "per_class_metrics": per_class_rows,
+        "confusion_matrices": confusion_matrices,
         "provenance": provenance_rows,
         "root_identity": root_rows,
         "fusion_membership": fusion_rows,
+        "tagger_use_diagnostics": {
+            "path": str(diagnostic_path),
+            "report": diagnostic_report,
+        },
         "outputs": outputs,
     }
     report_payload["report_content_hash"] = canonical_hash(
         {key: value for key, value in report_payload.items() if key != "outputs"}
     )
     _write_csv(Path(outputs["metrics_csv"]), metric_rows)
+    _write_csv(Path(outputs["per_class_metrics_csv"]), per_class_rows)
+    _atomic_json(
+        Path(outputs["confusion_matrices_json"]),
+        {"matrices": confusion_matrices},
+    )
     _write_csv(Path(outputs["provenance_csv"]), provenance_rows)
     _write_csv(Path(outputs["root_identity_csv"]), root_rows)
     _write_csv(Path(outputs["fusion_membership_csv"]), fusion_rows)

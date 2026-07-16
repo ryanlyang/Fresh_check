@@ -93,7 +93,7 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     )
     graph = build_submission_graph(config)
     keys = [job.key for job in graph]
-    assert len(graph) == 80
+    assert len(graph) == 81
     assert keys[:4] == ["input:splits", "input:hlt_cache", "input:offline_cache", "input:audit"]
     preflight_index = keys.index("preflight:actual_targets")
     for index, job in enumerate(graph):
@@ -102,7 +102,7 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
             assert "preflight:actual_targets" in job.dependencies
     report = graph[-1]
     assert report.key == "report:model_selection"
-    assert len(report.dependencies) == 72
+    assert len(report.dependencies) == 73
     expected_reports = {
         f"baseline:{name}" if name.startswith("A") else f"variant:{name}"
         for name in ABPH_EXPECTED_VARIANT_NAMES
@@ -233,7 +233,7 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
     assert result.returncode == 0
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["contract"] == ABPH_SLURM_ORCHESTRATION_CONTRACT
-    assert len(payload["jobs"]) == 80
+    assert len(payload["jobs"]) == 81
     assert payload["resource_profile"]["account"] == "reu-aisocial"
     assert all("--account=reu-aisocial" in row["command"] for row in payload["submission_commands"])
     assert all(row["environment"].get("ABPH_CONFIRM_FINAL_TEST") == "0" for row in payload["jobs"])
@@ -278,7 +278,7 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
     assert payload["campaign_mode"] == "highdata"
     assert payload["split_sizes"]["model_train"] == 5_000_000
     assert payload["resource_profile"]["partition"] == "tier3"
-    assert len(payload["jobs"]) == 80
+    assert len(payload["jobs"]) == 81
 
 
 def test_selection_report_hash_is_recomputed(tmp_path: Path) -> None:
@@ -342,7 +342,9 @@ def test_prediction_only_cli_executes_against_reused_artifacts(tmp_path: Path) -
     assert [row["stage"] for row in payload["jobs"]] == [
         "pseudo_prediction",
         "pseudo_prediction",
+        "pseudo_prediction",
     ]
+    assert payload["jobs"][-1]["arguments"][0] == "E7_shared_root_dual"
     assert payload["reuse_preflight"]["checked"]
 
 

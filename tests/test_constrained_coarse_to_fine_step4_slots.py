@@ -6,6 +6,7 @@ import unittest
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
@@ -34,6 +35,11 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     prepare_cell_slot_targets,
 )
 from teacher_logit_reco.constrained_coarse_to_fine.slots import _select_local_hlt_memory
+from teacher_logit_reco.constrained_coarse_to_fine.slot_loss import (
+    _pairwise_components,
+    _sinkhorn_square,
+    _weighted_mean,
+)
 
 
 def _particle(pt: float, eta: float, phi: float, pid: int, charge: float = 0.0) -> np.ndarray:
@@ -127,6 +133,177 @@ def _targets_for(output, offline, offline_mask, hlt, hlt_mask):
         torch.from_numpy(hierarchy_targets.reference_phi),
         terminal_level=output.slots.terminal_level,
     )
+
+
+def _nonpacked_targets_with_empty_cells(targets, *, minimum_targets_in_one_cell: int = 2):
+    """Create a deliberately ragged target cache for batched/scalar parity."""
+
+    batch, cells, width = targets.mask.shape
+    if int(minimum_targets_in_one_cell) <= 0:
+        raise ValueError("minimum_targets_in_one_cell must be positive")
+    padded_width = max(4, int(width) + 1, int(minimum_targets_in_one_cell) + 1)
+    coordinates = targets.local_coordinates.new_zeros(batch, cells, padded_width, 2)
+    pt = targets.pt.new_zeros(batch, cells, padded_width)
+    energy = targets.energy.new_zeros(batch, cells, padded_width)
+    pid_index = targets.pid_index.new_zeros(batch, cells, padded_width)
+    charge_index = targets.charge_index.new_zeros(batch, cells, padded_width)
+    mask = torch.zeros(batch, cells, padded_width, dtype=torch.bool)
+    duplicated = False
+    for batch_index in range(batch):
+        for cell_index in range(cells):
+            sources = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten().tolist()
+            if sources and not duplicated:
+                # Guarantee at least one multi-target cell and leave an interior
+                # padding gap, so the parity test cannot accidentally rely on
+                # compacted target masks.
+                while len(sources) < int(minimum_targets_in_one_cell):
+                    sources.append(sources[0])
+                duplicated = True
+            if not sources:
+                continue
+            destinations = list(range(max(0, len(sources) - 1))) + [padded_width - 1]
+            for source, destination in zip(sources, destinations, strict=True):
+                coordinates[batch_index, cell_index, destination] = targets.local_coordinates[
+                    batch_index, cell_index, source
+                ]
+                pt[batch_index, cell_index, destination] = targets.pt[batch_index, cell_index, source]
+                energy[batch_index, cell_index, destination] = targets.energy[batch_index, cell_index, source]
+                pid_index[batch_index, cell_index, destination] = targets.pid_index[
+                    batch_index, cell_index, source
+                ]
+                charge_index[batch_index, cell_index, destination] = targets.charge_index[
+                    batch_index, cell_index, source
+                ]
+                mask[batch_index, cell_index, destination] = True
+    assert duplicated
+    return replace(
+        targets,
+        local_coordinates=coordinates,
+        pt=pt,
+        energy=energy,
+        pid_index=pid_index,
+        charge_index=charge_index,
+        mask=mask,
+    )
+
+
+def _scalar_reference_slot_loss(output, targets, config):
+    """The pre-batching slot-loss calculation retained for regression parity."""
+
+    batch, views, cells, slots = output.total_pt.shape
+    zero = output.total_pt.sum() * 0.0
+    component_rows = {name: [] for name in ("log_pt", "coordinate", "pid", "charge", "log_energy", "uncertainty")}
+    existence_rows = []
+    count_rows = []
+    missing_rows = []
+    reliability_rows = []
+    for batch_index in range(batch):
+        for cell_index in range(cells):
+            target_indices = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten()
+            target_count = int(target_indices.numel())
+            for view_index in range(views):
+                existence_target = torch.zeros(slots, device=output.total_pt.device, dtype=output.total_pt.dtype)
+                if target_count:
+                    pair = _pairwise_components(
+                        output, targets, batch_index, view_index, cell_index, target_indices, config
+                    )
+                    if config.matching_mode == "sinkhorn":
+                        size = max(slots, target_count)
+                        square = pair["total"].new_zeros(size, size)
+                        square[:slots, :target_count] = pair["total"]
+                        if target_count < size:
+                            square[:slots, target_count:] = F.softplus(
+                                output.existence_logits[batch_index, view_index, cell_index]
+                            )[:, None]
+                        if slots < size:
+                            square[slots:, :target_count] = float(config.missing_target_weight)
+                        transport = _sinkhorn_square(square, config) * float(size)
+                        real_transport = transport[:slots, :target_count]
+                        existence_target = real_transport.sum(dim=-1).clamp(0.0, 1.0).detach()
+                        for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
+                            component_rows[name].append(
+                                _weighted_mean(pair[name], real_transport, config.epsilon)
+                            )
+                        missing_rows.append(transport[slots:, :target_count].sum() / max(1, target_count))
+                        if output.log_sigma is not None:
+                            sigma = output.log_sigma[batch_index, view_index, cell_index]
+                            errors = torch.stack(
+                                (pair["log_pt"], pair["deta"], pair["dphi"], pair["log_energy"], pair["pid"]),
+                                dim=-1,
+                            )
+                            log_sigma = sigma[:, None, :].expand_as(errors)
+                            nll = 0.5 * errors.square() * torch.exp(-2.0 * log_sigma) + log_sigma
+                            component_rows["uncertainty"].append(
+                                _weighted_mean(nll.mean(dim=-1), real_transport, config.epsilon)
+                            )
+                    else:
+                        matched = min(slots, target_count)
+                        indices = torch.arange(matched, device=output.total_pt.device)
+                        existence_target[indices] = 1.0
+                        for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
+                            component_rows[name].append(pair[name][indices, indices].mean())
+                        missing_rows.append(pair["total"].new_tensor(float(max(0, target_count - slots))))
+                logits = output.existence_logits[batch_index, view_index, cell_index]
+                existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
+                count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
+                realized_error = (torch.sigmoid(logits).sum() - float(target_count)).abs().detach()
+                realized_error = realized_error / max(1.0, float(target_count))
+                reliability_rows.append(
+                    F.smooth_l1_loss(
+                        output.reliability[batch_index, view_index, cell_index].mean(),
+                        1.0 - realized_error.clamp(0.0, 1.0),
+                    )
+                )
+
+    def mean(rows):
+        return torch.stack(rows).mean() if rows else zero
+
+    pid_raw = F.log_softmax(output.raw_pid_logits, dim=-1)
+    constrained_pid = output.pid_probabilities.detach().clamp_min(config.epsilon)
+    pid_consistency = F.kl_div(pid_raw, constrained_pid, reduction="none").sum(dim=-1).mean()
+    accounting_scale = torch.log1p(output.terminal_accounting.clamp_min(0.0))[:, None, :, :]
+    rendered_scale = torch.log1p(output.rendered_accounting.clamp_min(0.0))
+    accounting_consistency = F.smooth_l1_loss(
+        rendered_scale,
+        accounting_scale.expand_as(rendered_scale),
+        beta=float(config.huber_beta),
+    )
+    if output.dust_total_pt is None:
+        dust = zero
+    else:
+        cell_pt = output.terminal_accounting[..., ACCOUNTING_FIELD_NAMES.index("total_pT")]
+        dust = (output.dust_total_pt / cell_pt[:, None, :].clamp_min(config.epsilon)).mean()
+    components = {
+        "matched_log_pt": mean(component_rows["log_pt"]),
+        "matched_coordinate": mean(component_rows["coordinate"]),
+        "matched_pid": mean(component_rows["pid"]),
+        "matched_charge": mean(component_rows["charge"]),
+        "matched_log_energy": mean(component_rows["log_energy"]),
+        "existence": mean(existence_rows),
+        "count": mean(count_rows),
+        "pid_consistency": pid_consistency,
+        "accounting_consistency": accounting_consistency,
+        "dust": dust,
+        "missing_target": mean(missing_rows),
+        "uncertainty_nll": mean(component_rows["uncertainty"]),
+        "reliability": mean(reliability_rows),
+    }
+    loss = (
+        config.log_pt_weight * components["matched_log_pt"]
+        + config.coordinate_weight * components["matched_coordinate"]
+        + config.pid_weight * components["matched_pid"]
+        + config.charge_weight * components["matched_charge"]
+        + config.log_energy_weight * components["matched_log_energy"]
+        + config.existence_weight * components["existence"]
+        + config.count_weight * components["count"]
+        + config.pid_consistency_weight * components["pid_consistency"]
+        + config.accounting_consistency_weight * components["accounting_consistency"]
+        + config.dust_weight * components["dust"]
+        + config.missing_target_weight * components["missing_target"]
+        + config.uncertainty_weight * components["uncertainty_nll"]
+        + config.reliability_weight * components["reliability"]
+    )
+    return loss, components
 
 
 class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
@@ -347,6 +524,125 @@ class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
         )
         repeated = compute_particle_slot_loss(output.slots, permuted_targets, config)
         self.assertTrue(torch.allclose(loss.loss.detach(), repeated.loss.detach(), atol=2.0e-5, rtol=2.0e-5))
+
+    def test_batched_training_sinkhorn_omits_assignment_bookkeeping_without_changing_loss(self):
+        inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()
+        output = _build(C3_SINKHORN).eval()(*inputs)
+        targets = _targets_for(output, offline, offline_mask, hlt, hlt_mask)
+        config = ParticleSlotLossConfig(matching_mode="sinkhorn", sinkhorn_iterations=8)
+        diagnostic = compute_particle_slot_loss(output.slots, targets, config, return_assignments=True)
+        training = compute_particle_slot_loss(output.slots, targets, config, return_assignments=False)
+        self.assertTrue(diagnostic.assignments)
+        self.assertEqual(training.assignments, ())
+        self.assertTrue(torch.allclose(training.loss, diagnostic.loss, atol=2.0e-6, rtol=2.0e-6))
+        for name in diagnostic.components:
+            self.assertTrue(
+                torch.allclose(training.components[name], diagnostic.components[name], atol=2.0e-6, rtol=2.0e-6),
+                name,
+            )
+
+    def test_batched_matching_matches_scalar_reference_components_and_gradients(self):
+        inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()
+        for matching_mode in ("ordered", "sinkhorn"):
+            with self.subTest(matching_mode=matching_mode):
+                model = _build(C5_B1)
+                output = model(*inputs)
+                targets = _nonpacked_targets_with_empty_cells(
+                    _targets_for(output, offline, offline_mask, hlt, hlt_mask)
+                )
+                self.assertTrue(torch.any(~targets.mask[:, :, :-1]))
+                self.assertTrue(torch.any(targets.mask.sum(dim=-1) > 1))
+                config = ParticleSlotLossConfig(
+                    matching_mode=matching_mode,
+                    sinkhorn_iterations=8,
+                )
+                batched = compute_particle_slot_loss(
+                    output.slots,
+                    targets,
+                    config,
+                    return_assignments=False,
+                )
+                reference_loss, reference_components = _scalar_reference_slot_loss(
+                    output.slots,
+                    targets,
+                    config,
+                )
+                self.assertTrue(torch.allclose(batched.loss, reference_loss, atol=3.0e-6, rtol=3.0e-6))
+                for name, reference in reference_components.items():
+                    self.assertTrue(
+                        torch.allclose(batched.components[name], reference, atol=3.0e-6, rtol=3.0e-6),
+                        name,
+                    )
+                model.zero_grad(set_to_none=True)
+                batched.loss.backward(retain_graph=True)
+                batched_gradients = {
+                    name: parameter.grad.detach().clone()
+                    for name, parameter in model.named_parameters()
+                    if parameter.grad is not None
+                }
+                model.zero_grad(set_to_none=True)
+                reference_loss.backward()
+                reference_gradients = {
+                    name: parameter.grad.detach().clone()
+                    for name, parameter in model.named_parameters()
+                    if parameter.grad is not None
+                }
+                self.assertEqual(set(batched_gradients), set(reference_gradients))
+                for name in batched_gradients:
+                    self.assertTrue(
+                        torch.allclose(
+                            batched_gradients[name], reference_gradients[name], atol=5.0e-6, rtol=5.0e-6
+                        ),
+                        name,
+                    )
+
+    def test_batched_sinkhorn_matches_scalar_reference_for_c6_and_oversubscribed_cell(self):
+        inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()
+        model = _build(C6_MULTIVIEW)
+        output = model(*inputs)
+        slots = output.slots
+        self.assertEqual(slots.num_views, 4)
+        targets = _nonpacked_targets_with_empty_cells(
+            _targets_for(output, offline, offline_mask, hlt, hlt_mask),
+            minimum_targets_in_one_cell=slots.num_real_slots + 1,
+        )
+        self.assertGreater(int(targets.mask.sum(dim=-1).max()), slots.num_real_slots)
+        config = ParticleSlotLossConfig(matching_mode="sinkhorn", sinkhorn_iterations=6)
+        batched = compute_particle_slot_loss(
+            slots,
+            targets,
+            config,
+            return_assignments=False,
+        )
+        reference_loss, reference_components = _scalar_reference_slot_loss(slots, targets, config)
+        self.assertTrue(torch.allclose(batched.loss, reference_loss, atol=4.0e-6, rtol=4.0e-6))
+        for name, reference in reference_components.items():
+            self.assertTrue(
+                torch.allclose(batched.components[name], reference, atol=4.0e-6, rtol=4.0e-6),
+                name,
+            )
+        model.zero_grad(set_to_none=True)
+        batched.loss.backward(retain_graph=True)
+        batched_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        }
+        model.zero_grad(set_to_none=True)
+        reference_loss.backward()
+        reference_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        }
+        self.assertEqual(set(batched_gradients), set(reference_gradients))
+        for name in batched_gradients:
+            self.assertTrue(
+                torch.allclose(
+                    batched_gradients[name], reference_gradients[name], atol=7.0e-6, rtol=7.0e-6
+                ),
+                name,
+            )
 
     def test_hungarian_evaluation_diagnostic_is_independent_of_train_mode(self):
         inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()

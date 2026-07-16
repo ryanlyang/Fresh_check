@@ -48,6 +48,7 @@ RUN_ID="${1:?Usage: sbatch run_train_local_residual_reconstructor.sh <C0-C6>}"
 : "${LOCAL_RESIDUAL_FIELD_RECO_MAX_STACK_VAL_JETS:=}"
 : "${LOCAL_RESIDUAL_FIELD_RECO_SAVE_LAST_CHECKPOINT:=1}"
 : "${LOCAL_RESIDUAL_FIELD_RECO_DISABLE_AMP:=0}"
+: "${LOCAL_RESIDUAL_FIELD_NO_VERIFY_HASH:=0}"
 
 variant="${RUN_ID}"
 consistency_weight="0.0"
@@ -104,6 +105,7 @@ cmd=(
   --consistency-loss-weight "${consistency_weight}"
 )
 fresh_append_flag_if_enabled cmd --disable-amp "${LOCAL_RESIDUAL_FIELD_RECO_DISABLE_AMP}"
+fresh_append_flag_if_enabled cmd --no-verify-hash "${LOCAL_RESIDUAL_FIELD_NO_VERIFY_HASH}"
 if ! fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_RECO_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${LOCAL_RESIDUAL_FIELD_RECO_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${LOCAL_RESIDUAL_FIELD_RECO_MAX_TRAIN_JETS}"); fi
 if [[ -n "${LOCAL_RESIDUAL_FIELD_RECO_MAX_VAL_JETS}" ]]; then cmd+=(--max-val-jets "${LOCAL_RESIDUAL_FIELD_RECO_MAX_VAL_JETS}"); fi

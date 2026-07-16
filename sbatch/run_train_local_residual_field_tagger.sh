@@ -51,6 +51,7 @@ RUN_ID="${1:?Usage: sbatch run_train_local_residual_field_tagger.sh <A/B/D/E/F r
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_DISABLE_AMP:=0}"
 : "${LOCAL_RESIDUAL_FIELD_CONTROL_SEED:=9173}"
 : "${LOCAL_RESIDUAL_FIELD_D6_RECON_RUN_ID:=C5}"
+: "${LOCAL_RESIDUAL_FIELD_NO_VERIFY_HASH:=0}"
 
 field_source="zero"
 model_size="${LOCAL_RESIDUAL_FIELD_TAGGER_MODEL_SIZE}"
@@ -236,6 +237,7 @@ if [[ "${require_warm_start}" -eq 1 ]]; then cmd+=(--require-baseline-warm-start
 if [[ -n "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR}" ]]; then cmd+=(--teacher-logits-dir "${LOCAL_RESIDUAL_FIELD_TEACHER_LOGITS_DIR}"); fi
 if ((${#field_subset[@]})); then cmd+=(--field-subset "${field_subset[@]}"); fi
 fresh_append_flag_if_enabled cmd --disable-amp "${LOCAL_RESIDUAL_FIELD_TAGGER_DISABLE_AMP}"
+fresh_append_flag_if_enabled cmd --no-verify-hash "${LOCAL_RESIDUAL_FIELD_NO_VERIFY_HASH}"
 if ! fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_TAGGER_SAVE_LAST_CHECKPOINT}"; then cmd+=(--no-save-last-checkpoint); fi
 if [[ -n "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_TRAIN_JETS}" ]]; then cmd+=(--max-train-jets "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_TRAIN_JETS}"); fi
 if [[ -n "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_VAL_JETS}" ]]; then cmd+=(--max-val-jets "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_VAL_JETS}"); fi

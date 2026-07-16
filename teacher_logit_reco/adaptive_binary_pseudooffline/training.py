@@ -147,6 +147,10 @@ class ReconstructorCurriculumConfig:
     distribution_patience_evaluations: int = 15
     renderer_true_parent_fraction: float = 0.25
     renderer_transition_fraction: float = 0.50
+    maximum_capacity: int = 32
+    hierarchy_capacities: tuple[int, ...] = ABPH_LEVEL_CAPACITIES
+    renderer_enabled: bool = True
+    distribution_enabled: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -170,6 +174,21 @@ class ReconstructorCurriculumConfig:
         transition = float(self.renderer_transition_fraction)
         if first < 0.0 or transition < 0.0 or first + transition > 1.0:
             raise ValueError("renderer teacher-forcing fractions are invalid")
+        if int(self.maximum_capacity) not in (1, *ABPH_LEVEL_CAPACITIES):
+            raise ValueError(
+                f"maximum_capacity must be root-only (1) or one of {ABPH_LEVEL_CAPACITIES}"
+            )
+        capacities = tuple(int(value) for value in self.hierarchy_capacities)
+        if not capacities and int(self.maximum_capacity) != 1:
+            raise ValueError("hierarchy_capacities cannot be empty when hierarchy training is enabled")
+        if any(value not in ABPH_LEVEL_CAPACITIES for value in capacities):
+            raise ValueError(f"hierarchy_capacities must be drawn from {ABPH_LEVEL_CAPACITIES}")
+        if capacities != tuple(sorted(set(capacities))):
+            raise ValueError("hierarchy_capacities must be unique and increasing")
+        if any(value > int(self.maximum_capacity) for value in capacities):
+            raise ValueError("hierarchy_capacities cannot exceed maximum_capacity")
+        if bool(self.distribution_enabled) and not bool(self.renderer_enabled):
+            raise ValueError("distribution training requires the particle renderer phase")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -209,6 +228,8 @@ class ReconstructorTrainerConfig:
     amp: bool = True
     amp_dtype: str = "bfloat16"
     gradient_accumulation_steps: int = 1
+    root_hierarchy_gradient_accumulation_steps: int | None = None
+    renderer_distribution_gradient_accumulation_steps: int | None = None
     distributed_world_size: int = 1
     root_hierarchy_effective_batch_size: int = 1024
     renderer_distribution_effective_batch_size: int = 512
@@ -230,6 +251,13 @@ class ReconstructorTrainerConfig:
             raise ValueError("output_dir is required")
         if int(self.gradient_accumulation_steps) <= 0:
             raise ValueError("gradient_accumulation_steps must be positive")
+        for name in (
+            "root_hierarchy_gradient_accumulation_steps",
+            "renderer_distribution_gradient_accumulation_steps",
+        ):
+            value = getattr(self, name)
+            if value is not None and int(value) <= 0:
+                raise ValueError(f"{name} must be positive when supplied")
         for name in (
             "distributed_world_size",
             "root_hierarchy_effective_batch_size",
@@ -281,6 +309,7 @@ class CurriculumState:
     teacher_forcing_probability: float
     distribution_weight: float
     complete: bool = False
+    supervised_capacities: tuple[int, ...] = ABPH_LEVEL_CAPACITIES
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -298,7 +327,7 @@ class CurriculumController:
 
     @staticmethod
     def _build_stages(config: ReconstructorCurriculumConfig) -> tuple[CurriculumStage, ...]:
-        return (
+        stages = [
             CurriculumStage(
                 "phase1_root",
                 1,
@@ -306,35 +335,45 @@ class CurriculumController:
                 int(config.root_updates),
                 int(config.root_patience_evaluations),
                 1,
-            ),
-            *tuple(
-                CurriculumStage(
+            )
+        ]
+        stages.extend(
+            CurriculumStage(
                     f"phase2_hierarchy_{capacity}",
                     2,
                     "progressive_hierarchy",
                     int(config.hierarchy_updates_per_depth),
                     int(config.hierarchy_patience_evaluations),
                     int(capacity),
-                )
-                for capacity in ABPH_LEVEL_CAPACITIES
-            ),
-            CurriculumStage(
+            )
+            for capacity in config.hierarchy_capacities
+            if int(capacity) <= int(config.maximum_capacity)
+        )
+        if bool(config.renderer_enabled):
+            stages.append(CurriculumStage(
                 "phase3_renderer",
                 3,
                 "deterministic_particle_rendering",
                 int(config.renderer_updates),
                 int(config.renderer_patience_evaluations),
                 32,
-            ),
-            CurriculumStage(
+            ))
+        if bool(config.distribution_enabled):
+            stages.append(CurriculumStage(
                 "phase4_distribution",
                 4,
                 "probabilistic_multi_hypothesis",
                 int(config.distribution_updates),
                 int(config.distribution_patience_evaluations),
                 32,
-            ),
-        )
+            ))
+        return tuple(stages)
+
+    def is_final_stage(self, state: CurriculumState | None = None) -> bool:
+        if self.complete:
+            return False
+        resolved = self.state() if state is None else state
+        return int(resolved.stage_index) == len(self.stages) - 1
 
     @property
     def complete(self) -> bool:
@@ -379,6 +418,7 @@ class CurriculumController:
                 teacher_forcing_probability=0.0,
                 distribution_weight=0.25,
                 complete=True,
+                supervised_capacities=tuple(self.config.hierarchy_capacities),
             )
         stage = self.stages[self.stage_index]
         progress = self._progress(stage)
@@ -399,6 +439,7 @@ class CurriculumController:
                 else 0.0
             ),
             complete=False,
+            supervised_capacities=tuple(self.config.hierarchy_capacities),
         )
 
     def advance(self) -> bool:
@@ -537,9 +578,11 @@ def assemble_reconstruction_loss_terms(
     if particle_matching is not None:
         terms["particle"] = particle_matching.total
         components = tuple(particle_matching.component_losses.values())
-        if not components:
-            raise ValueError("particle matching exposes no feature components")
-        terms["particle_feature"] = torch.stack(components).mean()
+        terms["particle_feature"] = (
+            torch.stack(components).mean()
+            if components
+            else particle_matching.real_particle_loss
+        )
     if particle_auxiliary is not None:
         terms["auxiliary"] = particle_auxiliary.total
     if distribution_loss is not None:
@@ -562,7 +605,7 @@ def active_reconstruction_loss_names(context: ReconstructorStepContext) -> tuple
     if state.phase >= 2:
         names.extend(
             f"group_{capacity}"
-            for capacity in ABPH_LEVEL_CAPACITIES
+            for capacity in state.supervised_capacities
             if int(capacity) <= int(state.active_capacity)
         )
         names.append("topology")
@@ -765,7 +808,7 @@ def build_reconstructor_optimizer(
     optimizer_groups = []
     for name in ABPH_RECONSTRUCTOR_MODULE_GROUPS:
         parameters = list(module_groups[name].parameters())
-        if not parameters:
+        if not parameters and not bool(getattr(module_groups[name], "allow_empty", False)):
             raise ValueError(f"module group {name} has no parameters")
         for parameter in parameters:
             identifier = id(parameter)
@@ -784,6 +827,9 @@ def build_reconstructor_optimizer(
                 "peak_lr": float(policy.peak_lr),
                 "weight_decay": float(policy.weight_decay),
                 "group_name": name,
+                "shared_across_depths": bool(
+                    getattr(module_groups[name], "shared_across_depths", False)
+                ),
             }
         )
     unclaimed = set(model_parameters) - set(claimed)
@@ -810,12 +856,19 @@ def _stage_lr_multiplier(
     return float(minimum_fraction) + (1.0 - float(minimum_fraction)) * cosine
 
 
-def _group_phase_factor(group_name: str, state: CurriculumState) -> float:
+def _group_phase_factor(
+    group_name: str,
+    state: CurriculumState,
+    *,
+    shared_across_depths: bool = False,
+) -> float:
     if group_name == "hlt_encoder":
         return 1.0 if state.phase == 1 else 0.25
     if group_name == "root":
         return 1.0 if state.phase == 1 else 0.25
     if group_name.startswith("hierarchy_"):
+        if shared_across_depths:
+            return 1.0 if state.phase == 2 else (0.25 if state.phase > 2 else 0.0)
         capacity = int(group_name.rsplit("_", 1)[1])
         if state.phase < 2 or capacity > int(state.active_capacity):
             return 0.0
@@ -844,7 +897,11 @@ def configure_reconstructor_optimizer(
     metadata = []
     for group in optimizer.param_groups:
         name = str(group["group_name"])
-        phase_factor = _group_phase_factor(name, state)
+        phase_factor = _group_phase_factor(
+            name,
+            state,
+            shared_across_depths=bool(group.get("shared_across_depths", False)),
+        )
         trainable = phase_factor > 0.0
         learning_rate = float(group["peak_lr"]) * phase_factor * schedule if trainable else 0.0
         group["lr"] = learning_rate
@@ -1290,7 +1347,15 @@ def train_reconstructor_curriculum(
         active_parameters_for_update = [
             parameter for parameter in model.parameters() if parameter.requires_grad
         ]
-        for _ in range(int(config.gradient_accumulation_steps)):
+        accumulation_steps = int(
+            (
+                config.root_hierarchy_gradient_accumulation_steps
+                if state.phase <= 2
+                else config.renderer_distribution_gradient_accumulation_steps
+            )
+            or config.gradient_accumulation_steps
+        )
+        for _ in range(accumulation_steps):
             context = ReconstructorStepContext(
                 curriculum=state,
                 split="model_train",
@@ -1305,7 +1370,7 @@ def train_reconstructor_curriculum(
                 with torch.autocast(device_type=device.type, enabled=False):
                     composed = compose_reconstruction_loss(result, context, config.loss_weights)
                     training_required_losses = composed.required_terms
-                    scaled_loss = composed.total / float(config.gradient_accumulation_steps)
+                    scaled_loss = composed.total / float(accumulation_steps)
                 if will_evaluate:
                     objective_norms = _objective_gradient_norms(
                         composed, active_parameters_for_update
@@ -1417,12 +1482,13 @@ def train_reconstructor_curriculum(
                 "n_jets": int(accumulated_jets),
                 "effective_batch_size": int(effective_batch_size),
                 "expected_effective_batch_size": int(expected_effective_batch_size),
+                "gradient_accumulation_steps": int(accumulation_steps),
                 "mode": _training_mode(state, int(config.seed)),
                 "required_losses": list(training_required_losses),
                 "metrics": train_averages,
                 "gradient_norm_before_clip": float(gradient_norm.detach().cpu()),
                 "objective_gradient_norms": {
-                    name: value / float(config.gradient_accumulation_steps)
+                    name: value / float(accumulation_steps)
                     for name, value in objective_gradient_sums.items()
                 },
                 "optimizer_group_gradient_norms": optimizer_group_gradient_norms,
@@ -1452,11 +1518,7 @@ def train_reconstructor_curriculum(
                 controller=controller,
                 train_source=train_source,
                 config=config,
-                role=(
-                    "best_model_val"
-                    if state.stage_key == "phase4_distribution"
-                    else "best_stage_model_val"
-                ),
+                role=("best_model_val" if controller.is_final_stage(state) else "best_stage_model_val"),
                 validation=validation,
                 provenance=source_provenance,
                 optimizer_metadata=optimizer_metadata,
@@ -1470,7 +1532,7 @@ def train_reconstructor_curriculum(
                 model_metadata=model_metadata,
             )
             _atomic_torch_save(stage_path, payload)
-            if state.stage_key == "phase4_distribution":
+            if controller.is_final_stage(state):
                 _atomic_torch_save(output_dir / "best_model_val.pt", payload)
             best_by_stage[state.stage_key]["checkpoint_sha256"] = _file_sha256(stage_path)
         else:
@@ -1602,7 +1664,7 @@ def train_reconstructor_curriculum(
         )
     complete = bool(controller.complete)
     if complete and not (output_dir / "best_model_val.pt").exists():
-        raise RuntimeError("completed curriculum produced no phase-4 model-val checkpoint")
+        raise RuntimeError("completed curriculum produced no terminal model-val checkpoint")
     report = {
         "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
         "ok": complete,

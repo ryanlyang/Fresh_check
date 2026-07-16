@@ -11,7 +11,8 @@ import math
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Iterator, Mapping, Sequence
+import time
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -109,6 +110,7 @@ class CoarseToFineTrainConfig:
     max_val_jets: int | None = None
     max_stack_val_jets: int | None = None
     save_last_checkpoint: bool = True
+    progress_interval_batches: int = 100
     d_model: int = 256
     num_heads: int = 8
     encoder_layers: int = 8
@@ -154,6 +156,8 @@ class CoarseToFineTrainConfig:
                 raise ValueError(f"{name} must be positive")
         if int(self.num_workers) < 0 or int(self.max_nonfinite_batches) < 0:
             raise ValueError("num_workers and max_nonfinite_batches must be nonnegative")
+        if int(self.progress_interval_batches) <= 0:
+            raise ValueError("progress_interval_batches must be positive")
         for name in (
             "learning_rate",
             "hlt_encoder_lr_scale",
@@ -303,6 +307,15 @@ def _jsonable(value: Any) -> Any:
 def _save_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_progress(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically publish a compact heartbeat while a long epoch is in flight."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def _sha256(path: Path) -> str:
@@ -642,6 +655,7 @@ def _batch_losses(
     hierarchy_loss_weight: float,
     slot_loss_weight: float,
     coordinate_extent: float,
+    include_slot_matching_diagnostics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if isinstance(model_output, CTierReconstructorOutput):
         hierarchy = model_output.hierarchy
@@ -699,7 +713,12 @@ def _batch_losses(
             terminal_level=int(slots.terminal_level),
             coordinate_extent=float(coordinate_extent),
         )
-        slot_loss = compute_particle_slot_loss(slots, slot_targets, slot_config)
+        slot_loss = compute_particle_slot_loss(
+            slots,
+            slot_targets,
+            slot_config,
+            return_assignments=include_slot_matching_diagnostics,
+        )
         total = total + float(slot_loss_weight) * slot_loss.loss
         slot_selection = slot_loss.loss - float(slot_config.uncertainty_weight) * slot_loss.components[
             "uncertainty_nll"
@@ -707,44 +726,6 @@ def _batch_losses(
         selection_score = selection_score + float(slot_loss_weight) * slot_selection
         existence = torch.sigmoid(slots.existence_logits).clamp(1.0e-8, 1.0 - 1.0e-8)
         entropy = -(existence * torch.log(existence) + (1.0 - existence) * torch.log(1.0 - existence)).mean()
-        matched_pt: list[torch.Tensor] = []
-        matched_eta: list[torch.Tensor] = []
-        matched_phi: list[torch.Tensor] = []
-        matched_pid: list[torch.Tensor] = []
-        for assignment in slot_loss.assignments:
-            if int(assignment.pred_indices.numel()) == 0:
-                continue
-            batch_index = int(assignment.batch_index)
-            view_index = int(assignment.view_index)
-            cell_index = int(assignment.cell_index)
-            prediction_indices = assignment.pred_indices.to(device=slots.total_pt.device)
-            target_indices = assignment.target_indices.to(device=slots.total_pt.device)
-            predicted_pt = slots.total_pt[batch_index, view_index, cell_index].index_select(
-                0, prediction_indices
-            )
-            target_pt = slot_targets.pt[batch_index, cell_index].index_select(0, target_indices)
-            predicted_coordinates = slots.local_coordinates[
-                batch_index, view_index, cell_index
-            ].index_select(0, prediction_indices)
-            target_coordinates = slot_targets.local_coordinates[batch_index, cell_index].index_select(
-                0, target_indices
-            )
-            predicted_pid = slots.pid_probabilities[
-                batch_index, view_index, cell_index
-            ].index_select(0, prediction_indices).argmax(dim=-1)
-            target_pid = slot_targets.pid_index[batch_index, cell_index].index_select(0, target_indices)
-            matched_pt.append((predicted_pt - target_pt).abs().mean())
-            matched_eta.append((predicted_coordinates[:, 0] - target_coordinates[:, 0]).abs().mean())
-            dphi = torch.remainder(
-                predicted_coordinates[:, 1] - target_coordinates[:, 1] + math.pi,
-                2.0 * math.pi,
-            ) - math.pi
-            matched_phi.append(dphi.abs().mean())
-            matched_pid.append((predicted_pid == target_pid).float().mean())
-
-        def assignment_mean(rows: Sequence[torch.Tensor]) -> torch.Tensor:
-            return torch.stack(tuple(rows)).mean() if rows else total.new_zeros(())
-
         metrics.update(
             {
                 "loss.total": total,
@@ -753,12 +734,59 @@ def _batch_losses(
                 **{f"slot.component.{name}": value for name, value in slot_loss.components.items()},
                 **{f"slot.metric.{name}": value for name, value in slot_loss.metrics.items()},
                 "slot.metric.slot_usage_entropy": entropy,
-                "slot.metric.matched_pT_mae": assignment_mean(matched_pt),
-                "slot.metric.matched_eta_mae": assignment_mean(matched_eta),
-                "slot.metric.matched_phi_mae": assignment_mean(matched_phi),
-                "slot.metric.matched_pid_accuracy": assignment_mean(matched_pid),
             }
         )
+        if include_slot_matching_diagnostics:
+            # This is intentionally model-validation-only during campaign
+            # training.  Per-cell gather diagnostics are informative, but on
+            # a 128-cell C-tier model they create thousands of tiny GPU ops
+            # per batch and do not contribute to the optimization objective.
+            matched_pt: list[torch.Tensor] = []
+            matched_eta: list[torch.Tensor] = []
+            matched_phi: list[torch.Tensor] = []
+            matched_pid: list[torch.Tensor] = []
+            for assignment in slot_loss.assignments:
+                if int(assignment.pred_indices.numel()) == 0:
+                    continue
+                batch_index = int(assignment.batch_index)
+                view_index = int(assignment.view_index)
+                cell_index = int(assignment.cell_index)
+                prediction_indices = assignment.pred_indices.to(device=slots.total_pt.device)
+                target_indices = assignment.target_indices.to(device=slots.total_pt.device)
+                predicted_pt = slots.total_pt[batch_index, view_index, cell_index].index_select(
+                    0, prediction_indices
+                )
+                target_pt = slot_targets.pt[batch_index, cell_index].index_select(0, target_indices)
+                predicted_coordinates = slots.local_coordinates[
+                    batch_index, view_index, cell_index
+                ].index_select(0, prediction_indices)
+                target_coordinates = slot_targets.local_coordinates[batch_index, cell_index].index_select(
+                    0, target_indices
+                )
+                predicted_pid = slots.pid_probabilities[
+                    batch_index, view_index, cell_index
+                ].index_select(0, prediction_indices).argmax(dim=-1)
+                target_pid = slot_targets.pid_index[batch_index, cell_index].index_select(0, target_indices)
+                matched_pt.append((predicted_pt - target_pt).abs().mean())
+                matched_eta.append((predicted_coordinates[:, 0] - target_coordinates[:, 0]).abs().mean())
+                dphi = torch.remainder(
+                    predicted_coordinates[:, 1] - target_coordinates[:, 1] + math.pi,
+                    2.0 * math.pi,
+                ) - math.pi
+                matched_phi.append(dphi.abs().mean())
+                matched_pid.append((predicted_pid == target_pid).float().mean())
+
+            def assignment_mean(rows: Sequence[torch.Tensor]) -> torch.Tensor:
+                return torch.stack(tuple(rows)).mean() if rows else total.new_zeros(())
+
+            metrics.update(
+                {
+                    "slot.metric.matched_pT_mae": assignment_mean(matched_pt),
+                    "slot.metric.matched_eta_mae": assignment_mean(matched_eta),
+                    "slot.metric.matched_phi_mae": assignment_mean(matched_phi),
+                    "slot.metric.matched_pid_accuracy": assignment_mean(matched_pid),
+                }
+            )
     return total, metrics
 
 
@@ -775,6 +803,7 @@ def _run_epoch(
     amp_enabled: bool,
     max_jets: int | None,
     epoch: int,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     train = optimizer is not None
     model.train(train)
@@ -783,6 +812,41 @@ def _run_epoch(
     n_jets = 0
     n_batches = 0
     nonfinite_batches = 0
+    epoch_started = time.perf_counter()
+    track_cuda_memory = device.type == "cuda" and torch.cuda.is_available()
+    if track_cuda_memory:
+        torch.cuda.reset_peak_memory_stats(device)
+
+    def runtime_snapshot() -> dict[str, float | int]:
+        # CUDA execution is asynchronous. Synchronizing only at the sparse
+        # heartbeat boundaries keeps the training path fast while making the
+        # reported batch rate a trustworthy wall-clock measurement.
+        if track_cuda_memory:
+            torch.cuda.synchronize(device)
+        elapsed = max(time.perf_counter() - epoch_started, 1.0e-9)
+        peak_bytes = int(torch.cuda.max_memory_allocated(device)) if track_cuda_memory else 0
+        return {
+            "runtime.elapsed_seconds": float(elapsed),
+            "runtime.batches_per_second": float(n_batches) / elapsed,
+            "runtime.jets_per_second": float(n_jets) / elapsed,
+            "runtime.cuda_peak_allocated_bytes": peak_bytes,
+            "runtime.cuda_peak_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved(device)) if track_cuda_memory else 0
+            ),
+        }
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "state": "epoch_split_started",
+                "epoch": int(epoch),
+                "split": str(source.split),
+                "training": bool(train),
+                "n_batches": 0,
+                "n_jets": 0,
+                "nonfinite_batches_skipped": 0,
+            }
+        )
     for loader in _iter_split_loaders(
         source,
         config,
@@ -814,6 +878,7 @@ def _run_epoch(
                         float(config.hierarchy_loss_weight),
                         float(config.slot_loss_weight),
                         float(source.layout.coordinate_extent),
+                        include_slot_matching_diagnostics=not train,
                     )
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError("total loss is non-finite")
@@ -850,6 +915,21 @@ def _run_epoch(
             accumulator.add(batch_metrics, batch_size)
             n_jets += batch_size
             n_batches += 1
+            if progress_callback is not None and n_batches % int(config.progress_interval_batches) == 0:
+                progress_callback(
+                    {
+                        "state": "epoch_split_running",
+                        "epoch": int(epoch),
+                        "split": str(source.split),
+                        "training": bool(train),
+                        "n_batches": int(n_batches),
+                        "n_jets": int(n_jets),
+                        "nonfinite_batches_skipped": int(nonfinite_batches),
+                        "last_loss_total": batch_metrics.get("loss.total"),
+                        "last_selection_score": batch_metrics.get("selection.reconstruction_score"),
+                        **runtime_snapshot(),
+                    }
+                )
     metrics: dict[str, Any] = accumulator.means()
     metrics.update(
         {
@@ -857,10 +937,24 @@ def _run_epoch(
             "n_batches": int(n_batches),
             "nonfinite_batches_skipped": int(nonfinite_batches),
             "split": source.split,
+            **runtime_snapshot(),
         }
     )
     if n_jets <= 0:
         raise RuntimeError(f"no finite batches were processed for {source.split}")
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "state": "epoch_split_completed",
+                "epoch": int(epoch),
+                "split": str(source.split),
+                "training": bool(train),
+                "n_batches": int(n_batches),
+                "n_jets": int(n_jets),
+                "nonfinite_batches_skipped": int(nonfinite_batches),
+                **runtime_snapshot(),
+            }
+        )
     return metrics
 
 
@@ -946,17 +1040,26 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     set_training_seed(int(config.seed))
     output_dir = Path(config.output_dir)
     diagnostics_dir = output_dir / "diagnostics"
+    progress_path = output_dir / "training_progress.json"
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
+    def report_progress(payload: Mapping[str, Any]) -> None:
+        _write_progress(progress_path, payload)
+        print(json.dumps({"training_progress": _jsonable(payload)}, sort_keys=True), flush=True)
+
+    report_progress({"state": "starting", "variant": str(config.variant)})
     device = resolve_device(config.device)
     runtime_compatibility = configure_torch_native_triton_fallback(device)
     print(json.dumps({"runtime_compatibility": runtime_compatibility}, sort_keys=True))
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     requested_family, _ = _normalize_variant(config.variant)
     require_offline_particles = requested_family == "C"
+    report_progress({"state": "loading_split", "split": str(config.train_split)})
     train_source = _load_split_source(
         config, config.train_split, require_offline_particles=require_offline_particles
     )
+    report_progress({"state": "loading_split", "split": str(config.val_split)})
     val_source = _load_split_source(
         config, config.val_split, require_offline_particles=require_offline_particles
     )
@@ -990,6 +1093,14 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     }
     _save_json(output_dir / "source_metadata.json", source_metadata)
     _save_json(output_dir / "config.json", config.to_dict())
+    report_progress(
+        {
+            "state": "ready_for_epochs",
+            "train_jets": int(train_source.labels.shape[0]),
+            "model_val_jets": int(val_source.labels.shape[0]),
+            "amp_enabled": bool(amp_enabled),
+        }
+    )
 
     curves: list[dict[str, Any]] = []
     best_epoch = -1
@@ -1009,6 +1120,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             amp_enabled=amp_enabled,
             max_jets=config.max_train_jets,
             epoch=epoch,
+            progress_callback=report_progress,
         )
         with torch.no_grad():
             val_metrics = _run_epoch(
@@ -1023,6 +1135,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 amp_enabled=amp_enabled,
                 max_jets=config.max_val_jets,
                 epoch=epoch,
+                progress_callback=report_progress,
             )
         row = {"epoch": int(epoch), "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
@@ -1071,6 +1184,15 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         )
         _write_curves_csv(diagnostics_dir / "epoch_metrics.csv", curves)
         _write_curves_csv(diagnostics_dir / "reconstruction_metrics.csv", curves)
+        report_progress(
+            {
+                "state": "epoch_completed",
+                "epoch": int(epoch),
+                "train_n_jets": int(train_metrics["n_jets"]),
+                "model_val_n_jets": int(val_metrics["n_jets"]),
+                "model_val_selection_score": val_loss,
+            }
+        )
         if int(config.early_stop_patience) >= 0 and epochs_without_improvement > int(config.early_stop_patience):
             break
     checkpoint_path = output_dir / "best_model_val.pt"

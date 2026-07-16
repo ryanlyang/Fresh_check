@@ -6,6 +6,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scripts.fuse_adaptive_binary_pseudooffline import _detailed_metrics as fusion_metrics
+from scripts.predict_adaptive_binary_pseudooffline import (
+    _detailed_classifier_metrics as prediction_metrics,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
+    _detailed_eval_metrics as tagger_metrics,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -111,6 +118,21 @@ def test_primary_and_kd_objective_terms_are_not_silently_dropped() -> None:
     assert "offline_logit_kd" in kd.raw_terms
     assert "joint_reconstruction" not in kd.raw_terms
     assert kd.diagnostics["representation_kd_enabled"] is False
+
+
+def test_prediction_and_fusion_reports_include_full_ten_class_diagnostics() -> None:
+    labels = np.arange(40, dtype=np.int64) % 10
+    logits = np.full((40, 10), -2.0, dtype=np.float64)
+    logits[np.arange(40), labels] = 2.0
+    for metrics in (
+        prediction_metrics(logits, labels),
+        fusion_metrics(logits, labels),
+        tagger_metrics(logits, labels),
+    ):
+        assert metrics["accuracy"] == pytest.approx(1.0)
+        assert metrics["macro_ovr_auc"] == pytest.approx(1.0)
+        assert len(metrics["per_class_accuracy"]) == 10
+        assert np.asarray(metrics["confusion_matrix"]).shape == (10, 10)
 
 
 def _block(member: str, split: str, logits: np.ndarray, labels: np.ndarray) -> LogitPredictionBlock:
@@ -284,6 +306,30 @@ def _write_complete_campaign(root: Path) -> None:
         path = root / "runs" / name / "run_report.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report), encoding="utf-8")
+    diagnostic_path = root / "diagnostics" / "tagger_use_report.json"
+    diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+    diagnostic_path.write_text(
+        json.dumps(
+            {
+                "contract": "adaptive_binary_pseudooffline_tagger_diagnostics_v1",
+                "ok": True,
+                "selection_eligible": False,
+                "split": "model_val",
+                "variants": [
+                    "E5_kt32_mh4_dualcross",
+                    "E7_dual_hierarchy_dualcross",
+                ],
+                "rows": [
+                    {"variant": "E5_kt32_mh4_dualcross", "diagnostic": "unaltered"},
+                    {"variant": "E7_dual_hierarchy_dualcross", "diagnostic": "unaltered"},
+                ],
+                "final_test_loaded": False,
+                "offline_inputs_loaded": False,
+                "teacher_logits_loaded": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_full_campaign_report_checks_all_tiers_roots_and_frozen_membership(tmp_path: Path) -> None:

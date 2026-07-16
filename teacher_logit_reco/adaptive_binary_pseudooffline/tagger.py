@@ -8,7 +8,7 @@ HLT checkpoint exactly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -787,9 +787,13 @@ class BidirectionalFusionBlock(_ModuleBase):
         num_heads: int,
         dropout: float,
         rezero_init: float,
+        uncertainty_gates: bool = True,
+        update_pseudo_stream: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = int(num_heads)
+        self.uncertainty_gates = bool(uncertainty_gates)
+        self.update_pseudo_stream = bool(update_pseudo_stream)
         self.hlt_in = nn.Linear(particle_dim, fusion_dim)
         self.pseudo_in = nn.Linear(particle_dim, fusion_dim)
         self.hlt_attention = nn.MultiheadAttention(
@@ -836,10 +840,16 @@ class BidirectionalFusionBlock(_ModuleBase):
         scalar = torch.stack((mean_unc, mean_dis, mean_support, mean_depth), dim=-1)
         scalar = scalar[:, None].expand(-1, hlt_query.shape[1], -1)
         gate_input = torch.cat((hlt_query, attended, scalar, local_support.unsqueeze(-1)), dim=-1)
-        trust = torch.sigmoid(self.trust_gate(gate_input))
+        trust = (
+            torch.sigmoid(self.trust_gate(gate_input))
+            if self.uncertainty_gates
+            else torch.ones_like(attended)
+        )
         hlt_update = self.hlt_out(self.hlt_norm(attended * trust))
         hlt_tokens = hlt_state.tokens + self.hlt_rezero * hlt_update
         hlt_tokens = hlt_tokens * hlt_state.valid_mask.unsqueeze(-1).to(hlt_tokens.dtype)
+        if not self.update_pseudo_stream:
+            return replace(hlt_state, tokens=hlt_tokens), tuple(branches)
         updated_branches: list[_PseudoBranch] = []
         for branch in branches:
             batch, views, particles = branch.uncertainty.shape
@@ -872,6 +882,7 @@ class HierarchyAwareTaggerOutput:
     representation: Any
     baseline_representation: Any
     diagnostics: Mapping[str, Any]
+    auxiliary_logits: Mapping[str, Any] = field(default_factory=dict)
 
 
 class HierarchyAwareDualStreamTagger(_ModuleBase):
@@ -894,6 +905,11 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
         rezero_init: float = ABPH_PRIMARY_REZERO_INIT,
         dual_hierarchy: bool = False,
         independent_roots: bool = False,
+        fusion_kind: str = "bidirectional_dualcross",
+        use_hierarchy_memory: bool = True,
+        use_ancestor_injection: bool = True,
+        use_tree_bias: bool = True,
+        uncertainty_gates: bool = True,
     ) -> None:
         super().__init__()
         self.hlt_backbone = hlt_backbone
@@ -902,6 +918,11 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
         self.fusion_dim = int(fusion_dim)
         self.dual_hierarchy = bool(dual_hierarchy)
         self.independent_roots = bool(independent_roots)
+        self.fusion_kind = str(fusion_kind)
+        self.use_hierarchy_memory = bool(use_hierarchy_memory)
+        self.use_ancestor_injection = bool(use_ancestor_injection)
+        self.use_tree_bias = bool(use_tree_bias)
+        self.uncertainty_gates = bool(uncertainty_gates)
         self.view_dropout = float(view_dropout)
         if not 0.0 <= self.view_dropout < 1.0:
             raise ValueError("view_dropout must be in [0,1)")
@@ -912,8 +933,11 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
         if int(hlt_backbone.num_layers) != int(pseudo_backbone.num_layers):
             raise ValueError("HLT and pseudo ParT streams must share the locked layer count")
         locations = tuple(int(value) for value in fusion_locations)
-        if not locations or locations[-1] != int(hlt_backbone.num_layers):
-            raise ValueError("fusion locations must include the preclassification particle stage")
+        non_cross_kinds = {"pseudo_only", "untrained_logit_mean", "late_representation"}
+        if self.fusion_kind not in non_cross_kinds and not locations:
+            raise ValueError("cross-fusion variants require at least one fusion location")
+        if locations and locations[-1] > int(hlt_backbone.num_layers):
+            raise ValueError("fusion location exceeds the particle backbone depth")
         if tuple(sorted(set(locations))) != locations:
             raise ValueError("fusion locations must be unique and increasing")
         self.fusion_locations = locations
@@ -945,6 +969,8 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
                     num_heads=int(fusion_heads),
                     dropout=float(dropout),
                     rezero_init=float(rezero_init),
+                    uncertainty_gates=self.uncertainty_gates,
+                    update_pseudo_stream=(self.fusion_kind != "single_cross_attention"),
                 )
                 for _ in range(int(fusion_blocks_per_location))
             )
@@ -961,6 +987,13 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
         self.delta_logits = nn.Sequential(
             nn.LayerNorm(joint_dim), nn.Linear(joint_dim, self.num_classes), nn.Tanh()
         )
+        self.late_representation = nn.Sequential(
+            nn.LayerNorm(particle_dim * 2),
+            nn.Linear(particle_dim * 2, particle_dim * 2),
+            nn.GELU(),
+            nn.Linear(particle_dim * 2, particle_dim),
+        )
+        self.hierarchy_aux_classifier = nn.Linear(self.fusion_dim, self.num_classes)
         self.alpha = nn.Parameter(torch.tensor(float(rezero_init)))
         self.beta = nn.Parameter(torch.tensor(float(rezero_init)))
 
@@ -1029,12 +1062,16 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             root_override=root_override,
         )
         ancestors = derive_particle_ancestors(arrays[prefix + "group_indices"].long(), hierarchy)
-        injected = self.ancestor_injection(
-            state.tokens,
-            uncertainty.reshape(batch * views, particles),
-            state.valid_mask,
-            ancestors,
-            hierarchy,
+        injected = (
+            self.ancestor_injection(
+                state.tokens,
+                uncertainty.reshape(batch * views, particles),
+                state.valid_mask,
+                ancestors,
+                hierarchy,
+            )
+            if self.use_ancestor_injection
+            else state.tokens
         )
         return _PseudoBranch(
             name=hierarchy_name,
@@ -1086,6 +1123,8 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             supports.append(statistics[..., 1])
             depths.append(torch.full_like(disagreement, float(len(branch.hierarchy.levels))))
             geometric_masks.append(mask)
+            if not self.use_hierarchy_memory:
+                continue
             hierarchy_tokens, hierarchy_mask, hierarchy_disagreement = self.hierarchy_view_aggregator(
                 branch.hierarchy.tokens,
                 branch.hierarchy.mask,
@@ -1118,6 +1157,47 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             depth=torch.cat(depths, dim=1),
             geometric_mask=torch.cat(geometric_masks, dim=1),
         )
+
+    def _pseudo_classification(
+        self, branches: Sequence[_PseudoBranch]
+    ) -> tuple[Any, Any]:
+        representations = []
+        logits = []
+        for branch in branches:
+            aggregate, aggregate_mask, _, p4, _ = self._aggregate_branch(branch)
+            state = ParticleStageState(
+                tokens=aggregate,
+                valid_mask=aggregate_mask,
+                attention_bias=None,
+                four_vector=p4,
+            )
+            representation, branch_logits = self.pseudo_backbone.pool_and_classify(state)
+            representations.append(representation)
+            logits.append(branch_logits)
+        return torch.stack(representations, dim=0).mean(0), torch.stack(logits, dim=0).mean(0)
+
+    def _advance_pseudo_branches(
+        self,
+        branches: Sequence[_PseudoBranch],
+        start: int,
+        stop: int,
+    ) -> tuple[_PseudoBranch, ...]:
+        advanced = []
+        for branch in branches:
+            tree = None
+            if self.use_tree_bias:
+                tree = self.tree_bias(
+                    branch.ancestors.reshape(
+                        -1, branch.ancestors.shape[2], branch.ancestors.shape[3]
+                    ),
+                    branch.uncertainty.reshape(-1, branch.uncertainty.shape[2]),
+                    branch.state.valid_mask,
+                )
+            state = self.pseudo_backbone.run_layers(
+                branch.state, start, stop, extra_bias=tree
+            )
+            advanced.append(replace(branch, state=state))
+        return tuple(advanced)
 
     def _sample_view_keep(self, pseudo: PseudoViewInputs) -> Any:
         prior = pseudo.arrays["hypothesis_prior_log_prob"]
@@ -1159,7 +1239,8 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             return {
                 "shared_root": False,
                 "root_hashes": hashes,
-                "root_hash_count": len(set(hashes.values())),
+                "root_hash_count": len(hashes),
+                "unique_root_content_hash_count": len(set(hashes.values())),
             }
         if not compute_hashes:
             return {
@@ -1168,18 +1249,32 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
                 "root_hash_count": 1,
                 "hashes_deferred_during_training": True,
             }
+        branch_hashes: dict[str, str] = {}
+        for hierarchy_name in pseudo.hierarchy_names:
+            prefix = f"frontier__{hierarchy_name}__depth_00__"
+            branch_hashes[hierarchy_name] = _combined_tensor_sha256(
+                pseudo.arrays[prefix + "ledger"],
+                pseudo.arrays[prefix + "uncertainty"],
+                pseudo.arrays[prefix + "mask"],
+            )
         first_hierarchy = pseudo.hierarchy_names[0]
+        first_prefix = f"frontier__{first_hierarchy}__depth_00__"
+        first_ledger = pseudo.arrays[first_prefix + "ledger"]
+        shared_ledger = pseudo.arrays["shared_root_ledger"][
+            :, None, None, :
+        ].expand_as(first_ledger)
         root_hash = _combined_tensor_sha256(
-            pseudo.arrays["shared_root_ledger"],
-            pseudo.arrays[
-                f"frontier__{first_hierarchy}__depth_00__uncertainty"
-            ],
+            shared_ledger,
+            pseudo.arrays[first_prefix + "uncertainty"],
+            pseudo.arrays[first_prefix + "mask"],
         )
         return {
             "shared_root": True,
             "root_hash": root_hash,
-            "branch_root_hashes": {name: root_hash for name in pseudo.hierarchy_names},
-            "root_hash_count": 1,
+            "branch_root_hashes": branch_hashes,
+            "root_hash_count": len(set(branch_hashes.values())),
+            "unique_root_content_hash_count": len(set(branch_hashes.values())),
+            "branch_hashes_computed_independently": True,
         }
 
     def forward(
@@ -1209,6 +1304,7 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
                     "offline_inputs_loaded": False,
                     "teacher_logits_loaded": False,
                 },
+                auxiliary_logits={},
             )
         if isinstance(pseudo_views, DeployablePseudoViewBatch):
             pseudo = PseudoViewInputs.from_deployable_batch(
@@ -1245,31 +1341,64 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             )
             for index, name in enumerate(pseudo.hierarchy_names)
         )
+        if self.fusion_kind in {
+            "pseudo_only",
+            "untrained_logit_mean",
+            "late_representation",
+        }:
+            branches = self._advance_pseudo_branches(
+                branches, 0, self.pseudo_backbone.num_layers
+            )
+            pseudo_representation, pseudo_logits = self._pseudo_classification(branches)
+            if self.fusion_kind == "pseudo_only":
+                representation = pseudo_representation
+                logits = pseudo_logits
+            elif self.fusion_kind == "untrained_logit_mean":
+                representation = 0.5 * (base_representation + pseudo_representation)
+                logits = 0.5 * (baseline_logits + pseudo_logits)
+            else:
+                representation = self.late_representation(
+                    torch.cat((base_representation, pseudo_representation), dim=-1)
+                )
+                logits = self.hlt_backbone.classify(representation)
+            return HierarchyAwareTaggerOutput(
+                logits=logits,
+                baseline_logits=baseline_logits,
+                representation=representation,
+                baseline_representation=base_representation,
+                diagnostics={
+                    "contract": ABPH_HIERARCHY_TAGGER_CONTRACT,
+                    "hlt_only": False,
+                    "fusion_kind": self.fusion_kind,
+                    "hierarchy_names": list(pseudo.hierarchy_names),
+                    "offline_inputs_loaded": False,
+                    "teacher_logits_loaded": False,
+                    "root_provenance": root_provenance,
+                },
+                auxiliary_logits={"pseudo": pseudo_logits},
+            )
         fused_state = self.hlt_backbone.prepare(
             hlt_part["features"], hlt_part["lorentz_vectors"], hlt_part["mask"]
         )
         start = 0
         for location_index, stop in enumerate(self.fusion_locations):
             fused_state = self.hlt_backbone.run_layers(fused_state, start, stop)
-            advanced: list[_PseudoBranch] = []
-            for branch in branches:
-                tree = self.tree_bias(
-                    branch.ancestors.reshape(-1, branch.ancestors.shape[2], branch.ancestors.shape[3]),
-                    branch.uncertainty.reshape(-1, branch.uncertainty.shape[2]),
-                    branch.state.valid_mask,
-                )
-                state = self.pseudo_backbone.run_layers(
-                    branch.state, start, stop, extra_bias=tree
-                )
-                advanced.append(replace(branch, state=state))
-            branches = tuple(advanced)
+            branches = self._advance_pseudo_branches(branches, start, stop)
             for fusion in self.fusion_stacks[location_index]:
                 memory = self._cross_memory(branches)
                 fused_state, branches = fusion(fused_state, branches, memory)
             start = stop
+        if start < self.hlt_backbone.num_layers:
+            fused_state = self.hlt_backbone.run_layers(
+                fused_state, start, self.hlt_backbone.num_layers
+            )
+            branches = self._advance_pseudo_branches(
+                branches, start, self.pseudo_backbone.num_layers
+            )
         fused_representation, _ = self.hlt_backbone.pool_and_classify(fused_state)
         memory = self._cross_memory(branches)
         memory_representation = _masked_mean(memory.tokens, memory.mask, 1)
+        pseudo_representation, pseudo_logits = self._pseudo_classification(branches)
         joint = torch.cat(
             (base_representation, fused_representation, memory_representation), dim=-1
         )
@@ -1298,6 +1427,11 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             "alpha": float(self.alpha.detach().cpu()),
             "beta": float(self.beta.detach().cpu()),
             "root_provenance": root_provenance,
+            "fusion_kind": self.fusion_kind,
+            "hierarchy_memory": self.use_hierarchy_memory,
+            "ancestor_injection": self.use_ancestor_injection,
+            "tree_bias": self.use_tree_bias,
+            "uncertainty_gates": self.uncertainty_gates,
         }
         return HierarchyAwareTaggerOutput(
             logits=logits,
@@ -1305,6 +1439,10 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
             representation=representation,
             baseline_representation=base_representation,
             diagnostics=diagnostics,
+            auxiliary_logits={
+                "pseudo": pseudo_logits,
+                "hierarchy": self.hierarchy_aux_classifier(memory_representation),
+            },
         )
 
     def set_all_residual_scales(self, value: float) -> None:
@@ -1466,6 +1604,96 @@ def build_large_hierarchy_aware_tagger(
     )
 
 
+def build_variant_hierarchy_aware_tagger(
+    variant_name: str,
+    *,
+    num_classes: int = 10,
+    smoke: bool = False,
+) -> HierarchyAwareDualStreamTagger:
+    """Build the concrete E/F/G0/G1 architecture declared by the registry."""
+
+    from .variants import resolve_variant_config
+
+    resolved = resolve_variant_config(variant_name)
+    fusion = dict(resolved["model"]["fusion"])
+    run_id = str(resolved["variant"]["run_id"])
+    kind = str(fusion.get("kind", "bidirectional_dualcross"))
+    if run_id == "E0":
+        runtime_kind = "pseudo_only"
+    elif kind in {"untrained_logit_mean", "late_representation"}:
+        runtime_kind = kind
+    elif kind == "single_cross_attention":
+        runtime_kind = kind
+    else:
+        runtime_kind = "bidirectional_dualcross"
+    if smoke:
+        hlt_backbone = NativeStagewiseParticleTransformer(
+            input_dim=17,
+            model_dim=32,
+            num_layers=12,
+            num_heads=4,
+            num_classes=num_classes,
+        )
+        pseudo_backbone = NativeStagewiseParticleTransformer(
+            input_dim=17,
+            model_dim=32,
+            num_layers=12,
+            num_heads=4,
+            num_classes=num_classes,
+        )
+        fusion_dim = 32
+        fusion_heads = 4
+        aggregator_blocks = 1
+    else:
+        from jetclass_fresh.hlt_baseline import build_particle_transformer_classifier
+
+        hlt = build_particle_transformer_classifier(
+            num_classes=num_classes, model_size="large"
+        )
+        pseudo = build_particle_transformer_classifier(
+            num_classes=num_classes, model_size="large"
+        )
+        hlt_backbone = WeaverStagewiseParticleTransformer(hlt)
+        pseudo_backbone = WeaverStagewiseParticleTransformer(pseudo)
+        fusion_dim = 256
+        fusion_heads = 8
+        aggregator_blocks = int(
+            resolved["model"]["hierarchy_modules"]["view_aggregator_blocks"]
+        )
+    locations = tuple(
+        int(hlt_backbone.num_layers) if value == "preclassification" else int(value)
+        for value in fusion.get("locations", ())
+    )
+    if runtime_kind in {"pseudo_only", "untrained_logit_mean", "late_representation"}:
+        locations = ()
+    rezero = fusion.get("rezero_init", ABPH_PRIMARY_REZERO_INIT)
+    if rezero is None:
+        rezero = 1.0
+    hierarchy_memory = bool(fusion.get("hierarchy_memory", True))
+    use_hierarchy_structure = hierarchy_memory
+    return HierarchyAwareDualStreamTagger(
+        hlt_backbone=hlt_backbone,
+        pseudo_backbone=pseudo_backbone,
+        num_classes=num_classes,
+        fusion_dim=fusion_dim,
+        fusion_heads=fusion_heads,
+        fusion_blocks_per_location=int(fusion.get("blocks_per_location", 2)),
+        fusion_locations=locations,
+        view_aggregator_blocks=aggregator_blocks,
+        view_dropout=0.15,
+        hypothesis_latent_dim=64,
+        dropout=(0.0 if smoke else 0.1),
+        rezero_init=float(rezero),
+        dual_hierarchy=bool(fusion.get("dual_hierarchy", False)),
+        independent_roots=(run_id == "E11"),
+        fusion_kind=runtime_kind,
+        use_hierarchy_memory=hierarchy_memory,
+        use_ancestor_injection=use_hierarchy_structure,
+        use_tree_bias=use_hierarchy_structure,
+        uncertainty_gates=bool(fusion.get("uncertainty_gates", True)),
+    )
+
+
 __all__ = [
     "ABPH_HIERARCHY_TAGGER_CONTRACT",
     "ABPH_PRIMARY_FUSION_LOCATIONS",
@@ -1479,6 +1707,7 @@ __all__ = [
     "TreeRelationBias",
     "WeaverStagewiseParticleTransformer",
     "build_large_hierarchy_aware_tagger",
+    "build_variant_hierarchy_aware_tagger",
     "derive_particle_ancestors",
     "load_dual_stream_warm_starts",
 ]

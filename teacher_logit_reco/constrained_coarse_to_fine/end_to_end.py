@@ -937,6 +937,7 @@ def compute_end_to_end_loss(
                 ParticleSlotLossConfig(
                     matching_mode=str(reconstructor_output.slots.diagnostics["matching_mode"])
                 ),
+                return_assignments=False,
             )
             reconstruction = hierarchy_loss.loss + float(config.reconstruction_slot_weight) * slot_loss.loss
             reconstruction_rows.append(reconstruction)

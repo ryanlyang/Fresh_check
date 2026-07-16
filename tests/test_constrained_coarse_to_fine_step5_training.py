@@ -245,6 +245,17 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "direct particle decoding"):
             CoarseToFineTrainConfig(**base, variant="C5", direct_particle_decoding=True, amp=False)
 
+    def test_config_requires_positive_progress_heartbeat_interval(self):
+        base = dict(
+            output_dir="out",
+            manifest_path="manifest.json.gz",
+            hlt_cache_dir="hlt",
+            offline_cache_dir="offline",
+            target_cache_dir="targets",
+        )
+        with self.assertRaisesRegex(ValueError, "progress_interval_batches"):
+            CoarseToFineTrainConfig(**base, progress_interval_batches=0)
+
     def test_full_precision_is_the_default_and_amp_is_explicit(self):
         base = dict(
             output_dir="out",

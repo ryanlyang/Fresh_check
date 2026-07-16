@@ -150,6 +150,7 @@ from .particle_renderer import (
     project_n_body_phase_space,
 )
 from .particle_matching import (
+    compute_global_particle_matching_loss,
     ABPH_PARTICLE_MATCHING_CONTRACT,
     LocalParticleAssignment,
     ParticleAuxiliaryLossOutput,
@@ -193,6 +194,7 @@ from .tagger import (
     TreeRelationBias,
     WeaverStagewiseParticleTransformer,
     build_large_hierarchy_aware_tagger,
+    build_variant_hierarchy_aware_tagger,
     derive_particle_ancestors,
     load_dual_stream_warm_starts,
 )
@@ -289,6 +291,16 @@ from .training import (
     load_reconstructor_curriculum_checkpoint,
     train_reconstructor_curriculum,
 )
+from .production import (
+    AdaptiveBinaryReconstructionOutput,
+    AdaptiveBinaryReconstructorModel,
+    AdaptiveBinaryTargetBatchSource,
+    build_shared_root_dual_reconstructor,
+    load_selected_reconstructor,
+    package_trainable_pseudo_views,
+    reconstructor_runtime_provenance,
+    reconstructor_step,
+)
 from .inputs import (
     ABPH_HLT_ONLY_DATASET_CONTRACT,
     ABPH_INPUT_AUDIT_CONTRACT,
@@ -300,6 +312,11 @@ from .inputs import (
     validate_manifest_contract,
     validate_offline_view_contract,
     write_input_audit_report,
+)
+from .tagger_runtime import (
+    FrozenPseudoBatch,
+    FrozenPseudoBatchSource,
+    train_tagger_variant,
 )
 from .root_compiler import (
     ABPH_EFFECTIVE_MASS_GEV,
@@ -508,6 +525,7 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "compute_binary_accounting_losses",
     "compute_distribution_losses",
     "compute_local_particle_matching_loss",
+    "compute_global_particle_matching_loss",
     "compute_particle_auxiliary_losses",
     "compute_particle_observables",
     "conditional_distribution_weight",
@@ -554,6 +572,9 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "support_from_ledger",
     "variant_spec",
     "write_input_audit_report",
+    "FrozenPseudoBatch",
+    "FrozenPseudoBatchSource",
+    "train_tagger_variant",
     "require_adaptive_binary_target_invariants",
     "require_accounting_state",
     "synthetic_edge_case_preflight",
@@ -583,6 +604,14 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "evaluate_reconstructor_rollout",
     "load_reconstructor_curriculum_checkpoint",
     "train_reconstructor_curriculum",
+    "AdaptiveBinaryReconstructionOutput",
+    "AdaptiveBinaryReconstructorModel",
+    "AdaptiveBinaryTargetBatchSource",
+    "build_shared_root_dual_reconstructor",
+    "load_selected_reconstructor",
+    "package_trainable_pseudo_views",
+    "reconstructor_runtime_provenance",
+    "reconstructor_step",
     "DeployableHLTBatch",
     "DeployableHLTBatchSource",
     "DeployablePredictor",
@@ -609,6 +638,7 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "TreeRelationBias",
     "WeaverStagewiseParticleTransformer",
     "build_large_hierarchy_aware_tagger",
+    "build_variant_hierarchy_aware_tagger",
     "derive_particle_ancestors",
     "load_dual_stream_warm_starts",
     "TaggingObjectiveConfig",

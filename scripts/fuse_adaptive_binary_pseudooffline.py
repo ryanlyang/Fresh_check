@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from jetclass_fresh.jetclass_data import LABEL_NAMES  # noqa: E402
+
 from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     ABPH_FUSION_CANDIDATES,
     LogitPredictionBlock,
@@ -100,6 +102,75 @@ def _accuracy(logits: np.ndarray, labels: np.ndarray) -> float:
     return float((logits.argmax(axis=1) == labels).mean())
 
 
+def _binary_auc(scores: np.ndarray, positive: np.ndarray) -> float | None:
+    values = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(positive, dtype=bool)
+    positives = int(labels.sum())
+    negatives = int((~labels).sum())
+    if positives == 0 or negatives == 0:
+        return None
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    ranks = np.empty(values.shape[0], dtype=np.float64)
+    start = 0
+    while start < values.shape[0]:
+        stop = start + 1
+        while stop < values.shape[0] and sorted_values[stop] == sorted_values[start]:
+            stop += 1
+        ranks[order[start:stop]] = 0.5 * (start + stop - 1) + 1.0
+        start = stop
+    return float(
+        (ranks[labels].sum() - positives * (positives + 1) / 2.0)
+        / (positives * negatives)
+    )
+
+
+def _detailed_metrics(logits: np.ndarray, labels: np.ndarray) -> dict[str, Any]:
+    values = np.asarray(logits, dtype=np.float64)
+    truth = np.asarray(labels, dtype=np.int64)
+    shifted = values - values.max(axis=1, keepdims=True)
+    probabilities = np.exp(shifted)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    predictions = probabilities.argmax(axis=1)
+    classes = int(values.shape[1])
+    confusion = np.zeros((classes, classes), dtype=np.int64)
+    np.add.at(confusion, (truth, predictions), 1)
+    rows = []
+    aucs = []
+    for class_index in range(classes):
+        support = int(confusion[class_index].sum())
+        auc = _binary_auc(probabilities[:, class_index], truth == class_index)
+        if auc is not None:
+            aucs.append(auc)
+        rows.append(
+            {
+                "class_index": class_index,
+                "class_name": LABEL_NAMES[class_index] if class_index < len(LABEL_NAMES) else str(class_index),
+                "support": support,
+                "accuracy": (
+                    float(confusion[class_index, class_index] / support)
+                    if support
+                    else None
+                ),
+                "ovr_auc": auc,
+            }
+        )
+    return {
+        "available": True,
+        "accuracy": _accuracy(values, truth),
+        "loss": _cross_entropy(values, truth),
+        "cross_entropy": _cross_entropy(values, truth),
+        "macro_ovr_auc": float(np.mean(aucs)) if aucs else None,
+        "macro_per_class_accuracy": float(
+            np.mean([row["accuracy"] for row in rows if row["accuracy"] is not None])
+        ),
+        "per_class": rows,
+        "per_class_accuracy": rows,
+        "confusion_matrix": confusion.tolist(),
+        "n_jets": int(truth.shape[0]),
+    }
+
+
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -141,12 +212,7 @@ def _fit(root: Path, variant: str, supplied: Sequence[str]) -> dict[str, Any]:
         "source_git_commit": provenance.get("source_git_commit", "unknown"),
         "source_status_hash": provenance.get("source_status_hash", "unknown"),
         "metrics": {
-            "stack_val": {
-                "available": True,
-                "accuracy": _accuracy(fused, labels),
-                "cross_entropy": _cross_entropy(fused, labels),
-                "n_jets": int(labels.shape[0]),
-            }
+            "stack_val": _detailed_metrics(fused, labels)
         },
         "provenance": {"stack_val": provenance},
         "fusion": {
@@ -181,10 +247,7 @@ def _apply(root: Path, variant: str, split: str, artifact_path: Path) -> dict[st
     report = dict(_json(report_path))
     metrics = dict(report.get("metrics", {}))
     metrics[split] = {
-        "available": True,
-        "accuracy": _accuracy(logits, labels),
-        "cross_entropy": _cross_entropy(logits, labels),
-        "n_jets": int(labels.shape[0]),
+        **_detailed_metrics(logits, labels),
         "diagnostics": {
             "offline_inputs_loaded": False,
             "teacher_logits_loaded": False,

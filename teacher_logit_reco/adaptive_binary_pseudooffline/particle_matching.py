@@ -453,6 +453,117 @@ def compute_local_particle_matching_loss(
     )
 
 
+def compute_global_particle_matching_loss(
+    rendered: RenderedParticleBatch,
+    target_particle_features: Any,
+    target_particle_mask: Any,
+    *,
+    config: ParticleMatchingConfig | None = None,
+) -> ParticleMatchingLossOutput:
+    """D3 control: match complete predicted and offline sets without group locality."""
+
+    torch = require_torch()
+    resolved = config or ParticleMatchingConfig()
+    targets = torch.as_tensor(
+        target_particle_features,
+        device=rendered.four_vector.device,
+        dtype=rendered.four_vector.dtype,
+    )
+    target_valid = torch.as_tensor(
+        target_particle_mask, device=rendered.four_vector.device
+    ).bool()
+    assignments = []
+    real_terms = []
+    sink_terms = []
+    source_terms = []
+    component_totals: dict[str, list[Any]] = {}
+    methods = {"hungarian": 0, "unbalanced_ot": 0}
+    for batch_index in range(rendered.mask.shape[0]):
+        pred_indices = torch.nonzero(rendered.mask[batch_index], as_tuple=False).flatten()
+        target_indices = torch.nonzero(target_valid[batch_index], as_tuple=False).flatten()
+        if not int(pred_indices.numel()) or not int(target_indices.numel()):
+            raise ValueError("global particle matching requires nonempty predicted and target sets")
+        cost, components = pairwise_particle_cost(
+            rendered,
+            batch_index,
+            pred_indices,
+            targets[batch_index, target_indices],
+            resolved,
+        )
+        if int(pred_indices.numel()) == int(target_indices.numel()):
+            columns = _minimum_cost_square_assignment(cost)
+            transport = torch.zeros_like(cost)
+            transport[torch.arange(pred_indices.numel(), device=cost.device), columns] = 1.0
+            to_null = torch.zeros(pred_indices.numel(), device=cost.device, dtype=cost.dtype)
+            from_null = torch.zeros(target_indices.numel(), device=cost.device, dtype=cost.dtype)
+            method = "hungarian"
+        else:
+            transport, to_null, from_null = _log_sinkhorn_with_nulls(
+                cost,
+                torch.ones(pred_indices.numel(), device=cost.device, dtype=cost.dtype),
+                torch.ones(target_indices.numel(), device=cost.device, dtype=cost.dtype),
+                epsilon=resolved.sinkhorn_epsilon,
+                iterations=resolved.sinkhorn_iterations,
+                null_cost=resolved.null_sink_cost,
+            )
+            method = "unbalanced_ot"
+        normalization = float(max(int(target_indices.numel()), 1))
+        real_terms.append((transport * cost).sum() / normalization)
+        sink_terms.append(float(resolved.null_sink_cost) * to_null.sum() / normalization)
+        source_terms.append(float(resolved.null_sink_cost) * from_null.sum() / normalization)
+        for name, values in components.items():
+            component_totals.setdefault(name, []).append(
+                _weighted_component_mean(values, transport, cost.new_tensor(normalization))
+            )
+        methods[method] += 1
+        assignments.append(
+            LocalParticleAssignment(
+                batch_index=batch_index,
+                group_index=-1,
+                method=method,
+                predicted_slot_indices=pred_indices,
+                target_particle_indices=target_indices,
+                transport=transport,
+                source_to_null=to_null,
+                null_to_target=from_null,
+                diagnostics={
+                    "group_local_only": False,
+                    "global_set_control": True,
+                    "predicted_slots": int(pred_indices.numel()),
+                    "target_particles": int(target_indices.numel()),
+                },
+            )
+        )
+    real_loss = torch.stack(real_terms).mean()
+    null_sink = torch.stack(sink_terms).mean()
+    null_source = torch.stack(source_terms).mean()
+    total = real_loss + null_sink + null_source
+    if not bool(torch.isfinite(total)):
+        raise FloatingPointError("nonfinite global particle matching loss")
+    return ParticleMatchingLossOutput(
+        total=total,
+        real_particle_loss=real_loss,
+        null_sink_penalty=null_sink,
+        null_source_penalty=null_source,
+        component_losses={
+            name: torch.stack(values).mean() for name, values in component_totals.items()
+        },
+        assignments=tuple(assignments),
+        diagnostics={
+            "contract": ABPH_PARTICLE_MATCHING_CONTRACT,
+            "method_counts": methods,
+            "group_count": len(assignments),
+            "cross_group_assignments": "allowed",
+            "matching_crosses_group_boundaries": True,
+            "teacher_forced_topology_used": False,
+            "weighted_targets_use_unbalanced_ot": True,
+            "ordinary_targets_use_hungarian": True,
+            "global_set_control": True,
+            "config": resolved.to_dict(),
+        },
+    )
+
+
 def compute_particle_observables(rendered: RenderedParticleBatch) -> Mapping[str, Any]:
     """Differentiable jet/set summaries used for auxiliary losses and reports."""
 
@@ -759,6 +870,7 @@ __all__ = [
     "ParticleAuxiliaryLossWeights",
     "compute_particle_auxiliary_losses",
     "compute_local_particle_matching_loss",
+    "compute_global_particle_matching_loss",
     "compute_particle_observables",
     "pairwise_particle_cost",
 ]

@@ -47,6 +47,7 @@ esac
 : "${CONSTRAINED_C2F_RECO_BATCH_SIZE:=}"
 : "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE:=}"
 : "${CONSTRAINED_C2F_RECO_NUM_WORKERS:=4}"
+: "${CONSTRAINED_C2F_RECO_PROGRESS_INTERVAL_BATCHES:=100}"
 : "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT:=0}"
 : "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS:=}"
@@ -114,6 +115,7 @@ cmd=(
   --batch-size "${CONSTRAINED_C2F_RECO_BATCH_SIZE}"
   --eval-batch-size "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE}"
   --num-workers "${CONSTRAINED_C2F_RECO_NUM_WORKERS}"
+  --progress-interval-batches "${CONSTRAINED_C2F_RECO_PROGRESS_INTERVAL_BATCHES}"
   --device "${DEVICE}"
 )
 if fresh_bool_enabled "${unconstrained_slot_accounting}"; then cmd+=(--unconstrained-slot-accounting); fi

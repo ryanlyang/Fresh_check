@@ -45,6 +45,10 @@ class HLTBaselineTrainConfig:
     epochs: int = 20
     lr: float = 1.0e-3
     weight_decay: float = 1.0e-4
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    lr_schedule: str = "constant"
+    cosine_eta_min: float = 0.0
     num_workers: int = 0
     device: str = "auto"
     amp: bool = True
@@ -300,6 +304,7 @@ def run_epoch(
     amp: bool = False,
     grad_clip_norm: float = 0.0,
     max_batches: int | None = None,
+    scheduler=None,
 ) -> Dict[str, float]:
     """Train or evaluate one epoch depending on whether optimizer is supplied."""
 
@@ -372,6 +377,8 @@ def run_epoch(
                             optimizer.zero_grad(set_to_none=True)
                             continue
                     optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
 
             batch_size = int(batch["labels"].numel())
             total_loss += float(loss.detach().item()) * batch_size
@@ -470,7 +477,26 @@ def train_hlt_baseline(
         model = torch.compile(model)
 
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.lr), weight_decay=float(config.weight_decay))
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(config.lr),
+        betas=(float(config.adam_beta1), float(config.adam_beta2)),
+        weight_decay=float(config.weight_decay),
+    )
+    if config.lr_schedule not in {"constant", "cosine_per_update"}:
+        raise ValueError(f"unknown HLT learning-rate schedule {config.lr_schedule!r}")
+    steps_per_epoch = len(train_loader)
+    if config.max_train_batches is not None:
+        steps_per_epoch = min(steps_per_epoch, int(config.max_train_batches))
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, int(config.epochs) * max(1, int(steps_per_epoch))),
+            eta_min=float(config.cosine_eta_min),
+        )
+        if config.lr_schedule == "cosine_per_update"
+        else None
+    )
     scaler = amp_grad_scaler(bool(config.amp and device.type == "cuda"))
 
     run_metadata = {
@@ -502,6 +528,7 @@ def train_hlt_baseline(
             amp=config.amp,
             grad_clip_norm=config.grad_clip_norm,
             max_batches=config.max_train_batches,
+            scheduler=scheduler,
         )
         val_metrics = run_epoch(
             model,

@@ -326,8 +326,15 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
             dependencies=("A0_hlt_part",),
         ),
         _spec(
-            "A2", "A2_hlt_capacity_control", "parameter-matched HLT-only capacity control",
-            _deep_merge(hlt_only, {"model": {"hlt_part": {"capacity_match_target": "E5_excluding_frozen_reconstructor"}}}),
+            "A2", "A2_hlt_capacity_control", "predeclared deep HLT-only capacity proxy",
+            _deep_merge(hlt_only, {"model": {"hlt_part": {
+                "embed_dims": [256, 1024, 256],
+                "pair_embed_dims": [128, 128, 128],
+                "num_heads": 8,
+                "num_layers": 20,
+                "num_cls_layers": 5,
+                "capacity_control_kind": "predeclared_deep_single_stream_proxy",
+            }}}),
         ),
         _spec(
             "A3", "A3_hlt_from_scratch", "large HLT ParT from scratch",
@@ -350,19 +357,23 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
         _spec("B0", "B0_pooled_mlp_root", "pooled MLP root predictor", {
             "model": {"root_predictor": {"kind": "pooled_mlp", "query_blocks": 0}},
             "evaluation": {"final_test_eligible": False},
-        }),
+        }, dependencies=("A0_hlt_part",)),
         _spec("B1", "B1_semantic_query_root", "deterministic semantic-query root", {
             "model": {"root_predictor": {"kind": "semantic_query_deterministic"}, "distribution": {"enabled": False}},
             "evaluation": {"final_test_eligible": False},
-        }),
+        }, dependencies=("A0_hlt_part",)),
         _spec("B2", "B2_semantic_query_probabilistic", "probabilistic semantic-query root", {
             "model": {"root_predictor": {"kind": "semantic_query_probabilistic"}},
             "evaluation": {"final_test_eligible": False},
-        }, primary=True),
-        _spec("B3", "B3_root_sampled_ablation", "sampled-root ablation", {
-            "model": {"distribution": {"enabled": True, "sample_root": True, "shared_compiled_root": False}},
-            "evaluation": {"diagnostic_only": True, "final_test_eligible": False},
-        }),
+        }, dependencies=("A0_hlt_part",), primary=True),
+        _spec("B3", "B3_root_sampled_ablation", "sampled-root calibration diagnostic", {
+            "model": {"distribution": {"enabled": False, "sample_root": True, "shared_compiled_root": False}},
+            "evaluation": {
+                "diagnostic_only": True,
+                "final_test_eligible": False,
+                "sampled_root_downstream_rollout": False,
+            },
+        }, dependencies=("B2_semantic_query_probabilistic",)),
         _spec("B4", "B4_oracle_root_diagnostic", "oracle root diagnostic", _deep_merge({
             "data": {"input_view": "hlt_plus_oracle_root", "requires_offline_targets": True},
             "model": {"root_predictor": {"kind": "oracle_root"}},
@@ -370,28 +381,32 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
         _spec("C0", "C0_direct_8_group_set", "direct eight-group set", {
             "model": {"hierarchy": {"kind": "direct_set", "capacities": [8]}},
             "evaluation": {"final_test_eligible": False},
-        }),
-        _spec("C1", "C1_kt_2", "exclusive-kT hierarchy capacity 2", {"model": {"hierarchy": {"capacities": [2]}}, "evaluation": {"final_test_eligible": False}}),
-        _spec("C2", "C2_kt_4", "exclusive-kT hierarchy capacity 4", {"model": {"hierarchy": {"capacities": [2, 4]}}, "evaluation": {"final_test_eligible": False}}),
-        _spec("C3", "C3_kt_8", "exclusive-kT hierarchy capacity 8", {"model": {"hierarchy": {"capacities": [2, 4, 8]}}, "evaluation": {"final_test_eligible": False}}),
-        _spec("C4", "C4_kt_16", "exclusive-kT hierarchy capacity 16", {"model": {"hierarchy": {"capacities": [2, 4, 8, 16]}}, "evaluation": {"final_test_eligible": False}}),
-        _spec("C5", "C5_kt_32", "primary exclusive-kT hierarchy capacity 32", {"evaluation": {"final_test_eligible": False}}, primary=True),
+        }, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C1", "C1_kt_2", "exclusive-kT hierarchy capacity 2", {"model": {"hierarchy": {"capacities": [2]}}, "evaluation": {"final_test_eligible": False}}, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C2", "C2_kt_4", "exclusive-kT hierarchy capacity 4", {"model": {"hierarchy": {"capacities": [2, 4]}}, "evaluation": {"final_test_eligible": False}}, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C3", "C3_kt_8", "exclusive-kT hierarchy capacity 8", {"model": {"hierarchy": {"capacities": [2, 4, 8]}}, "evaluation": {"final_test_eligible": False}}, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C4", "C4_kt_16", "exclusive-kT hierarchy capacity 16", {"model": {"hierarchy": {"capacities": [2, 4, 8, 16]}}, "evaluation": {"final_test_eligible": False}}, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C5", "C5_kt_32", "primary exclusive-kT hierarchy capacity 32", {"evaluation": {"final_test_eligible": False}}, dependencies=("B2_semantic_query_probabilistic",), primary=True),
         _spec("C6", "C6_ca_32", "C/A hierarchy capacity 32", {
             "model": {"hierarchy": {"grouping": "cambridge_aachen", "grouping_power": 0}},
             "evaluation": {"final_test_eligible": False},
-        }),
+        }, dependencies=("B2_semantic_query_probabilistic",)),
         _spec("C7", "C7_shared_level_weights", "shared hierarchy-level weights", {
             "model": {"hierarchy": {"level_specific_weights": False}},
             "evaluation": {"diagnostic_only": True, "final_test_eligible": False},
-        }),
-        _spec("C8", "C8_unconstrained_split_control", "unconstrained split control", {
-            "model": {"hierarchy": {"constrained": False}},
+        }, dependencies=("B2_semantic_query_probabilistic",)),
+        _spec("C8", "C8_unconstrained_split_control", "unconstrained child-head loss diagnostic", {
+            "model": {"hierarchy": {
+                "constrained": False,
+                "unconstrained_auxiliary_heads": True,
+                "deployment_rollout_remains_constrained": True,
+            }},
             "evaluation": {"deployable": False, "diagnostic_only": True, "final_test_eligible": False},
-        }),
+        }, dependencies=("B2_semantic_query_probabilistic",)),
         _spec("C9", "C9_oracle_parent_rollout", "oracle-parent rollout diagnostic", _deep_merge({
             "data": {"input_view": "hlt_plus_oracle_parents", "requires_offline_targets": True},
             "model": {"hierarchy": {"oracle_parent_rollout": True}},
-        }, oracle_eval)),
+        }, oracle_eval), dependencies=("B2_semantic_query_probabilistic",)),
         _spec("D0", "D0_kt32_mean_particles", "deterministic kT32 particle renderer", {
             "model": {"distribution": {"enabled": False, "mean_views": 1, "stochastic_views": 0}},
             "evaluation": {"final_test_eligible": False},
@@ -406,19 +421,22 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
         _spec("D3", "D3_global_particle_set", "global particle set decoder", {
             "model": {"renderer": {"kind": "global_set", "local_matching": False}},
             "evaluation": {"diagnostic_only": True, "final_test_eligible": False},
-        }),
+        }, dependencies=("C5_kt_32",)),
         _spec("D4", "D4_no_nbody_projection", "renderer without N-body projection", {
             "model": {"renderer": {"exact_nbody_projection": False}},
             "evaluation": {"deployable": False, "diagnostic_only": True, "final_test_eligible": False},
-        }),
+        }, dependencies=("C5_kt_32",)),
         _spec("D5", "D5_oracle_groups_particles", "oracle L5 group renderer", _deep_merge({
             "data": {"input_view": "hlt_plus_oracle_l5", "requires_offline_targets": True},
-            "model": {"renderer": {"oracle_groups": True}},
-        }, oracle_eval)),
+            "model": {
+                "renderer": {"oracle_groups": True},
+                "distribution": {"enabled": False, "stochastic_views": 0},
+            },
+        }, oracle_eval), dependencies=("C5_kt_32",)),
         _spec("D6", "D6_true_offline_particles", "true offline particle architecture ceiling", _deep_merge({
             "data": {"input_view": "hlt_plus_offline_particles", "requires_offline_targets": True},
             "model": {"renderer": {"kind": "oracle_offline_particles"}},
-        }, oracle_eval)),
+        }, oracle_eval), dependencies=("A4_offline_part_ceiling", "D1_kt32_mh4_particles")),
         _spec("E0", "E0_pseudo_only", "pseudo-particle-only ParT", {
             "model": {"hlt_part": {"enabled": False}, "fusion": {"enabled": False}},
         }, dependencies=("D1_kt32_mh4_particles",)),
@@ -429,10 +447,10 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
             "model": {"fusion": {"kind": "late_representation", "locations": ["preclassification"]}},
         }),
         _spec("E3", "E3_single_cross_attention", "single cross-attention fusion", {
-            "model": {"fusion": {"kind": "single_cross_attention", "locations": [8], "hierarchy_memory": False}},
+            "model": {"fusion": {"kind": "single_cross_attention", "locations": [8], "blocks_per_location": 1, "hierarchy_memory": False}},
         }),
         _spec("E4", "E4_hierarchy_memory_fusion", "single cross-attention plus hierarchy memory", {
-            "model": {"fusion": {"kind": "single_cross_attention", "locations": [8], "hierarchy_memory": True}},
+            "model": {"fusion": {"kind": "single_cross_attention", "locations": [8], "blocks_per_location": 1, "hierarchy_memory": True}},
         }),
         _spec("E5", "E5_kt32_mh4_dualcross", "primary kT32 dual-cross tagger", {}, dependencies=("A0_hlt_part", "D1_kt32_mh4_particles"), primary=True),
         _spec("E6", "E6_ca32_mh4_dualcross", "C/A dual-cross tagger", {
@@ -464,7 +482,15 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
             },
             "evaluation": {"deployable": False, "diagnostic_only": True, "final_test_eligible": False},
         }),
-        _spec("F0", "F0_ce_reco_primary", "primary CE plus maintained reconstruction", {}, dependencies=("E5_kt32_mh4_dualcross",), primary=True),
+        _spec("F0", "F0_ce_reco_primary", "primary dual-hierarchy CE plus maintained reconstruction", {
+            "model": {
+                "fusion": {
+                    "dual_hierarchy": True,
+                    "view_types": ["exclusive_kt", "cambridge_aachen"],
+                },
+                "root_predictor": {"shared_across_hierarchies": True},
+            },
+        }, dependencies=("E7_dual_hierarchy_dualcross",), primary=True),
         _spec("F1", "F1_ce_only_frozen_reconstructor", "CE-only frozen reconstructor", {
             "training": {"schedule": "frozen_reconstructor", "objective": {"joint_reconstruction": 0.0}},
         }),
@@ -582,6 +608,13 @@ def resolve_variant_config(value: str) -> dict[str, Any]:
 
     spec = variant_spec(value)
     payload = _deep_merge(_base_config(), spec.overrides)
+    if spec.tier in {"E", "G"}:
+        # E-tier and neural G0/G1 runs consume a selected frozen
+        # reconstructor. Maintained reconstruction is introduced only by the
+        # explicit F-tier joint-training recipes.
+        payload["training"]["objective"]["joint_reconstruction"] = 0.0
+    if spec.run_id == "E0":
+        payload["training"]["objective"]["hlt_anchor_ce"] = 0.0
     payload["variant"] = {
         "contract": ABPH_VARIANT_REGISTRY_CONTRACT,
         "run_id": spec.run_id,

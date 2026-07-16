@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-val-jets", type=int, default=None)
     parser.add_argument("--max-stack-val-jets", type=int, default=None)
     parser.add_argument("--no-save-last-checkpoint", action="store_true")
+    parser.add_argument(
+        "--progress-interval-batches",
+        type=int,
+        default=100,
+        help="Write training_progress.json and a log heartbeat every N finite batches.",
+    )
     parser.add_argument("--d-model", type=int, default=256)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--encoder-layers", type=int, default=8)

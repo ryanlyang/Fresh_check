@@ -9,13 +9,14 @@ per-particle; it does not require one-to-one HLT/offline particle matching.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from jetclass_fresh.hlt_cache import hash_arrays, jet_identity_hash, load_cached_hlt_view
+from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view
 from jetclass_fresh.jetclass_data import JetIdentity, LABEL_NAMES, load_split_manifest, manifest_hash
 from teacher_logit_reco.architecture_view_part import load_cached_offline_view
 
@@ -358,16 +359,55 @@ def compute_local_particle_residual_fields(
     return output, hlt_mask.copy(), field_names, field_groups, diagnostics
 
 
+def _hash_update_array_chunked(
+    hasher: "hashlib._Hash",
+    name: str,
+    array: np.ndarray,
+    *,
+    dtype: np.dtype,
+    max_chunk_bytes: int = 64 * 1024 * 1024,
+) -> None:
+    """Update a hash with the same wire format as ``hash_arrays`` without a full cast copy."""
+
+    arr = np.asarray(array)
+    target_dtype = np.dtype(dtype)
+    hasher.update(str(name).encode("utf-8"))
+    hasher.update(str(target_dtype).encode("utf-8"))
+    hasher.update(json.dumps(arr.shape).encode("utf-8"))
+    if arr.size == 0:
+        return
+    if arr.ndim == 0:
+        hasher.update(np.ascontiguousarray(arr, dtype=target_dtype).tobytes())
+        return
+    row_items = int(np.prod(arr.shape[1:], dtype=np.int64)) if arr.ndim > 1 else 1
+    row_bytes = max(1, row_items * int(target_dtype.itemsize))
+    rows_per_chunk = max(1, int(max_chunk_bytes // row_bytes))
+    for start in range(0, int(arr.shape[0]), rows_per_chunk):
+        stop = min(start + rows_per_chunk, int(arr.shape[0]))
+        hasher.update(np.ascontiguousarray(arr[start:stop], dtype=target_dtype).tobytes())
+
+
 def _content_hash(arrays: Mapping[str, np.ndarray]) -> str:
-    return hash_arrays(
-        {
-            "target_fields": np.asarray(arrays["target_fields"], dtype=np.float32),
-            "target_mask": np.asarray(arrays["target_mask"], dtype=bool),
-            "labels": np.asarray(arrays["labels"], dtype=np.int64),
-            "jet_file_indices": np.asarray(arrays["jet_file_indices"], dtype=np.int32),
-            "jet_entries": np.asarray(arrays["jet_entries"], dtype=np.int64),
-        }
-    )
+    """Stable target-cache hash, preserving the original float32 hash contract.
+
+    Target fields may be stored as float16 to keep caches smaller.  Earlier cache
+    metadata intentionally hashed them after a float32 cast, so verification must
+    keep that dtype contract.  This implementation does that cast in chunks
+    instead of materializing the entire high-data target tensor as float32.
+    """
+
+    hasher = hashlib.sha256()
+    fields = {
+        "jet_entries": (arrays["jet_entries"], np.dtype(np.int64)),
+        "jet_file_indices": (arrays["jet_file_indices"], np.dtype(np.int32)),
+        "labels": (arrays["labels"], np.dtype(np.int64)),
+        "target_fields": (arrays["target_fields"], np.dtype(np.float32)),
+        "target_mask": (arrays["target_mask"], np.dtype(bool)),
+    }
+    for name in sorted(fields):
+        array, dtype = fields[name]
+        _hash_update_array_chunked(hasher, name, np.asarray(array), dtype=dtype)
+    return hasher.hexdigest()
 
 
 def _validate_pair_and_manifest(
@@ -571,7 +611,9 @@ def load_local_particle_residual_field_cache(
         raise ValueError(f"{split} residual-field cache is oracle-only and cannot be loaded for primary training")
 
     with np.load(array_path, allow_pickle=False) as data:
-        target_fields = data["target_fields"].astype(np.float32, copy=False)
+        target_fields = data["target_fields"]
+        if target_fields.dtype not in (np.dtype("float16"), np.dtype("float32")):
+            target_fields = target_fields.astype(np.float32, copy=False)
         target_mask = data["target_mask"].astype(bool, copy=False)
         labels = data["labels"].astype(np.int64, copy=False)
         file_indices = data["jet_file_indices"].astype(np.int64, copy=False)

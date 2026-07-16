@@ -279,9 +279,11 @@ class LocalParticleResidualFieldDataset:
         self.mask = np.asarray(hlt_view.mask[:n_rows], dtype=bool)
         self.labels = np.asarray(hlt_view.labels[:n_rows], dtype=np.int64)
         self.jet_ids = _truncate_sequence(tuple(hlt_view.jet_ids), n_rows)
-        self.target_fields = np.asarray(target_cache.target_fields[:n_rows], dtype=np.float32)
+        target_fields = np.asarray(target_cache.target_fields[:n_rows])
+        if target_fields.dtype not in (np.dtype("float16"), np.dtype("float32")):
+            target_fields = target_fields.astype(np.float32, copy=False)
+        self.target_fields = target_fields
         self.target_mask = np.asarray(target_cache.target_mask[:n_rows], dtype=bool)
-        self.target_fields = np.where(self.target_mask[:, :, None], self.target_fields, 0.0).astype(np.float32)
         self.teacher_logits = (
             np.asarray(teacher_logits.logits[:n_rows], dtype=np.float32)
             if teacher_logits is not None
@@ -329,17 +331,21 @@ class LocalParticleResidualFieldDataset:
         return int(self.labels.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        target_mask = self.target_mask[index]
+        target_fields = self.target_fields[index]
+        if not bool(np.all(target_mask)):
+            target_fields = np.where(target_mask[:, None], target_fields, 0.0).astype(target_fields.dtype, copy=False)
         item = {
             "tokens": self.tokens[index],
             "mask": self.mask[index],
             "labels": np.int64(self.labels[index]),
             "indices": np.int64(index),
-            "target_fields": self.target_fields[index],
-            "target_mask": self.target_mask[index],
+            "target_fields": target_fields,
+            "target_mask": target_mask,
         }
         if bool(self.config.include_oracle_fields):
-            item["oracle_fields"] = self.target_fields[index]
-            item["oracle_mask"] = self.target_mask[index]
+            item["oracle_fields"] = target_fields
+            item["oracle_mask"] = target_mask
         if self.teacher_logits is not None:
             item["teacher_logits"] = self.teacher_logits[index]
         return item

@@ -52,6 +52,8 @@ class SemanticRootPredictorConfig:
     ffn_dim: int = 1024
     dropout: float = 0.10
     attention_dropout: float = 0.10
+    architecture_kind: str = "semantic_query"
+    probabilistic: bool = True
     max_particles: int = ABPH_MAX_PARTICLES
     max_count: int = ABPH_MAX_PARTICLES
     log_scale_min: float = -6.0
@@ -63,17 +65,22 @@ class SemanticRootPredictorConfig:
             "jet_input_dim",
             "d_model",
             "num_heads",
-            "query_blocks",
             "ffn_dim",
             "max_particles",
             "max_count",
         ):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if int(self.query_blocks) < 0:
+            raise ValueError("query_blocks cannot be negative")
         if int(self.d_model) % int(self.num_heads) != 0:
             raise ValueError("d_model must be divisible by num_heads")
-        if int(self.query_blocks) < 3:
+        if self.architecture_kind not in {"semantic_query", "pooled_mlp"}:
+            raise ValueError("architecture_kind must be semantic_query or pooled_mlp")
+        if self.architecture_kind == "semantic_query" and int(self.query_blocks) < 3:
             raise ValueError("semantic root prediction requires at least three query blocks")
+        if self.architecture_kind == "pooled_mlp" and int(self.query_blocks) != 0:
+            raise ValueError("pooled-MLP root prediction requires query_blocks=0")
         if int(self.max_particles) != ABPH_MAX_PARTICLES or int(self.max_count) != ABPH_MAX_PARTICLES:
             raise ValueError("primary root predictor count/particle support must be exactly 128")
         for name in ("dropout", "attention_dropout"):
@@ -247,6 +254,13 @@ class SemanticRootPredictor(_ModuleBase):
         self.blocks = torch.nn.ModuleList(
             [_SemanticQueryBlock(resolved) for _ in range(resolved.query_blocks)]
         )
+        self.pooled_context = torch.nn.Sequential(
+            torch.nn.LayerNorm(2 * resolved.d_model),
+            torch.nn.Linear(2 * resolved.d_model, resolved.ffn_dim),
+            torch.nn.GELU(),
+            torch.nn.Dropout(resolved.dropout),
+            torch.nn.Linear(resolved.ffn_dim, resolved.d_model),
+        )
         self.query_norm = torch.nn.LayerNorm(resolved.d_model)
         self.context_token = torch.nn.Parameter(torch.zeros(1, 1, resolved.d_model))
         torch.nn.init.trunc_normal_(self.context_token, std=0.02)
@@ -336,17 +350,27 @@ class SemanticRootPredictor(_ModuleBase):
                 )
             jet = self.jet_projection(jet_raw)
         type_ids = torch.arange(len(ABPH_ROOT_QUERY_NAMES), device=particles.device)
-        queries = self.query_tokens.expand(batch, -1, -1)
-        queries = queries + self.query_type_embedding(type_ids)[None, :, :]
-        for block in self.blocks:
-            queries = block(queries, particles, mask, particle_attention_bias)
-        queries = self.query_norm(queries)
-        context_seed = self.context_token.expand(batch, -1, -1) + jet[:, None, :]
-        context_update, _ = self.context_attention(
-            self.context_norm(context_seed), queries, queries, need_weights=False
-        )
-        context = (context_seed + context_update).squeeze(1)
-        context = context + self.context_ffn(self.context_norm(context))
+        if self.config.architecture_kind == "pooled_mlp":
+            weights = mask.to(particles.dtype).unsqueeze(-1)
+            pooled = (particles * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+            context = self.pooled_context(torch.cat((pooled, jet), dim=-1))
+            queries = self.query_norm(
+                context[:, None, :]
+                + self.query_tokens.expand(batch, -1, -1)
+                + self.query_type_embedding(type_ids)[None, :, :]
+            )
+        else:
+            queries = self.query_tokens.expand(batch, -1, -1)
+            queries = queries + self.query_type_embedding(type_ids)[None, :, :]
+            for block in self.blocks:
+                queries = block(queries, particles, mask, particle_attention_bias)
+            queries = self.query_norm(queries)
+            context_seed = self.context_token.expand(batch, -1, -1) + jet[:, None, :]
+            context_update, _ = self.context_attention(
+                self.context_norm(context_seed), queries, queries, need_weights=False
+            )
+            context = (context_seed + context_update).squeeze(1)
+            context = context + self.context_ffn(self.context_norm(context))
 
         p4_raw = self.p4_head(queries[:, 0], context)
         count_raw = self.count_head(queries[:, 1], context)
@@ -376,40 +400,51 @@ class SemanticRootPredictor(_ModuleBase):
         charge_distribution = charge_raw[:, ABPH_CHARGE_SUPPORT_SIZE:]
         shape_mean_raw = shape_raw[:, :ABPH_SHAPE_RAW_DIM]
         shape_scale_raw = shape_raw[:, ABPH_SHAPE_RAW_DIM:]
+        p4_log_scale = self._bounded_log_scale(p4_raw[:, 4:] + uncertainty_p4)
+        delta_count_log_scale = self._bounded_log_scale(
+            count_distribution[:, 1] + uncertainty_count[:, 0]
+        )
+        composition_log_scale = self._bounded_log_scale(
+            composition_scale + uncertainty_composition
+        )
+        absolute_charge_log_scale = self._bounded_log_scale(
+            charge_distribution[:, 1] + uncertainty_charge[:, 0]
+        )
+        shape_log_scale = self._bounded_log_scale(shape_scale_raw + uncertainty_shape)
+        if not self.config.probabilistic:
+            # Deterministic B1 still uses the same physical compiler, but it
+            # cannot communicate learned uncertainty to later stages.
+            p4_log_scale = torch.zeros_like(p4_log_scale)
+            delta_count_log_scale = torch.zeros_like(delta_count_log_scale)
+            composition_log_scale = torch.zeros_like(composition_log_scale)
+            absolute_charge_log_scale = torch.zeros_like(absolute_charge_log_scale)
+            shape_log_scale = torch.zeros_like(shape_log_scale)
         return SemanticRootPrediction(
             query_tokens=queries,
             shared_context=context,
             p4_residual_mean=p4_raw[:, :4],
-            p4_residual_log_scale=self._bounded_log_scale(
-                p4_raw[:, 4:] + uncertainty_p4
-            ),
+            p4_residual_log_scale=p4_log_scale,
             count_logits=count_logits,
             delta_count_mean=count_distribution[:, 0],
-            delta_count_log_scale=self._bounded_log_scale(
-                count_distribution[:, 1] + uncertainty_count[:, 0]
-            ),
+            delta_count_log_scale=delta_count_log_scale,
             type_count_logits=composition_logits[:, :pid_count],
             type_pt_logits=composition_logits[:, pid_count : 2 * pid_count],
             type_energy_logits=composition_logits[:, 2 * pid_count :],
-            composition_log_scale=self._bounded_log_scale(
-                composition_scale + uncertainty_composition
-            ),
+            composition_log_scale=composition_log_scale,
             scalar_pt_excess_raw=scalar_pt_excess_raw,
             charge_logits=charge_logits,
             absolute_charge_mean=charge_distribution[:, 0],
-            absolute_charge_log_scale=self._bounded_log_scale(
-                charge_distribution[:, 1] + uncertainty_charge[:, 0]
-            ),
+            absolute_charge_log_scale=absolute_charge_log_scale,
             shape_raw=shape_mean_raw,
-            shape_log_scale=self._bounded_log_scale(
-                shape_scale_raw + uncertainty_shape
-            ),
+            shape_log_scale=shape_log_scale,
             diagnostics={
                 "contract": ABPH_ROOT_PREDICTOR_CONTRACT,
                 "query_names": ABPH_ROOT_QUERY_NAMES,
                 "offline_inputs_loaded": False,
                 "teacher_logits_loaded": False,
                 "particle_attention_bias_used": particle_attention_bias is not None,
+                "architecture_kind": self.config.architecture_kind,
+                "probabilistic": bool(self.config.probabilistic),
                 "config_hash": self.config.to_dict()["config_hash"],
             },
         )

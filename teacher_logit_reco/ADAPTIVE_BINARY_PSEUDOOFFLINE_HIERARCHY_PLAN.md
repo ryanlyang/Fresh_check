@@ -210,7 +210,7 @@ Fairness is established with:
 ```text
 canonical-base HLT ParT
 large HLT ParT matching the trusted branch
-parameter-matched expanded HLT-only ParT
+predeclared deep expanded HLT-only capacity proxy
 one predeclared XL HLT-only ParT
 schedule-matched HLT-only fine-tuning
 ```
@@ -1694,9 +1694,12 @@ inputs.
 
 `A2_hlt_capacity_control`:
 
-HLT-only large ParT with additional particle-attention and feed-forward blocks
-chosen so its trainable parameter count is within 5% of E5 excluding the
-frozen reconstructor. It uses the same update budget and label objective as E5.
+Predeclared deep HLT-only capacity proxy with `[256, 1024, 256]` embedding
+dimensions, 20 particle-attention layers, and five class-attention layers. It
+uses the same label objective and reports its measured trainable parameter
+count beside the fused models. This first campaign does **not** claim exact
+parameter matching: the purpose is to show whether a materially stronger
+single-stream HLT ParT explains the gain, without adding a tuning sweep.
 
 `A3_hlt_from_scratch`:
 
@@ -1740,8 +1743,10 @@ compiled root state.
 
 `B3_root_sampled_ablation`:
 
-Sample four calibrated root states before hierarchy rollout. This explicitly
-tests the shared-root decision and is not part of the primary model.
+Sample four calibrated compiled root states and report their root-level
+calibration and diversity. This diagnostic does not run those roots through a
+separately trained hierarchy, so it makes no downstream-rollout or tagging
+claim. It tests the shared-root decision only at the root compiler boundary.
 
 `B4_oracle_root_diagnostic`:
 
@@ -1784,8 +1789,11 @@ Exclusive-kT hierarchy with shared decoder weights across levels.
 
 `C8_unconstrained_split_control`:
 
-Explicit unconstrained child prediction control. It must never be reported as
-the constrained primary method.
+Auxiliary unconstrained child heads trained against child ledgers while the
+actual hierarchy rollout remains compiler-constrained. It is explicitly an
+unconstrained-head loss diagnostic, not an unconstrained deployment decoder,
+and must never be reported as the constrained primary method or as a complete
+unconstrained rollout control.
 
 `C9_oracle_parent_rollout`:
 

@@ -547,6 +547,8 @@ def _variant_dependencies(name: str) -> tuple[str, ...]:
             sources.append("prediction:D2_ca32_mh4_particles")
         elif name in {"E7_dual_hierarchy_dualcross", "E11_independent_root_dual_hierarchy_diagnostic", "G1_kt_ca_early_fusion"}:
             sources.extend(("prediction:D1_kt32_mh4_particles", "prediction:D2_ca32_mh4_particles"))
+            if name != "E11_independent_root_dual_hierarchy_diagnostic":
+                sources.append("prediction:E7_shared_root_dual")
         else:
             sources.append("prediction:D1_kt32_mh4_particles")
         dependencies = tuple(dict.fromkeys((*dependencies, *sources)))
@@ -636,12 +638,29 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     f"prediction:{name}",
                     "pseudo_prediction",
                     "run_adaptive_binary_prediction.sh",
-                    (name, "model_val", "stack_train", "stack_val"),
+                    (name, "model_train", "model_val", "stack_train", "stack_val"),
                     (_variant_job_key(name), "input:hlt_cache"),
                     gpu=True,
                     environment=common_env,
                 )
             )
+        jobs.append(
+            SlurmJobSpec(
+                "prediction:E7_shared_root_dual",
+                "pseudo_prediction",
+                "run_adaptive_binary_prediction.sh",
+                (
+                    "E7_shared_root_dual",
+                    "model_train",
+                    "model_val",
+                    "stack_train",
+                    "stack_val",
+                ),
+                tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                gpu=True,
+                environment=common_env,
+            )
+        )
         for name in ABPH_NEURAL_TAGGER_VARIANTS:
             jobs.append(
                 SlurmJobSpec(
@@ -715,6 +734,7 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
                     *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
                     *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                    "prediction:E7_shared_root_dual",
                     *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
                     f"variant:{_seed_member_name(primary_seed, 2)}",
                     f"variant:{_seed_member_name(primary_seed, 3)}",
@@ -727,7 +747,8 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         jobs.append(SlurmJobSpec("report:model_selection", "report", "run_adaptive_binary_report.sh", ("selection",), terminal, environment=common_env))
     elif config.stage_mode == "predictions":
         for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
-            jobs.append(SlurmJobSpec(f"prediction:{name}", "pseudo_prediction", "run_adaptive_binary_prediction.sh", (name, "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
+            jobs.append(SlurmJobSpec(f"prediction:{name}", "pseudo_prediction", "run_adaptive_binary_prediction.sh", (name, "model_train", "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
+        jobs.append(SlurmJobSpec("prediction:E7_shared_root_dual", "pseudo_prediction", "run_adaptive_binary_prediction.sh", ("E7_shared_root_dual", "model_train", "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
     elif config.stage_mode == "fusion":
         for name in ABPH_POSTHOC_VARIANTS:
             members = _fusion_member_names(name)
