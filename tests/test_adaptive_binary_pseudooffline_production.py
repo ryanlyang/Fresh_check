@@ -192,6 +192,13 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
     )
     for renderer in model.renderers.values():
         renderer.config = replace(renderer.config, exact_nbody_projection=False)
+    root_forward_count = 0
+
+    def count_root_forward(_module, _inputs, _output):
+        nonlocal root_forward_count
+        root_forward_count += 1
+
+    hook = model.root_predictor.register_forward_hook(count_root_forward)
     kt_batch = _reconstruction_batch("exclusive_kt")
     ca_batch = _reconstruction_batch("cambridge_aachen")
     loss = _joint_reconstruction_loss(
@@ -207,6 +214,8 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
         validation=False,
     )
     loss.backward()
+    hook.remove()
+    assert root_forward_count == 1
     for hierarchy_name in ("exclusive_kt", "cambridge_aachen"):
         assert any(
             parameter.grad is not None

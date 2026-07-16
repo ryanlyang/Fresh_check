@@ -271,6 +271,23 @@ def _write_complete_campaign(root: Path) -> None:
                 "shared_root": False,
                 "root_hash_count": 2,
             }
+        if name == "F0_ce_reco_primary":
+            diagnostics.update(
+                {
+                    "dual_hierarchy_joint_training": True,
+                    "joint_reconstructor_hierarchy_names": [
+                        "exclusive_kt",
+                        "cambridge_aachen",
+                    ],
+                }
+            )
+        if name == "D6_true_offline_particles":
+            diagnostics.update(
+                {
+                    "actual_pseudo_branch_forward_pass": True,
+                    "copied_A4_metrics": False,
+                }
+            )
         report: dict[str, object] = {
             "ok": True,
             "variant_name": name,

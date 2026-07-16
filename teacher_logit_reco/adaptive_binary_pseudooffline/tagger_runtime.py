@@ -450,6 +450,9 @@ def _joint_reconstruction_loss(
     )
     targets_by_hierarchy = batch.get("targets_by_hierarchy")
     if isinstance(targets_by_hierarchy, Mapping):
+        shared_forward = reconstructor.prepare_shared_reconstruction_forward(
+            batch["hlt_tokens"], batch["hlt_mask"]
+        )
         losses = []
         for hierarchy_name in reconstructor.hierarchy_names:
             if hierarchy_name not in targets_by_hierarchy:
@@ -462,6 +465,7 @@ def _joint_reconstruction_loss(
                     **batch,
                     "targets": targets_by_hierarchy[hierarchy_name],
                     "hierarchy_name": hierarchy_name,
+                    "shared_reconstructor_forward": shared_forward,
                 },
                 context,
             )

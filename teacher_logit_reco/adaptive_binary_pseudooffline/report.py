@@ -395,6 +395,31 @@ def write_adaptive_binary_campaign_report(
                 problems.append(f"{variant_name} resolved configuration hash mismatch")
 
         evaluation = resolved["evaluation"]
+        model_val_diagnostics = _diagnostics(report, "model_val")
+        if variant_name == "F0_ce_reco_primary":
+            hierarchy_names = tuple(
+                model_val_diagnostics.get(
+                    "joint_reconstructor_hierarchy_names", ()
+                )
+            )
+            if (
+                model_val_diagnostics.get("dual_hierarchy_joint_training") is not True
+                or hierarchy_names != ABPH_PRIMARY_HIERARCHY_NAMES
+            ):
+                problems.append(
+                    "F0 must attest joint kT/C-A shared-root reconstructor training"
+                )
+        if variant_name == "D6_true_offline_particles":
+            if (
+                model_val_diagnostics.get("actual_pseudo_branch_forward_pass") is not True
+                or model_val_diagnostics.get("copied_A4_metrics") is not False
+            ):
+                problems.append(
+                    "D6 must run true offline particles through the pseudo branch"
+                )
+        capacity = report.get("diagnostics", {}).get("capacity", {})
+        if not isinstance(capacity, Mapping):
+            capacity = {}
         expected_metric_split = (
             "stack_val" if variant_name in ABPH_POSTHOC_FUSION_VARIANTS else "model_val"
         )
@@ -425,6 +450,16 @@ def write_adaptive_binary_campaign_report(
                     "loss": _metric(split_metrics, "loss", "cross_entropy"),
                     "macro_ovr_auc": _metric(split_metrics, "macro_ovr_auc", "macro_auc"),
                     "n_jets": _metric(split_metrics, "n_jets"),
+                    "tagger_trainable_parameter_count": capacity.get(
+                        "tagger_trainable_parameter_count",
+                        capacity.get("trainable_parameter_count"),
+                    ),
+                    "reconstructor_trainable_parameter_count": capacity.get(
+                        "reconstructor_trainable_parameter_count"
+                    ),
+                    "combined_trainable_parameter_count": capacity.get(
+                        "combined_trainable_parameter_count"
+                    ),
                 }
             )
             per_class = split_metrics.get("per_class")

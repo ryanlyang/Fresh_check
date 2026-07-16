@@ -519,6 +519,32 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         jet, logits = self.hlt_encoder.pool_and_classify(state)
         return state.tokens, jet, logits
 
+    def prepare_shared_reconstruction_forward(
+        self, hlt_tokens: Any, hlt_mask: Any
+    ) -> Mapping[str, Any]:
+        """Compile the one root graph consumed by every hierarchy branch."""
+
+        torch = require_torch()
+        tokens = torch.as_tensor(hlt_tokens).float()
+        mask = torch.as_tensor(hlt_mask, device=tokens.device).bool()
+        particle_embeddings, jet_embedding, _ = self.encode_hlt(tokens, mask)
+        prediction = self.root_predictor(
+            particle_embeddings, mask, jet_embedding=jet_embedding
+        )
+        compiled = compile_root_state(prediction, tokens, mask)
+        support, axis_eta, axis_phi = self._support_features(tokens, mask)
+        return {
+            "tokens": tokens,
+            "mask": mask,
+            "particle_embeddings": particle_embeddings,
+            "jet_embedding": jet_embedding,
+            "root_prediction": prediction,
+            "compiled_root": compiled,
+            "support": support,
+            "axis_eta": axis_eta,
+            "axis_phi": axis_phi,
+        }
+
     def module_groups(self) -> Mapping[str, Any]:
         claimed: set[int] = set()
 
@@ -988,15 +1014,35 @@ def reconstructor_step(
             f"requested hierarchy {hierarchy_name!r} is absent from {model.hierarchy_names}"
         )
     target_tensors = hierarchy_targets_to_tensors(targets, device=tokens.device)
-    particle_embeddings, jet_embedding, _ = model.encode_hlt(tokens, mask)
-    prediction = model.root_predictor(particle_embeddings, mask, jet_embedding=jet_embedding)
-    compiled = compile_root_state(prediction, tokens, mask)
+    shared_forward = batch.get("shared_reconstructor_forward")
+    if shared_forward is not None:
+        if not isinstance(shared_forward, Mapping):
+            raise TypeError("shared_reconstructor_forward must be a mapping")
+        if not torch.equal(shared_forward["tokens"], tokens) or not torch.equal(
+            shared_forward["mask"], mask
+        ):
+            raise ValueError("shared reconstruction forward belongs to another HLT batch")
+        particle_embeddings = shared_forward["particle_embeddings"]
+        jet_embedding = shared_forward["jet_embedding"]
+        prediction = shared_forward["root_prediction"]
+        compiled = shared_forward["compiled_root"]
+        support = shared_forward["support"]
+        axis_eta = shared_forward["axis_eta"]
+        axis_phi = shared_forward["axis_phi"]
+    else:
+        shared_forward = model.prepare_shared_reconstruction_forward(tokens, mask)
+        particle_embeddings = shared_forward["particle_embeddings"]
+        jet_embedding = shared_forward["jet_embedding"]
+        prediction = shared_forward["root_prediction"]
+        compiled = shared_forward["compiled_root"]
+        support = shared_forward["support"]
+        axis_eta = shared_forward["axis_eta"]
+        axis_phi = shared_forward["axis_phi"]
     root_state = AccountingState.from_ledger(
         target_tensors.root_ledger if model.oracle_root else compiled.root_ledger
     )
     root_targets = build_root_residual_targets(tokens, mask, target_tensors.root_ledger)
     root_loss = compute_root_losses(prediction, compiled, root_targets)
-    support, axis_eta, axis_phi = model._support_features(tokens, mask)
     hierarchy_supervision = []
     supervised_outputs = []
     rollout_alignment = None
