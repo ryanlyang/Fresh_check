@@ -457,6 +457,17 @@ def load_adaptive_binary_target_shard(
     )
 
 
+def load_adaptive_binary_target_cache_metadata(
+    cache_dir: str | Path,
+    split: str,
+    grouping: str,
+) -> dict[str, Any]:
+    """Load and aggregate-hash-validate one target cache's metadata."""
+
+    _, metadata, _ = _load_metadata(cache_dir, split, grouping)
+    return dict(metadata)
+
+
 def iter_adaptive_binary_target_shards(
     cache_dir: str | Path,
     split: str,
@@ -598,5 +609,6 @@ __all__ = [
     "build_adaptive_binary_target_cache",
     "build_adaptive_binary_target_caches",
     "iter_adaptive_binary_target_shards",
+    "load_adaptive_binary_target_cache_metadata",
     "load_adaptive_binary_target_shard",
 ]

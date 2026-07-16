@@ -193,6 +193,12 @@ class _SplitSource:
     layout: HierarchyTargetLayout
     provenance: Mapping[str, Any]
 
+    @property
+    def n_jets(self) -> int:
+        """Number of HLT rows available to the streamed split loader."""
+
+        return int(self.hlt_view.labels.shape[0])
+
 
 class _ShardDataset(Dataset):
     def __init__(
@@ -1096,8 +1102,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     report_progress(
         {
             "state": "ready_for_epochs",
-            "train_jets": int(train_source.labels.shape[0]),
-            "model_val_jets": int(val_source.labels.shape[0]),
+            "train_jets": train_source.n_jets,
+            "model_val_jets": val_source.n_jets,
             "amp_enabled": bool(amp_enabled),
         }
     )

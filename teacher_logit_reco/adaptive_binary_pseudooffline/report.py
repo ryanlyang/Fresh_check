@@ -167,6 +167,69 @@ def _split_provenance(report: Mapping[str, Any], split: str) -> Mapping[str, Any
     return {}
 
 
+def _primary_dual_target_provenance_problems(
+    provenance: Mapping[str, Any],
+) -> list[str]:
+    prefix = "F0 model_val dual-target provenance"
+    problems: list[str] = []
+    if provenance.get("dual_target_provenance") is not True:
+        return [f"{prefix} is not attested"]
+    branches = provenance.get("hierarchy_branches")
+    if not isinstance(branches, Mapping):
+        return [f"{prefix} lacks hierarchy_branches"]
+    expected = set(ABPH_PRIMARY_HIERARCHY_NAMES)
+    if set(branches) != expected:
+        return [
+            f"{prefix} must contain exact kT/C-A branches; got {sorted(branches)}"
+        ]
+    required_branch_fields = (
+        "grouping",
+        "hierarchy_target_content_hash",
+        "grouping_algorithm_hash",
+        "offline_cache_content_hash",
+        "source_manifest_hash",
+        "hlt_content_hash",
+        "jet_identity_hash",
+    )
+    for hierarchy_name in ABPH_PRIMARY_HIERARCHY_NAMES:
+        branch = branches.get(hierarchy_name)
+        if not isinstance(branch, Mapping):
+            problems.append(f"{prefix}/{hierarchy_name} is not a mapping")
+            continue
+        if branch.get("grouping") != hierarchy_name:
+            problems.append(f"{prefix}/{hierarchy_name} grouping mismatch")
+        for field in required_branch_fields:
+            if branch.get(field) in (None, ""):
+                problems.append(f"{prefix}/{hierarchy_name} lacks {field}")
+    if problems:
+        return problems
+    common_fields = (
+        "offline_cache_content_hash",
+        "source_manifest_hash",
+        "hlt_content_hash",
+        "jet_identity_hash",
+    )
+    for field in common_fields:
+        values = {
+            str(branches[name][field]) for name in ABPH_PRIMARY_HIERARCHY_NAMES
+        }
+        if len(values) != 1:
+            problems.append(f"{prefix} conflicts on {field}")
+    target_hashes = {
+        name: branches[name]["hierarchy_target_content_hash"]
+        for name in ABPH_PRIMARY_HIERARCHY_NAMES
+    }
+    grouping_hashes = {
+        name: branches[name]["grouping_algorithm_hash"]
+        for name in ABPH_PRIMARY_HIERARCHY_NAMES
+    }
+    if provenance.get("hierarchy_target_content_hash") != canonical_hash(target_hashes):
+        problems.append(f"{prefix} aggregate hierarchy target hash mismatch")
+    if provenance.get("grouping_algorithm_hash") != canonical_hash(grouping_hashes):
+        problems.append(f"{prefix} aggregate grouping hash mismatch")
+    return problems
+
+
 def _artifact_value(report: Mapping[str, Any], field: str) -> Any:
     if report.get(field) is not None:
         return report.get(field)
@@ -409,13 +472,20 @@ def write_adaptive_binary_campaign_report(
                 problems.append(
                     "F0 must attest joint kT/C-A shared-root reconstructor training"
                 )
+            problems.extend(
+                _primary_dual_target_provenance_problems(
+                    _split_provenance(report, "model_val")
+                )
+            )
         if variant_name == "D6_true_offline_particles":
             if (
                 model_val_diagnostics.get("actual_pseudo_branch_forward_pass") is not True
                 or model_val_diagnostics.get("copied_A4_metrics") is not False
+                or model_val_diagnostics.get("pure_offline_architecture_ceiling") is not False
+                or model_val_diagnostics.get("retains_reconstructed_hierarchy_context") is not True
             ):
                 problems.append(
-                    "D6 must run true offline particles through the pseudo branch"
+                    "D6 must attest oracle particle-feature injection through the reconstructed pseudo branch"
                 )
         capacity = report.get("diagnostics", {}).get("capacity", {})
         if not isinstance(capacity, Mapping):

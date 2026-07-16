@@ -433,7 +433,7 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
                 "distribution": {"enabled": False, "stochastic_views": 0},
             },
         }, oracle_eval), dependencies=("C5_kt_32",)),
-        _spec("D6", "D6_true_offline_particles", "true offline particle architecture ceiling", _deep_merge({
+        _spec("D6", "D6_true_offline_particles", "oracle offline particle-feature injection diagnostic", _deep_merge({
             "data": {"input_view": "hlt_plus_offline_particles", "requires_offline_targets": True},
             "model": {"renderer": {"kind": "oracle_offline_particles"}},
         }, oracle_eval), dependencies=("A4_offline_part_ceiling", "D1_kt32_mh4_particles")),

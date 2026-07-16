@@ -328,6 +328,91 @@ class FrozenPseudoBatchSource:
                     return
 
 
+_PAIRED_TARGET_COMMON_METADATA_FIELDS = (
+    "source_manifest_hash",
+    "hlt_content_hash",
+    "offline_content_hash",
+    "jet_identity_hash",
+    "label_hash",
+    "label_names",
+    "class_counts",
+    "n_jets",
+    "schema_manifest_hash",
+    "root_feature_names",
+    "group_feature_names",
+    "particle_target_names",
+    "target_semantics",
+    "hlt_profile",
+    "hlt_profile_version",
+    "hlt_degradation_strength",
+)
+
+
+def _metadata_value_hash(value: Any) -> str:
+    return canonical_hash({"value": value})
+
+
+def _combined_target_metadata_provenance(
+    branches: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    required_names = set(_PairedHierarchyTargetBatchSource.REQUIRED_HIERARCHIES)
+    if set(branches) != required_names:
+        raise ValueError("dual target metadata must contain exact kT and C/A branches")
+    for field in _PAIRED_TARGET_COMMON_METADATA_FIELDS:
+        values = {name: metadata.get(field) for name, metadata in branches.items()}
+        if any(value in (None, "") for value in values.values()):
+            raise ValueError(f"dual target metadata lacks common field {field}: {values}")
+        if len({_metadata_value_hash(value) for value in values.values()}) != 1:
+            raise ValueError(f"dual target metadata conflicts on {field}: {values}")
+    branch_rows: dict[str, dict[str, Any]] = {}
+    for hierarchy_name, metadata in branches.items():
+        if metadata.get("grouping") != hierarchy_name:
+            raise ValueError(
+                f"target branch {hierarchy_name} declares {metadata.get('grouping')}"
+            )
+        target_hash = metadata.get("target_content_hash")
+        if target_hash in (None, ""):
+            raise ValueError(f"target branch {hierarchy_name} lacks aggregate hash")
+        branch_rows[hierarchy_name] = {
+            "grouping": hierarchy_name,
+            "hierarchy_target_content_hash": target_hash,
+            "grouping_algorithm_hash": canonical_hash(metadata.get("layout", {})),
+            "offline_cache_content_hash": metadata.get("offline_content_hash"),
+            "source_manifest_hash": metadata.get("source_manifest_hash"),
+            "hlt_content_hash": metadata.get("hlt_content_hash"),
+            "jet_identity_hash": metadata.get("jet_identity_hash"),
+        }
+    primary = branches["exclusive_kt"]
+    return {
+        "offline_cache_content_hash": primary["offline_content_hash"],
+        "hierarchy_target_content_hash": canonical_hash(
+            {
+                name: row["hierarchy_target_content_hash"]
+                for name, row in branch_rows.items()
+            }
+        ),
+        "hierarchy_target_schema_hash": canonical_hash(
+            {
+                "root": primary.get("root_feature_names"),
+                "group": primary.get("group_feature_names"),
+                "particle": primary.get("particle_target_names"),
+            }
+        ),
+        "grouping_algorithm_hash": canonical_hash(
+            {
+                name: row["grouping_algorithm_hash"]
+                for name, row in branch_rows.items()
+            }
+        ),
+        "root_ledger_schema_hash": canonical_hash(
+            {"root_feature_names": primary.get("root_feature_names")}
+        ),
+        "normalization_hash": "identity_physical_units_v1",
+        "dual_target_provenance": True,
+        "hierarchy_branches": branch_rows,
+    }
+
+
 class _PairedHierarchyTargetBatchSource:
     """Lockstep kT/C-A targets for one shared-root dual reconstructor."""
 
@@ -347,6 +432,7 @@ class _PairedHierarchyTargetBatchSource:
         self.hlt_view = primary.hlt_view
         primary_hash = primary.hlt_view.metadata.get("hlt_content_hash")
         primary_ids = jet_identity_hash(primary.hlt_view.jet_ids)
+        branch_metadata: dict[str, Mapping[str, Any]] = {}
         for name, source in self.sources.items():
             if source.split != primary.split:
                 raise ValueError(f"dual target split mismatch for {name}")
@@ -354,6 +440,10 @@ class _PairedHierarchyTargetBatchSource:
                 raise ValueError(f"dual target HLT hash mismatch for {name}")
             if jet_identity_hash(source.hlt_view.jet_ids) != primary_ids:
                 raise ValueError(f"dual target identity mismatch for {name}")
+            branch_metadata[name] = source.metadata
+        self.target_provenance = _combined_target_metadata_provenance(
+            branch_metadata
+        )
 
     @staticmethod
     def _merge(rows: Mapping[str, Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -450,9 +540,18 @@ def _joint_reconstruction_loss(
     )
     targets_by_hierarchy = batch.get("targets_by_hierarchy")
     if isinstance(targets_by_hierarchy, Mapping):
-        shared_forward = reconstructor.prepare_shared_reconstruction_forward(
-            batch["hlt_tokens"], batch["hlt_mask"]
-        )
+        shared_forward = batch.get("shared_reconstructor_forward")
+        if shared_forward is None:
+            shared_forward = reconstructor.prepare_shared_reconstruction_forward(
+                batch["hlt_tokens"], batch["hlt_mask"]
+            )
+        shared_deployment = batch.get("shared_deployment_output")
+        if shared_deployment is None:
+            shared_deployment = (
+                reconstructor.deploy_from_shared_reconstruction_forward(
+                    shared_forward, evaluation_seed=24731
+                )
+            )
         losses = []
         for hierarchy_name in reconstructor.hierarchy_names:
             if hierarchy_name not in targets_by_hierarchy:
@@ -466,6 +565,7 @@ def _joint_reconstruction_loss(
                     "targets": targets_by_hierarchy[hierarchy_name],
                     "hierarchy_name": hierarchy_name,
                     "shared_reconstructor_forward": shared_forward,
+                    "shared_deployment_output": shared_deployment,
                 },
                 context,
             )
@@ -595,15 +695,102 @@ def _source_provenance(
             if value in (None, ""):
                 raise ValueError(f"selected reconstructor provenance lacks {key}")
             result[key] = value
+        if target_provenance.get("dual_target_provenance") is True:
+            branches = target_provenance.get("hierarchy_branches")
+            if not isinstance(branches, Mapping):
+                raise ValueError("dual target provenance lacks hierarchy branches")
+            result["dual_target_provenance"] = True
+            result["hierarchy_branches"] = {
+                str(name): dict(value)
+                for name, value in branches.items()
+                if isinstance(value, Mapping)
+            }
+            if set(result["hierarchy_branches"]) != set(
+                _PairedHierarchyTargetBatchSource.REQUIRED_HIERARCHIES
+            ):
+                raise ValueError("dual target provenance must contain exact kT/C/A branches")
+    return result
+
+
+def _combine_report_target_provenance(
+    branches: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    required = set(_PairedHierarchyTargetBatchSource.REQUIRED_HIERARCHIES)
+    if set(branches) != required:
+        raise ValueError("dual report provenance must contain exact kT and C/A branches")
+    common_fields = (
+        "source_manifest_hash",
+        "jet_identity_hash",
+        "label_hash",
+        "class_mapping_hash",
+        "hlt_content_hash",
+        "hlt_profile",
+        "hlt_profile_version",
+        "hlt_degradation_strength",
+        "hlt_params_hash",
+        "offline_cache_content_hash",
+        "hierarchy_target_schema_hash",
+        "root_ledger_schema_hash",
+        "normalization_hash",
+    )
+    primary = branches["exclusive_kt"]
+    result: dict[str, Any] = {}
+    for field in common_fields:
+        values = {name: value.get(field) for name, value in branches.items()}
+        if any(value in (None, "") for value in values.values()):
+            raise ValueError(
+                f"dual hierarchy target provenance lacks {field}: {values}"
+            )
+        if len({_metadata_value_hash(value) for value in values.values()}) != 1:
+            raise ValueError(
+                f"dual hierarchy target provenance conflicts on {field}: {values}"
+            )
+        result[field] = primary[field]
+    branch_rows: dict[str, dict[str, Any]] = {}
+    for hierarchy_name, provenance in branches.items():
+        target_hash = provenance.get("hierarchy_target_content_hash")
+        grouping_hash = provenance.get("grouping_algorithm_hash")
+        if target_hash in (None, "") or grouping_hash in (None, ""):
+            raise ValueError(
+                f"dual hierarchy branch {hierarchy_name} lacks target/grouping hash"
+            )
+        branch_rows[hierarchy_name] = {
+            "grouping": hierarchy_name,
+            "hierarchy_target_content_hash": target_hash,
+            "grouping_algorithm_hash": grouping_hash,
+            "offline_cache_content_hash": provenance["offline_cache_content_hash"],
+            "source_manifest_hash": provenance["source_manifest_hash"],
+            "hlt_content_hash": provenance["hlt_content_hash"],
+            "jet_identity_hash": provenance["jet_identity_hash"],
+        }
+    result.update(
+        {
+            "hierarchy_target_content_hash": canonical_hash(
+                {
+                    name: row["hierarchy_target_content_hash"]
+                    for name, row in branch_rows.items()
+                }
+            ),
+            "grouping_algorithm_hash": canonical_hash(
+                {
+                    name: row["grouping_algorithm_hash"]
+                    for name, row in branch_rows.items()
+                }
+            ),
+            "dual_target_provenance": True,
+            "hierarchy_branches": branch_rows,
+        }
+    )
     return result
 
 
 def _selected_target_provenance(root: Path, cache_names: Sequence[str]) -> Mapping[str, Any]:
-    source_name = next(
-        (name for name in cache_names if name.startswith("D1") or name.startswith("D2")),
+    names = tuple(str(name) for name in cache_names)
+    dual = "E7_shared_root_dual" in names or {
         "D1_kt32_mh4_particles",
-    )
-    if source_name == "E7_shared_root_dual":
+        "D2_ca32_mh4_particles",
+    }.issubset(names)
+    if dual:
         branches: dict[str, Mapping[str, Any]] = {}
         for hierarchy_name, run_name in (
             ("exclusive_kt", "D1_kt32_mh4_particles"),
@@ -618,37 +805,17 @@ def _selected_target_provenance(root: Path, cache_names: Sequence[str]) -> Mappi
             if not isinstance(provenance, Mapping):
                 raise ValueError(f"{run_name} lacks model_val target provenance")
             branches[hierarchy_name] = provenance
-        common_fields = (
-            "offline_cache_content_hash",
-            "hierarchy_target_schema_hash",
-            "root_ledger_schema_hash",
-            "normalization_hash",
+        return _combine_report_target_provenance(branches)
+    recognized = tuple(
+        name
+        for name in names
+        if name in {"D1_kt32_mh4_particles", "D2_ca32_mh4_particles"}
+    )
+    if len(recognized) != 1:
+        raise ValueError(
+            f"cannot select target provenance from pseudo caches {list(names)}"
         )
-        primary = branches["exclusive_kt"]
-        result: dict[str, Any] = {}
-        for field in common_fields:
-            values = {name: value.get(field) for name, value in branches.items()}
-            if None in values.values() or len(set(values.values())) != 1:
-                raise ValueError(
-                    f"dual hierarchy target provenance conflicts on {field}: {values}"
-                )
-            result[field] = primary[field]
-        for field in ("hierarchy_target_content_hash", "grouping_algorithm_hash"):
-            values = {name: value.get(field) for name, value in branches.items()}
-            if None in values.values():
-                raise ValueError(f"dual hierarchy target provenance lacks {field}")
-            result[field] = canonical_hash(values)
-        result["hierarchy_branches"] = {
-            name: {
-                field: provenance.get(field)
-                for field in (
-                    "hierarchy_target_content_hash",
-                    "grouping_algorithm_hash",
-                )
-            }
-            for name, provenance in branches.items()
-        }
-        return result
+    source_name = recognized[0]
     report_path = root / "runs" / source_name / "run_report.json"
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     provenance = payload.get("provenance", {}).get("model_val")
@@ -830,13 +997,27 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
         tokens = cpu_batch["hlt_tokens"].to(device)
         mask = cpu_batch["hlt_mask"].to(device).bool()
         labels = cpu_batch["labels"].to(device).long()
-        deployed = reconstructor.deploy(tokens, mask, evaluation_seed=24731)
+        shared_forward = reconstructor.prepare_shared_reconstruction_forward(
+            tokens, mask
+        )
+        deployed = reconstructor.deploy_from_shared_reconstruction_forward(
+            shared_forward, evaluation_seed=24731
+        )
         pseudo = package_trainable_pseudo_views(deployed)
         output = model(tokens, mask, pseudo)
         reconstruction = None
         if objective_config.joint_reconstruction > 0.0:
             reconstruction = _joint_reconstruction_loss(
-                reconstructor, {**cpu_batch, "hlt_tokens": tokens, "hlt_mask": mask}, split=split, validation=validation
+                reconstructor,
+                {
+                    **cpu_batch,
+                    "hlt_tokens": tokens,
+                    "hlt_mask": mask,
+                    "shared_reconstructor_forward": shared_forward,
+                    "shared_deployment_output": deployed,
+                },
+                split=split,
+                validation=validation,
             )
         return output, labels, reconstruction, cpu_batch["indices"].to(device)
 
@@ -988,9 +1169,14 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
     (output_dir / "training_curves.json").write_text(
         json.dumps(curves, indent=2, sort_keys=True), encoding="utf-8"
     )
+    target_provenance = (
+        joint_val.target_provenance
+        if isinstance(joint_val, _PairedHierarchyTargetBatchSource)
+        else _selected_target_provenance(root, cache_names)
+    )
     provenance = _source_provenance(
         frozen_val,
-        target_provenance=_selected_target_provenance(root, cache_names),
+        target_provenance=target_provenance,
     )
     if best_val_metrics is None:
         raise RuntimeError("tagger training selected no model-validation metrics")

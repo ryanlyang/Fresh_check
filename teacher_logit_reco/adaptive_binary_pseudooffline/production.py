@@ -24,7 +24,10 @@ from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view
 from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
 
 from .binary_accounting import AccountingState
-from .cache import load_adaptive_binary_target_shard
+from .cache import (
+    load_adaptive_binary_target_cache_metadata,
+    load_adaptive_binary_target_shard,
+)
 from .config import canonical_hash
 from .hierarchy_alignment import (
     HierarchyTargetTensors,
@@ -220,8 +223,9 @@ class AdaptiveBinaryTargetBatchSource:
         self.shuffle_shards = bool(shuffle_shards)
         self.seed = int(seed)
         self.maximum_batches = None if maximum_batches is None else int(maximum_batches)
-        metadata_path = Path(target_cache_dir) / f"{split}_{grouping}_adaptive_binary_targets_metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = load_adaptive_binary_target_cache_metadata(
+            target_cache_dir, split, grouping
+        )
         self.metadata = metadata
         self.n_shards = int(metadata["n_shards"])
         self._order = list(range(self.n_shards))
@@ -749,19 +753,48 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         *,
         evaluation_seed: int,
     ) -> AdaptiveBinaryReconstructionOutput:
+        shared_forward = self.prepare_shared_reconstruction_forward(
+            hlt_tokens, hlt_mask
+        )
+        return self.deploy_from_shared_reconstruction_forward(
+            shared_forward, evaluation_seed=evaluation_seed
+        )
+
+    def deploy_from_shared_reconstruction_forward(
+        self,
+        shared_forward: Mapping[str, Any],
+        *,
+        evaluation_seed: int,
+    ) -> AdaptiveBinaryReconstructionOutput:
+        """Roll out all deployable views from one already-compiled root graph."""
+
         if self.oracle_root or self.oracle_parent_rollout or self.oracle_groups or self.oracle_offline_particles:
             raise RuntimeError(
                 f"{self.variant_name} is an offline-target diagnostic and has no deployable HLT-only path"
             )
-        tokens = require_torch().as_tensor(hlt_tokens).float()
-        mask = require_torch().as_tensor(hlt_mask, device=tokens.device).bool()
-        particle_embeddings, jet_embedding, _ = self.encode_hlt(tokens, mask)
-        root_prediction = self.root_predictor(
-            particle_embeddings, mask, jet_embedding=jet_embedding
-        )
-        compiled = compile_root_state(root_prediction, tokens, mask)
+        required = {
+            "tokens",
+            "mask",
+            "particle_embeddings",
+            "jet_embedding",
+            "root_prediction",
+            "compiled_root",
+            "support",
+            "axis_eta",
+            "axis_phi",
+        }
+        missing = sorted(required - set(shared_forward))
+        if missing:
+            raise ValueError(f"shared reconstruction forward lacks {missing}")
+        mask = shared_forward["mask"]
+        particle_embeddings = shared_forward["particle_embeddings"]
+        jet_embedding = shared_forward["jet_embedding"]
+        root_prediction = shared_forward["root_prediction"]
+        compiled = shared_forward["compiled_root"]
         root_state = AccountingState.from_ledger(compiled.root_ledger)
-        support, axis_eta, axis_phi = self._support_features(tokens, mask)
+        support = shared_forward["support"]
+        axis_eta = shared_forward["axis_eta"]
+        axis_phi = shared_forward["axis_phi"]
         hierarchy, rendered = self.rollout_and_render(
             root_state=root_state,
             root_prediction=root_prediction,
@@ -1015,6 +1048,7 @@ def reconstructor_step(
         )
     target_tensors = hierarchy_targets_to_tensors(targets, device=tokens.device)
     shared_forward = batch.get("shared_reconstructor_forward")
+    shared_deployment = batch.get("shared_deployment_output")
     if shared_forward is not None:
         if not isinstance(shared_forward, Mapping):
             raise TypeError("shared_reconstructor_forward must be a mapping")
@@ -1038,6 +1072,19 @@ def reconstructor_step(
         support = shared_forward["support"]
         axis_eta = shared_forward["axis_eta"]
         axis_phi = shared_forward["axis_phi"]
+    if shared_deployment is not None:
+        if not isinstance(shared_deployment, AdaptiveBinaryReconstructionOutput):
+            raise TypeError(
+                "shared_deployment_output must be an AdaptiveBinaryReconstructionOutput"
+            )
+        if (
+            shared_deployment.root_prediction is not prediction
+            or shared_deployment.compiled_root is not compiled
+            or shared_deployment.hlt_particle_embeddings is not particle_embeddings
+        ):
+            raise ValueError(
+                "shared deployment output does not belong to the supplied shared forward"
+            )
     root_state = AccountingState.from_ledger(
         target_tensors.root_ledger if model.oracle_root else compiled.root_ledger
     )
@@ -1118,15 +1165,21 @@ def reconstructor_step(
         latent = torch.zeros(
             tokens.shape[0], decoder.config.latent_dim, device=tokens.device, dtype=particle_embeddings.dtype
         )
-        rollout = decoder(
-            root_state,
-            prediction.shared_context,
-            prediction.query_tokens,
-            particle_embeddings,
-            mask,
-            support,
-            mode="rollout",
-            hypothesis_latent=latent,
+        rollout = (
+            shared_deployment.hierarchy_output.hypotheses[0].hierarchy_outputs[
+                hierarchy_name
+            ]
+            if shared_deployment is not None
+            else decoder(
+                root_state,
+                prediction.shared_context,
+                prediction.query_tokens,
+                particle_embeddings,
+                mask,
+                support,
+                mode="rollout",
+                hypothesis_latent=latent,
+            )
         )
         active_rollout = _truncate_output(
             supervised if model.oracle_parent_rollout else rollout,
@@ -1161,16 +1214,20 @@ def reconstructor_step(
             render_hierarchy = active_rollout if model.oracle_groups else rollout
             if model.global_particle_set:
                 render_hierarchy = _root_only_renderer_hierarchy(render_hierarchy)
-            rendered = model.renderers[hierarchy_name](
-                render_hierarchy,
-                prediction.query_tokens,
-                particle_embeddings,
-                mask,
-                support,
-                latent,
-                axis_eta,
-                axis_phi,
-                hypothesis_index=0,
+            rendered = (
+                shared_deployment.rendered_views[hierarchy_name][0]
+                if shared_deployment is not None
+                else model.renderers[hierarchy_name](
+                    render_hierarchy,
+                    prediction.query_tokens,
+                    particle_embeddings,
+                    mask,
+                    support,
+                    latent,
+                    axis_eta,
+                    axis_phi,
+                    hypothesis_index=0,
+                )
             )
             if model.renderer.config.local_matching:
                 particle_loss = compute_local_particle_matching_loss(
@@ -1193,16 +1250,20 @@ def reconstructor_step(
             tensors_to_check.append(rendered.four_vector)
 
             if context.curriculum.phase >= 4:
-                deployment_hierarchy, deployment_views = model.rollout_and_render(
-                    root_state=root_state,
-                    root_prediction=prediction,
-                    particle_embeddings=particle_embeddings,
-                    hlt_mask=mask,
-                    support=support,
-                    axis_eta=axis_eta,
-                    axis_phi=axis_phi,
-                    evaluation_seed=24731,
-                )
+                if shared_deployment is not None:
+                    deployment_hierarchy = shared_deployment.hierarchy_output
+                    deployment_views = shared_deployment.rendered_views
+                else:
+                    deployment_hierarchy, deployment_views = model.rollout_and_render(
+                        root_state=root_state,
+                        root_prediction=prediction,
+                        particle_embeddings=particle_embeddings,
+                        hlt_mask=mask,
+                        support=support,
+                        axis_eta=axis_eta,
+                        axis_phi=axis_phi,
+                        evaluation_seed=24731,
+                    )
                 rendered_hypotheses = deployment_views[hierarchy_name]
                 latent_context = model.hierarchy_reconstructor.encode_deployment_context(
                     root_state,

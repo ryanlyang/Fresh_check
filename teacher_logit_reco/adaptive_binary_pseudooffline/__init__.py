@@ -35,6 +35,7 @@ from .cache import (
     build_adaptive_binary_target_cache,
     build_adaptive_binary_target_caches,
     iter_adaptive_binary_target_shards,
+    load_adaptive_binary_target_cache_metadata,
     load_adaptive_binary_target_shard,
 )
 from .accounting_preflight import (
@@ -543,6 +544,7 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "hierarchy_targets_to_tensors",
     "inverse_softplus",
     "iter_adaptive_binary_target_shards",
+    "load_adaptive_binary_target_cache_metadata",
     "load_adaptive_binary_target_shard",
     "local_sibling_match",
     "kinematics_from_four_vector",

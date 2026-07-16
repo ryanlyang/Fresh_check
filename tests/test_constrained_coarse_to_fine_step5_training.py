@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
+import numpy as np
 import torch
 
 from scripts import train_constrained_coarse_to_fine as training_cli
@@ -27,6 +29,7 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     compute_hierarchy_reconstruction_loss,
 )
 from teacher_logit_reco.constrained_coarse_to_fine.train import (
+    _SplitSource,
     _grad_norm_if_finite,
     _loss_configs,
     _write_curves_csv,
@@ -69,6 +72,18 @@ def _toy_model_and_inputs():
 
 
 class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
+    def test_streamed_split_source_exposes_hlt_row_count_without_labels_attribute(self):
+        source = _SplitSource(
+            split="model_train",
+            hlt_view=SimpleNamespace(labels=np.zeros(7, dtype=np.int64)),
+            offline_view=None,
+            target_metadata={},
+            layout=None,
+            provenance={},
+        )
+        self.assertFalse(hasattr(source, "labels"))
+        self.assertEqual(source.n_jets, 7)
+
     def test_hierarchy_loss_is_exact_at_target_and_reports_required_diagnostics(self):
         model, inputs = _toy_model_and_inputs()
         output = model(*inputs)
