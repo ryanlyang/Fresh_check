@@ -1830,8 +1830,12 @@ ceiling.
 
 `D6_true_offline_particles`:
 
-True offline particles passed to the pseudo branch on model-val only. Measures
-tagger architecture ceiling and is never a deployable result.
+Oracle offline particle features are substituted into the reconstructed pseudo
+branch on model-val only. The run retains the reconstructed hierarchy context
+while zeroing synthetic group assignments, slot features, and uncertainty, so
+it is an **oracle particle-feature-injection diagnostic**, not an offline ParT
+or pure tagger-architecture ceiling. `A4_offline_part_ceiling` remains the
+actual offline ParT ceiling. D6 is never a deployable result.
 
 ### Tier E: Tagger Fusion
 

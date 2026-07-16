@@ -60,7 +60,7 @@ def _offline_particle_oracle_pseudo(
     *,
     device,
 ) -> PseudoViewInputs:
-    """Replace rendered particles with the exact offline target particle view."""
+    """Inject offline particle features while retaining reconstructed context."""
 
     torch = require_torch()
     arrays = dict(pseudo.arrays)
@@ -118,7 +118,7 @@ def _evaluate_true_offline_particle_branch(
     *,
     resolved_config_hash: str,
 ) -> tuple[dict, dict]:
-    """Run D6 through the real E0 pseudo branch with oracle particles."""
+    """Measure oracle particle-feature injection through the real pseudo branch."""
 
     torch = require_torch()
     root = Path(args.campaign_root)
@@ -532,7 +532,7 @@ def _write_oracle_reference_report(
     resolved: dict,
     output_dir: Path,
 ) -> dict:
-    """Write model-val-only B4/D6 ceilings without pretending they deploy."""
+    """Write model-val-only B4/D6 oracle diagnostics without deployability claims."""
 
     import torch
 
@@ -559,9 +559,14 @@ def _write_oracle_reference_report(
         )
         metrics["diagnostics"] = {
             "oracle_model_val_only": True,
-            "oracle_quantity": "true_offline_particles_routed_through_pseudo_branch",
+            "oracle_quantity": "offline_particle_features_injected_into_reconstructed_pseudo_branch",
             "copied_A4_metrics": False,
             "actual_pseudo_branch_forward_pass": True,
+            "pure_offline_architecture_ceiling": False,
+            "retains_reconstructed_hierarchy_context": True,
+            "group_assignments_zeroed": True,
+            "slot_features_zeroed": True,
+            "uncertainty_zeroed": True,
             "final_test_loaded": False,
         }
     else:

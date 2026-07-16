@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from jetclass_fresh.jetclass_data import JetIdentity
 
@@ -12,7 +14,9 @@ from scripts.train_adaptive_binary_pseudooffline_variant import (
     _selected_classifier_metrics,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
+    _combine_report_target_provenance,
     _joint_reconstruction_loss,
+    _selected_target_provenance,
 )
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
@@ -193,14 +197,34 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
     for renderer in model.renderers.values():
         renderer.config = replace(renderer.config, exact_nbody_projection=False)
     root_forward_count = 0
+    renderer_forward_counts = {
+        name: 0 for name in ("exclusive_kt", "cambridge_aachen")
+    }
 
     def count_root_forward(_module, _inputs, _output):
         nonlocal root_forward_count
         root_forward_count += 1
 
     hook = model.root_predictor.register_forward_hook(count_root_forward)
+    renderer_hooks = []
+    for hierarchy_name, renderer in model.renderers.items():
+        def count_renderer_forward(_module, _inputs, _output, *, name=hierarchy_name):
+            renderer_forward_counts[name] += 1
+
+        renderer_hooks.append(
+            renderer.register_forward_hook(count_renderer_forward)
+        )
     kt_batch = _reconstruction_batch("exclusive_kt")
     ca_batch = _reconstruction_batch("cambridge_aachen")
+    shared_forward = model.prepare_shared_reconstruction_forward(
+        kt_batch["hlt_tokens"], kt_batch["hlt_mask"]
+    )
+    shared_deployment = model.deploy_from_shared_reconstruction_forward(
+        shared_forward, evaluation_seed=24731
+    )
+    # This is the exact pseudo-view object consumed by the F0 CE path.
+    package_trainable_pseudo_views(shared_deployment).validate()
+    deployment_renderer_counts = dict(renderer_forward_counts)
     loss = _joint_reconstruction_loss(
         model,
         {
@@ -209,12 +233,17 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
                 "exclusive_kt": kt_batch["targets"],
                 "cambridge_aachen": ca_batch["targets"],
             },
+            "shared_reconstructor_forward": shared_forward,
+            "shared_deployment_output": shared_deployment,
         },
         split="model_train",
         validation=False,
     )
+    assert renderer_forward_counts == deployment_renderer_counts
     loss.backward()
     hook.remove()
+    for renderer_hook in renderer_hooks:
+        renderer_hook.remove()
     assert root_forward_count == 1
     for hierarchy_name in ("exclusive_kt", "cambridge_aachen"):
         assert any(
@@ -224,6 +253,78 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
             for parameter in model.hierarchy_reconstructor.decoders[
                 hierarchy_name
             ].parameters()
+        )
+
+
+def _target_report_provenance(*, target_hash: str, grouping_hash: str) -> dict:
+    return {
+        "source_manifest_hash": "manifest",
+        "jet_identity_hash": "jets",
+        "label_hash": "labels",
+        "class_mapping_hash": "classes",
+        "hlt_content_hash": "hlt",
+        "hlt_profile": "fixed_hlt_v2_realistic",
+        "hlt_profile_version": "2.0",
+        "hlt_degradation_strength": 2.5,
+        "hlt_params_hash": "hlt-params",
+        "offline_cache_content_hash": "offline",
+        "hierarchy_target_content_hash": target_hash,
+        "hierarchy_target_schema_hash": "schema",
+        "grouping_algorithm_hash": grouping_hash,
+        "root_ledger_schema_hash": "root-schema",
+        "normalization_hash": "normalization",
+    }
+
+
+def test_e7_target_provenance_selects_and_binds_both_hierarchies(tmp_path):
+    branches = {
+        "D1_kt32_mh4_particles": _target_report_provenance(
+            target_hash="kt-target", grouping_hash="kt-grouping"
+        ),
+        "D2_ca32_mh4_particles": _target_report_provenance(
+            target_hash="ca-target", grouping_hash="ca-grouping"
+        ),
+    }
+    for run_name, provenance in branches.items():
+        path = tmp_path / "runs" / run_name / "run_report.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"provenance": {"model_val": provenance}}),
+            encoding="utf-8",
+        )
+    selected = _selected_target_provenance(
+        tmp_path, ("E7_shared_root_dual",)
+    )
+    assert selected["dual_target_provenance"] is True
+    assert set(selected["hierarchy_branches"]) == {
+        "exclusive_kt",
+        "cambridge_aachen",
+    }
+    assert (
+        selected["hierarchy_branches"]["exclusive_kt"][
+            "hierarchy_target_content_hash"
+        ]
+        == "kt-target"
+    )
+    assert (
+        selected["hierarchy_branches"]["cambridge_aachen"][
+            "hierarchy_target_content_hash"
+        ]
+        == "ca-target"
+    )
+
+
+def test_dual_target_provenance_rejects_conflicting_offline_cache():
+    kt = _target_report_provenance(
+        target_hash="kt-target", grouping_hash="kt-grouping"
+    )
+    ca = _target_report_provenance(
+        target_hash="ca-target", grouping_hash="ca-grouping"
+    )
+    ca["offline_cache_content_hash"] = "stale-offline"
+    with pytest.raises(ValueError, match="offline_cache_content_hash"):
+        _combine_report_target_provenance(
+            {"exclusive_kt": kt, "cambridge_aachen": ca}
         )
 
 

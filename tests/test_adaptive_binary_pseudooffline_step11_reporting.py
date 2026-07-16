@@ -28,6 +28,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ablate_pseudo_inputs,
     apply_frozen_fusion,
     compute_tagging_objective,
+    canonical_hash,
     fit_frozen_stack_fusion,
     resolve_variant_config,
     tagging_objective_config,
@@ -286,6 +287,52 @@ def _write_complete_campaign(root: Path) -> None:
                 {
                     "actual_pseudo_branch_forward_pass": True,
                     "copied_A4_metrics": False,
+                    "pure_offline_architecture_ceiling": False,
+                    "retains_reconstructed_hierarchy_context": True,
+                }
+            )
+        provenance = _split_provenance(
+            target=bool(resolved["data"].get("requires_offline_targets"))
+        )
+        if name == "F0_ce_reco_primary":
+            target_hashes = {
+                "exclusive_kt": "target-kt",
+                "cambridge_aachen": "target-ca",
+            }
+            grouping_hashes = {
+                "exclusive_kt": "grouping-kt",
+                "cambridge_aachen": "grouping-ca",
+            }
+            provenance.update(
+                {
+                    "dual_target_provenance": True,
+                    "hierarchy_target_content_hash": canonical_hash(target_hashes),
+                    "grouping_algorithm_hash": canonical_hash(grouping_hashes),
+                    "hierarchy_branches": {
+                        hierarchy_name: {
+                            "grouping": hierarchy_name,
+                            "hierarchy_target_content_hash": target_hashes[
+                                hierarchy_name
+                            ],
+                            "grouping_algorithm_hash": grouping_hashes[
+                                hierarchy_name
+                            ],
+                            "offline_cache_content_hash": provenance[
+                                "offline_cache_content_hash"
+                            ],
+                            "source_manifest_hash": provenance[
+                                "source_manifest_hash"
+                            ],
+                            "hlt_content_hash": provenance["hlt_content_hash"],
+                            "jet_identity_hash": provenance[
+                                "jet_identity_hash"
+                            ],
+                        }
+                        for hierarchy_name in (
+                            "exclusive_kt",
+                            "cambridge_aachen",
+                        )
+                    },
                 }
             )
         report: dict[str, object] = {
@@ -304,11 +351,7 @@ def _write_complete_campaign(root: Path) -> None:
                     "diagnostics": diagnostics,
                 }
             },
-            "provenance": {
-                split: _split_provenance(
-                    target=bool(resolved["data"].get("requires_offline_targets"))
-                )
-            },
+            "provenance": {split: provenance},
         }
         if name in ABPH_POSTHOC_FUSION_VARIANTS:
             artifact = _fusion_artifact(name)
@@ -369,6 +412,27 @@ def test_full_campaign_report_checks_all_tiers_roots_and_frozen_membership(tmp_p
     )
     assert not failed["ok"]
     assert any("membership differs" in problem for problem in failed["problems"])
+
+
+def test_primary_report_rejects_missing_ca_target_provenance(tmp_path: Path) -> None:
+    _write_complete_campaign(tmp_path)
+    path = tmp_path / "runs" / "F0_ce_reco_primary" / "run_report.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["provenance"]["model_val"]["hierarchy_branches"][
+        "cambridge_aachen"
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    report = write_adaptive_binary_campaign_report(
+        AdaptiveBinaryCampaignReportConfig(
+            campaign_root=tmp_path,
+            output_dir=tmp_path / "missing-ca",
+        )
+    )
+    assert not report["ok"]
+    assert any(
+        "F0 model_val dual-target provenance" in problem
+        for problem in report["problems"]
+    )
 
 
 def test_final_metrics_require_success_and_unconditional_teacher_free_attestation(tmp_path: Path) -> None:
