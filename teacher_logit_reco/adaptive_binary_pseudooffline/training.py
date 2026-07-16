@@ -1530,6 +1530,36 @@ def train_reconstructor_curriculum(
             model.load_state_dict(selected["model_state_dict"], strict=True)
             ema.reset_from(model)
             optimizer.state.clear()
+            handoff_optimizer_metadata = (
+                configure_reconstructor_optimizer(optimizer, controller.state(), config)
+                if not controller.complete
+                else optimizer_metadata
+            )
+            if config.save_last_checkpoint:
+                _atomic_torch_save(
+                    output_dir / "last.pt",
+                    _checkpoint_payload(
+                        model=model,
+                        optimizer=optimizer,
+                        scaler=scaler,
+                        ema=ema,
+                        controller=controller,
+                        train_source=train_source,
+                        config=config,
+                        role="last",
+                        validation=validation,
+                        provenance=source_provenance,
+                        optimizer_metadata=handoff_optimizer_metadata,
+                        nonfinite_updates=nonfinite_updates,
+                        trainer_state={
+                            "curves": curves,
+                            "best_by_stage": best_by_stage,
+                            "evaluations_without_improvement": evaluations_without_improvement,
+                            "objective_skip_counts": objective_skip_counts,
+                        },
+                        model_metadata=model_metadata,
+                    ),
+                )
 
     optimizer_metadata = (
         configure_reconstructor_optimizer(optimizer, controller.state(), config)

@@ -355,3 +355,28 @@ def test_resume_restores_curriculum_optimizer_ema_rng_and_data_cursor(tmp_path):
     assert resumed["ok"] is True
     assert resumed["curriculum"]["global_update"] == 16
     assert resumed["rollout_validation_count"] == 16
+
+
+def test_stage_boundary_last_checkpoint_contains_selected_ema_handoff(tmp_path):
+    torch.manual_seed(103)
+    model = _TinyCurriculumModel()
+    config = _trainer_config(tmp_path / "handoff")
+    train_reconstructor_curriculum(
+        model,
+        model.module_groups(),
+        _source(),
+        _validation_batches,
+        _step,
+        config,
+        provenance={"manifest_hash": "handoff-manifest"},
+        maximum_optimizer_updates=2,
+        optimizer_policies=_policies(),
+    )
+    last = load_reconstructor_curriculum_checkpoint(tmp_path / "handoff" / "last.pt")
+    selected = load_reconstructor_curriculum_checkpoint(
+        tmp_path / "handoff" / "best_phase1_root.pt", require_selected=True
+    )
+    assert last["curriculum_state_dict"]["stage_index"] == 1
+    assert last["optimizer_state_dict"]["state"] == {}
+    for name, value in selected["model_state_dict"].items():
+        assert torch.equal(last["online_model_state_dict"][name], value)

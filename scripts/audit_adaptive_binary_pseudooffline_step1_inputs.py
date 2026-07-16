@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     path = write_input_audit_report(report, Path(args.output))
     print(f"wrote {path}")
     print(f"ok={bool(report.get('ok'))}")
-    return 0
+    return 0 if bool(report.get("ok")) else 1
 
 
 if __name__ == "__main__":
