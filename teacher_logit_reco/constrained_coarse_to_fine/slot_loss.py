@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import itertools
 import math
@@ -65,17 +66,23 @@ class ParticleSlotLossConfig:
     huber_beta: float = 0.20
     epsilon: float = 1.0e-8
     brute_force_limit: int = 8
+    hungarian_workers: int = 1
+    hungarian_executor: str = "serial"
 
     def __post_init__(self) -> None:
         if self.matching_mode not in {"ordered", "sinkhorn", "hungarian"}:
             raise ValueError("matching_mode must be ordered, sinkhorn, or hungarian")
         for name, value in asdict(self).items():
-            if name in {"matching_mode", "sinkhorn_iterations", "brute_force_limit"}:
+            if name in {"matching_mode", "sinkhorn_iterations", "brute_force_limit", "hungarian_workers", "hungarian_executor"}:
                 continue
             if float(value) < 0.0:
                 raise ValueError(f"{name} must be nonnegative")
         if int(self.sinkhorn_iterations) <= 0 or int(self.brute_force_limit) <= 0:
             raise ValueError("iteration and fallback limits must be positive")
+        if int(self.hungarian_workers) <= 0:
+            raise ValueError("hungarian_workers must be positive")
+        if str(self.hungarian_executor).strip().lower() not in {"serial", "thread"}:
+            raise ValueError("hungarian_executor must be serial or thread")
         if float(self.sinkhorn_temperature) <= 0.0 or float(self.epsilon) <= 0.0:
             raise ValueError("sinkhorn_temperature and epsilon must be positive")
 
@@ -211,12 +218,19 @@ def prepare_cell_slot_targets(
     )
 
 
-def _linear_sum_assignment(cost: torch.Tensor, brute_force_limit: int) -> tuple[torch.Tensor, torch.Tensor, str]:
+def _linear_sum_assignment_cpu(cost: np.ndarray, brute_force_limit: int) -> tuple[np.ndarray, np.ndarray, str]:
+    """Solve one CPU-resident hard assignment with the legacy tie policy."""
+
+    if cost.ndim != 2:
+        raise ValueError(f"Hungarian cost must be 2D, got {cost.shape}")
     rows_count, columns_count = int(cost.shape[0]), int(cost.shape[1])
+    if rows_count == 0 or columns_count == 0:
+        empty = np.zeros((0,), dtype=np.int64)
+        return empty, empty, "hungarian_empty"
     try:
         from scipy.optimize import linear_sum_assignment  # type: ignore
 
-        rows, columns = linear_sum_assignment(cost.detach().cpu().numpy())
+        rows, columns = linear_sum_assignment(cost)
         method = "hungarian_scipy"
     except ImportError:
         smaller = min(rows_count, columns_count)
@@ -229,23 +243,56 @@ def _linear_sum_assignment(cost: torch.Tensor, brute_force_limit: int) -> tuple[
         if rows_count <= columns_count:
             row_choices = tuple(range(rows_count))
             for columns_choice in itertools.permutations(range(columns_count), rows_count):
-                value = float(cost[row_choices, columns_choice].sum().detach().cpu().item())
+                value = float(cost[row_choices, columns_choice].sum())
                 if best is None or value < best[0]:
                     best = (value, row_choices, columns_choice)
         else:
             column_choices = tuple(range(columns_count))
             for row_choice in itertools.permutations(range(rows_count), columns_count):
-                value = float(cost[row_choice, column_choices].sum().detach().cpu().item())
+                value = float(cost[row_choice, column_choices].sum())
                 if best is None or value < best[0]:
                     best = (value, row_choice, column_choices)
         assert best is not None
         rows, columns = np.asarray(best[1]), np.asarray(best[2])
         method = "hungarian_bruteforce"
+    return np.asarray(rows, dtype=np.int64), np.asarray(columns, dtype=np.int64), method
+
+
+def _linear_sum_assignment(cost: torch.Tensor, brute_force_limit: int) -> tuple[torch.Tensor, torch.Tensor, str]:
+    """Scalar-reference tensor wrapper retained for hard-assignment parity tests."""
+
+    rows, columns, method = _linear_sum_assignment_cpu(
+        cost.detach().cpu().contiguous().numpy(),
+        brute_force_limit,
+    )
     return (
         torch.as_tensor(rows, dtype=torch.long, device=cost.device),
         torch.as_tensor(columns, dtype=torch.long, device=cost.device),
         method,
     )
+
+
+def _solve_hungarian_cost_collection(
+    costs: np.ndarray,
+    config: ParticleSlotLossConfig,
+) -> list[tuple[np.ndarray, np.ndarray, str]]:
+    """Solve a packed cost collection, returning results in original pair order."""
+
+    if costs.ndim != 3:
+        raise ValueError(f"packed Hungarian costs must have shape [pairs, slots, targets], got {costs.shape}")
+    pairs = int(costs.shape[0])
+
+    def solve(index: int) -> tuple[np.ndarray, np.ndarray, str]:
+        return _linear_sum_assignment_cpu(costs[index], int(config.brute_force_limit))
+
+    workers = min(int(config.hungarian_workers), pairs)
+    if str(config.hungarian_executor).strip().lower() != "thread" or workers <= 1:
+        return [solve(index) for index in range(pairs)]
+    # executor.map yields in input order even when individual SciPy calls
+    # finish out of order, preserving the scalar branch's deterministic pair
+    # ordering for tied costs and all downstream metric aggregation.
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="c2f-hungarian") as executor:
+        return list(executor.map(solve, range(pairs)))
 
 
 def _sinkhorn_square(cost: torch.Tensor, config: ParticleSlotLossConfig) -> torch.Tensor:
@@ -406,12 +453,202 @@ def _weighted_mean(matrix: torch.Tensor, weights: torch.Tensor, epsilon: float) 
     return (matrix * weights).sum() / weights.sum().clamp_min(epsilon)
 
 
+def _append_hungarian_rows_scalar(
+    output: ParticleSlotDecoderOutput,
+    targets: CellSlotTargets,
+    config: ParticleSlotLossConfig,
+    *,
+    return_assignments: bool,
+    component_rows: dict[str, list[torch.Tensor]],
+    existence_rows: list[torch.Tensor],
+    count_rows: list[torch.Tensor],
+    missing_rows: list[torch.Tensor],
+    reliability_rows: list[torch.Tensor],
+    assignments: list[SlotAssignment],
+) -> torch.Tensor:
+    """Retain the original per-cell C4 implementation as a parity reference."""
+
+    batch, views, cells, slots = output.total_pt.shape
+    matched_count = output.total_pt.sum() * 0.0
+    for batch_index in range(batch):
+        for cell_index in range(cells):
+            target_indices = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten()
+            target_count = int(target_indices.numel())
+            for view_index in range(views):
+                existence_target = torch.zeros(slots, device=output.total_pt.device, dtype=output.total_pt.dtype)
+                if target_count > 0:
+                    pair = _pairwise_components(
+                        output,
+                        targets,
+                        batch_index,
+                        view_index,
+                        cell_index,
+                        target_indices,
+                        config,
+                    )
+                    pred_indices, target_local, method = _linear_sum_assignment(
+                        pair["total"], config.brute_force_limit
+                    )
+                    existence_target[pred_indices] = 1.0
+                    for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
+                        component_rows[name].append(pair[name][pred_indices, target_local].mean())
+                    missing_rows.append(pair["total"].new_tensor(float(max(0, target_count - slots))))
+                    matched_count = matched_count + float(min(slots, target_count))
+                    if return_assignments:
+                        assignments.append(
+                            SlotAssignment(
+                                batch_index=batch_index,
+                                view_index=view_index,
+                                cell_index=cell_index,
+                                pred_indices=pred_indices.detach(),
+                                target_indices=target_indices.index_select(0, target_local).detach(),
+                                method=method,
+                            )
+                        )
+                logits = output.existence_logits[batch_index, view_index, cell_index]
+                existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
+                count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
+                realized_error = (
+                    torch.sigmoid(logits).sum() - float(target_count)
+                ).abs().detach() / max(1.0, float(target_count))
+                reliability_rows.append(
+                    F.smooth_l1_loss(
+                        output.reliability[batch_index, view_index, cell_index].mean(),
+                        (1.0 - realized_error.clamp(0.0, 1.0)),
+                    )
+                )
+    return matched_count
+
+
+def _append_hungarian_rows_packed(
+    output: ParticleSlotDecoderOutput,
+    targets: CellSlotTargets,
+    config: ParticleSlotLossConfig,
+    *,
+    return_assignments: bool,
+    component_rows: dict[str, list[torch.Tensor]],
+    existence_rows: list[torch.Tensor],
+    count_rows: list[torch.Tensor],
+    missing_rows: list[torch.Tensor],
+    reliability_rows: list[torch.Tensor],
+    assignments: list[SlotAssignment],
+    target_counts: torch.Tensor,
+) -> torch.Tensor:
+    """Run C4's exact hard assignments with packed CPU cost transfer.
+
+    Pair costs remain FP32 GPU tensors.  Each same-target-count collection is
+    copied to CPU once, then SciPy assignments run serially or in a bounded
+    thread pool.  Only integer assignment indices return to the GPU; selected
+    component losses retain their original autograd path through ``pair``.
+    """
+
+    batch, views, cells, slots = output.total_pt.shape
+    device = output.total_pt.device
+    packed_indices = _packed_target_indices(targets.mask)
+    flat_batch = torch.arange(batch, device=device).view(batch, 1, 1).expand(batch, cells, views).reshape(-1)
+    flat_cell = torch.arange(cells, device=device).view(1, cells, 1).expand(batch, cells, views).reshape(-1)
+    flat_view = torch.arange(views, device=device).view(1, 1, views).expand(batch, cells, views).reshape(-1)
+    flat_counts = target_counts.to(dtype=torch.long)[:, :, None].expand(-1, -1, views).reshape(-1)
+    records: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, str, dict[str, torch.Tensor]] | None] = [
+        None
+    ] * int(flat_counts.numel())
+    max_targets = int(flat_counts.max().detach().cpu().item()) if int(flat_counts.numel()) else 0
+
+    for target_count in range(1, max_targets + 1):
+        selected = torch.nonzero(flat_counts == target_count, as_tuple=False).flatten()
+        if not int(selected.numel()):
+            continue
+        batch_indices = flat_batch.index_select(0, selected)
+        cell_indices = flat_cell.index_select(0, selected)
+        view_indices = flat_view.index_select(0, selected)
+        target_indices = packed_indices[batch_indices, cell_indices, :target_count]
+        pair = _pairwise_components_batched(
+            pred_pt=output.total_pt[batch_indices, view_indices, cell_indices],
+            pred_energy=output.total_energy[batch_indices, view_indices, cell_indices],
+            pred_coordinates=output.local_coordinates[batch_indices, view_indices, cell_indices],
+            pred_pid=output.pid_probabilities[batch_indices, view_indices, cell_indices],
+            pred_charge_logits=output.charge_logits[batch_indices, view_indices, cell_indices],
+            target_pt=targets.pt[batch_indices, cell_indices].gather(-1, target_indices),
+            target_energy=targets.energy[batch_indices, cell_indices].gather(-1, target_indices),
+            target_coordinates=targets.local_coordinates[batch_indices, cell_indices].gather(
+                1,
+                target_indices[:, :, None].expand(-1, -1, 2),
+            ),
+            target_pid=targets.pid_index[batch_indices, cell_indices].gather(-1, target_indices),
+            target_charge=targets.charge_index[batch_indices, cell_indices].gather(-1, target_indices),
+            config=config,
+        )
+        # One synchronization/copy per target-count group replaces thousands
+        # of per-cell GPU-to-CPU transfers in the scalar C4 path.
+        solutions = _solve_hungarian_cost_collection(
+            pair["total"].detach().to(device="cpu").contiguous().numpy(),
+            config,
+        )
+        original_positions = selected.detach().cpu().tolist()
+        for row, (pred_cpu, target_cpu, method) in enumerate(solutions):
+            pred_indices = torch.as_tensor(pred_cpu, device=device, dtype=torch.long)
+            target_local = torch.as_tensor(target_cpu, device=device, dtype=torch.long)
+            selected_components = {
+                name: pair[name][row, pred_indices, target_local].mean()
+                for name in ("log_pt", "coordinate", "pid", "charge", "log_energy")
+            }
+            records[int(original_positions[row])] = (
+                int(target_count),
+                target_indices[row],
+                pred_indices,
+                target_local,
+                method,
+                selected_components,
+            )
+
+    matched_count = output.total_pt.sum() * 0.0
+    for flat_index, record in enumerate(records):
+        batch_index = flat_index // (cells * views)
+        within_batch = flat_index % (cells * views)
+        cell_index = within_batch // views
+        view_index = within_batch % views
+        target_count = 0 if record is None else record[0]
+        existence_target = torch.zeros(slots, device=device, dtype=output.total_pt.dtype)
+        if record is not None:
+            _, target_indices, pred_indices, target_local, method, selected_components = record
+            existence_target[pred_indices] = 1.0
+            for name, value in selected_components.items():
+                component_rows[name].append(value)
+            missing_rows.append(existence_target.new_tensor(float(max(0, target_count - slots))))
+            matched_count = matched_count + float(min(slots, target_count))
+            if return_assignments:
+                assignments.append(
+                    SlotAssignment(
+                        batch_index=batch_index,
+                        view_index=view_index,
+                        cell_index=cell_index,
+                        pred_indices=pred_indices.detach(),
+                        target_indices=target_indices.index_select(0, target_local).detach(),
+                        method=method,
+                    )
+                )
+        logits = output.existence_logits[batch_index, view_index, cell_index]
+        existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
+        count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
+        realized_error = (torch.sigmoid(logits).sum() - float(target_count)).abs().detach() / max(
+            1.0, float(target_count)
+        )
+        reliability_rows.append(
+            F.smooth_l1_loss(
+                output.reliability[batch_index, view_index, cell_index].mean(),
+                (1.0 - realized_error.clamp(0.0, 1.0)),
+            )
+        )
+    return matched_count
+
+
 def compute_particle_slot_loss(
     output: ParticleSlotDecoderOutput,
     targets: CellSlotTargets,
     config: ParticleSlotLossConfig | Mapping[str, Any] | None = None,
     *,
     return_assignments: bool = True,
+    _hungarian_execution: str = "packed",
 ) -> ParticleSlotLossOutput:
     """Compute differentiable cell-local matching and consistency losses."""
 
@@ -440,57 +677,35 @@ def compute_particle_slot_loss(
     existence_targets = torch.zeros_like(output.existence_logits)
 
     if config.matching_mode == "hungarian":
-        # This is an intentionally expensive hard-assignment control.  Keep
-        # its independent SciPy implementation rather than silently changing
-        # the experimental definition, while the normal ordered/Sinkhorn
-        # variants take the batched path below.
-        for batch_index in range(batch):
-            for cell_index in range(cells):
-                target_indices = torch.nonzero(targets.mask[batch_index, cell_index], as_tuple=False).flatten()
-                target_count = int(target_indices.numel())
-                for view_index in range(views):
-                    existence_target = torch.zeros(slots, device=output.total_pt.device, dtype=output.total_pt.dtype)
-                    if target_count > 0:
-                        pair = _pairwise_components(
-                            output,
-                            targets,
-                            batch_index,
-                            view_index,
-                            cell_index,
-                            target_indices,
-                            config,
-                        )
-                        pred_indices, target_local, method = _linear_sum_assignment(
-                            pair["total"], config.brute_force_limit
-                        )
-                        existence_target[pred_indices] = 1.0
-                        for name in ("log_pt", "coordinate", "pid", "charge", "log_energy"):
-                            component_rows[name].append(pair[name][pred_indices, target_local].mean())
-                        missing_rows.append(pair["total"].new_tensor(float(max(0, target_count - slots))))
-                        matched_count = matched_count + float(min(slots, target_count))
-                        if return_assignments:
-                            assignments.append(
-                                SlotAssignment(
-                                    batch_index=batch_index,
-                                    view_index=view_index,
-                                    cell_index=cell_index,
-                                    pred_indices=pred_indices.detach(),
-                                    target_indices=target_indices.index_select(0, target_local).detach(),
-                                    method=method,
-                                )
-                            )
-                    logits = output.existence_logits[batch_index, view_index, cell_index]
-                    existence_rows.append(F.binary_cross_entropy_with_logits(logits, existence_target))
-                    count_rows.append((torch.sigmoid(logits).sum() - float(target_count)).abs())
-                    realized_error = (
-                        torch.sigmoid(logits).sum() - float(target_count)
-                    ).abs().detach() / max(1.0, float(target_count))
-                    reliability_rows.append(
-                        F.smooth_l1_loss(
-                            output.reliability[batch_index, view_index, cell_index].mean(),
-                            (1.0 - realized_error.clamp(0.0, 1.0)),
-                        )
-                    )
+        if _hungarian_execution == "scalar_reference":
+            matched_count = _append_hungarian_rows_scalar(
+                output,
+                targets,
+                config,
+                return_assignments=return_assignments,
+                component_rows=component_rows,
+                existence_rows=existence_rows,
+                count_rows=count_rows,
+                missing_rows=missing_rows,
+                reliability_rows=reliability_rows,
+                assignments=assignments,
+            )
+        elif _hungarian_execution == "packed":
+            matched_count = _append_hungarian_rows_packed(
+                output,
+                targets,
+                config,
+                return_assignments=return_assignments,
+                component_rows=component_rows,
+                existence_rows=existence_rows,
+                count_rows=count_rows,
+                missing_rows=missing_rows,
+                reliability_rows=reliability_rows,
+                assignments=assignments,
+                target_counts=target_counts,
+            )
+        else:
+            raise ValueError(f"unknown Hungarian execution mode {_hungarian_execution!r}")
     else:
         packed_indices = _packed_target_indices(targets.mask)
         flat_batch = torch.arange(batch, device=output.total_pt.device).view(batch, 1, 1).expand(
@@ -697,6 +912,32 @@ def compute_particle_slot_loss(
         components=components,
         metrics=metrics,
         assignments=tuple(assignments),
+    )
+
+
+def _compute_particle_slot_loss_hungarian_scalar_reference(
+    output: ParticleSlotDecoderOutput,
+    targets: CellSlotTargets,
+    config: ParticleSlotLossConfig | Mapping[str, Any] | None = None,
+    *,
+    return_assignments: bool = True,
+) -> ParticleSlotLossOutput:
+    """Test-only scalar C4 reference for packed/threaded parity checks."""
+
+    if config is None:
+        resolved = ParticleSlotLossConfig(matching_mode="hungarian")
+    elif isinstance(config, ParticleSlotLossConfig):
+        resolved = config
+    else:
+        resolved = ParticleSlotLossConfig(**dict(config))
+    if resolved.matching_mode != "hungarian":
+        raise ValueError("Hungarian scalar reference requires matching_mode='hungarian'")
+    return compute_particle_slot_loss(
+        output,
+        targets,
+        resolved,
+        return_assignments=return_assignments,
+        _hungarian_execution="scalar_reference",
     )
 
 

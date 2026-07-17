@@ -42,10 +42,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-nonfinite-batches", type=int, default=8)
     parser.add_argument("--device", default="auto")
     parser.add_argument(
+        "--runtime-profile",
+        default="fp32_reference",
+        choices=(
+            "fp32_reference",
+            "fp16_diagnostic",
+            "bf16_calibration",
+            "accelerated_candidate_v1",
+            "accelerated_approved_v1",
+        ),
+        help="Named, hash-bound execution profile. Non-FP32 profiles become executable in acceleration Step 2.",
+    )
+    parser.add_argument(
+        "--precision-mode",
+        default=None,
+        choices=("fp32", "bf16_forward_fp32_loss", "fp16_forward_fp32_loss"),
+        help="Explicit forward/loss precision contract; defaults from --runtime-profile.",
+    )
+    parser.add_argument("--prefetch-factor", type=int, default=None)
+    parser.add_argument("--lr-schedule", choices=("constant", "warmup_cosine"), default="constant")
+    parser.add_argument("--warmup-fraction", type=float, default=0.10)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.05)
+    parser.add_argument("--min-epochs", type=int, default=0)
+    parser.add_argument(
+        "--fixed-horizon",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run all requested epochs and disable early stopping for certification jobs.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="Resume only from an epoch-boundary last.pt checkpoint with an exact matching runtime/input contract.",
+    )
+    parser.add_argument("--hungarian-workers", type=int, default=1)
+    parser.add_argument("--hungarian-executor", choices=("serial", "thread"), default="serial")
+    parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable CUDA AMP. Full precision is the stable default for constrained accounting losses.",
+        help="Legacy FP16 AMP switch. Prefer --precision-mode; BF16 execution is added in acceleration Step 2.",
     )
     parser.add_argument("--no-verify-hash", action="store_true")
     parser.add_argument("--no-pin-memory", action="store_true")
@@ -83,6 +119,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = vars(build_parser().parse_args())
+    profile_precision = {
+        "fp32_reference": "fp32",
+        "fp16_diagnostic": "fp16_forward_fp32_loss",
+        "bf16_calibration": "bf16_forward_fp32_loss",
+        "accelerated_candidate_v1": "bf16_forward_fp32_loss",
+        "accelerated_approved_v1": "bf16_forward_fp32_loss",
+    }
+    if args["precision_mode"] is None:
+        args["precision_mode"] = profile_precision[args["runtime_profile"]]
+    if bool(args["amp"]) and args["precision_mode"] == "fp32":
+        args["runtime_profile"] = "fp16_diagnostic"
+        args["precision_mode"] = "fp16_forward_fp32_loss"
+    elif args["runtime_profile"] == "fp32_reference" and args["precision_mode"] != "fp32":
+        args["runtime_profile"] = (
+            "bf16_calibration"
+            if args["precision_mode"] == "bf16_forward_fp32_loss"
+            else "fp16_diagnostic"
+        )
     args["verify_hash"] = not args.pop("no_verify_hash")
     args["pin_memory"] = not args.pop("no_pin_memory")
     args["save_last_checkpoint"] = not args.pop("no_save_last_checkpoint")

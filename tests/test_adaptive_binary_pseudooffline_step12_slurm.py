@@ -58,6 +58,13 @@ def _selection_report(
         "provenance": [],
         "root_identity": [],
         "fusion_membership": [],
+        "schedule_screening": {
+            "policy_label": "accelerated_screening_v1",
+            "runs": [{"variant": "B1_semantic_query_root"}],
+            "truncated_variants": [],
+            "negative_mechanism_conclusion_valid": True,
+            "automatic_highdata_promotion_allowed": True,
+        },
     }
     payload["report_content_hash"] = canonical_hash(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +294,30 @@ def test_selection_report_hash_is_recomputed(tmp_path: Path) -> None:
     payload["campaign_root"] = "changed"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="content hash mismatch"):
+        AdaptiveBinarySubmissionConfig(
+            campaign_root=tmp_path / "highdata",
+            data_dir=tmp_path / "data",
+            campaign_mode="highdata",
+            approve_highdata=True,
+            pilot_report_path=path,
+        )
+
+
+def test_truncated_screening_report_blocks_highdata_promotion(tmp_path: Path) -> None:
+    path = _selection_report(tmp_path / "report.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schedule_screening"].update(
+        {
+            "truncated_variants": ["D1_kt32_mh4_particles"],
+            "negative_mechanism_conclusion_valid": False,
+            "automatic_highdata_promotion_allowed": False,
+        }
+    )
+    payload.pop("report_content_hash")
+    payload["report_content_hash"] = canonical_hash(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="blocks automatic high-data promotion"):
         AdaptiveBinarySubmissionConfig(
             campaign_root=tmp_path / "highdata",
             data_dir=tmp_path / "data",

@@ -9,7 +9,8 @@ optimizer state, EMA selection, nonfinite handling, and restart semantics.
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import gc
 import hashlib
 import json
 import math
@@ -21,13 +22,50 @@ import numpy as np
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device, set_training_seed
 
+from .convergence_schedule import (
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    ABPH_LEGACY_SCHEDULE_CONTRACT,
+    ABPH_STAGE_ROLES,
+    StageScheduleBudget,
+    decide_stage_continuation,
+)
+from .distributed import (
+    DistributedRuntime,
+    ReconstructorTrainingModule,
+    all_gather_objects,
+    all_reduce_min_bool,
+    all_reduce_sum_int,
+    any_structural_error,
+    barrier,
+    broadcast_object,
+    build_stage_ddp_wrapper,
+    gather_error_summaries,
+    initialize_distributed_runtime,
+    require_standard_tensor_mapping,
+    tensor_mapping_is_finite,
+    verify_common_parameter_state,
+)
+from .distributed_validation import (
+    ABPH_DISTRIBUTED_VALIDATION_CONTRACT,
+    TypedValidationAccumulator,
+    finalize_typed_validation,
+)
 from .hypothesis_distribution import conditional_distribution_weight
+from .input_pipeline import (
+    ABPH_INPUT_PIPELINE_CONTRACT,
+    ABPH_PREFETCH_QUEUE_DEPTH,
+    BatchTransferStager,
+    RankLocalBatchPrefetcher,
+    prepare_contiguous_cpu_batch,
+)
+from .runtime_profile import RuntimeProfileConfig, RuntimeProfiler, profile_span
 from .targets import ABPH_LEVEL_CAPACITIES
 
 
 ABPH_RECONSTRUCTOR_TRAINING_CONTRACT = (
     "adaptive_binary_pseudooffline_reconstructor_training_v1"
 )
+ABPH_DISTRIBUTED_CHECKPOINT_CONTRACT = "adaptive_binary_distributed_checkpoint_v1"
 ABPH_RECONSTRUCTION_LOSS_NAMES: tuple[str, ...] = (
     "root",
     "group_2",
@@ -54,6 +92,10 @@ ABPH_RECONSTRUCTOR_MODULE_GROUPS: tuple[str, ...] = (
     "renderer",
     "distribution",
 )
+
+
+class _SynchronizedForwardRetry(RuntimeError):
+    pass
 
 
 def _canonical_hash(value: Mapping[str, Any]) -> str:
@@ -134,7 +176,7 @@ class ReconstructionLossWeights:
 
 @dataclass(frozen=True)
 class ReconstructorCurriculumConfig:
-    """Maximum update budgets and the locked progressive-depth schedule."""
+    """Progressive-depth schedule with explicit legacy/accelerated semantics."""
 
     root_updates: int = 150_000
     hierarchy_updates_per_depth: int = 80_000
@@ -151,6 +193,16 @@ class ReconstructorCurriculumConfig:
     hierarchy_capacities: tuple[int, ...] = ABPH_LEVEL_CAPACITIES
     renderer_enabled: bool = True
     distribution_enabled: bool = True
+    schedule_contract: str = ABPH_LEGACY_SCHEDULE_CONTRACT
+    campaign_schedule_profile: str = "legacy"
+    root_budget: StageScheduleBudget | None = None
+    hierarchy_budget: StageScheduleBudget | None = None
+    renderer_budget: StageScheduleBudget | None = None
+    distribution_budget: StageScheduleBudget | None = None
+    root_stage_role: str = "trained"
+    hierarchy_stage_role: str = "trained"
+    renderer_stage_role: str = "trained"
+    distribution_stage_role: str = "trained"
 
     def __post_init__(self) -> None:
         for name in (
@@ -189,9 +241,95 @@ class ReconstructorCurriculumConfig:
             raise ValueError("hierarchy_capacities cannot exceed maximum_capacity")
         if bool(self.distribution_enabled) and not bool(self.renderer_enabled):
             raise ValueError("distribution training requires the particle renderer phase")
+        roles = {
+            "root": self.root_stage_role,
+            "hierarchy": self.hierarchy_stage_role,
+            "renderer": self.renderer_stage_role,
+            "distribution": self.distribution_stage_role,
+        }
+        for family, role in roles.items():
+            if str(role) not in ABPH_STAGE_ROLES:
+                raise ValueError(f"invalid {family} stage role {role!r}")
+        if self.schedule_contract == ABPH_ACCELERATED_SCHEDULE_CONTRACT:
+            if self.campaign_schedule_profile not in {"pilot", "highdata"}:
+                raise ValueError(
+                    "accelerated schedule requires pilot or highdata campaign profile"
+                )
+            for family in ("root", "hierarchy", "renderer", "distribution"):
+                role = str(roles[family])
+                budget = getattr(self, f"{family}_budget")
+                enabled = (
+                    family == "root"
+                    or (family == "hierarchy" and int(self.maximum_capacity) > 1)
+                    or (family == "renderer" and bool(self.renderer_enabled))
+                    or (family == "distribution" and bool(self.distribution_enabled))
+                )
+                if enabled and role in {"trained", "warm_started_handoff"}:
+                    if not isinstance(budget, StageScheduleBudget):
+                        raise ValueError(
+                            f"accelerated {family} stage requires an explicit budget"
+                        )
+                elif enabled and role in {"disabled", "oracle"}:
+                    raise ValueError(
+                        f"{family} role {role!r} conflicts with an enabled curriculum stage"
+                    )
+            if self.root_stage_role == "warm_started_handoff" and self.root_budget != StageScheduleBudget(1, 0, 1):
+                raise ValueError("root warm-start handoff must remain exactly one update")
+            if self.hierarchy_stage_role == "warm_started_handoff" and self.hierarchy_budget != StageScheduleBudget(1, 0, 1):
+                raise ValueError("hierarchy warm-start handoff must remain exactly one update per depth")
+        elif self.schedule_contract != ABPH_LEGACY_SCHEDULE_CONTRACT:
+            raise ValueError(f"unknown schedule contract {self.schedule_contract!r}")
+        elif any(
+            budget is not None
+            for budget in (
+                self.root_budget,
+                self.hierarchy_budget,
+                self.renderer_budget,
+                self.distribution_budget,
+            )
+        ):
+            raise ValueError("legacy schedules may not carry accelerated stage budgets")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ReconstructorCurriculumConfig":
+        """Read old schedules as explicitly legacy, never as accelerated."""
+
+        values = dict(payload)
+        values.pop("contract", None)
+        values.setdefault("schedule_contract", ABPH_LEGACY_SCHEDULE_CONTRACT)
+        values.setdefault("campaign_schedule_profile", "legacy")
+        for family in ("root", "hierarchy", "renderer", "distribution"):
+            key = f"{family}_budget"
+            value = values.get(key)
+            if isinstance(value, Mapping):
+                values[key] = StageScheduleBudget.from_dict(value)
+            values.setdefault(f"{family}_stage_role", "trained")
+        return cls(**values)
+
+    @property
+    def accelerated(self) -> bool:
+        return self.schedule_contract == ABPH_ACCELERATED_SCHEDULE_CONTRACT
+
+    def stage_budget(self, family: str) -> StageScheduleBudget:
+        normalized = str(family)
+        if self.accelerated:
+            budget = getattr(self, f"{normalized}_budget")
+            if not isinstance(budget, StageScheduleBudget):
+                raise ValueError(f"missing accelerated budget for {normalized}")
+            return budget
+        legacy_updates = {
+            "root": self.root_updates,
+            "hierarchy": self.hierarchy_updates_per_depth,
+            "renderer": self.renderer_updates,
+            "distribution": self.distribution_updates,
+        }[normalized]
+        return StageScheduleBudget(int(legacy_updates), 0, int(legacy_updates))
+
+    def stage_role(self, family: str) -> str:
+        return str(getattr(self, f"{family}_stage_role"))
 
 
 @dataclass(frozen=True)
@@ -231,9 +369,19 @@ class ReconstructorTrainerConfig:
     root_hierarchy_gradient_accumulation_steps: int | None = None
     renderer_distribution_gradient_accumulation_steps: int | None = None
     distributed_world_size: int = 1
+    root_hierarchy_local_batch_size: int | None = None
+    renderer_distribution_local_batch_size: int | None = None
     root_hierarchy_effective_batch_size: int = 1024
     renderer_distribution_effective_batch_size: int = 512
     enforce_effective_batch_size: bool = True
+    runtime_batch_contract_path: str | None = None
+    runtime_batch_contract_hash: str | None = None
+    asynchronous_prefetch: bool = True
+    prefetch_queue_depth: int = ABPH_PREFETCH_QUEUE_DEPTH
+    pin_memory: bool = True
+    nonblocking_transfer: bool = True
+    ddp_find_unused_parameters: bool = True
+    ddp_broadcast_buffers: bool = False
     gradient_clip_norm: float = 1.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
@@ -243,6 +391,7 @@ class ReconstructorTrainerConfig:
     ema_decay: float = 0.9999
     maximum_nonfinite_updates: int = 8
     save_last_checkpoint: bool = True
+    runtime_profile: RuntimeProfileConfig = RuntimeProfileConfig()
     curriculum: ReconstructorCurriculumConfig = ReconstructorCurriculumConfig()
     loss_weights: ReconstructionLossWeights = ReconstructionLossWeights()
 
@@ -254,10 +403,30 @@ class ReconstructorTrainerConfig:
         for name in (
             "root_hierarchy_gradient_accumulation_steps",
             "renderer_distribution_gradient_accumulation_steps",
+            "root_hierarchy_local_batch_size",
+            "renderer_distribution_local_batch_size",
         ):
             value = getattr(self, name)
             if value is not None and int(value) <= 0:
                 raise ValueError(f"{name} must be positive when supplied")
+        if bool(self.runtime_batch_contract_path) != bool(self.runtime_batch_contract_hash):
+            raise ValueError("runtime batch contract path and hash must be supplied together")
+        if int(self.prefetch_queue_depth) != ABPH_PREFETCH_QUEUE_DEPTH:
+            raise ValueError(
+                f"prefetch_queue_depth is locked to {ABPH_PREFETCH_QUEUE_DEPTH}"
+            )
+        if bool(self.ddp_broadcast_buffers):
+            raise ValueError("ABPH DDP broadcast_buffers is locked off")
+        for family in ("root_hierarchy", "renderer_distribution"):
+            local = getattr(self, f"{family}_local_batch_size")
+            accumulation = getattr(self, f"{family}_gradient_accumulation_steps")
+            effective = getattr(self, f"{family}_effective_batch_size")
+            if local is not None and accumulation is not None:
+                actual = int(self.distributed_world_size) * int(local) * int(accumulation)
+                if actual != int(effective):
+                    raise ValueError(
+                        f"{family} runtime batch arithmetic gives {actual}, expected {effective}"
+                    )
         for name in (
             "distributed_world_size",
             "root_hierarchy_effective_batch_size",
@@ -285,14 +454,33 @@ class ReconstructorTrainerConfig:
         return payload
 
 
+def _normalized_trainer_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize pre-runtime schedule payloads for explicit legacy resume only."""
+
+    values = dict(payload)
+    values.pop("contract", None)
+    values.pop("config_hash", None)
+    values["curriculum"] = ReconstructorCurriculumConfig.from_dict(
+        dict(values.get("curriculum", {}))
+    ).to_dict()
+    values.setdefault("runtime_profile", asdict(RuntimeProfileConfig()))
+    return values
+
+
 @dataclass(frozen=True)
 class CurriculumStage:
     key: str
     phase: int
     phase_name: str
-    maximum_updates: int
+    family: str
+    role: str
+    budget: StageScheduleBudget
     patience_evaluations: int
     active_capacity: int
+
+    @property
+    def maximum_updates(self) -> int:
+        return int(self.budget.hard_max_updates)
 
 
 @dataclass(frozen=True)
@@ -310,6 +498,12 @@ class CurriculumState:
     distribution_weight: float
     complete: bool = False
     supervised_capacities: tuple[int, ...] = ABPH_LEVEL_CAPACITIES
+    stage_nominal_updates: int = 0
+    stage_extension_updates: int = 0
+    stage_hard_max_updates: int = 0
+    stage_extension_blocks: int = 0
+    stage_role: str = "trained"
+    schedule_contract: str = ABPH_LEGACY_SCHEDULE_CONTRACT
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -324,55 +518,72 @@ class CurriculumController:
         self.stage_index = 0
         self.stage_update = 0
         self.global_update = 0
+        self.extension_blocks: dict[str, int] = {
+            stage.key: 0 for stage in self.stages
+        }
+        self.stage_outcomes: dict[str, str] = {}
+        self.schedule_events: list[dict[str, Any]] = []
+        self.schedule_truncated = False
+        self._awaiting_boundary_decision = False
 
     @staticmethod
     def _build_stages(config: ReconstructorCurriculumConfig) -> tuple[CurriculumStage, ...]:
         stages = [
             CurriculumStage(
-                "phase1_root",
-                1,
-                "root_pretraining",
-                int(config.root_updates),
-                int(config.root_patience_evaluations),
-                1,
+                key="phase1_root",
+                phase=1,
+                phase_name="root_pretraining",
+                family="root",
+                role=config.stage_role("root"),
+                budget=config.stage_budget("root"),
+                patience_evaluations=int(config.root_patience_evaluations),
+                active_capacity=1,
             )
         ]
         stages.extend(
             CurriculumStage(
-                    f"phase2_hierarchy_{capacity}",
-                    2,
-                    "progressive_hierarchy",
-                    int(config.hierarchy_updates_per_depth),
-                    int(config.hierarchy_patience_evaluations),
-                    int(capacity),
+                key=f"phase2_hierarchy_{capacity}",
+                phase=2,
+                phase_name="progressive_hierarchy",
+                family="hierarchy",
+                role=config.stage_role("hierarchy"),
+                budget=config.stage_budget("hierarchy"),
+                patience_evaluations=int(config.hierarchy_patience_evaluations),
+                active_capacity=int(capacity),
             )
             for capacity in config.hierarchy_capacities
             if int(capacity) <= int(config.maximum_capacity)
         )
         if bool(config.renderer_enabled):
             stages.append(CurriculumStage(
-                "phase3_renderer",
-                3,
-                "deterministic_particle_rendering",
-                int(config.renderer_updates),
-                int(config.renderer_patience_evaluations),
-                32,
+                key="phase3_renderer",
+                phase=3,
+                phase_name="deterministic_particle_rendering",
+                family="renderer",
+                role=config.stage_role("renderer"),
+                budget=config.stage_budget("renderer"),
+                patience_evaluations=int(config.renderer_patience_evaluations),
+                active_capacity=32,
             ))
         if bool(config.distribution_enabled):
             stages.append(CurriculumStage(
-                "phase4_distribution",
-                4,
-                "probabilistic_multi_hypothesis",
-                int(config.distribution_updates),
-                int(config.distribution_patience_evaluations),
-                32,
+                key="phase4_distribution",
+                phase=4,
+                phase_name="probabilistic_multi_hypothesis",
+                family="distribution",
+                role=config.stage_role("distribution"),
+                budget=config.stage_budget("distribution"),
+                patience_evaluations=int(config.distribution_patience_evaluations),
+                active_capacity=32,
             ))
         return tuple(stages)
 
     def is_final_stage(self, state: CurriculumState | None = None) -> bool:
+        if state is not None:
+            return int(state.stage_index) == len(self.stages) - 1
         if self.complete:
             return False
-        resolved = self.state() if state is None else state
+        resolved = self.state()
         return int(resolved.stage_index) == len(self.stages) - 1
 
     @property
@@ -380,9 +591,20 @@ class CurriculumController:
         return self.stage_index >= len(self.stages)
 
     def _progress(self, stage: CurriculumStage) -> float:
-        if int(stage.maximum_updates) <= 1:
+        nominal = int(stage.budget.nominal_updates)
+        if nominal <= 1:
             return 1.0
-        return min(max(self.stage_update / float(stage.maximum_updates - 1), 0.0), 1.0)
+        return min(max(self.stage_update / float(nominal - 1), 0.0), 1.0)
+
+    def _current_stage_limit(self, stage: CurriculumStage) -> int:
+        if not self.config.accelerated:
+            return int(stage.maximum_updates)
+        blocks = int(self.extension_blocks[stage.key])
+        return min(
+            int(stage.budget.nominal_updates)
+            + blocks * int(stage.budget.extension_updates),
+            int(stage.budget.hard_max_updates),
+        )
 
     def _teacher_forcing(self, stage: CurriculumStage, progress: float) -> float:
         if stage.phase == 1:
@@ -419,6 +641,12 @@ class CurriculumController:
                 distribution_weight=0.25,
                 complete=True,
                 supervised_capacities=tuple(self.config.hierarchy_capacities),
+                stage_nominal_updates=0,
+                stage_extension_updates=0,
+                stage_hard_max_updates=0,
+                stage_extension_blocks=0,
+                stage_role="disabled",
+                schedule_contract=self.config.schedule_contract,
             )
         stage = self.stages[self.stage_index]
         progress = self._progress(stage)
@@ -429,7 +657,7 @@ class CurriculumController:
             phase_name=stage.phase_name,
             global_update=int(self.global_update),
             stage_update=int(self.stage_update),
-            stage_maximum_updates=int(stage.maximum_updates),
+            stage_maximum_updates=self._current_stage_limit(stage),
             active_capacity=int(stage.active_capacity),
             stage_progress=float(progress),
             teacher_forcing_probability=float(self._teacher_forcing(stage, progress)),
@@ -440,23 +668,63 @@ class CurriculumController:
             ),
             complete=False,
             supervised_capacities=tuple(self.config.hierarchy_capacities),
+            stage_nominal_updates=int(stage.budget.nominal_updates),
+            stage_extension_updates=int(stage.budget.extension_updates),
+            stage_hard_max_updates=int(stage.budget.hard_max_updates),
+            stage_extension_blocks=int(self.extension_blocks[stage.key]),
+            stage_role=stage.role,
+            schedule_contract=self.config.schedule_contract,
         )
 
     def advance(self) -> bool:
         if self.complete:
             raise RuntimeError("cannot advance a completed curriculum")
+        if self._awaiting_boundary_decision:
+            raise RuntimeError("cannot advance before resolving the schedule boundary")
         stage = self.stages[self.stage_index]
         self.global_update += 1
         self.stage_update += 1
-        transitioned = self.stage_update >= int(stage.maximum_updates)
-        if transitioned:
+        boundary = self.stage_update >= self._current_stage_limit(stage)
+        if boundary and self.config.accelerated:
+            self._awaiting_boundary_decision = True
+        elif boundary:
             self.stage_index += 1
             self.stage_update = 0
-        return transitioned
+        return boundary
+
+    def approve_extension(self, event: Mapping[str, Any]) -> None:
+        if not self.config.accelerated or not self._awaiting_boundary_decision:
+            raise RuntimeError("no accelerated schedule boundary awaits extension")
+        stage = self.stages[self.stage_index]
+        current = self._current_stage_limit(stage)
+        if current >= int(stage.budget.hard_max_updates):
+            raise RuntimeError("cannot extend a stage beyond its hard maximum")
+        self.extension_blocks[stage.key] += 1
+        if self._current_stage_limit(stage) <= current:
+            raise RuntimeError("approved extension did not increase the stage limit")
+        self.schedule_events.append(dict(event))
+        self._awaiting_boundary_decision = False
+
+    def finish_accelerated_stage(
+        self, outcome: str, event: Mapping[str, Any], *, schedule_truncated: bool
+    ) -> None:
+        if not self.config.accelerated or not self._awaiting_boundary_decision:
+            raise RuntimeError("no accelerated schedule boundary awaits completion")
+        stage = self.stages[self.stage_index]
+        self.stage_outcomes[stage.key] = str(outcome)
+        self.schedule_events.append(dict(event))
+        self.schedule_truncated = bool(
+            self.schedule_truncated or schedule_truncated
+        )
+        self.stage_index += 1
+        self.stage_update = 0
+        self._awaiting_boundary_decision = False
 
     def finish_stage_early(self) -> None:
         if self.complete:
             raise RuntimeError("cannot finish a completed curriculum")
+        if self.config.accelerated:
+            raise RuntimeError("accelerated stages use deterministic boundary decisions")
         self.stage_index += 1
         self.stage_update = 0
 
@@ -467,12 +735,20 @@ class CurriculumController:
             "stage_index": int(self.stage_index),
             "stage_update": int(self.stage_update),
             "global_update": int(self.global_update),
+            "extension_blocks": dict(self.extension_blocks),
+            "stage_outcomes": dict(self.stage_outcomes),
+            "schedule_events": list(self.schedule_events),
+            "schedule_truncated": bool(self.schedule_truncated),
+            "awaiting_boundary_decision": bool(self._awaiting_boundary_decision),
         }
 
     def load_state_dict(self, payload: Mapping[str, Any]) -> None:
         if payload.get("contract") != ABPH_RECONSTRUCTOR_TRAINING_CONTRACT:
             raise ValueError("curriculum checkpoint contract mismatch")
-        if dict(payload.get("config", {})) != self.config.to_dict():
+        saved_config = ReconstructorCurriculumConfig.from_dict(
+            dict(payload.get("config", {}))
+        )
+        if saved_config.to_dict() != self.config.to_dict():
             raise ValueError("curriculum checkpoint configuration mismatch")
         stage_index = int(payload["stage_index"])
         stage_update = int(payload["stage_update"])
@@ -480,7 +756,18 @@ class CurriculumController:
         if not 0 <= stage_index <= len(self.stages):
             raise ValueError("checkpoint stage index is out of range")
         if stage_index < len(self.stages):
-            if not 0 <= stage_update < self.stages[stage_index].maximum_updates:
+            stage = self.stages[stage_index]
+            blocks = {
+                str(name): int(value)
+                for name, value in dict(payload.get("extension_blocks", {})).items()
+            }
+            current_blocks = int(blocks.get(stage.key, 0))
+            current_limit = min(
+                int(stage.budget.nominal_updates)
+                + current_blocks * int(stage.budget.extension_updates),
+                int(stage.budget.hard_max_updates),
+            )
+            if not 0 <= stage_update < current_limit:
                 raise ValueError("checkpoint stage update is out of range")
         elif stage_update != 0:
             raise ValueError("completed curriculum must have zero stage update")
@@ -489,6 +776,23 @@ class CurriculumController:
         self.stage_index = stage_index
         self.stage_update = stage_update
         self.global_update = global_update
+        saved_blocks = dict(payload.get("extension_blocks", {}))
+        self.extension_blocks = {
+            stage.key: int(saved_blocks.get(stage.key, 0)) for stage in self.stages
+        }
+        self.stage_outcomes = {
+            str(name): str(value)
+            for name, value in dict(payload.get("stage_outcomes", {})).items()
+        }
+        self.schedule_events = [
+            dict(value) for value in payload.get("schedule_events", [])
+        ]
+        self.schedule_truncated = bool(payload.get("schedule_truncated", False))
+        self._awaiting_boundary_decision = bool(
+            payload.get("awaiting_boundary_decision", False)
+        )
+        if self._awaiting_boundary_decision:
+            raise ValueError("checkpoints may not persist an unresolved schedule boundary")
 
 
 @dataclass(frozen=True)
@@ -498,6 +802,10 @@ class ReconstructorStepContext:
     mode: str
     validation: bool
     teacher_forcing_probability: float
+    stochastic_seed: int | None = None
+    runtime_profiler: RuntimeProfiler | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.split not in {"model_train", "model_val"}:
@@ -780,7 +1088,10 @@ class ExponentialMovingAverage:
         shadow = dict(payload["shadow"])
         if set(shadow) != set(self.shadow):
             raise ValueError("EMA checkpoint parameter names differ")
-        self.shadow = {name: value.detach().clone() for name, value in shadow.items()}
+        self.shadow = {
+            name: value.detach().to(self.shadow[name].device).clone()
+            for name, value in shadow.items()
+        }
 
 
 def build_reconstructor_optimizer(
@@ -1059,6 +1370,9 @@ def evaluate_reconstructor_rollout(
     step_function: Callable[[Any, Any, ReconstructorStepContext], ReconstructorStepResult],
     config: ReconstructorTrainerConfig,
     device: Any,
+    runtime_profiler: RuntimeProfiler | None = None,
+    distributed_runtime: DistributedRuntime | None = None,
+    validation_owner: Any | None = None,
 ) -> dict[str, Any]:
     """Evaluate only a complete zero-teacher-forcing model-val rollout."""
 
@@ -1070,61 +1384,111 @@ def evaluate_reconstructor_rollout(
         mode="rollout",
         validation=True,
         teacher_forcing_probability=0.0,
+        runtime_profiler=runtime_profiler,
     )
-    sums: dict[str, float] = {}
-    total_jets = 0
-    batches_seen = 0
+    runtime = distributed_runtime or DistributedRuntime(0, 1, 0, "none", device.type)
+    accumulator = TypedValidationAccumulator()
     effective_weights: dict[str, float] | None = None
-    with torch.no_grad():
-        for cpu_batch in batches:
-            batch = _move_to_device(cpu_batch, device)
-            with _autocast(device, config):
-                result = step_function(model, batch, context)
-            with torch.autocast(device_type=device.type, enabled=False):
-                composed = compose_reconstruction_loss(result, context, config.loss_weights)
-            weight = int(result.batch_size)
-            current_effective_weights = dict(composed.effective_weights)
-            if effective_weights is None:
-                effective_weights = current_effective_weights
-            elif current_effective_weights != effective_weights:
-                raise RuntimeError("model-val objective weights changed within one evaluation")
-            row = {
-                "loss.total": float(composed.total.detach().float().cpu()),
-                **{
-                    f"loss.raw.{name}": float(value.detach().float().cpu())
-                    for name, value in composed.raw_terms.items()
-                },
-                **{
-                    f"loss.weighted.{name}": float(value.detach().float().cpu())
-                    for name, value in composed.weighted_terms.items()
-                },
-                **_scalar_metrics(result.metrics),
-            }
-            for name, value in row.items():
-                sums[name] = sums.get(name, 0.0) + value * weight
-            total_jets += weight
-            batches_seen += 1
-    if batches_seen == 0 or total_jets == 0:
-        raise RuntimeError("rollout model validation produced no batches")
-    averages = {name: value / total_jets for name, value in sums.items()}
-    selection = float(averages["loss.total"])
-    if not math.isfinite(selection):
-        raise FloatingPointError("rollout model-validation score is nonfinite")
+    iterator = iter(batches)
+    transfer_stager = BatchTransferStager(
+        device, non_blocking=bool(config.nonblocking_transfer)
+    )
+    local_error: BaseException | None = None
+    try:
+        with torch.no_grad():
+            while True:
+                try:
+                    with profile_span(runtime_profiler, "validation_source_wait"):
+                        cpu_batch = next(iterator)
+                except StopIteration:
+                    break
+                with profile_span(runtime_profiler, "pinned_memory_staging"):
+                    prepared_batch = prepare_contiguous_cpu_batch(
+                        cpu_batch,
+                        pin_memory=bool(config.pin_memory and device.type == "cuda"),
+                    )
+                with profile_span(runtime_profiler, "host_to_device"):
+                    staged_batch = transfer_stager.stage(prepared_batch)
+                    batch = staged_batch.wait()
+                with profile_span(runtime_profiler, "model_step_total"):
+                    with _autocast(device, config):
+                        result = step_function(model, batch, context)
+                with profile_span(runtime_profiler, "loss_composition"):
+                    with torch.autocast(device_type=device.type, enabled=False):
+                        composed = compose_reconstruction_loss(
+                            result, context, config.loss_weights
+                        )
+                weight = int(result.batch_size)
+                current_effective_weights = dict(composed.effective_weights)
+                if effective_weights is None:
+                    effective_weights = current_effective_weights
+                elif current_effective_weights != effective_weights:
+                    raise RuntimeError(
+                        "model-val objective weights changed within one evaluation"
+                    )
+                additive_row = {
+                    "loss.total": float(composed.total.detach().float().cpu()),
+                    **{
+                        f"loss.raw.{name}": float(value.detach().float().cpu())
+                        for name, value in composed.raw_terms.items()
+                    },
+                    **{
+                        f"loss.weighted.{name}": float(value.detach().float().cpu())
+                        for name, value in composed.weighted_terms.items()
+                    },
+                }
+                for name, value in additive_row.items():
+                    accumulator.add_mean(
+                        name,
+                        value,
+                        weight,
+                        selection_eligible=name == "loss.total",
+                    )
+                for name, value in _scalar_metrics(result.metrics).items():
+                    accumulator.add_non_additive(name, value, weight)
+                accumulator.finish_batch(weight)
+        if effective_weights is None:
+            raise RuntimeError("rollout model validation produced no batches")
+    except BaseException as exc:
+        local_error = exc
+    validation_succeeded = all_reduce_min_bool(
+        runtime, local_error is None, device=device
+    )
+    if not validation_succeeded:
+        errors = gather_error_summaries(
+            runtime,
+            phase="distributed_validation",
+            error=local_error,
+            structural=True,
+        )
+        raise RuntimeError(
+            "distributed validation failed before reduction: "
+            + json.dumps(list(errors), sort_keys=True)
+        )
+    assert effective_weights is not None
+    validation_range = getattr(validation_owner, "last_validation_range", None)
+    hlt_view = getattr(validation_owner, "hlt_view", None)
+    expected_jet_ids = None if hlt_view is None else tuple(hlt_view.jet_ids)
+    reduced = finalize_typed_validation(
+        accumulator,
+        runtime=runtime,
+        device=device,
+        required_losses=active_reconstruction_loss_names(context),
+        effective_weights=effective_weights,
+        validation_range=validation_range,
+        expected_jet_ids=expected_jet_ids,
+        split="model_val",
+    )
     return {
-        "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
+        "contract": ABPH_DISTRIBUTED_VALIDATION_CONTRACT,
+        "training_contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
         "split": "model_val",
         "mode": "rollout",
         "teacher_forcing_probability": 0.0,
         "offline_targets_loaded": True,
         "teacher_logits_loaded": False,
-        "checkpoint_selection_eligible": True,
         "selection_metric": "model_val.rollout.loss.total",
-        "selection_score": selection,
-        "n_jets": int(total_jets),
-        "n_batches": int(batches_seen),
-        "required_losses": list(active_reconstruction_loss_names(context)),
-        "effective_weights": effective_weights,
-        "metrics": averages,
+        **reduced,
     }
 
 
@@ -1144,8 +1508,29 @@ def _checkpoint_payload(
     nonfinite_updates: int,
     trainer_state: Mapping[str, Any],
     model_metadata: Mapping[str, Any],
+    distributed_runtime: Mapping[str, Any] | None = None,
+    rank_runtime_states: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selected = role in {"best_stage_model_val", "best_model_val"}
+    rows = [dict(row) for row in (rank_runtime_states or ())]
+    if not rows:
+        rows = [
+            {
+                "rank": 0,
+                "train_source_state_dict": dict(train_source.state_dict()),
+                "rng_state": _rng_state(),
+            }
+        ]
+    rows.sort(key=lambda row: int(row["rank"]))
+    if [int(row["rank"]) for row in rows] != list(range(len(rows))):
+        raise ValueError("checkpoint rank state rows are incomplete or reordered")
+    global_cursors = [
+        dict(row["train_source_state_dict"]).get("global_cursor") for row in rows
+    ]
+    if global_cursors[0] is not None and any(
+        cursor != global_cursors[0] for cursor in global_cursors
+    ):
+        raise ValueError("checkpoint ranks disagree on the committed global cursor")
     return {
         "checkpoint_contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
         "checkpoint_role": role,
@@ -1161,15 +1546,27 @@ def _checkpoint_payload(
         "scaler_state_dict": scaler.state_dict(),
         "ema_state_dict": ema.state_dict(),
         "curriculum_state_dict": controller.state_dict(),
-        "train_source_state_dict": dict(train_source.state_dict()),
-        "rng_state": _rng_state(),
+        # Retained for single-rank checkpoint-reader compatibility.
+        "train_source_state_dict": dict(rows[0]["train_source_state_dict"]),
+        "rng_state": rows[0]["rng_state"],
+        "distributed_checkpoint_state": {
+            "contract": ABPH_DISTRIBUTED_CHECKPOINT_CONTRACT,
+            "world_size": len(rows),
+            "rank_states": rows,
+            "global_source_cursor": global_cursors[0],
+            "source_state_semantics": "committed_cursor_after_successful_update",
+            "rng_state_semantics": "rank_local_python_numpy_torch_cuda",
+        },
         "config": config.to_dict(),
+        "schedule_contract": config.curriculum.schedule_contract,
+        "campaign_schedule_profile": config.curriculum.campaign_schedule_profile,
         "model_metadata": _jsonable(model_metadata),
         "validation": _jsonable(validation),
         "provenance": _jsonable(provenance),
         "optimizer_groups": _jsonable(optimizer_metadata),
         "nonfinite_updates": int(nonfinite_updates),
         "trainer_state": _jsonable(trainer_state),
+        "distributed_runtime": _jsonable(distributed_runtime or {}),
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
     }
@@ -1201,6 +1598,60 @@ def load_reconstructor_curriculum_checkpoint(
     if payload.get("final_test_loaded") is not False:
         raise ValueError("reconstructor checkpoint does not attest final-test isolation")
     return payload
+
+
+def _collective_checkpoint_load(
+    path: str | Path,
+    *,
+    runtime: DistributedRuntime,
+    require_selected: bool = False,
+) -> Mapping[str, Any]:
+    """Have rank zero validate one checkpoint, then broadcast that exact payload."""
+
+    local: Mapping[str, Any] | None = None
+    error: str | None = None
+    if runtime.is_primary:
+        try:
+            local = load_reconstructor_curriculum_checkpoint(
+                path, device="cpu", require_selected=require_selected
+            )
+        except BaseException as exc:  # broadcast failure instead of stranding peers
+            error = f"{type(exc).__name__}: {exc}"
+    control = broadcast_object(runtime, {"error": error, "payload": local})
+    if control["error"] is not None:
+        raise RuntimeError(f"rank-zero checkpoint load failed: {control['error']}")
+    payload = control["payload"]
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("broadcast checkpoint payload is missing")
+    return payload
+
+
+def _rank_state_for_resume(
+    payload: Mapping[str, Any], runtime: DistributedRuntime
+) -> Mapping[str, Any]:
+    distributed = dict(payload.get("distributed_checkpoint_state", {}))
+    if runtime.world_size == 1 and not distributed:
+        return {
+            "rank": 0,
+            "train_source_state_dict": payload["train_source_state_dict"],
+            "rng_state": payload["rng_state"],
+        }
+    if distributed.get("contract") != ABPH_DISTRIBUTED_CHECKPOINT_CONTRACT:
+        raise ValueError("distributed resume checkpoint state contract mismatch")
+    if int(distributed.get("world_size", -1)) != runtime.world_size:
+        raise ValueError("distributed resume checkpoint world size mismatch")
+    rows = [dict(row) for row in distributed.get("rank_states", ())]
+    if [int(row.get("rank", -1)) for row in rows] != list(range(runtime.world_size)):
+        raise ValueError("distributed resume checkpoint rank states are incomplete")
+    local = rows[runtime.rank]
+    saved_runtime = dict(local.get("runtime", {}))
+    if saved_runtime and (
+        int(saved_runtime.get("rank", -1)) != runtime.rank
+        or int(saved_runtime.get("world_size", -1)) != runtime.world_size
+        or str(saved_runtime.get("backend")) != runtime.backend
+    ):
+        raise ValueError("distributed resume rank topology mismatch")
+    return local
 
 
 def _component_config(module: Any) -> Any:
@@ -1250,10 +1701,25 @@ def train_reconstructor_curriculum(
     """Run phases 1-4 with exact restart and rollout-only model selection."""
 
     torch = require_torch()
-    set_training_seed(int(config.seed))
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(config.device)
+    distributed_runtime = initialize_distributed_runtime(
+        requested_world_size=int(config.distributed_world_size), device=device
+    )
+    set_training_seed(int(config.seed) + int(distributed_runtime.rank))
+    for source_name, source in (("train", train_source),):
+        source_rank = getattr(source, "rank", distributed_runtime.rank)
+        source_world = getattr(source, "world_size", distributed_runtime.world_size)
+        if (
+            int(source_rank) != distributed_runtime.rank
+            or int(source_world) != distributed_runtime.world_size
+        ):
+            raise ValueError(
+                f"{source_name} source rank topology differs from the distributed runtime"
+            )
+    if distributed_runtime.distributed and not bool(config.asynchronous_prefetch):
+        raise ValueError("distributed ABPH training requires deferred-commit prefetch")
     model.to(device)
     optimizer = build_reconstructor_optimizer(
         model,
@@ -1269,15 +1735,60 @@ def train_reconstructor_curriculum(
     source_provenance = _jsonable(dict(provenance or {}))
     model_metadata = describe_reconstructor_model(model, module_groups)
     config_hash = config.to_dict()["config_hash"]
+    profiler_output_dir = (
+        output_dir
+        if distributed_runtime.is_primary
+        else output_dir / "distributed_runtime" / f"rank_{distributed_runtime.rank:04d}"
+    )
+    runtime_profiler = RuntimeProfiler(
+        config.runtime_profile,
+        device=device,
+        output_dir=profiler_output_dir,
+        provenance=source_provenance,
+        training_config_hash=config_hash,
+        model_metadata_hash=model_metadata.get("model_metadata_hash"),
+    )
+    if hasattr(train_source, "set_runtime_profiler"):
+        train_source.set_runtime_profiler(runtime_profiler)
+    if hasattr(train_source, "set_plan_log_dir"):
+        train_source.set_plan_log_dir(output_dir / "global_batch_plans")
+    validation_owner = getattr(validation_batches, "__self__", None)
+    if validation_owner is not None:
+        validation_rank = getattr(validation_owner, "rank", distributed_runtime.rank)
+        validation_world = getattr(
+            validation_owner, "world_size", distributed_runtime.world_size
+        )
+        if (
+            int(validation_rank) != distributed_runtime.rank
+            or int(validation_world) != distributed_runtime.world_size
+        ):
+            raise ValueError(
+                "validation source rank topology differs from the distributed runtime"
+            )
+    if hasattr(validation_owner, "set_runtime_profiler"):
+        validation_owner.set_runtime_profiler(runtime_profiler)
     nonfinite_updates = 0
+    compiler_failure_updates = 0
     objective_skip_counts = {name: 0 for name in ABPH_RECONSTRUCTION_LOSS_NAMES}
     curves: list[dict[str, Any]] = []
     best_by_stage: dict[str, dict[str, Any]] = {}
     evaluations_without_improvement: dict[str, int] = {}
+    distributed_error_events: list[dict[str, Any]] = []
 
     if resume_from is not None:
-        payload = load_reconstructor_curriculum_checkpoint(resume_from, device=device)
-        if payload.get("config", {}).get("config_hash") != config_hash:
+        payload = _collective_checkpoint_load(
+            resume_from, runtime=distributed_runtime
+        )
+        saved_distributed = dict(payload.get("distributed_runtime", {}))
+        if saved_distributed and (
+            int(saved_distributed.get("world_size", -1))
+            != distributed_runtime.world_size
+            or str(saved_distributed.get("backend")) != distributed_runtime.backend
+        ):
+            raise ValueError("resume checkpoint distributed runtime mismatch")
+        if _normalized_trainer_config(
+            dict(payload.get("config", {}))
+        ) != _normalized_trainer_config(config.to_dict()):
             raise ValueError("resume checkpoint training configuration mismatch")
         if dict(payload.get("provenance", {})) != source_provenance:
             raise ValueError("resume checkpoint provenance mismatch")
@@ -1288,8 +1799,9 @@ def train_reconstructor_curriculum(
         scaler.load_state_dict(payload["scaler_state_dict"])
         ema.load_state_dict(payload["ema_state_dict"])
         controller.load_state_dict(payload["curriculum_state_dict"])
-        train_source.load_state_dict(payload["train_source_state_dict"])
-        _restore_rng_state(payload["rng_state"])
+        local_resume_state = _rank_state_for_resume(payload, distributed_runtime)
+        train_source.load_state_dict(local_resume_state["train_source_state_dict"])
+        _restore_rng_state(local_resume_state["rng_state"])
         nonfinite_updates = int(payload.get("nonfinite_updates", 0))
         saved_trainer_state = dict(payload.get("trainer_state", {}))
         curves = list(saved_trainer_state.get("curves", []))
@@ -1309,12 +1821,135 @@ def train_reconstructor_curriculum(
                 saved_trainer_state.get("objective_skip_counts", objective_skip_counts)
             ).items()
         }
+        compiler_failure_updates = int(
+            saved_trainer_state.get("compiler_failure_updates", 0)
+        )
+        distributed_error_events = [
+            dict(value)
+            for value in saved_trainer_state.get("distributed_error_events", ())
+        ]
 
-    _atomic_json(
-        output_dir / "config.json",
-        {
+    transfer_stager = BatchTransferStager(
+        device, non_blocking=bool(config.nonblocking_transfer)
+    )
+    prefetcher: RankLocalBatchPrefetcher | None = None
+    if bool(config.asynchronous_prefetch) and all(
+        hasattr(train_source, name)
+        for name in (
+            "current_cursor",
+            "derive_next_plan",
+            "agree_plan_hash",
+            "prepare_planned_batch",
+            "commit_planned_batch",
+        )
+    ):
+        prefetcher = RankLocalBatchPrefetcher(
+            train_source,
+            queue_depth=int(config.prefetch_queue_depth),
+            pin_memory=bool(config.pin_memory and device.type == "cuda"),
+        )
+    if distributed_runtime.distributed and prefetcher is None:
+        raise TypeError(
+            "distributed ABPH training requires a planned deferred-commit target source"
+        )
+    training_module = ReconstructorTrainingModule(
+        model,
+        step_function,
+        compose_reconstruction_loss,
+        config.loss_weights,
+    )
+    stage_wrapper: Any | None = None
+    wrapper_stage_key: str | None = None
+
+    def current_trainer_state() -> dict[str, Any]:
+        return {
+            "curves": curves,
+            "best_by_stage": best_by_stage,
+            "evaluations_without_improvement": evaluations_without_improvement,
+            "objective_skip_counts": objective_skip_counts,
+            "compiler_failure_updates": int(compiler_failure_updates),
+            "distributed_error_events": distributed_error_events,
+        }
+
+    def collective_checkpoint_payload(
+        *,
+        role: str,
+        validation: Mapping[str, Any] | None,
+        optimizer_metadata: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any] | None:
+        rank_states = all_gather_objects(
+            distributed_runtime,
+            {
+                "rank": distributed_runtime.rank,
+                "runtime": distributed_runtime.to_dict(),
+                "train_source_state_dict": dict(train_source.state_dict()),
+                "rng_state": _rng_state(),
+            },
+        )
+        payload: Mapping[str, Any] | None = None
+        payload_error: str | None = None
+        if distributed_runtime.is_primary:
+            try:
+                payload = _checkpoint_payload(
+                    model=model,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    ema=ema,
+                    controller=controller,
+                    train_source=train_source,
+                    config=config,
+                    role=role,
+                    validation=validation,
+                    provenance=source_provenance,
+                    optimizer_metadata=optimizer_metadata,
+                    nonfinite_updates=nonfinite_updates,
+                    trainer_state=current_trainer_state(),
+                    model_metadata=model_metadata,
+                    distributed_runtime=distributed_runtime.to_dict(),
+                    rank_runtime_states=rank_states,
+                )
+            except BaseException as exc:
+                payload_error = f"{type(exc).__name__}: {exc}"
+        payload_error = broadcast_object(distributed_runtime, payload_error)
+        if payload_error is not None:
+            raise RuntimeError(
+                f"rank-zero checkpoint assembly failed: {payload_error}"
+            )
+        return payload
+
+    def write_checkpoint_collective(
+        path: Path,
+        payload: Mapping[str, Any] | None,
+        *,
+        aliases: Sequence[Path] = (),
+    ) -> str:
+        local_error: str | None = None
+        if distributed_runtime.is_primary:
+            try:
+                if payload is None:
+                    raise RuntimeError("rank zero did not build a checkpoint payload")
+                _atomic_torch_save(path, payload)
+                for alias in aliases:
+                    _atomic_torch_save(alias, payload)
+            except BaseException as exc:
+                local_error = f"{type(exc).__name__}: {exc}"
+        error = broadcast_object(distributed_runtime, local_error)
+        if error is not None:
+            raise RuntimeError(f"rank-zero checkpoint write failed: {error}")
+        barrier(distributed_runtime)
+        digest = _file_sha256(path) if distributed_runtime.is_primary else None
+        digest = broadcast_object(distributed_runtime, digest)
+        if not isinstance(digest, str) or not digest:
+            raise RuntimeError("checkpoint content hash broadcast failed")
+        return digest
+
+    if distributed_runtime.is_primary:
+        _atomic_json(
+            output_dir / "config.json",
+            {
             "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
             "config": config.to_dict(),
+            "distributed_runtime": distributed_runtime.to_dict(),
             "provenance": source_provenance,
             "module_groups": list(ABPH_RECONSTRUCTOR_MODULE_GROUPS),
             "model_metadata": model_metadata,
@@ -1324,8 +1959,9 @@ def train_reconstructor_curriculum(
             ),
             "final_test_loaded": False,
             "teacher_logits_loaded": False,
-        },
-    )
+            },
+        )
+    barrier(distributed_runtime)
 
     updates_this_call = 0
     while not controller.complete:
@@ -1333,6 +1969,20 @@ def train_reconstructor_curriculum(
             break
         state = controller.state()
         optimizer_metadata = configure_reconstructor_optimizer(optimizer, state, config)
+        if stage_wrapper is None or wrapper_stage_key != state.stage_key:
+            if stage_wrapper is not None:
+                barrier(distributed_runtime)
+                del stage_wrapper
+                stage_wrapper = None
+            stage_wrapper = build_stage_ddp_wrapper(
+                training_module,
+                distributed_runtime,
+                device=device,
+                find_unused_parameters=bool(config.ddp_find_unused_parameters),
+            )
+            verify_common_parameter_state(distributed_runtime, model)
+            barrier(distributed_runtime)
+            wrapper_stage_key = state.stage_key
         model.train(True)
         optimizer.zero_grad(set_to_none=True)
         accumulated_jets = 0
@@ -1344,6 +1994,7 @@ def train_reconstructor_curriculum(
             or (state.global_update + 1) % int(config.curriculum.evaluation_interval) == 0
         )
         objective_gradient_sums: dict[str, float] = {}
+        global_batch_plan_hashes: list[str] = []
         active_parameters_for_update = [
             parameter for parameter in model.parameters() if parameter.requires_grad
         ]
@@ -1355,66 +2006,301 @@ def train_reconstructor_curriculum(
             )
             or config.gradient_accumulation_steps
         )
-        for _ in range(accumulation_steps):
+        local_batch_size = (
+            config.root_hierarchy_local_batch_size
+            if state.phase <= 2
+            else config.renderer_distribution_local_batch_size
+        )
+        if local_batch_size is not None:
+            if not hasattr(train_source, "set_batch_size"):
+                raise TypeError(
+                    "phase-specific runtime contract requires a resizable train source"
+                )
+            train_source.set_batch_size(int(local_batch_size))
+        runtime_profiler.begin_train_update(
+            state,
+            local_batch_size=getattr(train_source, "batch_size", None),
+            accumulation_steps=accumulation_steps,
+            distributed_world_size=int(config.distributed_world_size),
+        )
+        update_requests = tuple(
+            (int(state.global_update), int(index))
+            for index in range(accumulation_steps)
+        )
+        next_update_requests = (
+            ()
+            if will_evaluate
+            else tuple(
+                (int(state.global_update) + 1, int(index))
+                for index in range(accumulation_steps)
+            )
+        )
+        pipeline_requests = update_requests + next_update_requests
+        if prefetcher is not None:
+            prefetcher.prime(pipeline_requests)
+        for accumulation_index in range(accumulation_steps):
             context = ReconstructorStepContext(
                 curriculum=state,
                 split="model_train",
                 mode=_training_mode(state, int(config.seed)),
                 validation=False,
                 teacher_forcing_probability=float(state.teacher_forcing_probability),
+                stochastic_seed=(
+                    int(config.seed) + int(distributed_runtime.rank)
+                ),
+                runtime_profiler=runtime_profiler,
             )
+            cpu_batch = None
+            batch = None
+            input_error: BaseException | None = None
             try:
-                batch = _move_to_device(train_source.next_batch(), device)
-                with _autocast(device, config):
-                    result = step_function(model, batch, context)
-                with torch.autocast(device_type=device.type, enabled=False):
-                    composed = compose_reconstruction_loss(result, context, config.loss_weights)
-                    training_required_losses = composed.required_terms
-                    scaled_loss = composed.total / float(accumulation_steps)
-                if will_evaluate:
-                    objective_norms = _objective_gradient_norms(
-                        composed, active_parameters_for_update
-                    )
-                    for name, value in objective_norms.items():
-                        objective_gradient_sums[name] = (
-                            objective_gradient_sums.get(name, 0.0) + value
+                with profile_span(runtime_profiler, "target_source_wait"):
+                    if prefetcher is not None:
+                        cpu_batch = prefetcher.next_planned_batch(
+                            global_update=int(state.global_update),
+                            accumulation_index=int(accumulation_index),
                         )
-                scaler.scale(scaled_loss).backward()
-                accumulated_jets += int(result.batch_size)
-                train_rows.append(
+                    elif hasattr(train_source, "next_planned_batch"):
+                        cpu_batch = train_source.next_planned_batch(
+                            global_update=int(state.global_update),
+                            accumulation_index=int(accumulation_index),
+                        )
+                    else:
+                        cpu_batch = train_source.next_batch()
+                if prefetcher is not None:
+                    timing = prefetcher.last_timing
+                    if timing is not None:
+                        runtime_profiler.record_cpu_duration(
+                            "target_shard_decompression",
+                            timing.target_shard_decompression_seconds,
+                        )
+                        runtime_profiler.record_cpu_duration(
+                            "cpu_batch_assembly",
+                            max(
+                                0.0,
+                                timing.source_prepare_seconds
+                                - timing.target_shard_decompression_seconds,
+                            ),
+                        )
+                        runtime_profiler.record_cpu_duration(
+                            "pinned_memory_staging", timing.pinned_staging_seconds
+                        )
+                    prefetcher.prime(
+                        pipeline_requests[accumulation_index + 1 :]
+                    )
+                plan_hash = (
+                    cpu_batch.get("global_batch_plan_hash")
+                    if isinstance(cpu_batch, Mapping)
+                    else None
+                )
+                if plan_hash is not None:
+                    global_batch_plan_hashes.append(str(plan_hash))
+                    runtime_profiler.record_global_batch_plan_hash(str(plan_hash))
+                with profile_span(runtime_profiler, "host_to_device"):
+                    if prefetcher is None:
+                        with profile_span(runtime_profiler, "pinned_memory_staging"):
+                            cpu_batch = prepare_contiguous_cpu_batch(
+                                cpu_batch,
+                                pin_memory=bool(
+                                    config.pin_memory and device.type == "cuda"
+                                ),
+                            )
+                    staged_batch = transfer_stager.stage(cpu_batch)
+                    batch = staged_batch.wait()
+            except BaseException as exc:
+                input_error = exc
+            globally_ready = all_reduce_min_bool(
+                distributed_runtime, input_error is None, device=device
+            )
+            if not globally_ready:
+                errors = gather_error_summaries(
+                    distributed_runtime,
+                    phase="input_readiness",
+                    error=input_error,
+                    structural=True,
+                )
+                distributed_error_events.append(
                     {
-                        "loss.total": float(composed.total.detach().float().cpu()),
-                        **{
-                            f"loss.raw.{name}": float(value.detach().float().cpu())
-                            for name, value in composed.raw_terms.items()
-                        },
-                        **{
-                            f"loss.normalized.{name}": float(value.detach().float().cpu())
-                            for name, value in composed.raw_terms.items()
-                        },
-                        **{
-                            f"loss.effective_weight.{name}": float(value)
-                            for name, value in composed.effective_weights.items()
-                        },
+                        "global_update": int(state.global_update),
+                        "accumulation_index": int(accumulation_index),
+                        "phase": "input_readiness",
+                        "errors": list(errors),
                     }
                 )
-            except FloatingPointError as exc:
-                update_failed = True
-                nonfinite_updates += 1
-                message = str(exc)
-                for name in ABPH_RECONSTRUCTION_LOSS_NAMES:
-                    if f"loss term {name} " in message:
-                        objective_skip_counts[name] += 1
-                        break
                 optimizer.zero_grad(set_to_none=True)
-                if nonfinite_updates > int(config.maximum_nonfinite_updates):
-                    raise RuntimeError(
-                        "reconstructor exceeded the maximum skipped nonfinite updates"
-                    ) from exc
+                if prefetcher is not None:
+                    prefetcher.reset_to_committed_cursor()
+                runtime_profiler.end_train_update(
+                    success=False, jets=accumulated_jets
+                )
+                raise RuntimeError(
+                    "distributed ABPH input readiness failed: "
+                    + json.dumps(list(errors), sort_keys=True)
+                ) from input_error
+
+            synchronize_backward = accumulation_index + 1 == accumulation_steps
+            synchronization_context = (
+                nullcontext()
+                if not distributed_runtime.distributed or synchronize_backward
+                else stage_wrapper.no_sync()
+            )
+            forward_error: BaseException | None = None
+            ddp_output: Mapping[str, Any] | None = None
+            try:
+                with synchronization_context:
+                    try:
+                        with profile_span(runtime_profiler, "model_step_total"):
+                            with _autocast(device, config):
+                                ddp_output = require_standard_tensor_mapping(
+                                    stage_wrapper(batch, context)
+                                )
+                        if not tensor_mapping_is_finite(ddp_output):
+                            raise FloatingPointError(
+                                "DDP reconstructor forward produced nonfinite tensors"
+                            )
+                    except BaseException as exc:
+                        forward_error = exc
+                    globally_forward_ok = all_reduce_min_bool(
+                        distributed_runtime, forward_error is None, device=device
+                    )
+                    if not globally_forward_ok:
+                        errors = gather_error_summaries(
+                            distributed_runtime,
+                            phase="forward",
+                            error=forward_error,
+                            structural=(
+                                forward_error is not None
+                                and not isinstance(forward_error, FloatingPointError)
+                            ),
+                        )
+                        structural = any_structural_error(errors)
+                        distributed_error_events.append(
+                            {
+                                "global_update": int(state.global_update),
+                                "accumulation_index": int(accumulation_index),
+                                "phase": "forward",
+                                "structural": structural,
+                                "errors": list(errors),
+                            }
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        if prefetcher is not None:
+                            prefetcher.reset_to_committed_cursor()
+                        update_failed = True
+                        if structural:
+                            runtime_profiler.end_train_update(
+                                success=False, jets=accumulated_jets
+                            )
+                            raise RuntimeError(
+                                "distributed ABPH structural forward failure: "
+                                + json.dumps(list(errors), sort_keys=True)
+                            ) from forward_error
+                        nonfinite_updates += 1
+                        message = " ".join(
+                            str(row.get("message") or "") for row in errors
+                        )
+                        if (
+                            "accounting/projection" in message
+                            or "compiler" in message
+                        ):
+                            compiler_failure_updates += 1
+                        for name in ABPH_RECONSTRUCTION_LOSS_NAMES:
+                            if f"loss term {name} " in message:
+                                objective_skip_counts[name] += 1
+                                break
+                        if nonfinite_updates > int(config.maximum_nonfinite_updates):
+                            runtime_profiler.end_train_update(
+                                success=False, jets=accumulated_jets
+                            )
+                            raise RuntimeError(
+                                "reconstructor exceeded the maximum synchronized "
+                                "nonfinite updates"
+                            ) from forward_error
+                        raise _SynchronizedForwardRetry from forward_error
+
+                    metadata = training_module.last_metadata
+                    if metadata is None or ddp_output is None:
+                        raise RuntimeError("DDP forward omitted its local metadata contract")
+                    composed = ComposedReconstructionLoss(
+                        total=ddp_output["total_loss"],
+                        raw_terms=ddp_output["raw_loss_terms"],
+                        effective_weights=metadata["effective_weights"],
+                        weighted_terms=ddp_output["weighted_loss_terms"],
+                        required_terms=tuple(metadata["required_terms"]),
+                    )
+                    training_required_losses = composed.required_terms
+                    scaled_loss = composed.total / float(accumulation_steps)
+                    if will_evaluate:
+                        with profile_span(
+                            runtime_profiler, "objective_gradient_diagnostics"
+                        ):
+                            objective_norms = _objective_gradient_norms(
+                                composed, active_parameters_for_update
+                            )
+                        for name, value in objective_norms.items():
+                            objective_gradient_sums[name] = (
+                                objective_gradient_sums.get(name, 0.0) + value
+                            )
+                    with profile_span(runtime_profiler, "backward"):
+                        synchronization_span = (
+                            profile_span(
+                                runtime_profiler, "gradient_synchronization"
+                            )
+                            if distributed_runtime.distributed
+                            and synchronize_backward
+                            else nullcontext()
+                        )
+                        with synchronization_span:
+                            scaler.scale(scaled_loss).backward()
+                    batch_size = int(ddp_output["batch_size_tensor"].detach().cpu())
+                    accumulated_jets += batch_size
+                    train_rows.append(
+                        {
+                            "loss.total": float(
+                                composed.total.detach().float().cpu()
+                            ),
+                            **{
+                                f"loss.raw.{name}": float(
+                                    value.detach().float().cpu()
+                                )
+                                for name, value in composed.raw_terms.items()
+                            },
+                            **{
+                                f"loss.normalized.{name}": float(
+                                    value.detach().float().cpu()
+                                )
+                                for name, value in composed.raw_terms.items()
+                            },
+                            **{
+                                f"loss.effective_weight.{name}": float(value)
+                                for name, value in composed.effective_weights.items()
+                            },
+                        }
+                    )
+            except _SynchronizedForwardRetry:
+                barrier(distributed_runtime)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                stage_wrapper = None
+                gc.collect()
+                barrier(distributed_runtime)
+                stage_wrapper = build_stage_ddp_wrapper(
+                    training_module,
+                    distributed_runtime,
+                    device=device,
+                    find_unused_parameters=bool(config.ddp_find_unused_parameters),
+                )
+                verify_common_parameter_state(distributed_runtime, model)
+                barrier(distributed_runtime)
                 break
         if update_failed:
+            if prefetcher is not None:
+                prefetcher.reset_to_committed_cursor()
+            runtime_profiler.end_train_update(success=False, jets=accumulated_jets)
             continue
-        effective_batch_size = int(accumulated_jets) * int(config.distributed_world_size)
+        effective_batch_size = all_reduce_sum_int(
+            distributed_runtime, accumulated_jets, device=device
+        )
         expected_effective_batch_size = (
             int(config.root_hierarchy_effective_batch_size)
             if state.phase <= 2
@@ -1424,6 +2310,11 @@ def train_reconstructor_curriculum(
             bool(config.enforce_effective_batch_size)
             and effective_batch_size != expected_effective_batch_size
         ):
+            if prefetcher is not None:
+                prefetcher.reset_to_committed_cursor()
+            runtime_profiler.end_train_update(
+                success=False, jets=accumulated_jets
+            )
             raise ValueError(
                 f"stage {state.stage_key} accumulated effective batch size "
                 f"{effective_batch_size}, expected {expected_effective_batch_size}"
@@ -1432,10 +2323,41 @@ def train_reconstructor_curriculum(
         active_parameters = [
             parameter for parameter in model.parameters() if parameter.requires_grad
         ]
-        gradients = [parameter.grad for parameter in active_parameters if parameter.grad is not None]
-        if not gradients or not all(bool(torch.isfinite(gradient).all()) for gradient in gradients):
+        gradients = [
+            parameter.grad
+            for parameter in active_parameters
+            if parameter.grad is not None
+        ]
+        local_gradients_finite = bool(gradients) and all(
+            bool(torch.isfinite(gradient).all()) for gradient in gradients
+        )
+        globally_gradients_finite = all_reduce_min_bool(
+            distributed_runtime, local_gradients_finite, device=device
+        )
+        if not globally_gradients_finite:
+            errors = gather_error_summaries(
+                distributed_runtime,
+                phase="post_backward_gradients",
+                error=(
+                    None
+                    if local_gradients_finite
+                    else FloatingPointError("gradients are absent or nonfinite")
+                ),
+                structural=False,
+            )
+            distributed_error_events.append(
+                {
+                    "global_update": int(state.global_update),
+                    "phase": "post_backward_gradients",
+                    "structural": False,
+                    "errors": list(errors),
+                }
+            )
             nonfinite_updates += 1
             optimizer.zero_grad(set_to_none=True)
+            if prefetcher is not None:
+                prefetcher.reset_to_committed_cursor()
+            runtime_profiler.end_train_update(success=False, jets=accumulated_jets)
             if nonfinite_updates > int(config.maximum_nonfinite_updates):
                 raise RuntimeError("reconstructor gradients remained absent/nonfinite")
             continue
@@ -1443,16 +2365,50 @@ def train_reconstructor_curriculum(
         gradient_norm = torch.nn.utils.clip_grad_norm_(
             active_parameters, float(config.gradient_clip_norm)
         )
-        if not bool(torch.isfinite(gradient_norm)):
+        globally_gradient_norm_finite = all_reduce_min_bool(
+            distributed_runtime,
+            bool(torch.isfinite(gradient_norm)),
+            device=device,
+        )
+        if not globally_gradient_norm_finite:
+            errors = gather_error_summaries(
+                distributed_runtime,
+                phase="gradient_clip_norm",
+                error=(
+                    None
+                    if bool(torch.isfinite(gradient_norm))
+                    else FloatingPointError("gradient norm is nonfinite")
+                ),
+                structural=False,
+            )
+            distributed_error_events.append(
+                {
+                    "global_update": int(state.global_update),
+                    "phase": "gradient_clip_norm",
+                    "structural": False,
+                    "errors": list(errors),
+                }
+            )
             nonfinite_updates += 1
             optimizer.zero_grad(set_to_none=True)
+            if prefetcher is not None:
+                prefetcher.reset_to_committed_cursor()
+            runtime_profiler.end_train_update(success=False, jets=accumulated_jets)
             if nonfinite_updates > int(config.maximum_nonfinite_updates):
                 raise RuntimeError("reconstructor gradient norm remained nonfinite")
             continue
-        scaler.step(optimizer)
-        scaler.update()
-        ema.update(model)
-        optimizer.zero_grad(set_to_none=True)
+        with profile_span(runtime_profiler, "optimizer_ema_update"):
+            scaler.step(optimizer)
+            scaler.update()
+            ema.update(model)
+            optimizer.zero_grad(set_to_none=True)
+        if prefetcher is not None:
+            committed_hashes = prefetcher.commit_consumed()
+            if tuple(committed_hashes) != tuple(global_batch_plan_hashes):
+                raise RuntimeError(
+                    "committed global batch plans differ from the completed update"
+                )
+        runtime_profiler.end_train_update(success=True, jets=accumulated_jets)
         transitioned = controller.advance()
         updates_this_call += 1
 
@@ -1462,7 +2418,18 @@ def train_reconstructor_curriculum(
         )
         if not should_evaluate:
             continue
+        runtime_profiler.begin_validation(state)
+        validation_local_batch_size = (
+            config.root_hierarchy_local_batch_size
+            if state.phase <= 2
+            else config.renderer_distribution_local_batch_size
+        )
+        if validation_local_batch_size is not None and hasattr(
+            validation_owner, "set_batch_size"
+        ):
+            validation_owner.set_batch_size(int(validation_local_batch_size))
         with ema.applied(model):
+            verify_common_parameter_state(distributed_runtime, model)
             validation = evaluate_reconstructor_rollout(
                 model,
                 validation_batches(),
@@ -1470,7 +2437,14 @@ def train_reconstructor_curriculum(
                 step_function,
                 config,
                 device,
+                runtime_profiler=runtime_profiler,
+                distributed_runtime=distributed_runtime,
+                validation_owner=validation_owner,
             )
+        runtime_profiler.end_validation(
+            jets=int(validation["n_jets"]), batches=int(validation["n_batches"])
+        )
+        runtime_profiler.write(persist=distributed_runtime.is_primary)
         train_averages = {
             name: sum(row.get(name, 0.0) for row in train_rows) / len(train_rows)
             for name in sorted({name for row in train_rows for name in row})
@@ -1483,6 +2457,8 @@ def train_reconstructor_curriculum(
                 "effective_batch_size": int(effective_batch_size),
                 "expected_effective_batch_size": int(expected_effective_batch_size),
                 "gradient_accumulation_steps": int(accumulation_steps),
+                "distributed_runtime": distributed_runtime.to_dict(),
+                "global_batch_plan_hashes": list(global_batch_plan_hashes),
                 "mode": _training_mode(state, int(config.seed)),
                 "required_losses": list(training_required_losses),
                 "metrics": train_averages,
@@ -1494,14 +2470,39 @@ def train_reconstructor_curriculum(
                 "optimizer_group_gradient_norms": optimizer_group_gradient_norms,
                 "objective_skip_counts": dict(objective_skip_counts),
                 "nonfinite_updates": int(nonfinite_updates),
+                "compiler_failure_updates": int(compiler_failure_updates),
             },
             "model_val_rollout": validation,
             "optimizer_groups": optimizer_metadata,
         }
         curves.append(curve)
+        if validation.get("checkpoint_selection_eligible") is not True:
+            raise RuntimeError(
+                "model-val result is not eligible for checkpoint selection; "
+                "distributed reduction/coverage must complete first"
+            )
         score = float(validation["selection_score"])
         best = best_by_stage.get(state.stage_key)
-        improved = best is None or score < float(best["selection_score"])
+        selection_decision = None
+        if distributed_runtime.is_primary:
+            selection_decision = {
+                "stage_key": state.stage_key,
+                "selection_score": score,
+                "improved": best is None or score < float(best["selection_score"]),
+                "previous_best": None
+                if best is None
+                else float(best["selection_score"]),
+            }
+        selection_decision = broadcast_object(
+            distributed_runtime, selection_decision
+        )
+        if (
+            selection_decision["stage_key"] != state.stage_key
+            or float(selection_decision["selection_score"]) != score
+        ):
+            raise RuntimeError("rank-zero checkpoint selection decision is inconsistent")
+        improved = bool(selection_decision["improved"])
+        curve["checkpoint_selection_decision"] = selection_decision
         if improved:
             evaluations_without_improvement[state.stage_key] = 0
             stage_path = output_dir / f"best_{state.stage_key}.pt"
@@ -1510,73 +2511,121 @@ def train_reconstructor_curriculum(
                 "global_update": int(controller.global_update),
                 "checkpoint": str(stage_path),
             }
-            payload = _checkpoint_payload(
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                ema=ema,
-                controller=controller,
-                train_source=train_source,
-                config=config,
-                role=("best_model_val" if controller.is_final_stage(state) else "best_stage_model_val"),
-                validation=validation,
-                provenance=source_provenance,
-                optimizer_metadata=optimizer_metadata,
-                nonfinite_updates=nonfinite_updates,
-                trainer_state={
-                    "curves": curves,
-                    "best_by_stage": best_by_stage,
-                    "evaluations_without_improvement": evaluations_without_improvement,
-                    "objective_skip_counts": objective_skip_counts,
-                },
-                model_metadata=model_metadata,
-            )
-            _atomic_torch_save(stage_path, payload)
-            if controller.is_final_stage(state):
-                _atomic_torch_save(output_dir / "best_model_val.pt", payload)
-            best_by_stage[state.stage_key]["checkpoint_sha256"] = _file_sha256(stage_path)
         else:
             evaluations_without_improvement[state.stage_key] = (
                 evaluations_without_improvement.get(state.stage_key, 0) + 1
             )
 
-        if config.save_last_checkpoint:
-            _atomic_torch_save(
-                output_dir / "last.pt",
-                _checkpoint_payload(
-                    model=model,
-                    optimizer=optimizer,
-                    scaler=scaler,
-                    ema=ema,
-                    controller=controller,
-                    train_source=train_source,
-                    config=config,
-                    role="last",
-                    validation=validation,
-                    provenance=source_provenance,
-                    optimizer_metadata=optimizer_metadata,
-                    nonfinite_updates=nonfinite_updates,
-                    trainer_state={
-                        "curves": curves,
-                        "best_by_stage": best_by_stage,
-                        "evaluations_without_improvement": evaluations_without_improvement,
-                        "objective_skip_counts": objective_skip_counts,
-                    },
-                    model_metadata=model_metadata,
-                ),
+        stage_finished = False
+        if config.curriculum.accelerated and transitioned:
+            stage_definition = controller.stages[state.stage_index]
+            stage_history = [
+                row
+                for row in curves
+                if row["curriculum"]["stage_key"] == state.stage_key
+            ]
+            if stage_definition.role == "warm_started_handoff":
+                schedule_event = {
+                    "stage_key": state.stage_key,
+                    "global_update": int(controller.global_update),
+                    "stage_update": int(controller.stage_update),
+                    "outcome": "warm_started_handoff",
+                    "continue_training": False,
+                    "schedule_truncated": False,
+                    "checks": {"warm_started_handoff": True},
+                }
+                controller.finish_accelerated_stage(
+                    "warm_started_handoff",
+                    schedule_event,
+                    schedule_truncated=False,
+                )
+                stage_finished = True
+            else:
+                decision = decide_stage_continuation(
+                    stage_history,
+                    required_objectives=validation["required_losses"],
+                    best_checkpoint_global_update=best_by_stage[state.stage_key][
+                        "global_update"
+                    ],
+                    stage_update=int(controller.stage_update),
+                    nominal_updates=int(state.stage_nominal_updates),
+                    extension_blocks_completed=int(state.stage_extension_blocks),
+                    hard_max_updates=int(state.stage_hard_max_updates),
+                    nonfinite_updates=int(nonfinite_updates),
+                    compiler_failure_updates=int(compiler_failure_updates),
+                    stage_role=stage_definition.role,
+                )
+                schedule_event = {
+                    "stage_key": state.stage_key,
+                    "global_update": int(controller.global_update),
+                    "stage_update": int(controller.stage_update),
+                    "nominal_updates": int(state.stage_nominal_updates),
+                    "extension_updates": int(state.stage_extension_updates),
+                    "hard_max_updates": int(state.stage_hard_max_updates),
+                    "extension_blocks_before_decision": int(
+                        state.stage_extension_blocks
+                    ),
+                    **decision.to_dict(),
+                }
+                if decision.continue_training:
+                    controller.approve_extension(schedule_event)
+                else:
+                    controller.finish_accelerated_stage(
+                        decision.outcome,
+                        schedule_event,
+                        schedule_truncated=decision.schedule_truncated,
+                    )
+                    stage_finished = True
+            curve["schedule_decision"] = schedule_event
+
+        if improved:
+            payload = collective_checkpoint_payload(
+                role=("best_model_val" if controller.is_final_stage(state) else "best_stage_model_val"),
+                validation=validation,
+                optimizer_metadata=optimizer_metadata,
             )
-        _atomic_json(
-            output_dir / "training_curves.json",
-            {
+            with runtime_profiler.standalone_span(
+                "checkpoint_serialization", stage_key=state.stage_key
+            ):
+                checkpoint_hash = write_checkpoint_collective(
+                    stage_path,
+                    payload,
+                    aliases=(output_dir / "best_model_val.pt",)
+                    if controller.is_final_stage(state)
+                    else (),
+                )
+            best_by_stage[state.stage_key]["checkpoint_sha256"] = checkpoint_hash
+
+        if config.save_last_checkpoint:
+            payload = collective_checkpoint_payload(
+                role="last",
+                validation=validation,
+                optimizer_metadata=optimizer_metadata,
+            )
+            with runtime_profiler.standalone_span(
+                "checkpoint_serialization", stage_key=state.stage_key
+            ):
+                write_checkpoint_collective(
+                    output_dir / "last.pt", payload
+                )
+        if distributed_runtime.is_primary:
+            _atomic_json(
+                output_dir / "training_curves.json",
+                {
                 "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
                 "selection_metric": "model_val.rollout.loss.total",
                 "rollout_validation_required": True,
+                "schedule_contract": config.curriculum.schedule_contract,
+                "campaign_schedule_profile": (
+                    config.curriculum.campaign_schedule_profile
+                ),
                 "evaluations": curves,
-            },
-        )
+                },
+            )
+        barrier(distributed_runtime)
 
         early_transition = False
-        if not transitioned:
+        if not config.curriculum.accelerated and not transitioned:
             stage_definition = controller.stages[state.stage_index]
             early_transition = (
                 evaluations_without_improvement.get(state.stage_key, 0)
@@ -1584,10 +2633,14 @@ def train_reconstructor_curriculum(
             )
             if early_transition:
                 controller.finish_stage_early()
-        if transitioned or early_transition:
+        if not config.curriculum.accelerated:
+            stage_finished = bool(transitioned or early_transition)
+        if stage_finished:
             selected_path = Path(best_by_stage[state.stage_key]["checkpoint"])
-            selected = load_reconstructor_curriculum_checkpoint(
-                selected_path, device=device, require_selected=True
+            selected = _collective_checkpoint_load(
+                selected_path,
+                runtime=distributed_runtime,
+                require_selected=True,
             )
             model.load_state_dict(selected["model_state_dict"], strict=True)
             ema.reset_from(model)
@@ -1598,30 +2651,23 @@ def train_reconstructor_curriculum(
                 else optimizer_metadata
             )
             if config.save_last_checkpoint:
-                _atomic_torch_save(
-                    output_dir / "last.pt",
-                    _checkpoint_payload(
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler,
-                        ema=ema,
-                        controller=controller,
-                        train_source=train_source,
-                        config=config,
-                        role="last",
-                        validation=validation,
-                        provenance=source_provenance,
-                        optimizer_metadata=handoff_optimizer_metadata,
-                        nonfinite_updates=nonfinite_updates,
-                        trainer_state={
-                            "curves": curves,
-                            "best_by_stage": best_by_stage,
-                            "evaluations_without_improvement": evaluations_without_improvement,
-                            "objective_skip_counts": objective_skip_counts,
-                        },
-                        model_metadata=model_metadata,
-                    ),
+                payload = collective_checkpoint_payload(
+                    role="last",
+                    validation=validation,
+                    optimizer_metadata=handoff_optimizer_metadata,
                 )
+                with runtime_profiler.standalone_span(
+                    "checkpoint_serialization", stage_key=state.stage_key
+                ):
+                    write_checkpoint_collective(
+                        output_dir / "last.pt", payload
+                    )
+
+    prefetch_maximum_resident_batches = (
+        0 if prefetcher is None else int(prefetcher.maximum_resident_batches)
+    )
+    if prefetcher is not None:
+        prefetcher.close()
 
     optimizer_metadata = (
         configure_reconstructor_optimizer(optimizer, controller.state(), config)
@@ -1638,33 +2684,91 @@ def train_reconstructor_curriculum(
         ]
     )
     if config.save_last_checkpoint:
-        _atomic_torch_save(
-            output_dir / "last.pt",
-            _checkpoint_payload(
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                ema=ema,
-                controller=controller,
-                train_source=train_source,
-                config=config,
-                role="last",
-                validation=curves[-1]["model_val_rollout"] if curves else None,
-                provenance=source_provenance,
-                optimizer_metadata=optimizer_metadata,
-                nonfinite_updates=nonfinite_updates,
-                trainer_state={
-                    "curves": curves,
-                    "best_by_stage": best_by_stage,
-                    "evaluations_without_improvement": evaluations_without_improvement,
-                    "objective_skip_counts": objective_skip_counts,
-                },
-                model_metadata=model_metadata,
-            ),
+        final_stage_key = (
+            controller.state().stage_key if not controller.complete else "complete"
         )
+        payload = collective_checkpoint_payload(
+            role="last",
+            validation=curves[-1]["model_val_rollout"] if curves else None,
+            optimizer_metadata=optimizer_metadata,
+        )
+        with runtime_profiler.standalone_span(
+            "checkpoint_serialization", stage_key=final_stage_key
+        ):
+            write_checkpoint_collective(
+                output_dir / "last.pt", payload
+            )
     complete = bool(controller.complete)
-    if complete and not (output_dir / "best_model_val.pt").exists():
+    terminal_checkpoint_present = (
+        (output_dir / "best_model_val.pt").exists()
+        if distributed_runtime.is_primary
+        else None
+    )
+    terminal_checkpoint_present = broadcast_object(
+        distributed_runtime, terminal_checkpoint_present
+    )
+    if complete and not terminal_checkpoint_present:
         raise RuntimeError("completed curriculum produced no terminal model-val checkpoint")
+    runtime_profile = runtime_profiler.write(persist=distributed_runtime.is_primary)
+    runtime_profile = broadcast_object(
+        distributed_runtime,
+        runtime_profile if distributed_runtime.is_primary else None,
+    )
+    stage_schedule: dict[str, Any] = {}
+    for stage in controller.stages:
+        events = [
+            row for row in controller.schedule_events if row.get("stage_key") == stage.key
+        ]
+        if config.curriculum.accelerated:
+            status = controller.stage_outcomes.get(stage.key, "in_progress")
+        else:
+            status = (
+                "legacy_completed"
+                if stage.key in best_by_stage
+                and (
+                    controller.complete
+                    or controller.stage_index
+                    > next(
+                        index
+                        for index, candidate in enumerate(controller.stages)
+                        if candidate.key == stage.key
+                    )
+                )
+                else "in_progress"
+            )
+        stage_schedule[stage.key] = {
+            "family": stage.family,
+            "role": stage.role,
+            "status": status,
+            "budget": stage.budget.to_dict(),
+            "extension_blocks": int(controller.extension_blocks[stage.key]),
+            "last_boundary_update": (
+                int(events[-1]["stage_update"]) if events else None
+            ),
+            "events": events,
+        }
+    present_families = {stage.family for stage in controller.stages}
+    for family, key in (
+        ("hierarchy", "phase2_hierarchy_disabled"),
+        ("renderer", "phase3_renderer"),
+        ("distribution", "phase4_distribution"),
+    ):
+        if family not in present_families:
+            stage_schedule[key] = {
+                "family": family,
+                "role": config.curriculum.stage_role(family),
+                "status": config.curriculum.stage_role(family),
+                "budget": None,
+                "extension_blocks": 0,
+                "last_boundary_update": None,
+                "events": [],
+            }
+    best_model_val_sha256 = None
+    if complete and distributed_runtime.is_primary:
+        best_model_val_sha256 = _file_sha256(output_dir / "best_model_val.pt")
+    best_model_val_sha256 = broadcast_object(
+        distributed_runtime, best_model_val_sha256
+    )
     report = {
         "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
         "ok": complete,
@@ -1676,13 +2780,14 @@ def train_reconstructor_curriculum(
             str(output_dir / "best_model_val.pt") if complete else None
         ),
         "best_model_val_checkpoint_sha256": (
-            _file_sha256(output_dir / "best_model_val.pt") if complete else None
+            best_model_val_sha256 if complete else None
         ),
         "selection_split": "model_val",
         "selection_mode": "rollout",
         "rollout_validation_count": len(curves),
         "teacher_forced_validation_count": 0,
         "nonfinite_updates": int(nonfinite_updates),
+        "compiler_failure_updates": int(compiler_failure_updates),
         "objective_skip_counts": objective_skip_counts,
         "optimizer_groups": optimizer_metadata,
         "model_metadata": model_metadata,
@@ -1690,12 +2795,69 @@ def train_reconstructor_curriculum(
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
         "stage_handoff": "restore_best_ema_and_reset_optimizer_moments",
+        "schedule": {
+            "contract": config.curriculum.schedule_contract,
+            "policy_label": (
+                "accelerated_screening_v1"
+                if config.curriculum.accelerated
+                else "legacy_fixed_v1"
+            ),
+            "campaign_profile": config.curriculum.campaign_schedule_profile,
+            "stages": stage_schedule,
+            "events": list(controller.schedule_events),
+            "schedule_truncated": bool(controller.schedule_truncated),
+            "negative_mechanism_conclusion_valid": bool(
+                not controller.schedule_truncated
+            ),
+            "automatic_highdata_promotion_allowed": bool(
+                complete and not controller.schedule_truncated
+            ),
+            "warning": (
+                "Hard maximum reached while convergence rule still requested extension; "
+                "a negative mechanism conclusion is invalid."
+                if controller.schedule_truncated
+                else None
+            ),
+        },
+        "runtime_profile": {
+            "path": str(runtime_profiler.output_path),
+            "profile_content_hash": runtime_profile["profile_content_hash"],
+            "sampled_training_updates": runtime_profile["summary"][
+                "sampled_training_updates"
+            ],
+        },
+        "distributed_runtime": {
+            **distributed_runtime.to_dict(),
+            "find_unused_parameters": bool(config.ddp_find_unused_parameters),
+            "broadcast_buffers": False,
+            "stage_aware_wrapper": True,
+            "deferred_source_commit": bool(prefetcher is not None),
+            "error_events": distributed_error_events,
+        },
+        "input_pipeline": {
+            "contract": ABPH_INPUT_PIPELINE_CONTRACT,
+            "asynchronous_prefetch": bool(prefetcher is not None),
+            "queue_depth": int(config.prefetch_queue_depth),
+            "maximum_resident_batches": prefetch_maximum_resident_batches,
+            "pin_memory": bool(config.pin_memory and device.type == "cuda"),
+            "nonblocking_transfer": bool(
+                config.nonblocking_transfer and device.type == "cuda"
+            ),
+            "dedicated_cuda_transfer_stream": bool(device.type == "cuda"),
+            "cursor_commit": "training_thread_after_successful_dequeue",
+        },
     }
-    _atomic_json(output_dir / "run_report.json", report)
+    if distributed_runtime.is_primary:
+        _atomic_json(output_dir / "run_report.json", report)
+    barrier(distributed_runtime)
+    report = broadcast_object(
+        distributed_runtime, report if distributed_runtime.is_primary else None
+    )
     return report
 
 
 __all__ = [
+    "ABPH_DISTRIBUTED_CHECKPOINT_CONTRACT",
     "ABPH_RECONSTRUCTION_LOSS_NAMES",
     "ABPH_RECONSTRUCTOR_MODULE_GROUPS",
     "ABPH_RECONSTRUCTOR_TRAINING_CONTRACT",

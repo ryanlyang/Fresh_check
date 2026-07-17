@@ -26,6 +26,8 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.production import (
 )
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
+    AccountingState,
+    AdaptiveBinaryReconstructionOutput,
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryHierarchyLayout,
     PseudoViewInputs,
@@ -33,8 +35,10 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ReconstructorStepContext,
     CurriculumController,
     ReconstructorCurriculumConfig,
+    ReconstructionLossWeights,
     build_adaptive_binary_targets,
     build_variant_hierarchy_aware_tagger,
+    compose_reconstruction_loss,
     package_trainable_pseudo_views,
     reconstructor_step,
     resolve_variant_config,
@@ -114,6 +118,64 @@ def _phase2_context(capacity: int, supervised_capacities: tuple[int, ...]):
     )
 
 
+def _phase4_context() -> ReconstructorStepContext:
+    return ReconstructorStepContext(
+        curriculum=CurriculumState(
+            stage_index=7,
+            stage_key="phase4_distribution",
+            phase=4,
+            phase_name="probabilistic_multi_hypothesis",
+            global_update=1,
+            stage_update=1,
+            stage_maximum_updates=2,
+            active_capacity=32,
+            stage_progress=0.5,
+            teacher_forcing_probability=0.0,
+            distribution_weight=0.25,
+            supervised_capacities=(2, 4, 8, 16, 32),
+        ),
+        split="model_train",
+        mode="rollout",
+        validation=False,
+        teacher_forcing_probability=0.0,
+    )
+
+
+def _reference_all_at_once_deployment(
+    model: AdaptiveBinaryReconstructorModel,
+    shared: dict,
+) -> AdaptiveBinaryReconstructionOutput:
+    root_state = AccountingState.from_ledger(shared["compiled_root"].root_ledger)
+    hierarchy = model.hierarchy_reconstructor.deployment_rollout(
+        root_state,
+        shared["root_prediction"].shared_context,
+        shared["root_prediction"].query_tokens,
+        shared["particle_embeddings"],
+        shared["mask"],
+        shared["support"],
+        evaluation_seed=24731,
+    )
+    rendered = model._render_hypotheses(
+        root_prediction=shared["root_prediction"],
+        hypotheses=hierarchy.hypotheses,
+        particle_embeddings=shared["particle_embeddings"],
+        hlt_mask=shared["mask"],
+        support=shared["support"],
+        axis_eta=shared["axis_eta"],
+        axis_phi=shared["axis_phi"],
+    )
+    return AdaptiveBinaryReconstructionOutput(
+        root_prediction=shared["root_prediction"],
+        compiled_root=shared["compiled_root"],
+        root_state=root_state,
+        hlt_particle_embeddings=shared["particle_embeddings"],
+        hlt_jet_embedding=shared["jet_embedding"],
+        hlt_support_features=shared["support"],
+        hierarchy_output=hierarchy,
+        rendered_views=rendered,
+    )
+
+
 def test_c0_is_one_shot_and_skips_progressive_two_and_four_stages():
     model = AdaptiveBinaryReconstructorModel(
         variant_name="C0_direct_8_group_set", smoke=True
@@ -173,6 +235,158 @@ def test_c0_and_c8_training_losses_reach_their_distinct_heads():
         parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
         for parameter in unconstrained.unconstrained_child_heads[0].parameters()
     )
+
+
+def test_teacher_forced_phase2_omits_the_inactive_rollout_forward():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="C5_kt_32", smoke=True
+    ).eval()
+    decoder = model.hierarchy_reconstructor.decoders["exclusive_kt"]
+    calls = {"teacher_forced": 0, "rollout": 0}
+
+    def count_mode(_module, _args, kwargs, _output):
+        calls[str(kwargs["mode"])] += 1
+
+    hook = decoder.register_forward_hook(count_mode, with_kwargs=True)
+    result = reconstructor_step(
+        model,
+        _reconstruction_batch(),
+        _phase2_context(32, (2, 4, 8, 16, 32)),
+    )
+    hook.remove()
+
+    assert calls == {"teacher_forced": 1, "rollout": 0}
+    assert result.metrics["rollout_forward_executed"] is False
+    assert "frontier" not in result.loss_terms
+    assert {"root", "group_2", "group_4", "group_8", "group_16", "group_32", "topology"} <= set(
+        result.loss_terms
+    )
+
+
+def test_phase4_rolls_and_renders_hypothesis_zero_exactly_once(monkeypatch):
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="D1_kt32_mh4_particles", smoke=True
+    ).eval()
+    model.renderer.config = replace(
+        model.renderer.config, exact_nbody_projection=False
+    )
+    decoder = model.hierarchy_reconstructor.decoders["exclusive_kt"]
+    decoder_calls = {"teacher_forced": 0, "rollout": 0}
+    renderer_calls = 0
+    root_calls = 0
+    assembly = {}
+
+    def count_decoder(_module, _args, kwargs, _output):
+        decoder_calls[str(kwargs["mode"])] += 1
+
+    def count_renderer(_module, _args, _output):
+        nonlocal renderer_calls
+        renderer_calls += 1
+
+    def count_root(_module, _args, _output):
+        nonlocal root_calls
+        root_calls += 1
+
+    original_assemble = model.assemble_deployment_output
+
+    def capture_assembly(**kwargs):
+        output = original_assemble(**kwargs)
+        assembly.update(kwargs)
+        assembly["output"] = output
+        return output
+
+    monkeypatch.setattr(model, "assemble_deployment_output", capture_assembly)
+
+    handles = (
+        decoder.register_forward_hook(count_decoder, with_kwargs=True),
+        model.renderer.register_forward_hook(count_renderer),
+        model.root_predictor.register_forward_hook(count_root),
+    )
+    result = reconstructor_step(model, _reconstruction_batch(), _phase4_context())
+    for handle in handles:
+        handle.remove()
+
+    assert root_calls == 1
+    assert decoder_calls == {"teacher_forced": 1, "rollout": 5}
+    assert renderer_calls == 5
+    assert result.metrics["hypothesis_zero_reused"] is True
+    zero = assembly["hypothesis_zero"]
+    output = assembly["output"]
+    assert output.compiled_root is assembly["compiled_root"]
+    assert output.hierarchy_output.hypotheses[0] is zero.hypotheses[0]
+    assert output.rendered_views["exclusive_kt"][0] is zero.rendered_views[
+        "exclusive_kt"
+    ][0]
+
+
+def test_split_phase4_forward_matches_reference_losses_and_gradients():
+    optimized = AdaptiveBinaryReconstructorModel(
+        variant_name="D1_kt32_mh4_particles", smoke=True
+    ).eval()
+    reference = AdaptiveBinaryReconstructorModel(
+        variant_name="D1_kt32_mh4_particles", smoke=True
+    ).eval()
+    reference.load_state_dict(optimized.state_dict(), strict=True)
+    for model in (optimized, reference):
+        model.renderer.config = replace(
+            model.renderer.config, exact_nbody_projection=False
+        )
+    batch = _reconstruction_batch()
+    context = _phase4_context()
+
+    optimized_result = reconstructor_step(optimized, batch, context)
+    reference_shared = reference.prepare_shared_reconstruction_forward(
+        batch["hlt_tokens"], batch["hlt_mask"]
+    )
+    reference_deployment = _reference_all_at_once_deployment(
+        reference, reference_shared
+    )
+    reference_result = reconstructor_step(
+        reference,
+        {
+            **batch,
+            "shared_reconstructor_forward": reference_shared,
+            "shared_deployment_output": reference_deployment,
+        },
+        context,
+    )
+
+    assert optimized_result.metrics["hypothesis_zero_reused"] is True
+    assert reference_result.metrics["hypothesis_zero_reused"] is True
+    assert set(optimized_result.loss_terms) == set(reference_result.loss_terms)
+    for name in optimized_result.loss_terms:
+        torch.testing.assert_close(
+            optimized_result.loss_terms[name],
+            reference_result.loss_terms[name],
+            rtol=2.0e-5,
+            atol=2.0e-6,
+        )
+    optimized_loss = compose_reconstruction_loss(
+        optimized_result, context, ReconstructionLossWeights()
+    ).total
+    reference_loss = compose_reconstruction_loss(
+        reference_result, context, ReconstructionLossWeights()
+    ).total
+    torch.testing.assert_close(optimized_loss, reference_loss, rtol=2.0e-5, atol=2.0e-6)
+    optimized_loss.backward()
+    reference_loss.backward()
+
+    reference_parameters = dict(reference.named_parameters())
+    for name, parameter in optimized.named_parameters():
+        reference_gradient = reference_parameters[name].grad
+        if parameter.grad is None or reference_gradient is None:
+            assert parameter.grad is None and reference_gradient is None, name
+            continue
+        assert torch.equal(
+            torch.isfinite(parameter.grad), torch.isfinite(reference_gradient)
+        ), name
+        torch.testing.assert_close(
+            torch.nan_to_num(parameter.grad),
+            torch.nan_to_num(reference_gradient),
+            rtol=2.0e-4,
+            atol=2.0e-6,
+            msg=lambda message, name=name: f"{name}: {message}",
+        )
 
 
 def test_b3_draws_four_distinct_compiled_root_states_from_hlt_only():
@@ -504,6 +718,10 @@ def test_training_source_fills_microbatches_across_target_shards(monkeypatch):
     )
     metadata = {
         "n_shards": 2,
+        "shards": [
+            {"shard_index": 0, "start": 0, "stop": 3},
+            {"shard_index": 1, "start": 3, "stop": 4},
+        ],
         "hlt_content_hash": "hlt-hash",
         "jet_identity_hash": production_module.jet_identity_hash(jet_ids),
     }
@@ -546,5 +764,6 @@ def test_training_source_fills_microbatches_across_target_shards(monkeypatch):
         seed=24731,
     )
     validation_batches = list(validation_source.iter_epoch())
-    assert [row["hlt_tokens"].shape[0] for row in validation_batches] == [3, 1]
+    assert [row["hlt_tokens"].shape[0] for row in validation_batches] == [4]
     assert sum(row["hlt_tokens"].shape[0] for row in validation_batches) == 4
+    assert validation_source.last_validation_range.n_jets == 4

@@ -14,6 +14,7 @@ from .config import (
     ABPH_HLT_PROFILE_VERSION,
     canonical_hash,
 )
+from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
 from .diagnostics import ABPH_TAGGER_DIAGNOSTIC_CONTRACT
 from .fusion import (
     ABPH_FUSION_FIT_SPLIT,
@@ -403,6 +404,7 @@ def write_adaptive_binary_campaign_report(
     root_rows: list[dict[str, Any]] = []
     fusion_rows: list[dict[str, Any]] = []
     reports: dict[str, Mapping[str, Any]] = {}
+    schedule_rows: list[dict[str, Any]] = []
     report_paths: dict[str, str] = {}
     common_values: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -444,6 +446,33 @@ def write_adaptive_binary_campaign_report(
         report_paths[variant_name] = str(path)
         if report.get("ok") is not True:
             problems.append(f"{variant_name} run_report has ok!=true")
+        schedule = report.get("schedule")
+        schedule_required = (
+            variant_spec(variant_name).tier in {"B", "C", "D"}
+            and variant_name
+            not in {"B4_oracle_root_diagnostic", "D6_true_offline_particles"}
+        )
+        if schedule_required and not isinstance(schedule, Mapping):
+            problems.append(f"{variant_name} lacks accelerated schedule provenance")
+        if isinstance(schedule, Mapping):
+            if schedule.get("contract") != ABPH_ACCELERATED_SCHEDULE_CONTRACT:
+                problems.append(f"{variant_name} schedule contract mismatch")
+            if schedule.get("policy_label") != "accelerated_screening_v1":
+                problems.append(f"{variant_name} schedule policy is not accelerated_screening_v1")
+            schedule_rows.append(
+                {
+                    "variant": variant_name,
+                    "campaign_profile": schedule.get("campaign_profile"),
+                    "schedule_truncated": bool(schedule.get("schedule_truncated")),
+                    "negative_mechanism_conclusion_valid": bool(
+                        schedule.get("negative_mechanism_conclusion_valid")
+                    ),
+                    "automatic_highdata_promotion_allowed": bool(
+                        schedule.get("automatic_highdata_promotion_allowed")
+                    ),
+                    "stages": schedule.get("stages", {}),
+                }
+            )
         resolved = resolve_variant_config(variant_name)
         reported_name = report.get("variant_name")
         if reported_name is None and isinstance(report.get("variant"), Mapping):
@@ -649,6 +678,27 @@ def write_adaptive_binary_campaign_report(
         "provenance": provenance_rows,
         "root_identity": root_rows,
         "fusion_membership": fusion_rows,
+        "schedule_screening": {
+            "policy_label": "accelerated_screening_v1",
+            "runs": schedule_rows,
+            "truncated_variants": [
+                row["variant"] for row in schedule_rows if row["schedule_truncated"]
+            ],
+            "negative_mechanism_conclusion_valid": bool(
+                schedule_rows
+                and all(
+                    row["negative_mechanism_conclusion_valid"]
+                    for row in schedule_rows
+                )
+            ),
+            "automatic_highdata_promotion_allowed": bool(
+                schedule_rows
+                and all(
+                    row["automatic_highdata_promotion_allowed"]
+                    for row in schedule_rows
+                )
+            ),
+        },
         "tagger_use_diagnostics": {
             "path": str(diagnostic_path),
             "report": diagnostic_report,

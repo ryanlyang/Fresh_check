@@ -369,6 +369,8 @@ def _validate_training(
     hlt_cache_dir: Path,
     offline_cache_dir: Path,
     target_cache_dir: Path,
+    expected_runtime_profile_hash: str | None = None,
+    expected_reconstructor_checkpoint_hashes: set[str] | None = None,
 ) -> None:
     report = _read_json(root / "run_report.json")
     if report.get("ok") is not True:
@@ -380,6 +382,12 @@ def _validate_training(
     declared_run_id = report.get("run_id")
     if declared_run_id not in (None, run_id):
         raise ValueError(f"{run_id} report declares a different campaign run_id: {declared_run_id}")
+    if expected_runtime_profile_hash is not None:
+        _require_equal(
+            report.get("runtime_profile_hash"),
+            expected_runtime_profile_hash,
+            f"{run_id} runtime_profile_hash",
+        )
     if not tagger and run_id in {"C5-unconstrained", "Cdirect-unconstrained"}:
         model = report.get("model")
         slot = model.get("slot_config") if isinstance(model, Mapping) else None
@@ -397,9 +405,28 @@ def _validate_training(
     if checkpoint_sha in (None, ""):
         raise ValueError(f"{run_id} run_report lacks checkpoint_sha256")
     _require_equal(_file_sha256(checkpoint), checkpoint_sha, f"{run_id} checkpoint_sha256")
-    if tagger and not isinstance(report.get("provenance"), Mapping):
+    if tagger and (
+        expected_reconstructor_checkpoint_hashes is not None
+        or not isinstance(report.get("provenance"), Mapping)
+    ):
         source_metadata = _read_json(root / "source_metadata.json")
-        report = {**report, "provenance": source_metadata.get("provenance")}
+        if expected_reconstructor_checkpoint_hashes is not None:
+            reconstructors = source_metadata.get("reconstructors")
+            sources = reconstructors.get("sources") if isinstance(reconstructors, Mapping) else None
+            if not isinstance(sources, Mapping):
+                sources = {}
+            observed_hashes = {
+                str(row.get("checkpoint_sha256"))
+                for row in sources.values()
+                if isinstance(row, Mapping) and isinstance(row.get("checkpoint_sha256"), str)
+            }
+            _require_equal(
+                observed_hashes,
+                expected_reconstructor_checkpoint_hashes,
+                f"{run_id} source reconstructor checkpoint hashes",
+            )
+        if not isinstance(report.get("provenance"), Mapping):
+            report = {**report, "provenance": source_metadata.get("provenance")}
     _require_provenance(report, manifest_sha, run_id)
     _require_active_training_provenance(
         report,
@@ -421,6 +448,7 @@ def _validate_predictions(
     offline_cache_dir: Path,
     target_cache_dir: Path,
     tagger_root: Path,
+    expected_reconstructor_checkpoint_hashes: set[str] | None = None,
 ) -> None:
     _validate_training(
         tagger_root / run_id,
@@ -430,6 +458,7 @@ def _validate_predictions(
         hlt_cache_dir=hlt_cache_dir,
         offline_cache_dir=offline_cache_dir,
         target_cache_dir=target_cache_dir,
+        expected_reconstructor_checkpoint_hashes=expected_reconstructor_checkpoint_hashes,
     )
     report = _read_json(root / "prediction_run_report.json")
     if report.get("ok") is not True:
@@ -531,6 +560,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offline-cache-dir")
     parser.add_argument("--target-cache-dir")
     parser.add_argument("--tagger-root")
+    parser.add_argument("--expected-runtime-profile-hash")
+    parser.add_argument("--expected-reconstructor-checkpoint-sha256", action="append", default=None)
     return parser.parse_args()
 
 
@@ -566,6 +597,7 @@ def main() -> int:
             hlt_cache_dir=Path(args.hlt_cache_dir),
             offline_cache_dir=Path(args.offline_cache_dir),
             target_cache_dir=Path(args.target_cache_dir),
+            expected_runtime_profile_hash=args.expected_runtime_profile_hash,
         )
     elif args.kind == "tagger":
         if not args.hlt_cache_dir or not args.offline_cache_dir or not args.target_cache_dir:
@@ -578,6 +610,11 @@ def main() -> int:
             hlt_cache_dir=Path(args.hlt_cache_dir),
             offline_cache_dir=Path(args.offline_cache_dir),
             target_cache_dir=Path(args.target_cache_dir),
+            expected_reconstructor_checkpoint_hashes=(
+                None
+                if args.expected_reconstructor_checkpoint_sha256 is None
+                else set(args.expected_reconstructor_checkpoint_sha256)
+            ),
         )
     else:
         if not splits:
@@ -596,6 +633,11 @@ def main() -> int:
             offline_cache_dir=Path(args.offline_cache_dir),
             target_cache_dir=Path(args.target_cache_dir),
             tagger_root=Path(args.tagger_root),
+            expected_reconstructor_checkpoint_hashes=(
+                None
+                if args.expected_reconstructor_checkpoint_sha256 is None
+                else set(args.expected_reconstructor_checkpoint_sha256)
+            ),
         )
     print(f"valid {args.kind}: {root}")
     return 0

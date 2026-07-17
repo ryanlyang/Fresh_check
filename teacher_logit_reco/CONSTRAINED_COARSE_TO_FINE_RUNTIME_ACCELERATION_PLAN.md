@@ -230,7 +230,7 @@ The calibration selects one shared optimizer schedule for all comparable
 C-tier architecture variants:
 
 ```text
-C0, C1, C2, C3, C4, C5,
+C0, C1, C2, C3, C4, C5, C6,
 C5-B1, C5-B2, C5-B3, C5-no-slot, and Cdirect-unconstrained
 ```
 
@@ -240,7 +240,9 @@ It prevents an architecture comparison from silently becoming an LR comparison.
 
 C6 may use a different physical batch size because it renders four views and
 has a different activation footprint. C4 may use a different Hungarian worker
-count. Neither exception permits a variant-specific LR or schedule. Any run
+count. Neither exception permits a variant-specific LR or schedule. All C-tier
+variants, including C6, use the same approved peak LR, encoder LR cap, warmup,
+cosine floor, maximum epoch budget, minimum-epoch rule, and patience. Any run
 that intentionally uses a different optimizer schedule is a separately named
 schedule ablation and is excluded from primary C-tier architecture rankings.
 
@@ -268,7 +270,7 @@ assumed beneficial. High-data currently defaults to zero workers for memory
 safety, so worker-count selection must include that reference.
 
 A cross-shard persistent-worker loader is an optional later optimization, not
-a prerequisite for `accelerated_campaign_v1`. It requires a single
+a prerequisite for `accelerated_candidate_v1`. It requires a single
 manifest-ordered iterable dataset that opens one target shard at a time while
 retaining worker processes across boundaries. It may be implemented only with
 tests proving exactly the same row identities, shard order, balanced shuffle,
@@ -385,6 +387,35 @@ comparable C-tier variants once selected. C6 may use a different physical batch
 size, but its warmup/cosine schedule, data exposure rules, and loss definition
 remain explicit and comparable.
 
+### Checkpoint and Resume Contract
+
+The accelerated runtime profile must force
+`CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT=1`. The current space-saving default
+of omitting `last.pt` is not permitted for a resumable accelerated campaign.
+
+At every completed epoch, `last.pt` must contain:
+
+```text
+model state
+optimizer state
+scheduler state
+completed epoch index
+global optimizer step
+precision/runtime-profile state
+Python, NumPy, Torch CPU, and Torch CUDA RNG states
+manifest/cache/target/runtime-profile provenance
+```
+
+`best_model_val.pt` records the same scheduler/global-step state for audit, but
+it is not a resume source. `last.pt` is the only resumable artifact.
+
+Resume is supported only at completed epoch boundaries. A resume command must
+restore `last.pt` and continue at the next deterministic epoch seed. It must
+hard-fail if the manifest, HLT/offline/target hashes, runtime-profile hash,
+precision mode, physical batch size, worker count, model variant, optimizer,
+or scheduler settings differ from the checkpoint. A requeue cannot turn an
+FP32 or incomplete run into a BF16 accelerated run by resuming it.
+
 ## Benchmark and Acceptance Protocol
 
 ### Representative Variants
@@ -479,9 +510,17 @@ If more than one candidate passes, retain the highest-throughput candidate for
 the next certification stage. If no candidate passes, retain the current FP32
 profile for that execution family.
 
+Passing this three-epoch gate creates the immutable
+`accelerated_candidate_v1` profile artifact. That artifact records the chosen
+execution settings, calibration evidence, hashes, the code/environment
+fingerprint defined below, and the full-pilot contract; it may queue the
+complete accelerated pilot, including the C5-B3/C6 runs needed to gather
+subsequent certification evidence. It cannot queue high-data or final-test
+claim stages.
+
 ### Full Ten-Epoch Schedule Certification
 
-Before approving `accelerated_campaign_v1`, perform a full-scale pilot
+Before promoting an accelerated candidate to `accelerated_approved_v1`, perform a full-scale pilot
 comparison for the two reconstructor paths that matter most to downstream
 tagging:
 
@@ -497,6 +536,18 @@ seed contract, and validation metric. The reference may be an already-complete
 or still-completing `fp32_reference` campaign artifact only if its provenance
 and runtime profile validate exactly.
 
+Certification uses a dedicated fixed-horizon mode:
+
+```text
+maximum epochs: 10
+minimum epochs: 10
+early stopping: disabled
+```
+
+The runner must execute and report all ten epochs even if the model-val score
+plateaus after epoch five. The normal compressed campaign patience rule is not
+used for this certification run.
+
 The ten-epoch candidate must report:
 
 ```text
@@ -506,22 +557,99 @@ all named reconstruction diagnostics
 wall time, optimizer steps, and resource telemetry
 ```
 
-It is accepted only when it is non-inferior to the FP32 reference at the same
-ten-epoch horizon under the documented reconstruction thresholds. When the
-30-epoch FP32 reference completes, compare the accelerated best score with its
-eventual best score before using the profile for a primary high-data claim.
-Until that comparison exists, the accelerated profile may be used for a pilot
-runtime study but is not represented as proven equivalent to the eventual
+The ten-epoch certification passes only when the existing
+`accelerated_candidate_v1` profile is non-inferior to the FP32 reference at
+the same ten-epoch horizon under the documented reconstruction thresholds.
+Its report is retained as evidence bound to that candidate profile. It does
+not create a new candidate and does not approve high-data or final-test use.
+
+### Final Thirty-Epoch Promotion Gate
+
+`accelerated_approved_v1` requires a separate fixed-horizon, 30-epoch FP32
+reference for each of C5-B3 and C6. The references must run all 30 epochs with
+early stopping disabled, on the full pilot manifest and the identical
+HLT/offline/target cache contract used by the respective accelerated
+certification run. Compare each accelerated candidate's selected model-val
+checkpoint against the selected checkpoint of its matching FP32 reference on
+the same fixed, full-pilot `model_val` rows.
+
+For **each** of C5-B3 and C6, the final promotion comparison passes only when:
+
+```text
+best model-val reconstruction score is no worse than 1 percent relative
+matched pT, eta, phi, and PID diagnostics are each no worse than 2 percent
+hierarchy accounting and parent-child consistency are each no worse than 2 percent
+all named loss components and diagnostics are finite
+both the accelerated candidate and FP32 reference have zero nonfinite batches
+both the accelerated candidate and FP32 reference have zero skipped batches
+```
+
+The reconstruction score is minimized, so the first condition is evaluated as
+`accelerated_score <= 1.01 * fp32_reference_score` for stable positive
+reference scores. Diagnostic quantities are evaluated in their documented
+error direction with the corresponding `1.02` relative bound. Near-zero
+reference quantities use the same predeclared absolute tolerances as the
+three- and ten-epoch gates; the promotion report must record the selected
+tolerance and observed value for every such comparison. A completed 30-epoch
+reference that fails any one of these conditions does not promote the profile.
+
+Until both paths pass this final gate, the accelerated profile may be used for
+a pilot runtime study but is not represented as proven equivalent to the
 30-epoch reference.
 
 ### Tagger Sanity Gate
 
-Before declaring the accelerated reconstructor profile campaign-ready, train a
-small frozen-reconstructor dual-view tagger sanity run from the accepted
-`C5-B3` candidate and its FP32 reference. Require model-val accuracy and CE to
-be statistically compatible on the fixed calibration validation rows. This
-guards against a reconstructor metric that looks acceptable while degrading the
-downstream object that matters: tagging.
+Before declaring the accelerated reconstructor profile campaign-ready, perform
+two frozen-reconstructor downstream sanity comparisons on the fixed calibration
+validation rows:
+
+```text
+C5-B3 accelerated candidate versus the matching selected checkpoint from the
+fixed-horizon 30-epoch C5-B3 FP32 reference
+  use the dual-view tagger path intended for D5.
+
+C6 accelerated candidate versus the matching selected checkpoint from the
+fixed-horizon 30-epoch C6 FP32 reference
+  use the four-view pseudo-particle tagger path intended for D6.
+```
+
+For both paths, evaluate the two frozen reconstructor taggers on exactly the
+same fixed `model_val` jet identities and labels. Store per-jet class logits,
+per-jet CE, labels, jet-identity hash, and the prediction-array hash for the
+candidate and reference before computing the gate. Do not resample, filter, or
+retune either tagger after this row set is fixed.
+
+Within each comparison pair, the taggers must share an identical architecture,
+initialization checkpoint and seed, training/validation row identities and
+order, optimizer and schedule profile, augmentation and shuffle seeds, epoch
+budget, model-val selection rule, and stopping rule. The only permitted
+difference is the frozen reconstructor checkpoint (accelerated candidate or
+its matching selected 30-epoch FP32 reference). This makes the paired
+bootstrap a test of reconstructor differences rather than of tagger training
+noise.
+
+Use a deterministic, label-stratified paired percentile bootstrap with 10,000
+replicates and a recorded seed. Each replicate resamples row indices with
+replacement within every class and retains the candidate/reference pairing.
+Define the paired differences as:
+
+```text
+delta_accuracy = accuracy_accelerated - accuracy_fp32
+delta_ce       = mean_ce_accelerated - mean_ce_fp32
+```
+
+The one-sided 95 percent upper confidence bound must satisfy both rules for
+each C5-B3 and C6 comparison:
+
+```text
+upper_bound(-delta_accuracy) <= 0.005    # no more than 0.5 absolute accuracy points worse
+upper_bound(delta_ce)        <= 0.010    # no more than 0.010 CE worse
+```
+
+The report must include the observed paired differences, both confidence
+bounds, bootstrap seed/count, row and prediction hashes, and pass/fail status.
+This guards against a reconstructor metric that looks acceptable while
+degrading the downstream object that matters: tagging.
 
 ## Runtime Profiles
 
@@ -541,10 +669,25 @@ bf16_calibration
   constant-LR and warmup-cosine benchmark variants
   optional threaded Hungarian benchmark
 
-accelerated_campaign_v1
+fp16_diagnostic
+  FP16 forward, FP32 objective, GradScaler enabled
+  diagnostic fallback only; never selected for primary campaign ranking
+
+accelerated_candidate_v1
   benchmark-approved batch, workers, precision, Hungarian workers,
   one shared C-tier peak LR, warmup, cosine floor, max epochs,
   minimum epochs, and patience
+  created only after the three-epoch calibration gate passes
+  retains ten-epoch C5-B3/C6 certification evidence as that pilot work completes
+  permitted for the full accelerated pilot only
+  no high-data submission and no final-test claims
+
+accelerated_approved_v1
+  immutable promotion of accelerated_candidate_v1
+  requires fixed-horizon C5-B3/C6 certification, both tagger sanity gates,
+  and a passed fixed-horizon 30-epoch FP32-reference comparison for both paths
+  retains the exact candidate code/environment fingerprint
+  permits high-data submission and final-test claim stages
 ```
 
 Every output root must include the selected profile in its name and metadata,
@@ -554,10 +697,72 @@ for example:
 constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_pilot_accel_v1_<stamp>
 ```
 
-Artifacts from `fp32_reference` and `accelerated_campaign_v1` are not
-interchangeable under `SKIP_EXISTING`. Reuse validation must require exact
-equality of the runtime-profile hash in addition to existing cache, manifest,
-target, checkpoint, and prediction hashes.
+Artifacts from `fp32_reference`, `accelerated_candidate_v1`, and
+`accelerated_approved_v1` are not interchangeable under `SKIP_EXISTING`.
+Reuse validation must require exact equality of the runtime-profile hash in
+addition to existing cache, manifest, target, checkpoint, and prediction
+hashes.
+
+### Code and Environment Fingerprint
+
+Every candidate and approved profile artifact must be created from a clean
+source tree. The artifact records a canonical `code_environment` object and
+its SHA256, containing at least:
+
+```text
+full Git source commit SHA
+source-tree-clean boolean and SHA256 of `git status --porcelain=v1` output
+Python implementation and exact version
+PyTorch version
+PyTorch CUDA runtime version (`torch.version.cuda`)
+SciPy version
+```
+
+Creation fails when tracked source changes are present. The profile writer
+stores the clean status hash rather than silently normalizing a dirty checkout.
+The promotion writer must require every candidate, FP32 reference,
+certification report, and tagger-sanity report in its closure to carry the
+same `code_environment` SHA256. A source or dependency update therefore
+requires a new candidate and recertification; it cannot inherit a prior
+approval.
+
+### Immutable Promotion Closure
+
+Promotion writes one canonical `accelerated_approved_v1.json` artifact rather
+than copying fields into a submitter environment. It must be content-hashed
+and bind this complete parent closure:
+
+```text
+accelerated_candidate_v1 profile path and SHA256
+accelerated_candidate_v1 profile hash
+C5-B3 ten-epoch certification report path and SHA256
+C6 ten-epoch certification report path and SHA256
+C5-B3 tagger-sanity report path and SHA256
+C6 tagger-sanity report path and SHA256
+C5-B3 fixed-horizon 30-epoch FP32-reference report path and SHA256
+C6 fixed-horizon 30-epoch FP32-reference report path and SHA256
+the full-pilot manifest, HLT, offline, target-cache, and jet-identity hashes
+the candidate code/environment object and SHA256
+the resolved C5-B3 and C6 variant identifiers and their FP32/accelerated
+checkpoint hashes
+the predeclared numerical and bootstrap thresholds, observed values, and
+pass/fail decisions
+```
+
+The promotion writer must recompute every listed SHA256, verify that every
+report names the same parent candidate profile hash and cache/manifest
+contract, code/environment fingerprint, and reject a mixed C5-B3/C6 or
+mixed-campaign closure. The high-data/final-claim submitters must recompute
+this closure and the active code/environment fingerprint before submission;
+they may not accept caller overrides for its model, fusion, precision, or
+membership contract. A commit, cleanliness, Python, PyTorch, CUDA, or SciPy
+mismatch is a hard submission failure.
+
+The canonical high-data and final-claim submitters must accept only an
+`accelerated_approved_v1` promotion artifact. There is no default exploratory
+high-data bypass. Any intentionally exploratory high-data experiment requires
+a separately named stage, an explicit confirmation variable, and reports that
+it is not eligible for primary final claims.
 
 ## Reporting Requirements
 
@@ -566,6 +771,7 @@ Add a runtime table to the C2F report with one row per reconstructor run:
 ```text
 variant
 runtime profile hash
+code/environment fingerprint SHA256
 precision mode
 physical train/eval batch size
 worker count and prefetch settings
@@ -607,7 +813,8 @@ runs; it simply reaches each decision much sooner.
 Extend `CoarseToFineTrainConfig`, the CLI, Slurm runner, and submitter with
 named runtime profiles, explicit precision mode, AMP dtype, worker settings,
 batch settings, and scheduler parameters. Persist a canonical runtime-profile
-hash in every checkpoint and report.
+hash and the clean code/environment fingerprint in every checkpoint and
+report.
 
 ### Step 2: Implement BF16-Forward/FP32-Loss Execution
 
@@ -635,8 +842,10 @@ empty cells, overfull cells, and tied-cost behavior.
 ### Step 5: Add Step-Based Warmup/Cosine Scheduling
 
 Implement constant and warmup-cosine schedules, minimum-epoch behavior,
-checkpointed scheduler state, and clear early-stop reasons. Retain a constant
-LR profile as the reference control.
+checkpointed scheduler/global-step state, fixed-horizon certification mode,
+and clear early-stop reasons. Force epoch-boundary `last.pt` saving for every
+accelerated runtime profile and implement fail-closed resume validation.
+Retain a constant LR profile as the reference control.
 
 ### Step 6: Build the Calibration-Slice Producer
 
@@ -650,25 +859,65 @@ mismatches.
 Run the A-D benchmark matrix for C1, C5-B3, C6, and C4. Capture the numerical,
 reconstruction, resource, and timing telemetry needed for profile selection.
 
+Implementation artifacts:
+
+```text
+scripts/build_constrained_coarse_to_fine_runtime_benchmark_plan.py
+  Hash-bound A-D matrix, candidate batch/worker sweeps, and C4 serial/threaded
+  Hungarian-worker trials.
+
+sbatch/submit_constrained_coarse_to_fine_runtime_benchmarks.sh
+  Validates the Step 6 calibration artifacts, submits every matrix member using
+  the normal reconstructor runner, and holds one report job behind all members.
+
+scripts/write_constrained_coarse_to_fine_runtime_benchmark_report.py
+  Refuses missing/failed/mismatched artifacts and records per-epoch numerical,
+  reconstruction, throughput, input-wait, CPU, host-RSS, CUDA allocated, and
+  CUDA reserved-memory telemetry for Step 8.
+```
+
 ### Step 8: Enforce Profile Acceptance and Selection
 
 Implement a report writer that applies the numerical and non-inferiority gates,
 selects execution-only settings per family, selects one shared optimizer
 schedule for primary C-tier comparisons, and writes an immutable
-`accelerated_campaign_v1` profile artifact. Require full ten-epoch C5-B3/C6
-schedule certification before approving that artifact.
+`accelerated_candidate_v1` artifact immediately after the three-epoch gate.
+Bind fixed-horizon ten-epoch C5-B3/C6 certification reports to that existing
+candidate. Require two fixed-horizon 30-epoch FP32 comparisons that pass the
+explicit 1 percent/2 percent promotion limits, and the hash-closed promotion
+artifact, including an exact shared code/environment fingerprint, before
+promoting it to `accelerated_approved_v1`.
+
+The three-epoch portion is implemented by
+`runtime_selection.py` and
+`write_constrained_coarse_to_fine_accelerated_candidate.py`. It rejects an
+incomplete benchmark report, a BF16/FP32 mismatch, nonfinite/skipped batches,
+missing diagnostic telemetry, an over-cap GPU reservation, inconsistent clean
+code environments, or any configuration that cannot select one shared peak LR
+across C1, C5-B3, C6, and C4. The output is an immutable
+`accelerated_candidate_v1.json` artifact; it grants pilot-only queue rights.
+The 10/30-epoch and tagger-sanity evidence is deliberately not treated as
+present until Steps 9 and 10 provide those reports and the approved-profile
+closure writer consumes them.
 
 ### Step 9: Add Downstream Tagger Sanity Validation
 
-Run the fixed-slice frozen-reconstructor tagger comparison for the selected
-C5-B3 profile. Require compatible model-val tagging metrics before allowing
-the accelerated profile to submit a full campaign.
+Run fixed-slice frozen-reconstructor tagger comparisons for both C5-B3 and C6
+against the matching selected checkpoints from their fixed-horizon 30-epoch
+FP32 references. Use the intended D5 dual-view and D6 four-view paths,
+respectively, with all non-reconstructor tagger inputs and training choices
+identical inside each pair. Apply the fixed-row, label-stratified
+10,000-replicate paired-bootstrap accuracy/CE gate before promoting the
+profile.
 
 ### Step 10: Wire Full Pilot and High-Data Submitters
 
 Make the complete pilot and high-data campaign submitters consume an explicit,
-validated runtime-profile artifact. Preserve the full original run list and
-dependency graph. Reject missing, stale, or profile-mismatched reuse artifacts.
+validated runtime-profile artifact. `accelerated_candidate_v1` may submit the
+full pilot only. High-data and final-claim submitters require
+`accelerated_approved_v1`. Preserve the full original run list and dependency
+graph. Reject missing, stale, profile-mismatched, or code/environment-mismatched
+reuse artifacts.
 
 ## Test Plan
 
@@ -684,10 +933,22 @@ C4 serial/threaded assignment, loss, and gradient parity
 batch-profile memory and failure handling
 step-based scheduler values and checkpoint restore
 minimum-epoch and patience semantics
+fixed-horizon ten-epoch certification cannot stop early
+last-checkpoint creation, exact epoch-boundary resume, and resume rejection
+for runtime-profile or provenance mismatch
 runtime-profile hash inclusion in artifact reuse checks
+clean-source and code/environment fingerprint capture
+rejection of dirty-source candidate creation and changed-code/dependency
+high-data submission after approval
 derived calibration-cache provenance enforcement
 shared optimizer-profile enforcement across primary C-tier variants
 three-epoch gate and full ten-epoch schedule-certification logic
+candidate lifecycle: three-epoch creation, ten-epoch evidence attachment,
+and only 30-epoch/tagger promotion
+fixed-horizon 30-epoch C5-B3/C6 promotion limits and rejection behavior
+paired-bootstrap tagger sanity acceptance/rejection for C5-B3 and C6
+promotion-closure hash recomputation and mixed-artifact rejection
+candidate-to-approved promotion and high-data/final-claim submission gate
 benchmark acceptance/rejection logic
 submitter refusal without an approved profile artifact
 ```
@@ -698,7 +959,25 @@ syntax checks before queueing any calibration or accelerated campaign job.
 ## Queueing Rule
 
 Do not cancel a scientifically valid full campaign merely because this plan
-exists. The new accelerated campaign may be queued only after its calibration
-report is complete and accepted. When it is accepted, queue the full pilot and
-full high-data run lists exactly as defined by the main C2F plan, with the
-approved runtime profile recorded at submission time.
+exists. The queue state is deliberately two-stage:
+
+```text
+accelerated_candidate_v1
+  created after the three-epoch numerical/reconstruction gate passes
+  may queue the full accelerated pilot campaign
+  collects, but is not replaced by, ten-epoch C5-B3/C6 certification evidence
+  may not queue high-data or any final-test claim stage
+
+accelerated_approved_v1
+  fixed-horizon C5-B3/C6 certification passed
+  both downstream tagger sanity gates passed
+  both 30-epoch FP32-reference comparisons passed the explicit promotion limits
+  immutable promotion closure validates every parent profile/report/cache hash
+  may queue the complete high-data and approved final-claim campaign
+```
+
+The high-data submitter must hard-fail unless it receives an immutable,
+hash-closed `accelerated_approved_v1` artifact whose provenance and
+runtime-profile hash and active code/environment fingerprint match the
+requested campaign. When approved, it queues the full original high-data run
+list exactly as defined by the main C2F plan.

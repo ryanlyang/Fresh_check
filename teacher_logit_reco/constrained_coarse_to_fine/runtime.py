@@ -11,10 +11,15 @@ fallback before a long training job loads its data.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import os
 import platform
-from typing import Any
+from pathlib import Path
+import subprocess
+from typing import Any, Mapping
+from contextlib import nullcontext
 
 import torch
 
@@ -23,7 +28,290 @@ TORCH_NATIVE_TRITON_COMPAT_CONTRACT = "constrained_c2f_torch_native_triton_fallb
 TORCH_NATIVE_TRITON_MODE_ENV = "CONSTRAINED_C2F_TORCH_NATIVE_TRITON"
 TORCH_NATIVE_TRITON_PROBE_ENV = "CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE"
 
+C2F_RUNTIME_PROFILE_CONTRACT = "constrained_c2f_runtime_profile_v1"
+C2F_CODE_ENVIRONMENT_CONTRACT = "constrained_c2f_code_environment_v1"
+
+C2F_RUNTIME_PROFILES = frozenset(
+    {
+        "fp32_reference",
+        "fp16_diagnostic",
+        "bf16_calibration",
+        "accelerated_candidate_v1",
+        "accelerated_approved_v1",
+    }
+)
+C2F_PRECISION_MODES = frozenset(
+    {
+        "fp32",
+        "bf16_forward_fp32_loss",
+        "fp16_forward_fp32_loss",
+    }
+)
+_PROFILE_PRECISION_MODES = {
+    "fp32_reference": "fp32",
+    "fp16_diagnostic": "fp16_forward_fp32_loss",
+    "bf16_calibration": "bf16_forward_fp32_loss",
+    "accelerated_candidate_v1": "bf16_forward_fp32_loss",
+    "accelerated_approved_v1": "bf16_forward_fp32_loss",
+}
+
 _VALID_MODES = {"auto", "disable", "keep"}
+
+
+def _canonical_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def normalize_runtime_profile(profile: str) -> str:
+    """Return a validated named C2F execution profile."""
+
+    normalized = str(profile).strip().lower()
+    if normalized not in C2F_RUNTIME_PROFILES:
+        raise ValueError(f"unknown C2F runtime profile {profile!r}; expected one of {sorted(C2F_RUNTIME_PROFILES)}")
+    return normalized
+
+
+def normalize_precision_mode(precision_mode: str) -> str:
+    """Return a validated C2F precision declaration."""
+
+    normalized = str(precision_mode).strip().lower()
+    if normalized not in C2F_PRECISION_MODES:
+        raise ValueError(
+            f"unknown C2F precision mode {precision_mode!r}; expected one of {sorted(C2F_PRECISION_MODES)}"
+        )
+    return normalized
+
+
+def precision_mode_metadata(precision_mode: str) -> dict[str, Any]:
+    """Describe the intended autocast/scaler contract for a precision mode."""
+
+    normalized = normalize_precision_mode(precision_mode)
+    if normalized == "fp32":
+        return {
+            "precision_mode": normalized,
+            "autocast_enabled": False,
+            "autocast_dtype": None,
+            "grad_scaler_enabled": False,
+        }
+    dtype = "bfloat16" if normalized.startswith("bf16_") else "float16"
+    return {
+        "precision_mode": normalized,
+        "autocast_enabled": True,
+        "autocast_dtype": dtype,
+        "grad_scaler_enabled": normalized.startswith("fp16_"),
+    }
+
+
+def precision_execution_state(precision_mode: str, device: str | torch.device) -> dict[str, Any]:
+    """Resolve the actual autocast/scaler state for a specific runtime device."""
+
+    requested = precision_mode_metadata(precision_mode)
+    resolved_device = torch.device(device)
+    cuda_available = resolved_device.type == "cuda" and torch.cuda.is_available()
+    autocast_enabled = bool(requested["autocast_enabled"] and cuda_available)
+    grad_scaler_enabled = bool(requested["grad_scaler_enabled"] and cuda_available)
+    return {
+        **requested,
+        "device": str(resolved_device),
+        "autocast_enabled": autocast_enabled,
+        "autocast_dtype": requested["autocast_dtype"] if autocast_enabled else None,
+        "grad_scaler_enabled": grad_scaler_enabled,
+        "model_parameter_dtype": "float32",
+        "optimizer_state_dtype": "float32",
+        "loss_dtype": "float32",
+        "matching_cost_dtype": "float32",
+    }
+
+
+def precision_autocast_context(precision_mode: str, device: str | torch.device):
+    """Return the explicitly typed forward autocast context for C2F models."""
+
+    execution = precision_execution_state(precision_mode, device)
+    if not execution["autocast_enabled"]:
+        return nullcontext()
+    dtype = torch.bfloat16 if execution["autocast_dtype"] == "bfloat16" else torch.float16
+    try:
+        return torch.amp.autocast("cuda", dtype=dtype, enabled=True)
+    except AttributeError:  # pragma: no cover - compatibility for older torch releases
+        return torch.cuda.amp.autocast(dtype=dtype, enabled=True)
+
+
+def precision_autocast_disabled_context(device: str | torch.device):
+    """Return an explicit disabled-autocast context for the FP32 objective."""
+
+    resolved_device = torch.device(device)
+    if resolved_device.type != "cuda" or not torch.cuda.is_available():
+        return nullcontext()
+    try:
+        return torch.amp.autocast("cuda", enabled=False)
+    except AttributeError:  # pragma: no cover - compatibility for older torch releases
+        return torch.cuda.amp.autocast(enabled=False)
+
+
+def precision_grad_scaler(precision_mode: str, device: str | torch.device):
+    """Create a gradient scaler only for the explicit FP16 diagnostic mode."""
+
+    execution = precision_execution_state(precision_mode, device)
+    if not execution["grad_scaler_enabled"]:
+        return None
+    try:
+        return torch.amp.GradScaler("cuda", enabled=True)
+    except (AttributeError, TypeError):  # pragma: no cover - compatibility for older torch releases
+        return torch.cuda.amp.GradScaler(enabled=True)
+
+
+def build_runtime_profile(
+    *,
+    profile: str,
+    precision_mode: str,
+    batch_size: int,
+    eval_batch_size: int,
+    num_workers: int,
+    prefetch_factor: int | None,
+    learning_rate: float,
+    hlt_encoder_lr_scale: float,
+    weight_decay: float,
+    grad_clip_norm: float,
+    lr_schedule: str,
+    warmup_fraction: float,
+    min_lr_ratio: float,
+    min_epochs: int,
+    early_stop_patience: int,
+    fixed_horizon: bool,
+    max_epochs: int,
+    hungarian_workers: int,
+    hungarian_executor: str,
+) -> dict[str, Any]:
+    """Build the canonical, hash-bound execution profile persisted by C2F jobs.
+
+    Step 1 only declares the profile contract. Later acceleration steps consume
+    the stored fields to implement the matching scheduler, precision, and
+    Hungarian execution behavior without changing their identity in metadata.
+    """
+
+    normalized_profile = normalize_runtime_profile(profile)
+    normalized_precision = normalize_precision_mode(precision_mode)
+    expected_precision = _PROFILE_PRECISION_MODES[normalized_profile]
+    if normalized_precision != expected_precision:
+        raise ValueError(
+            f"runtime profile {normalized_profile!r} requires precision mode "
+            f"{expected_precision!r}, got {normalized_precision!r}"
+        )
+    normalized_schedule = str(lr_schedule).strip().lower()
+    if normalized_schedule not in {"constant", "warmup_cosine"}:
+        raise ValueError("lr_schedule must be 'constant' or 'warmup_cosine'")
+    normalized_executor = str(hungarian_executor).strip().lower()
+    if normalized_executor not in {"serial", "thread"}:
+        raise ValueError("hungarian_executor must be 'serial' or 'thread'")
+    if prefetch_factor is not None and int(prefetch_factor) <= 0:
+        raise ValueError("prefetch_factor must be positive when supplied")
+    if int(num_workers) == 0 and prefetch_factor is not None:
+        raise ValueError("prefetch_factor requires num_workers > 0")
+    if not 0.0 < float(warmup_fraction) <= 1.0:
+        raise ValueError("warmup_fraction must be in (0, 1]")
+    if not 0.0 < float(min_lr_ratio) <= 1.0:
+        raise ValueError("min_lr_ratio must be in (0, 1]")
+    if int(min_epochs) < 0:
+        raise ValueError("min_epochs must be nonnegative")
+    if int(max_epochs) <= 0:
+        raise ValueError("max_epochs must be positive")
+    if int(min_epochs) > int(max_epochs):
+        raise ValueError("min_epochs cannot exceed max_epochs")
+    if int(hungarian_workers) <= 0:
+        raise ValueError("hungarian_workers must be positive")
+
+    payload: dict[str, Any] = {
+        "contract": C2F_RUNTIME_PROFILE_CONTRACT,
+        "name": normalized_profile,
+        "precision": precision_mode_metadata(normalized_precision),
+        "batch": {
+            "train": int(batch_size),
+            "eval": int(eval_batch_size),
+        },
+        "input_pipeline": {
+            "num_workers": int(num_workers),
+            "prefetch_factor": None if prefetch_factor is None else int(prefetch_factor),
+        },
+        "optimizer": {
+            "learning_rate": float(learning_rate),
+            "hlt_encoder_lr_scale": float(hlt_encoder_lr_scale),
+            "weight_decay": float(weight_decay),
+            "grad_clip_norm": float(grad_clip_norm),
+        },
+        "scheduler": {
+            "name": normalized_schedule,
+            "warmup_fraction": float(warmup_fraction),
+            "min_lr_ratio": float(min_lr_ratio),
+            "min_epochs": int(min_epochs),
+            "early_stop_patience": int(early_stop_patience),
+            "fixed_horizon": bool(fixed_horizon),
+            "max_epochs": int(max_epochs),
+        },
+        "hungarian": {
+            "workers": int(hungarian_workers),
+            "executor": normalized_executor,
+        },
+    }
+    payload["runtime_profile_hash"] = _canonical_sha256(payload)
+    return payload
+
+
+def collect_code_environment(project_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Collect the reproducibility fingerprint required by candidate profiles."""
+
+    root = Path(project_dir) if project_dir is not None else Path(__file__).resolve().parents[2]
+    commit: str | None = None
+    status = ""
+    git_error: str | None = None
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        git_error = str(error)
+    try:
+        import scipy
+
+        scipy_version: str | None = scipy.__version__
+    except ImportError:
+        scipy_version = None
+    payload: dict[str, Any] = {
+        "contract": C2F_CODE_ENVIRONMENT_CONTRACT,
+        "source_commit": commit,
+        "source_tree_clean": bool(commit is not None and not status),
+        "source_status_hash": hashlib.sha256(status.encode("utf-8")).hexdigest(),
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+        "scipy_version": scipy_version,
+    }
+    if git_error is not None:
+        payload["git_error"] = git_error
+    payload["code_environment_hash"] = _canonical_sha256(payload)
+    return payload
+
+
+def profile_requires_clean_source(profile: str) -> bool:
+    """Return whether the named profile may be created only from a clean tree."""
+
+    return normalize_runtime_profile(profile) in {"accelerated_candidate_v1", "accelerated_approved_v1"}
+
+
+def profile_requires_last_checkpoint(profile: str) -> bool:
+    """Return whether a profile must persist an epoch-boundary resume point."""
+
+    return normalize_runtime_profile(profile) != "fp32_reference"
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:
@@ -150,8 +438,23 @@ def configure_torch_native_triton_fallback(
 
 
 __all__ = [
+    "C2F_CODE_ENVIRONMENT_CONTRACT",
+    "C2F_PRECISION_MODES",
+    "C2F_RUNTIME_PROFILE_CONTRACT",
+    "C2F_RUNTIME_PROFILES",
     "TORCH_NATIVE_TRITON_COMPAT_CONTRACT",
     "TORCH_NATIVE_TRITON_MODE_ENV",
     "TORCH_NATIVE_TRITON_PROBE_ENV",
+    "build_runtime_profile",
+    "collect_code_environment",
     "configure_torch_native_triton_fallback",
+    "normalize_precision_mode",
+    "normalize_runtime_profile",
+    "precision_autocast_context",
+    "precision_autocast_disabled_context",
+    "precision_execution_state",
+    "precision_grad_scaler",
+    "precision_mode_metadata",
+    "profile_requires_clean_source",
+    "profile_requires_last_checkpoint",
 ]

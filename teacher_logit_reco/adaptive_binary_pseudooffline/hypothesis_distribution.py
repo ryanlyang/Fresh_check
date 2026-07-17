@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from jetclass_fresh.hlt_baseline import require_torch
 
@@ -339,7 +339,42 @@ class MultiHypothesisHierarchyReconstructor(_ModuleBase):
         *,
         evaluation_seed: int = ABPH_FIXED_EVALUATION_SEED,
     ) -> MultiHypothesisHierarchyOutput:
-        torch = require_torch()
+        latent_set = self.prepare_deployment_hypotheses(
+            root_state,
+            root_hidden,
+            root_semantic_tokens,
+            hlt_particle_embeddings,
+            hlt_particle_mask,
+            evaluation_seed=int(evaluation_seed),
+        )
+        hypotheses = self.rollout_deployment_hypotheses(
+            root_state,
+            root_hidden,
+            root_semantic_tokens,
+            hlt_particle_embeddings,
+            hlt_particle_mask,
+            hlt_support_features,
+            latent_set=latent_set,
+            hypothesis_indices=range(latent_set.count),
+        )
+        return self.assemble_deployment_rollout(
+            root_state,
+            latent_set=latent_set,
+            hypotheses=hypotheses,
+        )
+
+    def prepare_deployment_hypotheses(
+        self,
+        root_state: AccountingState,
+        root_hidden: Any,
+        root_semantic_tokens: Any,
+        hlt_particle_embeddings: Any,
+        hlt_particle_mask: Any,
+        *,
+        evaluation_seed: int = ABPH_FIXED_EVALUATION_SEED,
+    ) -> HypothesisLatentSet:
+        """Create the ordered mean-plus-stochastic latent set exactly once."""
+
         context = self.encode_deployment_context(
             root_state,
             root_hidden,
@@ -347,12 +382,34 @@ class MultiHypothesisHierarchyReconstructor(_ModuleBase):
             hlt_particle_embeddings,
             hlt_particle_mask,
         )
-        latent_set = self.latent_model.deployment_hypotheses(
+        return self.latent_model.deployment_hypotheses(
             context, evaluation_seed=int(evaluation_seed)
         )
+
+    def rollout_deployment_hypotheses(
+        self,
+        root_state: AccountingState,
+        root_hidden: Any,
+        root_semantic_tokens: Any,
+        hlt_particle_embeddings: Any,
+        hlt_particle_mask: Any,
+        hlt_support_features: Any,
+        *,
+        latent_set: HypothesisLatentSet,
+        hypothesis_indices: Sequence[int],
+    ) -> tuple[HierarchyHypothesis, ...]:
+        """Roll out an audited ordered subset of one prepared latent set."""
+
+        indices = tuple(int(value) for value in hypothesis_indices)
+        if not indices:
+            return ()
+        if indices != tuple(sorted(set(indices))):
+            raise ValueError("hypothesis indices must be unique and increasing")
+        if indices[0] < 0 or indices[-1] >= latent_set.count:
+            raise IndexError("hypothesis index is outside the prepared latent set")
         hypotheses: list[HierarchyHypothesis] = []
-        root_ledgers = []
-        for hypothesis_index, identity in enumerate(latent_set.identities):
+        for hypothesis_index in indices:
+            identity = latent_set.identities[hypothesis_index]
             outputs = {}
             for hierarchy_name, decoder in self.decoders.items():
                 output = decoder(
@@ -366,7 +423,6 @@ class MultiHypothesisHierarchyReconstructor(_ModuleBase):
                     hypothesis_latent=latent_set.values[:, hypothesis_index],
                 )
                 outputs[hierarchy_name] = output
-                root_ledgers.append(output.root_frontier.ledger)
             hypotheses.append(
                 HierarchyHypothesis(
                     identity=identity,
@@ -375,6 +431,37 @@ class MultiHypothesisHierarchyReconstructor(_ModuleBase):
                     hierarchy_outputs=outputs,
                 )
             )
+        return tuple(hypotheses)
+
+    def assemble_deployment_rollout(
+        self,
+        root_state: AccountingState,
+        *,
+        latent_set: HypothesisLatentSet,
+        hypotheses: Sequence[HierarchyHypothesis],
+    ) -> MultiHypothesisHierarchyOutput:
+        """Assemble the complete schema after indexed rollout without recomputation."""
+
+        torch = require_torch()
+        ordered = tuple(hypotheses)
+        if len(ordered) != latent_set.count:
+            raise ValueError("deployment assembly requires every prepared hypothesis")
+        for index, hypothesis in enumerate(ordered):
+            if hypothesis.identity is not latent_set.identities[index]:
+                raise ValueError("deployment hypotheses do not preserve latent identity objects")
+            if hypothesis.latent is not latent_set.values[:, index]:
+                # Tensor slicing creates a new view object on each expression, so
+                # exact storage/value identity is the enforceable contract here.
+                expected = latent_set.values[:, index]
+                if not torch.equal(hypothesis.latent, expected):
+                    raise ValueError("deployment hypothesis latent differs from its prepared value")
+            if set(hypothesis.hierarchy_outputs) != set(self.decoders):
+                raise ValueError("deployment hypothesis hierarchy membership mismatch")
+        root_ledgers = [
+            output.root_frontier.ledger
+            for hypothesis in ordered
+            for output in hypothesis.hierarchy_outputs.values()
+        ]
         stacked_roots = torch.stack(root_ledgers, dim=1)
         shared = root_state.ledger[:, None, None, :]
         exact = bool(torch.equal(stacked_roots, shared.expand_as(stacked_roots)))
@@ -384,7 +471,7 @@ class MultiHypothesisHierarchyReconstructor(_ModuleBase):
         if not exact or maximum_variance != 0.0:
             raise RuntimeError("primary hypotheses did not preserve the exact shared root")
         return MultiHypothesisHierarchyOutput(
-            hypotheses=tuple(hypotheses),
+            hypotheses=ordered,
             latent_set=latent_set,
             shared_root_ledger=root_state.ledger,
             diagnostics={

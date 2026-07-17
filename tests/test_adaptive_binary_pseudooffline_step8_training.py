@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
     ReconstructorStepContext,
     ReconstructorStepResult,
     ReconstructorTrainerConfig,
+    RuntimeProfileConfig,
     active_reconstruction_loss_names,
     assemble_reconstruction_loss_terms,
     build_reconstructor_optimizer,
@@ -23,6 +25,11 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
     configure_reconstructor_optimizer,
     load_reconstructor_curriculum_checkpoint,
     train_reconstructor_curriculum,
+)
+from scripts.audit_adaptive_binary_runtime import main as runtime_audit_main
+from teacher_logit_reco.adaptive_binary_pseudooffline.convergence_schedule import (
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    StageScheduleBudget,
 )
 
 
@@ -290,6 +297,14 @@ def test_complete_short_overfit_visits_and_selects_every_depth(tmp_path):
     assert curves["rollout_validation_required"] is True
     assert all(row["model_val_rollout"]["mode"] == "rollout" for row in curves["evaluations"])
     for row in curves["evaluations"]:
+        validation = row["model_val_rollout"]
+        assert validation["selection_numerator"] / validation[
+            "selection_denominator"
+        ] == pytest.approx(validation["selection_score"])
+        assert validation["reduction_schema"]["loss.total"]["kind"] == "mean"
+        assert validation["reduction_schema"]["loss.total"][
+            "selection_eligible"
+        ] is True
         assert set(row["train"]["objective_gradient_norms"]) == set(
             row["train"]["required_losses"]
         )
@@ -314,6 +329,8 @@ def test_complete_short_overfit_visits_and_selects_every_depth(tmp_path):
     assert selected["selection_mode"] == "rollout"
     assert selected["final_test_loaded"] is False
     assert selected["model_metadata"]["model_metadata_hash"]
+    assert selected["distributed_checkpoint_state"]["world_size"] == 1
+    assert selected["distributed_checkpoint_state"]["rank_states"][0]["rank"] == 0
     assert set(selected["model_metadata"]["module_groups"]) == set(
         ABPH_RECONSTRUCTOR_MODULE_GROUPS
     )
@@ -380,3 +397,146 @@ def test_stage_boundary_last_checkpoint_contains_selected_ema_handoff(tmp_path):
     assert last["optimizer_state_dict"]["state"] == {}
     for name, value in selected["model_state_dict"].items():
         assert torch.equal(last["online_model_state_dict"][name], value)
+
+
+def test_runtime_telemetry_is_complete_and_optimization_neutral(tmp_path):
+    enabled_model = _TinyCurriculumModel()
+    disabled_model = _TinyCurriculumModel()
+    disabled_model.load_state_dict(enabled_model.state_dict())
+    common = _trainer_config(tmp_path / "enabled")
+    enabled_config = replace(
+        common,
+        save_last_checkpoint=False,
+        runtime_profile=RuntimeProfileConfig(
+            enabled=True,
+            warmup_updates_per_stage=0,
+            sample_interval=1,
+        ),
+    )
+    disabled_config = replace(
+        common,
+        output_dir=str(tmp_path / "disabled"),
+        save_last_checkpoint=False,
+        runtime_profile=RuntimeProfileConfig(enabled=False),
+    )
+    enabled_report = train_reconstructor_curriculum(
+        enabled_model,
+        enabled_model.module_groups(),
+        _source(),
+        _validation_batches,
+        _step,
+        enabled_config,
+        provenance={"manifest_hash": "telemetry-manifest"},
+        maximum_optimizer_updates=1,
+        optimizer_policies=_policies(),
+    )
+    disabled_report = train_reconstructor_curriculum(
+        disabled_model,
+        disabled_model.module_groups(),
+        _source(),
+        _validation_batches,
+        _step,
+        disabled_config,
+        provenance={"manifest_hash": "telemetry-manifest"},
+        maximum_optimizer_updates=1,
+        optimizer_policies=_policies(),
+    )
+    for name, value in enabled_model.state_dict().items():
+        assert torch.equal(value, disabled_model.state_dict()[name]), name
+    assert enabled_report["curriculum"] == disabled_report["curriculum"]
+    enabled_curve = json.loads(
+        (tmp_path / "enabled" / "training_curves.json").read_text()
+    )
+    disabled_curve = json.loads(
+        (tmp_path / "disabled" / "training_curves.json").read_text()
+    )
+    assert enabled_curve == disabled_curve
+
+    profile = json.loads(
+        (tmp_path / "enabled" / "runtime_profile.json").read_text()
+    )
+    assert profile["ok"] is True
+    assert set(profile["required_buckets"]) == set(profile["buckets"])
+    assert profile["summary"]["sampled_training_updates"] == 1
+    assert profile["summary"]["validation_count"] == 1
+    assert profile["profile_content_hash"]
+
+
+def test_runtime_reference_plan_is_fixed_and_separate_from_campaign_runs(tmp_path):
+    assert runtime_audit_main(["--campaign-root", str(tmp_path)]) == 0
+    plan_path = tmp_path / "audits" / "runtime_reference" / "benchmark_plan.json"
+    first = json.loads(plan_path.read_text())
+    assert first["fixed_batch_order"] is True
+    assert first["complete_model_val_rollout_required"] is True
+    assert [row["variant"] for row in first["entries"]] == [
+        "B1_semantic_query_root",
+        "D1_kt32_mh4_particles",
+    ]
+    assert all(row["updates"] == 20 for row in first["entries"])
+    assert all(
+        "--runtime-reference-benchmark" in row["command"]
+        for row in first["entries"]
+    )
+    assert (
+        first["entries"][1]["environment"]["ABPH_RENDERER_UPDATES"] == "1"
+    )
+    assert runtime_audit_main(["--campaign-root", str(tmp_path)]) == 0
+    second = json.loads(plan_path.read_text())
+    assert second["plan_hash"] == first["plan_hash"]
+
+
+def test_accelerated_trainer_persists_extension_and_hard_cap_decisions(tmp_path):
+    model = _TinyCurriculumModel()
+    curriculum = ReconstructorCurriculumConfig(
+        root_updates=3,
+        hierarchy_updates_per_depth=1,
+        renderer_updates=1,
+        distribution_updates=1,
+        evaluation_interval=1,
+        maximum_capacity=1,
+        hierarchy_capacities=(),
+        renderer_enabled=False,
+        distribution_enabled=False,
+        schedule_contract=ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+        campaign_schedule_profile="pilot",
+        root_budget=StageScheduleBudget(3, 1, 4),
+        root_stage_role="trained",
+        hierarchy_stage_role="disabled",
+        renderer_stage_role="disabled",
+        distribution_stage_role="disabled",
+    )
+    config = replace(
+        _trainer_config(tmp_path / "accelerated"),
+        curriculum=curriculum,
+        save_last_checkpoint=True,
+    )
+    report = train_reconstructor_curriculum(
+        model,
+        model.module_groups(),
+        _source(),
+        _validation_batches,
+        _step,
+        config,
+        provenance={"manifest_hash": "accelerated-manifest"},
+        optimizer_policies=_policies(),
+    )
+    assert report["ok"] is True
+    assert report["curriculum"]["global_update"] == 4
+    assert report["schedule"]["policy_label"] == "accelerated_screening_v1"
+    root = report["schedule"]["stages"]["phase1_root"]
+    assert root["extension_blocks"] == 1
+    assert root["status"] == "hard_max_reached"
+    assert [event["outcome"] for event in root["events"]] == [
+        "extended_for_convergence",
+        "hard_max_reached",
+    ]
+    assert report["schedule"]["schedule_truncated"] is True
+    assert report["schedule"]["negative_mechanism_conclusion_valid"] is False
+    assert report["schedule"]["automatic_highdata_promotion_allowed"] is False
+    last = load_reconstructor_curriculum_checkpoint(
+        tmp_path / "accelerated" / "last.pt"
+    )
+    controller_state = last["curriculum_state_dict"]
+    assert controller_state["extension_blocks"]["phase1_root"] == 1
+    assert controller_state["stage_outcomes"]["phase1_root"] == "hard_max_reached"
+    assert controller_state["schedule_truncated"] is True

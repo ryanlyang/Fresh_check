@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import random
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset
 
 from scripts import train_constrained_coarse_to_fine as training_cli
 
@@ -16,6 +19,7 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
     B4_NO_MOMENTS,
     B5_NO_COMPOSITION,
     B6_NO_COUNTS,
+    C4_HUNGARIAN,
     MOMENT_FIELD_NAMES,
     PID_COUNT_INDICES,
     PID_PT_INDICES,
@@ -30,7 +34,11 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
 )
 from teacher_logit_reco.constrained_coarse_to_fine.train import (
     _SplitSource,
+    _build_shard_loader,
     _grad_norm_if_finite,
+    _input_pipeline_metadata,
+    _loader_order_seed,
+    _loader_worker_seed,
     _loss_configs,
     _write_curves_csv,
 )
@@ -270,6 +278,144 @@ class ConstrainedCoarseToFineStep5TrainingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "progress_interval_batches"):
             CoarseToFineTrainConfig(**base, progress_interval_batches=0)
+
+    def test_prefetch_requires_workers_and_per_shard_loader_keeps_the_established_order_seed(self):
+        base = dict(
+            output_dir="out",
+            manifest_path="manifest.json.gz",
+            hlt_cache_dir="hlt",
+            offline_cache_dir="offline",
+            target_cache_dir="targets",
+            seed=412,
+            batch_size=3,
+            eval_batch_size=4,
+            pin_memory=False,
+        )
+        with self.assertRaisesRegex(ValueError, "prefetch_factor requires"):
+            CoarseToFineTrainConfig(**base, num_workers=0, prefetch_factor=2)
+
+        config = CoarseToFineTrainConfig(**base, num_workers=0)
+        dataset = TensorDataset(torch.arange(11, dtype=torch.int64))
+        epoch, shard_index = 3, 5
+        first_loader = _build_shard_loader(
+            dataset,
+            config,
+            train=True,
+            epoch=epoch,
+            shard_index=shard_index,
+        )
+        second_loader = _build_shard_loader(
+            dataset,
+            config,
+            train=True,
+            epoch=epoch,
+            shard_index=shard_index,
+        )
+        first_rows = torch.cat([batch[0] for batch in first_loader])
+        second_rows = torch.cat([batch[0] for batch in second_loader])
+        # DataLoader consumes one generator draw to seed its iterator before
+        # RandomSampler produces the shuffled order.  Match the established
+        # pre-Step-3 loader behavior exactly rather than asserting a raw
+        # randperm from the initial seed.
+        reference_generator = torch.Generator().manual_seed(
+            _loader_order_seed(config, epoch=epoch, shard_index=shard_index)
+        )
+        torch.empty((), dtype=torch.int64).random_(generator=reference_generator)
+        expected = torch.randperm(len(dataset), generator=reference_generator)
+        self.assertTrue(torch.equal(first_rows, expected))
+        self.assertTrue(torch.equal(second_rows, expected))
+
+    def test_prefetch_loader_has_reproducible_worker_seeds_without_persistent_workers(self):
+        config = CoarseToFineTrainConfig(
+            output_dir="out",
+            manifest_path="manifest.json.gz",
+            hlt_cache_dir="hlt",
+            offline_cache_dir="offline",
+            target_cache_dir="targets",
+            seed=912,
+            batch_size=2,
+            eval_batch_size=2,
+            num_workers=4,
+            prefetch_factor=2,
+            pin_memory=False,
+        )
+        captured: dict[str, object] = {}
+
+        def fake_loader(_dataset, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        with patch("teacher_logit_reco.constrained_coarse_to_fine.train.DataLoader", fake_loader):
+            _build_shard_loader(
+                TensorDataset(torch.arange(4, dtype=torch.int64)),
+                config,
+                train=True,
+                epoch=2,
+                shard_index=7,
+            )
+
+        self.assertEqual(captured["prefetch_factor"], 2)
+        self.assertNotIn("persistent_workers", captured)
+        self.assertIn("worker_init_fn", captured)
+        self.assertEqual(
+            _loader_worker_seed(config, epoch=2, shard_index=7, worker_id=3),
+            _loader_worker_seed(config, epoch=2, shard_index=7, worker_id=3),
+        )
+        self.assertNotEqual(
+            _loader_worker_seed(config, epoch=2, shard_index=7, worker_id=3),
+            _loader_worker_seed(config, epoch=2, shard_index=8, worker_id=3),
+        )
+
+        py_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        try:
+            expected_seed = _loader_worker_seed(config, epoch=2, shard_index=7, worker_id=3)
+            random.seed(expected_seed)
+            np.random.seed(expected_seed)
+            torch.manual_seed(expected_seed)
+            expected = (random.random(), float(np.random.rand()), float(torch.rand(())))
+            worker_init = captured["worker_init_fn"]
+            assert callable(worker_init)
+            worker_init(3)
+            first = (random.random(), float(np.random.rand()), float(torch.rand(())))
+            worker_init(3)
+            second = (random.random(), float(np.random.rand()), float(torch.rand(())))
+        finally:
+            random.setstate(py_state)
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+        self.assertEqual(first, expected)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            _input_pipeline_metadata(config),
+            {
+                "contract": "constrained_c2f_per_shard_loader_v1",
+                "loader_lifecycle": "one_loader_per_target_shard",
+                "shuffle_seed": "run_seed + epoch * 1009 + shard_index",
+                "worker_seed": "shuffle_seed + worker_id modulo 2**32",
+                "num_workers": 4,
+                "prefetch_factor": 2,
+                "persistent_workers": False,
+            },
+        )
+
+    def test_c4_slot_loss_receives_the_explicit_hungarian_execution_settings(self):
+        config = CoarseToFineTrainConfig(
+            output_dir="out",
+            manifest_path="manifest.json.gz",
+            hlt_cache_dir="hlt",
+            offline_cache_dir="offline",
+            target_cache_dir="targets",
+            hungarian_workers=4,
+            hungarian_executor="thread",
+        )
+        _, slot_config = _loss_configs(config, "C", C4_HUNGARIAN)
+        self.assertIsNotNone(slot_config)
+        assert slot_config is not None
+        self.assertEqual(slot_config.matching_mode, "hungarian")
+        self.assertEqual(slot_config.hungarian_workers, 4)
+        self.assertEqual(slot_config.hungarian_executor, "thread")
 
     def test_full_precision_is_the_default_and_amp_is_explicit(self):
         base = dict(

@@ -34,17 +34,26 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (  #
     _detailed_eval_metrics,
     _initialize_tagger,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (  # noqa: E402
+    distributed_environment,
+)
 from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     ABPH_LEVEL_CAPACITIES,
     ABPH_RECONSTRUCTOR_VARIANTS,
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT,
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryTargetBatchSource,
     PseudoViewInputs,
     ReconstructorCurriculumConfig,
     ReconstructorTrainerConfig,
+    RuntimeProfileConfig,
+    accelerated_stage_budget,
+    budget_for_stage_role,
     canonical_hash,
     build_variant_hierarchy_aware_tagger,
     load_selected_reconstructor,
+    load_runtime_batch_contract,
+    infer_campaign_schedule_profile,
     package_trainable_pseudo_views,
     reconstructor_runtime_provenance,
     reconstructor_step,
@@ -204,9 +213,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--campaign-root", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=int(os.environ.get("ABPH_BATCH_SIZE", "64")))
+    parser.add_argument(
+        "--runtime-batch-contract",
+        default=os.environ.get("ABPH_RUNTIME_BATCH_CONTRACT") or None,
+        help="Immutable full-step batch calibration contract for reconstructor training.",
+    )
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("ABPH_NUM_WORKERS", "0")))
     parser.add_argument("--smoke", action="store_true", default=os.environ.get("ABPH_SMOKE", "0") == "1")
     parser.add_argument("--maximum-updates", type=int, default=None)
+    parser.add_argument("--output-name", default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--runtime-reference-benchmark",
+        action="store_true",
+        help="Run the fixed 20-update Step-1 timing reference with one full validation.",
+    )
     return parser
 
 
@@ -623,6 +644,10 @@ def _write_oracle_reference_report(
 
 def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: Path) -> dict:
     root = Path(args.campaign_root)
+    if args.smoke or args.runtime_reference_benchmark:
+        requested_rank, requested_world_size = 0, 1
+    else:
+        requested_rank, requested_world_size, _local_rank = distributed_environment()
     grouping = str(resolved["model"]["hierarchy"].get("grouping", "exclusive_kt"))
     renderer_enabled = bool(resolved["model"]["renderer"].get("enabled"))
     distribution_enabled = bool(resolved["model"]["distribution"].get("enabled"))
@@ -687,6 +712,8 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         shuffle_shards=True,
         seed=24731 + 1009 * (int(args.seed_index) - 1),
         maximum_batches=(1 if args.smoke else None),
+        rank=requested_rank,
+        world_size=requested_world_size,
     )
     val_source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
@@ -697,6 +724,8 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         shuffle_shards=False,
         seed=24732,
         maximum_batches=(1 if args.smoke else int(os.environ.get("ABPH_MAX_VAL_BATCHES", "0")) or None),
+        rank=requested_rank,
+        world_size=requested_world_size,
     )
     target_metadata = train_source.metadata
     provenance = reconstructor_runtime_provenance(
@@ -704,16 +733,112 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         target_metadata=target_metadata,
         hlt_metadata=train_source.hlt_view.metadata,
     )
+    runtime_batch_contract = None
+    if not args.smoke and not args.runtime_reference_benchmark:
+        contract_path = Path(args.runtime_batch_contract) if args.runtime_batch_contract else (
+            root / "runtime_batch_contracts" / args.variant / "runtime_batch_contract.json"
+        )
+        runtime_batch_contract = load_runtime_batch_contract(
+            contract_path,
+            expected_variant_name=args.variant,
+            expected_resolved_variant_config_hash=resolved["resolved_config_hash"],
+            expected_runtime_provenance_hash=canonical_hash(provenance),
+            expected_world_size=requested_world_size,
+        )
+        provenance = {
+            **provenance,
+            "runtime_batch_contract_hash": runtime_batch_contract.contract_hash,
+            "runtime_batch_contract_path": str(contract_path.resolve()),
+        }
+        train_source.bind_runtime_contract_hash(runtime_batch_contract.contract_hash)
+        val_source.bind_runtime_contract_hash(runtime_batch_contract.contract_hash)
     smoke_updates = 1 if args.smoke else None
     inherited_updates = 1 if tier in {"C", "D"} else None
     inherited_hierarchy_updates = 1 if tier == "D" else None
     maximum_capacity = _maximum_capacity(resolved)
+    benchmark_updates = 20
+    accelerated_schedule = not args.smoke and not args.runtime_reference_benchmark
+    schedule_profile = None
+    root_role = "trained"
+    hierarchy_role = "trained" if maximum_capacity > 1 else "disabled"
+    renderer_role = "trained" if renderer_enabled else "disabled"
+    distribution_role = "trained" if distribution_enabled else "disabled"
+    if accelerated_schedule:
+        schedule_profile = infer_campaign_schedule_profile(
+            model_train_jets=len(train_source.hlt_view.labels),
+            model_val_jets=len(val_source.hlt_view.labels),
+        )
+        if source_variant is not None and tier in {"C", "D"}:
+            root_role = "warm_started_handoff"
+        if source_variant is not None and tier == "D" and maximum_capacity > 1:
+            hierarchy_role = "warm_started_handoff"
+        root_budget = budget_for_stage_role(
+            accelerated_stage_budget(schedule_profile, "root"), root_role
+        )
+        hierarchy_budget = (
+            budget_for_stage_role(
+                accelerated_stage_budget(schedule_profile, "hierarchy"),
+                hierarchy_role,
+            )
+            if hierarchy_role != "disabled"
+            else None
+        )
+        renderer_budget = (
+            budget_for_stage_role(
+                accelerated_stage_budget(schedule_profile, "renderer"), renderer_role
+            )
+            if renderer_role != "disabled"
+            else None
+        )
+        distribution_budget = (
+            budget_for_stage_role(
+                accelerated_stage_budget(schedule_profile, "distribution"),
+                distribution_role,
+            )
+            if distribution_role != "disabled"
+            else None
+        )
+    else:
+        root_budget = None
+        hierarchy_budget = None
+        renderer_budget = None
+        distribution_budget = None
     curriculum = ReconstructorCurriculumConfig(
-        root_updates=smoke_updates or inherited_updates or int(os.environ.get("ABPH_ROOT_UPDATES", "150000")),
-        hierarchy_updates_per_depth=smoke_updates or inherited_hierarchy_updates or int(os.environ.get("ABPH_HIERARCHY_UPDATES", "80000")),
-        renderer_updates=smoke_updates or int(os.environ.get("ABPH_RENDERER_UPDATES", "200000")),
-        distribution_updates=smoke_updates or int(os.environ.get("ABPH_DISTRIBUTION_UPDATES", "200000")),
-        evaluation_interval=1 if args.smoke else int(os.environ.get("ABPH_EVAL_INTERVAL", "2000")),
+        root_updates=(
+            int(root_budget.nominal_updates)
+            if root_budget is not None
+            else smoke_updates
+            or inherited_updates
+            or int(os.environ.get("ABPH_ROOT_UPDATES", "150000"))
+        ),
+        hierarchy_updates_per_depth=(
+            int(hierarchy_budget.nominal_updates)
+            if hierarchy_budget is not None
+            else smoke_updates
+            or inherited_hierarchy_updates
+            or int(os.environ.get("ABPH_HIERARCHY_UPDATES", "80000"))
+        ),
+        renderer_updates=(
+            int(renderer_budget.nominal_updates)
+            if renderer_budget is not None
+            else smoke_updates
+            or int(os.environ.get("ABPH_RENDERER_UPDATES", "200000"))
+        ),
+        distribution_updates=(
+            int(distribution_budget.nominal_updates)
+            if distribution_budget is not None
+            else smoke_updates
+            or int(os.environ.get("ABPH_DISTRIBUTION_UPDATES", "200000"))
+        ),
+        evaluation_interval=(
+            1
+            if args.smoke
+            else (
+                benchmark_updates
+                if args.runtime_reference_benchmark
+                else int(os.environ.get("ABPH_EVAL_INTERVAL", "2000"))
+            )
+        ),
         maximum_capacity=maximum_capacity,
         hierarchy_capacities=(
             ()
@@ -725,22 +850,90 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         ),
         renderer_enabled=renderer_enabled,
         distribution_enabled=distribution_enabled,
+        schedule_contract=(
+            ABPH_ACCELERATED_SCHEDULE_CONTRACT
+            if accelerated_schedule
+            else "adaptive_binary_pseudooffline_legacy_fixed_v1"
+        ),
+        campaign_schedule_profile=(schedule_profile or "legacy"),
+        root_budget=root_budget,
+        hierarchy_budget=hierarchy_budget,
+        renderer_budget=renderer_budget,
+        distribution_budget=distribution_budget,
+        root_stage_role=root_role,
+        hierarchy_stage_role=hierarchy_role,
+        renderer_stage_role=renderer_role,
+        distribution_stage_role=distribution_role,
     )
-    batch_size = int(args.batch_size)
-    if 1024 % batch_size or 512 % batch_size:
-        raise ValueError("batch size must divide both locked effective batch sizes 1024 and 512")
+    if runtime_batch_contract is None:
+        root_hierarchy_batch_size = int(args.batch_size)
+        renderer_distribution_batch_size = int(args.batch_size)
+        if 1024 % root_hierarchy_batch_size or 512 % renderer_distribution_batch_size:
+            raise ValueError("batch size must divide both locked effective batch sizes 1024 and 512")
+        root_hierarchy_accumulation = 1 if args.smoke else 1024 // root_hierarchy_batch_size
+        renderer_distribution_accumulation = (
+            1 if args.smoke else 512 // renderer_distribution_batch_size
+        )
+        runtime_contract_path = None
+        runtime_contract_hash = None
+    else:
+        root_selection = runtime_batch_contract.selections["root_hierarchy"]
+        renderer_selection = runtime_batch_contract.selections["renderer_distribution"]
+        root_hierarchy_batch_size = int(root_selection.local_batch_size)
+        renderer_distribution_batch_size = int(renderer_selection.local_batch_size)
+        root_hierarchy_accumulation = int(root_selection.accumulation_steps)
+        renderer_distribution_accumulation = int(renderer_selection.accumulation_steps)
+        runtime_contract_path = str(
+            Path(args.runtime_batch_contract)
+            if args.runtime_batch_contract
+            else root / "runtime_batch_contracts" / args.variant / "runtime_batch_contract.json"
+        )
+        runtime_contract_hash = runtime_batch_contract.contract_hash
+    train_source.set_batch_size(root_hierarchy_batch_size)
+    val_source.set_batch_size(root_hierarchy_batch_size)
     trainer = ReconstructorTrainerConfig(
         output_dir=str(output_dir),
         seed=24731 + 1009 * (int(args.seed_index) - 1),
         device=args.device,
         amp=not args.smoke,
         gradient_accumulation_steps=1,
-        root_hierarchy_gradient_accumulation_steps=(1 if args.smoke else 1024 // batch_size),
-        renderer_distribution_gradient_accumulation_steps=(1 if args.smoke else 512 // batch_size),
-        root_hierarchy_effective_batch_size=(batch_size if args.smoke else 1024),
-        renderer_distribution_effective_batch_size=(batch_size if args.smoke else 512),
+        root_hierarchy_gradient_accumulation_steps=root_hierarchy_accumulation,
+        renderer_distribution_gradient_accumulation_steps=renderer_distribution_accumulation,
+        distributed_world_size=requested_world_size,
+        root_hierarchy_local_batch_size=root_hierarchy_batch_size,
+        renderer_distribution_local_batch_size=renderer_distribution_batch_size,
+        root_hierarchy_effective_batch_size=(root_hierarchy_batch_size if args.smoke else 1024),
+        renderer_distribution_effective_batch_size=(renderer_distribution_batch_size if args.smoke else 512),
+        runtime_batch_contract_path=runtime_contract_path,
+        runtime_batch_contract_hash=runtime_contract_hash,
+        asynchronous_prefetch=os.environ.get("ABPH_ASYNC_PREFETCH", "1") == "1",
+        pin_memory=os.environ.get("ABPH_PIN_MEMORY", "1") == "1",
+        nonblocking_transfer=(
+            os.environ.get("ABPH_NONBLOCKING_TRANSFER", "1") == "1"
+        ),
+        runtime_profile=RuntimeProfileConfig(
+            enabled=os.environ.get("ABPH_RUNTIME_PROFILE_ENABLED", "1") == "1",
+            warmup_updates_per_stage=int(
+                os.environ.get("ABPH_RUNTIME_PROFILE_WARMUP_UPDATES", "5")
+            ),
+            sample_interval=(
+                1
+                if args.runtime_reference_benchmark
+                else int(os.environ.get("ABPH_RUNTIME_PROFILE_INTERVAL", "100"))
+            ),
+            profile_validation=True,
+            benchmark_mode=bool(args.runtime_reference_benchmark),
+            benchmark_updates=benchmark_updates,
+        ),
         curriculum=curriculum,
     )
+    maximum_updates = args.maximum_updates
+    if args.runtime_reference_benchmark:
+        if maximum_updates is not None and int(maximum_updates) != benchmark_updates:
+            raise ValueError(
+                "runtime reference benchmark is locked to exactly 20 updates"
+            )
+        maximum_updates = benchmark_updates
     report = train_reconstructor_curriculum(
         model,
         model.module_groups(),
@@ -749,8 +942,38 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         reconstructor_step,
         trainer,
         provenance=provenance,
-        maximum_optimizer_updates=args.maximum_updates,
+        maximum_optimizer_updates=maximum_updates,
     )
+    if args.runtime_reference_benchmark:
+        profile_path = output_dir / "runtime_profile.json"
+        validation_count = int(report.get("rollout_validation_count", 0))
+        completed_updates = int(
+            report.get("curriculum", {}).get("global_update", -1)
+        )
+        benchmark_ok = (
+            completed_updates == benchmark_updates
+            and validation_count >= 1
+            and profile_path.is_file()
+        )
+        return {
+            **report,
+            "ok": benchmark_ok,
+            "status": (
+                "runtime_reference_benchmark_complete"
+                if benchmark_ok
+                else "runtime_reference_benchmark_failed"
+            ),
+            "runtime_reference_benchmark": {
+                "contract": "adaptive_binary_pseudooffline_runtime_reference_v1",
+                "updates": benchmark_updates,
+                "full_model_val_evaluations": validation_count,
+                "runtime_profile": str(profile_path),
+                "fixed_seed": int(trainer.seed),
+                "fixed_batch_order": True,
+            },
+            "variant_name": args.variant,
+            "variant": resolved["variant"],
+        }
     if not report["ok"]:
         return {**report, "variant_name": args.variant, "variant": resolved["variant"]}
     checkpoint = output_dir / "best_model_val.pt"
@@ -825,8 +1048,16 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     resolved = resolve_variant_config(args.variant)
     spec = variant_spec(args.variant)
-    output_name = args.variant if int(args.seed_index) == 1 else f"{args.variant}__seed{args.seed_index}"
-    output_dir = Path(args.campaign_root) / "runs" / output_name
+    output_name = args.output_name or (
+        args.variant
+        if int(args.seed_index) == 1
+        else f"{args.variant}__seed{args.seed_index}"
+    )
+    output_dir = (
+        Path(args.output_dir)
+        if args.output_dir is not None
+        else Path(args.campaign_root) / "runs" / output_name
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     if spec.tier == "A":
         report = _train_baseline(args, resolved, output_dir)

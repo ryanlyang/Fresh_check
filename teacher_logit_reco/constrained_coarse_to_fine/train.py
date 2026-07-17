@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import csv
+from functools import partial
 import gc
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
-import subprocess
+import random
 import time
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
@@ -19,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from jetclass_fixed_hlt import HLT_PROFILE_V2_REALISTIC, HLT_PROFILE_V2_REALISTIC_VERSION
-from jetclass_fresh.hlt_baseline import amp_autocast_context, amp_grad_scaler, resolve_device, set_training_seed
+from jetclass_fresh.hlt_baseline import resolve_device, set_training_seed
 from jetclass_fresh.hlt_cache import jet_identity_hash, load_cached_hlt_view, normalize_hlt_profile
 from jetclass_fresh.jetclass_data import BALANCED_SPLIT_ROW_ORDERING, load_split_manifest, manifest_hash
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
@@ -42,7 +43,17 @@ from .model import (
     build_coarse_to_fine_reconstructor,
     normalize_b_tier_variant,
 )
-from .runtime import configure_torch_native_triton_fallback
+from .runtime import (
+    build_runtime_profile,
+    collect_code_environment,
+    configure_torch_native_triton_fallback,
+    precision_autocast_context,
+    precision_autocast_disabled_context,
+    precision_execution_state,
+    precision_grad_scaler,
+    profile_requires_clean_source,
+    profile_requires_last_checkpoint,
+)
 from .slot_loss import ParticleSlotLossConfig, compute_particle_slot_loss, prepare_cell_slot_targets
 from .slots import (
     CTierReconstructorOutput,
@@ -51,30 +62,23 @@ from .slots import (
     normalize_c_tier_variant,
 )
 
+try:  # resource is unavailable on Windows, where the focused tests also run.
+    import resource
+except ImportError:  # pragma: no cover - platform dependent
+    resource = None
+
 
 COARSE_TO_FINE_TRAIN_CONTRACT = "constrained_coarse_to_fine_reconstructor_training_v1"
 COARSE_TO_FINE_ALLOWED_TRAIN_SPLITS = ("model_train", "model_val", "stack_val")
 
 
 def _source_state() -> dict[str, Any]:
-    commit = os.environ.get("SOURCE_COMMIT") or os.environ.get("GIT_COMMIT")
-    status_hash = os.environ.get("SOURCE_STATUS_HASH")
-    try:
-        if not commit:
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-            ).stdout.strip()
-        if not status_hash:
-            status = subprocess.run(
-                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-            status_hash = hashlib.sha256(status.encode("utf-8")).hexdigest()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return {"source_commit": commit, "source_status_hash": status_hash}
+    code_environment = collect_code_environment()
+    return {
+        "source_commit": code_environment.get("source_commit"),
+        "source_status_hash": code_environment.get("source_status_hash"),
+        "code_environment": code_environment,
+    }
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,17 @@ class CoarseToFineTrainConfig:
     early_stop_patience: int = 6
     max_nonfinite_batches: int = 8
     device: str = "auto"
+    runtime_profile: str = "fp32_reference"
+    precision_mode: str = "fp32"
+    prefetch_factor: int | None = None
+    lr_schedule: str = "constant"
+    warmup_fraction: float = 0.10
+    min_lr_ratio: float = 0.05
+    min_epochs: int = 0
+    fixed_horizon: bool = False
+    resume_from: str | None = None
+    hungarian_workers: int = 1
+    hungarian_executor: str = "serial"
     # The bounded hierarchy uncertainty objective is still best run in full
     # precision on the GH200 workers; AMP remains an explicit opt-in for
     # controlled tests.
@@ -156,8 +171,22 @@ class CoarseToFineTrainConfig:
                 raise ValueError(f"{name} must be positive")
         if int(self.num_workers) < 0 or int(self.max_nonfinite_batches) < 0:
             raise ValueError("num_workers and max_nonfinite_batches must be nonnegative")
+        if self.prefetch_factor is not None:
+            if int(self.prefetch_factor) <= 0:
+                raise ValueError("prefetch_factor must be positive when supplied")
+            if int(self.num_workers) == 0:
+                raise ValueError("prefetch_factor requires num_workers > 0")
         if int(self.progress_interval_batches) <= 0:
             raise ValueError("progress_interval_batches must be positive")
+        if int(self.min_epochs) < 0 or int(self.min_epochs) > int(self.epochs):
+            raise ValueError("min_epochs must be in [0, epochs]")
+        if int(self.early_stop_patience) < -1:
+            raise ValueError("early_stop_patience must be at least -1")
+        if profile_requires_last_checkpoint(self.runtime_profile) and not bool(self.save_last_checkpoint):
+            raise ValueError("accelerated runtime profiles require save_last_checkpoint=True")
+        if str(self.runtime_profile).strip() in {"accelerated_candidate_v1", "accelerated_approved_v1"} \
+                and int(self.max_nonfinite_batches) != 0:
+            raise ValueError("accelerated runtime profiles require max_nonfinite_batches=0")
         for name in (
             "learning_rate",
             "hlt_encoder_lr_scale",
@@ -175,12 +204,44 @@ class CoarseToFineTrainConfig:
             raise ValueError("direct particle decoding requires unconstrained slot accounting")
         if float(self.weight_decay) < 0.0:
             raise ValueError("weight_decay must be nonnegative")
+        if bool(self.amp) and str(self.precision_mode).strip().lower() != "fp16_forward_fp32_loss":
+            raise ValueError("legacy amp=True requires precision_mode='fp16_forward_fp32_loss'")
+        self.runtime_profile_metadata()
         _normalize_variant(self.variant)
+
+    def runtime_profile_metadata(self) -> dict[str, Any]:
+        """Return the canonical runtime-profile contract for this run."""
+
+        return build_runtime_profile(
+            profile=self.runtime_profile,
+            precision_mode=self.precision_mode,
+            batch_size=self.batch_size,
+            eval_batch_size=self.eval_batch_size,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+            learning_rate=self.learning_rate,
+            hlt_encoder_lr_scale=self.hlt_encoder_lr_scale,
+            weight_decay=self.weight_decay,
+            grad_clip_norm=self.grad_clip_norm,
+            lr_schedule=self.lr_schedule,
+            warmup_fraction=self.warmup_fraction,
+            min_lr_ratio=self.min_lr_ratio,
+            min_epochs=self.min_epochs,
+            early_stop_patience=self.early_stop_patience,
+            fixed_horizon=self.fixed_horizon,
+            max_epochs=self.epochs,
+            hungarian_workers=self.hungarian_workers,
+            hungarian_executor=self.hungarian_executor,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["contract"] = COARSE_TO_FINE_TRAIN_CONTRACT
         payload["resolved_variant"] = _normalize_variant(self.variant)[1]
+        runtime_profile = self.runtime_profile_metadata()
+        payload["runtime_profile_name"] = runtime_profile["name"]
+        payload["runtime_profile"] = runtime_profile
+        payload["runtime_profile_hash"] = runtime_profile["runtime_profile_hash"]
         return payload
 
 
@@ -447,6 +508,95 @@ def _target_arrays(shard: Any, stop: int) -> dict[str, np.ndarray]:
     }
 
 
+def _loader_order_seed(config: CoarseToFineTrainConfig, *, epoch: int, shard_index: int) -> int:
+    """Return the established per-epoch/per-shard sampler seed.
+
+    This intentionally preserves the seed formula used before Step 3 so an
+    input-pipeline profile cannot quietly change balanced shuffle membership or
+    row order.
+    """
+
+    return int(config.seed) + int(epoch) * 1009 + int(shard_index)
+
+
+def _loader_worker_seed(
+    config: CoarseToFineTrainConfig,
+    *,
+    epoch: int,
+    shard_index: int,
+    worker_id: int,
+) -> int:
+    """Derive a deterministic CPU-worker seed from the run/shard identity."""
+
+    return int((_loader_order_seed(config, epoch=epoch, shard_index=shard_index) + int(worker_id)) % (2**32))
+
+
+def _seed_loader_worker(
+    worker_id: int,
+    *,
+    run_seed: int,
+    epoch: int,
+    shard_index: int,
+) -> None:
+    """Seed every CPU RNG a shard loader could use without touching CUDA."""
+
+    worker_seed = int((int(run_seed) + int(epoch) * 1009 + int(shard_index) + int(worker_id)) % (2**32))
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def _build_shard_loader(
+    dataset: Dataset,
+    config: CoarseToFineTrainConfig,
+    *,
+    train: bool,
+    epoch: int,
+    shard_index: int,
+) -> DataLoader:
+    """Construct one deterministic shard loader with optional prefetch overlap.
+
+    Each target shard owns a separate loader today, so ``persistent_workers``
+    would be discarded at the next shard boundary.  Deliberately omit it until
+    a future streaming dataset can retain workers across shards with parity
+    tests for row identities and order.
+    """
+
+    order_seed = _loader_order_seed(config, epoch=epoch, shard_index=shard_index)
+    kwargs: dict[str, Any] = {
+        "batch_size": int(config.batch_size if train else config.eval_batch_size),
+        "shuffle": bool(train),
+        "num_workers": int(config.num_workers),
+        "pin_memory": bool(config.pin_memory),
+        "generator": torch.Generator().manual_seed(order_seed),
+        "drop_last": False,
+    }
+    if int(config.num_workers) > 0:
+        kwargs["worker_init_fn"] = partial(
+            _seed_loader_worker,
+            run_seed=int(config.seed),
+            epoch=int(epoch),
+            shard_index=int(shard_index),
+        )
+        if config.prefetch_factor is not None:
+            kwargs["prefetch_factor"] = int(config.prefetch_factor)
+    return DataLoader(dataset, **kwargs)
+
+
+def _input_pipeline_metadata(config: CoarseToFineTrainConfig) -> dict[str, Any]:
+    """Describe the deterministic, per-shard input-pipeline contract."""
+
+    return {
+        "contract": "constrained_c2f_per_shard_loader_v1",
+        "loader_lifecycle": "one_loader_per_target_shard",
+        "shuffle_seed": "run_seed + epoch * 1009 + shard_index",
+        "worker_seed": "shuffle_seed + worker_id modulo 2**32",
+        "num_workers": int(config.num_workers),
+        "prefetch_factor": None if config.prefetch_factor is None else int(config.prefetch_factor),
+        "persistent_workers": False,
+    }
+
+
 def _iter_split_loaders(
     source: _SplitSource,
     config: CoarseToFineTrainConfig,
@@ -506,15 +656,12 @@ def _iter_split_loaders(
             row_indices=np.arange(start, stop, dtype=np.int64),
             split=source.split,
         )
-        generator = torch.Generator().manual_seed(int(config.seed) + int(epoch) * 1009 + shard_index)
-        yield DataLoader(
+        yield _build_shard_loader(
             dataset,
-            batch_size=int(config.batch_size if train else config.eval_batch_size),
-            shuffle=bool(train),
-            num_workers=int(config.num_workers),
-            pin_memory=bool(config.pin_memory),
-            generator=generator,
-            drop_last=False,
+            config,
+            train=train,
+            epoch=epoch,
+            shard_index=shard_index,
         )
         if remaining is not None:
             remaining -= take
@@ -588,6 +735,147 @@ def _optimizer(model: torch.nn.Module, config: CoarseToFineTrainConfig) -> torch
     return torch.optim.AdamW(groups, weight_decay=float(config.weight_decay))
 
 
+class _StepLearningRateScheduler:
+    """Deterministic per-update constant or linear-warmup/cosine LR schedule."""
+
+    _CONTRACT = "constrained_c2f_step_scheduler_v1"
+    _WARMUP_START_RATIO = 0.10
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        *,
+        name: str,
+        total_steps: int,
+        steps_per_epoch: int,
+        warmup_fraction: float,
+        min_lr_ratio: float,
+    ) -> None:
+        self.optimizer = optimizer
+        self.name = str(name).strip().lower()
+        if self.name not in {"constant", "warmup_cosine"}:
+            raise ValueError("scheduler name must be 'constant' or 'warmup_cosine'")
+        self.total_steps = int(total_steps)
+        self.steps_per_epoch = int(steps_per_epoch)
+        if self.total_steps <= 0 or self.steps_per_epoch <= 0:
+            raise ValueError("scheduler total_steps and steps_per_epoch must be positive")
+        self.warmup_fraction = float(warmup_fraction)
+        self.min_lr_ratio = float(min_lr_ratio)
+        self.base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+        self.global_step = 0
+        if self.name == "warmup_cosine":
+            requested = max(1, int(math.ceil(self.total_steps * self.warmup_fraction)))
+            self.warmup_steps = min(requested, self.steps_per_epoch)
+        else:
+            self.warmup_steps = 0
+        self._apply_step(self.global_step)
+
+    def _scale(self, step: int) -> float:
+        if self.name == "constant":
+            return 1.0
+        if step < self.warmup_steps:
+            denominator = max(self.warmup_steps - 1, 1)
+            return self._WARMUP_START_RATIO + (1.0 - self._WARMUP_START_RATIO) * (step / denominator)
+        decay_steps = max(self.total_steps - self.warmup_steps, 1)
+        progress = min(max((step - self.warmup_steps) / decay_steps, 0.0), 1.0)
+        return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    def _apply_step(self, step: int) -> None:
+        scale = self._scale(int(step))
+        for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            group["lr"] = base_lr * scale
+
+    def step(self) -> None:
+        """Advance after one successful optimizer update."""
+
+        self.global_step += 1
+        self._apply_step(self.global_step)
+
+    def current_lrs(self) -> list[float]:
+        return [float(group["lr"]) for group in self.optimizer.param_groups]
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "contract": self._CONTRACT,
+            "name": self.name,
+            "total_steps": self.total_steps,
+            "steps_per_epoch": self.steps_per_epoch,
+            "warmup_fraction": self.warmup_fraction,
+            "warmup_steps": self.warmup_steps,
+            "min_lr_ratio": self.min_lr_ratio,
+            "base_lrs": list(self.base_lrs),
+            "global_step": self.global_step,
+            "current_lrs": self.current_lrs(),
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        expected = self.state_dict()
+        for name in (
+            "contract",
+            "name",
+            "total_steps",
+            "steps_per_epoch",
+            "warmup_fraction",
+            "warmup_steps",
+            "min_lr_ratio",
+            "base_lrs",
+        ):
+            if state.get(name) != expected.get(name):
+                raise ValueError(f"scheduler resume mismatch for {name}")
+        global_step = int(state.get("global_step", -1))
+        if not 0 <= global_step <= self.total_steps:
+            raise ValueError("scheduler resume global_step is outside the planned step budget")
+        self.global_step = global_step
+        self._apply_step(self.global_step)
+
+
+def _planned_split_batches(
+    source: _SplitSource,
+    config: CoarseToFineTrainConfig,
+    *,
+    max_jets: int | None,
+    train: bool,
+) -> int:
+    """Count the exact per-shard DataLoader batches without opening target arrays."""
+
+    remaining = None if max_jets is None else int(max_jets)
+    batch_size = int(config.batch_size if train else config.eval_batch_size)
+    total = 0
+    for shard in source.target_metadata.get("shards", []):
+        if remaining is not None and remaining <= 0:
+            break
+        count = int(shard["stop"]) - int(shard["start"])
+        take = count if remaining is None else min(count, remaining)
+        if take > 0:
+            total += int(math.ceil(take / batch_size))
+        if remaining is not None:
+            remaining -= take
+    if total <= 0:
+        raise ValueError(f"no planned batches for {source.split}")
+    return total
+
+
+def _build_step_scheduler(
+    optimizer: torch.optim.Optimizer,
+    config: CoarseToFineTrainConfig,
+    train_source: _SplitSource,
+) -> _StepLearningRateScheduler:
+    steps_per_epoch = _planned_split_batches(
+        train_source,
+        config,
+        max_jets=config.max_train_jets,
+        train=True,
+    )
+    return _StepLearningRateScheduler(
+        optimizer,
+        name=config.lr_schedule,
+        total_steps=int(config.epochs) * steps_per_epoch,
+        steps_per_epoch=steps_per_epoch,
+        warmup_fraction=config.warmup_fraction,
+        min_lr_ratio=config.min_lr_ratio,
+    )
+
+
 def _move_batch(batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {
         name: value.to(device=device, non_blocking=True)
@@ -621,6 +909,69 @@ def _all_finite(value: Any) -> bool:
     return bool(finite)
 
 
+def _float32_tensor(value: torch.Tensor | None) -> torch.Tensor | None:
+    """Cast a floating forward tensor to FP32 without breaking autograd."""
+
+    if value is None or not value.is_floating_point():
+        return value
+    return value.float()
+
+
+def _fp32_hierarchy_loss_view(output: CoarseToFineReconstructorOutput) -> CoarseToFineReconstructorOutput:
+    """Copy only hierarchy tensors consumed by the FP32 accounting objective."""
+
+    levels = tuple(
+        replace(
+            level,
+            accounting=_float32_tensor(level.accounting),
+            log_sigma=_float32_tensor(level.log_sigma),
+        )
+        for level in output.levels
+    )
+    return replace(
+        output,
+        global_accounting=_float32_tensor(output.global_accounting),
+        global_log_sigma=_float32_tensor(output.global_log_sigma),
+        global_auxiliary=_float32_tensor(output.global_auxiliary),
+        levels=levels,
+    )
+
+
+def _fp32_slot_loss_view(output: Any) -> Any:
+    """Copy the slot tensors used by matching/accounting into FP32."""
+
+    return replace(
+        output,
+        terminal_accounting=_float32_tensor(output.terminal_accounting),
+        local_coordinates=_float32_tensor(output.local_coordinates),
+        total_pt=_float32_tensor(output.total_pt),
+        total_energy=_float32_tensor(output.total_energy),
+        expected_count=_float32_tensor(output.expected_count),
+        pid_probabilities=_float32_tensor(output.pid_probabilities),
+        raw_pid_logits=_float32_tensor(output.raw_pid_logits),
+        charge_logits=_float32_tensor(output.charge_logits),
+        existence_logits=_float32_tensor(output.existence_logits),
+        log_sigma=_float32_tensor(output.log_sigma),
+        reliability=_float32_tensor(output.reliability),
+        dust_total_pt=_float32_tensor(output.dust_total_pt),
+        rendered_accounting=_float32_tensor(output.rendered_accounting),
+    )
+
+
+def _fp32_loss_view(model_output: Any) -> Any:
+    """Create the typed FP32 loss view required after an autocast forward pass."""
+
+    if isinstance(model_output, CTierReconstructorOutput):
+        return replace(
+            model_output,
+            hierarchy=_fp32_hierarchy_loss_view(model_output.hierarchy),
+            slots=_fp32_slot_loss_view(model_output.slots),
+        )
+    if isinstance(model_output, CoarseToFineReconstructorOutput):
+        return _fp32_hierarchy_loss_view(model_output)
+    raise TypeError(f"unsupported C2F output type for FP32 loss view: {type(model_output).__name__}")
+
+
 def _grad_norm_if_finite(model: torch.nn.Module) -> torch.Tensor | None:
     total: torch.Tensor | None = None
     for parameter in model.parameters():
@@ -646,6 +997,8 @@ def _loss_configs(config: CoarseToFineTrainConfig, family: str, variant: str):
     if family == "C":
         slot_kwargs: dict[str, Any] = {
             "matching_mode": c_tier_variant_spec(variant).slot_spec.matching_mode,
+            "hungarian_workers": int(config.hungarian_workers),
+            "hungarian_executor": str(config.hungarian_executor),
         }
         if config.direct_particle_decoding:
             slot_kwargs.update(accounting_consistency_weight=0.0, dust_weight=0.0)
@@ -805,20 +1158,32 @@ def _run_epoch(
     variant: str,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
+    scheduler: _StepLearningRateScheduler | None,
     scaler: Any | None,
-    amp_enabled: bool,
+    precision_mode: str,
+    autocast_enabled: bool,
+    grad_scaler_enabled: bool,
     max_jets: int | None,
     epoch: int,
     progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     train = optimizer is not None
+    if train != (scheduler is not None):
+        raise ValueError("training epochs require a scheduler and evaluation epochs must not have one")
     model.train(train)
+    resolved_precision = precision_execution_state(precision_mode, device)
+    if bool(autocast_enabled) != bool(resolved_precision["autocast_enabled"]):
+        raise ValueError("autocast execution state does not match the requested precision mode")
+    if bool(grad_scaler_enabled) != bool(resolved_precision["grad_scaler_enabled"]):
+        raise ValueError("GradScaler execution state does not match the requested precision mode")
     hierarchy_config, slot_config = _loss_configs(config, family, variant)
     accumulator = _MetricAccumulator()
     n_jets = 0
     n_batches = 0
     nonfinite_batches = 0
     epoch_started = time.perf_counter()
+    cpu_started = time.process_time()
+    batch_loading_seconds = 0.0
     track_cuda_memory = device.type == "cuda" and torch.cuda.is_available()
     if track_cuda_memory:
         torch.cuda.reset_peak_memory_stats(device)
@@ -830,15 +1195,26 @@ def _run_epoch(
         if track_cuda_memory:
             torch.cuda.synchronize(device)
         elapsed = max(time.perf_counter() - epoch_started, 1.0e-9)
+        cpu_elapsed = max(time.process_time() - cpu_started, 0.0)
         peak_bytes = int(torch.cuda.max_memory_allocated(device)) if track_cuda_memory else 0
         return {
             "runtime.elapsed_seconds": float(elapsed),
             "runtime.batches_per_second": float(n_batches) / elapsed,
             "runtime.jets_per_second": float(n_jets) / elapsed,
+            "runtime.batch_loading_seconds": float(batch_loading_seconds),
+            "runtime.batch_loading_fraction": float(batch_loading_seconds) / elapsed,
+            "runtime.cpu_process_seconds": float(cpu_elapsed),
+            "runtime.cpu_process_utilization": 100.0 * float(cpu_elapsed) / elapsed,
+            "runtime.host_max_rss_bytes": (
+                int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+                if resource is not None and os.name != "nt"
+                else 0
+            ),
             "runtime.cuda_peak_allocated_bytes": peak_bytes,
             "runtime.cuda_peak_reserved_bytes": (
                 int(torch.cuda.max_memory_reserved(device)) if track_cuda_memory else 0
             ),
+            "runtime.global_optimizer_step": int(scheduler.global_step) if scheduler is not None else 0,
         }
 
     if progress_callback is not None:
@@ -851,6 +1227,8 @@ def _run_epoch(
                 "n_batches": 0,
                 "n_jets": 0,
                 "nonfinite_batches_skipped": 0,
+                "hungarian_workers": int(config.hungarian_workers),
+                "hungarian_executor": str(config.hungarian_executor),
             }
         )
     for loader in _iter_split_loaders(
@@ -861,23 +1239,31 @@ def _run_epoch(
         max_jets=max_jets,
         epoch=epoch,
     ):
-        for cpu_batch in loader:
+        iterator = iter(loader)
+        while True:
+            batch_load_started = time.perf_counter()
+            try:
+                cpu_batch = next(iterator)
+            except StopIteration:
+                break
+            batch_loading_seconds += time.perf_counter() - batch_load_started
             batch = _move_batch(cpu_batch, device)
             batch_size = int(batch["labels"].shape[0])
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
             gradients_unscaled = False
             try:
-                with amp_autocast_context(bool(amp_enabled)):
+                with precision_autocast_context(precision_mode, device):
                     output = model(batch["points"], batch["features"], batch["vectors"], batch["mask"])
                     if not _all_finite(output):
                         raise FloatingPointError("model output is non-finite")
-                # The normal campaign runs the entire path in FP32. Exit the
-                # forward autocast scope before constructing the objective so
-                # an explicit AMP run still has a clearly isolated loss path.
-                with amp_autocast_context(False):
+                # The hierarchy and slot objectives must run in FP32 even
+                # when the model forward used BF16/FP16 autocast. Explicit
+                # casts preserve the graph back to the lower-precision forward.
+                with precision_autocast_disabled_context(device):
+                    loss_output = _fp32_loss_view(output)
                     loss, batch_metrics = _batch_losses(
-                        output,
+                        loss_output,
                         batch,
                         hierarchy_config,
                         slot_config,
@@ -886,11 +1272,14 @@ def _run_epoch(
                         float(source.layout.coordinate_extent),
                         include_slot_matching_diagnostics=not train,
                     )
+                if loss.dtype != torch.float32:
+                    raise FloatingPointError(f"C2F objective must be FP32, got {loss.dtype}")
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError("total loss is non-finite")
                 if optimizer is not None:
-                    assert scaler is not None
-                    if amp_enabled:
+                    if grad_scaler_enabled:
+                        if scaler is None:
+                            raise RuntimeError("FP16 precision mode requires an enabled GradScaler")
                         scaler.scale(loss).backward()
                         scaler.unscale_(optimizer)
                         gradients_unscaled = True
@@ -901,17 +1290,23 @@ def _run_epoch(
                         raise FloatingPointError("gradients are absent or non-finite")
                     if float(config.grad_clip_norm) > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.grad_clip_norm))
-                    if amp_enabled:
+                    if grad_scaler_enabled:
+                        assert scaler is not None
                         scaler.step(optimizer)
                         scaler.update()
                     else:
                         optimizer.step()
+                    assert scheduler is not None
+                    scheduler.step()
                     batch_metrics["train.grad_norm_before_clip"] = grad_norm
+                    batch_metrics["train.global_optimizer_step"] = float(scheduler.global_step)
+                    for group_index, learning_rate in enumerate(scheduler.current_lrs()):
+                        batch_metrics[f"train.learning_rate.group{group_index}"] = learning_rate
             except FloatingPointError:
                 nonfinite_batches += 1
                 if optimizer is not None:
                     optimizer.zero_grad(set_to_none=True)
-                    if scaler is not None and gradients_unscaled:
+                    if grad_scaler_enabled and scaler is not None and gradients_unscaled:
                         scaler.update()
                 if nonfinite_batches > int(config.max_nonfinite_batches):
                     raise RuntimeError(
@@ -933,6 +1328,8 @@ def _run_epoch(
                         "nonfinite_batches_skipped": int(nonfinite_batches),
                         "last_loss_total": batch_metrics.get("loss.total"),
                         "last_selection_score": batch_metrics.get("selection.reconstruction_score"),
+                        "hungarian_workers": int(config.hungarian_workers),
+                        "hungarian_executor": str(config.hungarian_executor),
                         **runtime_snapshot(),
                     }
                 )
@@ -958,6 +1355,8 @@ def _run_epoch(
                 "n_batches": int(n_batches),
                 "n_jets": int(n_jets),
                 "nonfinite_batches_skipped": int(nonfinite_batches),
+                "hungarian_workers": int(config.hungarian_workers),
+                "hungarian_executor": str(config.hungarian_executor),
                 **runtime_snapshot(),
             }
         )
@@ -1003,10 +1402,142 @@ def _model_description(model: torch.nn.Module, family: str, variant: str) -> dic
     }
 
 
+def _capture_rng_state(device: torch.device) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+    if device.type == "cuda" and torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: Mapping[str, Any], device: torch.device) -> None:
+    required = ("python", "numpy", "torch_cpu")
+    missing = [name for name in required if name not in state]
+    if missing:
+        raise ValueError(f"resume checkpoint is missing RNG state: {missing}")
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if device.type == "cuda" and torch.cuda.is_available():
+        if "torch_cuda" not in state:
+            raise ValueError("resume checkpoint is missing Torch CUDA RNG state")
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+_RESUME_CONFIG_KEYS = (
+    "resolved_variant",
+    "epochs",
+    "batch_size",
+    "eval_batch_size",
+    "num_workers",
+    "prefetch_factor",
+    "learning_rate",
+    "hlt_encoder_lr_scale",
+    "weight_decay",
+    "grad_clip_norm",
+    "lr_schedule",
+    "warmup_fraction",
+    "min_lr_ratio",
+    "min_epochs",
+    "early_stop_patience",
+    "fixed_horizon",
+    "hungarian_workers",
+    "hungarian_executor",
+    "precision_mode",
+    "runtime_profile_hash",
+)
+
+
+def _validate_resume_checkpoint(
+    payload: Mapping[str, Any],
+    *,
+    config: CoarseToFineTrainConfig,
+    family: str,
+    variant: str,
+    provenance: Mapping[str, Any],
+    precision_execution: Mapping[str, Any],
+    scheduler: _StepLearningRateScheduler,
+    source_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Reject any resume whose exact epoch-boundary contract changed."""
+
+    problems: list[str] = []
+    if payload.get("checkpoint_contract") != COARSE_TO_FINE_TRAIN_CONTRACT:
+        problems.append("checkpoint contract")
+    if payload.get("checkpoint_role") != "last":
+        problems.append("checkpoint role is not last")
+    if payload.get("family") != family:
+        problems.append("model family")
+    if payload.get("variant") != variant:
+        problems.append("model variant")
+    checkpoint_config = payload.get("config")
+    current_config = config.to_dict()
+    if not isinstance(checkpoint_config, Mapping):
+        problems.append("checkpoint config")
+    else:
+        for name in _RESUME_CONFIG_KEYS:
+            if checkpoint_config.get(name) != current_config.get(name):
+                problems.append(f"config.{name}")
+    if payload.get("provenance") != _jsonable(provenance):
+        problems.append("manifest/cache/target provenance")
+    if payload.get("precision_execution") != _jsonable(precision_execution):
+        problems.append("precision execution")
+    checkpoint_environment = payload.get("code_environment")
+    if checkpoint_environment != _jsonable(source_state.get("code_environment")):
+        problems.append("code environment")
+    scheduler_state = payload.get("scheduler_state")
+    if not isinstance(scheduler_state, Mapping):
+        problems.append("scheduler state")
+    else:
+        try:
+            # Validate immutable schedule fields before any mutable state is restored.
+            probe = scheduler.state_dict()
+            for name in (
+                "contract",
+                "name",
+                "total_steps",
+                "steps_per_epoch",
+                "warmup_fraction",
+                "warmup_steps",
+                "min_lr_ratio",
+                "base_lrs",
+            ):
+                if scheduler_state.get(name) != probe.get(name):
+                    problems.append(f"scheduler.{name}")
+        except (TypeError, ValueError) as error:
+            problems.append(f"scheduler state ({error})")
+    training_state = payload.get("training_state")
+    if not isinstance(training_state, Mapping):
+        problems.append("training state")
+    else:
+        completed_epoch = training_state.get("completed_epoch")
+        if not isinstance(completed_epoch, int) or not 0 <= completed_epoch < int(config.epochs):
+            problems.append("training_state.completed_epoch")
+        elif payload.get("epoch") != completed_epoch:
+            problems.append("checkpoint epoch")
+        if training_state.get("global_optimizer_step") != (scheduler_state or {}).get("global_step"):
+            problems.append("training_state.global_optimizer_step")
+        curves = training_state.get("curves")
+        if not isinstance(curves, list) or len(curves) != int(completed_epoch or 0) + 1:
+            problems.append("training_state.curves")
+        for name in ("best_epoch", "best_loss", "best_model_val", "epochs_without_improvement"):
+            if name not in training_state:
+                problems.append(f"training_state.{name}")
+    if not isinstance(payload.get("rng_state"), Mapping):
+        problems.append("RNG state")
+    if problems:
+        raise ValueError("resume checkpoint contract mismatch: " + "; ".join(problems))
+    return training_state
+
+
 def _checkpoint_payload(
     *,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: _StepLearningRateScheduler,
     epoch: int,
     config: CoarseToFineTrainConfig,
     family: str,
@@ -1015,20 +1546,31 @@ def _checkpoint_payload(
     provenance: Mapping[str, Any],
     checkpoint_role: str,
     source_state: Mapping[str, Any],
+    precision_execution: Mapping[str, Any],
+    training_state: Mapping[str, Any],
+    rng_state: Mapping[str, Any],
 ) -> dict[str, Any]:
     hierarchy_loss_config, slot_loss_config = _loss_configs(config, family, variant)
     return {
         "checkpoint_contract": COARSE_TO_FINE_TRAIN_CONTRACT,
         "checkpoint_role": str(checkpoint_role),
         "epoch": int(epoch),
+        "family": str(family),
+        "variant": str(variant),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "training_state": _jsonable(training_state),
+        "rng_state": dict(rng_state),
         "config": config.to_dict(),
         "model": _model_description(model, family, variant),
         "hierarchy_loss_config": hierarchy_loss_config.to_dict(),
         "slot_loss_config": None if slot_loss_config is None else slot_loss_config.to_dict(),
         "metrics": _jsonable(metrics),
         "provenance": _jsonable(provenance),
+        "runtime_profile": config.runtime_profile_metadata(),
+        "precision_execution": _jsonable(precision_execution),
+        "code_environment": _jsonable(source_state.get("code_environment")),
         "source_state": _jsonable(source_state),
     }
 
@@ -1054,11 +1596,32 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         _write_progress(progress_path, payload)
         print(json.dumps({"training_progress": _jsonable(payload)}, sort_keys=True), flush=True)
 
-    report_progress({"state": "starting", "variant": str(config.variant)})
+    runtime_profile = config.runtime_profile_metadata()
+    source_state = _source_state()
+    code_environment = source_state["code_environment"]
+    if profile_requires_clean_source(config.runtime_profile) and not bool(code_environment.get("source_tree_clean")):
+        raise RuntimeError(
+            f"runtime profile {config.runtime_profile!r} requires a clean source tree; "
+            f"source commit={code_environment.get('source_commit')!r}"
+        )
+    report_progress(
+        {
+            "state": "starting",
+            "variant": str(config.variant),
+            "runtime_profile": runtime_profile["name"],
+            "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
+            "code_environment_hash": code_environment["code_environment_hash"],
+            "hungarian_workers": int(config.hungarian_workers),
+            "hungarian_executor": str(config.hungarian_executor),
+        }
+    )
     device = resolve_device(config.device)
     runtime_compatibility = configure_torch_native_triton_fallback(device)
     print(json.dumps({"runtime_compatibility": runtime_compatibility}, sort_keys=True))
-    amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
+    precision_execution = precision_execution_state(config.precision_mode, device)
+    autocast_enabled = bool(precision_execution["autocast_enabled"])
+    grad_scaler_enabled = bool(precision_execution["grad_scaler_enabled"])
+    input_pipeline = _input_pipeline_metadata(config)
     requested_family, _ = _normalize_variant(config.variant)
     require_offline_particles = requested_family == "C"
     report_progress({"state": "loading_split", "split": str(config.train_split)})
@@ -1075,7 +1638,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     model, family, variant = _build_model(config, train_layout)
     model.to(device)
     optimizer = _optimizer(model, config)
-    scaler = amp_grad_scaler(amp_enabled)
+    scheduler = _build_step_scheduler(optimizer, config, train_source)
+    scaler = precision_grad_scaler(config.precision_mode, device)
     hierarchy_loss_config, slot_loss_config = _loss_configs(config, family, variant)
     provenance = {
         "model_train": train_source.provenance,
@@ -1093,10 +1657,57 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             {"group_name": group.get("group_name"), "lr": group["lr"], "parameter_count": sum(p.numel() for p in group["params"])}
             for group in optimizer.param_groups
         ],
+        "scheduler": scheduler.state_dict(),
         "trainable_parameter_count": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
         "runtime_compatibility": runtime_compatibility,
-        "source_state": _source_state(),
+        "precision_execution": precision_execution,
+        "input_pipeline": input_pipeline,
+        "runtime_profile": runtime_profile,
+        "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
+        "code_environment": code_environment,
+        "source_state": source_state,
     }
+    curves: list[dict[str, Any]] = []
+    best_epoch = -1
+    best_loss = float("inf")
+    best_val: Mapping[str, Any] = {}
+    epochs_without_improvement = 0
+    start_epoch = 0
+    if config.resume_from:
+        resume_path = Path(config.resume_from)
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"resume checkpoint does not exist: {resume_path}")
+        resume_payload = _load_checkpoint(resume_path, device)
+        resume_state = _validate_resume_checkpoint(
+            resume_payload,
+            config=config,
+            family=family,
+            variant=variant,
+            provenance=provenance,
+            precision_execution=precision_execution,
+            scheduler=scheduler,
+            source_state=source_metadata["source_state"],
+        )
+        model.load_state_dict(resume_payload["model_state_dict"])
+        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+        scheduler.load_state_dict(resume_payload["scheduler_state"])
+        _restore_rng_state(resume_payload["rng_state"], device)
+        curves = [dict(item) for item in resume_state["curves"]]
+        best_epoch = int(resume_state["best_epoch"])
+        best_loss = float(resume_state["best_loss"])
+        best_val = dict(resume_state["best_model_val"])
+        epochs_without_improvement = int(resume_state["epochs_without_improvement"])
+        start_epoch = int(resume_state["completed_epoch"]) + 1
+        report_progress(
+            {
+                "state": "resumed_at_epoch_boundary",
+                "resume_from": str(resume_path),
+                "completed_epoch": start_epoch - 1,
+                "next_epoch": start_epoch,
+                "global_optimizer_step": scheduler.global_step,
+            }
+        )
+
     _save_json(output_dir / "source_metadata.json", source_metadata)
     _save_json(output_dir / "config.json", config.to_dict())
     report_progress(
@@ -1104,16 +1715,19 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             "state": "ready_for_epochs",
             "train_jets": train_source.n_jets,
             "model_val_jets": val_source.n_jets,
-            "amp_enabled": bool(amp_enabled),
+            "precision_mode": config.precision_mode,
+            "autocast_enabled": autocast_enabled,
+            "autocast_dtype": precision_execution["autocast_dtype"],
+            "grad_scaler_enabled": grad_scaler_enabled,
+            "input_pipeline": input_pipeline,
+            "hungarian_workers": int(config.hungarian_workers),
+            "hungarian_executor": str(config.hungarian_executor),
+            "scheduler": scheduler.state_dict(),
         }
     )
 
-    curves: list[dict[str, Any]] = []
-    best_epoch = -1
-    best_loss = float("inf")
-    best_val: Mapping[str, Any] = {}
-    epochs_without_improvement = 0
-    for epoch in range(int(config.epochs)):
+    stop_reason: str | None = "resume_already_completed_budget" if start_epoch >= int(config.epochs) else None
+    for epoch in range(start_epoch, int(config.epochs)):
         train_metrics = _run_epoch(
             model,
             train_source,
@@ -1122,8 +1736,11 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             variant=variant,
             device=device,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
-            amp_enabled=amp_enabled,
+            precision_mode=config.precision_mode,
+            autocast_enabled=autocast_enabled,
+            grad_scaler_enabled=grad_scaler_enabled,
             max_jets=config.max_train_jets,
             epoch=epoch,
             progress_callback=report_progress,
@@ -1137,8 +1754,11 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 variant=variant,
                 device=device,
                 optimizer=None,
+                scheduler=None,
                 scaler=None,
-                amp_enabled=amp_enabled,
+                precision_mode=config.precision_mode,
+                autocast_enabled=autocast_enabled,
+                grad_scaler_enabled=grad_scaler_enabled,
                 max_jets=config.max_val_jets,
                 epoch=epoch,
                 progress_callback=report_progress,
@@ -1146,15 +1766,30 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         row = {"epoch": int(epoch), "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
         val_loss = float(val_metrics.get("selection.reconstruction_score", float("nan")))
-        if math.isfinite(val_loss) and val_loss < best_loss:
+        improved = math.isfinite(val_loss) and val_loss < best_loss
+        if improved:
             best_epoch = int(epoch)
             best_loss = val_loss
             best_val = dict(val_metrics)
             epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        training_state = {
+            "completed_epoch": int(epoch),
+            "global_optimizer_step": int(scheduler.global_step),
+            "best_epoch": int(best_epoch),
+            "best_loss": float(best_loss),
+            "best_model_val": _jsonable(best_val),
+            "epochs_without_improvement": int(epochs_without_improvement),
+            "curves": _jsonable(curves),
+        }
+        rng_state = _capture_rng_state(device)
+        if improved:
             torch.save(
                 _checkpoint_payload(
                     model=model,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     epoch=epoch,
                     config=config,
                     family=family,
@@ -1163,16 +1798,18 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     provenance=provenance,
                     checkpoint_role="best_model_val",
                     source_state=source_metadata["source_state"],
+                    precision_execution=precision_execution,
+                    training_state=training_state,
+                    rng_state=rng_state,
                 ),
                 output_dir / "best_model_val.pt",
             )
-        else:
-            epochs_without_improvement += 1
         if config.save_last_checkpoint:
             torch.save(
                 _checkpoint_payload(
                     model=model,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     epoch=epoch,
                     config=config,
                     family=family,
@@ -1181,6 +1818,9 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                     provenance=provenance,
                     checkpoint_role="last",
                     source_state=source_metadata["source_state"],
+                    precision_execution=precision_execution,
+                    training_state=training_state,
+                    rng_state=rng_state,
                 ),
                 output_dir / "last.pt",
             )
@@ -1197,15 +1837,30 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 "train_n_jets": int(train_metrics["n_jets"]),
                 "model_val_n_jets": int(val_metrics["n_jets"]),
                 "model_val_selection_score": val_loss,
+                "global_optimizer_step": scheduler.global_step,
+                "learning_rates": scheduler.current_lrs(),
+                "hungarian_workers": int(config.hungarian_workers),
+                "hungarian_executor": str(config.hungarian_executor),
             }
         )
-        if int(config.early_stop_patience) >= 0 and epochs_without_improvement > int(config.early_stop_patience):
+        eligible_for_early_stop = int(epoch) + 1 >= int(config.min_epochs)
+        if (
+            not bool(config.fixed_horizon)
+            and eligible_for_early_stop
+            and int(config.early_stop_patience) >= 0
+            and epochs_without_improvement > 0
+            and epochs_without_improvement >= int(config.early_stop_patience)
+        ):
+            stop_reason = "early_stopping_patience_exhausted"
             break
+    if stop_reason is None:
+        stop_reason = "fixed_horizon_completed" if bool(config.fixed_horizon) else "max_epochs_completed"
     checkpoint_path = output_dir / "best_model_val.pt"
     if best_epoch < 0 or not checkpoint_path.exists():
         raise RuntimeError("training did not produce a finite model_val checkpoint")
     payload = _load_checkpoint(checkpoint_path, device)
     model.load_state_dict(payload["model_state_dict"])
+    selected_scheduler_state = payload.get("scheduler_state")
     # stack_val is diagnostic only. Release model_train before opening it so
     # high-data runs never retain all three large cache views simultaneously.
     del train_source
@@ -1232,8 +1887,11 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 variant=variant,
                 device=device,
                 optimizer=None,
+                scheduler=None,
                 scaler=None,
-                amp_enabled=amp_enabled,
+                precision_mode=config.precision_mode,
+                autocast_enabled=autocast_enabled,
+                grad_scaler_enabled=grad_scaler_enabled,
                 max_jets=config.max_stack_val_jets,
                 epoch=best_epoch,
             )
@@ -1242,10 +1900,18 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "split": "model_val",
         "selection_only": True,
         "best_epoch": best_epoch,
+        "stop_reason": stop_reason,
+        "completed_epochs": len(curves),
         "metrics": best_val,
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": _sha256(checkpoint_path),
         "provenance": val_source.provenance,
+        "runtime_profile": runtime_profile,
+        "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
+        "precision_execution": precision_execution,
+        "input_pipeline": input_pipeline,
+        "selected_scheduler_state": selected_scheduler_state,
+        "code_environment": code_environment,
     }
     _save_json(output_dir / "model_val_report.json", model_val_report)
     if stack_metrics is not None:
@@ -1259,6 +1925,12 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 "metrics": stack_metrics,
                 "checkpoint_sha256": model_val_report["checkpoint_sha256"],
                 "provenance": stack_source.provenance,
+                "runtime_profile": runtime_profile,
+                "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
+                "precision_execution": precision_execution,
+                "input_pipeline": input_pipeline,
+                "selected_scheduler_state": selected_scheduler_state,
+                "code_environment": code_environment,
             },
         )
     report = {
@@ -1268,6 +1940,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "family": family,
         "variant": variant,
         "best_epoch": best_epoch,
+        "stop_reason": stop_reason,
+        "completed_epochs": len(curves),
         "selection_metric": "model_val.selection.reconstruction_score",
         "best_model_val": best_val,
         "stack_val": stack_metrics,
@@ -1283,6 +1957,13 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "training_config": config.to_dict(),
         "provenance": provenance,
         "runtime_compatibility": runtime_compatibility,
+        "precision_execution": precision_execution,
+        "input_pipeline": input_pipeline,
+        "runtime_profile": runtime_profile,
+        "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
+        "scheduler_state_at_stop": scheduler.state_dict(),
+        "selected_scheduler_state": selected_scheduler_state,
+        "code_environment": code_environment,
         "final_test_loaded": False,
         "source_state": source_metadata["source_state"],
     }

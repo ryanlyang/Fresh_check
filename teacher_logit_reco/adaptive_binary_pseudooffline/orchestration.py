@@ -14,6 +14,7 @@ from .config import (
     canonical_hash,
 )
 from .accounting_preflight import ABPH_STEP4_PREFLIGHT_CONTRACT
+from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
 from .report import ABPH_CAMPAIGN_REPORT_CONTRACT
 from .variants import ABPH_EXPECTED_VARIANT_NAMES, resolve_variant_config, variant_spec
 
@@ -123,6 +124,14 @@ def require_successful_selection_report(path: str | Path) -> Mapping[str, Any]:
         raise ValueError("selection report is not successful")
     if payload.get("final_test_policy", {}).get("confirmed") is not False:
         raise ValueError("selection report must precede final-test evaluation")
+    screening = payload.get("schedule_screening")
+    if not isinstance(screening, Mapping):
+        raise ValueError("selection report lacks accelerated schedule screening")
+    if screening.get("automatic_highdata_promotion_allowed") is not True:
+        raise ValueError(
+            "selection report blocks automatic high-data promotion because the "
+            "accelerated schedule is incomplete or truncated"
+        )
     saved_hash = payload.get("report_content_hash")
     if not saved_hash:
         raise ValueError("selection report lacks its content hash")
@@ -580,6 +589,8 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
     common_env = {
         "ABPH_ROOT": str(paths.root),
         "ABPH_CAMPAIGN_MODE": config.campaign_mode,
+        "ABPH_RECONSTRUCTOR_SCHEDULE_CONTRACT": ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+        "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY": "accelerated_screening_v1",
         "ABPH_DATA_DIR": str(config.data_dir),
         "ABPH_CONFIRM_FINAL_TEST": "1" if config.confirm_final_test else "0",
     }
@@ -835,6 +846,12 @@ def submission_manifest(
         "stage_mode": config.stage_mode,
         "cluster": config.cluster,
         "split_sizes": dict(config.split_sizes),
+        "reconstructor_schedule": {
+            "contract": ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+            "policy_label": "accelerated_screening_v1",
+            "campaign_profile": config.campaign_mode,
+            "profile_selected_from_split_sizes": True,
+        },
         "confirm_final_test": config.confirm_final_test,
         "jobs": [job.to_dict() for job in jobs],
     }

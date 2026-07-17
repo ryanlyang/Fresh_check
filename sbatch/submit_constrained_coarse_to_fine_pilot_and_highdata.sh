@@ -10,14 +10,21 @@ source "${SCRIPT_DIR}/common.sh"
 fresh_prepare_submitter
 
 : "${CONSTRAINED_C2F_PAIR_STAMP:=$(date +%Y%m%d_%H%M%S)}"
-: "${CONSTRAINED_C2F_PILOT_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_pilot_${CONSTRAINED_C2F_PAIR_STAMP}}"
-: "${CONSTRAINED_C2F_HIGHDATA_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_highdata_${CONSTRAINED_C2F_PAIR_STAMP}}"
 : "${CONSTRAINED_C2F_CAMPAIGN_STAGE:=pilot}"
 : "${CONSTRAINED_C2F_APPROVE_HIGHDATA:=0}"
 
 case "${CONSTRAINED_C2F_CAMPAIGN_STAGE}" in
+  pilot) CONSTRAINED_C2F_RUNTIME_PROFILE=accelerated_candidate_v1 ;;
+  highdata) CONSTRAINED_C2F_RUNTIME_PROFILE=accelerated_approved_v1 ;;
+  *) echo "CONSTRAINED_C2F_CAMPAIGN_STAGE must be pilot or highdata" >&2; exit 2 ;;
+esac
+: "${CONSTRAINED_C2F_PILOT_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_pilot_accel_v1_${CONSTRAINED_C2F_PAIR_STAMP}}"
+: "${CONSTRAINED_C2F_HIGHDATA_ROOT:=${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_highdata_accel_approved_v1_${CONSTRAINED_C2F_PAIR_STAMP}}"
+
+case "${CONSTRAINED_C2F_CAMPAIGN_STAGE}" in
   pilot)
     CONSTRAINED_C2F_CAMPAIGN_MODE=pilot \
+    CONSTRAINED_C2F_RUNTIME_PROFILE="${CONSTRAINED_C2F_RUNTIME_PROFILE}" \
     CONSTRAINED_C2F_ROOT="${CONSTRAINED_C2F_PILOT_ROOT}" \
       bash "${SCRIPT_DIR}/submit_constrained_coarse_to_fine_experiment.sh"
     ;;
@@ -36,12 +43,12 @@ if not bool(report.get("ok")):
     raise SystemExit("pilot final report is not ok; refusing high-data submission")
 PY
     CONSTRAINED_C2F_CAMPAIGN_MODE=highdata \
+    CONSTRAINED_C2F_RUNTIME_PROFILE="${CONSTRAINED_C2F_RUNTIME_PROFILE}" \
     CONSTRAINED_C2F_ROOT="${CONSTRAINED_C2F_HIGHDATA_ROOT}" \
     CONSTRAINED_C2F_APPROVE_HIGHDATA="${CONSTRAINED_C2F_APPROVE_HIGHDATA}" \
     CONSTRAINED_C2F_PILOT_REPORT_PATH="${pilot_report}" \
       bash "${SCRIPT_DIR}/submit_constrained_coarse_to_fine_experiment.sh"
     ;;
-  *) echo "CONSTRAINED_C2F_CAMPAIGN_STAGE must be pilot or highdata" >&2; exit 2 ;;
 esac
 
 cat <<SUMMARY

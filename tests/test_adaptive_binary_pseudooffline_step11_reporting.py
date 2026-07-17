@@ -18,6 +18,7 @@ torch = pytest.importorskip("torch")
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_EXPECTED_VARIANT_NAMES,
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT,
     ABPH_POSTHOC_FUSION_VARIANTS,
     ABPH_TARGET_PROVENANCE_FIELDS,
     AdaptiveBinaryCampaignReportConfig,
@@ -381,6 +382,19 @@ def _write_complete_campaign(root: Path) -> None:
             },
             "provenance": {split: provenance},
         }
+        if (
+            variant_spec(name).tier in {"B", "C", "D"}
+            and name not in {"B4_oracle_root_diagnostic", "D6_true_offline_particles"}
+        ):
+            report["schedule"] = {
+                "contract": ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+                "policy_label": "accelerated_screening_v1",
+                "campaign_profile": "pilot",
+                "schedule_truncated": False,
+                "negative_mechanism_conclusion_valid": True,
+                "automatic_highdata_promotion_allowed": True,
+                "stages": {},
+            }
         if name in ABPH_POSTHOC_FUSION_VARIANTS:
             artifact = _fusion_artifact(name)
             path = root / "fusion" / name / "frozen_fusion.json"

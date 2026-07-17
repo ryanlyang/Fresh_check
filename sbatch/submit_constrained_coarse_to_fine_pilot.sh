@@ -2,4 +2,6 @@
 # Submit one pilot campaign graph.
 set -euo pipefail
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONSTRAINED_C2F_RUNTIME_PROFILE:=accelerated_candidate_v1}"
+export CONSTRAINED_C2F_RUNTIME_PROFILE
 CONSTRAINED_C2F_CAMPAIGN_MODE=pilot bash "${PROJECT_DIR}/sbatch/submit_constrained_coarse_to_fine_experiment.sh"

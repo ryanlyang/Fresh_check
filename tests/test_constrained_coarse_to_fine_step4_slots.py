@@ -36,7 +36,9 @@ from teacher_logit_reco.constrained_coarse_to_fine import (
 )
 from teacher_logit_reco.constrained_coarse_to_fine.slots import _select_local_hlt_memory
 from teacher_logit_reco.constrained_coarse_to_fine.slot_loss import (
+    _compute_particle_slot_loss_hungarian_scalar_reference,
     _pairwise_components,
+    _solve_hungarian_cost_collection,
     _sinkhorn_square,
     _weighted_mean,
 )
@@ -643,6 +645,115 @@ class ConstrainedCoarseToFineStep4SlotTests(unittest.TestCase):
                 ),
                 name,
             )
+
+    def test_packed_threaded_hungarian_matches_scalar_reference_for_ragged_overfull_targets(self):
+        inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()
+        torch.manual_seed(337)
+        model = _build(C4_HUNGARIAN)
+        output = model(*inputs)
+        # Keep C4's hard-assignment model path, but use two slots so this
+        # deliberately overfull three-target case remains executable under
+        # the documented small-matrix fallback when SciPy is unavailable.
+        slots = replace(
+            output.slots,
+            real_slot_embeddings=output.slots.real_slot_embeddings[..., :2, :],
+            local_coordinates=output.slots.local_coordinates[..., :2, :],
+            total_pt=output.slots.total_pt[..., :2],
+            category_pt=output.slots.category_pt[..., :2, :],
+            total_energy=output.slots.total_energy[..., :2],
+            expected_count=output.slots.expected_count[..., :2],
+            category_count=output.slots.category_count[..., :2, :],
+            pid_probabilities=output.slots.pid_probabilities[..., :2, :],
+            raw_pid_logits=output.slots.raw_pid_logits[..., :2, :],
+            charge_logits=output.slots.charge_logits[..., :2, :],
+            existence_logits=output.slots.existence_logits[..., :2],
+            log_sigma=None if output.slots.log_sigma is None else output.slots.log_sigma[..., :2, :],
+            reliability=output.slots.reliability[..., :2],
+        )
+        targets = _nonpacked_targets_with_empty_cells(
+            _targets_for(output, offline, offline_mask, hlt, hlt_mask),
+            minimum_targets_in_one_cell=slots.num_real_slots + 1,
+        )
+        self.assertTrue(torch.any(targets.mask.sum(dim=-1) == 0))
+        self.assertGreater(int(targets.mask.sum(dim=-1).max()), slots.num_real_slots)
+        config = ParticleSlotLossConfig(
+            matching_mode="hungarian",
+            hungarian_executor="thread",
+            hungarian_workers=4,
+        )
+        packed = compute_particle_slot_loss(slots, targets, config, return_assignments=True)
+        reference = _compute_particle_slot_loss_hungarian_scalar_reference(
+            slots,
+            targets,
+            config,
+            return_assignments=True,
+        )
+
+        self.assertTrue(torch.allclose(packed.loss, reference.loss, atol=6.0e-6, rtol=6.0e-6))
+        for name in reference.components:
+            self.assertTrue(
+                torch.allclose(packed.components[name], reference.components[name], atol=6.0e-6, rtol=6.0e-6),
+                name,
+            )
+        for name in reference.metrics:
+            self.assertTrue(
+                torch.allclose(packed.metrics[name], reference.metrics[name], atol=6.0e-6, rtol=6.0e-6),
+                name,
+            )
+
+        def signature(assignments):
+            return [
+                (
+                    item.batch_index,
+                    item.view_index,
+                    item.cell_index,
+                    tuple(item.pred_indices.cpu().tolist()),
+                    tuple(item.target_indices.cpu().tolist()),
+                    item.method,
+                )
+                for item in assignments
+            ]
+
+        self.assertEqual(signature(packed.assignments), signature(reference.assignments))
+        model.zero_grad(set_to_none=True)
+        packed.loss.backward(retain_graph=True)
+        packed_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        }
+        model.zero_grad(set_to_none=True)
+        reference.loss.backward()
+        reference_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        }
+        self.assertEqual(set(packed_gradients), set(reference_gradients))
+        for name in packed_gradients:
+            self.assertTrue(
+                torch.allclose(packed_gradients[name], reference_gradients[name], atol=8.0e-6, rtol=8.0e-6),
+                name,
+            )
+
+    def test_threaded_hungarian_keeps_serial_order_for_tied_costs(self):
+        costs = np.zeros((5, 4, 4), dtype=np.float32)
+        serial = _solve_hungarian_cost_collection(
+            costs,
+            ParticleSlotLossConfig(matching_mode="hungarian", hungarian_executor="serial", hungarian_workers=1),
+        )
+        threaded = _solve_hungarian_cost_collection(
+            costs,
+            ParticleSlotLossConfig(matching_mode="hungarian", hungarian_executor="thread", hungarian_workers=3),
+        )
+        self.assertEqual(len(threaded), len(serial))
+        for index, ((serial_rows, serial_columns, serial_method), (thread_rows, thread_columns, thread_method)) in enumerate(
+            zip(serial, threaded, strict=True)
+        ):
+            self.assertEqual(serial_method, thread_method)
+            self.assertTrue(np.array_equal(serial_rows, thread_rows))
+            self.assertTrue(np.array_equal(serial_columns, thread_columns))
+            self.assertEqual(float(costs[index, thread_rows, thread_columns].sum()), 0.0)
 
     def test_hungarian_evaluation_diagnostic_is_independent_of_train_mode(self):
         inputs, hlt, hlt_mask, offline, offline_mask = _torch_inputs()

@@ -45,9 +45,15 @@ else
 fi
 
 : "${CONSTRAINED_C2F_STAGE_MODE:=full}"
+: "${CONSTRAINED_C2F_RUNTIME_PROFILE:=fp32_reference}"
+: "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT:=}"
+case "${CONSTRAINED_C2F_RUNTIME_PROFILE}" in
+  fp32_reference|fp16_diagnostic|bf16_calibration|accelerated_candidate_v1|accelerated_approved_v1) ;;
+  *) echo "Unsupported CONSTRAINED_C2F_RUNTIME_PROFILE: ${CONSTRAINED_C2F_RUNTIME_PROFILE}" >&2; exit 2 ;;
+esac
 : "${CONSTRAINED_C2F_DATA_DIR:=${PD10_DATA_DIR:-${DATA_DIR}}}"
 if [[ -z "${CONSTRAINED_C2F_ROOT:-}" ]]; then
-  CONSTRAINED_C2F_ROOT="${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_${CONSTRAINED_C2F_CAMPAIGN_MODE}_$(date +%Y%m%d_%H%M%S)"
+  CONSTRAINED_C2F_ROOT="${OUTPUT_ROOT}/constrained_coarse_to_fine_pseudooffline_hltv2_s2p5_${CONSTRAINED_C2F_CAMPAIGN_MODE}_${CONSTRAINED_C2F_RUNTIME_PROFILE}_$(date +%Y%m%d_%H%M%S)"
 fi
 : "${CONSTRAINED_C2F_INPUTS_DIR:=${CONSTRAINED_C2F_ROOT}/inputs}"
 : "${CONSTRAINED_C2F_MANIFEST_PATH:=${CONSTRAINED_C2F_INPUTS_DIR}/split_manifest/split_manifest.json.gz}"
@@ -77,6 +83,37 @@ fi
 : "${CONSTRAINED_C2F_HLT_WARM_START_CHECKPOINT:=${CONSTRAINED_C2F_TAGGER_ROOT}/A0/best_model_val.pt}"
 : "${CONSTRAINED_C2F_APPROVE_FINAL_TEST:=0}"
 : "${CONSTRAINED_C2F_SELECTION_REPORT_PATH:=${CONSTRAINED_C2F_ROOT}/final_report/final_report.json}"
+: "${CONSTRAINED_C2F_RECO_PRECISION_MODE:=}"
+: "${CONSTRAINED_C2F_RECO_PREFETCH_FACTOR:=}"
+: "${CONSTRAINED_C2F_RECO_LR_SCHEDULE:=constant}"
+: "${CONSTRAINED_C2F_RECO_WARMUP_FRACTION:=0.10}"
+: "${CONSTRAINED_C2F_RECO_MIN_LR_RATIO:=0.05}"
+: "${CONSTRAINED_C2F_RECO_MIN_EPOCHS:=0}"
+: "${CONSTRAINED_C2F_RECO_FIXED_HORIZON:=0}"
+: "${CONSTRAINED_C2F_HUNGARIAN_WORKERS:=1}"
+: "${CONSTRAINED_C2F_HUNGARIAN_EXECUTOR:=serial}"
+
+CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS=""
+if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" && "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]]; then
+  [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_approved_v1" ]] || {
+    echo "High-data and final-claim submission require CONSTRAINED_C2F_RUNTIME_PROFILE=accelerated_approved_v1." >&2
+    exit 2
+  }
+  CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS="accelerated_approved_v1"
+elif [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" && "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_candidate_v1" ]]; then
+  CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS="accelerated_candidate_v1"
+elif [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" && "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_approved_v1" ]]; then
+  CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS="accelerated_approved_v1"
+fi
+if [[ -n "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS}" ]]; then
+  [[ -n "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" ]] || {
+    echo "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS} requires CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT." >&2
+    exit 2
+  }
+  "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_runtime_profile.py \
+    --profile "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" \
+    --expected-status "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS}" >/dev/null
+fi
 
 if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" && "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]]; then
   fresh_bool_enabled "${CONSTRAINED_C2F_APPROVE_HIGHDATA}" || {
@@ -97,6 +134,14 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 if not bool(report.get("ok")):
     raise SystemExit("pilot final report is not ok; refusing high-data submission")
 PY
+fi
+
+if [[ "${CONSTRAINED_C2F_CAMPAIGN_MODE}" == "highdata" ]]; then
+  c2f_require_frozen_value CONSTRAINED_C2F_RECON_RUN_IDS "${CONSTRAINED_C2F_RECON_RUN_IDS}" "${C2F_FROZEN_RECON_RUN_IDS}"
+  c2f_require_frozen_value CONSTRAINED_C2F_TAGGER_RUN_IDS "${CONSTRAINED_C2F_TAGGER_RUN_IDS}" "${C2F_FROZEN_TAGGER_RUN_IDS}"
+  c2f_require_frozen_value CONSTRAINED_C2F_PREDICT_RUN_IDS "${CONSTRAINED_C2F_PREDICT_RUN_IDS}" "${C2F_FROZEN_TAGGER_RUN_IDS}"
+  c2f_require_frozen_value CONSTRAINED_C2F_FUSION_GROUPS "${CONSTRAINED_C2F_FUSION_GROUPS}" "${C2F_FROZEN_FUSION_GROUPS}"
+  c2f_require_frozen_value CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS "${CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS}" "${C2F_FROZEN_REQUIRED_FUSION_GROUPS}"
 fi
 
 : "${CONSTRAINED_C2F_SUBMIT_SPLITS:=1}"
@@ -176,6 +221,21 @@ case "${CONSTRAINED_C2F_STAGE_MODE}" in
   *) echo "Unknown CONSTRAINED_C2F_STAGE_MODE: ${CONSTRAINED_C2F_STAGE_MODE}" >&2; exit 2 ;;
 esac
 
+if [[ "${CONSTRAINED_C2F_STAGE_MODE}" == "final_claims" ]]; then
+  [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_approved_v1" ]] || {
+    echo "Final-claim submission requires CONSTRAINED_C2F_RUNTIME_PROFILE=accelerated_approved_v1." >&2
+    exit 2
+  }
+  [[ -n "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" ]] || {
+    echo "Final-claim submission requires CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT." >&2
+    exit 2
+  }
+  CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS="accelerated_approved_v1"
+  "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_runtime_profile.py \
+    --profile "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" \
+    --expected-status "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS}" >/dev/null
+fi
+
 if [[ "${CONSTRAINED_C2F_STAGE_MODE}" != "final_claims" ]] \
   && fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_PREDICTIONS}" \
   && ! fresh_bool_enabled "${CONSTRAINED_C2F_SUBMIT_TAGGERS}" \
@@ -196,6 +256,12 @@ export CONSTRAINED_C2F_REQUIRED_FUSION_GROUPS CONSTRAINED_C2F_REPORT_RECON_RUN_I
 export CONSTRAINED_C2F_REPORT_TAGGER_RUN_IDS CONFIRM_FINAL_TEST
 export CONSTRAINED_C2F_RECO_NUM_WORKERS CONSTRAINED_C2F_TAGGER_NUM_WORKERS
 export CONSTRAINED_C2F_SELECTION_REPORT_PATH CONSTRAINED_C2F_SELECTION_REPORT_SHA256
+export CONSTRAINED_C2F_RUNTIME_PROFILE CONSTRAINED_C2F_RECO_PRECISION_MODE
+export CONSTRAINED_C2F_RECO_PREFETCH_FACTOR CONSTRAINED_C2F_RECO_LR_SCHEDULE
+export CONSTRAINED_C2F_RECO_WARMUP_FRACTION CONSTRAINED_C2F_RECO_MIN_LR_RATIO
+export CONSTRAINED_C2F_RECO_MIN_EPOCHS CONSTRAINED_C2F_RECO_FIXED_HORIZON
+export CONSTRAINED_C2F_HUNGARIAN_WORKERS CONSTRAINED_C2F_HUNGARIAN_EXECUTOR
+export CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS
 
 dependency_token_is_valid() {
   [[ "$1" =~ ^[0-9]+$ ]] || { fresh_is_dry_run && [[ "$1" =~ ^DRYRUN_[A-Za-z0-9_]+$ ]]; }
@@ -267,34 +333,57 @@ target_complete() {
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" >/dev/null 2>&1
 }
+runtime_profile_hash_for_run() {
+  local run_id="$1"
+  [[ -n "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" ]] || return 0
+  [[ -n "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS}" ]] || return 0
+  "${PYTHON_BIN}" - "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT}" \
+    "${CONSTRAINED_C2F_RUNTIME_PROFILE_EXPECTED_STATUS}" "${run_id}" <<'PY'
+import sys
+from teacher_logit_reco.constrained_coarse_to_fine.runtime_profiles import resolve_execution, validate_runtime_profile
+
+validated = validate_runtime_profile(sys.argv[1], expected_status=sys.argv[2])
+print(resolve_execution(validated["profile"], sys.argv[3])["runtime_profile_hash"])
+PY
+}
 recon_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
+  local expected_hash="" args=()
+  expected_hash="$(runtime_profile_hash_for_run "$1")"
+  [[ -n "${expected_hash}" ]] && args+=(--expected-runtime-profile-hash "${expected_hash}")
   "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_artifact.py \
     --kind reconstructor --path "${CONSTRAINED_C2F_RECON_ROOT}/$1" --run-id "$1" \
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
-    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null 2>&1
+    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" "${args[@]}" >/dev/null 2>&1
 }
 tagger_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
+  local hashes=() value args=() hash_output=""
+  hash_output="$(reconstructor_hashes_for_tagger "$1")" || return 1
+  while IFS= read -r value; do [[ -n "${value}" ]] && hashes+=("${value}"); done <<< "${hash_output}"
+  for value in "${hashes[@]}"; do args+=(--expected-reconstructor-checkpoint-sha256 "${value}"); done
   "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_artifact.py \
     --kind tagger --path "${CONSTRAINED_C2F_TAGGER_ROOT}/$1" --run-id "$1" \
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
-    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" >/dev/null 2>&1
+    --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" "${args[@]}" >/dev/null 2>&1
 }
 prediction_complete() {
   [[ -f "${CONSTRAINED_C2F_MANIFEST_PATH}" ]] || return 1
-  local rows=(); fresh_split_words rows "${CONSTRAINED_C2F_PREDICT_SPLITS}"
+  local rows=() hashes=() value args=() hash_output=""; fresh_split_words rows "${CONSTRAINED_C2F_PREDICT_SPLITS}"
+  hash_output="$(reconstructor_hashes_for_tagger "$1")" || return 1
+  while IFS= read -r value; do [[ -n "${value}" ]] && hashes+=("${value}"); done <<< "${hash_output}"
+  for value in "${hashes[@]}"; do args+=(--expected-reconstructor-checkpoint-sha256 "${value}"); done
   "${PYTHON_BIN}" scripts/validate_constrained_coarse_to_fine_artifact.py \
     --kind prediction --path "${CONSTRAINED_C2F_PREDICTION_DIR}/$1" --run-id "$1" \
     --manifest "${CONSTRAINED_C2F_MANIFEST_PATH}" --splits "${rows[@]}" \
     --hlt-cache-dir "${CONSTRAINED_C2F_HLT_CACHE_DIR}" \
     --offline-cache-dir "${CONSTRAINED_C2F_OFFLINE_CACHE_DIR}" \
     --target-cache-dir "${CONSTRAINED_C2F_TARGET_CACHE_DIR}" \
-    --tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}" >/dev/null 2>&1
+    --tagger-root "${CONSTRAINED_C2F_TAGGER_ROOT}" "${args[@]}" >/dev/null 2>&1
 }
 
 tagger_reconstructors() {
@@ -312,6 +401,25 @@ tagger_reconstructors() {
     E4) printf '%s\n' Cdirect-unconstrained ;;
     *) echo "Unsupported tagger run ID in submitter: $1" >&2; return 2 ;;
   esac
+}
+
+reconstructor_hashes_for_tagger() {
+  local tagger_id="$1" source_id checkpoint
+  while IFS= read -r source_id; do
+    [[ -z "${source_id}" ]] && continue
+    recon_complete "${source_id}" || return 1
+    checkpoint="${CONSTRAINED_C2F_RECON_ROOT}/${source_id}/best_model_val.pt"
+    "${PYTHON_BIN}" - "${checkpoint}" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+  done < <(tagger_reconstructors "${tagger_id}")
 }
 
 preflight_reused_inputs() {
@@ -386,6 +494,12 @@ if ! fresh_is_dry_run; then
     echo "root=${CONSTRAINED_C2F_ROOT}"
     echo "campaign_mode=${CONSTRAINED_C2F_CAMPAIGN_MODE}"
     echo "stage_mode=${CONSTRAINED_C2F_STAGE_MODE}"
+    echo "runtime_profile=${CONSTRAINED_C2F_RUNTIME_PROFILE}"
+    echo "precision_mode=${CONSTRAINED_C2F_RECO_PRECISION_MODE:-profile_default}"
+    echo "lr_schedule=${CONSTRAINED_C2F_RECO_LR_SCHEDULE}"
+    echo "prefetch_factor=${CONSTRAINED_C2F_RECO_PREFETCH_FACTOR:-none}"
+    echo "hungarian_executor=${CONSTRAINED_C2F_HUNGARIAN_EXECUTOR}"
+    echo "hungarian_workers=${CONSTRAINED_C2F_HUNGARIAN_WORKERS}"
     echo "hlt_profile=${CONSTRAINED_C2F_HLT_PROFILE}"
     echo "hlt_strength=${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH}"
     echo "sizes=${CONSTRAINED_C2F_MODEL_TRAIN_SIZE}/${CONSTRAINED_C2F_MODEL_VAL_SIZE}/${CONSTRAINED_C2F_STACK_TRAIN_SIZE}/${CONSTRAINED_C2F_STACK_VAL_SIZE}/${CONSTRAINED_C2F_FINAL_TEST_SIZE}"
@@ -398,6 +512,7 @@ echo "constrained_c2f_submission_start:"
 echo "  root: ${CONSTRAINED_C2F_ROOT}"
 echo "  campaign_mode: ${CONSTRAINED_C2F_CAMPAIGN_MODE}"
 echo "  stage_mode: ${CONSTRAINED_C2F_STAGE_MODE}"
+echo "  runtime_profile: ${CONSTRAINED_C2F_RUNTIME_PROFILE}"
 echo "  hlt: ${CONSTRAINED_C2F_HLT_PROFILE} strength=${CONSTRAINED_C2F_HLT_DEGRADATION_STRENGTH}"
 
 split_jid=""; hlt_jid=""; offline_jid=""; target_jid=""

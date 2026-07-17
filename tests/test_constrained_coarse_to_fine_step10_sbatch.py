@@ -598,7 +598,8 @@ def test_step10_submitter_uses_conda_for_reuse_validation_without_probe_tracebac
     assert "fresh_prepare_submitter\nfresh_activate_env" in submitter
     assert "submitter_python=$(${PYTHON_BIN}" in submitter
     assert "--kind reconstructor" in submitter
-    assert "--target-cache-dir \"${CONSTRAINED_C2F_TARGET_CACHE_DIR}\" >/dev/null 2>&1" in submitter
+    assert "--expected-reconstructor-checkpoint-sha256" in submitter
+    assert "reconstructor_hashes_for_tagger" in submitter
 
 
 def test_step10_saves_only_selected_checkpoints_by_default() -> None:
@@ -683,6 +684,45 @@ def test_completion_validator_rejects_stale_manifest_provenance() -> None:
         failed = subprocess.run(command, capture_output=True, text=True)
         assert failed.returncode != 0
         assert "source_manifest_hash mismatch" in failed.stderr
+
+
+def test_completion_validator_rejects_stale_tagger_reconstructor_source() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = root / "manifest.json"
+        payload = {"splits": {"model_train": [], "model_val": []}}
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        manifest_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        hlt_root, offline_root, target_root, provenance = _write_active_input_metadata(root, manifest_sha)
+        run = root / "D5"
+        run.mkdir()
+        checkpoint = run / "best_model_val.pt"
+        checkpoint.write_bytes(b"tagger checkpoint")
+        checkpoint_sha = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        source_hash = hashlib.sha256(b"reconstructor checkpoint").hexdigest()
+        (run / "run_report.json").write_text(
+            json.dumps({"ok": True, "variant": "D5", "checkpoint_sha256": checkpoint_sha, "provenance": provenance}),
+            encoding="utf-8",
+        )
+        (run / "source_metadata.json").write_text(
+            json.dumps({"reconstructors": {"sources": {"C5-B3": {"checkpoint_sha256": source_hash}}}}),
+            encoding="utf-8",
+        )
+        command = (
+            sys.executable,
+            str(ROOT / "scripts" / "validate_constrained_coarse_to_fine_artifact.py"),
+            "--kind", "tagger", "--path", str(run), "--run-id", "D5",
+            "--manifest", str(manifest),
+            *_active_input_args(hlt_root, offline_root, target_root),
+            "--expected-reconstructor-checkpoint-sha256", source_hash,
+        )
+        assert subprocess.run(command, capture_output=True, text=True).returncode == 0
+        stale = (*command[:-2], "--expected-reconstructor-checkpoint-sha256", "stale-hash")
+        failed = subprocess.run(stale, capture_output=True, text=True)
+        assert failed.returncode != 0
+        assert "source reconstructor checkpoint hashes mismatch" in failed.stderr
 
 
 def test_completion_validator_accepts_normalized_control_and_seed_variants() -> None:
@@ -793,3 +833,17 @@ def test_frozen_tagger_sweep_never_unfreezes_reconstructor() -> None:
         assert phase.name == "frozen_reconstructor_tagger"
         assert not phase.terminal_decoder_trainable
         assert not phase.upper_hierarchy_trainable
+
+
+def test_runtime_profile_is_forwarded_by_submitter_and_reconstructor_runner() -> None:
+    submitter = _read("submit_constrained_coarse_to_fine_experiment.sh")
+    runner = _read("run_train_constrained_coarse_to_fine_reconstructor.sh")
+
+    assert "CONSTRAINED_C2F_RUNTIME_PROFILE:=fp32_reference" in submitter
+    assert "CONSTRAINED_C2F_RUNTIME_PROFILE" in submitter
+    assert "_${CONSTRAINED_C2F_RUNTIME_PROFILE}_" in submitter
+    assert "--runtime-profile" in runner
+    assert "--precision-mode" in runner
+    assert "--lr-schedule" in runner
+    assert "--hungarian-workers" in runner
+    assert "CONSTRAINED_C2F_HUNGARIAN_WORKERS exceeds SLURM_CPUS_PER_TASK" in runner

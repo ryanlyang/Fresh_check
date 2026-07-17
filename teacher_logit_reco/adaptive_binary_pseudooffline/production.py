@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -29,6 +30,15 @@ from .cache import (
     load_adaptive_binary_target_shard,
 )
 from .config import canonical_hash
+from .distributed_stream import (
+    GlobalBatchCursor,
+    GlobalBatchPlan,
+    ShardSlice,
+    contiguous_validation_range,
+    derive_global_batch_plan,
+    deterministic_shard_order,
+    validation_range_row,
+)
 from .hierarchy_alignment import (
     HierarchyTargetTensors,
     align_recursive_hierarchy,
@@ -44,6 +54,8 @@ from .hierarchy_decoder import (
     RecursiveHierarchyOutput,
 )
 from .hypothesis_distribution import (
+    HierarchyHypothesis,
+    HypothesisLatentSet,
     MultiHypothesisHierarchyOutput,
     MultiHypothesisHierarchyReconstructor,
     compute_distribution_losses,
@@ -63,6 +75,7 @@ from .root_compiler import CompiledRootState, ROOT_FEATURE_NAMES, compile_root_s
 from .root_model import SemanticRootPrediction, SemanticRootPredictor, SemanticRootPredictorConfig
 from .root_objectives import compute_root_losses, compute_root_metrics
 from .root_transforms import build_root_residual_targets, summarize_hlt_root, wrap_phi_tensor
+from .runtime_profile import RuntimeProfiler, profile_span
 from .schemas import ABPH_MAX_PARTICLES, ABPH_PID_CATEGORIES
 from .tagger import (
     NativeStagewiseParticleTransformer,
@@ -78,12 +91,16 @@ from .targets import (
 from .training import (
     ReconstructorStepContext,
     ReconstructorStepResult,
+    active_reconstruction_loss_names,
     assemble_reconstruction_loss_terms,
 )
 from .variants import resolve_variant_config
 
 
 ABPH_PRODUCTION_RUNTIME_CONTRACT = "adaptive_binary_pseudooffline_production_runtime_v1"
+ABPH_DISTRIBUTED_TARGET_SOURCE_STATE_CONTRACT = (
+    "adaptive_binary_distributed_target_source_state_v2"
+)
 
 
 def _root_only_renderer_hierarchy(
@@ -265,6 +282,9 @@ class AdaptiveBinaryTargetBatchSource:
         shuffle_shards: bool,
         seed: int,
         maximum_batches: int | None = None,
+        rank: int = 0,
+        world_size: int = 1,
+        runtime_contract_hash: str = ABPH_PRODUCTION_RUNTIME_CONTRACT,
     ) -> None:
         if int(batch_size) <= 0:
             raise ValueError("batch_size must be positive")
@@ -276,17 +296,34 @@ class AdaptiveBinaryTargetBatchSource:
         self.shuffle_shards = bool(shuffle_shards)
         self.seed = int(seed)
         self.maximum_batches = None if maximum_batches is None else int(maximum_batches)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        if self.world_size <= 0 or not 0 <= self.rank < self.world_size:
+            raise ValueError("target source rank/world_size is invalid")
+        self.runtime_contract_hash = str(runtime_contract_hash)
+        if not self.runtime_contract_hash:
+            raise ValueError("target source runtime contract hash is required")
         metadata = load_adaptive_binary_target_cache_metadata(
             target_cache_dir, split, grouping
         )
         self.metadata = metadata
         self.n_shards = int(metadata["n_shards"])
+        self._shard_metadata = tuple(dict(value) for value in metadata.get("shards", ()))
+        if len(self._shard_metadata) != self.n_shards:
+            raise ValueError("target source requires canonical aggregate shard metadata")
         self._order = list(range(self.n_shards))
         self._epoch = 0
         self._cursor = 0
         self._offset = 0
         self._active = None
+        self._active_shard_id: int | None = None
         self._batches_seen = 0
+        self._global_stream_position = 0
+        self._last_completed_plan: GlobalBatchPlan | None = None
+        self._plan_log_dir: Path | None = None
+        self._last_validation_range = None
+        self._runtime_profiler: RuntimeProfiler | None = None
+        self._last_background_decompression_seconds = 0.0
         self._reshuffle()
         if metadata.get("hlt_content_hash") != self.hlt_view.metadata.get("hlt_content_hash"):
             raise ValueError("target source is not bound to the active HLT cache")
@@ -294,136 +331,352 @@ class AdaptiveBinaryTargetBatchSource:
             raise ValueError("target source and HLT cache jet identities differ")
 
     def _reshuffle(self) -> None:
-        self._order = list(range(self.n_shards))
-        if self.shuffle_shards:
-            np.random.default_rng(self.seed + self._epoch).shuffle(self._order)
-
-    def _load_active(self) -> Any:
-        if self._active is None:
-            self._active = load_adaptive_binary_target_shard(
-                self.target_cache_dir,
-                self.split,
-                self.grouping,
-                self._order[self._cursor],
-                verify_hash=True,
+        self._order = list(
+            deterministic_shard_order(
+                n_shards=self.n_shards,
+                seed=self.seed,
+                epoch=self._epoch,
+                grouping=self.grouping,
+                shuffle=self.shuffle_shards,
             )
+        )
+
+    def _load_shard(self, shard_id: int, *, profile_runtime: bool = True) -> Any:
+        value = int(shard_id)
+        if self._active is None or self._active_shard_id != value:
+            profiler = self._runtime_profiler if profile_runtime else None
+            with profile_span(profiler, "target_shard_decompression"):
+                self._active = load_adaptive_binary_target_shard(
+                    self.target_cache_dir,
+                    self.split,
+                    self.grouping,
+                    value,
+                    verify_hash=True,
+                )
+            self._active_shard_id = value
         return self._active
 
-    def _advance_shard(self) -> None:
-        self._cursor += 1
-        self._offset = 0
-        self._active = None
-        if self._cursor >= self.n_shards:
-            self._epoch += 1
-            self._cursor = 0
-            self._reshuffle()
+    def set_runtime_profiler(self, profiler: RuntimeProfiler | None) -> None:
+        self._runtime_profiler = profiler
 
-    def _next_batch(self, *, fill_across_shards: bool) -> Mapping[str, Any]:
+    def set_plan_log_dir(self, path: str | Path | None) -> None:
+        self._plan_log_dir = None if path is None else Path(path)
+        if self._plan_log_dir is not None and self.rank == 0:
+            self._plan_log_dir.mkdir(parents=True, exist_ok=True)
+
+    def bind_runtime_contract_hash(self, contract_hash: str) -> None:
+        if self._batches_seen or self._global_stream_position:
+            raise RuntimeError("cannot change runtime contract after stream consumption")
+        value = str(contract_hash)
+        if not value:
+            raise ValueError("runtime contract hash is required")
+        self.runtime_contract_hash = value
+
+    def set_batch_size(self, batch_size: int) -> None:
+        """Switch phase-local microbatch size without changing the sample cursor."""
+
+        value = int(batch_size)
+        if value <= 0:
+            raise ValueError("batch_size must be positive")
+        self.batch_size = value
+
+    def _cursor_state(self) -> GlobalBatchCursor:
+        return GlobalBatchCursor(
+            epoch=int(self._epoch),
+            shard_cursor=int(self._cursor),
+            shard_offset=int(self._offset),
+            global_stream_position=int(self._global_stream_position),
+            shard_order=tuple(int(value) for value in self._order),
+        )
+
+    @property
+    def current_cursor(self) -> GlobalBatchCursor:
+        """Return the committed cursor; speculative prefetch never mutates it."""
+
+        return self._cursor_state()
+
+    def derive_next_plan(
+        self,
+        *,
+        global_update: int,
+        accumulation_index: int,
+        cursor: GlobalBatchCursor | None = None,
+    ) -> GlobalBatchPlan:
+        return derive_global_batch_plan(
+            runtime_contract_hash=self.runtime_contract_hash,
+            split=self.split,
+            grouping=self.grouping,
+            cursor=self._cursor_state() if cursor is None else cursor,
+            global_update=int(global_update),
+            accumulation_index=int(accumulation_index),
+            rank_count=self.world_size,
+            local_batch_size=self.batch_size,
+            shards=self._shard_metadata,
+            jet_ids=self.hlt_view.jet_ids,
+            seed=self.seed,
+            shuffle=self.shuffle_shards,
+        )
+
+    def _agree_plan_hash(self, plan: GlobalBatchPlan) -> None:
+        if self.world_size == 1:
+            return
+        torch = require_torch()
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            raise RuntimeError("distributed target source requires an initialized process group")
+        if int(torch.distributed.get_world_size()) != self.world_size:
+            raise RuntimeError("target source world size differs from the process group")
+        if int(torch.distributed.get_rank()) != self.rank:
+            raise RuntimeError("target source rank differs from the process group")
+        gathered: list[str | None] = [None for _ in range(self.world_size)]
+        torch.distributed.all_gather_object(gathered, plan.plan_hash)
+        if any(value != plan.plan_hash for value in gathered):
+            raise RuntimeError("global batch plan hash differs across ranks")
+
+    def agree_plan_hash(self, plan: GlobalBatchPlan) -> None:
+        """Collectively approve a plan before a worker opens target shards."""
+
+        self._agree_plan_hash(plan)
+
+    def _persist_plan(self, plan: GlobalBatchPlan) -> None:
+        if self._plan_log_dir is None or self.rank != 0:
+            return
+        path = self._plan_log_dir / (
+            f"update_{plan.global_update:09d}_accum_{plan.accumulation_index:04d}.json"
+        )
+        payload = plan.to_dict()
+        if path.exists():
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if existing.get("plan_hash") != plan.plan_hash:
+                raise FileExistsError(f"refusing to replace a different global batch plan: {path}")
+            return
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+
+    def _materialize_slices(
+        self,
+        slices: Sequence[ShardSlice],
+        *,
+        expected_identity_hash: str | None = None,
+        plan_hash: str | None = None,
+        profile_runtime: bool = True,
+    ) -> Mapping[str, Any]:
         torch = require_torch()
         token_chunks: list[np.ndarray] = []
         mask_chunks: list[np.ndarray] = []
         label_chunks: list[np.ndarray] = []
         index_chunks: list[np.ndarray] = []
         target_chunks: list[AdaptiveBinaryTargetBatch] = []
-        remaining = self.batch_size
-
-        while remaining > 0:
-            shard = self._load_active()
-            local_start = self._offset
-            available = int(shard.targets.n_jets) - int(local_start)
-            if available <= 0:
-                self._advance_shard()
-                continue
-            take = min(remaining, available)
-            local_stop = local_start + take
+        observed_ids = []
+        background_decompression_seconds = 0.0
+        for item in slices:
+            shard_started = time.perf_counter()
+            shard = self._load_shard(
+                item.shard_id, profile_runtime=profile_runtime
+            )
+            if not profile_runtime:
+                background_decompression_seconds += time.perf_counter() - shard_started
+            local_start = int(item.local_start)
+            local_stop = int(item.local_stop)
             global_start = int(shard.start) + local_start
             global_stop = int(shard.start) + local_stop
             expected_ids = tuple(self.hlt_view.jet_ids[global_start:global_stop])
             actual_ids = tuple(shard.jet_ids[local_start:local_stop])
             if expected_ids != actual_ids:
-                raise ValueError("HLT/target batch identity alignment failed")
-
-            token_chunks.append(
-                np.asarray(
-                    self.hlt_view.tokens[global_start:global_stop], dtype=np.float32
-                )
-            )
-            mask_chunks.append(
-                np.asarray(self.hlt_view.mask[global_start:global_stop], dtype=bool)
-            )
-            label_chunks.append(
-                np.asarray(self.hlt_view.labels[global_start:global_stop], dtype=np.int64)
-            )
+                raise ValueError("HLT/target planned slice identity alignment failed")
+            observed_ids.extend(actual_ids)
+            token_chunks.append(np.asarray(self.hlt_view.tokens[global_start:global_stop], dtype=np.float32))
+            mask_chunks.append(np.asarray(self.hlt_view.mask[global_start:global_stop], dtype=bool))
+            label_chunks.append(np.asarray(self.hlt_view.labels[global_start:global_stop], dtype=np.int64))
             index_chunks.append(np.arange(global_start, global_stop, dtype=np.int64))
             target_chunks.append(_slice_target_batch(shard.targets, local_start, local_stop))
-
-            self._offset = local_stop
-            remaining -= take
-            if self._offset >= shard.targets.n_jets:
-                self._advance_shard()
-            if not fill_across_shards:
-                break
-
         if not target_chunks:
-            raise RuntimeError("target source produced an empty batch")
-        batch = {
+            raise RuntimeError("planned target source produced an empty batch")
+        observed_hash = jet_identity_hash(tuple(observed_ids))
+        if expected_identity_hash is not None and observed_hash != expected_identity_hash:
+            raise ValueError("materialized rank-local identities differ from the global batch plan")
+        if not profile_runtime:
+            self._last_background_decompression_seconds = (
+                background_decompression_seconds
+            )
+        return {
             "hlt_tokens": torch.from_numpy(np.concatenate(token_chunks, axis=0)),
             "hlt_mask": torch.from_numpy(np.concatenate(mask_chunks, axis=0)),
             "labels": torch.from_numpy(np.concatenate(label_chunks, axis=0)),
             "targets": _concatenate_target_batches(target_chunks),
             "indices": torch.from_numpy(np.concatenate(index_chunks, axis=0)),
+            "global_batch_plan_hash": plan_hash,
         }
+
+    def consume_background_decompression_seconds(self) -> float:
+        value = float(self._last_background_decompression_seconds)
+        self._last_background_decompression_seconds = 0.0
+        return value
+
+    def prepare_planned_batch(
+        self, plan: GlobalBatchPlan, *, background_worker: bool = False
+    ) -> Mapping[str, Any]:
+        """Materialize this rank's slice without advancing the committed cursor."""
+
+        if plan.runtime_contract_hash != self.runtime_contract_hash:
+            raise ValueError("prefetched plan runtime contract differs from the source")
+        if plan.split != self.split or plan.grouping != self.grouping:
+            raise ValueError("prefetched plan split/grouping differs from the source")
+        if len(plan.rank_plans) != self.world_size:
+            raise ValueError("prefetched plan rank topology differs from the source")
+        rank_plan = plan.rank_plans[self.rank]
+        return self._materialize_slices(
+            rank_plan.slices,
+            expected_identity_hash=rank_plan.ordered_jet_identity_hash,
+            plan_hash=plan.plan_hash,
+            profile_runtime=not background_worker,
+        )
+
+    def commit_planned_batch(self, plan: GlobalBatchPlan) -> None:
+        """Commit one successfully consumed plan in exact stream order."""
+
+        expected = self.derive_next_plan(
+            global_update=plan.global_update,
+            accumulation_index=plan.accumulation_index,
+        )
+        if expected.plan_hash != plan.plan_hash:
+            raise RuntimeError(
+                "cannot commit a prefetched plan that is not next at the source cursor"
+            )
+        self._persist_plan(plan)
+        next_cursor = plan.next_cursor
+        self._epoch = next_cursor.epoch
+        self._cursor = next_cursor.shard_cursor
+        self._offset = next_cursor.shard_offset
+        self._global_stream_position = next_cursor.global_stream_position
+        self._order = list(next_cursor.shard_order)
+        self._last_completed_plan = plan
         self._batches_seen += 1
-        return batch
+
+    def next_planned_batch(
+        self, *, global_update: int, accumulation_index: int
+    ) -> Mapping[str, Any]:
+        """Agree one global window, then materialize only this rank's slices."""
+
+        with profile_span(self._runtime_profiler, "cpu_batch_assembly"):
+            plan = self.derive_next_plan(
+                global_update=global_update, accumulation_index=accumulation_index
+            )
+            self._agree_plan_hash(plan)
+            batch = self.prepare_planned_batch(plan)
+            self.commit_planned_batch(plan)
+            return batch
 
     def next_batch(self) -> Mapping[str, Any]:
-        # The optimizer's effective-batch contract assumes a full microbatch.
-        # Join a shard tail to the next shard rather than silently reducing it.
-        return self._next_batch(fill_across_shards=True)
+        return self.next_planned_batch(
+            global_update=self._batches_seen,
+            accumulation_index=0,
+        )
 
     def iter_epoch(self) -> Iterable[Mapping[str, Any]]:
-        limit = self.maximum_batches
+        start, stop = contiguous_validation_range(
+            n_jets=len(self.hlt_view.jet_ids),
+            rank=self.rank,
+            world_size=self.world_size,
+        )
         produced = 0
-        # Validation sources are constructed with shuffle_shards=False and are
-        # consumed from a fresh cursor for every call.
-        self._epoch = 0
-        self._cursor = 0
-        self._offset = 0
-        self._active = None
-        while self._cursor < self.n_shards:
-            if limit is not None and produced >= limit:
+        observed_indices: list[int] = []
+        self._last_validation_range = None
+        for batch_start in range(start, stop, self.batch_size):
+            if self.maximum_batches is not None and produced >= self.maximum_batches:
                 break
-            active_cursor = self._cursor
-            yield self._next_batch(fill_across_shards=False)
+            batch_stop = min(batch_start + self.batch_size, stop)
+            slices: list[ShardSlice] = []
+            for shard_id, metadata in enumerate(self._shard_metadata):
+                shard_start = int(metadata["start"])
+                shard_stop = int(metadata["stop"])
+                overlap_start = max(batch_start, shard_start)
+                overlap_stop = min(batch_stop, shard_stop)
+                if overlap_start < overlap_stop:
+                    slices.append(
+                        ShardSlice(
+                            stream_epoch=0,
+                            shard_id=shard_id,
+                            local_start=overlap_start - shard_start,
+                            local_stop=overlap_stop - shard_start,
+                        )
+                    )
+            batch = self._materialize_slices(tuple(slices))
+            indices = [int(value) for value in batch["indices"].tolist()]
+            if indices != list(range(batch_start, batch_stop)):
+                raise ValueError("validation batch does not match its contiguous range")
+            observed_indices.extend(indices)
             produced += 1
-            if self._cursor == 0 and active_cursor == self.n_shards - 1:
-                break
+            yield batch
+        if observed_indices == list(range(start, stop)):
+            self._last_validation_range = validation_range_row(
+                split=self.split,
+                rank=self.rank,
+                start=start,
+                stop=stop,
+                jet_ids=self.hlt_view.jet_ids,
+            )
+
+    @property
+    def last_validation_range(self):
+        return self._last_validation_range
 
     def state_dict(self) -> dict[str, Any]:
+        cursor = self._cursor_state()
         return {
-            "contract": ABPH_PRODUCTION_RUNTIME_CONTRACT,
+            "contract": ABPH_DISTRIBUTED_TARGET_SOURCE_STATE_CONTRACT,
             "split": self.split,
             "grouping": self.grouping,
-            "epoch": self._epoch,
-            "cursor": self._cursor,
-            "offset": self._offset,
-            "batches_seen": self._batches_seen,
-            "order": list(self._order),
+            "batch_size": int(self.batch_size),
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "runtime_contract_hash": self.runtime_contract_hash,
+            "rank_batch_counter": self._batches_seen,
+            "global_cursor": cursor.to_dict(),
+            "next_plan_cursor": cursor.to_dict(),
+            "last_completed_plan": (
+                None
+                if self._last_completed_plan is None
+                else self._last_completed_plan.to_dict()
+            ),
         }
 
     def load_state_dict(self, payload: Mapping[str, Any]) -> None:
-        if payload.get("contract") != ABPH_PRODUCTION_RUNTIME_CONTRACT:
+        if payload.get("contract") != ABPH_DISTRIBUTED_TARGET_SOURCE_STATE_CONTRACT:
             raise ValueError("target batch-source checkpoint contract mismatch")
         if payload.get("split") != self.split or payload.get("grouping") != self.grouping:
             raise ValueError("target batch-source split/grouping mismatch")
-        self._epoch = int(payload["epoch"])
-        self._cursor = int(payload["cursor"])
-        self._offset = int(payload["offset"])
-        self._batches_seen = int(payload.get("batches_seen", 0))
-        self._order = [int(value) for value in payload["order"]]
-        if sorted(self._order) != list(range(self.n_shards)):
-            raise ValueError("target batch-source shard order is invalid")
+        if int(payload.get("rank", -1)) != self.rank or int(
+            payload.get("world_size", -1)
+        ) != self.world_size:
+            raise ValueError("target batch-source rank topology mismatch")
+        if payload.get("runtime_contract_hash") != self.runtime_contract_hash:
+            raise ValueError("target batch-source runtime contract mismatch")
+        saved_batch_size = int(payload.get("batch_size", self.batch_size))
+        if saved_batch_size <= 0:
+            raise ValueError("target batch-source checkpoint batch size is invalid")
+        self.batch_size = saved_batch_size
+        cursor = GlobalBatchCursor.from_dict(payload["global_cursor"])
+        next_cursor = GlobalBatchCursor.from_dict(payload["next_plan_cursor"])
+        if cursor != next_cursor:
+            raise ValueError("checkpoint global cursor differs from the exact next-plan cursor")
+        self._epoch = cursor.epoch
+        self._cursor = cursor.shard_cursor
+        self._offset = cursor.shard_offset
+        self._global_stream_position = cursor.global_stream_position
+        self._order = list(cursor.shard_order)
+        self._batches_seen = int(payload.get("rank_batch_counter", 0))
+        raw_plan = payload.get("last_completed_plan")
+        self._last_completed_plan = (
+            None if raw_plan is None else GlobalBatchPlan.from_dict(raw_plan)
+        )
+        if (
+            self._last_completed_plan is not None
+            and self._last_completed_plan.next_cursor != cursor
+        ):
+            raise ValueError("checkpoint plan does not lead to the saved next cursor")
         self._active = None
+        self._active_shard_id = None
 
 
 class _ParameterGroup:
@@ -453,6 +706,16 @@ class AdaptiveBinaryReconstructionOutput:
     hlt_support_features: Any
     hierarchy_output: MultiHypothesisHierarchyOutput
     rendered_views: Mapping[str, tuple[RenderedParticleBatch, ...]]
+
+
+@dataclass(frozen=True)
+class HypothesisRenderBundle:
+    """An ordered hypothesis subset and the exact particle objects it rendered."""
+
+    latent_set: HypothesisLatentSet
+    hypotheses: tuple[HierarchyHypothesis, ...]
+    rendered_views: Mapping[str, tuple[RenderedParticleBatch, ...]]
+    hypothesis_indices: tuple[int, ...]
 
 
 class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
@@ -616,19 +879,24 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         return state.tokens, jet, logits
 
     def prepare_shared_reconstruction_forward(
-        self, hlt_tokens: Any, hlt_mask: Any
+        self,
+        hlt_tokens: Any,
+        hlt_mask: Any,
+        *,
+        runtime_profiler: RuntimeProfiler | None = None,
     ) -> Mapping[str, Any]:
         """Compile the one root graph consumed by every hierarchy branch."""
 
-        torch = require_torch()
-        tokens = torch.as_tensor(hlt_tokens).float()
-        mask = torch.as_tensor(hlt_mask, device=tokens.device).bool()
-        particle_embeddings, jet_embedding, _ = self.encode_hlt(tokens, mask)
-        prediction = self.root_predictor(
-            particle_embeddings, mask, jet_embedding=jet_embedding
-        )
-        compiled = compile_root_state(prediction, tokens, mask)
-        support, axis_eta, axis_phi = self._support_features(tokens, mask)
+        with profile_span(runtime_profiler, "hlt_encode_root_compile"):
+            torch = require_torch()
+            tokens = torch.as_tensor(hlt_tokens).float()
+            mask = torch.as_tensor(hlt_mask, device=tokens.device).bool()
+            particle_embeddings, jet_embedding, _ = self.encode_hlt(tokens, mask)
+            prediction = self.root_predictor(
+                particle_embeddings, mask, jet_embedding=jet_embedding
+            )
+            compiled = compile_root_state(prediction, tokens, mask)
+            support, axis_eta, axis_phi = self._support_features(tokens, mask)
         return {
             "tokens": tokens,
             "mask": mask,
@@ -790,6 +1058,224 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
             results.append(compile_root_state(sampled, tokens, mask))
         return tuple(results)
 
+    def _render_hypotheses(
+        self,
+        *,
+        root_prediction: SemanticRootPrediction,
+        hypotheses: Sequence[HierarchyHypothesis],
+        particle_embeddings: Any,
+        hlt_mask: Any,
+        support: Any,
+        axis_eta: Any,
+        axis_phi: Any,
+        runtime_profiler: RuntimeProfiler | None = None,
+    ) -> Mapping[str, tuple[RenderedParticleBatch, ...]]:
+        rendered: dict[str, list[RenderedParticleBatch]] = {
+            name: [] for name in self.hierarchy_names
+        }
+        with profile_span(runtime_profiler, "particle_render_projection"):
+            for hypothesis in hypotheses:
+                hypothesis_index = int(hypothesis.identity.index)
+                for name in self.hierarchy_names:
+                    renderer_hierarchy = hypothesis.hierarchy_outputs[name]
+                    if self.global_particle_set:
+                        renderer_hierarchy = _root_only_renderer_hierarchy(
+                            renderer_hierarchy
+                        )
+                    rendered[name].append(
+                        self.renderers[name](
+                            renderer_hierarchy,
+                            root_prediction.query_tokens,
+                            particle_embeddings,
+                            hlt_mask,
+                            support,
+                            hypothesis.latent,
+                            axis_eta,
+                            axis_phi,
+                            hypothesis_index=hypothesis_index,
+                        )
+                    )
+        return {name: tuple(values) for name, values in rendered.items()}
+
+    def _prepare_deployment_latent_set(
+        self,
+        *,
+        root_state: AccountingState,
+        root_prediction: SemanticRootPrediction,
+        particle_embeddings: Any,
+        hlt_mask: Any,
+        evaluation_seed: int,
+    ) -> HypothesisLatentSet:
+        return self.hierarchy_reconstructor.prepare_deployment_hypotheses(
+            root_state,
+            root_prediction.shared_context,
+            root_prediction.query_tokens,
+            particle_embeddings,
+            hlt_mask,
+            evaluation_seed=int(evaluation_seed),
+        )
+
+    def _rollout_and_render_hypothesis_indices(
+        self,
+        *,
+        root_state: AccountingState,
+        root_prediction: SemanticRootPrediction,
+        particle_embeddings: Any,
+        hlt_mask: Any,
+        support: Any,
+        axis_eta: Any,
+        axis_phi: Any,
+        latent_set: HypothesisLatentSet,
+        hypothesis_indices: Sequence[int],
+        runtime_profiler: RuntimeProfiler | None = None,
+    ) -> HypothesisRenderBundle:
+        indices = tuple(int(value) for value in hypothesis_indices)
+        with profile_span(runtime_profiler, "rollout_hierarchy_decode"):
+            hypotheses = self.hierarchy_reconstructor.rollout_deployment_hypotheses(
+                root_state,
+                root_prediction.shared_context,
+                root_prediction.query_tokens,
+                particle_embeddings,
+                hlt_mask,
+                support,
+                latent_set=latent_set,
+                hypothesis_indices=indices,
+            )
+        rendered = self._render_hypotheses(
+            root_prediction=root_prediction,
+            hypotheses=hypotheses,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            runtime_profiler=runtime_profiler,
+        )
+        return HypothesisRenderBundle(
+            latent_set=latent_set,
+            hypotheses=hypotheses,
+            rendered_views=rendered,
+            hypothesis_indices=indices,
+        )
+
+    def rollout_and_render_hypothesis_zero(
+        self,
+        *,
+        root_state: AccountingState,
+        root_prediction: SemanticRootPrediction,
+        particle_embeddings: Any,
+        hlt_mask: Any,
+        support: Any,
+        axis_eta: Any,
+        axis_phi: Any,
+        evaluation_seed: int,
+        latent_set: HypothesisLatentSet | None = None,
+        runtime_profiler: RuntimeProfiler | None = None,
+    ) -> HypothesisRenderBundle:
+        """Create the deterministic reference view once for all phase-4 losses."""
+
+        prepared = latent_set or self._prepare_deployment_latent_set(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            evaluation_seed=evaluation_seed,
+        )
+        if int(prepared.identities[0].index) != 0:
+            raise RuntimeError("the prepared reference hypothesis is not index zero")
+        return self._rollout_and_render_hypothesis_indices(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            latent_set=prepared,
+            hypothesis_indices=(0,),
+            runtime_profiler=runtime_profiler,
+        )
+
+    def rollout_and_render_additional_hypotheses(
+        self,
+        *,
+        root_state: AccountingState,
+        root_prediction: SemanticRootPrediction,
+        particle_embeddings: Any,
+        hlt_mask: Any,
+        support: Any,
+        axis_eta: Any,
+        axis_phi: Any,
+        latent_set: HypothesisLatentSet,
+        start_index: int = 1,
+        runtime_profiler: RuntimeProfiler | None = None,
+    ) -> HypothesisRenderBundle:
+        """Render only the stochastic tail from an existing prepared latent set."""
+
+        start = int(start_index)
+        if start != 1:
+            raise ValueError("additional deployable hypotheses must begin at index one")
+        return self._rollout_and_render_hypothesis_indices(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            latent_set=latent_set,
+            hypothesis_indices=range(start, latent_set.count),
+            runtime_profiler=runtime_profiler,
+        )
+
+    def assemble_deployment_output(
+        self,
+        *,
+        root_prediction: SemanticRootPrediction,
+        compiled_root: CompiledRootState,
+        root_state: AccountingState,
+        particle_embeddings: Any,
+        jet_embedding: Any,
+        support: Any,
+        hypothesis_zero: HypothesisRenderBundle,
+        additional_hypotheses: HypothesisRenderBundle,
+    ) -> AdaptiveBinaryReconstructionOutput:
+        """Assemble the standard output while preserving hypothesis-zero identity."""
+
+        if hypothesis_zero.latent_set is not additional_hypotheses.latent_set:
+            raise ValueError("deployment bundles were built from different latent sets")
+        if hypothesis_zero.hypothesis_indices != (0,):
+            raise ValueError("the reference deployment bundle is not hypothesis zero")
+        if additional_hypotheses.hypothesis_indices != tuple(
+            range(1, hypothesis_zero.latent_set.count)
+        ):
+            raise ValueError("the additional deployment bundle is incomplete or reordered")
+        hypotheses = hypothesis_zero.hypotheses + additional_hypotheses.hypotheses
+        hierarchy = self.hierarchy_reconstructor.assemble_deployment_rollout(
+            root_state,
+            latent_set=hypothesis_zero.latent_set,
+            hypotheses=hypotheses,
+        )
+        rendered: dict[str, tuple[RenderedParticleBatch, ...]] = {}
+        for name in self.hierarchy_names:
+            zero_views = hypothesis_zero.rendered_views[name]
+            extra_views = additional_hypotheses.rendered_views[name]
+            if len(zero_views) != 1:
+                raise RuntimeError("hypothesis-zero bundle must contain one rendered view")
+            rendered[name] = zero_views + extra_views
+            if rendered[name][0] is not zero_views[0]:
+                raise RuntimeError("deployment assembly copied the hypothesis-zero view")
+        return AdaptiveBinaryReconstructionOutput(
+            root_prediction=root_prediction,
+            compiled_root=compiled_root,
+            root_state=root_state,
+            hlt_particle_embeddings=particle_embeddings,
+            hlt_jet_embedding=jet_embedding,
+            hlt_support_features=support,
+            hierarchy_output=hierarchy,
+            rendered_views=rendered,
+        )
+
     def rollout_and_render(
         self,
         *,
@@ -801,42 +1287,42 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         axis_eta: Any,
         axis_phi: Any,
         evaluation_seed: int,
+        runtime_profiler: RuntimeProfiler | None = None,
     ) -> tuple[MultiHypothesisHierarchyOutput, Mapping[str, tuple[RenderedParticleBatch, ...]]]:
-        """Render every fixed hypothesis from one already-compiled root state."""
+        """Compatibility API assembled from one reference and one tail rollout."""
 
-        hierarchy = self.hierarchy_reconstructor.deployment_rollout(
-            root_state,
-            root_prediction.shared_context,
-            root_prediction.query_tokens,
-            particle_embeddings,
-            hlt_mask,
-            support,
-            evaluation_seed=int(evaluation_seed),
+        zero = self.rollout_and_render_hypothesis_zero(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            evaluation_seed=evaluation_seed,
+            runtime_profiler=runtime_profiler,
         )
-        rendered: dict[str, list[RenderedParticleBatch]] = {
-            name: [] for name in self.hierarchy_names
+        additional = self.rollout_and_render_additional_hypotheses(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=hlt_mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            latent_set=zero.latent_set,
+            start_index=1,
+            runtime_profiler=runtime_profiler,
+        )
+        hierarchy = self.hierarchy_reconstructor.assemble_deployment_rollout(
+            root_state,
+            latent_set=zero.latent_set,
+            hypotheses=zero.hypotheses + additional.hypotheses,
+        )
+        return hierarchy, {
+            name: zero.rendered_views[name] + additional.rendered_views[name]
+            for name in self.hierarchy_names
         }
-        for hypothesis_index, hypothesis in enumerate(hierarchy.hypotheses):
-            for name in self.hierarchy_names:
-                renderer_hierarchy = hypothesis.hierarchy_outputs[name]
-                if self.global_particle_set:
-                    renderer_hierarchy = _root_only_renderer_hierarchy(
-                        renderer_hierarchy
-                    )
-                rendered[name].append(
-                    self.renderers[name](
-                        renderer_hierarchy,
-                        root_prediction.query_tokens,
-                        particle_embeddings,
-                        hlt_mask,
-                        support,
-                        hypothesis.latent,
-                        axis_eta,
-                        axis_phi,
-                        hypothesis_index=hypothesis_index,
-                    )
-                )
-        return hierarchy, {name: tuple(values) for name, values in rendered.items()}
 
     def deploy(
         self,
@@ -887,7 +1373,7 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         support = shared_forward["support"]
         axis_eta = shared_forward["axis_eta"]
         axis_phi = shared_forward["axis_phi"]
-        hierarchy, rendered = self.rollout_and_render(
+        zero = self.rollout_and_render_hypothesis_zero(
             root_state=root_state,
             root_prediction=root_prediction,
             particle_embeddings=particle_embeddings,
@@ -897,15 +1383,26 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
             axis_phi=axis_phi,
             evaluation_seed=evaluation_seed,
         )
-        return AdaptiveBinaryReconstructionOutput(
+        additional = self.rollout_and_render_additional_hypotheses(
+            root_state=root_state,
+            root_prediction=root_prediction,
+            particle_embeddings=particle_embeddings,
+            hlt_mask=mask,
+            support=support,
+            axis_eta=axis_eta,
+            axis_phi=axis_phi,
+            latent_set=zero.latent_set,
+            start_index=1,
+        )
+        return self.assemble_deployment_output(
             root_prediction=root_prediction,
             compiled_root=compiled,
             root_state=root_state,
-            hlt_particle_embeddings=particle_embeddings,
-            hlt_jet_embedding=jet_embedding,
-            hlt_support_features=support,
-            hierarchy_output=hierarchy,
-            rendered_views=rendered,
+            particle_embeddings=particle_embeddings,
+            jet_embedding=jet_embedding,
+            support=support,
+            hypothesis_zero=zero,
+            additional_hypotheses=additional,
         )
 
     def predict_deployable_batch(self, batch: Any, *, evaluation_seed: int) -> Any:
@@ -1130,6 +1627,12 @@ def reconstructor_step(
     """Typed Step-8 objective using the real compiled hierarchy and renderer."""
 
     torch = require_torch()
+    runtime_profiler = context.runtime_profiler
+    stochastic_seed = (
+        24731
+        if context.validation
+        else int(context.stochastic_seed if context.stochastic_seed is not None else 24731)
+    )
     tokens = torch.as_tensor(batch["hlt_tokens"]).float()
     mask = torch.as_tensor(batch["hlt_mask"], device=tokens.device).bool()
     targets: AdaptiveBinaryTargetBatch = batch["targets"]
@@ -1138,7 +1641,8 @@ def reconstructor_step(
         raise ValueError(
             f"requested hierarchy {hierarchy_name!r} is absent from {model.hierarchy_names}"
         )
-    target_tensors = hierarchy_targets_to_tensors(targets, device=tokens.device)
+    with profile_span(runtime_profiler, "matching_loss_construction"):
+        target_tensors = hierarchy_targets_to_tensors(targets, device=tokens.device)
     shared_forward = batch.get("shared_reconstructor_forward")
     shared_deployment = batch.get("shared_deployment_output")
     if shared_forward is not None:
@@ -1156,7 +1660,9 @@ def reconstructor_step(
         axis_eta = shared_forward["axis_eta"]
         axis_phi = shared_forward["axis_phi"]
     else:
-        shared_forward = model.prepare_shared_reconstruction_forward(tokens, mask)
+        shared_forward = model.prepare_shared_reconstruction_forward(
+            tokens, mask, runtime_profiler=runtime_profiler
+        )
         particle_embeddings = shared_forward["particle_embeddings"]
         jet_embedding = shared_forward["jet_embedding"]
         prediction = shared_forward["root_prediction"]
@@ -1180,14 +1686,18 @@ def reconstructor_step(
     root_state = AccountingState.from_ledger(
         target_tensors.root_ledger if model.oracle_root else compiled.root_ledger
     )
-    root_targets = build_root_residual_targets(tokens, mask, target_tensors.root_ledger)
-    root_loss = compute_root_losses(prediction, compiled, root_targets)
+    with profile_span(runtime_profiler, "matching_loss_construction"):
+        root_targets = build_root_residual_targets(
+            tokens, mask, target_tensors.root_ledger
+        )
+        root_loss = compute_root_losses(prediction, compiled, root_targets)
     hierarchy_supervision = []
     supervised_outputs = []
     rollout_alignment = None
     particle_loss = None
     particle_auxiliary = None
     distribution_loss = None
+    hypothesis_zero_reused = False
     tensors_to_check = [prediction.p4_residual_mean, compiled.root_ledger]
 
     if context.curriculum.phase >= 2:
@@ -1196,26 +1706,33 @@ def reconstructor_step(
             for capacity in ABPH_LEVEL_CAPACITIES
         )
         decoder = model.hierarchy_reconstructor.decoders[hierarchy_name]
-        teachers = build_teacher_parent_frontiers(target_tensors, d_model=decoder.config.d_model)
-        supervised = decoder(
-            root_state,
-            prediction.shared_context,
-            prediction.query_tokens,
-            particle_embeddings,
-            mask,
-            support,
-            mode="teacher_forced",
-            teacher_parent_frontiers=teachers,
-        )
-        if model.direct_group_set:
-            direct_group, direct_topology, direct_metrics = _one_shot_eight_group_losses(
-                model,
-                prediction,
-                compiled,
+        with profile_span(runtime_profiler, "matching_loss_construction"):
+            teachers = build_teacher_parent_frontiers(
+                target_tensors, d_model=decoder.config.d_model
+            )
+        with profile_span(runtime_profiler, "teacher_forced_hierarchy_decode"):
+            supervised = decoder(
+                root_state,
+                prediction.shared_context,
+                prediction.query_tokens,
                 particle_embeddings,
                 mask,
-                target_tensors,
+                support,
+                mode="teacher_forced",
+                teacher_parent_frontiers=teachers,
             )
+        if model.direct_group_set:
+            with profile_span(runtime_profiler, "matching_loss_construction"):
+                direct_group, direct_topology, direct_metrics = (
+                    _one_shot_eight_group_losses(
+                        model,
+                        prediction,
+                        compiled,
+                        particle_embeddings,
+                        mask,
+                        target_tensors,
+                    )
+                )
             terms = assemble_reconstruction_loss_terms(root_loss=root_loss)
             terms.update(
                 {
@@ -1242,109 +1759,197 @@ def reconstructor_step(
                     direct_group,
                 ),
             )
-        for depth, level in enumerate(supervised.levels[:depth_count]):
-            supervised_outputs.append(level)
-            hierarchy_supervision.append(
-                compute_teacher_forced_level_supervision(
-                    level,
-                    target_tensors.level_ledgers[depth],
-                    target_tensors.level_supports[depth],
-                    target_tensors.level_masks[depth],
-                    target_tensors.level_parent_indices[depth],
-                    teachers[depth].topology,
+        with profile_span(runtime_profiler, "matching_loss_construction"):
+            for depth, level in enumerate(supervised.levels[:depth_count]):
+                supervised_outputs.append(level)
+                hierarchy_supervision.append(
+                    compute_teacher_forced_level_supervision(
+                        level,
+                        target_tensors.level_ledgers[depth],
+                        target_tensors.level_supports[depth],
+                        target_tensors.level_masks[depth],
+                        target_tensors.level_parent_indices[depth],
+                        teachers[depth].topology,
+                    )
                 )
-            )
-        latent = torch.zeros(
-            tokens.shape[0], decoder.config.latent_dim, device=tokens.device, dtype=particle_embeddings.dtype
+        required_losses = active_reconstruction_loss_names(context)
+        rollout_required = bool(
+            context.mode == "rollout"
+            or context.validation
+            or context.curriculum.phase >= 3
+            or model.oracle_parent_rollout
+            or model.oracle_groups
+            or model.oracle_offline_particles
         )
-        rollout = (
-            shared_deployment.hierarchy_output.hypotheses[0].hierarchy_outputs[
-                hierarchy_name
-            ]
-            if shared_deployment is not None
-            else decoder(
-                root_state,
-                prediction.shared_context,
-                prediction.query_tokens,
-                particle_embeddings,
-                mask,
-                support,
-                mode="rollout",
-                hypothesis_latent=latent,
+        if not rollout_required and "frontier" in required_losses:
+            raise RuntimeError(
+                "the required-loss contract requested frontier supervision after "
+                "the rollout forward was declared inactive"
             )
-        )
-        active_rollout = _truncate_output(
-            supervised if model.oracle_parent_rollout else rollout,
-            depth_count,
-        )
-        active_targets = _truncate_targets(target_tensors, depth_count)
-        if model.oracle_groups and depth_count == len(ABPH_LEVEL_CAPACITIES):
-            final = active_rollout.final_frontier
-            oracle_final = replace(
-                final,
-                ledger=target_tensors.level_ledgers[-1],
-                support=target_tensors.level_supports[-1],
-                mask=target_tensors.level_masks[-1],
-                topology=target_tensors.level_topology[-1],
-                parent_indices=target_tensors.level_parent_indices[-1],
+        latent = None
+        rollout = None
+        active_rollout = None
+        hypothesis_zero_bundle = None
+        if rollout_required:
+            if shared_deployment is not None:
+                rollout = shared_deployment.hierarchy_output.hypotheses[
+                    0
+                ].hierarchy_outputs[hierarchy_name]
+            elif (
+                context.curriculum.phase >= 4
+                and not model.oracle_root
+                and not model.oracle_parent_rollout
+                and not model.oracle_groups
+                and not model.oracle_offline_particles
+            ):
+                hypothesis_zero_bundle = model.rollout_and_render_hypothesis_zero(
+                    root_state=root_state,
+                    root_prediction=prediction,
+                    particle_embeddings=particle_embeddings,
+                    hlt_mask=mask,
+                    support=support,
+                    axis_eta=axis_eta,
+                    axis_phi=axis_phi,
+                    evaluation_seed=stochastic_seed,
+                    runtime_profiler=runtime_profiler,
+                )
+                rollout = hypothesis_zero_bundle.hypotheses[0].hierarchy_outputs[
+                    hierarchy_name
+                ]
+                latent = hypothesis_zero_bundle.hypotheses[0].latent
+            else:
+                latent = torch.zeros(
+                    tokens.shape[0],
+                    decoder.config.latent_dim,
+                    device=tokens.device,
+                    dtype=particle_embeddings.dtype,
+                )
+                with profile_span(runtime_profiler, "rollout_hierarchy_decode"):
+                    rollout = decoder(
+                        root_state,
+                        prediction.shared_context,
+                        prediction.query_tokens,
+                        particle_embeddings,
+                        mask,
+                        support,
+                        mode="rollout",
+                        hypothesis_latent=latent,
+                    )
+            active_rollout = _truncate_output(
+                supervised if model.oracle_parent_rollout else rollout,
+                depth_count,
             )
-            active_rollout = replace(
-                active_rollout,
-                mode="rollout",
-                final_frontier=oracle_final,
-                diagnostics={
-                    **dict(active_rollout.diagnostics),
-                    "oracle_groups_supplied": True,
-                },
-            )
-        rollout_alignment = align_recursive_hierarchy(active_rollout, active_targets)
-        tensors_to_check.append(active_rollout.final_frontier.ledger)
+            active_targets = _truncate_targets(target_tensors, depth_count)
+            if model.oracle_groups and depth_count == len(ABPH_LEVEL_CAPACITIES):
+                final = active_rollout.final_frontier
+                oracle_final = replace(
+                    final,
+                    ledger=target_tensors.level_ledgers[-1],
+                    support=target_tensors.level_supports[-1],
+                    mask=target_tensors.level_masks[-1],
+                    topology=target_tensors.level_topology[-1],
+                    parent_indices=target_tensors.level_parent_indices[-1],
+                )
+                active_rollout = replace(
+                    active_rollout,
+                    mode="rollout",
+                    final_frontier=oracle_final,
+                    diagnostics={
+                        **dict(active_rollout.diagnostics),
+                        "oracle_groups_supplied": True,
+                    },
+                )
+            with profile_span(runtime_profiler, "matching_loss_construction"):
+                rollout_alignment = align_recursive_hierarchy(
+                    active_rollout, active_targets
+                )
+            tensors_to_check.append(active_rollout.final_frontier.ledger)
 
         if context.curriculum.phase >= 3:
+            if rollout is None or active_rollout is None or rollout_alignment is None:
+                raise RuntimeError("renderer supervision requires an active rollout")
             if depth_count != len(ABPH_LEVEL_CAPACITIES):
                 raise RuntimeError("renderer phase requires the complete depth-32 hierarchy")
             render_hierarchy = active_rollout if model.oracle_groups else rollout
             if model.global_particle_set:
                 render_hierarchy = _root_only_renderer_hierarchy(render_hierarchy)
-            rendered = (
-                shared_deployment.rendered_views[hierarchy_name][0]
-                if shared_deployment is not None
-                else model.renderers[hierarchy_name](
-                    render_hierarchy,
-                    prediction.query_tokens,
-                    particle_embeddings,
-                    mask,
-                    support,
-                    latent,
-                    axis_eta,
-                    axis_phi,
-                    hypothesis_index=0,
-                )
-            )
-            if model.renderer.config.local_matching:
-                particle_loss = compute_local_particle_matching_loss(
-                    rendered,
-                    torch.as_tensor(targets.particle_targets, device=tokens.device).float(),
-                    torch.as_tensor(targets.particle_mask, device=tokens.device).bool(),
-                    rollout_alignment.levels[-1].renderer_target_map,
-                )
+            if shared_deployment is not None:
+                rendered = shared_deployment.rendered_views[hierarchy_name][0]
+            elif hypothesis_zero_bundle is not None:
+                rendered = hypothesis_zero_bundle.rendered_views[hierarchy_name][0]
             else:
-                particle_loss = compute_global_particle_matching_loss(
+                if latent is None:
+                    raise RuntimeError("renderer supervision lacks its hypothesis latent")
+                with profile_span(runtime_profiler, "particle_render_projection"):
+                    rendered = model.renderers[hierarchy_name](
+                        render_hierarchy,
+                        prediction.query_tokens,
+                        particle_embeddings,
+                        mask,
+                        support,
+                        latent,
+                        axis_eta,
+                        axis_phi,
+                        hypothesis_index=0,
+                    )
+            with profile_span(runtime_profiler, "matching_loss_construction"):
+                if model.renderer.config.local_matching:
+                    particle_loss = compute_local_particle_matching_loss(
+                        rendered,
+                        torch.as_tensor(
+                            targets.particle_targets, device=tokens.device
+                        ).float(),
+                        torch.as_tensor(
+                            targets.particle_mask, device=tokens.device
+                        ).bool(),
+                        rollout_alignment.levels[-1].renderer_target_map,
+                    )
+                else:
+                    particle_loss = compute_global_particle_matching_loss(
+                        rendered,
+                        torch.as_tensor(
+                            targets.particle_targets, device=tokens.device
+                        ).float(),
+                        torch.as_tensor(
+                            targets.particle_mask, device=tokens.device
+                        ).bool(),
+                    )
+                particle_auxiliary = compute_particle_auxiliary_losses(
                     rendered,
                     torch.as_tensor(targets.particle_targets, device=tokens.device).float(),
                     torch.as_tensor(targets.particle_mask, device=tokens.device).bool(),
                 )
-            particle_auxiliary = compute_particle_auxiliary_losses(
-                rendered,
-                torch.as_tensor(targets.particle_targets, device=tokens.device).float(),
-                torch.as_tensor(targets.particle_mask, device=tokens.device).bool(),
-            )
             tensors_to_check.append(rendered.four_vector)
 
             if context.curriculum.phase >= 4:
                 if shared_deployment is not None:
                     deployment_hierarchy = shared_deployment.hierarchy_output
                     deployment_views = shared_deployment.rendered_views
+                elif hypothesis_zero_bundle is not None:
+                    additional = model.rollout_and_render_additional_hypotheses(
+                        root_state=root_state,
+                        root_prediction=prediction,
+                        particle_embeddings=particle_embeddings,
+                        hlt_mask=mask,
+                        support=support,
+                        axis_eta=axis_eta,
+                        axis_phi=axis_phi,
+                        latent_set=hypothesis_zero_bundle.latent_set,
+                        start_index=1,
+                        runtime_profiler=runtime_profiler,
+                    )
+                    deployment = model.assemble_deployment_output(
+                        root_prediction=prediction,
+                        compiled_root=compiled,
+                        root_state=root_state,
+                        particle_embeddings=particle_embeddings,
+                        jet_embedding=jet_embedding,
+                        support=support,
+                        hypothesis_zero=hypothesis_zero_bundle,
+                        additional_hypotheses=additional,
+                    )
+                    deployment_hierarchy = deployment.hierarchy_output
+                    deployment_views = deployment.rendered_views
                 else:
                     deployment_hierarchy, deployment_views = model.rollout_and_render(
                         root_state=root_state,
@@ -1354,9 +1959,16 @@ def reconstructor_step(
                         support=support,
                         axis_eta=axis_eta,
                         axis_phi=axis_phi,
-                        evaluation_seed=24731,
+                        evaluation_seed=stochastic_seed,
+                        runtime_profiler=runtime_profiler,
                     )
                 rendered_hypotheses = deployment_views[hierarchy_name]
+                hypothesis_zero_reused = rendered_hypotheses[0] is rendered
+                if not hypothesis_zero_reused:
+                    raise RuntimeError(
+                        "phase-4 particle and distribution paths did not share the "
+                        "exact rendered hypothesis-zero object"
+                    )
                 latent_context = model.hierarchy_reconstructor.encode_deployment_context(
                     root_state,
                     prediction.shared_context,
@@ -1365,16 +1977,19 @@ def reconstructor_step(
                     mask,
                 )
                 posterior = model.hierarchy_reconstructor.latent_model.training_posterior_sample(
-                    latent_context, target_tensors, seed=24731
+                    latent_context, target_tensors, seed=stochastic_seed
                 )
                 observables = _distribution_observables(rendered_hypotheses[1:])
-                distribution_loss = compute_distribution_losses(
-                    posterior,
-                    observables,
-                    _target_distribution_observables(targets, tokens.device),
-                    split_negative_log_likelihood=rollout_alignment.total_frontier_loss,
-                    particle_negative_log_likelihood=particle_loss.total,
-                )
+                with profile_span(runtime_profiler, "matching_loss_construction"):
+                    distribution_loss = compute_distribution_losses(
+                        posterior,
+                        observables,
+                        _target_distribution_observables(targets, tokens.device),
+                        split_negative_log_likelihood=(
+                            rollout_alignment.total_frontier_loss
+                        ),
+                        particle_negative_log_likelihood=particle_loss.total,
+                    )
                 tensors_to_check.append(
                     deployment_hierarchy.hypotheses[0]
                     .hierarchy_outputs[hierarchy_name]
@@ -1409,6 +2024,8 @@ def reconstructor_step(
         "hierarchy_constraints_in_loss": model.constrained_hierarchy,
         "unconstrained_raw_child_heads": not model.constrained_hierarchy,
         "hierarchy_name": hierarchy_name,
+        "rollout_forward_executed": bool(rollout_required),
+        "hypothesis_zero_reused": bool(hypothesis_zero_reused),
     }
     return ReconstructorStepResult(
         loss_terms=terms,
@@ -1534,6 +2151,7 @@ __all__ = [
     "AdaptiveBinaryReconstructionOutput",
     "AdaptiveBinaryReconstructorModel",
     "AdaptiveBinaryTargetBatchSource",
+    "HypothesisRenderBundle",
     "reconstructor_runtime_provenance",
     "reconstructor_step",
     "package_trainable_pseudo_views",
