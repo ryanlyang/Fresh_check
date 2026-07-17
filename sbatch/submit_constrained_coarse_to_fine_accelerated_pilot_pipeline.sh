@@ -24,9 +24,14 @@ fresh_activate_env
 : "${CONSTRAINED_C2F_SBATCH_PARTITION:=}"
 : "${CONSTRAINED_C2F_CALIBRATION_CPUS:=16}"
 : "${CONSTRAINED_C2F_CALIBRATION_MEM:=300G}"
+: "${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID:=}"
 
 fresh_require_file "${CONSTRAINED_C2F_PARENT_MANIFEST_PATH}"
-if ! fresh_is_dry_run && [[ -e "${CONSTRAINED_C2F_CALIBRATION_ROOT}" ]]; then
+if [[ -n "${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID}" ]] && [[ ! "${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID}" =~ ^[0-9]+$ ]]; then
+  echo "CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID must be a Slurm job id" >&2
+  exit 2
+fi
+if [[ -z "${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID}" ]] && ! fresh_is_dry_run && [[ -e "${CONSTRAINED_C2F_CALIBRATION_ROOT}" ]]; then
   echo "Refusing to reuse an existing calibration root: ${CONSTRAINED_C2F_CALIBRATION_ROOT}" >&2
   exit 2
 fi
@@ -41,16 +46,22 @@ export CONSTRAINED_C2F_ACCELERATED_CANDIDATE_PATH CONSTRAINED_C2F_ACCELERATED_PI
 export CONSTRAINED_C2F_RUNTIME_PIPELINE_SUBMISSION CONSTRAINED_C2F_GPU_MEMORY_GB
 export CONSTRAINED_C2F_PARENT_MANIFEST_PATH CONSTRAINED_C2F_SBATCH_ACCOUNT CONSTRAINED_C2F_SBATCH_PARTITION
 export CONSTRAINED_C2F_CALIBRATION_CPUS CONSTRAINED_C2F_CALIBRATION_MEM
+export CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID
 
 if fresh_is_dry_run; then
-  echo "Would submit calibration, then a dependency controller that submits benchmarks, the candidate, and the accelerated pilot."
+  echo "Would attach to calibration when CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID is set; otherwise submit calibration, then a dependency controller that submits benchmarks, the candidate, and the accelerated pilot."
   exit 0
 fi
 
-calibration_output="$(bash "${SCRIPT_DIR}/submit_constrained_coarse_to_fine_runtime_calibration.sh")"
-printf '%s\n' "${calibration_output}"
-calibration_job_id="$(printf '%s\n' "${calibration_output}" | awk '/Submitted batch job/ {print $NF; exit}')"
-[[ "${calibration_job_id}" =~ ^[0-9]+$ ]] || { echo "Could not parse calibration job id" >&2; exit 2; }
+if [[ -n "${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID}" ]]; then
+  calibration_job_id="${CONSTRAINED_C2F_EXISTING_CALIBRATION_JOB_ID}"
+  echo "Attaching to existing calibration job ${calibration_job_id}"
+else
+  calibration_output="$(bash "${SCRIPT_DIR}/submit_constrained_coarse_to_fine_runtime_calibration.sh")"
+  printf '%s\n' "${calibration_output}"
+  calibration_job_id="$(printf '%s\n' "${calibration_output}" | awk '/Submitted batch job/ {print $NF; exit}')"
+  [[ "${calibration_job_id}" =~ ^[0-9]+$ ]] || { echo "Could not parse calibration job id" >&2; exit 2; }
+fi
 
 printf 'stage\tjob_id\ncalibration\t%s\n' "${calibration_job_id}" > "${CONSTRAINED_C2F_RUNTIME_PIPELINE_SUBMISSION}"
 
