@@ -126,9 +126,18 @@ Execution rules:
    Hungarian cost construction, uncertainty NLL, and total-loss aggregation is
    explicitly converted to FP32 inside a disabled autocast region.
 5. Gradients flow through the FP32 casts back to the BF16-forward activations.
-6. BF16 does not use gradient scaling. FP16, if retained for diagnostics, uses
-   the existing scaler path.
-7. All finite checks remain mandatory before optimizer step.
+6. The trainer carries three separate precision states:
+
+   ```text
+   autocast_enabled
+   autocast_dtype
+   grad_scaler_enabled
+   ```
+
+   `autocast_enabled` is true for BF16 and FP16 forward modes.
+   `grad_scaler_enabled` is true only for FP16. BF16 executes backward,
+   unscaling checks, clipping, and optimizer step without a scaler.
+7. All finite checks remain mandatory before optimizer step in every mode.
 
 The explicit FP32 conversion matters. Merely exiting an autocast context does
 not promote already-produced BF16 tensors. The implementation needs a small
@@ -146,7 +155,9 @@ model_parameter_dtype
 optimizer_state_dtype
 loss_dtype
 matching_cost_dtype
-AMP/scaler enabled state
+autocast enabled state
+autocast dtype
+gradient scaler enabled state
 finite-batch and skipped-batch counts
 ```
 
@@ -198,13 +209,14 @@ backward, optimizer step, and validation batch. A candidate is rejected if
 its peak reserved memory exceeds 80 percent of the physical GPU memory or if
 it produces any out-of-memory event.
 
-### Learning-Rate Calibration
+### Shared Optimizer Schedule Calibration
 
 The current constant learning rate is `2e-4` for the reconstructor parameter
 group and `0.05 * 2e-4` for the HLT encoder group. Large-batch optimization
 must not blindly use linear LR scaling.
 
-For every selected physical batch family, evaluate:
+Evaluate the following candidate schedule settings across the representative
+variants:
 
 ```text
 peak reconstructor LR: 2e-4, 4e-4, 6e-4
@@ -214,26 +226,53 @@ gradient clip norm: unchanged
 loss weights and matcher hyperparameters: unchanged
 ```
 
-The selected peak learning rate is the highest stable candidate that passes
-the validation criteria below. If a larger-batch candidate fails, the runner
-falls back to the lower accepted batch size. It must never silently substitute
-a different LR or batch after a failure.
+The calibration selects one shared optimizer schedule for all comparable
+C-tier architecture variants:
+
+```text
+C0, C1, C2, C3, C4, C5,
+C5-B1, C5-B2, C5-B3, C5-no-slot, and Cdirect-unconstrained
+```
+
+That shared contract includes peak LR, HLT encoder LR cap, warmup fraction,
+minimum LR ratio, maximum epochs, minimum epochs, and early-stop patience.
+It prevents an architecture comparison from silently becoming an LR comparison.
+
+C6 may use a different physical batch size because it renders four views and
+has a different activation footprint. C4 may use a different Hungarian worker
+count. Neither exception permits a variant-specific LR or schedule. Any run
+that intentionally uses a different optimizer schedule is a separately named
+schedule ablation and is excluded from primary C-tier architecture rankings.
+
+If a larger-batch candidate fails, the runner falls back to the lower accepted
+batch size while retaining the same approved shared optimizer schedule. It
+must never silently substitute a different LR or batch after a failure.
 
 ## Input Pipeline Plan
 
 The data path already uses pinned host memory and nonblocking device transfers.
-Keep both. Add the following only when `num_workers > 0`:
+Keep both. The current trainer creates, consumes, and discards one DataLoader
+per target shard. Consequently, `persistent_workers=True` cannot preserve
+workers across shard boundaries and is not part of the initial accelerated
+profile.
+
+The immediate, objective-preserving input-pipeline candidate is:
 
 ```text
-persistent_workers=True
 prefetch_factor=2
 deterministic worker initialization derived from run seed, epoch, and shard
 ```
 
-The C2F trainer builds one DataLoader per target shard. Worker persistence
-therefore does not eliminate every worker startup, but it should reduce
-avoidable churn within a shard and overlap future batch preparation with GPU
-execution.
+Apply `prefetch_factor` only when `num_workers > 0`. It is benchmarked, not
+assumed beneficial. High-data currently defaults to zero workers for memory
+safety, so worker-count selection must include that reference.
+
+A cross-shard persistent-worker loader is an optional later optimization, not
+a prerequisite for `accelerated_campaign_v1`. It requires a single
+manifest-ordered iterable dataset that opens one target shard at a time while
+retaining worker processes across boundaries. It may be implemented only with
+tests proving exactly the same row identities, shard order, balanced shuffle,
+and epoch seeding as the current loader.
 
 Benchmark worker counts:
 
@@ -364,19 +403,35 @@ multi-view activation pressure, and CPU hard assignment.
 
 ### Fixed Calibration Data
 
-Build a deterministic, manifest-bound calibration slice from existing
+Build a deterministic, manifest-bound calibration slice from campaign
 `model_train` and `model_val` rows:
 
 ```text
 calibration model_train: 50,000 balanced jets
 calibration model_val: 30,000 balanced jets
 no stack or final-test rows
-same HLT/offline/target caches as the campaign
 fixed row identifiers written to calibration_manifest.json
 ```
 
-Run three epochs for the calibration. This is long enough to detect obvious
-optimization divergence while remaining far cheaper than a full campaign.
+The calibration slice must use its own derived artifact set:
+
+```text
+calibration_manifest.json.gz
+calibration_hlt_cache/
+calibration_offline_cache/
+calibration_targets/
+```
+
+These artifacts are built from the calibration manifest with the same raw
+dataset, HLT profile, HLT strength, target-builder version, layout, and cache
+validation rules as the parent campaign. They are not the full campaign cache
+directories paired with a subset manifest. Each derived cache must record and
+be validated against the calibration manifest hash, row count, labels, and jet
+identity hash before training starts.
+
+The three-epoch calibration is only a numerical and early-learning screen. It
+does not certify that a compressed ten-epoch schedule reproduces the eventual
+selection behavior of the 30-epoch reference.
 
 ### Benchmark Matrix
 
@@ -407,10 +462,10 @@ same target counts, matched-slot counts, and assignment cardinalities
 The exact threshold is applied only to stable non-near-zero components. Tiny
 denominators use an absolute tolerance recorded alongside the result.
 
-### Reconstruction Non-Inferiority Gate
+### Three-Epoch Reconstruction Gate
 
-Candidates C and D are accepted only when, after three fixed calibration
-epochs:
+Candidates C and D may advance to full schedule certification only when, after
+three fixed calibration epochs:
 
 ```text
 model_val reconstruction score is no worse than 1 percent relative to A
@@ -420,8 +475,44 @@ no new nonfinite batches are observed
 peak reserved GPU memory remains at or below the configured safety cap
 ```
 
-If more than one candidate passes, choose the highest jets/s candidate. If no
-candidate passes, retain the current FP32 profile for that execution family.
+If more than one candidate passes, retain the highest-throughput candidate for
+the next certification stage. If no candidate passes, retain the current FP32
+profile for that execution family.
+
+### Full Ten-Epoch Schedule Certification
+
+Before approving `accelerated_campaign_v1`, perform a full-scale pilot
+comparison for the two reconstructor paths that matter most to downstream
+tagging:
+
+```text
+C5-B3
+C6
+```
+
+For each path, run the accepted accelerated configuration for all ten planned
+epochs on the full pilot manifest and the full pilot HLT/offline/target caches.
+Compare it to a full-pilot FP32 reference with the same architecture, data,
+seed contract, and validation metric. The reference may be an already-complete
+or still-completing `fp32_reference` campaign artifact only if its provenance
+and runtime profile validate exactly.
+
+The ten-epoch candidate must report:
+
+```text
+per-epoch model-val reconstruction scores through epoch 10
+best model-val score through epoch 10
+all named reconstruction diagnostics
+wall time, optimizer steps, and resource telemetry
+```
+
+It is accepted only when it is non-inferior to the FP32 reference at the same
+ten-epoch horizon under the documented reconstruction thresholds. When the
+30-epoch FP32 reference completes, compare the accelerated best score with its
+eventual best score before using the profile for a primary high-data claim.
+Until that comparison exists, the accelerated profile may be used for a pilot
+runtime study but is not represented as proven equivalent to the eventual
+30-epoch reference.
 
 ### Tagger Sanity Gate
 
@@ -452,7 +543,8 @@ bf16_calibration
 
 accelerated_campaign_v1
   benchmark-approved batch, workers, precision, Hungarian workers,
-  peak LR, warmup, cosine floor, max epochs, minimum epochs, and patience
+  one shared C-tier peak LR, warmup, cosine floor, max epochs,
+  minimum epochs, and patience
 ```
 
 Every output root must include the selected profile in its name and metadata,
@@ -522,12 +614,16 @@ hash in every checkpoint and report.
 Add typed autocast helpers and FP32 output-casting helpers. Keep the complete
 hierarchy and slot loss path in FP32. Add tests for finite BF16 forward output,
 FP32 loss tensors, correct gradient flow, and FP32-reference component parity.
+Represent autocast enablement, autocast dtype, and scaler enablement as three
+separate states; enable the scaler only for FP16.
 
 ### Step 3: Improve DataLoader Overlap Safely
 
-Add deterministic persistent-worker and prefetch support. Preserve shard order,
-row identities, epoch seeding, and balanced shuffle semantics. Add tests for
-identical row membership/order contracts across worker configurations.
+Add deterministic prefetch support for the existing per-shard loader. Preserve
+shard order, row identities, epoch seeding, and balanced shuffle semantics.
+Do not claim cross-shard persistence from `persistent_workers` unless a later
+single-loader streaming implementation is added and passes identical
+membership/order tests.
 
 ### Step 4: Parallelize C4 Without Changing Its Objective
 
@@ -544,8 +640,10 @@ LR profile as the reference control.
 
 ### Step 6: Build the Calibration-Slice Producer
 
-Create the deterministic manifest-bound 50k/30k calibration slice, its
-provenance metadata, and a validator that rejects cache or target mismatches.
+Create the deterministic manifest-bound 50k/30k calibration slice and build
+derived HLT, offline, and target caches for that manifest. Write provenance
+metadata and a validator that rejects calibration-manifest/cache/target
+mismatches.
 
 ### Step 7: Build the Throughput Benchmark Runner
 
@@ -555,8 +653,10 @@ reconstruction, resource, and timing telemetry needed for profile selection.
 ### Step 8: Enforce Profile Acceptance and Selection
 
 Implement a report writer that applies the numerical and non-inferiority gates,
-selects the fastest passing configuration per execution family, and writes an
-immutable `accelerated_campaign_v1` profile artifact.
+selects execution-only settings per family, selects one shared optimizer
+schedule for primary C-tier comparisons, and writes an immutable
+`accelerated_campaign_v1` profile artifact. Require full ten-epoch C5-B3/C6
+schedule certification before approving that artifact.
 
 ### Step 9: Add Downstream Tagger Sanity Validation
 
@@ -578,13 +678,16 @@ The focused test suite must cover:
 BF16 forward and FP32 loss dtype boundaries
 finite output/loss/gradient checks under all precision modes
 fixed-batch FP32/BF16 component and gradient parity
+separate autocast dtype and scaler-state behavior
 deterministic worker, shard, and row-order behavior
 C4 serial/threaded assignment, loss, and gradient parity
 batch-profile memory and failure handling
 step-based scheduler values and checkpoint restore
 minimum-epoch and patience semantics
 runtime-profile hash inclusion in artifact reuse checks
-calibration-manifest provenance enforcement
+derived calibration-cache provenance enforcement
+shared optimizer-profile enforcement across primary C-tier variants
+three-epoch gate and full ten-epoch schedule-certification logic
 benchmark acceptance/rejection logic
 submitter refusal without an approved profile artifact
 ```
