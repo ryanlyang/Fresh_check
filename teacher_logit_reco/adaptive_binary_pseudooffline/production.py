@@ -198,6 +198,59 @@ def _slice_target_batch(targets: AdaptiveBinaryTargetBatch, start: int, stop: in
     )
 
 
+def _concatenate_target_batches(
+    batches: Sequence[AdaptiveBinaryTargetBatch],
+) -> AdaptiveBinaryTargetBatch:
+    if not batches:
+        raise ValueError("cannot concatenate an empty target-batch sequence")
+    if len(batches) == 1:
+        return batches[0]
+    first = batches[0]
+    layout = first.layout.to_dict()
+    level_count = len(first.level_features)
+    for batch in batches[1:]:
+        if batch.layout.to_dict() != layout:
+            raise ValueError("target batches use different hierarchy layouts")
+        if len(batch.level_features) != level_count:
+            raise ValueError("target batches use different hierarchy depths")
+
+    def concatenate(name: str) -> np.ndarray:
+        return np.concatenate(
+            [np.asarray(getattr(batch, name)) for batch in batches], axis=0
+        )
+
+    def concatenate_levels(name: str) -> tuple[np.ndarray, ...]:
+        return tuple(
+            np.concatenate(
+                [np.asarray(getattr(batch, name)[depth]) for batch in batches],
+                axis=0,
+            )
+            for depth in range(level_count)
+        )
+
+    return AdaptiveBinaryTargetBatch(
+        root_features=concatenate("root_features"),
+        root_identities=concatenate("root_identities"),
+        level_features=concatenate_levels("level_features"),
+        level_masks=concatenate_levels("level_masks"),
+        level_topology=concatenate_levels("level_topology"),
+        level_parent_indices=concatenate_levels("level_parent_indices"),
+        level_membership=concatenate_levels("level_membership"),
+        level_identities=concatenate_levels("level_identities"),
+        particle_targets=concatenate("particle_targets"),
+        particle_mask=concatenate("particle_mask"),
+        hlt_axis_eta=concatenate("hlt_axis_eta"),
+        hlt_axis_phi=concatenate("hlt_axis_phi"),
+        valid_hlt_counts=concatenate("valid_hlt_counts"),
+        valid_offline_counts=concatenate("valid_offline_counts"),
+        layout=first.layout,
+        diagnostics={
+            **dict(first.diagnostics),
+            "assembled_target_chunks": len(batches),
+        },
+    )
+
+
 class AdaptiveBinaryTargetBatchSource:
     """Stateful target-shard reader aligned to the immutable HLT cache."""
 
@@ -265,29 +318,68 @@ class AdaptiveBinaryTargetBatchSource:
             self._cursor = 0
             self._reshuffle()
 
-    def next_batch(self) -> Mapping[str, Any]:
+    def _next_batch(self, *, fill_across_shards: bool) -> Mapping[str, Any]:
         torch = require_torch()
-        shard = self._load_active()
-        local_start = self._offset
-        local_stop = min(local_start + self.batch_size, shard.targets.n_jets)
-        global_start = int(shard.start) + local_start
-        global_stop = int(shard.start) + local_stop
-        expected_ids = tuple(self.hlt_view.jet_ids[global_start:global_stop])
-        actual_ids = tuple(shard.jet_ids[local_start:local_stop])
-        if expected_ids != actual_ids:
-            raise ValueError("HLT/target batch identity alignment failed")
+        token_chunks: list[np.ndarray] = []
+        mask_chunks: list[np.ndarray] = []
+        label_chunks: list[np.ndarray] = []
+        index_chunks: list[np.ndarray] = []
+        target_chunks: list[AdaptiveBinaryTargetBatch] = []
+        remaining = self.batch_size
+
+        while remaining > 0:
+            shard = self._load_active()
+            local_start = self._offset
+            available = int(shard.targets.n_jets) - int(local_start)
+            if available <= 0:
+                self._advance_shard()
+                continue
+            take = min(remaining, available)
+            local_stop = local_start + take
+            global_start = int(shard.start) + local_start
+            global_stop = int(shard.start) + local_stop
+            expected_ids = tuple(self.hlt_view.jet_ids[global_start:global_stop])
+            actual_ids = tuple(shard.jet_ids[local_start:local_stop])
+            if expected_ids != actual_ids:
+                raise ValueError("HLT/target batch identity alignment failed")
+
+            token_chunks.append(
+                np.asarray(
+                    self.hlt_view.tokens[global_start:global_stop], dtype=np.float32
+                )
+            )
+            mask_chunks.append(
+                np.asarray(self.hlt_view.mask[global_start:global_stop], dtype=bool)
+            )
+            label_chunks.append(
+                np.asarray(self.hlt_view.labels[global_start:global_stop], dtype=np.int64)
+            )
+            index_chunks.append(np.arange(global_start, global_stop, dtype=np.int64))
+            target_chunks.append(_slice_target_batch(shard.targets, local_start, local_stop))
+
+            self._offset = local_stop
+            remaining -= take
+            if self._offset >= shard.targets.n_jets:
+                self._advance_shard()
+            if not fill_across_shards:
+                break
+
+        if not target_chunks:
+            raise RuntimeError("target source produced an empty batch")
         batch = {
-            "hlt_tokens": torch.from_numpy(np.asarray(self.hlt_view.tokens[global_start:global_stop], dtype=np.float32)),
-            "hlt_mask": torch.from_numpy(np.asarray(self.hlt_view.mask[global_start:global_stop], dtype=bool)),
-            "labels": torch.from_numpy(np.asarray(self.hlt_view.labels[global_start:global_stop], dtype=np.int64)),
-            "targets": _slice_target_batch(shard.targets, local_start, local_stop),
-            "indices": torch.arange(global_start, global_stop, dtype=torch.long),
+            "hlt_tokens": torch.from_numpy(np.concatenate(token_chunks, axis=0)),
+            "hlt_mask": torch.from_numpy(np.concatenate(mask_chunks, axis=0)),
+            "labels": torch.from_numpy(np.concatenate(label_chunks, axis=0)),
+            "targets": _concatenate_target_batches(target_chunks),
+            "indices": torch.from_numpy(np.concatenate(index_chunks, axis=0)),
         }
-        self._offset = local_stop
         self._batches_seen += 1
-        if self._offset >= shard.targets.n_jets:
-            self._advance_shard()
         return batch
+
+    def next_batch(self) -> Mapping[str, Any]:
+        # The optimizer's effective-batch contract assumes a full microbatch.
+        # Join a shard tail to the next shard rather than silently reducing it.
+        return self._next_batch(fill_across_shards=True)
 
     def iter_epoch(self) -> Iterable[Mapping[str, Any]]:
         limit = self.maximum_batches
@@ -302,7 +394,7 @@ class AdaptiveBinaryTargetBatchSource:
             if limit is not None and produced >= limit:
                 break
             active_cursor = self._cursor
-            yield self.next_batch()
+            yield self._next_batch(fill_across_shards=False)
             produced += 1
             if self._cursor == 0 and active_cursor == self.n_shards - 1:
                 break

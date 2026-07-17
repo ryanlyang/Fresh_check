@@ -18,6 +18,12 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
     _joint_reconstruction_loss,
     _selected_target_provenance,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline import production as production_module
+from teacher_logit_reco.adaptive_binary_pseudooffline.production import (
+    AdaptiveBinaryTargetBatchSource,
+    _concatenate_target_batches,
+    _slice_target_batch,
+)
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     AdaptiveBinaryReconstructorModel,
@@ -464,3 +470,81 @@ def test_primary_root_models_require_and_load_the_selected_a0_encoder(tmp_path):
     assert report["source_variant"] == "A0_hlt_part"
     assert torch.equal(target.weight, source.weight)
     assert torch.equal(target.bias, source.bias)
+
+
+def test_training_source_fills_microbatches_across_target_shards(monkeypatch):
+    tokens, mask = _hlt_batch()
+    tokens = torch.cat((tokens, tokens), dim=0).numpy()
+    mask = torch.cat((mask, mask), dim=0).numpy()
+    labels = np.arange(4, dtype=np.int64)
+    jet_ids = tuple(
+        JetIdentity(file="HToBB_010.root", entry=index, label=int(labels[index]))
+        for index in range(4)
+    )
+    base_targets = _reconstruction_batch()["targets"]
+    targets = _concatenate_target_batches((base_targets, base_targets))
+    shards = (
+        SimpleNamespace(
+            targets=_slice_target_batch(targets, 0, 3),
+            jet_ids=jet_ids[:3],
+            start=0,
+        ),
+        SimpleNamespace(
+            targets=_slice_target_batch(targets, 3, 4),
+            jet_ids=jet_ids[3:],
+            start=3,
+        ),
+    )
+    hlt_view = SimpleNamespace(
+        tokens=tokens,
+        mask=mask,
+        labels=labels,
+        jet_ids=jet_ids,
+        metadata={"hlt_content_hash": "hlt-hash"},
+    )
+    metadata = {
+        "n_shards": 2,
+        "hlt_content_hash": "hlt-hash",
+        "jet_identity_hash": production_module.jet_identity_hash(jet_ids),
+    }
+    monkeypatch.setattr(
+        production_module, "load_cached_hlt_view", lambda *_args, **_kwargs: hlt_view
+    )
+    monkeypatch.setattr(
+        production_module,
+        "load_adaptive_binary_target_cache_metadata",
+        lambda *_args, **_kwargs: metadata,
+    )
+    monkeypatch.setattr(
+        production_module,
+        "load_adaptive_binary_target_shard",
+        lambda _root, _split, _grouping, index, **_kwargs: shards[index],
+    )
+
+    training_source = AdaptiveBinaryTargetBatchSource(
+        hlt_cache_dir="unused",
+        target_cache_dir="unused",
+        split="model_train",
+        grouping="exclusive_kt",
+        batch_size=4,
+        shuffle_shards=False,
+        seed=24731,
+    )
+    batch = training_source.next_batch()
+    assert batch["hlt_tokens"].shape[0] == 4
+    assert batch["targets"].n_jets == 4
+    assert batch["indices"].tolist() == [0, 1, 2, 3]
+    assert batch["targets"].diagnostics["assembled_target_chunks"] == 2
+
+    validation_source = AdaptiveBinaryTargetBatchSource(
+        hlt_cache_dir="unused",
+        target_cache_dir="unused",
+        split="model_val",
+        grouping="exclusive_kt",
+        batch_size=4,
+        shuffle_shards=False,
+        seed=24731,
+    )
+    validation_batches = list(validation_source.iter_epoch())
+    assert [row["hlt_tokens"].shape[0] for row in validation_batches] == [3, 1]
+    assert sum(row["hlt_tokens"].shape[0] for row in validation_batches) == 4
