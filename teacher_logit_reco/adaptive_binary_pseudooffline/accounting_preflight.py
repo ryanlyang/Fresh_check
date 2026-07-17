@@ -35,7 +35,7 @@ from .targets import (
 )
 
 
-ABPH_STEP4_PREFLIGHT_CONTRACT = "adaptive_binary_pseudooffline_step4_preflight_v1"
+ABPH_STEP4_PREFLIGHT_CONTRACT = "adaptive_binary_pseudooffline_step4_preflight_v2"
 ABPH_TARGET_REPLAY_P4_TOLERANCE = 5.0e-3
 _HARD_LEDGER_NAMES: tuple[str, ...] = (
     "energy",
@@ -80,12 +80,19 @@ def neutral_binary_prediction(
 def _group_ledger(features: np.ndarray) -> np.ndarray:
     if tuple(GROUP_FEATURE_NAMES[: len(ROOT_FEATURE_NAMES)]) != tuple(ROOT_FEATURE_NAMES):
         raise RuntimeError("group target schema no longer begins with the root accounting ledger")
-    return np.asarray(features[..., : len(ROOT_FEATURE_NAMES)], dtype=np.float32)
+    # Real JetClass jets can be highly boosted. Replaying their cached float32
+    # components through an inverse boost in float32 loses the small invariant
+    # masses through cancellation, even when the cached parent/children close.
+    return np.asarray(features[..., : len(ROOT_FEATURE_NAMES)], dtype=np.float64)
 
 
 def _hard_target_residual(compiled: Any, target_children: Any) -> dict[str, float]:
     torch = require_torch()
-    target = torch.as_tensor(target_children, device=compiled.child_ledger.device).float()
+    target = torch.as_tensor(
+        target_children,
+        device=compiled.child_ledger.device,
+        dtype=compiled.child_ledger.dtype,
+    )
     residuals: dict[str, float] = {}
     for name in _HARD_LEDGER_NAMES:
         observed = compiled.child_ledger[0, :, ROOT_FEATURE_INDEX[name]]
@@ -96,9 +103,14 @@ def _hard_target_residual(compiled: Any, target_children: Any) -> dict[str, floa
 
 def _compile_target_children(parent_ledger: np.ndarray, child_ledgers: np.ndarray) -> tuple[Any, dict[str, float]]:
     torch = require_torch()
-    parent = AccountingState.from_ledger(torch.as_tensor(parent_ledger[None, :]).float())
-    children = torch.as_tensor(child_ledgers).float()
-    prediction = neutral_binary_prediction(1)
+    # This is an acceptance audit, not the mixed-precision training path. Use
+    # float64 so target phase-space inversion tests physics feasibility instead
+    # of float32 cancellation at large boosts.
+    parent = AccountingState.from_ledger(
+        torch.as_tensor(parent_ledger[None, :], dtype=torch.float64)
+    )
+    children = torch.as_tensor(child_ledgers, dtype=torch.float64)
+    prediction = neutral_binary_prediction(1, dtype=torch.float64)
     child_one_type = torch.stack(
         tuple(children[0, ROOT_FEATURE_INDEX[f"count_{name}"]].round().to(torch.long) for name in ABPH_PID_CATEGORIES)
     )[None, :]
@@ -115,7 +127,37 @@ def _compile_target_children(parent_ledger: np.ndarray, child_ledgers: np.ndarra
         child_one_charge_override=children[0, ROOT_FEATURE_INDEX["integer_charge"]].round()[None].to(torch.long),
         child_four_vector_override=child_p4,
     )
-    return result, _hard_target_residual(result, children)
+    residuals = _hard_target_residual(result, children)
+    # For an exact target override, the useful p4 audit is parent/child closure,
+    # not the intentionally identical compiled-vs-target rows.
+    for index, name in enumerate(("energy", "px", "py", "pz")):
+        residuals[name] = float(
+            (children[:, index].sum() - parent.four_vector[0, index]).abs().detach().cpu()
+        )
+    return result, residuals
+
+
+def _hard_residual_problems(
+    residuals: Mapping[str, float],
+    target_ledgers: np.ndarray,
+    *,
+    p4_tolerance: float,
+) -> list[str]:
+    """Apply scale-aware p4 tolerances while keeping discrete ledgers exact."""
+
+    problems: list[str] = []
+    targets = np.asarray(target_ledgers, dtype=np.float64)
+    for name, residual in residuals.items():
+        if name in ("energy", "px", "py", "pz"):
+            scale = float(np.max(np.abs(targets[..., ROOT_FEATURE_INDEX[name]]), initial=0.0))
+            tolerance = float(p4_tolerance) + ABPH_BINARY_P4_REL_TOLERANCE * scale
+        elif name == "minimum_mass_budget":
+            tolerance = 2.0e-6
+        else:
+            tolerance = 0.0
+        if float(residual) > tolerance:
+            problems.append(f"{name} residual {float(residual):.6g} exceeds {tolerance:.6g}")
+    return problems
 
 
 def _renderer_target_audit(
@@ -225,7 +267,7 @@ def audit_target_batch_feasibility(
             continue
         if labels is not None:
             class_counts[LABEL_NAMES[int(labels[jet_index])]] += 1
-        root_ledger = np.asarray(targets.root_features[jet_index], dtype=np.float32)
+        root_ledger = np.asarray(targets.root_features[jet_index], dtype=np.float64)
         try:
             root_state = AccountingState.from_ledger(require_torch().as_tensor(root_ledger[None, :]))
         except Exception as exc:
@@ -257,13 +299,27 @@ def audit_target_batch_feasibility(
                         problems.append(f"{prefix} depth {depth_index + 1}: terminal carry cardinality mismatch")
                         continue
                     target_child = current_ledgers[child_indices[0]]
-                    hard_residual = max(
-                        abs(float(parent_ledger[ROOT_FEATURE_INDEX[name]] - target_child[ROOT_FEATURE_INDEX[name]]))
+                    carry_residuals = {
+                        name: abs(
+                            float(
+                                parent_ledger[ROOT_FEATURE_INDEX[name]]
+                                - target_child[ROOT_FEATURE_INDEX[name]]
+                            )
+                        )
                         for name in _HARD_LEDGER_NAMES
-                    )
+                    }
+                    hard_residual = max(carry_residuals.values(), default=0.0)
                     max_hard_target_residual = max(max_hard_target_residual, hard_residual)
-                    if hard_residual > p4_tolerance:
-                        problems.append(f"{prefix} depth {depth_index + 1}: terminal carry changed hard state")
+                    carry_problems = _hard_residual_problems(
+                        carry_residuals,
+                        target_child[None, :],
+                        p4_tolerance=p4_tolerance,
+                    )
+                    if carry_problems:
+                        problems.append(
+                            f"{prefix} depth {depth_index + 1}: terminal carry changed hard state: "
+                            + "; ".join(carry_problems)
+                        )
                     continue
                 transition_count += 1
                 if child_indices.size != 2:
@@ -275,9 +331,15 @@ def audit_target_batch_feasibility(
                     compiled, residuals = _compile_target_children(parent_ledger, child_ledgers)
                     max_local = max(residuals.values(), default=0.0)
                     max_hard_target_residual = max(max_hard_target_residual, max_local)
-                    if max_local > p4_tolerance:
+                    residual_problems = _hard_residual_problems(
+                        residuals,
+                        child_ledgers,
+                        p4_tolerance=p4_tolerance,
+                    )
+                    if residual_problems:
                         problems.append(
-                            f"{prefix} depth {depth_index + 1}: compiled target residual {max_local:.6g}"
+                            f"{prefix} depth {depth_index + 1}: compiled target residual: "
+                            + "; ".join(residual_problems)
                         )
                     near_massless_groups += int(compiled.diagnostics["near_massless_count"])
                 except Exception as exc:

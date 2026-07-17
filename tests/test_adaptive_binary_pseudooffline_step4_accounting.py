@@ -291,6 +291,44 @@ def test_actual_target_hierarchy_and_renderer_replay_with_zero_failures():
     )
 
 
+def test_real_target_preflight_is_stable_for_highly_boosted_collinear_jets():
+    hlt = np.zeros((1, 128, RAW_TOKEN_DIM), dtype=np.float32)
+    offline = np.zeros_like(hlt)
+    hlt_mask = np.zeros((1, 128), dtype=bool)
+    offline_mask = np.zeros_like(hlt_mask)
+    for particle_index in range(32):
+        pid = particle_index % len(ABPH_PID_CATEGORIES)
+        pt = 4000.0 - 30.0 * particle_index
+        eta = 4.4 + 1.0e-4 * particle_index
+        phi = 1.2 + 2.0e-4 * particle_index
+        charge = (
+            (1.0 if particle_index % 2 == 0 else -1.0)
+            if pid in (0, 3, 4)
+            else 0.0
+        )
+        row = _token(pt, eta, phi, pid=pid, charge=charge)
+        hlt[0, particle_index] = row
+        offline[0, particle_index] = row
+        hlt_mask[0, particle_index] = True
+        offline_mask[0, particle_index] = True
+    targets = build_adaptive_binary_targets(
+        hlt,
+        hlt_mask,
+        offline,
+        offline_mask,
+        jet_ids=(JetIdentity(file="boosted.root", entry=0, label=0),),
+        layout=AdaptiveBinaryHierarchyLayout(grouping="exclusive_kt"),
+    )
+
+    report = audit_target_batch_feasibility(targets)
+
+    assert report["ok"], report["problems"][:10]
+    assert report["compiler_failure_count"] == 0
+    # Absolute float32 parent/child closure grows with the multi-TeV p4 scale;
+    # acceptance above is governed by the compiler's relative tolerance.
+    assert report["max_hard_target_residual"] < 1.0
+
+
 def test_synthetic_campaign_edge_matrix_covers_all_required_boundaries():
     report = synthetic_edge_case_preflight()
     assert report["ok"], report
@@ -329,6 +367,28 @@ def test_infeasible_overrides_fail_closed_without_repair():
             child_one_charge_override=torch.tensor((0,)),
             child_four_vector_override=bad_p4,
         )
+
+
+def test_feasible_four_vector_override_is_preserved_exactly():
+    parent = AccountingState.from_ledger(
+        _ledger((30.0, 0.0, 0.0, 0.0), (0, 4, 0, 0, 0, 0), 0, dtype=torch.float64)
+    )
+    target = torch.tensor(
+        [[[12.0, 3.0, 0.0, 0.0], [18.0, -3.0, 0.0, 0.0]]],
+        dtype=torch.float64,
+    )
+    compiled = compile_binary_split(
+        parent,
+        _random_prediction(1, dtype=torch.float64),
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+        child_one_count_override=torch.tensor((2,)),
+        child_one_type_counts_override=torch.tensor(((0, 2, 0, 0, 0, 0),)),
+        child_one_charge_override=torch.tensor((0,)),
+        child_four_vector_override=target,
+    )
+
+    torch.testing.assert_close(compiled.child_four_vector, target, rtol=0.0, atol=0.0)
+    assert compiled.diagnostics["phase_space_branch"] == "validated_exact_target_override"
 
 
 def test_all_relaxed_paths_have_finite_gradients():

@@ -37,7 +37,12 @@ ABPH_MASS_PRECISION_ABS_TOLERANCE = 3.0e-5
 # Float32 (E, p) loses low invariant masses through E^2-p^2 cancellation for
 # highly boosted particles. The ledger floor remains exact; this tolerance is
 # only for auditing the p4 representation of that already-compiled state.
-ABPH_MASS_PRECISION_ENERGY_FACTOR = 5.0e-5
+# Invariant mass is recovered from E^2-|p|^2, so float32 component error is
+# amplified by cancellation for boosted states. Its resolvable mass scale is
+# O(sqrt(eps_float32) * E), not O(eps_float32 * E). This bound is used only as
+# a numerical feasibility tolerance; compiled masses are still hard-bounded by
+# the discrete type budget before p4 construction.
+ABPH_MASS_PRECISION_ENERGY_FACTOR = 5.0e-4
 ABPH_AUXILIARY_ADDITIVE_NAMES: tuple[str, ...] = (
     "scalar_sum_pt",
     *(f"energy_{name}" for name in ABPH_PID_CATEGORIES),
@@ -659,6 +664,7 @@ def compile_binary_split(
         masses = floors + available[:, None] * mass_fractions[:, :2]
         direction = prediction.direction_raw[split_indices]
         collinear_fraction = torch.sigmoid(prediction.collinear_fraction_raw[split_indices])
+        target_p4 = None
         if child_four_vector_override is not None:
             target_p4 = torch.as_tensor(
                 child_four_vector_override,
@@ -682,21 +688,32 @@ def compile_binary_split(
                 (target_masses.sum(dim=-1) > parent_mass + parent_mass_tolerance).any()
             ):
                 raise ValueError("child four-vector override violates mass feasibility")
-            # Cached float32 p4 components can lose sub-MeV invariant mass through
-            # cancellation. The discrete ledger remains the authoritative floor.
-            masses = torch.maximum(target_masses, floors)
-            rest_spatial = _inverse_boost_spatial(target_p4[:, 0], parent_p4)
-            direction = rest_spatial
-            collinear_fraction = (
-                target_p4[:, 0, 0] / parent_p4[:, 0].clamp_min(1.0e-12)
-            ).clamp(1.0e-6, 1.0 - 1.0e-6)
-        p4_one, p4_two, phase_diagnostics = two_body_phase_space_split(
-            parent_p4,
-            masses,
-            direction,
-            collinear_fraction=collinear_fraction,
-        )
-        child_p4 = torch.stack((p4_one, p4_two), dim=1)
+        if target_p4 is None:
+            p4_one, p4_two, phase_diagnostics = two_body_phase_space_split(
+                parent_p4,
+                masses,
+                direction,
+                collinear_fraction=collinear_fraction,
+            )
+            child_p4 = torch.stack((p4_one, p4_two), dim=1)
+        else:
+            # An override is used only by the mandatory target-replay audit. It
+            # must preserve the already validated target p4 exactly; converting
+            # a boosted target through inverse/forward Lorentz transforms can
+            # catastrophically lose its small invariant mass through numerical
+            # cancellation and no longer tests the supplied target.
+            child_p4 = target_p4
+            target_mass = _invariant_mass(parent_p4)
+            phase_diagnostics = {
+                "near_massless_mask": target_mass <= float(ABPH_NEAR_MASSLESS_THRESHOLD_GEV),
+                "near_massless_count": int(
+                    (target_mass <= float(ABPH_NEAR_MASSLESS_THRESHOLD_GEV)).sum().detach().cpu()
+                ),
+                "branch": "validated_exact_target_override",
+                "max_four_vector_residual": float(
+                    (child_p4.sum(dim=1) - parent_p4).abs().max().detach().cpu()
+                ),
+            }
 
         parent_additive = torch.stack(
             tuple(parent.ledger[split_indices, ROOT_FEATURE_INDEX[name]] for name in ABPH_AUXILIARY_ADDITIVE_NAMES),
@@ -766,6 +783,9 @@ def compile_binary_split(
     diagnostics["joint_charge_support_nonempty"] = bool(
         joint_charge_mask_full[split_mask].any(dim=-1).all()
     ) if bool(split_mask.any()) else True
+    diagnostics["phase_space_branch"] = (
+        phase_diagnostics["branch"] if int(split_indices.numel()) else "no_split"
+    )
     if not diagnostics["ok"]:
         raise RuntimeError("binary accounting compiler failed closed: " + "; ".join(diagnostics["problems"]))
     return CompiledBinarySplit(
