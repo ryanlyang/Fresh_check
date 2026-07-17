@@ -69,6 +69,77 @@ class TypedValidationAccumulator:
             {"value": number, "n_jets": count}
         )
 
+    def add_sum(self, name: str, value: float) -> None:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"invalid sum contribution for {name}")
+        row = self.additive.setdefault(
+            str(name),
+            {
+                "kind": "sum",
+                "numerator": 0.0,
+                "denominator": 0.0,
+                "selection_eligible": False,
+                "denominator_semantics": None,
+            },
+        )
+        if row["kind"] != "sum":
+            raise ValueError(f"validation reduction schema changed for {name}")
+        row["numerator"] += number
+
+    def add_count(self, name: str, count: int) -> None:
+        value = int(count)
+        if value < 0:
+            raise ValueError(f"invalid count contribution for {name}")
+        row = self.additive.setdefault(
+            str(name),
+            {
+                "kind": "count",
+                "numerator": 0.0,
+                "denominator": 0.0,
+                "selection_eligible": False,
+                "denominator_semantics": "events",
+            },
+        )
+        if row["kind"] != "count":
+            raise ValueError(f"validation reduction schema changed for {name}")
+        row["denominator"] += value
+
+    def add_ratio(
+        self,
+        name: str,
+        numerator: float,
+        denominator: float,
+        *,
+        denominator_semantics: str,
+    ) -> None:
+        top = float(numerator)
+        bottom = float(denominator)
+        if (
+            not math.isfinite(top)
+            or not math.isfinite(bottom)
+            or bottom < 0.0
+            or not str(denominator_semantics)
+        ):
+            raise ValueError(f"invalid ratio contribution for {name}")
+        row = self.additive.setdefault(
+            str(name),
+            {
+                "kind": "ratio",
+                "numerator": 0.0,
+                "denominator": 0.0,
+                "selection_eligible": False,
+                "denominator_semantics": str(denominator_semantics),
+            },
+        )
+        if (
+            row["kind"] != "ratio"
+            or row["denominator_semantics"] != str(denominator_semantics)
+        ):
+            raise ValueError(f"validation reduction schema changed for {name}")
+        row["numerator"] += top
+        row["denominator"] += bottom
+
     def finish_batch(self, n_jets: int) -> None:
         count = int(n_jets)
         if count <= 0:
@@ -136,6 +207,7 @@ def finalize_typed_validation(
         "effective_weights": {
             str(name): float(value) for name, value in effective_weights.items()
         },
+        "teacher_forcing_probability": 0.0,
         "validation_range": (
             None
             if validation_range is None
@@ -156,6 +228,8 @@ def finalize_typed_validation(
             raise RuntimeError("required validation losses differ across ranks")
         if row["effective_weights"] != reference["effective_weights"]:
             raise RuntimeError("validation objective weights differ across ranks")
+        if float(row.get("teacher_forcing_probability", -1.0)) != 0.0:
+            raise RuntimeError("distributed validation used nonzero teacher forcing")
 
     reduced: dict[str, dict[str, Any]] = {}
     metrics: dict[str, float] = {}
@@ -255,6 +329,20 @@ def finalize_typed_validation(
         for name, row in reduced.items()
     ):
         raise RuntimeError("an unreviewed validation metric is selection eligible")
+    required = tuple(reference["required_losses"])
+    if set(reference["effective_weights"]) != set(required):
+        raise RuntimeError("validation effective weights do not cover required losses")
+    missing_required_schema = sorted(
+        name
+        for loss_name in required
+        for name in (f"loss.raw.{loss_name}", f"loss.weighted.{loss_name}")
+        if name not in reduced or reduced[name]["kind"] != "mean"
+    )
+    if missing_required_schema:
+        raise RuntimeError(
+            "required validation loss schemas are missing: "
+            + ", ".join(missing_required_schema)
+        )
     return {
         "contract": ABPH_DISTRIBUTED_VALIDATION_CONTRACT,
         "selection_score": float(selection_row["value"]),

@@ -1510,6 +1510,7 @@ def _checkpoint_payload(
     model_metadata: Mapping[str, Any],
     distributed_runtime: Mapping[str, Any] | None = None,
     rank_runtime_states: Sequence[Mapping[str, Any]] | None = None,
+    runtime_profile_hash: str | None = None,
 ) -> dict[str, Any]:
     selected = role in {"best_stage_model_val", "best_model_val"}
     rows = [dict(row) for row in (rank_runtime_states or ())]
@@ -1567,6 +1568,13 @@ def _checkpoint_payload(
         "nonfinite_updates": int(nonfinite_updates),
         "trainer_state": _jsonable(trainer_state),
         "distributed_runtime": _jsonable(distributed_runtime or {}),
+        "runtime_contracts": {
+            "distributed_runtime_contract": (
+                dict(distributed_runtime or {}).get("contract")
+            ),
+            "runtime_batch_contract_hash": config.runtime_batch_contract_hash,
+            "runtime_profile_snapshot_hash": runtime_profile_hash,
+        },
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
     }
@@ -1907,6 +1915,9 @@ def train_reconstructor_curriculum(
                     model_metadata=model_metadata,
                     distributed_runtime=distributed_runtime.to_dict(),
                     rank_runtime_states=rank_states,
+                    runtime_profile_hash=runtime_profiler.payload()[
+                        "profile_content_hash"
+                    ],
                 )
             except BaseException as exc:
                 payload_error = f"{type(exc).__name__}: {exc}"

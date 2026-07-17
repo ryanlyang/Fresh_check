@@ -190,6 +190,15 @@ def _distributed_validation_worker(rank: int, world_size: int, port: int) -> Non
             selection_eligible=True,
         )
         accumulator.add_mean("loss.raw.root", 2.0 + rank, count)
+        accumulator.add_mean("loss.weighted.root", 2.0 + rank, count)
+        accumulator.add_sum("diagnostic.total_groups", 4.0 + rank)
+        accumulator.add_count("diagnostic.accepted_groups", 2 + rank)
+        accumulator.add_ratio(
+            "diagnostic.acceptance",
+            2 + rank,
+            4 + rank,
+            denominator_semantics="groups",
+        )
         accumulator.add_non_additive("calibration.quantile", 0.2 + rank, count)
         accumulator.finish_batch(count)
         result = finalize_typed_validation(
@@ -214,6 +223,10 @@ def _distributed_validation_worker(rank: int, world_size: int, port: int) -> Non
         assert result["checkpoint_selection_eligible"] is True
         assert result["validation_coverage"]["n_jets"] == 5
         assert result["reduction_schema"]["loss.total"]["kind"] == "mean"
+        assert result["metrics"]["diagnostic.total_groups"] == 9.0
+        assert result["metrics"]["diagnostic.accepted_groups"] == 5.0
+        assert result["metrics"]["diagnostic.acceptance"] == pytest.approx(5.0 / 9.0)
+        assert result["reduction_schema"]["diagnostic.acceptance"]["kind"] == "ratio"
         assert (
             result["non_additive_diagnostics"]["calibration.quantile"][
                 "selection_eligible"
@@ -533,6 +546,8 @@ def _distributed_checkpoint_worker(rank: int, world_size: int, port: int, root: 
         assert distributed["world_size"] == 2
         assert [row["rank"] for row in distributed["rank_states"]] == [0, 1]
         assert [row["train_source_state_dict"]["cursor"] for row in distributed["rank_states"]] == [1, 1]
+        assert checkpoint["runtime_contracts"]["distributed_runtime_contract"]
+        assert checkpoint["runtime_contracts"]["runtime_profile_snapshot_hash"]
         assert (output / "run_report.json").exists()
         assert (output / "training_curves.json").exists()
     torch.distributed.barrier()
