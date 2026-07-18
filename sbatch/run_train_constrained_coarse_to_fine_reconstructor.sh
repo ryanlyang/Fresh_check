@@ -133,22 +133,42 @@ fi
 # than B-tier or single-view C-tier models.  Preserve explicit operator
 # settings, but select resource-aware defaults for unattended campaign runs.
 if [[ -z "${CONSTRAINED_C2F_RECO_BATCH_SIZE}" ]]; then
-  case "${RUN_ID}" in
-    C6) CONSTRAINED_C2F_RECO_BATCH_SIZE=8 ;;
-    C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
-      CONSTRAINED_C2F_RECO_BATCH_SIZE=16
-      ;;
-    *) CONSTRAINED_C2F_RECO_BATCH_SIZE=64 ;;
-  esac
+  if [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "bf16_exploratory_pilot_v1" ]]; then
+    case "${RUN_ID}" in
+      C6) CONSTRAINED_C2F_RECO_BATCH_SIZE=16 ;;
+      C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+        CONSTRAINED_C2F_RECO_BATCH_SIZE=32
+        ;;
+      *) CONSTRAINED_C2F_RECO_BATCH_SIZE=128 ;;
+    esac
+  else
+    case "${RUN_ID}" in
+      C6) CONSTRAINED_C2F_RECO_BATCH_SIZE=8 ;;
+      C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+        CONSTRAINED_C2F_RECO_BATCH_SIZE=16
+        ;;
+      *) CONSTRAINED_C2F_RECO_BATCH_SIZE=64 ;;
+    esac
+  fi
 fi
 if [[ -z "${CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE}" ]]; then
-  case "${RUN_ID}" in
-    C6) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=16 ;;
-    C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
-      CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=32
-      ;;
-    *) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=128 ;;
-  esac
+  if [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "bf16_exploratory_pilot_v1" ]]; then
+    case "${RUN_ID}" in
+      C6) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=32 ;;
+      C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+        CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=64
+        ;;
+      *) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=256 ;;
+    esac
+  else
+    case "${RUN_ID}" in
+      C6) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=16 ;;
+      C[0-6]|C5-B1|C5-B2|C5-B3|C5-no-slot|Cdirect-unconstrained)
+        CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=32
+        ;;
+      *) CONSTRAINED_C2F_RECO_EVAL_BATCH_SIZE=128 ;;
+    esac
+  fi
 fi
 
 OUTPUT_DIR="${CONSTRAINED_C2F_RECON_ROOT}/${CONSTRAINED_C2F_RECO_OUTPUT_ID}"

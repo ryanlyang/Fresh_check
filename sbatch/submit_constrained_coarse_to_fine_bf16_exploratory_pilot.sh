@@ -34,6 +34,19 @@ export CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT=
 export CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT=0
 export CONSTRAINED_C2F_RECO_SAVE_BEST_CHECKPOINT=1
 
+# The direct pilot is intentionally a short exploratory campaign, not the
+# certification profile. It gets a comparable six-epoch minimum, but cannot
+# spend five days on a 30-epoch reconstructor schedule.
+export CONSTRAINED_C2F_RECO_EPOCHS=10
+export CONSTRAINED_C2F_RECO_LEARNING_RATE=4.0e-4
+export CONSTRAINED_C2F_RECO_LR_SCHEDULE=warmup_cosine
+export CONSTRAINED_C2F_RECO_WARMUP_FRACTION=0.10
+export CONSTRAINED_C2F_RECO_MIN_LR_RATIO=0.05
+export CONSTRAINED_C2F_RECO_MIN_EPOCHS=6
+export CONSTRAINED_C2F_RECO_EARLY_STOP_PATIENCE=2
+export CONSTRAINED_C2F_RECO_FIXED_HORIZON=0
+export CONSTRAINED_C2F_RECO_MAX_NONFINITE_BATCHES=0
+
 if [[ -n "${CONSTRAINED_C2F_REUSE_INPUTS_ROOT}" ]]; then
   reuse_inputs_dir="${CONSTRAINED_C2F_REUSE_INPUTS_ROOT}/inputs"
   reuse_manifest="${reuse_inputs_dir}/split_manifest/split_manifest.json.gz"

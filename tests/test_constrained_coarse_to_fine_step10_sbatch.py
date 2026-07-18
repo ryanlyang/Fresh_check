@@ -859,3 +859,7 @@ def test_bf16_exploratory_pilot_wrapper_is_pilot_only_and_storage_bounded() -> N
     assert "CONSTRAINED_C2F_REUSE_INPUTS_ROOT" in wrapper
     assert "CONSTRAINED_C2F_SUBMIT_HLT_CACHE=0" in wrapper
     assert "CONSTRAINED_C2F_SUBMIT_TARGETS=0" in wrapper
+    assert "CONSTRAINED_C2F_RECO_EPOCHS=10" in wrapper
+    assert "CONSTRAINED_C2F_RECO_LEARNING_RATE=4.0e-4" in wrapper
+    assert "CONSTRAINED_C2F_RECO_MIN_EPOCHS=6" in wrapper
+    assert "CONSTRAINED_C2F_RECO_EARLY_STOP_PATIENCE=2" in wrapper
