@@ -886,6 +886,9 @@ def test_streaming_bootstrap_is_projection_and_runtime_gate_ordered() -> None:
         / "run_submit_adaptive_binary_streaming_campaign.sh"
     ).read_text(encoding="utf-8")
     assert "build_adaptive_binary_bootstrap_storage_projection.py" in submitter
+    assert "CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
+    assert "CONDA_ENV:=atlas_kd_tigris" in submitter
+    assert submitter.index("CONDA_BASE:=") < submitter.index('source "${PROJECT_DIR}/sbatch/common.sh"')
     assert "submit_adaptive_binary_runtime_batch_probes_tigris.sh" in submitter
     assert "submit_adaptive_binary_runtime_acceptance_tigris.sh" in submitter
     assert "--dependency=\"afterok:${report_job_id}\"" in submitter
@@ -912,6 +915,7 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
         REPO_ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
     ).read_text(encoding="utf-8")
     assert "--nodes=4" in submitter and "--ntasks=4" in submitter
+    assert "CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
     assert "afterok:" in submitter
     assert "probe_adaptive_binary_runtime_batch.py" in worker
     assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker

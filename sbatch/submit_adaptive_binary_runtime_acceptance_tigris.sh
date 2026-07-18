@@ -4,6 +4,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
+: "${CONDA_ENV:=atlas_kd_tigris}"
+export PROJECT_DIR CONDA_BASE CONDA_ENV
 source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_prepare_submitter
 fresh_activate_env
