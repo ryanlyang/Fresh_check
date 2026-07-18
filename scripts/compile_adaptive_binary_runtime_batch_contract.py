@@ -62,6 +62,15 @@ def main(argv: list[str] | None = None) -> int:
         measurement = FullStepBatchMeasurement.from_dict(
             json.loads(path.read_text(encoding="utf-8"))
         )
+        expected_provenance_hash = canonical_hash(provenance)
+        if measurement.variant_name != args.variant:
+            raise ValueError(f"candidate measurement variant mismatch: {path}")
+        if measurement.resolved_variant_config_hash != resolved["resolved_config_hash"]:
+            raise ValueError(f"candidate measurement config hash mismatch: {path}")
+        if measurement.runtime_provenance_hash != expected_provenance_hash:
+            raise ValueError(f"candidate measurement active-cache provenance mismatch: {path}")
+        if measurement.requested_world_size != int(args.requested_world_size):
+            raise ValueError(f"candidate measurement topology mismatch: {path}")
         if measurement.accumulation_steps != accumulation_steps:
             raise ValueError(f"candidate measurement accumulation mismatch: {path}")
         return measurement

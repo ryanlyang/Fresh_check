@@ -6,11 +6,18 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .config import canonical_hash
 from .runtime_batch import FullStepBatchMeasurement, exact_accumulation_steps
+from .runtime_batch import ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER
 
 
 def measure_full_optimizer_step(
     *,
     stage_family: str,
+    variant_name: str,
+    resolved_variant_config_hash: str,
+    runtime_provenance_hash: str,
+    slurm_job_id: str,
+    slurm_job_account: str,
+    slurm_job_partition: str,
     local_batch_size: int,
     requested_world_size: int,
     model: Any,
@@ -67,7 +74,14 @@ def measure_full_optimizer_step(
                 raise TypeError(
                     "full-step probe forward must return a tensor mapping with total_loss"
                 )
-            if not all(torch.is_tensor(value) for value in output.values()):
+            def tensor_leaves(value: Any) -> bool:
+                if isinstance(value, Mapping):
+                    return all(tensor_leaves(item) for item in value.values())
+                if isinstance(value, (tuple, list)):
+                    return all(tensor_leaves(item) for item in value)
+                return bool(torch.is_tensor(value))
+
+            if not tensor_leaves(output):
                 raise TypeError("full-step probe output mapping may contain only tensors")
             loss = output["total_loss"]
             if loss.ndim != 0 or not bool(torch.isfinite(loss)):
@@ -131,6 +145,13 @@ def measure_full_optimizer_step(
 
     return FullStepBatchMeasurement(
         stage_family=stage_family,
+        variant_name=str(variant_name),
+        resolved_variant_config_hash=str(resolved_variant_config_hash),
+        runtime_provenance_hash=str(runtime_provenance_hash),
+        measurement_producer=ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
+        slurm_job_id=str(slurm_job_id),
+        slurm_job_account=str(slurm_job_account),
+        slurm_job_partition=str(slurm_job_partition),
         local_batch_size=local,
         accumulation_steps=accumulation,
         requested_world_size=int(requested_world_size),
