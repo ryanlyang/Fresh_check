@@ -33,6 +33,15 @@ fi
 : "${ABPH_PREFLIGHT_JETS_PER_CLASS:=64}"
 export PYTHONNOUSERSITE=1
 fresh_setup
+streaming=0
+publish_source=""
+publish_destination=""
+publish_role=""
+if [[ "${ABPH_STORAGE_PROFILE}" == "streaming_30gb_v1" ]]; then
+  streaming=1
+  source "${PROJECT_DIR}/sbatch/adaptive_binary_ram_workspace.sh"
+  abph_setup_ram_workspace
+fi
 case "${ACTION}" in
   mode_preflight)
     [[ "${ABPH_STORAGE_PROFILE}" == "streaming_30gb_v1" ]] || {
@@ -40,8 +49,6 @@ case "${ACTION}" in
       exit 2
     }
     : "${ABPH_STORAGE_PROJECTION_PATH:?Streaming target-mode preflight requires ABPH_STORAGE_PROJECTION_PATH}"
-    source "${PROJECT_DIR}/sbatch/adaptive_binary_ram_workspace.sh"
-    abph_setup_ram_workspace
     mkdir -p "${ABPH_ROOT}/audits"
     cmd=("${PYTHON_BIN}" -u scripts/select_adaptive_binary_target_mode.py
       --campaign-root "${ABPH_ROOT}" --campaign-mode "${ABPH_CAMPAIGN_MODE:-pilot}"
@@ -63,14 +70,23 @@ case "${ACTION}" in
         exit 0
       fi
     fi
+    target_cache_dir="${ABPH_TARGET_CACHE_DIR}"
+    if ((streaming)); then
+      target_cache_dir="${ABPH_RAM_WORKSPACE}/targets"
+      : "${ABPH_RAM_STAGE_RESERVATION_BYTES:?Streaming target staging requires a projected RAM reservation}"
+      abph_reserve_ram_workspace "target_cache_stage" "${ABPH_RAM_STAGE_RESERVATION_BYTES}"
+      publish_source="${target_cache_dir}"
+      publish_destination="${ABPH_TARGET_CACHE_DIR}"
+      publish_role="hierarchy_target_cache"
+    fi
     cmd=("${PYTHON_BIN}" -u scripts/cache_adaptive_binary_hierarchy_targets.py
       --manifest "${ABPH_MANIFEST_PATH}" --hlt-cache-dir "${ABPH_HLT_CACHE_DIR}"
-      --offline-cache-dir "${ABPH_OFFLINE_CACHE_DIR}" --output-cache-dir "${ABPH_TARGET_CACHE_DIR}"
+      --offline-cache-dir "${ABPH_OFFLINE_CACHE_DIR}" --output-cache-dir "${target_cache_dir}"
       --splits model_train model_val --groupings exclusive_kt cambridge_aachen
       --chunk-size "${ABPH_TARGET_CHUNK_SIZE}"
       --storage-codec "${ABPH_TARGET_STORAGE_CODEC}"
       --forensic-jets-per-class "${ABPH_FORENSIC_JETS_PER_CLASS}"
-      --report "${ABPH_TARGET_CACHE_DIR}/step2_target_cache_report.json")
+      --report "${target_cache_dir}/step2_target_cache_report.json")
     fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE:-0}"
     ;;
   preflight)
@@ -86,12 +102,33 @@ case "${ACTION}" in
         --selection "${ABPH_TARGET_MODE_REPORT}" --campaign-root "${ABPH_ROOT}"
         --expected-mode rank_local_build)
     else
+      feasibility_report="${ABPH_ROOT}/audits/actual_target_feasibility.json"
+      if ((streaming)); then
+        feasibility_report="${ABPH_RAM_WORKSPACE}/target_preflight/actual_target_feasibility.json"
+        publish_source="$(dirname "${feasibility_report}")"
+        publish_destination="${ABPH_ROOT}/audits"
+        publish_role="actual_target_preflight"
+      fi
       cmd=("${PYTHON_BIN}" -u scripts/audit_adaptive_binary_step4_accounting.py
         --target-cache-dir "${ABPH_TARGET_CACHE_DIR}" --splits model_train model_val
         --groupings exclusive_kt cambridge_aachen --max-jets-per-class "${ABPH_PREFLIGHT_JETS_PER_CLASS}"
-        --report "${ABPH_ROOT}/audits/actual_target_feasibility.json")
+        --report "${feasibility_report}")
     fi
     ;;
   *) echo "Unknown ABPH target action ${ACTION}" >&2; exit 2 ;;
 esac
 fresh_run "${cmd[@]}"
+if [[ -n "${publish_source}" ]]; then
+  if [[ -n "${ABPH_RAM_STAGE_RESERVATION_ID:-}" ]]; then
+    abph_commit_ram_workspace "${publish_source}"
+  fi
+  publish_cmd=("${PYTHON_BIN}" -u scripts/publish_adaptive_binary_quota_tree.py
+    --campaign-root "${ABPH_ROOT}"
+    --source-dir "${publish_source}"
+    --destination-dir "${publish_destination}"
+    --artifact-role "${publish_role}"
+    --run-id "targets-${ACTION}-${SLURM_JOB_ID:-local}")
+  fresh_append_flag_if_enabled publish_cmd --overwrite "${OVERWRITE:-0}"
+  fresh_run "${publish_cmd[@]}"
+  abph_release_ram_workspace
+fi

@@ -26,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True)
     parser.add_argument("--output-dir")
+    parser.add_argument("--logical-output-dir")
     parser.add_argument("--confirm-final-test", action="store_true")
     parser.add_argument("--selection-report")
     parser.add_argument("--final-claim-contract")
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     config_args = {
         "campaign_root": args.campaign_root,
         "output_dir": args.output_dir,
+        "logical_output_dir": args.logical_output_dir,
         "confirm_final_test": bool(args.confirm_final_test),
     }
     if claims is not None:

@@ -270,8 +270,10 @@ def test_streaming_cache_binds_inputs_and_reassembles_order(tmp_path):
     assert metadata["checkpoint_sha256"]
     assert metadata["final_test_attestation"] == {
         "offline_inputs_loaded": False,
+        "offline_targets_loaded": False,
         "teacher_logits_loaded": False,
         "offline_target_selected_hypothesis": False,
+        "pseudo_cache_loaded_from_persistent_storage": False,
         "fusion_fitted_on_final_test": False,
     }
     assert metadata["memory_audit"]["full_prediction_materialized"] is False

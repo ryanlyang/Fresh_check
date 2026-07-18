@@ -246,6 +246,11 @@ def _sbatch_command(
     ]
     if resource.account:
         command.append(f"--account={resource.account}")
+    if job.environment.get("ABPH_SUPPRESS_SLURM_LOGS") == "1":
+        # The strict storage profile keeps scheduler-owned, unreservable streams
+        # off persistent project storage. Scientific outputs remain in the
+        # quota-managed campaign tree.
+        command.extend(("--output=/dev/null", "--error=/dev/null"))
     if job.gpu:
         command.append(f"--gres={resource.gpu_gres}")
     if dependency_ids:

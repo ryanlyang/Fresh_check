@@ -24,7 +24,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import (
     StorageProjectionRow,
     build_storage_projection,
     campaign_storage_audit,
+    cleanup_quota_managed_artifact,
     initialize_storage_accounting,
+    publish_quota_managed_file,
     release_persistent_reservation,
     require_storage_projection,
     reserve_persistent_artifact,
@@ -35,6 +37,81 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_quota_managed_file_publication_streams_ephemeral_artifact(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "campaign"
+    profile = _small_profile()
+    initialize_storage_accounting(root, profile=profile)
+    source = tmp_path / "tmpfs-simulation" / "model_train_fixed_hlt.npz"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"cache-payload" * 100)
+    destination = root / "inputs" / "hlt_cache" / source.name
+    receipt = publish_quota_managed_file(
+        root,
+        source,
+        destination,
+        artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+        artifact_role="input_hlt_cache",
+        source_provenance_hash="source-hash",
+        run_id="hlt-cache-test",
+        profile=profile,
+        copy_buffer_bytes=17,
+    )
+    assert destination.read_bytes() == source.read_bytes()
+    assert receipt["actual_bytes"] == source.stat().st_size
+    ledger = json.loads(storage_paths(root)["ledger"].read_text(encoding="utf-8"))
+    assert not ledger["active_reservations"]
+    assert str(destination.resolve()) in ledger["committed_artifacts"]
+
+
+def test_quota_managed_cleanup_requires_exact_role_and_hash(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    profile = _small_profile()
+    initialize_storage_accounting(root, profile=profile)
+    source = tmp_path / "ram" / "payload.bin"
+    source.parent.mkdir()
+    source.write_bytes(b"persistent-boundary-smoke")
+    destination = root / "storage" / "lifecycle_smoke_payload" / "payload.bin"
+    receipt = publish_quota_managed_file(
+        root,
+        source,
+        destination,
+        artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+        artifact_role="ram_lifecycle_smoke_payload",
+        source_provenance_hash="smoke-source",
+        run_id="smoke",
+        profile=profile,
+    )
+    with pytest.raises(ValueError, match="role mismatch"):
+        cleanup_quota_managed_artifact(
+            root,
+            destination,
+            expected_sha256=receipt["sha256"],
+            expected_artifact_role="wrong-role",
+            profile=profile,
+        )
+    with pytest.raises(ValueError, match="ledger hash mismatch"):
+        cleanup_quota_managed_artifact(
+            root,
+            destination,
+            expected_sha256="wrong-hash",
+            expected_artifact_role="ram_lifecycle_smoke_payload",
+            profile=profile,
+        )
+    cleanup = cleanup_quota_managed_artifact(
+        root,
+        destination,
+        expected_sha256=receipt["sha256"],
+        expected_artifact_role="ram_lifecycle_smoke_payload",
+        profile=profile,
+    )
+    assert cleanup["destination_removed"] is True
+    assert cleanup["ledger_reconciled"] is True
+    ledger = json.loads(storage_paths(root)["ledger"].read_text(encoding="utf-8"))
+    assert str(destination.resolve()) not in ledger["committed_artifacts"]
 
 
 def _projection(root: Path, path: Path, *, oversized: bool = False) -> dict:
@@ -274,6 +351,11 @@ def test_streaming_config_binds_projection_into_graph_and_manifest(tmp_path: Pat
         job.environment["ABPH_STORAGE_PROFILE"] == ABPH_STREAMING_STORAGE_PROFILE
         for job in graph
     )
+    assert all(
+        job.environment["ABPH_RAM_STAGE_RESERVATION_BYTES"]
+        == str(projection["projected_peak_persistent_bytes"])
+        for job in graph
+    )
     assert not any(job.stage == "pseudo_prediction" for job in graph)
     e5 = jobs["variant:E5_kt32_mh4_dualcross"]
     e7 = jobs["variant:E7_dual_hierarchy_dualcross"]
@@ -327,6 +409,12 @@ def test_streaming_submitter_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert payload["storage_accounting"]["profile"]["implementation_contract"] == (
         ABPH_STREAMING_STORAGE_CONTRACT
     )
+    for row in payload["submission_commands"]:
+        assert "--output=/dev/null" in row["command"]
+        assert "--error=/dev/null" in row["command"]
+        assert row["environment"]["MIRROR_DIAGNOSTICS"] == "0"
+        assert row["environment"]["LOG_DIR"].startswith("/dev/shm/")
+        assert row["environment"]["DIAGNOSTICS_ROOT"].startswith("/dev/shm/")
     assert not root.exists()
 
 

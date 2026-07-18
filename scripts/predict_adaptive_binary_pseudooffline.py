@@ -594,6 +594,7 @@ def _update_run_report(
                 "teacher_logits_loaded": False,
                 "offline_targets_loaded": False,
                 "hypothesis_selection_used_offline_target": False,
+                "pseudo_cache_loaded_from_persistent_storage": False,
                 "fusion_fitted_on_final_test": False,
             }
             if split == "final_test"
@@ -1331,6 +1332,7 @@ def _write_classifier_predictions(
                     "teacher_logits_loaded": False,
                     "offline_targets_loaded": False,
                     "hypothesis_selection_used_offline_target": False,
+                    "pseudo_cache_loaded_from_persistent_storage": False,
                     "fusion_fitted_on_final_test": False,
                 }
                 if split == "final_test"

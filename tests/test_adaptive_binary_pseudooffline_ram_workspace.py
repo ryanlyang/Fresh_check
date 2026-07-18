@@ -103,8 +103,13 @@ def test_rank_workspace_reservations_preserve_headroom_and_cleanup(tmp_path: Pat
         assert (root / name).is_dir()
 
     reservation = workspace.reserve(owner="rank2", role="target_slice", expected_bytes=3_000_000)
-    workspace.commit(reservation, measured_bytes=2_000_000)
+    stage = root / "targets" / "stage"
+    stage.mkdir()
+    (stage / "payload.bin").write_bytes(b"x" * 2_000_000)
+    assert workspace.commit_tree(reservation, stage) == 2_000_000
     assert workspace.reserved_bytes == 2_000_000
+    with pytest.raises(ValueError, match="escapes owned workspace"):
+        workspace.commit_tree(reservation, tmp_path / "unrelated")
     with pytest.raises(MemoryError, match="20% headroom"):
         workspace.reserve(owner="rank2", role="too_large", expected_bytes=6_000_001)
     workspace.release(reservation)

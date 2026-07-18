@@ -1059,8 +1059,10 @@ def generate_deployable_pseudo_view_cache(
             "evaluation_seed": int(config.evaluation_seed),
             "final_test_attestation": {
                 "offline_inputs_loaded": False,
+                "offline_targets_loaded": False,
                 "teacher_logits_loaded": False,
                 "offline_target_selected_hypothesis": False,
+                "pseudo_cache_loaded_from_persistent_storage": False,
                 "fusion_fitted_on_final_test": False,
             },
             "memory_audit": {
@@ -1176,8 +1178,10 @@ def audit_deployable_pseudo_view_cache(
     attestation = dict(metadata.get("final_test_attestation") or {})
     for name in (
         "offline_inputs_loaded",
+        "offline_targets_loaded",
         "teacher_logits_loaded",
         "offline_target_selected_hypothesis",
+        "pseudo_cache_loaded_from_persistent_storage",
         "fusion_fitted_on_final_test",
     ):
         if attestation.get(name) is not False:

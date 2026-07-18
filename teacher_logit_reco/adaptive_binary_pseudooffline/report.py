@@ -28,6 +28,7 @@ from .storage_lifecycle import (
     require_artifact_manifest,
     require_cleanup_receipt,
 )
+from .storage_acceptance import require_storage_acceptance
 from .variants import (
     ABPH_EXPECTED_VARIANT_NAMES,
     resolve_variant_config,
@@ -70,8 +71,10 @@ ABPH_ARTIFACT_PROVENANCE_FIELDS: tuple[str, ...] = (
 )
 ABPH_FINAL_TEST_ATTESTATIONS: Mapping[str, bool] = {
     "offline_inputs_loaded": False,
+    "offline_targets_loaded": False,
     "teacher_logits_loaded": False,
     "hypothesis_selection_used_offline_target": False,
+    "pseudo_cache_loaded_from_persistent_storage": False,
     "fusion_fitted_on_final_test": False,
 }
 ABPH_REQUIRED_DIAGNOSTIC_VARIANTS: tuple[str, ...] = (
@@ -290,6 +293,7 @@ def _final_claim_defaults() -> tuple[str, ...]:
 class AdaptiveBinaryCampaignReportConfig:
     campaign_root: str | Path
     output_dir: str | Path | None = None
+    logical_output_dir: str | Path | None = None
     required_variants: tuple[str, ...] = ABPH_EXPECTED_VARIANT_NAMES
     final_claim_variants: tuple[str, ...] = _final_claim_defaults()
     confirm_final_test: bool = False
@@ -402,6 +406,11 @@ def write_adaptive_binary_campaign_report(
 ) -> dict[str, Any]:
     root = Path(config.campaign_root)
     output_dir = Path(config.output_dir) if config.output_dir is not None else root / "report"
+    logical_output_dir = (
+        Path(config.logical_output_dir)
+        if config.logical_output_dir is not None
+        else output_dir
+    )
     problems: list[str] = []
     metric_rows: list[dict[str, Any]] = []
     per_class_rows: list[dict[str, Any]] = []
@@ -421,13 +430,43 @@ def write_adaptive_binary_campaign_report(
             privileged_cleanup = require_cleanup_receipt(root, "privileged")
             deployable_cleanup = require_cleanup_receipt(root, "deployable")
             projection = _read_json(root / "storage" / "storage_projection.json")
-            wave_five_audit = _read_json(
-                root / "storage" / "storage_audits" / "wave_5.json"
+            wave_audits: dict[str, Mapping[str, Any]] = {}
+            for wave in range(7):
+                audit = _read_json(
+                    root / "storage" / "storage_audits" / f"wave_{wave}.json"
+                )
+                if audit is None or audit.get("ok") is not True:
+                    problems.append(
+                        f"streaming campaign lacks a successful Wave-{wave} storage audit"
+                    )
+                    continue
+                expected_hash = canonical_hash(
+                    {key: value for key, value in audit.items() if key != "content_hash"}
+                )
+                if audit.get("content_hash") != expected_hash:
+                    problems.append(f"Wave-{wave} storage audit hash mismatch")
+                    continue
+                wave_audits[str(wave)] = audit
+            wave_six_audit = wave_audits.get("6")
+            storage_acceptance = require_storage_acceptance(
+                root / "storage" / "storage_acceptance.json",
+                campaign_root=root,
+                campaign_mode=config.campaign_mode,
             )
             if projection is None or projection.get("ok") is not True:
                 problems.append("streaming campaign lacks a successful storage projection")
-            if wave_five_audit is None or wave_five_audit.get("ok") is not True:
-                problems.append("streaming campaign lacks a successful Wave-5 storage audit")
+            measured_peak = max(
+                (
+                    int(row.get("measured_persistent_bytes", -1))
+                    for row in wave_audits.values()
+                ),
+                default=-1,
+            )
+            measured_retained = (
+                int(wave_six_audit.get("measured_persistent_bytes", -1))
+                if isinstance(wave_six_audit, Mapping)
+                else -1
+            )
             storage_lifecycle = {
                 "artifact_manifest_path": str(artifact_manifest_path(root)),
                 "artifact_manifest_hash": artifact_manifest["content_hash"],
@@ -440,7 +479,17 @@ def write_adaptive_binary_campaign_report(
                     cleanup_receipt_path(root, "deployable")
                 ),
                 "deployable_cleanup": deployable_cleanup,
-                "wave_5_storage_audit": wave_five_audit,
+                "wave_6_final_storage_audit": wave_six_audit,
+                "wave_storage_audits": wave_audits,
+                "projected_peak_persistent_bytes": projection.get(
+                    "projected_peak_persistent_bytes"
+                ),
+                "measured_peak_persistent_bytes": measured_peak,
+                "projected_final_retained_bytes": projection.get(
+                    "projected_final_retained_bytes"
+                ),
+                "measured_retained_bytes_before_quota_managed_report": measured_retained,
+                "campaign_acceptance": storage_acceptance,
             }
         except (OSError, ValueError, KeyError, TypeError) as exc:
             problems.append(f"streaming storage lifecycle is invalid: {exc}")
@@ -673,6 +722,9 @@ def write_adaptive_binary_campaign_report(
         final_metrics = _split_metrics(report, "final_test")
         if _metrics_available(final_metrics):
             attestations = _diagnostics(report, "final_test")
+            nested_attestations = attestations.get("final_test_attestation")
+            if isinstance(nested_attestations, Mapping):
+                attestations = nested_attestations
             for field, expected in ABPH_FINAL_TEST_ATTESTATIONS.items():
                 if attestations.get(field) is not expected:
                     problems.append(
@@ -714,13 +766,16 @@ def write_adaptive_binary_campaign_report(
         )
 
     outputs = {
-        "metrics_csv": str(output_dir / "metrics.csv"),
-        "per_class_metrics_csv": str(output_dir / "per_class_metrics.csv"),
-        "confusion_matrices_json": str(output_dir / "confusion_matrices.json"),
-        "provenance_csv": str(output_dir / "provenance.csv"),
-        "root_identity_csv": str(output_dir / "root_identity.csv"),
-        "fusion_membership_csv": str(output_dir / "fusion_membership.csv"),
-        "final_report_json": str(output_dir / "final_report.json"),
+        "metrics_csv": str(logical_output_dir / "metrics.csv"),
+        "per_class_metrics_csv": str(logical_output_dir / "per_class_metrics.csv"),
+        "confusion_matrices_json": str(logical_output_dir / "confusion_matrices.json"),
+        "provenance_csv": str(logical_output_dir / "provenance.csv"),
+        "root_identity_csv": str(logical_output_dir / "root_identity.csv"),
+        "fusion_membership_csv": str(logical_output_dir / "fusion_membership.csv"),
+        "final_report_json": str(logical_output_dir / "final_report.json"),
+    }
+    physical_outputs = {
+        key: str(output_dir / Path(value).name) for key, value in outputs.items()
     }
     report_payload = {
         "contract": ABPH_CAMPAIGN_REPORT_CONTRACT,
@@ -778,16 +833,16 @@ def write_adaptive_binary_campaign_report(
     report_payload["report_content_hash"] = canonical_hash(
         {key: value for key, value in report_payload.items() if key != "outputs"}
     )
-    _write_csv(Path(outputs["metrics_csv"]), metric_rows)
-    _write_csv(Path(outputs["per_class_metrics_csv"]), per_class_rows)
+    _write_csv(Path(physical_outputs["metrics_csv"]), metric_rows)
+    _write_csv(Path(physical_outputs["per_class_metrics_csv"]), per_class_rows)
     _atomic_json(
-        Path(outputs["confusion_matrices_json"]),
+        Path(physical_outputs["confusion_matrices_json"]),
         {"matrices": confusion_matrices},
     )
-    _write_csv(Path(outputs["provenance_csv"]), provenance_rows)
-    _write_csv(Path(outputs["root_identity_csv"]), root_rows)
-    _write_csv(Path(outputs["fusion_membership_csv"]), fusion_rows)
-    _atomic_json(Path(outputs["final_report_json"]), report_payload)
+    _write_csv(Path(physical_outputs["provenance_csv"]), provenance_rows)
+    _write_csv(Path(physical_outputs["root_identity_csv"]), root_rows)
+    _write_csv(Path(physical_outputs["fusion_membership_csv"]), fusion_rows)
+    _atomic_json(Path(physical_outputs["final_report_json"]), report_payload)
     return report_payload
 
 

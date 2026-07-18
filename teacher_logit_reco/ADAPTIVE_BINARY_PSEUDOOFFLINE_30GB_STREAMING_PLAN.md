@@ -49,8 +49,11 @@ accounting for their combined size. In the new primary path:
    campaign exceed 30,000,000,000 persistent bytes.
 
 The target steady-state retained footprint is at most 20 GB. The remaining 10
-GB is mandatory safety headroom for in-flight atomic writes, Slurm logs,
-diagnostics, and unexpected but bounded metadata growth.
+GB is mandatory safety headroom for in-flight atomic writes and unexpected but
+bounded metadata growth. Canonical streaming submissions send scheduler-owned
+stdout/stderr to `/dev/null`, disable persistent diagnostic mirroring, and keep
+any transient worker diagnostics in node-local memory; they therefore cannot
+bypass the campaign quota outside its root.
 
 ## 2. Why RAM Is Usable but Not Persistent
 
@@ -582,12 +585,34 @@ After every required logit block is verified:
 
 ### Wave 6: Report and retention
 
-- write the selection report;
 - retain compact selected checkpoints required for reproducibility and final
   claims;
 - optionally remove non-selected ablation checkpoints only through an explicit
   reviewed retention policy;
-- write final actual-byte accounting.
+- reconcile the quota ledger and write the mandatory final actual-byte audit;
+- only after that audit succeeds, build the selection report in rank-local
+  memory and publish every report file through exact-byte quota reservations.
+
+The report requires successful Wave 0 through Wave 6 receipts. Because its own
+publication is quota-managed, it cannot turn a successful Wave-6 audit into an
+unaccounted post-audit overshoot.
+
+All material legacy builders, including split, HLT, offline, and shared target
+cache builders, write first into a verified rank-local RAM workspace. Their
+direct `np.savez_compressed` writes are never pointed at the campaign root.
+Completed files are streamed one at a time through the shared reservation
+ledger and atomically published; concurrent HLT/offline jobs therefore share
+one preventive 30 GB boundary.
+
+Before a material HLT, offline, or shared-target builder starts, its private
+workspace reserves the projection's conservative peak byte count through the
+RAM reservation API. The reservation checks tmpfs free space, the Slurm/cgroup
+limit, and mandatory 20% headroom. The worker commits the measured completed
+tree before publication and releases the reservation only after quota-managed
+publication succeeds; insufficient tmpfs therefore fails before cache work.
+The measured tree must resolve beneath the reservation's owned workspace;
+outside paths, the workspace root itself, and symbolic-link escapes fail
+closed.
 
 No cleanup job uses broad wildcard deletion. It reads exact paths from the
 artifact manifest, resolves every path beneath the campaign root, verifies the
@@ -784,8 +809,14 @@ validation, and 30 GB Tigris submitters.
 ### Step 10: Complete parity, failure, and campaign acceptance
 
 Run codec, checkpoint, DDP, quota-race, cleanup-safety, scientific-parity, and
-runtime tests. Queue a small real-data storage smoke, then the complete pilot
-only after it stays below projected RAM and persistent-byte gates.
+runtime tests. Queue a mandatory Tigris lifecycle smoke that executes the real
+tmpfs reserve, build, measured commit, quota publication, release, and evidence
+verification path. Its payload crosses from the RAM workspace into a locked
+temporary subtree under the real campaign root; the smoke verifies the real
+quota ledger and SHA-256, then removes that exact artifact through the normal
+hash-checked cleanup contract and reconciles the ledger. The complete pilot is
+dependency-blocked until that smoke and the real-data storage checks stay below
+projected RAM and persistent-byte gates.
 
 ## 20. Files Expected to Change
 
@@ -829,8 +860,10 @@ The storage-constrained campaign is complete only when:
 3. the projected peak is at most 24 GB and final retained projection at most 20
    GB;
 4. measured persistent usage never exceeds 30,000,000,000 bytes;
-5. every concurrent writer uses an atomic quota reservation;
-6. all RAM workspaces are topology-tested and retain 20% headroom;
+5. every persistent material writer uses an atomic quota reservation, and the
+   acceptance gate rehashes the submitted Slurm I/O contract;
+6. all RAM workspaces are topology-tested, retain 20% headroom, and pass the
+   executable Tigris reserve/build/publish/release lifecycle smoke;
 7. selected checkpoints contain no duplicate training state;
 8. tagger and scoring outputs are bound to exact reconstructor/HLT identities;
 9. cleanup is dependency-controlled, hash-checked, exact-path, and receipted;

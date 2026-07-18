@@ -33,7 +33,17 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import (
     StorageProjectionRow,
     build_storage_projection,
     initialize_storage_accounting,
+    publish_quota_managed_file,
+    storage_paths,
     write_storage_projection,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.ram_workspace import (
+    RamCapacityProbe,
+    RankLocalWorkspace,
+)
+from scripts.run_adaptive_binary_ram_lifecycle_smoke import (
+    SMOKE_ARTIFACT_ROLE,
+    main as run_ram_lifecycle_smoke,
 )
 
 
@@ -71,14 +81,32 @@ def _campaign_inputs(root: Path) -> None:
     ):
         hlt.mkdir(parents=True, exist_ok=True)
         (hlt / f"{split}_fixed_hlt.npz").write_bytes(f"hlt-{split}".encode())
-        _json(hlt / f"{split}_fixed_hlt_metadata.json", {"split": split})
+        _json(
+            hlt / f"{split}_fixed_hlt_metadata.json",
+            {
+                "split": split,
+                "source_manifest_hash": "manifest",
+                "hlt_content_hash": f"hlt-hash-{split}",
+                "jet_identity_hash": f"identity-{split}",
+                "label_hash": f"labels-{split}",
+            },
+        )
     offline = root / "inputs" / "offline_cache"
     for split in ("model_train", "model_val"):
         offline.mkdir(parents=True, exist_ok=True)
         (offline / f"{split}_offline.npz").write_bytes(
             f"offline-{split}".encode()
         )
-        _json(offline / f"{split}_offline_metadata.json", {"split": split})
+        _json(
+            offline / f"{split}_offline_metadata.json",
+            {
+                "split": split,
+                "source_manifest_hash": "manifest",
+                "offline_content_hash": f"offline-hash-{split}",
+                "jet_identity_hash": f"identity-{split}",
+                "label_hash": f"labels-{split}",
+            },
+        )
     _json(
         root / "audits" / "target_mode_selection.json",
         {"selected_mode": "rank_local_build", "content_hash": "mode"},
@@ -121,7 +149,8 @@ def _target_consumer_report(path: Path, name: str = "B1") -> None:
             "provenance": {
                 "model_val": {
                     "source_manifest_hash": "manifest",
-                    "offline_cache_content_hash": "offline",
+                    "hlt_content_hash": "hlt-hash-model_val",
+                    "offline_cache_content_hash": "offline-hash-model_val",
                     "hierarchy_target_content_hash": "targets",
                 }
             },
@@ -174,6 +203,29 @@ def test_cleanup_refuses_changed_manifest_artifact(tmp_path: Path) -> None:
             root, barrier="privileged", expected_consumers=("B1",)
         )
     assert not cleanup_receipt_path(root, "privileged").exists()
+
+
+def test_consumer_receipt_is_bound_to_frozen_hlt_source(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    initialize_storage_accounting(root, profile=ABPH_STREAMING_STORAGE_PROFILE)
+    _campaign_inputs(root)
+    build_artifact_manifest(root, data_dir=tmp_path / "data")
+    report = root / "runs" / "B1" / "run_report.json"
+    _target_consumer_report(report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["provenance"]["model_val"]["hlt_content_hash"] = "other-hlt-cache"
+    _json(report, payload)
+    with pytest.raises(ValueError, match="HLT cache hash mismatch"):
+        write_consumer_receipt(root, consumer="B1", run_report=report)
+
+
+def test_privileged_cleanup_refuses_empty_consumer_membership(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    initialize_storage_accounting(root, profile=ABPH_STREAMING_STORAGE_PROFILE)
+    _campaign_inputs(root)
+    build_artifact_manifest(root, data_dir=tmp_path / "data")
+    with pytest.raises(ValueError, match="requires frozen consumer membership"):
+        execute_cleanup_barrier(root, barrier="privileged")
 
 
 def test_cleanup_intent_allows_retry_after_partial_exact_deletion(
@@ -236,8 +288,8 @@ def test_streaming_graph_has_all_waves_receipts_and_cleanup_barriers(
     )
     for member in ABPH_JOINT_TARGET_TAGGER_MEMBERS:
         assert f"receipt:{member}" in jobs
-    assert jobs["report:model_selection"].dependencies == ("wave:5",)
-    assert jobs["wave:6"].dependencies == ("report:model_selection",)
+    assert jobs["wave:6"].dependencies == ("wave:5",)
+    assert jobs["report:model_selection"].dependencies == ("wave:6",)
 
 
 def test_models_reuse_fails_after_privileged_cleanup(tmp_path: Path) -> None:
@@ -277,3 +329,132 @@ def test_streaming_tigris_wrapper_locks_profile_and_account() -> None:
     assert "ABPH_STORAGE_PROFILE:=streaming_30gb_v1" in source
     assert "ABPH_STORAGE_PROJECTION_PATH:?" in source
     assert "ABPH_RUNTIME_ACCEPTANCE_PATH:?" in source
+
+
+def test_material_streaming_writers_stage_then_quota_publish() -> None:
+    root = Path(__file__).resolve().parents[1]
+    inputs = (root / "sbatch" / "run_adaptive_binary_inputs.sh").read_text(
+        encoding="utf-8"
+    )
+    targets = (root / "sbatch" / "run_adaptive_binary_targets.sh").read_text(
+        encoding="utf-8"
+    )
+    report = (root / "sbatch" / "run_adaptive_binary_report.sh").read_text(
+        encoding="utf-8"
+    )
+    for source in (inputs, targets, report):
+        assert "abph_setup_ram_workspace" in source
+        assert "publish_adaptive_binary_quota_tree.py" in source
+    for source in (inputs, targets):
+        assert "abph_reserve_ram_workspace" in source
+        assert "abph_commit_ram_workspace" in source
+        assert "abph_release_ram_workspace" in source
+    assert 'hlt_cache_dir="${ABPH_RAM_WORKSPACE}/hlt_cache"' in inputs
+    assert 'offline_cache_dir="${ABPH_RAM_WORKSPACE}/offline_cache"' in inputs
+    assert 'target_cache_dir="${ABPH_RAM_WORKSPACE}/targets"' in targets
+    assert 'staged_report="${ABPH_RAM_WORKSPACE}/' in report
+
+
+def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
+    root = Path(__file__).resolve().parents[1]
+    worker = (root / "sbatch" / "run_adaptive_binary_storage_acceptance.sh").read_text(
+        encoding="utf-8"
+    )
+    smoke = (root / "scripts" / "run_adaptive_binary_ram_lifecycle_smoke.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ram_lifecycle_smoke)" in worker
+    ordered_actions = (
+        "abph_reserve_ram_workspace",
+        "run_adaptive_binary_ram_lifecycle_smoke.py prepare",
+        "abph_commit_ram_workspace",
+        "publish_adaptive_binary_quota_tree.py",
+        "abph_release_ram_workspace",
+        "run_adaptive_binary_ram_lifecycle_smoke.py verify",
+    )
+    positions = [worker.index(action) for action in ordered_actions]
+    assert positions == sorted(positions)
+    assert '--campaign-root "${ABPH_ROOT}"' in worker
+    assert '--destination-dir "${ABPH_ROOT}/storage/lifecycle_smoke_payload"' in worker
+    assert "workspace_filesystem_required" in smoke
+    assert "cleanup_quota_managed_artifact" in smoke
+    acceptance = (
+        root
+        / "teacher_logit_reco"
+        / "adaptive_binary_pseudooffline"
+        / "storage_acceptance.py"
+    ).read_text(encoding="utf-8")
+    assert "ABPH_RAM_LIFECYCLE_SMOKE_CONTRACT" in acceptance
+    assert '"ram_lifecycle_smoke"' in acceptance
+
+
+def test_ram_lifecycle_smoke_publishes_to_campaign_then_cleans(tmp_path: Path) -> None:
+    campaign = tmp_path / "persistent_campaign"
+    initialize_storage_accounting(campaign, profile=ABPH_STREAMING_STORAGE_PROFILE)
+    workspace_root = tmp_path / "tmpfs_simulation" / "abph-job-0"
+    probe = RamCapacityProbe(
+        root=workspace_root.parent,
+        filesystem_type="tmpfs",
+        filesystem_free_bytes=8_000_000,
+        cgroup_limit_bytes=8_000_000,
+        cgroup_current_bytes=0,
+        slurm_allocation_bytes=8_000_000,
+    )
+    workspace = RankLocalWorkspace(
+        workspace_root, job_id="job", rank=0, probe=probe
+    )
+    reservation = workspace.reserve(
+        owner="job", role="storage_lifecycle_smoke", expected_bytes=2_000_000
+    )
+    assert (
+        run_ram_lifecycle_smoke(
+            [
+                "prepare",
+                "--workspace",
+                str(workspace.root),
+                "--campaign-root",
+                str(campaign),
+            ]
+        )
+        == 0
+    )
+    stage = workspace.root / "codec_scratch" / "ram_lifecycle_stage"
+    source = stage / "payload.bin"
+    workspace.commit_tree(reservation, stage)
+    destination = campaign / "storage" / "lifecycle_smoke_payload" / "payload.bin"
+    publish_quota_managed_file(
+        campaign,
+        source,
+        destination,
+        artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+        artifact_role=SMOKE_ARTIFACT_ROLE,
+        source_provenance_hash="smoke-source",
+        run_id="smoke",
+        profile=ABPH_STREAMING_STORAGE_PROFILE,
+    )
+    workspace.release(reservation)
+    output = campaign / "storage" / "ram_lifecycle_smoke.json"
+    assert (
+        run_ram_lifecycle_smoke(
+            [
+                "verify",
+                "--workspace",
+                str(workspace.root),
+                "--campaign-root",
+                str(campaign),
+                "--output",
+                str(output),
+                "--source-git-commit",
+                "commit",
+                "--source-status-hash",
+                "status",
+            ]
+        )
+        == 0
+    )
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["persistent_publication_verified"] is True
+    assert evidence["persistent_cleanup"]["destination_removed"] is True
+    assert not destination.exists()
+    ledger = json.loads(storage_paths(campaign)["ledger"].read_text(encoding="utf-8"))
+    assert str(destination.resolve()) not in ledger["committed_artifacts"]

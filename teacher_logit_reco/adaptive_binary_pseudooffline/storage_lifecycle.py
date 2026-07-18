@@ -132,6 +132,11 @@ def build_artifact_manifest(
     if destination.exists():
         return require_artifact_manifest(root)
     artifacts: list[dict[str, Any]] = []
+    source_contracts: dict[str, dict[str, Any]] = {
+        "hlt": {},
+        "offline": {},
+        "targets": {},
+    }
     hlt_dir = root / "inputs" / "hlt_cache"
     for split in ("model_train", "model_val", "stack_train", "stack_val", "final_test"):
         metadata_path = hlt_dir / f"{split}_fixed_hlt_metadata.json"
@@ -149,12 +154,30 @@ def build_artifact_manifest(
         )
         if metadata.get("split") not in (None, split):
             raise ValueError(f"HLT metadata split mismatch for {split}")
+        source_contracts["hlt"][split] = {
+            name: metadata.get(name)
+            for name in (
+                "source_manifest_hash",
+                "hlt_content_hash",
+                "jet_identity_hash",
+                "label_hash",
+            )
+        }
 
     offline_dir = root / "inputs" / "offline_cache"
     for split in ("model_train", "model_val"):
         metadata = _read_json(offline_dir / f"{split}_offline_metadata.json")
         if metadata.get("split") not in (None, split):
             raise ValueError(f"offline metadata split mismatch for {split}")
+        source_contracts["offline"][split] = {
+            name: metadata.get(name)
+            for name in (
+                "source_manifest_hash",
+                "offline_content_hash",
+                "jet_identity_hash",
+                "label_hash",
+            )
+        }
         artifacts.append(
             _relative_entry(
                 root,
@@ -180,6 +203,15 @@ def build_artifact_manifest(
                     target_dir, split, grouping
                 )
                 metadata = _read_json(metadata_path)
+                source_contracts["targets"][f"{split}/{grouping}"] = {
+                    name: metadata.get(name)
+                    for name in (
+                        "source_manifest_hash",
+                        "offline_content_hash",
+                        "target_content_hash",
+                        "jet_identity_hash",
+                    )
+                }
                 for shard in metadata.get("shards", []):
                     path = shard_dir / str(shard["filename"])
                     entry = _relative_entry(
@@ -206,6 +238,55 @@ def build_artifact_manifest(
                         raise ValueError(f"forensic sample hash differs from metadata: {path}")
                     artifacts.append(entry)
 
+    required_source_fields = {
+        "hlt": ("source_manifest_hash", "hlt_content_hash", "jet_identity_hash"),
+        "offline": (
+            "source_manifest_hash",
+            "offline_content_hash",
+            "jet_identity_hash",
+        ),
+    }
+    for source_kind, fields in required_source_fields.items():
+        for split, contract in source_contracts[source_kind].items():
+            missing = [name for name in fields if contract.get(name) in (None, "")]
+            if missing:
+                raise ValueError(
+                    f"{source_kind} source contract {split} lacks {missing}"
+                )
+    manifest_hashes = {
+        contract["source_manifest_hash"]
+        for contracts in (source_contracts["hlt"], source_contracts["offline"])
+        for contract in contracts.values()
+    }
+    if len(manifest_hashes) != 1:
+        raise ValueError(
+            "HLT/offline source contracts do not share one manifest hash: "
+            f"{sorted(manifest_hashes)}"
+        )
+    for name, contract in source_contracts["targets"].items():
+        missing = [
+            field
+            for field in (
+                "source_manifest_hash",
+                "offline_content_hash",
+                "target_content_hash",
+                "jet_identity_hash",
+            )
+            if contract.get(field) in (None, "")
+        ]
+        if missing:
+            raise ValueError(f"target source contract {name} lacks {missing}")
+        split = name.split("/", 1)[0]
+        if contract["source_manifest_hash"] != next(iter(manifest_hashes)):
+            raise ValueError(f"target source contract {name} uses another manifest")
+        if contract["offline_content_hash"] != source_contracts["offline"][split][
+            "offline_content_hash"
+        ]:
+            raise ValueError(f"target source contract {name} uses another offline cache")
+        if contract["jet_identity_hash"] != source_contracts["offline"][split][
+            "jet_identity_hash"
+        ]:
+            raise ValueError(f"target source contract {name} uses other jet identities")
     relative_paths = [row["relative_path"] for row in artifacts]
     if len(relative_paths) != len(set(relative_paths)):
         raise ValueError("artifact manifest contains duplicate paths")
@@ -217,6 +298,7 @@ def build_artifact_manifest(
         "target_mode": target_mode,
         "target_mode_hash": target_mode_hash,
         "artifacts": sorted(artifacts, key=lambda row: row["relative_path"]),
+        "source_contracts": source_contracts,
         "rebuild_instructions": {
             "data_dir": str(Path(data_dir).resolve()),
             "manifest": "inputs/split_manifest/split_manifest.json.gz",
@@ -288,6 +370,7 @@ def write_consumer_receipt(
         )
         required_target_fields = (
             "source_manifest_hash",
+            "hlt_content_hash",
             "offline_cache_content_hash",
             "hierarchy_target_content_hash",
         )
@@ -300,6 +383,43 @@ def write_consumer_receipt(
             raise ValueError(
                 f"consumer {consumer} lacks target provenance {missing_target_fields}"
             )
+        contracts = manifest.get("source_contracts")
+        if not isinstance(contracts, Mapping):
+            raise ValueError("artifact manifest lacks source contracts")
+        offline_contract = dict(contracts.get("offline", {})).get("model_val", {})
+        hlt_contract = dict(contracts.get("hlt", {})).get("model_val", {})
+        expected_manifest_hash = hlt_contract.get("source_manifest_hash")
+        if expected_manifest_hash in (None, "") or offline_contract.get(
+            "source_manifest_hash"
+        ) != expected_manifest_hash:
+            raise ValueError("artifact manifest has conflicting model_val sources")
+        if provenance.get("source_manifest_hash") != expected_manifest_hash:
+            raise ValueError(f"consumer {consumer} source manifest hash mismatch")
+        expected_hlt_hash = hlt_contract.get("hlt_content_hash")
+        if expected_hlt_hash in (None, "") or provenance.get(
+            "hlt_content_hash"
+        ) != expected_hlt_hash:
+            raise ValueError(f"consumer {consumer} HLT cache hash mismatch")
+        expected_offline_hash = offline_contract.get("offline_content_hash")
+        if expected_offline_hash not in (None, "") and provenance.get(
+            "offline_cache_content_hash"
+        ) != expected_offline_hash:
+            raise ValueError(f"consumer {consumer} offline cache hash mismatch")
+        target_contracts = dict(contracts.get("targets", {}))
+        model_val_targets = {
+            key.split("/", 1)[1]: value.get("target_content_hash")
+            for key, value in target_contracts.items()
+            if key.startswith("model_val/")
+            and isinstance(value, Mapping)
+            and value.get("target_content_hash") not in (None, "")
+        }
+        allowed_target_hashes = set(model_val_targets.values())
+        if len(model_val_targets) > 1:
+            allowed_target_hashes.add(canonical_hash(model_val_targets))
+        if allowed_target_hashes and provenance.get(
+            "hierarchy_target_content_hash"
+        ) not in allowed_target_hashes:
+            raise ValueError(f"consumer {consumer} hierarchy target hash mismatch")
     required_roles = (
         ABPH_PRIVILEGED_CLEANUP_ROLES
         if consumer_kind == "target_consumer"
@@ -431,6 +551,8 @@ def execute_cleanup_barrier(
         scoring_verification = verify_bundled_logits(root, scoring_members)
     elif barrier != "privileged":
         raise ValueError(f"unknown cleanup barrier {barrier!r}")
+    elif not expected_consumers:
+        raise ValueError("privileged cleanup requires frozen consumer membership")
     planned = [
         {
             "relative_path": row["relative_path"],

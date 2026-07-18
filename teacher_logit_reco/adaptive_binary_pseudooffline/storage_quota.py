@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 import uuid
@@ -784,6 +785,70 @@ def write_quota_managed_bytes(
         raise
 
 
+def publish_quota_managed_file(
+    campaign_root: str | Path,
+    source: str | Path,
+    destination: str | Path,
+    *,
+    artifact_class: StorageArtifactClass | str,
+    artifact_role: str,
+    source_provenance_hash: str,
+    run_id: str,
+    profile: str | StorageProfile = ABPH_STREAMING_STORAGE_PROFILE,
+    copy_buffer_bytes: int = 8 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Stream one completed ephemeral file through the quota reservation boundary."""
+
+    source_path = Path(source).resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"quota publication source is missing: {source_path}")
+    if source_path.is_symlink():
+        raise ValueError(f"quota publication refuses symbolic links: {source_path}")
+    if int(copy_buffer_bytes) <= 0:
+        raise ValueError("quota publication copy buffer must be positive")
+    expected_bytes = source_path.stat().st_size
+    reservation = reserve_persistent_artifact(
+        campaign_root,
+        destination=destination,
+        expected_bytes=expected_bytes,
+        artifact_class=artifact_class,
+        artifact_role=artifact_role,
+        source_provenance_hash=source_provenance_hash,
+        run_id=run_id,
+        profile=profile,
+    )
+    temporary = Path(str(reservation["temporary_path"]))
+    try:
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        with source_path.open("rb") as source_handle, temporary.open("xb") as output:
+            shutil.copyfileobj(
+                source_handle,
+                output,
+                length=int(copy_buffer_bytes),
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        if source_path.stat().st_size != expected_bytes:
+            raise RuntimeError(
+                f"quota publication source changed while copying: {source_path}"
+            )
+        return commit_persistent_artifact(
+            campaign_root,
+            str(reservation["reservation_id"]),
+            profile=profile,
+        )
+    except BaseException:
+        try:
+            release_persistent_reservation(
+                campaign_root,
+                str(reservation["reservation_id"]),
+                profile=profile,
+            )
+        except (KeyError, FileNotFoundError):
+            pass
+        raise
+
+
 def write_quota_managed_json(
     campaign_root: str | Path,
     destination: str | Path,
@@ -873,6 +938,68 @@ def reconcile_storage_accounting(
     }
 
 
+def cleanup_quota_managed_artifact(
+    campaign_root: str | Path,
+    artifact_path: str | Path,
+    *,
+    expected_sha256: str,
+    expected_artifact_role: str,
+    profile: str | StorageProfile = ABPH_STREAMING_STORAGE_PROFILE,
+) -> dict[str, Any]:
+    """Hash-check, remove, and reconcile one quota-managed artifact."""
+
+    root = Path(campaign_root).resolve()
+    resolved_profile = resolve_storage_profile(profile)
+    artifact = _resolved_inside(
+        artifact_path, root, label="quota-managed cleanup artifact"
+    )
+    if not expected_sha256 or not expected_artifact_role:
+        raise ValueError("cleanup requires an expected hash and artifact role")
+    paths = storage_paths(root)
+    with _exclusive_lock(paths["lock"]):
+        ledger = _load_ledger(paths["ledger"], root=root, profile=resolved_profile)
+        committed = dict(ledger.get("committed_artifacts", {}))
+        row = committed.get(str(artifact))
+        if not isinstance(row, Mapping):
+            raise KeyError(f"artifact is not committed in the quota ledger: {artifact}")
+        if row.get("artifact_role") != expected_artifact_role:
+            raise ValueError(f"quota-managed cleanup role mismatch: {artifact}")
+        if row.get("sha256") != expected_sha256:
+            raise ValueError(f"quota-managed cleanup ledger hash mismatch: {artifact}")
+        if not artifact.is_file() or artifact.is_symlink():
+            raise FileNotFoundError(
+                f"quota-managed cleanup artifact is absent or unsafe: {artifact}"
+            )
+        actual_sha256 = _sha256_file(artifact)
+        actual_bytes = int(artifact.stat().st_size)
+        if actual_sha256 != expected_sha256:
+            raise ValueError(f"quota-managed cleanup artifact hash changed: {artifact}")
+        if actual_bytes != int(row.get("actual_bytes", -1)):
+            raise ValueError(f"quota-managed cleanup artifact size changed: {artifact}")
+        artifact.unlink()
+        committed.pop(str(artifact))
+        ledger["committed_artifacts"] = committed
+        ledger["last_measured_campaign_bytes"] = int(
+            campaign_storage_audit(root, profile=resolved_profile)[
+                "measured_persistent_bytes"
+            ]
+        )
+        _write_ledger(paths["ledger"], ledger)
+    return {
+        "contract": "adaptive_binary_quota_managed_cleanup_v1",
+        "ok": True,
+        "campaign_root": str(root),
+        "artifact_path": str(artifact),
+        "artifact_role": expected_artifact_role,
+        "sha256": actual_sha256,
+        "bytes": actual_bytes,
+        "destination_removed": not artifact.exists(),
+        "ledger_reconciled": str(artifact) not in ledger["committed_artifacts"],
+        "ledger_revision": int(ledger["revision"]),
+        "measured_persistent_bytes": int(ledger["last_measured_campaign_bytes"]),
+    }
+
+
 __all__ = [
     "ABPH_CACHE_HEAVY_STORAGE_PROFILE",
     "ABPH_MAX_PERSISTENT_BYTES",
@@ -891,8 +1018,10 @@ __all__ = [
     "StorageProjectionRow",
     "build_storage_projection",
     "campaign_storage_audit",
+    "cleanup_quota_managed_artifact",
     "commit_persistent_artifact",
     "initialize_storage_accounting",
+    "publish_quota_managed_file",
     "reconcile_storage_accounting",
     "release_persistent_reservation",
     "require_storage_projection",

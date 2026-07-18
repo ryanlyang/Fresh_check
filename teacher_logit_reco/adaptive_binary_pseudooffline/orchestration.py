@@ -32,6 +32,7 @@ from .storage_lifecycle import (
     require_cleanup_receipt,
     verify_bundled_logits,
 )
+from .storage_acceptance import require_storage_acceptance
 from .target_mode import (
     ABPH_RANK_LOCAL_TARGET_MODE,
     load_target_mode_selection,
@@ -736,6 +737,14 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
                 "models reuse is impossible after privileged inputs were cleaned; "
                 "start a fresh full campaign or explicitly rebuild its inputs"
             )
+        if config.stage_mode == "models":
+            acceptance_path = paths.storage / "storage_acceptance.json"
+            require_storage_acceptance(
+                acceptance_path,
+                campaign_root=paths.root,
+                campaign_mode=config.campaign_mode,
+            )
+            checked.append(str(acceptance_path))
         if config.stage_mode == "diagnostics" and cleanup_receipt_path(
             paths.root, "deployable"
         ).exists():
@@ -1571,7 +1580,17 @@ def _build_reused_model_graph(
                 environment=common_env,
             )
         )
-        report_dependencies = ("wave:5",)
+        jobs.append(
+            SlurmJobSpec(
+                "wave:6",
+                "storage_wave",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("wave_receipt", "6"),
+                ("wave:5",),
+                environment=common_env,
+            )
+        )
+        report_dependencies = ("wave:6",)
     else:
         report_dependencies = tuple(
             dict.fromkeys(
@@ -1602,17 +1621,6 @@ def _build_reused_model_graph(
             environment=common_env,
         )
     )
-    if streaming:
-        jobs.append(
-            SlurmJobSpec(
-                "wave:6",
-                "storage_wave",
-                "run_adaptive_binary_storage_lifecycle.sh",
-                ("wave_receipt", "6"),
-                ("report:model_selection",),
-                environment=common_env,
-            )
-        )
     return jobs
 
 
@@ -1620,6 +1628,7 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
     """Build the canonical, topologically ordered campaign graph."""
 
     paths = config.paths
+    streaming = config.storage_profile == "streaming_30gb_v1"
     common_env = {
         "ABPH_ROOT": str(paths.root),
         "ABPH_CAMPAIGN_MODE": config.campaign_mode,
@@ -1632,9 +1641,32 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         "ABPH_STORAGE_LEDGER_PATH": str(paths.storage / "quota_ledger.json"),
         "ABPH_TARGET_MODE_REPORT": str(paths.target_mode_report),
     }
+    if streaming:
+        ephemeral_namespace = f"abph_{paths.root.name}"
+        ram_stage_projection = require_storage_projection(
+            config.storage_projection_path,
+            campaign_root=paths.root,
+            campaign_mode=config.campaign_mode,
+            profile=config.storage_profile,
+        )
+        common_env.update(
+            {
+                "LOG_DIR": f"/dev/shm/{ephemeral_namespace}/logs",
+                "DIAGNOSTICS_ROOT": f"/dev/shm/{ephemeral_namespace}/diagnostics",
+                "MIRROR_DIAGNOSTICS": "0",
+                "ABPH_SUPPRESS_SLURM_LOGS": "1",
+                "ABPH_RAM_STAGE_RESERVATION_BYTES": str(
+                    int(ram_stage_projection["projected_peak_persistent_bytes"])
+                ),
+            }
+        )
     if config.storage_projection_path is not None:
         common_env["ABPH_STORAGE_PROJECTION_PATH"] = str(
             Path(config.storage_projection_path).resolve()
+        )
+    if config.runtime_acceptance_path is not None:
+        common_env["ABPH_RUNTIME_ACCEPTANCE_PATH"] = str(
+            Path(config.runtime_acceptance_path).resolve()
         )
     if config.selection_report_path is not None:
         common_env["ABPH_SELECTION_REPORT_PATH"] = str(config.selection_report_path)
@@ -1660,8 +1692,6 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         "ABPH_DDP_TIMEOUT_SECONDS": "300",
     }
     jobs: list[SlurmJobSpec] = []
-    streaming = config.storage_profile == "streaming_30gb_v1"
-
     if config.stage_mode == "full":
         jobs.append(SlurmJobSpec("input:splits", "splits", "run_adaptive_binary_inputs.sh", ("splits",), environment=common_env))
         input_parent = "input:splits"
@@ -1761,6 +1791,41 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 )
             )
             reconstructor_preflight = "wave:2"
+            jobs.append(
+                SlurmJobSpec(
+                    "acceptance:component_parity_tests",
+                    "storage_acceptance_tests",
+                    "run_adaptive_binary_storage_acceptance.sh",
+                    ("tests",),
+                    ("wave:0",),
+                    environment=common_env,
+                )
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    "acceptance:ram_lifecycle_smoke",
+                    "storage_acceptance_smoke",
+                    "run_adaptive_binary_storage_acceptance.sh",
+                    ("ram_lifecycle_smoke",),
+                    ("wave:0",),
+                    environment=common_env,
+                )
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    "acceptance:storage_smoke",
+                    "storage_acceptance",
+                    "run_adaptive_binary_storage_acceptance.sh",
+                    ("compile",),
+                    (
+                        "wave:2",
+                        "acceptance:component_parity_tests",
+                        "acceptance:ram_lifecycle_smoke",
+                    ),
+                    environment=common_env,
+                )
+            )
+            reconstructor_preflight = "acceptance:storage_smoke"
         reconstructor_names = (
             *ABPH_RECONSTRUCTOR_VARIANTS,
             *ABPH_RENDERER_VARIANTS,
@@ -2041,7 +2106,17 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     environment=common_env,
                 )
             )
-            report_dependencies = ("wave:5",)
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:6",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "6"),
+                    ("wave:5",),
+                    environment=common_env,
+                )
+            )
+            report_dependencies = ("wave:6",)
         else:
             terminal = tuple(
                 dict.fromkeys(
@@ -2074,17 +2149,6 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 environment=common_env,
             )
         )
-        if streaming:
-            jobs.append(
-                SlurmJobSpec(
-                    "wave:6",
-                    "storage_wave",
-                    "run_adaptive_binary_storage_lifecycle.sh",
-                    ("wave_receipt", "6"),
-                    ("report:model_selection",),
-                    environment=common_env,
-                )
-            )
     elif config.stage_mode == "models":
         jobs.extend(
             _build_reused_model_graph(

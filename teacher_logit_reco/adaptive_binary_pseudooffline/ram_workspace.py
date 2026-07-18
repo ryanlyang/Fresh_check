@@ -364,6 +364,45 @@ class RankLocalWorkspace:
             payload["reservations"] = reservations
             self._write(payload)
 
+    def commit_tree(self, reservation_id: str, measured_path: str | Path) -> int:
+        """Measure and commit a tree that is owned by this workspace."""
+
+        measured_root = Path(measured_path).resolve()
+        try:
+            relative = measured_root.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(
+                f"RAM reservation measured path escapes owned workspace: {measured_root}"
+            ) from exc
+        if not relative.parts:
+            raise ValueError("RAM reservation must measure a stage beneath workspace root")
+        if not measured_root.exists():
+            raise FileNotFoundError(
+                f"RAM reservation measured path is missing: {measured_root}"
+            )
+        if measured_root.is_symlink():
+            raise ValueError("RAM reservation measured path cannot be a symbolic link")
+        if measured_root.is_file():
+            measured_bytes = measured_root.stat().st_size
+        else:
+            measured_bytes = 0
+            for path in measured_root.rglob("*"):
+                if path.is_symlink():
+                    raise ValueError(
+                        f"RAM reservation measured tree contains a symbolic link: {path}"
+                    )
+                if path.is_file():
+                    resolved = path.resolve()
+                    try:
+                        resolved.relative_to(measured_root)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"RAM reservation measured file escapes stage tree: {path}"
+                        ) from exc
+                    measured_bytes += path.stat().st_size
+        self.commit(reservation_id, measured_bytes=measured_bytes)
+        return int(measured_bytes)
+
     def release(self, reservation_id: str) -> None:
         with self._lock:
             payload = self._require_owner()
