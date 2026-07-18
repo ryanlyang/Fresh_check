@@ -714,6 +714,12 @@ def _write_oracle_reference_report(
 
 def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: Path) -> dict:
     root = Path(args.campaign_root)
+    if args.runtime_reference_benchmark:
+        # The one-rank and DDP4 acceptance trajectories must start from the
+        # same parameters; trainer seeding happens after model construction.
+        torch = require_torch()
+        torch.manual_seed(24731)
+        np.random.seed(24731)
     if args.smoke:
         requested_rank, requested_world_size = 0, 1
     else:
@@ -737,7 +743,18 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         ),
         None,
     )
-    if source_variant is None and tier == "B":
+    if args.runtime_reference_benchmark:
+        # Runtime certification compares identical isolated initializations. It
+        # must not depend on a campaign checkpoint (notably C5 for D1) that the
+        # certified campaign itself has not trained yet.
+        source_variant = None
+        warm_start = {
+            "loaded": False,
+            "source_variant": None,
+            "parameter_tensors": 0,
+            "reason": "isolated_runtime_reference_initialization",
+        }
+    elif source_variant is None and tier == "B":
         warm_start = _load_selected_hlt_encoder(
             model,
             root / "runs" / "A0_hlt_part" / "best_model_val.pt",

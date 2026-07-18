@@ -259,7 +259,8 @@ def build_storage_acceptance(
     if float(target_mode.get("minimum_ram_headroom_fraction", -1.0)) < 0.20:
         problems.append("RAM workspace has less than the required 20% headroom")
 
-    runtime = require_runtime_acceptance(runtime_acceptance, scope="optimized_pilot")
+    runtime_scope = "highdata" if campaign_mode == "highdata" else "ddp4_runtime"
+    runtime = require_runtime_acceptance(runtime_acceptance, scope=runtime_scope)
     tests = require_storage_test_evidence(test_evidence)
     ram_smoke = _read_json(ram_lifecycle_smoke)
     _require_content_hash(ram_smoke, label="RAM lifecycle smoke")
@@ -346,6 +347,7 @@ def build_storage_acceptance(
         "runtime_acceptance": {
             "path": str(Path(runtime_acceptance).resolve()),
             "sha256": _sha256(runtime_acceptance),
+            "required_scope": runtime_scope,
             "content_hash": runtime["acceptance_content_hash"],
         },
         "component_parity_tests": {

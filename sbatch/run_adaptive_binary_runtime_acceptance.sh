@@ -15,7 +15,7 @@ set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/common.sh"
-MODE="${1:?Usage: run_adaptive_binary_runtime_acceptance.sh <smoke|benchmark> [variant]}"
+MODE="${1:?Usage: run_adaptive_binary_runtime_acceptance.sh <smoke|benchmark|benchmark_uninstrumented> [variant]}"
 VARIANT="${2:-}"
 : "${ABPH_ROOT:?Set ABPH_ROOT to the prepared pilot campaign root}"
 : "${ABPH_RUNTIME_ACCEPTANCE_ROOT:=${ABPH_ROOT}/audits/runtime_acceptance}"
@@ -54,14 +54,28 @@ case "${MODE}" in
       --expected-world-size "${ABPH_DISTRIBUTED_WORLD_SIZE}"
       --device "${DEVICE}")
     ;;
-  benchmark)
+  benchmark|benchmark_uninstrumented)
     [[ "${VARIANT}" == "B1_semantic_query_root" || "${VARIANT}" == "D1_kt32_mh4_particles" ]] || {
       echo "Unsupported representative benchmark variant ${VARIANT}" >&2
       exit 2
     }
     "${PYTHON_BIN}" scripts/validate_adaptive_binary_orchestration.py preflight \
       --path "${ABPH_ROOT}/audits/actual_target_feasibility.json"
-    output_dir="${profile_root}/benchmarks/${VARIANT}"
+    if [[ "${MODE}" == "benchmark_uninstrumented" ]]; then
+      [[ "${ABPH_RECONSTRUCTOR_PARALLELISM}" == "single" ]] || {
+        echo "The uninstrumented control is a single-rank benchmark" >&2
+        exit 2
+      }
+      [[ "${VARIANT}" == "D1_kt32_mh4_particles" ]] || {
+        echo "The uninstrumented control is locked to the deep representative" >&2
+        exit 2
+      }
+      export ABPH_RUNTIME_PROFILE_ENABLED=0
+      output_dir="${ABPH_RUNTIME_ACCEPTANCE_ROOT}/single_path/uninstrumented/${VARIANT}"
+    else
+      export ABPH_RUNTIME_PROFILE_ENABLED=1
+      output_dir="${profile_root}/benchmarks/${VARIANT}"
+    fi
     if [[ "${VARIANT}" == "D1_kt32_mh4_particles" ]]; then
       export ABPH_RENDERER_UPDATES=1
     fi
@@ -77,6 +91,7 @@ case "${MODE}" in
   *) echo "Unknown runtime acceptance mode ${MODE}" >&2; exit 2 ;;
 esac
 
+start_ns="$(date +%s%N)"
 if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
   [[ "${SLURM_JOB_NUM_NODES:-0}" == "${ABPH_DISTRIBUTED_NODES}" ]] || {
     echo "allocated node count differs from the acceptance contract" >&2
@@ -95,4 +110,14 @@ if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
     --kill-on-bad-exit=1 --cpu-bind=cores --export=ALL "${cmd[@]}"
 else
   fresh_run "${cmd[@]}"
+fi
+if [[ "${MODE}" == "benchmark" || "${MODE}" == "benchmark_uninstrumented" ]]; then
+  end_ns="$(date +%s%N)"
+  elapsed_seconds="$(${PYTHON_BIN} -c 'import sys; print((int(sys.argv[2])-int(sys.argv[1]))/1e9)' "${start_ns}" "${end_ns}")"
+  fresh_run "${PYTHON_BIN}" scripts/write_adaptive_binary_runtime_walltime.py \
+    --elapsed-seconds "${elapsed_seconds}" \
+    --profile-enabled "${ABPH_RUNTIME_PROFILE_ENABLED}" \
+    --run-report "${output_dir}/run_report.json" \
+    --delete-selected-checkpoint \
+    --output "${output_dir}/wall_time.json"
 fi

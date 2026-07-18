@@ -600,7 +600,10 @@ class AdaptiveBinarySubmissionConfig:
                 raise PermissionError(
                     "ABPH ddp4 full campaigns require a Step-10 runtime acceptance artifact"
                 )
-            scope = "highdata" if self.campaign_mode == "highdata" else "optimized_pilot"
+            # The optimized pilot produces the extension and campaign evidence
+            # used by later promotion gates. Requiring that evidence before the
+            # first optimized pilot would make submission circular.
+            scope = "highdata" if self.campaign_mode == "highdata" else "ddp4_runtime"
             require_runtime_acceptance(self.runtime_acceptance_path, scope=scope)
         if self.campaign_mode == "highdata" and self.stage_mode != "final_claims":
             if not self.approve_highdata:
@@ -2267,11 +2270,7 @@ def submission_manifest(
             scope=(
                 "highdata"
                 if config.campaign_mode == "highdata"
-                else (
-                    "optimized_pilot"
-                    if config.stage_mode in {"full", "models"}
-                    else "ddp4_runtime"
-                )
+                else "ddp4_runtime"
             ),
         )
         runtime_acceptance = {

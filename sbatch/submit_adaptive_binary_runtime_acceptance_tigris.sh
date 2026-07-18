@@ -16,13 +16,16 @@ export ABPH_ROOT ABPH_RUNTIME_ACCEPTANCE_ROOT PYTHONNOUSERSITE=1
 
 for required in \
   "${ABPH_ROOT}/audits/actual_target_feasibility.json" \
-  "${ABPH_SINGLE_PATH_ACCEPTANCE_PATH:-${ABPH_ROOT}/audits/runtime_reference/single_path_acceptance.json}" \
-  "${ABPH_ROOT}/runs/A0_hlt_part/best_model_val.pt" \
-  "${ABPH_ROOT}/runs/C5_kt_32/best_model_val.pt" \
-  "${ABPH_ROOT}/runtime_batch_contracts/B1_semantic_query_root/runtime_batch_contract.json" \
-  "${ABPH_ROOT}/runtime_batch_contracts/D1_kt32_mh4_particles/runtime_batch_contract.json"; do
+  "${ABPH_ROOT}/runs/A0_hlt_part/best_model_val.pt"; do
   fresh_require_file "${required}"
 done
+contract_paths=(
+  "${ABPH_ROOT}/runtime_batch_contracts/B1_semantic_query_root/runtime_batch_contract.json"
+  "${ABPH_ROOT}/runtime_batch_contracts/D1_kt32_mh4_particles/runtime_batch_contract.json"
+)
+if [[ -z "${ABPH_RUNTIME_BATCH_DEPENDENCY:-}" ]]; then
+  for required in "${contract_paths[@]}"; do fresh_require_file "${required}"; done
+fi
 if ! fresh_is_dry_run && [[ -e "${ABPH_RUNTIME_ACCEPTANCE_ROOT}" ]]; then
   echo "Refusing to replace existing runtime acceptance evidence: ${ABPH_RUNTIME_ACCEPTANCE_ROOT}" >&2
   exit 2
@@ -35,6 +38,7 @@ ddp4_args=(--parsable --account="${ABPH_SBATCH_ACCOUNT}" --partition="${ABPH_SBA
   --nodes=4 --ntasks=4 --ntasks-per-node=1 --cpus-per-task=16 --mem=220G --gres=gpu:gh200:1)
 worker="${PROJECT_DIR}/sbatch/run_adaptive_binary_runtime_acceptance.sh"
 job_ids=()
+declare -A case_job_ids=()
 submission_manifest="${ABPH_RUNTIME_ACCEPTANCE_ROOT}/submission.tsv"
 printf 'profile\tmode\tvariant\tjob_id\n' > "${submission_manifest}"
 
@@ -58,6 +62,7 @@ submit_case() {
   [[ "${job_id}" =~ ^[0-9]+$ ]] || { echo "Invalid sbatch response: ${submitted}" >&2; exit 2; }
   printf '%s\t%s\t%s\t%s\n' "${profile}" "${mode}" "${variant}" "${job_id}" >> "${submission_manifest}"
   job_ids+=("${job_id}")
+  case_job_ids["${profile}:${mode}:${variant}"]="${job_id}"
   echo "${submitted}"
 }
 
@@ -66,11 +71,25 @@ for profile in single ddp4; do
   submit_case "${profile}" benchmark B1_semantic_query_root
   submit_case "${profile}" benchmark D1_kt32_mh4_particles
 done
+submit_case single benchmark_uninstrumented D1_kt32_mh4_particles
 
 if fresh_is_dry_run; then
   exit 0
 fi
-dependency="afterok:$(IFS=:; echo "${job_ids[*]}")"
+single_path_dependency="afterok:${case_job_ids[single:benchmark:D1_kt32_mh4_particles]}:${case_job_ids[single:benchmark_uninstrumented:D1_kt32_mh4_particles]}"
+single_path_submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
+  --partition="${ABPH_SBATCH_PARTITION}" --dependency="${single_path_dependency}" \
+  "${PROJECT_DIR}/sbatch/run_compile_adaptive_binary_single_path_acceptance.sh")"
+single_path_job_id="${single_path_submitted%%;*}"
+printf 'single\tcompile_single_path\tD1_kt32_mh4_particles\t%s\n' "${single_path_job_id}" >> "${submission_manifest}"
+echo "${single_path_submitted}"
+
+report_dependencies=("${job_ids[@]}" "${single_path_job_id}")
+if [[ -n "${ABPH_RUNTIME_BATCH_DEPENDENCY:-}" ]]; then
+  IFS=: read -r -a upstream_ids <<< "${ABPH_RUNTIME_BATCH_DEPENDENCY#afterok:}"
+  report_dependencies+=("${upstream_ids[@]}")
+fi
+dependency="afterok:$(IFS=:; echo "${report_dependencies[*]}")"
 report_submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
   --partition="${ABPH_SBATCH_PARTITION}" --dependency="${dependency}" \
   "${PROJECT_DIR}/sbatch/run_write_adaptive_binary_runtime_acceptance.sh")"
@@ -80,4 +99,5 @@ echo "${report_submitted}"
 echo "adaptive_binary_runtime_acceptance_submission_complete:"
 echo "  root: ${ABPH_RUNTIME_ACCEPTANCE_ROOT}"
 echo "  evidence_jobs: ${#job_ids[@]}"
+echo "  single_path_job: ${single_path_job_id}"
 echo "  report_job: ${report_job_id}"

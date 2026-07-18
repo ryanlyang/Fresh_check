@@ -112,7 +112,7 @@ def _runtime_acceptance(path: Path, *, highdata: bool = False) -> Path:
         "runtime_gate": {"approved": True, "checks": {"transport": True}},
         "promotion": {
             "ddp4_runtime_approved": True,
-            "optimized_pilot_submission_allowed": True,
+            "optimized_pilot_submission_allowed": False,
             "highdata_submission_allowed": bool(highdata),
             "production_reconstructor_parallelism": "ddp4",
         },
@@ -863,13 +863,39 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "--account=\"${ABPH_SBATCH_ACCOUNT}\"" in submitter
     assert "--nodes=4" in submitter and "--ntasks=4" in submitter
     assert "afterok:" in submitter
-    assert "C5_kt_32/best_model_val.pt" in submitter
-    assert "single_path_acceptance.json" in submitter
+    assert "C5_kt_32/best_model_val.pt" not in submitter
+    assert "benchmark_uninstrumented" in submitter
+    assert "run_compile_adaptive_binary_single_path_acceptance.sh" in submitter
+    assert "ABPH_RUNTIME_BATCH_DEPENDENCY" in submitter
     assert "--kill-on-bad-exit=1" in worker
     assert "run_adaptive_binary_ddp_acceptance_smoke.py" in worker
     assert "--runtime-reference-benchmark" in worker
     assert "write_adaptive_binary_runtime_acceptance.py" in compiler
     assert "--single-path-acceptance" in compiler
+
+
+def test_streaming_bootstrap_is_projection_and_runtime_gate_ordered() -> None:
+    submitter = (
+        REPO_ROOT
+        / "sbatch"
+        / "submit_adaptive_binary_streaming30gb_bootstrap_tigris.sh"
+    ).read_text(encoding="utf-8")
+    continuation = (
+        REPO_ROOT
+        / "sbatch"
+        / "run_submit_adaptive_binary_streaming_campaign.sh"
+    ).read_text(encoding="utf-8")
+    assert "build_adaptive_binary_bootstrap_storage_projection.py" in submitter
+    assert "submit_adaptive_binary_runtime_batch_probes_tigris.sh" in submitter
+    assert "submit_adaptive_binary_runtime_acceptance_tigris.sh" in submitter
+    assert "--dependency=\"afterok:${report_job_id}\"" in submitter
+    assert "ABPH_APPROVE_PREPARED_ROOT_PRUNE" in submitter
+    assert "ABPH_CONFIRM_PREPARED_ROOT_IDLE" in submitter
+    assert "run_prune_adaptive_binary_prepared_root.sh" in submitter
+    assert "--dependency=\"afterok:${prune_job_id}\"" in submitter
+    assert "run_submit_adaptive_binary_streaming_campaign.sh" in submitter
+    assert "scope=\"ddp4_runtime\"" in continuation
+    assert "submit_adaptive_binary_pseudooffline_streaming30gb_tigris.sh" in continuation
 
 
 def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
