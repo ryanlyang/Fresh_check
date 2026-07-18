@@ -847,3 +847,12 @@ def test_runtime_profile_is_forwarded_by_submitter_and_reconstructor_runner() ->
     assert "--lr-schedule" in runner
     assert "--hungarian-workers" in runner
     assert "CONSTRAINED_C2F_HUNGARIAN_WORKERS exceeds SLURM_CPUS_PER_TASK" in runner
+
+
+def test_bf16_exploratory_pilot_wrapper_is_pilot_only_and_storage_bounded() -> None:
+    wrapper = _read("submit_constrained_coarse_to_fine_bf16_exploratory_pilot.sh")
+    assert "CONSTRAINED_C2F_CAMPAIGN_MODE=pilot" in wrapper
+    assert "CONSTRAINED_C2F_RUNTIME_PROFILE=bf16_exploratory_pilot_v1" in wrapper
+    assert "CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT=0" in wrapper
+    assert "CONSTRAINED_C2F_RECO_SAVE_BEST_CHECKPOINT=1" in wrapper
+    assert "CONSTRAINED_C2F_MIN_FREE_GB:=40" in wrapper

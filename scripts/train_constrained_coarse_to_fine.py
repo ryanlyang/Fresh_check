@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-val-jets", type=int, default=None)
     parser.add_argument("--max-stack-val-jets", type=int, default=None)
     parser.add_argument("--no-save-last-checkpoint", action="store_true")
+    parser.add_argument("--no-save-best-checkpoint", action="store_true")
     parser.add_argument(
         "--progress-interval-batches",
         type=int,
@@ -140,6 +141,7 @@ def main() -> int:
     args["verify_hash"] = not args.pop("no_verify_hash")
     args["pin_memory"] = not args.pop("no_pin_memory")
     args["save_last_checkpoint"] = not args.pop("no_save_last_checkpoint")
+    args["save_best_checkpoint"] = not args.pop("no_save_best_checkpoint")
     args["constrain_slot_accounting"] = not args.pop("unconstrained_slot_accounting")
     report = train_coarse_to_fine_reconstructor(CoarseToFineTrainConfig(**args))
     print(json.dumps(report, indent=2, sort_keys=True))

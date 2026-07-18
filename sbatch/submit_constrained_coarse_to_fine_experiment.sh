@@ -48,7 +48,7 @@ fi
 : "${CONSTRAINED_C2F_RUNTIME_PROFILE:=fp32_reference}"
 : "${CONSTRAINED_C2F_RUNTIME_PROFILE_ARTIFACT:=}"
 case "${CONSTRAINED_C2F_RUNTIME_PROFILE}" in
-  fp32_reference|fp16_diagnostic|bf16_calibration|accelerated_candidate_v1|accelerated_approved_v1) ;;
+  fp32_reference|fp16_diagnostic|bf16_calibration|bf16_exploratory_pilot_v1|accelerated_candidate_v1|accelerated_approved_v1) ;;
   *) echo "Unsupported CONSTRAINED_C2F_RUNTIME_PROFILE: ${CONSTRAINED_C2F_RUNTIME_PROFILE}" >&2; exit 2 ;;
 esac
 : "${CONSTRAINED_C2F_DATA_DIR:=${PD10_DATA_DIR:-${DATA_DIR}}}"

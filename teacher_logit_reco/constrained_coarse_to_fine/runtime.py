@@ -36,6 +36,7 @@ C2F_RUNTIME_PROFILES = frozenset(
         "fp32_reference",
         "fp16_diagnostic",
         "bf16_calibration",
+        "bf16_exploratory_pilot_v1",
         "accelerated_candidate_v1",
         "accelerated_approved_v1",
     }
@@ -51,6 +52,7 @@ _PROFILE_PRECISION_MODES = {
     "fp32_reference": "fp32",
     "fp16_diagnostic": "fp16_forward_fp32_loss",
     "bf16_calibration": "bf16_forward_fp32_loss",
+    "bf16_exploratory_pilot_v1": "bf16_forward_fp32_loss",
     "accelerated_candidate_v1": "bf16_forward_fp32_loss",
     "accelerated_approved_v1": "bf16_forward_fp32_loss",
 }
@@ -311,7 +313,7 @@ def profile_requires_clean_source(profile: str) -> bool:
 def profile_requires_last_checkpoint(profile: str) -> bool:
     """Return whether a profile must persist an epoch-boundary resume point."""
 
-    return normalize_runtime_profile(profile) != "fp32_reference"
+    return normalize_runtime_profile(profile) in {"accelerated_candidate_v1", "accelerated_approved_v1"}
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:

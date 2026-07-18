@@ -6,7 +6,11 @@ import json
 
 import pytest
 
-from teacher_logit_reco.constrained_coarse_to_fine.runtime import build_runtime_profile
+from teacher_logit_reco.constrained_coarse_to_fine.runtime import (
+    build_runtime_profile,
+    precision_mode_metadata,
+    profile_requires_last_checkpoint,
+)
 from teacher_logit_reco.constrained_coarse_to_fine.runtime_profiles import (
     write_approved_profile,
 )
@@ -14,6 +18,33 @@ from teacher_logit_reco.constrained_coarse_to_fine.runtime_profiles import (
 
 def _canonical_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def test_bf16_exploratory_pilot_profile_is_nonresumable_bf16() -> None:
+    profile = build_runtime_profile(
+        profile="bf16_exploratory_pilot_v1",
+        precision_mode="bf16_forward_fp32_loss",
+        batch_size=16,
+        eval_batch_size=32,
+        num_workers=4,
+        prefetch_factor=2,
+        learning_rate=2.0e-4,
+        hlt_encoder_lr_scale=0.05,
+        weight_decay=1.0e-4,
+        grad_clip_norm=1.0,
+        lr_schedule="constant",
+        warmup_fraction=0.1,
+        min_lr_ratio=0.05,
+        min_epochs=0,
+        early_stop_patience=8,
+        fixed_horizon=False,
+        max_epochs=30,
+        hungarian_workers=1,
+        hungarian_executor="serial",
+    )
+
+    assert profile["precision"] == precision_mode_metadata("bf16_forward_fp32_loss")
+    assert profile_requires_last_checkpoint("bf16_exploratory_pilot_v1") is False
 
 
 def _environment() -> dict[str, object]:

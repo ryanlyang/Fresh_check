@@ -958,6 +958,19 @@ syntax checks before queueing any calibration or accelerated campaign job.
 
 ## Queueing Rule
 
+### Direct Exploratory Pilot Exception
+
+An operator may deliberately skip the calibration/candidate gate for one full
+**pilot-only** run by using `bf16_exploratory_pilot_v1`. This profile fixes the
+safe BF16-forward/FP32-loss boundary and retains one selected checkpoint per
+reconstructor, but creates neither a candidate nor an approved artifact. It
+exists for measuring the complete pilot graph's real wall-clock behavior
+without a benchmark fan-out.
+
+`bf16_exploratory_pilot_v1` is never eligible for high-data submission or
+final-test claims. A later high-data or claim campaign still requires the
+candidate and approved-profile pathway below.
+
 Do not cancel a scientifically valid full campaign merely because this plan
 exists. The queue state is deliberately two-stage:
 

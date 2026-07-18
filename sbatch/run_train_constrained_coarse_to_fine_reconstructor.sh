@@ -69,7 +69,11 @@ esac
 : "${CONSTRAINED_C2F_RECO_MAX_TRAIN_JETS:=}"
 : "${CONSTRAINED_C2F_RECO_MAX_VAL_JETS:=}"
 : "${CONSTRAINED_C2F_RECO_MAX_STACK_VAL_JETS:=}"
-: "${CONSTRAINED_C2F_RECO_STACK_VAL_SPLIT:=stack_val}"
+# An explicitly empty value is meaningful for runtime benchmarks, which build
+# only model_train/model_val calibration inputs. Use '=' so an empty export is
+# preserved instead of being replaced by the normal campaign default.
+: "${CONSTRAINED_C2F_RECO_STACK_VAL_SPLIT=stack_val}"
+: "${CONSTRAINED_C2F_RECO_SAVE_BEST_CHECKPOINT:=1}"
 : "${CONSTRAINED_C2F_RECO_AMP:=0}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON:=auto}"
 : "${CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE:=1}"
@@ -91,21 +95,21 @@ if [[ -z "${CONSTRAINED_C2F_RECO_PRECISION_MODE}" ]]; then
   case "${CONSTRAINED_C2F_RUNTIME_PROFILE}" in
     fp32_reference) CONSTRAINED_C2F_RECO_PRECISION_MODE=fp32 ;;
     fp16_diagnostic) CONSTRAINED_C2F_RECO_PRECISION_MODE=fp16_forward_fp32_loss ;;
-    bf16_calibration|accelerated_candidate_v1|accelerated_approved_v1)
+    bf16_calibration|bf16_exploratory_pilot_v1|accelerated_candidate_v1|accelerated_approved_v1)
       CONSTRAINED_C2F_RECO_PRECISION_MODE=bf16_forward_fp32_loss
       ;;
     *) echo "Unsupported CONSTRAINED_C2F_RUNTIME_PROFILE: ${CONSTRAINED_C2F_RUNTIME_PROFILE}" >&2; exit 2 ;;
   esac
 fi
 
-if [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "fp32_reference" ]]; then
-  : "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT:=0}"
-else
+if [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_candidate_v1" || "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_approved_v1" ]]; then
   : "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT:=1}"
   if ! fresh_bool_enabled "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT}"; then
     echo "${CONSTRAINED_C2F_RUNTIME_PROFILE} requires CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT=1" >&2
     exit 2
   fi
+else
+  : "${CONSTRAINED_C2F_RECO_SAVE_LAST_CHECKPOINT:=0}"
 fi
 if [[ "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_candidate_v1" || "${CONSTRAINED_C2F_RUNTIME_PROFILE}" == "accelerated_approved_v1" ]]; then
   CONSTRAINED_C2F_RECO_MAX_NONFINITE_BATCHES=0
@@ -202,6 +206,9 @@ cmd=(
   --progress-interval-batches "${CONSTRAINED_C2F_RECO_PROGRESS_INTERVAL_BATCHES}"
   --device "${DEVICE}"
 )
+if ! fresh_bool_enabled "${CONSTRAINED_C2F_RECO_SAVE_BEST_CHECKPOINT}"; then
+  cmd+=(--no-save-best-checkpoint)
+fi
 if [[ -n "${CONSTRAINED_C2F_RECO_STACK_VAL_SPLIT}" ]]; then
   cmd+=(--stack-val-split "${CONSTRAINED_C2F_RECO_STACK_VAL_SPLIT}")
 fi
@@ -220,6 +227,8 @@ fresh_write_run_config "${OUTPUT_DIR}" "constrained_c2f_reconstructor_${CONSTRAI
 fresh_run "${cmd[@]}"
 
 if ! fresh_is_dry_run; then
-  fresh_require_file "${OUTPUT_DIR}/best_model_val.pt"
+  if fresh_bool_enabled "${CONSTRAINED_C2F_RECO_SAVE_BEST_CHECKPOINT}"; then
+    fresh_require_file "${OUTPUT_DIR}/best_model_val.pt"
+  fi
   fresh_require_file "${OUTPUT_DIR}/run_report.json"
 fi

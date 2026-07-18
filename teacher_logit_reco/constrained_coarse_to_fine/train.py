@@ -124,6 +124,7 @@ class CoarseToFineTrainConfig:
     max_train_jets: int | None = None
     max_val_jets: int | None = None
     max_stack_val_jets: int | None = None
+    save_best_checkpoint: bool = True
     save_last_checkpoint: bool = True
     progress_interval_batches: int = 100
     d_model: int = 256
@@ -1671,6 +1672,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     best_epoch = -1
     best_loss = float("inf")
     best_val: Mapping[str, Any] = {}
+    best_model_state: dict[str, torch.Tensor] | None = None
     epochs_without_improvement = 0
     start_epoch = 0
     if config.resume_from:
@@ -1771,6 +1773,11 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             best_epoch = int(epoch)
             best_loss = val_loss
             best_val = dict(val_metrics)
+            if not config.save_best_checkpoint:
+                best_model_state = {
+                    name: parameter.detach().cpu().clone()
+                    for name, parameter in model.state_dict().items()
+                }
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -1784,7 +1791,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
             "curves": _jsonable(curves),
         }
         rng_state = _capture_rng_state(device)
-        if improved:
+        if improved and config.save_best_checkpoint:
             torch.save(
                 _checkpoint_payload(
                     model=model,
@@ -1856,11 +1863,23 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
     if stop_reason is None:
         stop_reason = "fixed_horizon_completed" if bool(config.fixed_horizon) else "max_epochs_completed"
     checkpoint_path = output_dir / "best_model_val.pt"
-    if best_epoch < 0 or not checkpoint_path.exists():
+    if best_epoch < 0:
         raise RuntimeError("training did not produce a finite model_val checkpoint")
-    payload = _load_checkpoint(checkpoint_path, device)
-    model.load_state_dict(payload["model_state_dict"])
-    selected_scheduler_state = payload.get("scheduler_state")
+    if config.save_best_checkpoint:
+        if not checkpoint_path.exists():
+            raise RuntimeError("training did not produce a finite model_val checkpoint")
+        payload = _load_checkpoint(checkpoint_path, device)
+        model.load_state_dict(payload["model_state_dict"])
+        selected_scheduler_state = payload.get("scheduler_state")
+        checkpoint_label: str | None = str(checkpoint_path)
+        checkpoint_sha256: str | None = _sha256(checkpoint_path)
+    else:
+        if best_model_state is None:
+            raise RuntimeError("metrics-only training did not retain the selected model state")
+        model.load_state_dict(best_model_state)
+        selected_scheduler_state = scheduler.state_dict()
+        checkpoint_label = None
+        checkpoint_sha256 = None
     # stack_val is diagnostic only. Release model_train before opening it so
     # high-data runs never retain all three large cache views simultaneously.
     del train_source
@@ -1903,8 +1922,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "stop_reason": stop_reason,
         "completed_epochs": len(curves),
         "metrics": best_val,
-        "checkpoint": str(checkpoint_path),
-        "checkpoint_sha256": _sha256(checkpoint_path),
+        "checkpoint": checkpoint_label,
+        "checkpoint_sha256": checkpoint_sha256,
         "provenance": val_source.provenance,
         "runtime_profile": runtime_profile,
         "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
@@ -1923,7 +1942,7 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
                 "selection_only": False,
                 "best_epoch": best_epoch,
                 "metrics": stack_metrics,
-                "checkpoint_sha256": model_val_report["checkpoint_sha256"],
+                "checkpoint_sha256": checkpoint_sha256,
                 "provenance": stack_source.provenance,
                 "runtime_profile": runtime_profile,
                 "runtime_profile_hash": runtime_profile["runtime_profile_hash"],
@@ -1945,8 +1964,8 @@ def train_coarse_to_fine_reconstructor(config: CoarseToFineTrainConfig) -> dict[
         "selection_metric": "model_val.selection.reconstruction_score",
         "best_model_val": best_val,
         "stack_val": stack_metrics,
-        "checkpoint": str(checkpoint_path),
-        "checkpoint_sha256": model_val_report["checkpoint_sha256"],
+        "checkpoint": checkpoint_label,
+        "checkpoint_sha256": checkpoint_sha256,
         "last_checkpoint": str(output_dir / "last.pt") if config.save_last_checkpoint else None,
         "training_curves": str(output_dir / "training_curves.json"),
         "reconstruction_diagnostics_csv": str(diagnostics_dir / "reconstruction_metrics.csv"),
