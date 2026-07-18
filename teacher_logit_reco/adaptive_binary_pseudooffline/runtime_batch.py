@@ -337,6 +337,16 @@ def calibrate_runtime_batch_contract(
             measurement = probe(family, local_batch_size, accumulation)
             if measurement.stage_family != family or measurement.local_batch_size != local_batch_size:
                 raise ValueError("probe returned evidence for the wrong candidate")
+            if measurement.accumulation_steps != accumulation:
+                raise ValueError("probe returned evidence with the wrong accumulation count")
+            if measurement.variant_name != variant_name:
+                raise ValueError("probe returned evidence for the wrong variant")
+            if measurement.resolved_variant_config_hash != resolved_variant_config_hash:
+                raise ValueError("probe returned evidence for a stale resolved variant config")
+            if measurement.runtime_provenance_hash != runtime_provenance_hash:
+                raise ValueError("probe returned evidence for stale runtime provenance")
+            if measurement.requested_world_size != requested_world_size:
+                raise ValueError("probe returned evidence for the wrong requested world size")
             hashes.append(str(measurement.to_dict()["measurement_hash"]))
             if not measurement.production_rejections():
                 chosen = RuntimeBatchSelection(

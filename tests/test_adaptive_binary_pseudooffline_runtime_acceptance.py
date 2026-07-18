@@ -21,6 +21,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     require_runtime_acceptance,
     write_runtime_batch_contract,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_batch import (
+    ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
+)
 
 
 ROOT_VARIANT = "B1_semantic_query_root"
@@ -162,9 +165,22 @@ def _smoke(path: Path, *, world_size: int) -> Path:
     return _write_json(path / "smoke_report.json", payload)
 
 
-def _measurement(family: str, local: int, accumulation: int) -> FullStepBatchMeasurement:
+def _measurement(
+    family: str,
+    local: int,
+    accumulation: int,
+    *,
+    variant_name: str,
+) -> FullStepBatchMeasurement:
     return FullStepBatchMeasurement(
         stage_family=family,
+        variant_name=variant_name,
+        resolved_variant_config_hash="config",
+        runtime_provenance_hash="runtime",
+        measurement_producer=ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
+        slurm_job_id="12345",
+        slurm_job_account="reu-aisocial",
+        slurm_job_partition="tigris",
         local_batch_size=local,
         accumulation_steps=accumulation,
         requested_world_size=4,
@@ -202,7 +218,7 @@ def _batch_contract(path: Path, variant: str) -> Path:
         runtime_provenance_hash="runtime",
         requested_world_size=4,
         probe=lambda family, local, accumulation: _measurement(
-            family, local, accumulation
+            family, local, accumulation, variant_name=variant
         ),
     )
     return write_runtime_batch_contract(path, contract)
@@ -372,3 +388,32 @@ def test_acceptance_rehashes_evidence_when_reused(tmp_path: Path):
     curves.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="changed after review"):
         require_runtime_acceptance(path)
+
+
+def test_acceptance_rejects_cpu_only_timing_without_synchronized_wall(tmp_path: Path):
+    single, ddp4, contracts, smokes, single_path = _evidence(tmp_path)
+    run_dir = single[ROOT_VARIANT]
+    profile_path = run_dir / "runtime_profile.json"
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["buckets"]["optimizer_update_total"].pop(
+        "synchronized_wall_total_seconds"
+    )
+    profile.pop("profile_content_hash")
+    profile["profile_content_hash"] = canonical_hash(profile)
+    _write_json(profile_path, profile)
+    report_path = run_dir / "run_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["runtime_profile"]["profile_content_hash"] = profile[
+        "profile_content_hash"
+    ]
+    _write_json(report_path, report)
+
+    with pytest.raises(ValueError, match="lacks measured throughput"):
+        build_runtime_acceptance_report(
+            single_run_dirs=single,
+            ddp4_run_dirs=ddp4,
+            single_smoke_path=smokes[0],
+            ddp4_smoke_path=smokes[1],
+            ddp4_batch_contracts=contracts,
+            single_path_acceptance=single_path,
+        )

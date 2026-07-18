@@ -151,6 +151,30 @@ def _distributed_worker(rank: int, world_size: int, port: int) -> None:
         )
         verify_common_parameter_state(runtime, model)
         barrier(runtime)
+        backward_error = None
+        try:
+            scalar = torch.ones((), requires_grad=True)
+            if rank == 1:
+                scalar.register_hook(
+                    lambda _gradient: (_ for _ in ()).throw(
+                        RuntimeError("injected rank-local backward failure")
+                    )
+                )
+            scalar.backward()
+        except BaseException as exc:
+            backward_error = exc
+        assert not all_reduce_min_bool(
+            runtime, backward_error is None, device=torch.device("cpu")
+        )
+        backward_errors = gather_error_summaries(
+            runtime,
+            phase="backward",
+            error=backward_error,
+            structural=True,
+        )
+        assert any_structural_error(backward_errors)
+        assert any(row.get("phase") == "backward" for row in backward_errors)
+        barrier(runtime)
         assert not all_reduce_min_bool(
             runtime, rank == 0, device=torch.device("cpu")
         )

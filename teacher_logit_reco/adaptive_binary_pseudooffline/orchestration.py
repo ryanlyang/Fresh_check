@@ -96,6 +96,14 @@ ABPH_FUSION_CANDIDATES: Mapping[str, tuple[str, ...]] = {
 ABPH_LOGIT_PREDICTION_MEMBERS: tuple[str, ...] = tuple(
     dict.fromkeys(member for members in ABPH_FUSION_CANDIDATES.values() for member in members)
 )
+ABPH_RUNTIME_BATCH_PROBE_SPECS: tuple[tuple[str, int], ...] = (
+    ("root_hierarchy", 256),
+    ("root_hierarchy", 128),
+    ("root_hierarchy", 64),
+    ("renderer_distribution", 128),
+    ("renderer_distribution", 64),
+    ("renderer_distribution", 32),
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -460,7 +468,7 @@ class AdaptiveBinarySubmissionConfig:
     rebuild_targets: bool = True
     rebuild_models: bool = True
     rebuild_predictions: bool = True
-    reconstructor_parallelism: str = "single"
+    reconstructor_parallelism: str = "ddp4"
     runtime_acceptance_path: str | Path | None = None
     allow_debug_single_reconstructor: bool = False
 
@@ -579,45 +587,181 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
     paths = config.paths
     checked: list[str] = []
 
-    def require_run(member: str) -> None:
+    def require_exact(actual: Any, expected: Any, label: str) -> None:
+        if actual != expected:
+            raise ValueError(f"{label} mismatch: {actual!r} != {expected!r}")
+
+    def require_run(
+        member: str, *, expected_provenance: Mapping[str, Any] | None = None
+    ) -> None:
         run_dir = _run_dir(paths, member)
-        _require_successful_json(run_dir / "run_report.json", label=f"{member} run report")
+        report = _require_successful_json(
+            run_dir / "run_report.json", label=f"{member} run report"
+        )
         checkpoint = run_dir / "best_model_val.pt"
         if not checkpoint.is_file():
             raise FileNotFoundError(f"{member} checkpoint is missing: {checkpoint}")
+        checkpoint_hash = _sha256_file(checkpoint)
+        require_exact(
+            report.get("selected_checkpoint_hash")
+            or report.get("best_model_val_checkpoint_sha256"),
+            checkpoint_hash,
+            f"{member} selected checkpoint hash",
+        )
+        if expected_provenance is not None:
+            provenance_rows = report.get("provenance")
+            if not isinstance(provenance_rows, Mapping) or not isinstance(
+                provenance_rows.get("model_val"), Mapping
+            ):
+                raise ValueError(f"{member} lacks model_val provenance")
+            observed = provenance_rows["model_val"]
+            for key, value in expected_provenance.items():
+                require_exact(
+                    observed.get(key), value, f"{member} model_val {key}"
+                )
         checked.extend((str(run_dir / "run_report.json"), str(checkpoint)))
 
     if config.stage_mode in {"models", "predictions", "diagnostics", "final_claims"}:
-        _require_successful_json(
+        input_audit = _require_successful_json(
             paths.root / "audits" / "step1_input_audit.json",
             label="Step-1 input audit",
         )
         checked.append(str(paths.root / "audits" / "step1_input_audit.json"))
     if config.stage_mode == "models":
+        manifest_report = input_audit.get("manifest")
+        hlt_reports = input_audit.get("hlt_splits")
+        offline_reports = input_audit.get("offline_splits")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (manifest_report, hlt_reports, offline_reports)
+        ):
+            raise ValueError("Step-1 input audit lacks split provenance maps")
+        manifest_sha = manifest_report.get("manifest_hash")
         require_actual_target_preflight(paths.preflight_report)
         checked.append(str(paths.preflight_report))
         for split in ("model_train", "model_val"):
+            current_hlt_metadata = _read_json(
+                paths.hlt_cache / f"{split}_fixed_hlt_metadata.json"
+            )
+            current_offline_metadata = _read_json(
+                paths.offline_cache / f"{split}_offline_metadata.json"
+            )
+            hlt_expected = hlt_reports.get(split)
+            offline_expected = offline_reports.get(split)
+            if not isinstance(hlt_expected, Mapping) or not isinstance(
+                offline_expected, Mapping
+            ):
+                raise ValueError(f"input audit lacks active {split} cache provenance")
+            for key in (
+                "source_manifest_hash",
+                "hlt_content_hash",
+                "jet_identity_hash",
+            ):
+                require_exact(
+                    current_hlt_metadata.get(key),
+                    hlt_expected.get(key),
+                    f"current HLT {split} {key}",
+                )
+            for key in (
+                "source_manifest_hash",
+                "offline_content_hash",
+                "jet_identity_hash",
+            ):
+                require_exact(
+                    current_offline_metadata.get(key),
+                    offline_expected.get(key),
+                    f"current offline {split} {key}",
+                )
             for grouping in ("exclusive_kt", "cambridge_aachen"):
                 metadata = load_adaptive_binary_target_cache_metadata(
                     paths.target_cache, split, grouping
                 )
                 if metadata.get("target_content_hash") in {None, ""}:
                     raise ValueError(f"reused target metadata lacks a hash: {split}/{grouping}")
+                for key, expected in {
+                    "source_manifest_hash": manifest_sha,
+                    "hlt_content_hash": hlt_expected.get("hlt_content_hash"),
+                    "offline_content_hash": offline_expected.get(
+                        "offline_content_hash"
+                    ),
+                    "jet_identity_hash": hlt_expected.get("jet_identity_hash"),
+                }.items():
+                    require_exact(
+                        metadata.get(key),
+                        expected,
+                        f"target {split}/{grouping} {key}",
+                    )
                 checked.append(
                     str(
                         paths.target_cache
                         / f"{split}_{grouping}_adaptive_binary_targets_metadata.json"
                     )
                 )
+        hlt_model_val = hlt_reports.get("model_val")
+        offline_model_val = offline_reports.get("model_val")
+        if not isinstance(hlt_model_val, Mapping) or not isinstance(
+            offline_model_val, Mapping
+        ):
+            raise ValueError("input audit lacks model_val baseline provenance")
         for member in ABPH_BASELINE_VARIANTS:
-            require_run(member)
+            if member == "A4_offline_part_ceiling":
+                expected = {
+                    "source_manifest_hash": manifest_sha,
+                    "jet_identity_hash": offline_model_val.get("jet_identity_hash"),
+                    "label_hash": offline_model_val.get("label_hash"),
+                    "offline_content_hash": offline_model_val.get(
+                        "offline_content_hash"
+                    ),
+                }
+            else:
+                expected = {
+                    "source_manifest_hash": manifest_sha,
+                    "jet_identity_hash": hlt_model_val.get("jet_identity_hash"),
+                    "label_hash": hlt_model_val.get("label_hash"),
+                    "hlt_content_hash": hlt_model_val.get("hlt_content_hash"),
+                }
+            require_run(member, expected_provenance=expected)
         teacher_root = paths.root / "teacher_logits" / "A4_offline_part_ceiling"
+        teacher_checkpoint_hash = _sha256_file(
+            _run_dir(paths, "A4_offline_part_ceiling") / "best_model_val.pt"
+        )
         for split in ("model_train", "model_val"):
             prediction = teacher_root / f"{split}.npz"
             metadata = teacher_root / f"{split}_metadata.json"
             if not prediction.is_file():
                 raise FileNotFoundError(f"reused teacher logits are missing: {prediction}")
-            _require_successful_json(metadata, label=f"{split} teacher-logit metadata")
+            teacher_metadata = _require_successful_json(
+                metadata, label=f"{split} teacher-logit metadata"
+            )
+            offline_expected = offline_reports.get(split)
+            if not isinstance(offline_expected, Mapping):
+                raise ValueError(f"input audit lacks offline {split} provenance")
+            teacher_provenance = teacher_metadata.get("provenance")
+            if not isinstance(teacher_provenance, Mapping):
+                raise ValueError(f"{split} teacher logits lack provenance")
+            for key, expected in {
+                "source_manifest_hash": manifest_sha,
+                "jet_identity_hash": offline_expected.get("jet_identity_hash"),
+                "label_hash": offline_expected.get("label_hash"),
+                "offline_content_hash": offline_expected.get(
+                    "offline_content_hash"
+                ),
+            }.items():
+                require_exact(
+                    teacher_provenance.get(key),
+                    expected,
+                    f"{split} teacher-logit {key}",
+                )
+            require_exact(
+                teacher_metadata.get("checkpoint_sha256"),
+                teacher_checkpoint_hash,
+                f"{split} teacher-logit checkpoint",
+            )
+            require_exact(
+                teacher_metadata.get("prediction_sha256"),
+                _sha256_file(prediction),
+                f"{split} teacher-logit prediction",
+            )
             checked.extend((str(prediction), str(metadata)))
     elif config.stage_mode == "predictions":
         require_actual_target_preflight(paths.preflight_report)
@@ -686,6 +830,63 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
 
 def _variant_job_key(name: str) -> str:
     return f"variant:{name}"
+
+
+def _runtime_batch_probe_job_key(
+    name: str, stage_family: str, local_batch_size: int
+) -> str:
+    return f"runtime_batch_probe:{name}:{stage_family}:b{int(local_batch_size)}"
+
+
+def _runtime_batch_contract_job_key(name: str) -> str:
+    return f"runtime_batch_contract:{name}"
+
+
+def _runtime_batch_contract_jobs(
+    *,
+    names: Sequence[str],
+    dependencies: Sequence[str],
+    common_env: Mapping[str, str],
+) -> list[SlurmJobSpec]:
+    """Create measured DDP4 candidate probes and one compiler per variant."""
+
+    jobs: list[SlurmJobSpec] = []
+    base_dependencies = tuple(dict.fromkeys(str(value) for value in dependencies))
+    for name in names:
+        probe_keys: list[str] = []
+        for stage_family, local_batch_size in ABPH_RUNTIME_BATCH_PROBE_SPECS:
+            key = _runtime_batch_probe_job_key(
+                name, stage_family, local_batch_size
+            )
+            probe_keys.append(key)
+            jobs.append(
+                SlurmJobSpec(
+                    key,
+                    "runtime_batch_probe",
+                    "run_adaptive_binary_runtime_batch_probe.sh",
+                    (name, stage_family, str(local_batch_size)),
+                    base_dependencies,
+                    gpu=True,
+                    environment=common_env,
+                    nodes=4,
+                    ntasks=4,
+                    ntasks_per_node=1,
+                    gpus_per_node=1,
+                    distributed_world_size=4,
+                    launcher="srun",
+                )
+            )
+        jobs.append(
+            SlurmJobSpec(
+                _runtime_batch_contract_job_key(name),
+                "runtime_batch_contract",
+                "run_compile_adaptive_binary_runtime_batch_contract.sh",
+                (name,),
+                tuple(probe_keys),
+                environment=common_env,
+            )
+        )
+    return jobs
 
 
 def _seed_member_name(name: str, seed_index: int) -> str:
@@ -759,14 +960,28 @@ def _build_reused_model_graph(
     """Rebuild B-through-report while treating validated preparation as immutable."""
 
     jobs: list[SlurmJobSpec] = []
-    for name in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
+    reconstructor_names = (
+        *ABPH_RECONSTRUCTOR_VARIANTS,
+        *ABPH_RENDERER_VARIANTS,
+    )
+    jobs.extend(
+        _runtime_batch_contract_jobs(
+            names=reconstructor_names,
+            dependencies=(),
+            common_env=common_env,
+        )
+    )
+    for name in reconstructor_names:
         jobs.append(
             SlurmJobSpec(
                 _variant_job_key(name),
                 "renderer" if variant_spec(name).tier == "D" else "reconstructor",
                 "run_adaptive_binary_variant.sh",
                 (name,),
-                _reused_model_dependencies(name),
+                (
+                    _runtime_batch_contract_job_key(name),
+                    *_reused_model_dependencies(name),
+                ),
                 gpu=True,
                 environment=reconstructor_env,
                 nodes=int(topology["nodes"]),
@@ -924,6 +1139,7 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         "ABPH_DISTRIBUTED_NTASKS_PER_NODE": str(topology["ntasks_per_node"]),
         "ABPH_DISTRIBUTED_GPUS_PER_NODE": str(topology["gpus_per_node"]),
         "ABPH_DISTRIBUTED_WORLD_SIZE": str(topology["distributed_world_size"]),
+        "ABPH_DDP_TIMEOUT_SECONDS": "300",
     }
     jobs: list[SlurmJobSpec] = []
 
@@ -960,14 +1176,28 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         )
         jobs.append(SlurmJobSpec("target:cache", "targets", "run_adaptive_binary_targets.sh", ("cache",), ("input:audit",), environment=common_env))
         jobs.append(SlurmJobSpec("preflight:actual_targets", "preflight", "run_adaptive_binary_targets.sh", ("preflight",), ("target:cache",), environment=common_env))
-        for name in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
+        reconstructor_names = (
+            *ABPH_RECONSTRUCTOR_VARIANTS,
+            *ABPH_RENDERER_VARIANTS,
+        )
+        jobs.extend(
+            _runtime_batch_contract_jobs(
+                names=reconstructor_names,
+                dependencies=("preflight:actual_targets",),
+                common_env=common_env,
+            )
+        )
+        for name in reconstructor_names:
             jobs.append(
                 SlurmJobSpec(
                     _variant_job_key(name),
                     "renderer" if variant_spec(name).tier == "D" else "reconstructor",
                     "run_adaptive_binary_variant.sh",
                     (name,),
-                    _variant_dependencies(name),
+                    (
+                        _runtime_batch_contract_job_key(name),
+                        *_variant_dependencies(name),
+                    ),
                     gpu=True,
                     environment=reconstructor_env,
                     nodes=int(topology["nodes"]),

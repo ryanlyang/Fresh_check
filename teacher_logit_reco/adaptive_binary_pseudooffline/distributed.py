@@ -153,6 +153,22 @@ def destroy_distributed_runtime(runtime: DistributedRuntime) -> None:
         torch.distributed.destroy_process_group()
 
 
+def abort_distributed_runtime(runtime: DistributedRuntime) -> None:
+    """Tear down a failed process group without entering another collective."""
+
+    torch = require_torch()
+    if not runtime.distributed or not torch.distributed.is_initialized():
+        return
+    try:
+        default_group = torch.distributed.distributed_c10d._get_default_group()
+        abort = getattr(default_group, "abort", None)
+        if callable(abort):
+            abort()
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
+
 def barrier(runtime: DistributedRuntime) -> None:
     torch = require_torch()
     if runtime.distributed:

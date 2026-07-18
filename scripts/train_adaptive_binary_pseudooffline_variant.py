@@ -269,6 +269,8 @@ def _split_provenance(view, *, target=None) -> dict:
         "hlt_profile_version": metadata.get("hlt_profile_version"),
         "hlt_degradation_strength": metadata.get("hlt_degradation_strength"),
         "hlt_params_hash": metadata.get("hlt_params_hash"),
+        "offline_content_hash": metadata.get("offline_content_hash")
+        or metadata.get("content_hash"),
     }
     if target is not None:
         result.update(
@@ -459,7 +461,7 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
         "source_status_hash": "recorded_by_slurm_run_config",
         "metrics": {"model_val": metrics},
         "provenance": {
-            "model_val": _split_provenance(hlt_view),
+            "model_val": _split_provenance(evaluation_view),
             "artifact": {
                 "resolved_variant_config_hash": resolved["resolved_config_hash"],
                 "selected_checkpoint_hash": _sha256(checkpoint),

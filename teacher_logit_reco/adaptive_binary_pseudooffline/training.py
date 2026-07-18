@@ -32,6 +32,7 @@ from .convergence_schedule import (
 from .distributed import (
     DistributedRuntime,
     ReconstructorTrainingModule,
+    abort_distributed_runtime,
     all_gather_objects,
     all_reduce_min_bool,
     all_reduce_sum_int,
@@ -2252,17 +2253,88 @@ def train_reconstructor_curriculum(
                             objective_gradient_sums[name] = (
                                 objective_gradient_sums.get(name, 0.0) + value
                             )
-                    with profile_span(runtime_profiler, "backward"):
-                        synchronization_span = (
-                            profile_span(
-                                runtime_profiler, "gradient_synchronization"
+                    backward_error: BaseException | None = None
+                    try:
+                        with profile_span(runtime_profiler, "backward"):
+                            synchronization_span = (
+                                profile_span(
+                                    runtime_profiler, "gradient_synchronization"
+                                )
+                                if distributed_runtime.distributed
+                                and synchronize_backward
+                                else nullcontext()
                             )
-                            if distributed_runtime.distributed
-                            and synchronize_backward
-                            else nullcontext()
+                            with synchronization_span:
+                                scaler.scale(scaled_loss).backward()
+                    except BaseException as exc:
+                        backward_error = exc
+                    if backward_error is not None:
+                        distributed_error_events.append(
+                            {
+                                "global_update": int(state.global_update),
+                                "accumulation_index": int(accumulation_index),
+                                "phase": "backward_abort",
+                                "structural": True,
+                                "errors": [
+                                    {
+                                        "rank": distributed_runtime.rank,
+                                        "phase": "backward",
+                                        "structural": True,
+                                        "error_type": type(backward_error).__name__,
+                                        "message": str(backward_error)[:1024],
+                                    }
+                                ],
+                            }
                         )
-                        with synchronization_span:
-                            scaler.scale(scaled_loss).backward()
+                        optimizer.zero_grad(set_to_none=True)
+                        if prefetcher is not None:
+                            prefetcher.reset_to_committed_cursor()
+                        runtime_profiler.end_train_update(
+                            success=False, jets=accumulated_jets
+                        )
+                        abort_distributed_runtime(distributed_runtime)
+                        raise RuntimeError(
+                            "distributed ABPH rank-local backward failure; "
+                            "the process group was aborted"
+                        ) from backward_error
+                    try:
+                        globally_backward_ok = all_reduce_min_bool(
+                            distributed_runtime,
+                            True,
+                            device=device,
+                        )
+                    except BaseException as exc:
+                        abort_distributed_runtime(distributed_runtime)
+                        raise RuntimeError(
+                            "distributed ABPH peer failed during backward; "
+                            "the process group was aborted"
+                        ) from exc
+                    if not globally_backward_ok:
+                        errors = gather_error_summaries(
+                            distributed_runtime,
+                            phase="backward",
+                            error=backward_error,
+                            structural=True,
+                        )
+                        distributed_error_events.append(
+                            {
+                                "global_update": int(state.global_update),
+                                "accumulation_index": int(accumulation_index),
+                                "phase": "backward",
+                                "structural": True,
+                                "errors": list(errors),
+                            }
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+                        if prefetcher is not None:
+                            prefetcher.reset_to_committed_cursor()
+                        runtime_profiler.end_train_update(
+                            success=False, jets=accumulated_jets
+                        )
+                        raise RuntimeError(
+                            "distributed ABPH backward failure: "
+                            + json.dumps(list(errors), sort_keys=True)
+                        ) from backward_error
                     batch_size = int(ddp_output["batch_size_tensor"].detach().cpu())
                     accumulated_jets += batch_size
                     train_rows.append(
@@ -2419,7 +2491,9 @@ def train_reconstructor_curriculum(
                 raise RuntimeError(
                     "committed global batch plans differ from the completed update"
                 )
-        runtime_profiler.end_train_update(success=True, jets=accumulated_jets)
+        runtime_profiler.end_train_update(
+            success=True, jets=effective_batch_size
+        )
         transitioned = controller.advance()
         updates_this_call += 1
 

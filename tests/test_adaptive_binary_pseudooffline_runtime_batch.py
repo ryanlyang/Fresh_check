@@ -15,6 +15,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     measure_full_optimizer_step,
     write_runtime_batch_contract,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_batch import (
+    ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
+)
 
 
 def _measurement(
@@ -26,10 +29,20 @@ def _measurement(
     measured_world: int = 4,
     free_fraction: float = 0.20,
     successful: bool = True,
+    variant_name: str = "D1_kt32_mh4_particles",
+    config_hash: str = "config-hash",
+    provenance_hash: str = "provenance-hash",
 ) -> FullStepBatchMeasurement:
     total = 1000
     return FullStepBatchMeasurement(
         stage_family=family,
+        variant_name=variant_name,
+        resolved_variant_config_hash=config_hash,
+        runtime_provenance_hash=provenance_hash,
+        measurement_producer=ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
+        slurm_job_id="12345",
+        slurm_job_account="reu-aisocial",
+        slurm_job_partition="tigris",
         local_batch_size=local,
         accumulation_steps=accumulation,
         requested_world_size=requested_world,
@@ -117,6 +130,22 @@ def test_single_rank_evidence_cannot_approve_a_requested_ddp4_contract():
         )
 
 
+def test_calibration_rejects_measurement_for_stale_variant_provenance():
+    with pytest.raises(ValueError, match="wrong variant"):
+        calibrate_runtime_batch_contract(
+            variant_name="D1_kt32_mh4_particles",
+            resolved_variant_config_hash="config-hash",
+            runtime_provenance_hash="provenance-hash",
+            requested_world_size=4,
+            probe=lambda family, local, accumulation: _measurement(
+                family,
+                local,
+                accumulation,
+                variant_name="B1_root_deterministic",
+            ),
+        )
+
+
 def test_contract_is_hash_bound_immutable_and_expected_input_checked(tmp_path):
     contract = calibrate_runtime_batch_contract(
         variant_name="B1_root_deterministic",
@@ -124,7 +153,10 @@ def test_contract_is_hash_bound_immutable_and_expected_input_checked(tmp_path):
         runtime_provenance_hash="provenance-hash",
         requested_world_size=4,
         probe=lambda family, local, accumulation: _measurement(
-            family, local, accumulation
+            family,
+            local,
+            accumulation,
+            variant_name="B1_root_deterministic",
         ),
     )
     path = tmp_path / "runtime_batch_contract.json"
@@ -160,6 +192,12 @@ def test_full_step_probe_materializes_gradients_adamw_and_ema_on_cpu():
 
     measurement = measure_full_optimizer_step(
         stage_family="root_hierarchy",
+        variant_name="B1_root_deterministic",
+        resolved_variant_config_hash="config-hash",
+        runtime_provenance_hash="provenance-hash",
+        slurm_job_id="12345",
+        slurm_job_account="reu-aisocial",
+        slurm_job_partition="tigris",
         local_batch_size=256,
         requested_world_size=1,
         model=model,

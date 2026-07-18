@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -24,10 +25,18 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     freeze_final_claim_contract,
     load_final_claim_contract,
     require_actual_target_preflight,
+    require_partial_stage_inputs,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline import orchestration as orchestration_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _executor_environment(tmp_path: Path) -> dict[str, str]:
@@ -114,9 +123,11 @@ def _runtime_acceptance(path: Path, *, highdata: bool = False) -> Path:
 
 
 def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
+    acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
     config = AdaptiveBinarySubmissionConfig(
         campaign_root=tmp_path / "campaign",
         data_dir=tmp_path / "data",
+        runtime_acceptance_path=acceptance,
     )
     graph = build_submission_graph(config)
     keys = [job.key for job in graph]
@@ -145,14 +156,15 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
         job for job in graph if job.stage in {"reconstructor", "renderer"}
     ]
     assert reconstructor_jobs
-    assert all(job.launcher == "direct" for job in reconstructor_jobs)
-    assert all(job.distributed_world_size == 1 for job in reconstructor_jobs)
-    assert all(job.nodes == 1 for job in graph)
+    assert all(job.launcher == "srun" for job in reconstructor_jobs)
+    assert all(job.distributed_world_size == 4 for job in reconstructor_jobs)
+    assert all(job.nodes == 4 for job in reconstructor_jobs)
 
 
 def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
     tmp_path: Path,
 ) -> None:
+    acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
     config = AdaptiveBinarySubmissionConfig(
         campaign_root=tmp_path / "campaign",
         data_dir=tmp_path / "data",
@@ -161,6 +173,7 @@ def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
         rebuild_targets=False,
         rebuild_models=True,
         rebuild_predictions=True,
+        runtime_acceptance_path=acceptance,
     )
     graph = build_submission_graph(config)
     keys = {job.key for job in graph}
@@ -176,12 +189,168 @@ def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
     assert d1.dependencies == ("variant:C5_kt_32",)
 
 
-def test_single_gpu_training_uses_exact_default_when_no_probe_contract_exists() -> None:
+def test_models_reuse_is_bound_to_current_cache_and_teacher_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "campaign"
+    rows = {}
+    for split in ("model_train", "model_val"):
+        rows[split] = {
+            "source_manifest_hash": "manifest",
+            "hlt_content_hash": f"hlt-{split}",
+            "offline_content_hash": f"offline-{split}",
+            "jet_identity_hash": f"identity-{split}",
+            "label_hash": f"labels-{split}",
+        }
+        for directory, filename, keys in (
+            (
+                root / "inputs" / "hlt_cache",
+                f"{split}_fixed_hlt_metadata.json",
+                ("source_manifest_hash", "hlt_content_hash", "jet_identity_hash"),
+            ),
+            (
+                root / "inputs" / "offline_cache",
+                f"{split}_offline_metadata.json",
+                ("source_manifest_hash", "offline_content_hash", "jet_identity_hash"),
+            ),
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / filename).write_text(
+                json.dumps({key: rows[split][key] for key in keys}),
+                encoding="utf-8",
+            )
+    audit = {
+        "ok": True,
+        "manifest": {"manifest_hash": "manifest"},
+        "hlt_splits": {
+            split: {
+                key: value
+                for key, value in rows[split].items()
+                if key != "offline_content_hash"
+            }
+            for split in rows
+        },
+        "offline_splits": {
+            split: {
+                key: value
+                for key, value in rows[split].items()
+                if key != "hlt_content_hash"
+            }
+            for split in rows
+        },
+    }
+    audit_path = root / "audits" / "step1_input_audit.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    _actual_target_preflight(root / "audits" / "actual_target_feasibility.json")
+
+    monkeypatch.setattr(
+        orchestration_module,
+        "ABPH_BASELINE_VARIANTS",
+        ("A0_hlt_part", "A4_offline_part_ceiling"),
+    )
+    monkeypatch.setattr(
+        orchestration_module,
+        "load_adaptive_binary_target_cache_metadata",
+        lambda _root, split, _grouping: {
+            "target_content_hash": f"target-{split}",
+            "source_manifest_hash": "manifest",
+            "hlt_content_hash": rows[split]["hlt_content_hash"],
+            "offline_content_hash": rows[split]["offline_content_hash"],
+            "jet_identity_hash": rows[split]["jet_identity_hash"],
+        },
+    )
+
+    for member, source in (
+        ("A0_hlt_part", "hlt"),
+        ("A4_offline_part_ceiling", "offline"),
+    ):
+        run = root / "runs" / member
+        run.mkdir(parents=True, exist_ok=True)
+        checkpoint = run / "best_model_val.pt"
+        checkpoint.write_bytes(member.encode("ascii"))
+        provenance = {
+            "source_manifest_hash": "manifest",
+            "jet_identity_hash": rows["model_val"]["jet_identity_hash"],
+            "label_hash": rows["model_val"]["label_hash"],
+            f"{source}_content_hash": rows["model_val"][f"{source}_content_hash"],
+        }
+        (run / "run_report.json").write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "selected_checkpoint_hash": _sha256(checkpoint),
+                    "provenance": {"model_val": provenance},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    teacher_root = root / "teacher_logits" / "A4_offline_part_ceiling"
+    teacher_root.mkdir(parents=True)
+    teacher_checkpoint = root / "runs" / "A4_offline_part_ceiling" / "best_model_val.pt"
+    for split in ("model_train", "model_val"):
+        prediction = teacher_root / f"{split}.npz"
+        prediction.write_bytes(f"prediction-{split}".encode("ascii"))
+        (teacher_root / f"{split}_metadata.json").write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "checkpoint_sha256": _sha256(teacher_checkpoint),
+                    "prediction_sha256": _sha256(prediction),
+                    "provenance": {
+                        "source_manifest_hash": "manifest",
+                        "jet_identity_hash": rows[split]["jet_identity_hash"],
+                        "label_hash": rows[split]["label_hash"],
+                        "offline_content_hash": rows[split]["offline_content_hash"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=root,
+        data_dir=tmp_path / "data",
+        stage_mode="models",
+        rebuild_inputs=False,
+        rebuild_targets=False,
+        rebuild_models=True,
+        reconstructor_parallelism="single",
+        allow_debug_single_reconstructor=True,
+    )
+    assert require_partial_stage_inputs(config)["checked"]
+
+    hlt_metadata = root / "inputs" / "hlt_cache" / "model_val_fixed_hlt_metadata.json"
+    stale = json.loads(hlt_metadata.read_text(encoding="utf-8"))
+    stale["hlt_content_hash"] = "different-valid-cache"
+    hlt_metadata.write_text(json.dumps(stale), encoding="utf-8")
+    with pytest.raises(ValueError, match="current HLT model_val hlt_content_hash mismatch"):
+        require_partial_stage_inputs(config)
+
+
+def test_non_smoke_training_requires_a_provenance_bound_batch_contract() -> None:
     source = (
         REPO_ROOT / "scripts" / "train_adaptive_binary_pseudooffline_variant.py"
     ).read_text(encoding="utf-8")
-    assert "requested_world_size > 1 or contract_path.is_file()" in source
     assert "load_runtime_batch_contract(" in source
+    assert "if not args.smoke and not args.runtime_reference_benchmark:" in source
+
+
+def test_single_gpu_full_campaign_is_explicitly_debug_only(tmp_path: Path) -> None:
+    with pytest.raises(PermissionError, match="debug-only"):
+        AdaptiveBinarySubmissionConfig(
+            campaign_root=tmp_path / "blocked",
+            data_dir=tmp_path / "data",
+            reconstructor_parallelism="single",
+        )
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=tmp_path / "allowed",
+        data_dir=tmp_path / "data",
+        reconstructor_parallelism="single",
+        allow_debug_single_reconstructor=True,
+    )
+    assert config.reconstructor_parallelism == "single"
 
 
 def test_ddp4_topology_is_scoped_to_reconstructors(tmp_path: Path) -> None:
@@ -239,6 +408,8 @@ def test_highdata_approval_is_canonical(tmp_path: Path) -> None:
             campaign_root=tmp_path / "highdata",
             data_dir=tmp_path / "data",
             campaign_mode="highdata",
+            reconstructor_parallelism="single",
+            allow_debug_single_reconstructor=True,
         )
     report = _selection_report(tmp_path / "pilot" / "final_report.json")
     config = AdaptiveBinarySubmissionConfig(
@@ -247,6 +418,8 @@ def test_highdata_approval_is_canonical(tmp_path: Path) -> None:
         campaign_mode="highdata",
         approve_highdata=True,
         pilot_report_path=report,
+        reconstructor_parallelism="single",
+        allow_debug_single_reconstructor=True,
     )
     assert build_submission_graph(config)[0].key == "input:splits"
 
@@ -315,6 +488,7 @@ def test_partial_stage_rejects_upstream_rebuild(stage: str, tmp_path: Path) -> N
 
 def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> None:
     manifest = tmp_path / "submission.json"
+    acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
     result = subprocess.run(
         [
             sys.executable,
@@ -325,6 +499,8 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
             str(tmp_path / "data"),
             "--cluster",
             "tigris",
+            "--runtime-acceptance",
+            str(acceptance),
             "--project-dir",
             str(REPO_ROOT),
             "--dry-run",
@@ -352,7 +528,7 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
     assert payload["reconstructor_parallelism"]["contract"] == (
         ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT
     )
-    assert payload["reconstructor_parallelism"]["mode"] == "single"
+    assert payload["reconstructor_parallelism"]["mode"] == "ddp4"
     saved_parallelism = json.loads(
         (manifest.parent / "abph_reconstructor_parallelism.json").read_text(encoding="utf-8")
     )
@@ -435,6 +611,9 @@ def test_variant_worker_has_fail_closed_srun_contract() -> None:
 
 def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path: Path) -> None:
     pilot_report = _selection_report(tmp_path / "pilot" / "final_report.json")
+    acceptance = _runtime_acceptance(
+        tmp_path / "runtime_acceptance.json", highdata=True
+    )
     output = tmp_path / "highdata_submission.json"
     subprocess.run(
         [
@@ -450,7 +629,9 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
             "--pilot-report",
             str(pilot_report),
             "--cluster",
-            "tier3",
+            "tigris",
+            "--runtime-acceptance",
+            str(acceptance),
             "--project-dir",
             str(REPO_ROOT),
             "--dry-run",
@@ -466,7 +647,7 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["campaign_mode"] == "highdata"
     assert payload["split_sizes"]["model_train"] == 5_000_000
-    assert payload["resource_profile"]["partition"] == "tier3"
+    assert payload["resource_profile"]["partition"] == "tigris"
     assert len(payload["jobs"]) == 81
 
 
@@ -482,6 +663,8 @@ def test_selection_report_hash_is_recomputed(tmp_path: Path) -> None:
             campaign_mode="highdata",
             approve_highdata=True,
             pilot_report_path=path,
+            reconstructor_parallelism="single",
+            allow_debug_single_reconstructor=True,
         )
 
 
@@ -506,6 +689,8 @@ def test_truncated_screening_report_blocks_highdata_promotion(tmp_path: Path) ->
             campaign_mode="highdata",
             approve_highdata=True,
             pilot_report_path=path,
+            reconstructor_parallelism="single",
+            allow_debug_single_reconstructor=True,
         )
 
 
@@ -544,8 +729,14 @@ def test_prediction_only_cli_executes_against_reused_artifacts(tmp_path: Path) -
     for member in ("D1_kt32_mh4_particles", "D2_ca32_mh4_particles"):
         run = root / "runs" / member
         run.mkdir(parents=True)
-        (run / "run_report.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
-        (run / "best_model_val.pt").write_bytes(b"checkpoint")
+        checkpoint = run / "best_model_val.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        (run / "run_report.json").write_text(
+            json.dumps(
+                {"ok": True, "selected_checkpoint_hash": _sha256(checkpoint)}
+            ),
+            encoding="utf-8",
+        )
     payload = _run_cli(
         root,
         "predictions",
@@ -583,7 +774,7 @@ def test_fusion_only_cli_executes_against_reused_predictions(tmp_path: Path) -> 
     assert payload["reuse_preflight"]["checked"]
 
 
-def test_canonical_submitter_fails_before_sbatch_when_runtime_is_missing(
+def test_canonical_submitter_fails_closed_when_runtime_acceptance_is_missing(
     tmp_path: Path,
 ) -> None:
     environment = os.environ.copy()
@@ -611,7 +802,7 @@ def test_canonical_submitter_fails_before_sbatch_when_runtime_is_missing(
         capture_output=True,
     )
     assert result.returncode != 0
-    assert "requires ABPH_VARIANT_EXECUTOR" in result.stderr
+    assert "runtime acceptance artifact" in result.stderr
     assert not (tmp_path / "campaign" / "submission_logs").exists()
 
 
@@ -635,6 +826,35 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "--runtime-reference-benchmark" in worker
     assert "write_adaptive_binary_runtime_acceptance.py" in compiler
     assert "--single-path-acceptance" in compiler
+
+
+def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
+    submitter = (
+        REPO_ROOT / "sbatch" / "submit_adaptive_binary_runtime_batch_probes_tigris.sh"
+    ).read_text(encoding="utf-8")
+    worker = (
+        REPO_ROOT / "sbatch" / "run_adaptive_binary_runtime_batch_probe.sh"
+    ).read_text(encoding="utf-8")
+    compiler = (
+        REPO_ROOT / "sbatch" / "run_compile_adaptive_binary_runtime_batch_contract.sh"
+    ).read_text(encoding="utf-8")
+    probe = (
+        REPO_ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
+    ).read_text(encoding="utf-8")
+    assert "--nodes=4" in submitter and "--ntasks=4" in submitter
+    assert "afterok:" in submitter
+    assert "probe_adaptive_binary_runtime_batch.py" in worker
+    assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker
+    assert "compile_adaptive_binary_runtime_batch_contract.py" in compiler
+    for required in (
+        "SLURM_JOB_ID",
+        "SLURM_JOB_ACCOUNT",
+        "SLURM_JOB_PARTITION",
+        "resolved_variant_config_hash",
+        "runtime_provenance_hash",
+        "measure_full_optimizer_step",
+    ):
+        assert required in probe
 
 
 def test_canonical_shell_forwards_step10_acceptance_artifact() -> None:

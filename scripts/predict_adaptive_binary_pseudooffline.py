@@ -406,6 +406,16 @@ def _offline_teacher_logits(
                 "split": split,
                 "n_jets": maximum,
                 "checkpoint_sha256": _sha256(checkpoint),
+                "prediction_sha256": _sha256(output_dir / f"{split}.npz"),
+                "provenance": {
+                    **_split_provenance(view),
+                    "offline_content_hash": view.metadata.get(
+                        "offline_content_hash"
+                    )
+                    or view.metadata.get("content_hash"),
+                    "offline_inputs_loaded": True,
+                    "teacher_logits_loaded": False,
+                },
                 "final_test_loaded": False,
                 "selection_eligible": False,
             },
