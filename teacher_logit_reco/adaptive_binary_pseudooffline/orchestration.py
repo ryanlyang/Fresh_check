@@ -462,6 +462,7 @@ class AdaptiveBinarySubmissionConfig:
     rebuild_predictions: bool = True
     reconstructor_parallelism: str = "single"
     runtime_acceptance_path: str | Path | None = None
+    allow_debug_single_reconstructor: bool = False
 
     def __post_init__(self) -> None:
         if self.campaign_mode not in {"pilot", "highdata"}:
@@ -474,6 +475,15 @@ class AdaptiveBinarySubmissionConfig:
             raise ValueError("reconstructor_parallelism must be single or ddp4")
         if self.reconstructor_parallelism == "ddp4" and self.cluster != "tigris":
             raise ValueError("ABPH ddp4 is currently certified only for Tigris")
+        if (
+            self.reconstructor_parallelism == "single"
+            and self.stage_mode in {"full", "models"}
+            and not self.allow_debug_single_reconstructor
+        ):
+            raise PermissionError(
+                "single-GPU full/models submission is debug-only; pass the explicit "
+                "debug override or use the gated ddp4 production profile"
+            )
         if self.reconstructor_parallelism == "ddp4" and self.stage_mode in {
             "full",
             "models",

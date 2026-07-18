@@ -14,7 +14,7 @@ import time
 from typing import Any, Iterator, Mapping
 
 
-ABPH_RUNTIME_PROFILE_CONTRACT = "adaptive_binary_pseudooffline_runtime_profile_v1"
+ABPH_RUNTIME_PROFILE_CONTRACT = "adaptive_binary_pseudooffline_runtime_profile_v2"
 ABPH_RUNTIME_PROFILE_BUCKETS: tuple[str, ...] = (
     "optimizer_update_total",
     "target_source_wait",
@@ -107,6 +107,7 @@ class _TimingSample:
     bucket: str
     cpu_seconds: float
     cuda_seconds: float | None
+    synchronized_wall_seconds: float | None = None
 
 
 class RuntimeProfiler:
@@ -331,17 +332,21 @@ class RuntimeProfiler:
             self._record_event(end_event)
             if self._cuda_enabled:
                 self._torch.cuda.synchronize(self.device)
+            synchronized_wall_seconds = max(
+                time.perf_counter() - start_cpu, 0.0
+            )
             self._samples.append(
                 _TimingSample(
                     stage_key=str(stage_key),
                     scope="standalone",
                     bucket=bucket,
-                    cpu_seconds=max(time.perf_counter() - start_cpu, 0.0),
+                    cpu_seconds=synchronized_wall_seconds,
                     cuda_seconds=(
                         None
                         if start_event is None
                         else max(float(start_event.elapsed_time(end_event)) / 1000.0, 0.0)
                     ),
+                    synchronized_wall_seconds=synchronized_wall_seconds,
                 )
             )
 
@@ -349,11 +354,11 @@ class RuntimeProfiler:
         if self._scope is None:
             raise RuntimeError("runtime profiler has no active scope")
         scope = self._scope
-        end_cpu = time.perf_counter()
         end_event = self._new_event() if scope["sample"] else None
         self._record_event(end_event)
         if scope["sample"] and self._cuda_enabled:
             self._torch.cuda.synchronize(self.device)
+        end_cpu = time.perf_counter()
         if scope["sample"]:
             for pending in scope["pending"]:
                 cuda_seconds = None
@@ -374,6 +379,7 @@ class RuntimeProfiler:
                             float(pending["end_cpu"] - pending["start_cpu"]), 0.0
                         ),
                         cuda_seconds=cuda_seconds,
+                        synchronized_wall_seconds=None,
                     )
                 )
             total_cuda = (
@@ -391,6 +397,9 @@ class RuntimeProfiler:
                     bucket=total_bucket,
                     cpu_seconds=max(float(end_cpu - scope["start_cpu"]), 0.0),
                     cuda_seconds=total_cuda,
+                    synchronized_wall_seconds=max(
+                        float(end_cpu - scope["start_cpu"]), 0.0
+                    ),
                 )
             )
             if self._cuda_enabled:
@@ -404,6 +413,9 @@ class RuntimeProfiler:
         return {
             "sampled": bool(scope["sample"]),
             "cpu_seconds": max(float(end_cpu - scope["start_cpu"]), 0.0),
+            "synchronized_wall_seconds": max(
+                float(end_cpu - scope["start_cpu"]), 0.0
+            ),
         }
 
     def end_train_update(self, *, success: bool, jets: int) -> None:
@@ -438,9 +450,12 @@ class RuntimeProfiler:
                 "n_batches": int(batches),
                 "sampled": bool(summary["sampled"]),
                 "cpu_seconds": float(summary["cpu_seconds"]),
+                "synchronized_wall_seconds": float(
+                    summary["synchronized_wall_seconds"]
+                ),
                 "jets_per_second": (
-                    float(jets) / float(summary["cpu_seconds"])
-                    if summary["cpu_seconds"] > 0.0
+                    float(jets) / float(summary["synchronized_wall_seconds"])
+                    if summary["synchronized_wall_seconds"] > 0.0
                     else None
                 ),
             }
@@ -450,6 +465,11 @@ class RuntimeProfiler:
         samples = [row for row in self._samples if row.bucket == bucket]
         cpu = [float(row.cpu_seconds) for row in samples]
         cuda = [float(row.cuda_seconds) for row in samples if row.cuda_seconds is not None]
+        synchronized_wall = [
+            float(row.synchronized_wall_seconds)
+            for row in samples
+            if row.synchronized_wall_seconds is not None
+        ]
         return {
             "status": "measured" if samples else "no_samples",
             "samples": len(samples),
@@ -457,15 +477,22 @@ class RuntimeProfiler:
             "cpu_median_seconds": float(statistics.median(cpu)) if cpu else None,
             "cuda_total_seconds": float(sum(cuda)) if cuda else None,
             "cuda_median_seconds": float(statistics.median(cuda)) if cuda else None,
+            "synchronized_wall_total_seconds": float(sum(synchronized_wall)),
+            "synchronized_wall_median_seconds": (
+                float(statistics.median(synchronized_wall))
+                if synchronized_wall
+                else None
+            ),
         }
 
     def _stage_summary(self, row: Mapping[str, Any]) -> dict[str, Any]:
         update_samples = [
-            sample.cpu_seconds
+            sample.synchronized_wall_seconds
             for sample in self._samples
             if sample.stage_key == row["stage_key"]
             and sample.scope == "train"
             and sample.bucket == "optimizer_update_total"
+            and sample.synchronized_wall_seconds is not None
         ]
         median_update = (
             float(statistics.median(update_samples)) if update_samples else None
@@ -534,10 +561,15 @@ class RuntimeProfiler:
         buckets = {
             name: self._bucket_summary(name) for name in ABPH_RUNTIME_PROFILE_BUCKETS
         }
-        update_total = float(buckets["optimizer_update_total"]["cpu_total_seconds"])
+        update_total = float(
+            buckets["optimizer_update_total"]["synchronized_wall_total_seconds"]
+        )
         data_wait = float(buckets["target_source_wait"]["cpu_total_seconds"])
+        communication_bucket = buckets["gradient_synchronization"]
         communication = float(
-            buckets["gradient_synchronization"]["cpu_total_seconds"]
+            communication_bucket["cuda_total_seconds"]
+            if communication_bucket["cuda_total_seconds"] is not None
+            else communication_bucket["cpu_total_seconds"]
         )
         payload: dict[str, Any] = {
             "contract": ABPH_RUNTIME_PROFILE_CONTRACT,

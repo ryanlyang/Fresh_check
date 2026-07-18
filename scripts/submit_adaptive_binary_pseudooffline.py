@@ -65,8 +65,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reconstructor-parallelism",
         choices=ABPH_RECONSTRUCTOR_PARALLELISM_MODES,
-        default=os.environ.get("ABPH_RECONSTRUCTOR_PARALLELISM", "single"),
+        default=os.environ.get("ABPH_RECONSTRUCTOR_PARALLELISM", "ddp4"),
         help="Distributed topology for B/C/D reconstructor jobs only.",
+    )
+    parser.add_argument(
+        "--allow-debug-single-reconstructor",
+        action="store_true",
+        default=_bool_env("ABPH_ALLOW_DEBUG_SINGLE_RECONSTRUCTOR"),
+        help="Explicitly allow the non-production single-GPU full/models path.",
     )
     parser.add_argument(
         "--runtime-acceptance",
@@ -103,6 +109,9 @@ def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
         },
         reconstructor_parallelism=args.reconstructor_parallelism,
         runtime_acceptance_path=args.runtime_acceptance,
+        allow_debug_single_reconstructor=bool(
+            args.allow_debug_single_reconstructor
+        ),
     )
 
 

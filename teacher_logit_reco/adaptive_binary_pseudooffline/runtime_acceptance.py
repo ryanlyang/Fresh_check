@@ -161,10 +161,18 @@ def _benchmark_evidence(
     device = profile.get("device")
     if not all(isinstance(value, Mapping) for value in (buckets, stages, summary, device)):
         raise ValueError(f"runtime benchmark telemetry is malformed: {directory}")
-    update_seconds = float(buckets["optimizer_update_total"].get("cpu_total_seconds", 0.0))
+    update_seconds = float(
+        buckets["optimizer_update_total"].get(
+            "synchronized_wall_total_seconds", 0.0
+        )
+    )
     sampled_jets = sum(int(row.get("sampled_jets", 0)) for row in stages.values())
     sampled_updates = sum(int(row.get("sampled_updates", 0)) for row in stages.values())
-    validation_seconds = float(buckets["full_validation"].get("cpu_total_seconds", 0.0))
+    validation_seconds = float(
+        buckets["full_validation"].get(
+            "synchronized_wall_total_seconds", 0.0
+        )
+    )
     peak = int(summary.get("peak_reserved_bytes", 0))
     total_memory = int(device.get("total_memory_bytes", 0))
     if (

@@ -62,10 +62,21 @@ def _benchmark(
     coverage["expected_ordered_row_hash"] = canonical_hash(ordered_ranges)
     coverage["selection_eligible"] = True
     buckets = {
-        name: {"cpu_total_seconds": 0.0} for name in ABPH_RUNTIME_PROFILE_BUCKETS
+        name: {
+            "cpu_total_seconds": 0.0,
+            "cuda_total_seconds": None,
+            "synchronized_wall_total_seconds": 0.0,
+        }
+        for name in ABPH_RUNTIME_PROFILE_BUCKETS
     }
     buckets["optimizer_update_total"]["cpu_total_seconds"] = update_seconds
+    buckets["optimizer_update_total"][
+        "synchronized_wall_total_seconds"
+    ] = update_seconds
     buckets["full_validation"]["cpu_total_seconds"] = validation_seconds
+    buckets["full_validation"][
+        "synchronized_wall_total_seconds"
+    ] = validation_seconds
     buckets["gradient_synchronization"]["cpu_total_seconds"] = (
         update_seconds * 0.20 if world_size > 1 else 0.0
     )

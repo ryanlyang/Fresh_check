@@ -8,7 +8,7 @@ set -euo pipefail
 : "${ABPH_CAMPAIGN_MODE:=pilot}"
 : "${ABPH_STAGE_MODE:=full}"
 : "${ABPH_CLUSTER:=tigris}"
-: "${ABPH_RECONSTRUCTOR_PARALLELISM:=single}"
+: "${ABPH_RECONSTRUCTOR_PARALLELISM:=ddp4}"
 : "${PYTHONNOUSERSITE:=1}"
 : "${CONDA_ENV:=atlas_kd_tigris}"
 
@@ -40,6 +40,7 @@ if [[ "${CONFIRM_FINAL_TEST:-0}" == "1" ]]; then cmd+=(--confirm-final-test); fi
 if [[ -n "${ABPH_SELECTION_REPORT_PATH:-}" ]]; then cmd+=(--selection-report "${ABPH_SELECTION_REPORT_PATH}"); fi
 if [[ -n "${ABPH_FINAL_CLAIM_CONTRACT:-}" ]]; then cmd+=(--final-claim-contract "${ABPH_FINAL_CLAIM_CONTRACT}"); fi
 if [[ -n "${ABPH_RUNTIME_ACCEPTANCE_PATH:-}" ]]; then cmd+=(--runtime-acceptance "${ABPH_RUNTIME_ACCEPTANCE_PATH}"); fi
+if [[ "${ABPH_ALLOW_DEBUG_SINGLE_RECONSTRUCTOR:-0}" == "1" ]]; then cmd+=(--allow-debug-single-reconstructor); fi
 if [[ "${DRY_RUN:-0}" == "1" ]]; then cmd+=(--dry-run); fi
 if [[ -n "${ABPH_GPU_MEMORY:-}" ]]; then cmd+=(--gpu-memory "${ABPH_GPU_MEMORY}"); fi
 if [[ -n "${ABPH_CPU_MEMORY:-}" ]]; then cmd+=(--cpu-memory "${ABPH_CPU_MEMORY}"); fi

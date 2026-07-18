@@ -12,8 +12,9 @@ from .config import canonical_hash
 
 ABPH_RUNTIME_BATCH_CONTRACT = "adaptive_binary_pseudooffline_runtime_batch_v1"
 ABPH_RUNTIME_BATCH_MEASUREMENT_CONTRACT = (
-    "adaptive_binary_pseudooffline_full_step_batch_measurement_v1"
+    "adaptive_binary_pseudooffline_full_step_batch_measurement_v2"
 )
+ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER = "canonical_slurm_full_optimizer_step_v1"
 ABPH_RUNTIME_BATCH_STAGE_FAMILIES = ("root_hierarchy", "renderer_distribution")
 ABPH_RUNTIME_BATCH_EFFECTIVE_BATCHES = {
     "root_hierarchy": 1024,
@@ -56,6 +57,13 @@ class FullStepBatchMeasurement:
     """Auditable worst-rank evidence from one candidate optimizer step."""
 
     stage_family: str
+    variant_name: str
+    resolved_variant_config_hash: str
+    runtime_provenance_hash: str
+    measurement_producer: str
+    slurm_job_id: str
+    slurm_job_account: str
+    slurm_job_partition: str
     local_batch_size: int
     accumulation_steps: int
     requested_world_size: int
@@ -88,6 +96,18 @@ class FullStepBatchMeasurement:
     def __post_init__(self) -> None:
         if self.stage_family not in ABPH_RUNTIME_BATCH_STAGE_FAMILIES:
             raise ValueError(f"unknown stage family {self.stage_family!r}")
+        for name in (
+            "variant_name",
+            "resolved_variant_config_hash",
+            "runtime_provenance_hash",
+            "slurm_job_id",
+            "slurm_job_account",
+            "slurm_job_partition",
+        ):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"{name} is required")
+        if self.measurement_producer != ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER:
+            raise ValueError("runtime batch measurement producer is not canonical")
         expected = exact_accumulation_steps(
             self.stage_family,
             world_size=self.requested_world_size,
@@ -142,6 +162,8 @@ class FullStepBatchMeasurement:
             failures.append("fewer_than_two_prefetch_buffers")
         if not self.active_parameter_groups:
             failures.append("active_parameter_groups_missing")
+        if not self.slurm_job_id.isdigit():
+            failures.append("canonical_slurm_job_id_missing")
         if self.requested_world_size > 1:
             if not self.process_group_initialized:
                 failures.append("process_group_not_initialized")
@@ -412,6 +434,7 @@ __all__ = [
     "ABPH_RUNTIME_BATCH_CONTRACT",
     "ABPH_RUNTIME_BATCH_EFFECTIVE_BATCHES",
     "ABPH_RUNTIME_BATCH_MEASUREMENT_CONTRACT",
+    "ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER",
     "ABPH_RUNTIME_BATCH_MINIMUM_FREE_FRACTION",
     "ABPH_RUNTIME_BATCH_STAGE_FAMILIES",
     "FullStepBatchMeasurement",
