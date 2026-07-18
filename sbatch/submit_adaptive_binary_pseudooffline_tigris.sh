@@ -6,7 +6,11 @@ set -euo pipefail
 : "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
 : "${CONDA_ENV:=atlas_kd_tigris}"
 : "${ABPH_SBATCH_ACCOUNT:=reu-aisocial}"
+: "${ABPH_RECONSTRUCTOR_PARALLELISM:=single}"
 : "${PYTHONNOUSERSITE:=1}"
-export PROJECT_DIR ABPH_DATA_DIR CONDA_BASE CONDA_ENV ABPH_SBATCH_ACCOUNT PYTHONNOUSERSITE
+export PROJECT_DIR ABPH_DATA_DIR CONDA_BASE CONDA_ENV ABPH_SBATCH_ACCOUNT PYTHONNOUSERSITE ABPH_RECONSTRUCTOR_PARALLELISM
+if [[ -n "${ABPH_RUNTIME_ACCEPTANCE_PATH:-}" ]]; then
+  export ABPH_RUNTIME_ACCEPTANCE_PATH
+fi
 export ABPH_CLUSTER=tigris
 exec bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_pseudooffline.sh" "$@"

@@ -8,6 +8,7 @@ set -euo pipefail
 : "${ABPH_CAMPAIGN_MODE:=pilot}"
 : "${ABPH_STAGE_MODE:=full}"
 : "${ABPH_CLUSTER:=tigris}"
+: "${ABPH_RECONSTRUCTOR_PARALLELISM:=single}"
 : "${PYTHONNOUSERSITE:=1}"
 : "${CONDA_ENV:=atlas_kd_tigris}"
 
@@ -28,6 +29,7 @@ cmd=(python -u "${PROJECT_DIR}/scripts/submit_adaptive_binary_pseudooffline.py"
   --campaign-mode "${ABPH_CAMPAIGN_MODE}"
   --stage-mode "${ABPH_STAGE_MODE}"
   --cluster "${ABPH_CLUSTER}"
+  --reconstructor-parallelism "${ABPH_RECONSTRUCTOR_PARALLELISM}"
   --project-dir "${PROJECT_DIR}")
 
 if [[ -n "${ABPH_SBATCH_ACCOUNT:-}" ]]; then cmd+=(--account "${ABPH_SBATCH_ACCOUNT}"); fi
@@ -37,6 +39,7 @@ if [[ "${ABPH_APPROVE_FINAL_TEST:-0}" == "1" ]]; then cmd+=(--approve-final-test
 if [[ "${CONFIRM_FINAL_TEST:-0}" == "1" ]]; then cmd+=(--confirm-final-test); fi
 if [[ -n "${ABPH_SELECTION_REPORT_PATH:-}" ]]; then cmd+=(--selection-report "${ABPH_SELECTION_REPORT_PATH}"); fi
 if [[ -n "${ABPH_FINAL_CLAIM_CONTRACT:-}" ]]; then cmd+=(--final-claim-contract "${ABPH_FINAL_CLAIM_CONTRACT}"); fi
+if [[ -n "${ABPH_RUNTIME_ACCEPTANCE_PATH:-}" ]]; then cmd+=(--runtime-acceptance "${ABPH_RUNTIME_ACCEPTANCE_PATH}"); fi
 if [[ "${DRY_RUN:-0}" == "1" ]]; then cmd+=(--dry-run); fi
 if [[ -n "${ABPH_GPU_MEMORY:-}" ]]; then cmd+=(--gpu-memory "${ABPH_GPU_MEMORY}"); fi
 if [[ -n "${ABPH_CPU_MEMORY:-}" ]]; then cmd+=(--cpu-memory "${ABPH_CPU_MEMORY}"); fi

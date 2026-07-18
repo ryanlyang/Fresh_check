@@ -7,6 +7,8 @@ import math
 import statistics
 from typing import Any, Mapping, Sequence
 
+from .config import canonical_hash
+
 
 ABPH_ACCELERATED_SCHEDULE_CONTRACT = (
     "adaptive_binary_pseudooffline_accelerated_screening_v1"
@@ -352,7 +354,7 @@ def build_extension_comparison_report(
     extension_category = tagging_signal_category(extension_tagging_gain)
     tagging_changed = nominal_category != extension_category
     schedule_truncated = bool(reconstruction_changed or tagging_changed)
-    return {
+    report = {
         "contract": ABPH_EXTENSION_COMPARISON_CONTRACT,
         "ok": True,
         "variant_name": str(variant_name),
@@ -383,6 +385,8 @@ def build_extension_comparison_report(
             "use_extension_cap" if schedule_truncated else "retain_nominal"
         ),
     }
+    report["report_content_hash"] = canonical_hash(report)
+    return report
 
 
 __all__ = [

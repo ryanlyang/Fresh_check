@@ -226,7 +226,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-reference-benchmark",
         action="store_true",
-        help="Run the fixed 20-update Step-1 timing reference with one full validation.",
+        help=(
+            "Run the fixed 20-update timing reference with one full validation; "
+            "the active Slurm world size is preserved for Step-10 parity."
+        ),
     )
     return parser
 
@@ -644,7 +647,7 @@ def _write_oracle_reference_report(
 
 def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: Path) -> dict:
     root = Path(args.campaign_root)
-    if args.smoke or args.runtime_reference_benchmark:
+    if args.smoke:
         requested_rank, requested_world_size = 0, 1
     else:
         requested_rank, requested_world_size, _local_rank = distributed_environment()
@@ -868,11 +871,16 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
     if runtime_batch_contract is None:
         root_hierarchy_batch_size = int(args.batch_size)
         renderer_distribution_batch_size = int(args.batch_size)
-        if 1024 % root_hierarchy_batch_size or 512 % renderer_distribution_batch_size:
-            raise ValueError("batch size must divide both locked effective batch sizes 1024 and 512")
-        root_hierarchy_accumulation = 1 if args.smoke else 1024 // root_hierarchy_batch_size
+        root_denominator = requested_world_size * root_hierarchy_batch_size
+        renderer_denominator = requested_world_size * renderer_distribution_batch_size
+        if 1024 % root_denominator or 512 % renderer_denominator:
+            raise ValueError(
+                "world size times local batch must divide both locked effective "
+                "batch sizes 1024 and 512"
+            )
+        root_hierarchy_accumulation = 1 if args.smoke else 1024 // root_denominator
         renderer_distribution_accumulation = (
-            1 if args.smoke else 512 // renderer_distribution_batch_size
+            1 if args.smoke else 512 // renderer_denominator
         )
         runtime_contract_path = None
         runtime_contract_hash = None
@@ -1069,8 +1077,13 @@ def main(argv: list[str] | None = None) -> int:
         from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import train_tagger_variant
 
         report = train_tagger_variant(args, resolved, output_dir)
-    _atomic_json(output_dir / "run_report.json", report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    is_primary = True
+    if spec.tier in {"B", "C", "D"} and not args.smoke:
+        rank, _world_size, _local_rank = distributed_environment()
+        is_primary = rank == 0
+    if is_primary:
+        _atomic_json(output_dir / "run_report.json", report)
+        print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report.get("ok") is True else 1
 
 

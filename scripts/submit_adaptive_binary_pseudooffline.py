@@ -19,11 +19,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (  # noqa: E402
+    ABPH_RECONSTRUCTOR_PARALLELISM_MODES,
     ABPH_STAGE_MODES,
     AdaptiveBinarySubmissionConfig,
     SlurmJobSpec,
     SlurmResourceProfile,
     build_submission_graph,
+    canonical_hash,
     require_partial_stage_inputs,
     submission_manifest,
 )
@@ -60,6 +62,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu-memory")
     parser.add_argument("--gpu-cpus", type=int)
     parser.add_argument("--cpu-cpus", type=int)
+    parser.add_argument(
+        "--reconstructor-parallelism",
+        choices=ABPH_RECONSTRUCTOR_PARALLELISM_MODES,
+        default=os.environ.get("ABPH_RECONSTRUCTOR_PARALLELISM", "single"),
+        help="Distributed topology for B/C/D reconstructor jobs only.",
+    )
+    parser.add_argument(
+        "--runtime-acceptance",
+        default=os.environ.get("ABPH_RUNTIME_ACCEPTANCE_PATH"),
+        help="Immutable Step-10 acceptance artifact required by full DDP4 campaigns.",
+    )
     return parser
 
 
@@ -82,17 +95,29 @@ def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
         rebuild_targets=not partial,
         rebuild_models=not partial,
         rebuild_predictions=args.stage_mode in {"full", "predictions", "final_claims"},
+        reconstructor_parallelism=args.reconstructor_parallelism,
+        runtime_acceptance_path=args.runtime_acceptance,
     )
 
 
-def _resource(args: argparse.Namespace) -> SlurmResourceProfile:
+def _resource(
+    args: argparse.Namespace,
+    config: AdaptiveBinarySubmissionConfig,
+) -> SlurmResourceProfile:
     profile = SlurmResourceProfile.for_cluster(args.cluster, account=args.account)
+    topology = config.reconstructor_topology
     return replace(
         profile,
         gpu_memory=args.gpu_memory or profile.gpu_memory,
         cpu_memory=args.cpu_memory or profile.cpu_memory,
         gpu_cpus=args.gpu_cpus or profile.gpu_cpus,
         cpu_cpus=args.cpu_cpus or profile.cpu_cpus,
+        nodes=int(topology["nodes"]),
+        ntasks=int(topology["ntasks"]),
+        ntasks_per_node=int(topology["ntasks_per_node"]),
+        gpus_per_node=int(topology["gpus_per_node"]),
+        distributed_world_size=int(topology["distributed_world_size"]),
+        launcher=str(topology["launcher"]),
     )
 
 
@@ -162,6 +187,9 @@ def _sbatch_command(
         "--parsable",
         f"--job-name=abph_{job.stage}"[:128],
         f"--partition={resource.partition}",
+        f"--nodes={job.nodes}",
+        f"--ntasks={job.ntasks}",
+        f"--ntasks-per-node={job.ntasks_per_node}",
         f"--cpus-per-task={resource.gpu_cpus if job.gpu else resource.cpu_cpus}",
         f"--mem={resource.gpu_memory if job.gpu else resource.cpu_memory}",
         f"--time={resource.gpu_time if job.gpu else resource.cpu_time}",
@@ -203,6 +231,12 @@ def _submit(
                 "PYTHONNOUSERSITE": "1",
                 "ABPH_SBATCH_ACCOUNT": resource.account,
                 "ABPH_SBATCH_PARTITION": resource.partition,
+                "ABPH_JOB_LAUNCHER": job.launcher,
+                "ABPH_DISTRIBUTED_NODES": str(job.nodes),
+                "ABPH_DISTRIBUTED_NTASKS": str(job.ntasks),
+                "ABPH_DISTRIBUTED_NTASKS_PER_NODE": str(job.ntasks_per_node),
+                "ABPH_DISTRIBUTED_GPUS_PER_NODE": str(job.resolved_gpus_per_node),
+                "ABPH_DISTRIBUTED_WORLD_SIZE": str(job.distributed_world_size),
             }
         )
         if dry_run:
@@ -231,10 +265,23 @@ def _submit(
                 "environment": {
                     **runtime_environment,
                     **dict(job.environment),
+                    "ABPH_JOB_LAUNCHER": job.launcher,
+                    "ABPH_DISTRIBUTED_NODES": str(job.nodes),
+                    "ABPH_DISTRIBUTED_NTASKS": str(job.ntasks),
+                    "ABPH_DISTRIBUTED_NTASKS_PER_NODE": str(job.ntasks_per_node),
+                    "ABPH_DISTRIBUTED_GPUS_PER_NODE": str(job.resolved_gpus_per_node),
+                    "ABPH_DISTRIBUTED_WORLD_SIZE": str(job.distributed_world_size),
                 },
             }
         )
     return job_ids, commands
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -242,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     config = _config(args)
     reuse_preflight = require_partial_stage_inputs(config)
     jobs = build_submission_graph(config)
-    resource = _resource(args)
+    resource = _resource(args, config)
     project_dir = Path(args.project_dir).resolve()
     runtime_environment, runtime_executors = _resolve_runtime_executors(
         stage_mode=args.stage_mode,
@@ -272,9 +319,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_manifest
         else Path(args.campaign_root) / "submission_logs" / f"abph_{args.stage_mode}_submission.json"
     )
+    parallelism_path = destination.parent / "abph_reconstructor_parallelism.json"
+    parallelism_manifest = {
+        **dict(manifest["reconstructor_parallelism"]),
+        "campaign_root": str(config.paths.root),
+        "cluster": config.cluster,
+        "account": resource.account,
+        "partition": resource.partition,
+        "gpu_gres_per_node": resource.gpu_gres,
+        "gpu_cpus_per_rank": resource.gpu_cpus,
+        "gpu_memory_per_node": resource.gpu_memory,
+        "submission_graph_hash": manifest["graph_hash"],
+    }
+    parallelism_manifest["content_hash"] = parallelism_content_hash = canonical_hash(
+        parallelism_manifest
+    )
+    manifest["parallelism_manifest"] = {
+        "path": str(parallelism_path),
+        "content_hash": parallelism_content_hash,
+    }
     if not args.dry_run or args.output_manifest:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        _write_json_atomic(destination, manifest)
+        _write_json_atomic(parallelism_path, parallelism_manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
 

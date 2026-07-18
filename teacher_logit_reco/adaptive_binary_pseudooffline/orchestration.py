@@ -16,10 +16,15 @@ from .config import (
 from .accounting_preflight import ABPH_STEP4_PREFLIGHT_CONTRACT
 from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
 from .report import ABPH_CAMPAIGN_REPORT_CONTRACT
+from .runtime_acceptance import require_runtime_acceptance
 from .variants import ABPH_EXPECTED_VARIANT_NAMES, resolve_variant_config, variant_spec
 
 
 ABPH_SLURM_ORCHESTRATION_CONTRACT = "adaptive_binary_pseudooffline_slurm_orchestration_v1"
+ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT = (
+    "adaptive_binary_reconstructor_parallelism_v1"
+)
+ABPH_RECONSTRUCTOR_PARALLELISM_MODES: tuple[str, ...] = ("single", "ddp4")
 ABPH_FINAL_CLAIM_CONTRACT = "adaptive_binary_pseudooffline_final_claim_contract_v1"
 ABPH_STAGE_MODES: tuple[str, ...] = (
     "full",
@@ -266,6 +271,29 @@ class SlurmResourceProfile:
     cpu_memory: str
     gpu_time: str = "3-00:00:00"
     cpu_time: str = "2-00:00:00"
+    nodes: int = 1
+    ntasks: int = 1
+    ntasks_per_node: int = 1
+    gpus_per_node: int = 1
+    distributed_world_size: int = 1
+    launcher: str = "direct"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "nodes",
+            "ntasks",
+            "ntasks_per_node",
+            "gpus_per_node",
+            "distributed_world_size",
+        ):
+            if int(getattr(self, name)) <= 0:
+                raise ValueError(f"Slurm resource {name} must be positive")
+        if self.ntasks != self.nodes * self.ntasks_per_node:
+            raise ValueError("Slurm resource task topology is inconsistent")
+        if self.distributed_world_size != self.ntasks:
+            raise ValueError("Slurm resource world size must equal ntasks")
+        if self.launcher not in {"direct", "srun"}:
+            raise ValueError("Slurm resource launcher must be direct or srun")
 
     @classmethod
     def for_cluster(cls, cluster: str, *, account: str | None = None) -> "SlurmResourceProfile":
@@ -355,12 +383,44 @@ class SlurmJobSpec:
     dependencies: tuple[str, ...] = ()
     gpu: bool = False
     environment: Mapping[str, str] = field(default_factory=dict)
+    nodes: int = 1
+    ntasks: int = 1
+    ntasks_per_node: int = 1
+    gpus_per_node: int | None = None
+    distributed_world_size: int = 1
+    launcher: str = "direct"
 
     def __post_init__(self) -> None:
         if not self.key or not self.stage or not self.script:
             raise ValueError("Slurm jobs require key, stage, and script")
         if self.key in self.dependencies:
             raise ValueError(f"job {self.key} depends on itself")
+        for name in (
+            "nodes",
+            "ntasks",
+            "ntasks_per_node",
+            "distributed_world_size",
+        ):
+            if int(getattr(self, name)) <= 0:
+                raise ValueError(f"job {self.key} has invalid {name}")
+        if self.gpus_per_node is not None and int(self.gpus_per_node) < 0:
+            raise ValueError(f"job {self.key} has invalid gpus_per_node")
+        if self.ntasks != self.nodes * self.ntasks_per_node:
+            raise ValueError(f"job {self.key} has inconsistent task topology")
+        if self.distributed_world_size != self.ntasks:
+            raise ValueError(f"job {self.key} world size differs from ntasks")
+        if self.launcher not in {"direct", "srun"}:
+            raise ValueError(f"job {self.key} has an invalid launcher")
+        if self.launcher == "direct" and self.distributed_world_size != 1:
+            raise ValueError(f"job {self.key} cannot launch multiple direct ranks")
+        if not self.gpu and self.distributed_world_size != 1:
+            raise ValueError(f"CPU job {self.key} cannot use reconstructor DDP")
+
+    @property
+    def resolved_gpus_per_node(self) -> int:
+        if self.gpus_per_node is not None:
+            return int(self.gpus_per_node)
+        return 1 if self.gpu else 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -371,6 +431,12 @@ class SlurmJobSpec:
             "dependencies": list(self.dependencies),
             "gpu": self.gpu,
             "environment": dict(self.environment),
+            "nodes": int(self.nodes),
+            "ntasks": int(self.ntasks),
+            "ntasks_per_node": int(self.ntasks_per_node),
+            "gpus_per_node": self.resolved_gpus_per_node,
+            "distributed_world_size": int(self.distributed_world_size),
+            "launcher": self.launcher,
         }
 
 
@@ -392,6 +458,8 @@ class AdaptiveBinarySubmissionConfig:
     rebuild_targets: bool = True
     rebuild_models: bool = True
     rebuild_predictions: bool = True
+    reconstructor_parallelism: str = "single"
+    runtime_acceptance_path: str | Path | None = None
 
     def __post_init__(self) -> None:
         if self.campaign_mode not in {"pilot", "highdata"}:
@@ -400,6 +468,17 @@ class AdaptiveBinarySubmissionConfig:
             raise ValueError(f"unknown stage mode {self.stage_mode!r}")
         if self.cluster not in ABPH_CLUSTER_PROFILES:
             raise ValueError(f"unknown cluster {self.cluster!r}")
+        if self.reconstructor_parallelism not in ABPH_RECONSTRUCTOR_PARALLELISM_MODES:
+            raise ValueError("reconstructor_parallelism must be single or ddp4")
+        if self.reconstructor_parallelism == "ddp4" and self.cluster != "tigris":
+            raise ValueError("ABPH ddp4 is currently certified only for Tigris")
+        if self.reconstructor_parallelism == "ddp4" and self.stage_mode == "full":
+            if self.runtime_acceptance_path is None:
+                raise PermissionError(
+                    "ABPH ddp4 full campaigns require a Step-10 runtime acceptance artifact"
+                )
+            scope = "highdata" if self.campaign_mode == "highdata" else "optimized_pilot"
+            require_runtime_acceptance(self.runtime_acceptance_path, scope=scope)
         if self.campaign_mode == "highdata" and self.stage_mode != "final_claims":
             if not self.approve_highdata:
                 raise PermissionError("high-data submission requires canonical approval")
@@ -436,6 +515,32 @@ class AdaptiveBinarySubmissionConfig:
     @property
     def split_sizes(self) -> Mapping[str, int]:
         return ABPH_PILOT_SPLIT_SIZES if self.campaign_mode == "pilot" else ABPH_HIGHDATA_SPLIT_SIZES
+
+    @property
+    def reconstructor_topology(self) -> Mapping[str, Any]:
+        if self.reconstructor_parallelism == "ddp4":
+            return {
+                "contract": ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT,
+                "mode": "ddp4",
+                "nodes": 4,
+                "ntasks": 4,
+                "ntasks_per_node": 1,
+                "gpus_per_node": 1,
+                "distributed_world_size": 4,
+                "launcher": "srun",
+                "promotion_status": "requires_step10_runtime_acceptance",
+            }
+        return {
+            "contract": ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT,
+            "mode": "single",
+            "nodes": 1,
+            "ntasks": 1,
+            "ntasks_per_node": 1,
+            "gpus_per_node": 1,
+            "distributed_world_size": 1,
+            "launcher": "direct",
+            "promotion_status": "debug_compatibility",
+        }
 
 
 def _run_dir(paths: AdaptiveBinaryCampaignPaths, member: str) -> Path:
@@ -596,6 +701,17 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
     }
     if config.selection_report_path is not None:
         common_env["ABPH_SELECTION_REPORT_PATH"] = str(config.selection_report_path)
+    topology = dict(config.reconstructor_topology)
+    reconstructor_env = {
+        **common_env,
+        "ABPH_RECONSTRUCTOR_PARALLELISM": str(topology["mode"]),
+        "ABPH_JOB_LAUNCHER": str(topology["launcher"]),
+        "ABPH_DISTRIBUTED_NODES": str(topology["nodes"]),
+        "ABPH_DISTRIBUTED_NTASKS": str(topology["ntasks"]),
+        "ABPH_DISTRIBUTED_NTASKS_PER_NODE": str(topology["ntasks_per_node"]),
+        "ABPH_DISTRIBUTED_GPUS_PER_NODE": str(topology["gpus_per_node"]),
+        "ABPH_DISTRIBUTED_WORLD_SIZE": str(topology["distributed_world_size"]),
+    }
     jobs: list[SlurmJobSpec] = []
 
     if config.stage_mode == "full":
@@ -640,7 +756,13 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     (name,),
                     _variant_dependencies(name),
                     gpu=True,
-                    environment=common_env,
+                    environment=reconstructor_env,
+                    nodes=int(topology["nodes"]),
+                    ntasks=int(topology["ntasks"]),
+                    ntasks_per_node=int(topology["ntasks_per_node"]),
+                    gpus_per_node=int(topology["gpus_per_node"]),
+                    distributed_world_size=int(topology["distributed_world_size"]),
+                    launcher=str(topology["launcher"]),
                 )
             )
         for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
@@ -839,6 +961,31 @@ def submission_manifest(
     config: AdaptiveBinarySubmissionConfig,
     jobs: Sequence[SlurmJobSpec],
 ) -> dict[str, Any]:
+    topology = dict(config.reconstructor_topology)
+    topology["reconstructor_job_keys"] = [
+        job.key for job in jobs if job.stage in {"reconstructor", "renderer"}
+    ]
+    topology["parallelism_hash"] = canonical_hash(topology)
+    runtime_acceptance = None
+    if config.runtime_acceptance_path is not None:
+        acceptance_path = Path(config.runtime_acceptance_path).resolve()
+        acceptance = require_runtime_acceptance(
+            acceptance_path,
+            scope=(
+                "highdata"
+                if config.campaign_mode == "highdata"
+                else (
+                    "optimized_pilot"
+                    if config.stage_mode == "full"
+                    else "ddp4_runtime"
+                )
+            ),
+        )
+        runtime_acceptance = {
+            "path": str(acceptance_path),
+            "sha256": _sha256_file(acceptance_path),
+            "acceptance_content_hash": acceptance["acceptance_content_hash"],
+        }
     payload = {
         "contract": ABPH_SLURM_ORCHESTRATION_CONTRACT,
         "campaign_root": str(config.paths.root),
@@ -852,6 +999,8 @@ def submission_manifest(
             "campaign_profile": config.campaign_mode,
             "profile_selected_from_split_sizes": True,
         },
+        "reconstructor_parallelism": topology,
+        "runtime_acceptance": runtime_acceptance,
         "confirm_final_test": config.confirm_final_test,
         "jobs": [job.to_dict() for job in jobs],
     }
@@ -870,6 +1019,8 @@ __all__ = [
     "ABPH_NEURAL_TAGGER_VARIANTS",
     "ABPH_POSTHOC_VARIANTS",
     "ABPH_RECONSTRUCTOR_VARIANTS",
+    "ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT",
+    "ABPH_RECONSTRUCTOR_PARALLELISM_MODES",
     "ABPH_RENDERER_VARIANTS",
     "ABPH_SLURM_ORCHESTRATION_CONTRACT",
     "ABPH_STAGE_MODES",

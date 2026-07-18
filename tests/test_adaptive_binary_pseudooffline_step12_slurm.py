@@ -14,6 +14,8 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_FINAL_CLAIM_CONTRACT,
     ABPH_FUSION_CANDIDATES,
     ABPH_POSTHOC_VARIANTS,
+    ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT,
+    ABPH_RUNTIME_ACCEPTANCE_CONTRACT,
     ABPH_SLURM_ORCHESTRATION_CONTRACT,
     ABPH_STEP4_PREFLIGHT_CONTRACT,
     AdaptiveBinarySubmissionConfig,
@@ -93,6 +95,24 @@ def _actual_target_preflight(path: Path) -> Path:
     return path
 
 
+def _runtime_acceptance(path: Path, *, highdata: bool = False) -> Path:
+    payload = {
+        "contract": ABPH_RUNTIME_ACCEPTANCE_CONTRACT,
+        "ok": True,
+        "runtime_gate": {"approved": True, "checks": {"transport": True}},
+        "promotion": {
+            "ddp4_runtime_approved": True,
+            "optimized_pilot_submission_allowed": True,
+            "highdata_submission_allowed": bool(highdata),
+            "production_reconstructor_parallelism": "ddp4",
+        },
+    }
+    payload["acceptance_content_hash"] = canonical_hash(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     config = AdaptiveBinarySubmissionConfig(
         campaign_root=tmp_path / "campaign",
@@ -121,6 +141,52 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     assert "teacher_logits:A4_offline_part_ceiling" in keys
     f4 = next(job for job in graph if job.key == "variant:F4_ce_logit_kd")
     assert "teacher_logits:A4_offline_part_ceiling" in f4.dependencies
+    reconstructor_jobs = [
+        job for job in graph if job.stage in {"reconstructor", "renderer"}
+    ]
+    assert reconstructor_jobs
+    assert all(job.launcher == "direct" for job in reconstructor_jobs)
+    assert all(job.distributed_world_size == 1 for job in reconstructor_jobs)
+    assert all(job.nodes == 1 for job in graph)
+
+
+def test_ddp4_topology_is_scoped_to_reconstructors(tmp_path: Path) -> None:
+    with pytest.raises(PermissionError, match="runtime acceptance"):
+        AdaptiveBinarySubmissionConfig(
+            campaign_root=tmp_path / "ungated",
+            data_dir=tmp_path / "data",
+            cluster="tigris",
+            reconstructor_parallelism="ddp4",
+        )
+    acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=tmp_path / "campaign",
+        data_dir=tmp_path / "data",
+        cluster="tigris",
+        reconstructor_parallelism="ddp4",
+        runtime_acceptance_path=acceptance,
+    )
+    graph = build_submission_graph(config)
+    for job in graph:
+        if job.stage in {"reconstructor", "renderer"}:
+            assert (job.nodes, job.ntasks, job.ntasks_per_node) == (4, 4, 1)
+            assert job.resolved_gpus_per_node == 1
+            assert job.distributed_world_size == 4
+            assert job.launcher == "srun"
+            assert job.environment["ABPH_RECONSTRUCTOR_PARALLELISM"] == "ddp4"
+            assert job.environment["ABPH_DISTRIBUTED_WORLD_SIZE"] == "4"
+        else:
+            assert (job.nodes, job.ntasks, job.ntasks_per_node) == (1, 1, 1)
+            assert job.distributed_world_size == 1
+            assert job.launcher == "direct"
+
+    with pytest.raises(ValueError, match="certified only for Tigris"):
+        AdaptiveBinarySubmissionConfig(
+            campaign_root=tmp_path / "tier3",
+            data_dir=tmp_path / "data",
+            cluster="tier3",
+            reconstructor_parallelism="ddp4",
+        )
 
 
 def test_actual_target_preflight_fails_closed(tmp_path: Path) -> None:
@@ -249,6 +315,88 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
         "ABPH_PREDICTION_EXECUTOR",
         "ABPH_DIAGNOSTIC_EXECUTOR",
     }
+    assert payload["reconstructor_parallelism"]["contract"] == (
+        ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT
+    )
+    assert payload["reconstructor_parallelism"]["mode"] == "single"
+    saved_parallelism = json.loads(
+        (manifest.parent / "abph_reconstructor_parallelism.json").read_text(encoding="utf-8")
+    )
+    assert saved_parallelism["parallelism_hash"] == payload["reconstructor_parallelism"][
+        "parallelism_hash"
+    ]
+    saved_hash = saved_parallelism.pop("content_hash")
+    assert saved_hash == canonical_hash(saved_parallelism)
+    assert payload["parallelism_manifest"]["content_hash"] == saved_hash
+
+
+def test_canonical_submitter_emits_four_node_reconstructor_commands(tmp_path: Path) -> None:
+    manifest = tmp_path / "submission" / "ddp4.json"
+    acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "submit_adaptive_binary_pseudooffline.py"),
+            "--campaign-root",
+            str(tmp_path / "campaign"),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--cluster",
+            "tigris",
+            "--reconstructor-parallelism",
+            "ddp4",
+            "--runtime-acceptance",
+            str(acceptance),
+            "--project-dir",
+            str(REPO_ROOT),
+            "--dry-run",
+            "--output-manifest",
+            str(manifest),
+        ],
+        cwd=REPO_ROOT,
+        env=_executor_environment(tmp_path),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["resource_profile"]["nodes"] == 4
+    assert payload["resource_profile"]["distributed_world_size"] == 4
+    assert payload["resource_profile"]["launcher"] == "srun"
+    assert payload["runtime_acceptance"]["path"] == str(acceptance.resolve())
+    jobs_by_key = {row["key"]: row for row in payload["jobs"]}
+    commands_by_key = {row["key"]: row for row in payload["submission_commands"]}
+    reconstructor_keys = set(payload["reconstructor_parallelism"]["reconstructor_job_keys"])
+    assert reconstructor_keys
+    for key, job in jobs_by_key.items():
+        command = commands_by_key[key]["command"]
+        if key in reconstructor_keys:
+            assert "--nodes=4" in command
+            assert "--ntasks=4" in command
+            assert "--ntasks-per-node=1" in command
+            assert commands_by_key[key]["environment"]["ABPH_JOB_LAUNCHER"] == "srun"
+        else:
+            assert "--nodes=1" in command
+            assert "--ntasks=1" in command
+            assert commands_by_key[key]["environment"]["ABPH_JOB_LAUNCHER"] == "direct"
+
+
+def test_variant_worker_has_fail_closed_srun_contract() -> None:
+    source = (REPO_ROOT / "sbatch" / "run_adaptive_binary_variant.sh").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        'ABPH_RECONSTRUCTOR_PARALLELISM:-single',
+        '[[ "${SLURM_JOB_NUM_NODES:-0}" == "${ABPH_DISTRIBUTED_NODES}" ]]',
+        '[[ "${SLURM_NTASKS:-0}" == "${ABPH_DISTRIBUTED_NTASKS}" ]]',
+        'scontrol show hostnames "${SLURM_JOB_NODELIST}"',
+        'export MASTER_ADDR="${master_addr}"',
+        'export MASTER_PORT=',
+        'fresh_run srun',
+        '--kill-on-bad-exit=1',
+        '--export=ALL',
+    ):
+        assert required in source
 
 
 def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path: Path) -> None:
@@ -431,3 +579,33 @@ def test_canonical_submitter_fails_before_sbatch_when_runtime_is_missing(
     assert result.returncode != 0
     assert "requires ABPH_VARIANT_EXECUTOR" in result.stderr
     assert not (tmp_path / "campaign" / "submission_logs").exists()
+
+
+def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> None:
+    submitter = (
+        REPO_ROOT / "sbatch" / "submit_adaptive_binary_runtime_acceptance_tigris.sh"
+    ).read_text(encoding="utf-8")
+    worker = (
+        REPO_ROOT / "sbatch" / "run_adaptive_binary_runtime_acceptance.sh"
+    ).read_text(encoding="utf-8")
+    compiler = (
+        REPO_ROOT / "sbatch" / "run_write_adaptive_binary_runtime_acceptance.sh"
+    ).read_text(encoding="utf-8")
+    assert "--account=\"${ABPH_SBATCH_ACCOUNT}\"" in submitter
+    assert "--nodes=4" in submitter and "--ntasks=4" in submitter
+    assert "afterok:" in submitter
+    assert "C5_kt_32/best_model_val.pt" in submitter
+    assert "single_path_acceptance.json" in submitter
+    assert "--kill-on-bad-exit=1" in worker
+    assert "run_adaptive_binary_ddp_acceptance_smoke.py" in worker
+    assert "--runtime-reference-benchmark" in worker
+    assert "write_adaptive_binary_runtime_acceptance.py" in compiler
+    assert "--single-path-acceptance" in compiler
+
+
+def test_canonical_shell_forwards_step10_acceptance_artifact() -> None:
+    source = (
+        REPO_ROOT / "sbatch" / "submit_adaptive_binary_pseudooffline.sh"
+    ).read_text(encoding="utf-8")
+    assert "ABPH_RUNTIME_ACCEPTANCE_PATH" in source
+    assert "--runtime-acceptance" in source
