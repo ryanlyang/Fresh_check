@@ -737,10 +737,15 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         hlt_metadata=train_source.hlt_view.metadata,
     )
     runtime_batch_contract = None
-    if not args.smoke and not args.runtime_reference_benchmark:
-        contract_path = Path(args.runtime_batch_contract) if args.runtime_batch_contract else (
-            root / "runtime_batch_contracts" / args.variant / "runtime_batch_contract.json"
-        )
+    contract_path = Path(args.runtime_batch_contract) if args.runtime_batch_contract else (
+        root / "runtime_batch_contracts" / args.variant / "runtime_batch_contract.json"
+    )
+    should_load_runtime_contract = (
+        not args.smoke
+        and not args.runtime_reference_benchmark
+        and (requested_world_size > 1 or contract_path.is_file())
+    )
+    if should_load_runtime_contract:
         runtime_batch_contract = load_runtime_batch_contract(
             contract_path,
             expected_variant_name=args.variant,

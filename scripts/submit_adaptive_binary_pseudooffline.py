@@ -78,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
     partial = args.stage_mode in {"predictions", "fusion", "diagnostics", "report", "final_claims"}
+    reuse_preparation = args.stage_mode == "models"
     return AdaptiveBinarySubmissionConfig(
         campaign_root=args.campaign_root,
         data_dir=args.data_dir,
@@ -91,10 +92,15 @@ def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
         selection_report_path=args.selection_report,
         final_claim_contract_path=args.final_claim_contract,
         confirm_final_test=bool(args.confirm_final_test),
-        rebuild_inputs=not partial,
-        rebuild_targets=not partial,
+        rebuild_inputs=not partial and not reuse_preparation,
+        rebuild_targets=not partial and not reuse_preparation,
         rebuild_models=not partial,
-        rebuild_predictions=args.stage_mode in {"full", "predictions", "final_claims"},
+        rebuild_predictions=args.stage_mode in {
+            "full",
+            "models",
+            "predictions",
+            "final_claims",
+        },
         reconstructor_parallelism=args.reconstructor_parallelism,
         runtime_acceptance_path=args.runtime_acceptance,
     )
@@ -137,7 +143,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _required_executor_names(stage_mode: str) -> tuple[str, ...]:
-    if stage_mode == "full":
+    if stage_mode in {"full", "models"}:
         return tuple(_EXECUTOR_DEFAULTS)
     if stage_mode in {"predictions", "final_claims"}:
         return ("ABPH_PREDICTION_EXECUTOR",)

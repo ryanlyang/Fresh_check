@@ -14,6 +14,7 @@ from .config import (
     canonical_hash,
 )
 from .accounting_preflight import ABPH_STEP4_PREFLIGHT_CONTRACT
+from .cache import load_adaptive_binary_target_cache_metadata
 from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
 from .report import ABPH_CAMPAIGN_REPORT_CONTRACT
 from .runtime_acceptance import require_runtime_acceptance
@@ -28,6 +29,7 @@ ABPH_RECONSTRUCTOR_PARALLELISM_MODES: tuple[str, ...] = ("single", "ddp4")
 ABPH_FINAL_CLAIM_CONTRACT = "adaptive_binary_pseudooffline_final_claim_contract_v1"
 ABPH_STAGE_MODES: tuple[str, ...] = (
     "full",
+    "models",
     "predictions",
     "fusion",
     "diagnostics",
@@ -472,7 +474,10 @@ class AdaptiveBinarySubmissionConfig:
             raise ValueError("reconstructor_parallelism must be single or ddp4")
         if self.reconstructor_parallelism == "ddp4" and self.cluster != "tigris":
             raise ValueError("ABPH ddp4 is currently certified only for Tigris")
-        if self.reconstructor_parallelism == "ddp4" and self.stage_mode == "full":
+        if self.reconstructor_parallelism == "ddp4" and self.stage_mode in {
+            "full",
+            "models",
+        }:
             if self.runtime_acceptance_path is None:
                 raise PermissionError(
                     "ABPH ddp4 full campaigns require a Step-10 runtime acceptance artifact"
@@ -506,6 +511,11 @@ class AdaptiveBinarySubmissionConfig:
             if self.rebuild_inputs or self.rebuild_targets or self.rebuild_models:
                 raise ValueError(
                     f"partial stage {self.stage_mode} cannot rebuild upstream inputs/targets/models"
+                )
+        if self.stage_mode == "models":
+            if self.rebuild_inputs or self.rebuild_targets or not self.rebuild_models:
+                raise ValueError(
+                    "models stage must reuse inputs/targets and rebuild model outputs"
                 )
 
     @property
@@ -567,13 +577,39 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
             raise FileNotFoundError(f"{member} checkpoint is missing: {checkpoint}")
         checked.extend((str(run_dir / "run_report.json"), str(checkpoint)))
 
-    if config.stage_mode in {"predictions", "diagnostics", "final_claims"}:
+    if config.stage_mode in {"models", "predictions", "diagnostics", "final_claims"}:
         _require_successful_json(
             paths.root / "audits" / "step1_input_audit.json",
             label="Step-1 input audit",
         )
         checked.append(str(paths.root / "audits" / "step1_input_audit.json"))
-    if config.stage_mode == "predictions":
+    if config.stage_mode == "models":
+        require_actual_target_preflight(paths.preflight_report)
+        checked.append(str(paths.preflight_report))
+        for split in ("model_train", "model_val"):
+            for grouping in ("exclusive_kt", "cambridge_aachen"):
+                metadata = load_adaptive_binary_target_cache_metadata(
+                    paths.target_cache, split, grouping
+                )
+                if metadata.get("target_content_hash") in {None, ""}:
+                    raise ValueError(f"reused target metadata lacks a hash: {split}/{grouping}")
+                checked.append(
+                    str(
+                        paths.target_cache
+                        / f"{split}_{grouping}_adaptive_binary_targets_metadata.json"
+                    )
+                )
+        for member in ABPH_BASELINE_VARIANTS:
+            require_run(member)
+        teacher_root = paths.root / "teacher_logits" / "A4_offline_part_ceiling"
+        for split in ("model_train", "model_val"):
+            prediction = teacher_root / f"{split}.npz"
+            metadata = teacher_root / f"{split}_metadata.json"
+            if not prediction.is_file():
+                raise FileNotFoundError(f"reused teacher logits are missing: {prediction}")
+            _require_successful_json(metadata, label=f"{split} teacher-logit metadata")
+            checked.extend((str(prediction), str(metadata)))
+    elif config.stage_mode == "predictions":
         require_actual_target_preflight(paths.preflight_report)
         checked.append(str(paths.preflight_report))
         for member in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
@@ -685,6 +721,173 @@ def _topological_validate(jobs: Sequence[SlurmJobSpec]) -> None:
         if unresolved:
             raise ValueError(f"job {job.key} is not topologically ordered: {unresolved}")
         known.add(job.key)
+
+
+def _reused_model_dependencies(name: str) -> tuple[str, ...]:
+    """Keep only dependencies rebuilt by the models-onward reuse stage."""
+
+    external = {
+        "preflight:actual_targets",
+        "input:hlt_cache",
+        "input:offline_cache",
+        "teacher_logits:A4_offline_part_ceiling",
+        *(f"baseline:{member}" for member in ABPH_BASELINE_VARIANTS),
+    }
+    return tuple(
+        dependency
+        for dependency in _variant_dependencies(name)
+        if dependency not in external
+    )
+
+
+def _build_reused_model_graph(
+    *,
+    common_env: Mapping[str, str],
+    reconstructor_env: Mapping[str, str],
+    topology: Mapping[str, Any],
+) -> list[SlurmJobSpec]:
+    """Rebuild B-through-report while treating validated preparation as immutable."""
+
+    jobs: list[SlurmJobSpec] = []
+    for name in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
+        jobs.append(
+            SlurmJobSpec(
+                _variant_job_key(name),
+                "renderer" if variant_spec(name).tier == "D" else "reconstructor",
+                "run_adaptive_binary_variant.sh",
+                (name,),
+                _reused_model_dependencies(name),
+                gpu=True,
+                environment=reconstructor_env,
+                nodes=int(topology["nodes"]),
+                ntasks=int(topology["ntasks"]),
+                ntasks_per_node=int(topology["ntasks_per_node"]),
+                gpus_per_node=int(topology["gpus_per_node"]),
+                distributed_world_size=int(topology["distributed_world_size"]),
+                launcher=str(topology["launcher"]),
+            )
+        )
+    for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
+        jobs.append(
+            SlurmJobSpec(
+                f"prediction:{name}",
+                "pseudo_prediction",
+                "run_adaptive_binary_prediction.sh",
+                (name, "model_train", "model_val", "stack_train", "stack_val"),
+                (_variant_job_key(name),),
+                gpu=True,
+                environment=common_env,
+            )
+        )
+    jobs.append(
+        SlurmJobSpec(
+            "prediction:E7_shared_root_dual",
+            "pseudo_prediction",
+            "run_adaptive_binary_prediction.sh",
+            (
+                "E7_shared_root_dual",
+                "model_train",
+                "model_val",
+                "stack_train",
+                "stack_val",
+            ),
+            tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+            gpu=True,
+            environment=common_env,
+        )
+    )
+    for name in ABPH_NEURAL_TAGGER_VARIANTS:
+        jobs.append(
+            SlurmJobSpec(
+                _variant_job_key(name),
+                "tagger",
+                "run_adaptive_binary_variant.sh",
+                (name,),
+                _reused_model_dependencies(name),
+                gpu=True,
+                environment=common_env,
+            )
+        )
+    primary_seed = "F0_ce_reco_primary"
+    for seed_index in (2, 3):
+        jobs.append(
+            SlurmJobSpec(
+                f"variant:{_seed_member_name(primary_seed, seed_index)}",
+                "tagger_seed",
+                "run_adaptive_binary_variant.sh",
+                (primary_seed, str(seed_index)),
+                _reused_model_dependencies(primary_seed),
+                gpu=True,
+                environment=common_env,
+            )
+        )
+    for member in ABPH_LOGIT_PREDICTION_MEMBERS:
+        model_key = (
+            f"variant:{member}"
+            if "__seed" in member
+            else _dependency_job_key(member)
+        )
+        jobs.append(
+            SlurmJobSpec(
+                f"logit_prediction:{member}",
+                "logit_prediction",
+                "run_adaptive_binary_prediction.sh",
+                (member, "model_val", "stack_train", "stack_val"),
+                () if model_key.startswith("baseline:") else (model_key,),
+                gpu=True,
+                environment=common_env,
+            )
+        )
+    for name in ABPH_POSTHOC_VARIANTS:
+        member_names = _fusion_member_names(name)
+        jobs.append(
+            SlurmJobSpec(
+                _variant_job_key(name),
+                "fusion",
+                "run_adaptive_binary_fusion.sh",
+                (name, *member_names),
+                tuple(f"logit_prediction:{member}" for member in member_names),
+                environment=common_env,
+            )
+        )
+    jobs.append(
+        SlurmJobSpec(
+            "diagnostic:tagger_use",
+            "diagnostics",
+            "run_adaptive_binary_diagnostics.sh",
+            ABPH_DIAGNOSTIC_VARIANTS,
+            tuple(_variant_job_key(name) for name in ABPH_DIAGNOSTIC_VARIANTS),
+            gpu=True,
+            environment=common_env,
+        )
+    )
+    terminal = tuple(
+        dict.fromkeys(
+            (
+                *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
+                *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
+                *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                "prediction:E7_shared_root_dual",
+                *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
+                f"variant:{_seed_member_name(primary_seed, 2)}",
+                f"variant:{_seed_member_name(primary_seed, 3)}",
+                *(f"logit_prediction:{member}" for member in ABPH_LOGIT_PREDICTION_MEMBERS),
+                *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
+                "diagnostic:tagger_use",
+            )
+        )
+    )
+    jobs.append(
+        SlurmJobSpec(
+            "report:model_selection",
+            "report",
+            "run_adaptive_binary_report.sh",
+            ("selection",),
+            terminal,
+            environment=common_env,
+        )
+    )
+    return jobs
 
 
 def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[SlurmJobSpec, ...]:
@@ -878,6 +1081,14 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
             )
         )
         jobs.append(SlurmJobSpec("report:model_selection", "report", "run_adaptive_binary_report.sh", ("selection",), terminal, environment=common_env))
+    elif config.stage_mode == "models":
+        jobs.extend(
+            _build_reused_model_graph(
+                common_env=common_env,
+                reconstructor_env=reconstructor_env,
+                topology=topology,
+            )
+        )
     elif config.stage_mode == "predictions":
         for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
             jobs.append(SlurmJobSpec(f"prediction:{name}", "pseudo_prediction", "run_adaptive_binary_prediction.sh", (name, "model_train", "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
@@ -976,7 +1187,7 @@ def submission_manifest(
                 if config.campaign_mode == "highdata"
                 else (
                     "optimized_pilot"
-                    if config.stage_mode == "full"
+                    if config.stage_mode in {"full", "models"}
                     else "ddp4_runtime"
                 )
             ),

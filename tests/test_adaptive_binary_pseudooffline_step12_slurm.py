@@ -150,6 +150,40 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     assert all(job.nodes == 1 for job in graph)
 
 
+def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
+    tmp_path: Path,
+) -> None:
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=tmp_path / "campaign",
+        data_dir=tmp_path / "data",
+        stage_mode="models",
+        rebuild_inputs=False,
+        rebuild_targets=False,
+        rebuild_models=True,
+        rebuild_predictions=True,
+    )
+    graph = build_submission_graph(config)
+    keys = {job.key for job in graph}
+    assert len(graph) == 67
+    assert not any(job.stage in {"splits", "hlt_cache", "offline_cache", "targets"} for job in graph)
+    assert not any(job.stage in {"baseline", "teacher_logits"} for job in graph)
+    assert "variant:B1_semantic_query_root" in keys
+    assert "variant:C5_kt_32" in keys
+    assert "variant:D1_kt32_mh4_particles" in keys
+    assert "prediction:E7_shared_root_dual" in keys
+    assert "report:model_selection" in keys
+    d1 = next(job for job in graph if job.key == "variant:D1_kt32_mh4_particles")
+    assert d1.dependencies == ("variant:C5_kt_32",)
+
+
+def test_single_gpu_training_uses_exact_default_when_no_probe_contract_exists() -> None:
+    source = (
+        REPO_ROOT / "scripts" / "train_adaptive_binary_pseudooffline_variant.py"
+    ).read_text(encoding="utf-8")
+    assert "requested_world_size > 1 or contract_path.is_file()" in source
+    assert "load_runtime_batch_contract(" in source
+
+
 def test_ddp4_topology_is_scoped_to_reconstructors(tmp_path: Path) -> None:
     with pytest.raises(PermissionError, match="runtime acceptance"):
         AdaptiveBinarySubmissionConfig(
