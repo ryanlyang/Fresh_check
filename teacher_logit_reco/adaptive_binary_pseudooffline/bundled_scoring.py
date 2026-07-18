@@ -157,6 +157,13 @@ def encode_logit_only_npz(
     return output.getvalue()
 
 
+def persisted_identity_hash(jet_ids: np.ndarray) -> str:
+    identities = np.asarray(jet_ids, dtype=np.str_)
+    if identities.ndim != 1:
+        raise ValueError("persisted scoring identities must be one-dimensional")
+    return canonical_hash({"ordered_jet_ids": identities.tolist()})
+
+
 def validate_logit_only_npz(path: str | Path) -> dict[str, Any]:
     source = Path(path)
     with np.load(source, allow_pickle=False) as payload:
@@ -182,6 +189,7 @@ def validate_logit_only_npz(path: str | Path) -> dict[str, Any]:
         "n_classes": int(logits.shape[1]),
         "sha256": digest,
         "array_names": list(ABPH_LOGIT_ONLY_ARRAY_NAMES),
+        "persisted_identity_hash": persisted_identity_hash(jet_ids),
     }
 
 
@@ -192,6 +200,7 @@ __all__ = [
     "ScoringSourceFamily",
     "encode_logit_only_npz",
     "group_scoring_members",
+    "persisted_identity_hash",
     "scoring_source_family",
     "source_generation_hash",
     "validate_logit_only_npz",

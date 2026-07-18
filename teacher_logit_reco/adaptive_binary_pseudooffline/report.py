@@ -22,6 +22,12 @@ from .fusion import (
     load_frozen_fusion_artifact,
 )
 from .tagger import ABPH_PRIMARY_HIERARCHY_NAMES
+from .storage_lifecycle import (
+    artifact_manifest_path,
+    cleanup_receipt_path,
+    require_artifact_manifest,
+    require_cleanup_receipt,
+)
 from .variants import (
     ABPH_EXPECTED_VARIANT_NAMES,
     resolve_variant_config,
@@ -407,6 +413,37 @@ def write_adaptive_binary_campaign_report(
     schedule_rows: list[dict[str, Any]] = []
     report_paths: dict[str, str] = {}
     common_values: dict[tuple[str, str], dict[str, Any]] = {}
+    storage_lifecycle: dict[str, Any] | None = None
+
+    if artifact_manifest_path(root).is_file():
+        try:
+            artifact_manifest = require_artifact_manifest(root)
+            privileged_cleanup = require_cleanup_receipt(root, "privileged")
+            deployable_cleanup = require_cleanup_receipt(root, "deployable")
+            projection = _read_json(root / "storage" / "storage_projection.json")
+            wave_five_audit = _read_json(
+                root / "storage" / "storage_audits" / "wave_5.json"
+            )
+            if projection is None or projection.get("ok") is not True:
+                problems.append("streaming campaign lacks a successful storage projection")
+            if wave_five_audit is None or wave_five_audit.get("ok") is not True:
+                problems.append("streaming campaign lacks a successful Wave-5 storage audit")
+            storage_lifecycle = {
+                "artifact_manifest_path": str(artifact_manifest_path(root)),
+                "artifact_manifest_hash": artifact_manifest["content_hash"],
+                "storage_projection": projection,
+                "privileged_cleanup_path": str(
+                    cleanup_receipt_path(root, "privileged")
+                ),
+                "privileged_cleanup": privileged_cleanup,
+                "deployable_cleanup_path": str(
+                    cleanup_receipt_path(root, "deployable")
+                ),
+                "deployable_cleanup": deployable_cleanup,
+                "wave_5_storage_audit": wave_five_audit,
+            }
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            problems.append(f"streaming storage lifecycle is invalid: {exc}")
 
     diagnostic_path = root / "diagnostics" / "tagger_use_report.json"
     diagnostic_report = _read_json(diagnostic_path)
@@ -735,6 +772,7 @@ def write_adaptive_binary_campaign_report(
             "path": str(diagnostic_path),
             "report": diagnostic_report,
         },
+        "storage_lifecycle": storage_lifecycle,
         "outputs": outputs,
     }
     report_payload["report_content_hash"] = canonical_hash(

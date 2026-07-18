@@ -9,9 +9,13 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.bundled_scoring import (
     ABPH_LOGIT_ONLY_ARRAY_NAMES,
     encode_logit_only_npz,
     group_scoring_members,
+    persisted_identity_hash,
     scoring_source_family,
     source_generation_hash,
     validate_logit_only_npz,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.fusion import (
+    LogitPredictionBlock,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (
     ABPH_BUNDLED_SCORING_FAMILIES,
@@ -122,6 +126,37 @@ def test_source_generation_hash_binds_split_checkpoint_and_identity() -> None:
     )
 
 
+def test_bundled_prediction_block_fails_closed_on_reordered_identities() -> None:
+    jet_ids = np.asarray(["source:0:0", "source:1:1"], dtype=np.str_)
+    provenance = {
+        "source_manifest_hash": "manifest",
+        "jet_identity_hash": "native-identities",
+        "label_hash": "labels",
+        "class_mapping_hash": "classes",
+        "hlt_content_hash": "hlt",
+        "teacher_logits_loaded": False,
+        "source_family": scoring_source_family(
+            "E5_kt32_mh4_dualcross"
+        ).to_dict(),
+        "source_generation_hash": "source",
+        "ordered_scoring_identity_hash": "native-selected-identities",
+        "persisted_identity_hash": persisted_identity_hash(jet_ids),
+        "pseudo_representations_written_persistently": False,
+    }
+    block = LogitPredictionBlock(
+        member="E5_kt32_mh4_dualcross",
+        split="stack_train",
+        logits=np.ones((2, 10), dtype=np.float32),
+        labels=np.asarray([0, 1], dtype=np.int64),
+        jet_ids=jet_ids[::-1],
+        checkpoint_hash="checkpoint",
+        resolved_config_hash="config",
+        provenance=provenance,
+    )
+    with pytest.raises(ValueError, match="identity ordering hash"):
+        block.validate()
+
+
 def test_streaming_graph_queues_source_families_and_not_per_member(
     tmp_path: Path,
 ) -> None:
@@ -145,7 +180,7 @@ def test_streaming_graph_queues_source_families_and_not_per_member(
     }
     assert not any(key.startswith("logit_prediction:") for key in jobs)
     d1 = jobs["logit_bundle:d1_exclusive_kt"]
-    assert d1.executable == "run_adaptive_binary_bundled_scoring.sh"
+    assert d1.script == "run_adaptive_binary_bundled_scoring.sh"
     assert d1.arguments == (
         "E5_kt32_mh4_dualcross",
         "F4_ce_logit_kd",

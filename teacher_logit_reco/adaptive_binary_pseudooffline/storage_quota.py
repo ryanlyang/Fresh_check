@@ -821,6 +821,58 @@ def write_campaign_storage_audit(
     return path, audit
 
 
+def reconcile_storage_accounting(
+    campaign_root: str | Path,
+    *,
+    allowed_missing_paths: Iterable[str | Path] = (),
+    profile: str | StorageProfile = ABPH_STREAMING_STORAGE_PROFILE,
+) -> dict[str, Any]:
+    """Reconcile the quota ledger after audited exact-path cleanup."""
+
+    root = Path(campaign_root).resolve()
+    resolved_profile = resolve_storage_profile(profile)
+    paths = storage_paths(root)
+    allowed = {
+        _resolved_inside(path, root, label="allowed missing artifact")
+        for path in allowed_missing_paths
+    }
+    with _exclusive_lock(paths["lock"]):
+        ledger = _load_ledger(paths["ledger"], root=root, profile=resolved_profile)
+        removed: list[str] = []
+        verified: list[str] = []
+        committed = dict(ledger.get("committed_artifacts", {}))
+        for raw_path, row in tuple(committed.items()):
+            path = _resolved_inside(raw_path, root, label="committed artifact")
+            if not path.is_file():
+                if path not in allowed:
+                    raise FileNotFoundError(
+                        "committed artifact disappeared outside cleanup contract: "
+                        f"{path}"
+                    )
+                committed.pop(raw_path)
+                removed.append(str(path))
+                continue
+            expected_hash = str(row.get("sha256", ""))
+            if not expected_hash or _sha256_file(path) != expected_hash:
+                raise ValueError(f"committed artifact hash changed: {path}")
+            verified.append(str(path))
+        ledger["committed_artifacts"] = committed
+        ledger["last_measured_campaign_bytes"] = int(
+            campaign_storage_audit(root, profile=resolved_profile)[
+                "measured_persistent_bytes"
+            ]
+        )
+        ledger["revision"] = int(ledger.get("revision", 0)) + 1
+        ledger["updated_at"] = _utc_now()
+        _write_ledger(paths["ledger"], ledger)
+    return {
+        "removed_committed_paths": sorted(removed),
+        "verified_committed_paths": sorted(verified),
+        "measured_persistent_bytes": int(ledger["last_measured_campaign_bytes"]),
+        "ledger_revision": int(ledger["revision"]),
+    }
+
+
 __all__ = [
     "ABPH_CACHE_HEAVY_STORAGE_PROFILE",
     "ABPH_MAX_PERSISTENT_BYTES",
@@ -841,6 +893,7 @@ __all__ = [
     "campaign_storage_audit",
     "commit_persistent_artifact",
     "initialize_storage_accounting",
+    "reconcile_storage_accounting",
     "release_persistent_reservation",
     "require_storage_projection",
     "reserve_persistent_artifact",

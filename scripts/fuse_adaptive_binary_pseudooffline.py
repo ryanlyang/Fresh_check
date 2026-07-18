@@ -28,6 +28,11 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     resolve_variant_config,
     write_frozen_fusion_artifact,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.bundled_scoring import (  # noqa: E402
+    ABPH_BUNDLED_SCORING_CONTRACT,
+    scoring_source_family,
+    validate_logit_only_npz,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,6 +56,26 @@ def _block(root: Path, member: str, split: str) -> LogitPredictionBlock:
     array_path = root / "logit_predictions" / member / f"{split}.npz"
     metadata_path = root / "logit_predictions" / member / f"{split}_metadata.json"
     metadata = _json(metadata_path)
+    if metadata.get("bundled_scoring_contract") == ABPH_BUNDLED_SCORING_CONTRACT:
+        artifact = validate_logit_only_npz(array_path)
+        if metadata.get("prediction_sha256") != artifact["sha256"]:
+            raise ValueError(f"{member}/{split} bundled artifact hash mismatch")
+        if metadata.get("logit_only_artifact") != artifact:
+            raise ValueError(f"{member}/{split} logit-only contract mismatch")
+        expected_family = scoring_source_family(member).to_dict()
+        if metadata.get("source_family") != expected_family:
+            raise ValueError(f"{member}/{split} scoring source family mismatch")
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            raise ValueError(f"{member}/{split} bundled provenance is missing")
+        if metadata.get("source_generation_hash") != provenance.get(
+            "source_generation_hash"
+        ):
+            raise ValueError(f"{member}/{split} source generation hash mismatch")
+        if artifact["persisted_identity_hash"] != provenance.get(
+            "persisted_identity_hash"
+        ):
+            raise ValueError(f"{member}/{split} persisted identities mismatch")
     with np.load(array_path, allow_pickle=False) as arrays:
         block = LogitPredictionBlock(
             member=member,

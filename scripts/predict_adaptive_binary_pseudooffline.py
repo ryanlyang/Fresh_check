@@ -61,6 +61,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.bundled_scoring import (  
     ABPH_BUNDLED_SCORING_CONTRACT,
     encode_logit_only_npz,
     group_scoring_members,
+    persisted_identity_hash,
     scoring_source_family,
     source_generation_hash,
     validate_logit_only_npz,
@@ -1135,6 +1136,7 @@ def _write_bundled_classifier_predictions(
             "ordered_scoring_identity_hash": jet_identity_hash(
                 tuple(view.jet_ids[int(index)] for index in indices)
             ),
+            "persisted_identity_hash": persisted_identity_hash(jet_ids),
             "pseudo_representations_written_persistently": False,
         }
         artifacts: dict[str, Any] = {}

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +25,12 @@ from .storage_quota import (
     ABPH_STORAGE_PROFILE_NAMES,
     require_storage_projection,
     resolve_storage_profile,
+)
+from .storage_lifecycle import (
+    cleanup_receipt_path,
+    require_artifact_manifest,
+    require_cleanup_receipt,
+    verify_bundled_logits,
 )
 from .target_mode import (
     ABPH_RANK_LOCAL_TARGET_MODE,
@@ -111,6 +117,44 @@ ABPH_LOGIT_PREDICTION_MEMBERS: tuple[str, ...] = tuple(
 )
 ABPH_BUNDLED_SCORING_FAMILIES: Mapping[str, tuple[str, ...]] = (
     group_scoring_members(ABPH_LOGIT_PREDICTION_MEMBERS)
+)
+ABPH_JOINT_TARGET_TAGGER_VARIANTS: tuple[str, ...] = tuple(
+    name
+    for name in ABPH_NEURAL_TAGGER_VARIANTS
+    if variant_spec(name).tier == "F" and variant_spec(name).run_id not in {"F1", "F4"}
+)
+ABPH_JOINT_TARGET_TAGGER_MEMBERS: tuple[str, ...] = (
+    *ABPH_JOINT_TARGET_TAGGER_VARIANTS,
+    "F0_ce_reco_primary__seed2",
+    "F0_ce_reco_primary__seed3",
+)
+def _neural_prerequisite_closure(names: Sequence[str]) -> tuple[str, ...]:
+    ordered: list[str] = []
+    visiting: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise ValueError(f"neural prerequisite cycle contains {name}")
+        visiting.add(name)
+        for dependency in variant_spec(name).dependencies:
+            if dependency in ABPH_NEURAL_TAGGER_VARIANTS:
+                visit(dependency)
+                if dependency not in ordered and dependency not in names:
+                    ordered.append(dependency)
+        visiting.remove(name)
+
+    for name in names:
+        visit(name)
+    return tuple(ordered)
+
+
+ABPH_PRIVILEGED_TAGGER_PREREQUISITES: tuple[str, ...] = (
+    _neural_prerequisite_closure(ABPH_JOINT_TARGET_TAGGER_VARIANTS)
+)
+ABPH_PRIVILEGED_CONSUMERS: tuple[str, ...] = (
+    *ABPH_RECONSTRUCTOR_VARIANTS,
+    *ABPH_RENDERER_VARIANTS,
+    *ABPH_JOINT_TARGET_TAGGER_MEMBERS,
 )
 ABPH_RUNTIME_BATCH_PROBE_SPECS: tuple[tuple[str, int], ...] = (
     ("root_hierarchy", 256),
@@ -681,6 +725,23 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
         return {"stage_mode": "full", "checked": []}
     paths = config.paths
     checked: list[str] = []
+    streaming = config.storage_profile == "streaming_30gb_v1"
+    if streaming:
+        lifecycle_manifest = require_artifact_manifest(paths.root)
+        checked.append(str(paths.storage / "artifact_manifest.json"))
+        if config.stage_mode == "models" and cleanup_receipt_path(
+            paths.root, "privileged"
+        ).exists():
+            raise PermissionError(
+                "models reuse is impossible after privileged inputs were cleaned; "
+                "start a fresh full campaign or explicitly rebuild its inputs"
+            )
+        if config.stage_mode == "diagnostics" and cleanup_receipt_path(
+            paths.root, "deployable"
+        ).exists():
+            raise PermissionError(
+                "tagger diagnostics cannot be rerun after deployable HLT cleanup"
+            )
 
     def require_exact(actual: Any, expected: Any, label: str) -> None:
         if actual != expected:
@@ -928,6 +989,14 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
         for member in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
             require_run(member)
     elif config.stage_mode == "fusion":
+        if streaming:
+            verified = verify_bundled_logits(
+                paths.root, ABPH_LOGIT_PREDICTION_MEMBERS
+            )
+            checked.extend(
+                str(paths.logits / row["member"] / f"{row['split']}.npz")
+                for row in verified["verified"]
+            )
         for name in ABPH_POSTHOC_VARIANTS:
             for member in _fusion_member_names(name):
                 for split in ("stack_train", "stack_val"):
@@ -942,6 +1011,10 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
         for member in ABPH_DIAGNOSTIC_VARIANTS:
             require_run(member)
     elif config.stage_mode == "report":
+        if streaming:
+            for barrier in ("privileged", "deployable"):
+                require_cleanup_receipt(paths.root, barrier)
+                checked.append(str(cleanup_receipt_path(paths.root, barrier)))
         for member in (
             *ABPH_BASELINE_VARIANTS,
             *ABPH_RECONSTRUCTOR_VARIANTS,
@@ -961,6 +1034,22 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
             _require_successful_json(report, label=f"{name} run report")
             checked.extend((str(artifact), str(report)))
     elif config.stage_mode == "final_claims":
+        if streaming:
+            final_hlt = paths.hlt_cache / "final_test_fixed_hlt.npz"
+            retained = {
+                row["relative_path"]: row
+                for row in lifecycle_manifest["artifacts"]
+                if row.get("role") == "hlt_final_test_payload"
+            }
+            relative = final_hlt.resolve().relative_to(paths.root.resolve()).as_posix()
+            row = retained.get(relative)
+            if row is None or not final_hlt.is_file():
+                raise FileNotFoundError(
+                    "streaming final claims require the manifest-retained final-test HLT"
+                )
+            if _sha256_file(final_hlt) != row.get("sha256"):
+                raise ValueError("retained final-test HLT hash differs from lifecycle manifest")
+            checked.append(str(final_hlt))
         contract = load_final_claim_contract(
             config.final_claim_contract_path,
             selection_report_path=config.selection_report_path,
@@ -1213,6 +1302,7 @@ def _reused_model_dependencies(name: str) -> tuple[str, ...]:
 
 def _build_reused_model_graph(
     *,
+    paths: AdaptiveBinaryCampaignPaths,
     common_env: Mapping[str, str],
     reconstructor_env: Mapping[str, str],
     topology: Mapping[str, Any],
@@ -1245,6 +1335,22 @@ def _build_reused_model_graph(
                 launcher=str(topology["launcher"]),
             )
         )
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    f"receipt:{name}",
+                    "consumer_receipt",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    (
+                        "consumer_receipt",
+                        name,
+                        str(_run_dir(paths, name) / "run_report.json"),
+                        "target_consumer",
+                    ),
+                    (_variant_job_key(name),),
+                    environment=common_env,
+                )
+            )
     if not streaming:
         for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
             jobs.append(
@@ -1275,43 +1381,30 @@ def _build_reused_model_graph(
                 environment=common_env,
             )
         )
-    for name in ABPH_NEURAL_TAGGER_VARIANTS:
-        jobs.append(
-            SlurmJobSpec(
-                _variant_job_key(name),
-                "tagger",
-                "run_adaptive_binary_variant.sh",
-                (name,),
-                (
-                    _streaming_variant_dependencies(name, reused_models=True)
-                    if streaming
-                    else _reused_model_dependencies(name)
-                ),
-                gpu=True,
-                environment=tagger_env,
-                nodes=int(tagger_topology["nodes"]),
-                ntasks=int(tagger_topology["ntasks"]),
-                ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
-                gpus_per_node=int(tagger_topology["gpus_per_node"]),
-                distributed_world_size=int(tagger_topology["distributed_world_size"]),
-                launcher=str(tagger_topology["launcher"]),
-            )
-        )
     primary_seed = "F0_ce_reco_primary"
-    for seed_index in (2, 3):
+
+    def append_reused_tagger(
+        name: str,
+        *,
+        member_name: str | None = None,
+        seed_index: int | None = None,
+        cross_privileged_barrier: bool = False,
+    ) -> None:
+        member = member_name or name
+        dependencies = (
+            _streaming_variant_dependencies(name, reused_models=True)
+            if streaming
+            else _reused_model_dependencies(name)
+        )
+        if cross_privileged_barrier:
+            dependencies = tuple(dict.fromkeys((*dependencies, "wave:3")))
         jobs.append(
             SlurmJobSpec(
-                f"variant:{_seed_member_name(primary_seed, seed_index)}",
-                "tagger_seed",
+                f"variant:{member}",
+                "tagger_seed" if seed_index is not None else "tagger",
                 "run_adaptive_binary_variant.sh",
-                (primary_seed, str(seed_index)),
-                (
-                    _streaming_variant_dependencies(
-                        primary_seed, reused_models=True
-                    )
-                    if streaming
-                    else _reused_model_dependencies(primary_seed)
-                ),
+                (name,) if seed_index is None else (name, str(seed_index)),
+                dependencies,
                 gpu=True,
                 environment=tagger_env,
                 nodes=int(tagger_topology["nodes"]),
@@ -1322,13 +1415,112 @@ def _build_reused_model_graph(
                 launcher=str(tagger_topology["launcher"]),
             )
         )
-    jobs.extend(
-        _logit_scoring_jobs(
+
+    if streaming:
+        for name in ABPH_PRIVILEGED_TAGGER_PREREQUISITES:
+            append_reused_tagger(name)
+        for name in ABPH_JOINT_TARGET_TAGGER_VARIANTS:
+            append_reused_tagger(name)
+            jobs.append(
+                SlurmJobSpec(
+                    f"receipt:{name}",
+                    "consumer_receipt",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    (
+                        "consumer_receipt",
+                        name,
+                        str(_run_dir(paths, name) / "run_report.json"),
+                        "target_consumer",
+                    ),
+                    (_variant_job_key(name),),
+                    environment=common_env,
+                )
+            )
+        for seed_index in (2, 3):
+            member = _seed_member_name(primary_seed, seed_index)
+            append_reused_tagger(
+                primary_seed, member_name=member, seed_index=seed_index
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    f"receipt:{member}",
+                    "consumer_receipt",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    (
+                        "consumer_receipt",
+                        member,
+                        str(_run_dir(paths, member) / "run_report.json"),
+                        "target_consumer",
+                    ),
+                    (f"variant:{member}",),
+                    environment=common_env,
+                )
+            )
+        jobs.append(
+            SlurmJobSpec(
+                "barrier:privileged_cleanup",
+                "storage_cleanup",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("cleanup_privileged", *ABPH_PRIVILEGED_CONSUMERS),
+                tuple(f"receipt:{name}" for name in ABPH_PRIVILEGED_CONSUMERS),
+                environment=common_env,
+            )
+        )
+        jobs.append(
+            SlurmJobSpec(
+                "wave:3",
+                "storage_wave",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("wave_receipt", "3"),
+                ("barrier:privileged_cleanup",),
+                environment=common_env,
+            )
+        )
+        for name in ABPH_NEURAL_TAGGER_VARIANTS:
+            if name not in (
+                *ABPH_JOINT_TARGET_TAGGER_VARIANTS,
+                *ABPH_PRIVILEGED_TAGGER_PREREQUISITES,
+            ):
+                append_reused_tagger(name, cross_privileged_barrier=True)
+    else:
+        for name in ABPH_NEURAL_TAGGER_VARIANTS:
+            append_reused_tagger(name)
+        for seed_index in (2, 3):
+            append_reused_tagger(
+                primary_seed,
+                member_name=_seed_member_name(primary_seed, seed_index),
+                seed_index=seed_index,
+            )
+    tagger_members = (
+        *ABPH_NEURAL_TAGGER_VARIANTS,
+        _seed_member_name(primary_seed, 2),
+        _seed_member_name(primary_seed, 3),
+    )
+    if streaming:
+        jobs.append(
+            SlurmJobSpec(
+                "wave:4",
+                "storage_wave",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("wave_receipt", "4"),
+                tuple(f"variant:{name}" for name in tagger_members),
+                environment=common_env,
+            )
+        )
+    scoring_jobs = _logit_scoring_jobs(
             common_env=common_env,
             streaming=streaming,
             reused_preparation=True,
         )
-    )
+    if streaming:
+        scoring_jobs = [
+            replace(
+                job,
+                dependencies=tuple(dict.fromkeys((*job.dependencies, "wave:4"))),
+            )
+            for job in scoring_jobs
+        ]
+    jobs.extend(scoring_jobs)
     for name in ABPH_POSTHOC_VARIANTS:
         member_names = _fusion_member_names(name)
         jobs.append(
@@ -1352,45 +1544,75 @@ def _build_reused_model_graph(
             environment=common_env,
         )
     )
-    terminal = tuple(
-        dict.fromkeys(
-            (
-                *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
-                *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
-                *(
-                    ()
-                    if streaming
-                    else (
-                        *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-                        "prediction:E7_shared_root_dual",
-                    )
-                ),
-                *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
-                f"variant:{_seed_member_name(primary_seed, 2)}",
-                f"variant:{_seed_member_name(primary_seed, 3)}",
-                *(
-                    tuple(f"logit_bundle:{name}" for name in ABPH_BUNDLED_SCORING_FAMILIES)
-                    if streaming
-                    else tuple(
-                        f"logit_prediction:{member}"
-                        for member in ABPH_LOGIT_PREDICTION_MEMBERS
-                    )
-                ),
-                *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
-                "diagnostic:tagger_use",
+    if streaming:
+        bundle_jobs = tuple(
+            f"logit_bundle:{name}" for name in ABPH_BUNDLED_SCORING_FAMILIES
+        )
+        jobs.append(
+            SlurmJobSpec(
+                "barrier:deployable_cleanup",
+                "storage_cleanup",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("cleanup_deployable", *ABPH_LOGIT_PREDICTION_MEMBERS),
+                (*bundle_jobs, "diagnostic:tagger_use"),
+                environment=common_env,
             )
         )
-    )
+        jobs.append(
+            SlurmJobSpec(
+                "wave:5",
+                "storage_wave",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("wave_receipt", "5"),
+                (
+                    "barrier:deployable_cleanup",
+                    *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
+                ),
+                environment=common_env,
+            )
+        )
+        report_dependencies = ("wave:5",)
+    else:
+        report_dependencies = tuple(
+            dict.fromkeys(
+                (
+                    *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
+                    *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
+                    *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                    "prediction:E7_shared_root_dual",
+                    *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
+                    f"variant:{_seed_member_name(primary_seed, 2)}",
+                    f"variant:{_seed_member_name(primary_seed, 3)}",
+                    *(
+                        f"logit_prediction:{member}"
+                        for member in ABPH_LOGIT_PREDICTION_MEMBERS
+                    ),
+                    *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
+                    "diagnostic:tagger_use",
+                )
+            )
+        )
     jobs.append(
         SlurmJobSpec(
             "report:model_selection",
             "report",
             "run_adaptive_binary_report.sh",
             ("selection",),
-            terminal,
+            report_dependencies,
             environment=common_env,
         )
     )
+    if streaming:
+        jobs.append(
+            SlurmJobSpec(
+                "wave:6",
+                "storage_wave",
+                "run_adaptive_binary_storage_lifecycle.sh",
+                ("wave_receipt", "6"),
+                ("report:model_selection",),
+                environment=common_env,
+            )
+        )
     return jobs
 
 
@@ -1442,8 +1664,21 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
 
     if config.stage_mode == "full":
         jobs.append(SlurmJobSpec("input:splits", "splits", "run_adaptive_binary_inputs.sh", ("splits",), environment=common_env))
-        jobs.append(SlurmJobSpec("input:hlt_cache", "hlt_cache", "run_adaptive_binary_inputs.sh", ("hlt_cache",), ("input:splits",), environment=common_env))
-        jobs.append(SlurmJobSpec("input:offline_cache", "offline_cache", "run_adaptive_binary_inputs.sh", ("offline_cache",), ("input:splits",), environment=common_env))
+        input_parent = "input:splits"
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:0",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "0"),
+                    ("input:splits",),
+                    environment=common_env,
+                )
+            )
+            input_parent = "wave:0"
+        jobs.append(SlurmJobSpec("input:hlt_cache", "hlt_cache", "run_adaptive_binary_inputs.sh", ("hlt_cache",), (input_parent,), environment=common_env))
+        jobs.append(SlurmJobSpec("input:offline_cache", "offline_cache", "run_adaptive_binary_inputs.sh", ("offline_cache",), (input_parent,), environment=common_env))
         jobs.append(SlurmJobSpec("input:audit", "input_audit", "run_adaptive_binary_inputs.sh", ("audit",), ("input:hlt_cache", "input:offline_cache"), environment=common_env))
         for name in ABPH_BASELINE_VARIANTS:
             baseline_dependencies = tuple(
@@ -1471,6 +1706,23 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 environment=common_env,
             )
         )
+        wave_one_parent = "input:audit"
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:1",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "1"),
+                    (
+                        "input:audit",
+                        *(f"baseline:{name}" for name in ABPH_BASELINE_VARIANTS),
+                        "teacher_logits:A4_offline_part_ceiling",
+                    ),
+                    environment=common_env,
+                )
+            )
+            wave_one_parent = "wave:1"
         target_dependencies: tuple[str, ...] = ("input:audit",)
         if config.storage_profile == "streaming_30gb_v1":
             jobs.append(
@@ -1479,13 +1731,36 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     "preflight",
                     "run_adaptive_binary_targets.sh",
                     ("mode_preflight",),
-                    ("input:audit",),
+                    (wave_one_parent,),
                     environment=common_env,
                 )
             )
             target_dependencies = ("target:mode_preflight",)
         jobs.append(SlurmJobSpec("target:cache", "targets", "run_adaptive_binary_targets.sh", ("cache",), target_dependencies, environment=common_env))
         jobs.append(SlurmJobSpec("preflight:actual_targets", "preflight", "run_adaptive_binary_targets.sh", ("preflight",), ("target:cache",), environment=common_env))
+        reconstructor_preflight = "preflight:actual_targets"
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    "lifecycle:artifact_manifest",
+                    "storage_manifest",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("manifest",),
+                    ("preflight:actual_targets",),
+                    environment=common_env,
+                )
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:2",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "2"),
+                    ("lifecycle:artifact_manifest",),
+                    environment=common_env,
+                )
+            )
+            reconstructor_preflight = "wave:2"
         reconstructor_names = (
             *ABPH_RECONSTRUCTOR_VARIANTS,
             *ABPH_RENDERER_VARIANTS,
@@ -1493,7 +1768,7 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         jobs.extend(
             _runtime_batch_contract_jobs(
                 names=reconstructor_names,
-                dependencies=("preflight:actual_targets",),
+                dependencies=(reconstructor_preflight,),
                 common_env=common_env,
                 topology=topology,
             )
@@ -1519,6 +1794,22 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     launcher=str(topology["launcher"]),
                 )
             )
+            if streaming:
+                jobs.append(
+                    SlurmJobSpec(
+                        f"receipt:{name}",
+                        "consumer_receipt",
+                        "run_adaptive_binary_storage_lifecycle.sh",
+                        (
+                            "consumer_receipt",
+                            name,
+                            str(_run_dir(paths, name) / "run_report.json"),
+                            "target_consumer",
+                        ),
+                        (_variant_job_key(name), "lifecycle:artifact_manifest"),
+                        environment=common_env,
+                    )
+                )
         if not streaming:
             for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
                 jobs.append(
@@ -1549,41 +1840,30 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     environment=common_env,
                 )
             )
-        for name in ABPH_NEURAL_TAGGER_VARIANTS:
-            jobs.append(
-                SlurmJobSpec(
-                    _variant_job_key(name),
-                    "tagger",
-                    "run_adaptive_binary_variant.sh",
-                    (name,),
-                    (
-                        _streaming_variant_dependencies(name)
-                        if streaming
-                        else _variant_dependencies(name)
-                    ),
-                    gpu=True,
-                    environment=tagger_env,
-                    nodes=int(tagger_topology["nodes"]),
-                    ntasks=int(tagger_topology["ntasks"]),
-                    ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
-                    gpus_per_node=int(tagger_topology["gpus_per_node"]),
-                    distributed_world_size=int(tagger_topology["distributed_world_size"]),
-                    launcher=str(tagger_topology["launcher"]),
-                )
-            )
         primary_seed = "F0_ce_reco_primary"
-        for seed_index in (2, 3):
+
+        def append_tagger(
+            name: str,
+            *,
+            member_name: str | None = None,
+            seed_index: int | None = None,
+            cross_privileged_barrier: bool = False,
+        ) -> None:
+            member = member_name or name
+            dependencies = (
+                _streaming_variant_dependencies(name)
+                if streaming
+                else _variant_dependencies(name)
+            )
+            if cross_privileged_barrier:
+                dependencies = tuple(dict.fromkeys((*dependencies, "wave:3")))
             jobs.append(
                 SlurmJobSpec(
-                    f"variant:{_seed_member_name(primary_seed, seed_index)}",
-                    "tagger_seed",
+                    f"variant:{member}",
+                    "tagger_seed" if seed_index is not None else "tagger",
                     "run_adaptive_binary_variant.sh",
-                    (primary_seed, str(seed_index)),
-                    (
-                        _streaming_variant_dependencies(primary_seed)
-                        if streaming
-                        else _variant_dependencies(primary_seed)
-                    ),
+                    (name,) if seed_index is None else (name, str(seed_index)),
+                    dependencies,
                     gpu=True,
                     environment=tagger_env,
                     nodes=int(tagger_topology["nodes"]),
@@ -1594,13 +1874,120 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     launcher=str(tagger_topology["launcher"]),
                 )
             )
-        jobs.extend(
-            _logit_scoring_jobs(
+
+        if streaming:
+            for name in ABPH_PRIVILEGED_TAGGER_PREREQUISITES:
+                append_tagger(name)
+            for name in ABPH_JOINT_TARGET_TAGGER_VARIANTS:
+                append_tagger(name)
+                jobs.append(
+                    SlurmJobSpec(
+                        f"receipt:{name}",
+                        "consumer_receipt",
+                        "run_adaptive_binary_storage_lifecycle.sh",
+                        (
+                            "consumer_receipt",
+                            name,
+                            str(_run_dir(paths, name) / "run_report.json"),
+                            "target_consumer",
+                        ),
+                        (_variant_job_key(name), "lifecycle:artifact_manifest"),
+                        environment=common_env,
+                    )
+                )
+            for seed_index in (2, 3):
+                member = _seed_member_name(primary_seed, seed_index)
+                append_tagger(
+                    primary_seed,
+                    member_name=member,
+                    seed_index=seed_index,
+                )
+                jobs.append(
+                    SlurmJobSpec(
+                        f"receipt:{member}",
+                        "consumer_receipt",
+                        "run_adaptive_binary_storage_lifecycle.sh",
+                        (
+                            "consumer_receipt",
+                            member,
+                            str(_run_dir(paths, member) / "run_report.json"),
+                            "target_consumer",
+                        ),
+                        (f"variant:{member}", "lifecycle:artifact_manifest"),
+                        environment=common_env,
+                    )
+                )
+            jobs.append(
+                SlurmJobSpec(
+                    "barrier:privileged_cleanup",
+                    "storage_cleanup",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("cleanup_privileged", *ABPH_PRIVILEGED_CONSUMERS),
+                    (
+                        *(f"receipt:{name}" for name in ABPH_PRIVILEGED_CONSUMERS),
+                        "teacher_logits:A4_offline_part_ceiling",
+                    ),
+                    environment=common_env,
+                )
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:3",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "3"),
+                    ("barrier:privileged_cleanup",),
+                    environment=common_env,
+                )
+            )
+            for name in ABPH_NEURAL_TAGGER_VARIANTS:
+                if name not in (
+                    *ABPH_JOINT_TARGET_TAGGER_VARIANTS,
+                    *ABPH_PRIVILEGED_TAGGER_PREREQUISITES,
+                ):
+                    append_tagger(name, cross_privileged_barrier=True)
+        else:
+            for name in ABPH_NEURAL_TAGGER_VARIANTS:
+                append_tagger(name)
+            for seed_index in (2, 3):
+                append_tagger(
+                    primary_seed,
+                    member_name=_seed_member_name(primary_seed, seed_index),
+                    seed_index=seed_index,
+                )
+
+        tagger_members = (
+            *ABPH_NEURAL_TAGGER_VARIANTS,
+            _seed_member_name(primary_seed, 2),
+            _seed_member_name(primary_seed, 3),
+        )
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:4",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "4"),
+                    tuple(f"variant:{name}" for name in tagger_members),
+                    environment=common_env,
+                )
+            )
+        scoring_jobs = _logit_scoring_jobs(
                 common_env=common_env,
                 streaming=streaming,
                 reused_preparation=False,
             )
-        )
+        if streaming:
+            scoring_jobs = [
+                replace(
+                    job,
+                    dependencies=tuple(
+                        dict.fromkeys((*job.dependencies, "wave:4"))
+                    ),
+                )
+                for job in scoring_jobs
+            ]
+        jobs.extend(scoring_jobs)
         for name in ABPH_POSTHOC_VARIANTS:
             member_names = _fusion_member_names(name)
             members = _fusion_scoring_dependencies(
@@ -1627,43 +2014,81 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 environment=common_env,
             )
         )
-        terminal = tuple(
-            dict.fromkeys(
-                (
-                    *(f"baseline:{name}" for name in ABPH_BASELINE_VARIANTS),
-                    *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
-                    *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
-                    *(
-                        ()
-                        if streaming
-                        else (
-                            *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-                            "prediction:E7_shared_root_dual",
-                        )
-                    ),
-                    *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
-                    f"variant:{_seed_member_name(primary_seed, 2)}",
-                    f"variant:{_seed_member_name(primary_seed, 3)}",
-                    *(
-                        tuple(
-                            f"logit_bundle:{name}"
-                            for name in ABPH_BUNDLED_SCORING_FAMILIES
-                        )
-                        if streaming
-                        else tuple(
-                            f"logit_prediction:{member}"
-                            for member in ABPH_LOGIT_PREDICTION_MEMBERS
-                        )
-                    ),
-                    *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
-                    "diagnostic:tagger_use",
+        if streaming:
+            bundle_jobs = tuple(
+                f"logit_bundle:{name}" for name in ABPH_BUNDLED_SCORING_FAMILIES
+            )
+            jobs.append(
+                SlurmJobSpec(
+                    "barrier:deployable_cleanup",
+                    "storage_cleanup",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("cleanup_deployable", *ABPH_LOGIT_PREDICTION_MEMBERS),
+                    (*bundle_jobs, "diagnostic:tagger_use"),
+                    environment=common_env,
                 )
             )
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:5",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "5"),
+                    (
+                        "barrier:deployable_cleanup",
+                        *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
+                    ),
+                    environment=common_env,
+                )
+            )
+            report_dependencies = ("wave:5",)
+        else:
+            terminal = tuple(
+                dict.fromkeys(
+                    (
+                        *(f"baseline:{name}" for name in ABPH_BASELINE_VARIANTS),
+                        *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
+                        *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
+                        *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                        "prediction:E7_shared_root_dual",
+                        *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
+                        f"variant:{_seed_member_name(primary_seed, 2)}",
+                        f"variant:{_seed_member_name(primary_seed, 3)}",
+                        *(
+                            f"logit_prediction:{member}"
+                            for member in ABPH_LOGIT_PREDICTION_MEMBERS
+                        ),
+                        *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
+                        "diagnostic:tagger_use",
+                    )
+                )
+            )
+            report_dependencies = terminal
+        jobs.append(
+            SlurmJobSpec(
+                "report:model_selection",
+                "report",
+                "run_adaptive_binary_report.sh",
+                ("selection",),
+                report_dependencies,
+                environment=common_env,
+            )
         )
-        jobs.append(SlurmJobSpec("report:model_selection", "report", "run_adaptive_binary_report.sh", ("selection",), terminal, environment=common_env))
+        if streaming:
+            jobs.append(
+                SlurmJobSpec(
+                    "wave:6",
+                    "storage_wave",
+                    "run_adaptive_binary_storage_lifecycle.sh",
+                    ("wave_receipt", "6"),
+                    ("report:model_selection",),
+                    environment=common_env,
+                )
+            )
     elif config.stage_mode == "models":
         jobs.extend(
             _build_reused_model_graph(
+                paths=paths,
                 common_env=common_env,
                 reconstructor_env=reconstructor_env,
                 topology=topology,
@@ -1858,8 +2283,12 @@ __all__ = [
     "ABPH_FINAL_CLAIM_CONTRACT",
     "ABPH_FUSION_CANDIDATES",
     "ABPH_LOGIT_PREDICTION_MEMBERS",
+    "ABPH_JOINT_TARGET_TAGGER_MEMBERS",
+    "ABPH_JOINT_TARGET_TAGGER_VARIANTS",
     "ABPH_NEURAL_TAGGER_VARIANTS",
     "ABPH_POSTHOC_VARIANTS",
+    "ABPH_PRIVILEGED_CONSUMERS",
+    "ABPH_PRIVILEGED_TAGGER_PREREQUISITES",
     "ABPH_RECONSTRUCTOR_VARIANTS",
     "ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT",
     "ABPH_RECONSTRUCTOR_PARALLELISM_MODES",

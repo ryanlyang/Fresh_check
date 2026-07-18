@@ -108,6 +108,29 @@ class LogitPredictionBlock:
             raise ValueError(f"fusion block lacks provenance {missing}")
         if self.provenance.get("teacher_logits_loaded") is not False:
             raise ValueError("fusion predictions must be teacher-logit free")
+        if self.provenance.get("source_family") is not None:
+            bundled_required = (
+                "source_generation_hash",
+                "ordered_scoring_identity_hash",
+                "persisted_identity_hash",
+            )
+            bundled_missing = [
+                name for name in bundled_required if not self.provenance.get(name)
+            ]
+            if bundled_missing:
+                raise ValueError(
+                    f"bundled fusion block lacks provenance {bundled_missing}"
+                )
+            actual_identity_hash = canonical_hash(
+                {"ordered_jet_ids": np.asarray(jet_ids, dtype=np.str_).tolist()}
+            )
+            if self.provenance["persisted_identity_hash"] != actual_identity_hash:
+                raise ValueError("bundled fusion block identity ordering hash differs")
+            if (
+                self.provenance.get("pseudo_representations_written_persistently")
+                is not False
+            ):
+                raise ValueError("bundled fusion block persisted pseudo representations")
 
     @property
     def prediction_hash(self) -> str:

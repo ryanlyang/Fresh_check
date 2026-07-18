@@ -263,7 +263,7 @@ def test_streaming_config_binds_projection_into_graph_and_manifest(tmp_path: Pat
     )
     graph = build_submission_graph(config)
     jobs = {job.key: job for job in graph}
-    assert jobs["target:mode_preflight"].dependencies == ("input:audit",)
+    assert jobs["target:mode_preflight"].dependencies == ("wave:1",)
     assert jobs["target:cache"].dependencies == ("target:mode_preflight",)
     assert all(
         job.environment["ABPH_TARGET_MODE_REPORT"]
