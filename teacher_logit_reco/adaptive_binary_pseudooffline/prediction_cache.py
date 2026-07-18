@@ -38,6 +38,20 @@ from .hypothesis_distribution import (
 )
 from .inputs import AdaptiveBinaryHLTOnlyDataset, load_hlt_only_dataset
 from .particle_renderer import RenderedParticleBatch
+from .pseudo_consumer import (
+    ABPH_CONSUMER_FRONTIER_FIELDS,
+    ABPH_CONSUMER_GLOBAL_FIELDS,
+    ABPH_CONSUMER_PARTICLE_FIELDS,
+    ABPH_CONSUMER_PSEUDO_CONTRACT,
+    ABPH_CONSUMER_PSEUDO_SCHEMA_VERSION,
+    ABPH_RENDERER_ONLY_FRONTIER_FIELDS,
+    ABPH_RENDERER_ONLY_PARTICLE_FIELDS,
+    consumer_pseudo_array_names,
+    consumer_pseudo_schema_hash,
+    project_consumer_pseudo_arrays,
+    pseudo_array_key,
+    validate_consumer_pseudo_arrays,
+)
 from .schemas import ABPH_MAX_PARTICLES
 from .training import (
     describe_reconstructor_model,
@@ -55,31 +69,13 @@ _IDENTITY_ARRAY_KEYS = (
     "jet_entries",
     "source_indices",
 )
-_FRONTIER_FIELDS = (
-    "ledger",
-    "hidden",
-    "support",
-    "uncertainty",
-    "mask",
-    "topology",
-    "parent_indices",
-    "source_child_indices",
+_FULL_FRONTIER_FIELDS = (
+    *ABPH_CONSUMER_FRONTIER_FIELDS,
+    *ABPH_RENDERER_ONLY_FRONTIER_FIELDS,
 )
-_PREDICTION_REQUIRED_GLOBAL_KEYS = (
-    "shared_root_ledger",
-    "hypothesis_latent",
-    "hypothesis_prior_log_prob",
-)
-_PREDICTION_REQUIRED_PARTICLE_FIELDS = (
-    "canonical_features",
-    "side_channels",
-    "four_vector",
-    "mass",
-    "mask",
-    "group_indices",
-    "local_slot_indices",
-    "uncertainty",
-    "slot_hidden",
+_FULL_PARTICLE_FIELDS = (
+    *ABPH_CONSUMER_PARTICLE_FIELDS,
+    *ABPH_RENDERER_ONLY_PARTICLE_FIELDS,
 )
 
 
@@ -115,16 +111,7 @@ def _class_mapping_hash() -> str:
 
 
 def _prediction_key(hierarchy: str, category: str, field: str, depth: int | None = None) -> str:
-    hierarchy_name = str(hierarchy)
-    if not hierarchy_name or "__" in hierarchy_name:
-        raise ValueError("hierarchy names must be nonempty and cannot contain '__'")
-    if category == "particle":
-        return f"particle__{hierarchy_name}__{field}"
-    if category == "frontier":
-        if depth is None or int(depth) < 0:
-            raise ValueError("frontier keys require a nonnegative depth")
-        return f"frontier__{hierarchy_name}__depth_{int(depth):02d}__{field}"
-    raise ValueError(f"unknown prediction category {category!r}")
+    return pseudo_array_key(hierarchy, category, field, depth)
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -187,7 +174,7 @@ class DeployablePseudoViewBatch:
             )
         if not self.hierarchy_names or len(self.hierarchy_names) != len(set(self.hierarchy_names)):
             raise ValueError("prediction batch requires unique hierarchy names")
-        missing = [name for name in _PREDICTION_REQUIRED_GLOBAL_KEYS if name not in arrays]
+        missing = [name for name in ABPH_CONSUMER_GLOBAL_FIELDS if name not in arrays]
         if missing:
             raise KeyError(f"prediction batch is missing global arrays: {missing}")
         root = arrays["shared_root_ledger"]
@@ -204,7 +191,7 @@ class DeployablePseudoViewBatch:
             if arrays[name].ndim < 2 or int(arrays[name].shape[1]) != n_views:
                 raise ValueError(f"{name} does not contain all fixed views")
         for hierarchy in self.hierarchy_names:
-            for field in _PREDICTION_REQUIRED_PARTICLE_FIELDS:
+            for field in ABPH_CONSUMER_PARTICLE_FIELDS:
                 key = _prediction_key(hierarchy, "particle", field)
                 if key not in arrays:
                     raise KeyError(f"prediction batch is missing {key}")
@@ -221,7 +208,7 @@ class DeployablePseudoViewBatch:
             if depth_count <= 0:
                 raise ValueError(f"hierarchy {hierarchy!r} has no frontier depths")
             for depth in range(depth_count):
-                for field in _FRONTIER_FIELDS:
+                for field in ABPH_CONSUMER_FRONTIER_FIELDS:
                     key = _prediction_key(hierarchy, "frontier", field, depth)
                     if key not in arrays:
                         raise KeyError(f"prediction batch is missing {key}")
@@ -240,6 +227,15 @@ class DeployablePseudoViewBatch:
             raise ValueError(
                 "deployable prediction must attest offline_target_selected_hypothesis=false"
             )
+        consumer_report = validate_consumer_pseudo_arrays(
+            arrays,
+            hierarchy_names=self.hierarchy_names,
+            frontier_depths=self.frontier_depths,
+            exact=self.diagnostics.get("consumer_only_pseudo") is True,
+        )
+        declared_consumer_hash = self.diagnostics.get("consumer_pseudo_schema_hash")
+        if declared_consumer_hash not in (None, consumer_report["schema_hash"]):
+            raise ValueError("consumer pseudo schema hash mismatch")
         schema = _schema_for_arrays(arrays, batch_size)
         return {
             "ok": True,
@@ -251,7 +247,35 @@ class DeployablePseudoViewBatch:
             },
             "schema": schema,
             "schema_hash": _schema_hash(schema),
+            "consumer_pseudo_schema_hash": consumer_report["schema_hash"],
         }
+
+    def to_consumer_only(self) -> "DeployablePseudoViewBatch":
+        arrays = project_consumer_pseudo_arrays(
+            self.arrays,
+            hierarchy_names=self.hierarchy_names,
+            frontier_depths=self.frontier_depths,
+        )
+        diagnostics = {
+            **dict(self.diagnostics),
+            "consumer_only_pseudo": True,
+            "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+            "consumer_pseudo_schema_hash": consumer_pseudo_schema_hash(
+                arrays,
+                hierarchy_names=self.hierarchy_names,
+                frontier_depths=self.frontier_depths,
+            ),
+            "renderer_only_fields_retained": False,
+        }
+        result = DeployablePseudoViewBatch(
+            arrays=arrays,
+            view_names=self.view_names,
+            hierarchy_names=self.hierarchy_names,
+            frontier_depths=dict(self.frontier_depths),
+            diagnostics=diagnostics,
+        )
+        result.validate()
+        return result
 
     def slice(self, start: int, stop: int) -> "DeployablePseudoViewBatch":
         begin = int(start)
@@ -270,6 +294,8 @@ class DeployablePseudoViewBatch:
 def package_deployable_pseudo_views(
     hierarchy_output: MultiHypothesisHierarchyOutput,
     rendered_views: Mapping[str, Sequence[RenderedParticleBatch]],
+    *,
+    consumer_only: bool = True,
 ) -> DeployablePseudoViewBatch:
     """Convert rollout and renderer outputs into the stable Step-9 tensor schema."""
 
@@ -304,7 +330,10 @@ def package_deployable_pseudo_views(
                 raise ValueError("particle renderer lacks its HLT-only deployment attestation")
             if int(diagnostics.get("hypothesis_index", -1)) != view_index:
                 raise ValueError("particle renderer hypothesis identity mismatch")
-        for field in _PREDICTION_REQUIRED_PARTICLE_FIELDS:
+        particle_fields = (
+            ABPH_CONSUMER_PARTICLE_FIELDS if consumer_only else _FULL_PARTICLE_FIELDS
+        )
+        for field in particle_fields:
             arrays[_prediction_key(hierarchy, "particle", field)] = _stack_numpy(
                 [getattr(particle_batch, field) for particle_batch in rendered]
             )
@@ -324,7 +353,10 @@ def package_deployable_pseudo_views(
                 output.root_frontier if depth == 0 else output.levels[depth - 1].next_frontier
                 for output in outputs
             ]
-            for field in _FRONTIER_FIELDS:
+            frontier_fields = (
+                ABPH_CONSUMER_FRONTIER_FIELDS if consumer_only else _FULL_FRONTIER_FIELDS
+            )
+            for field in frontier_fields:
                 arrays[_prediction_key(hierarchy, "frontier", field, depth)] = _stack_numpy(
                     [getattr(frontier, field) for frontier in frontiers]
                 )
@@ -339,6 +371,14 @@ def package_deployable_pseudo_views(
             "teacher_logits_loaded": False,
             "offline_target_selected_hypothesis": False,
             "fixed_evaluation_hypotheses": True,
+            "consumer_only_pseudo": bool(consumer_only),
+            "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+            "consumer_pseudo_schema_hash": consumer_pseudo_schema_hash(
+                arrays,
+                hierarchy_names=hierarchy_names,
+                frontier_depths=frontier_depths,
+            ),
+            "renderer_only_fields_retained": not bool(consumer_only),
             "shared_root_exact_across_views_and_hierarchies": bool(
                 hierarchy_output.diagnostics.get(
                     "exact_root_identity_across_all_hypotheses_and_hierarchies"
@@ -674,7 +714,7 @@ def _sidecar_hash(payload: Mapping[str, Any]) -> str:
 
 
 def _cache_hash_payload(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         key: metadata[key]
         for key in (
             "cache_contract",
@@ -709,6 +749,14 @@ def _cache_hash_payload(metadata: Mapping[str, Any]) -> dict[str, Any]:
             "shards",
         )
     }
+    for key in (
+        "consumer_pseudo_contract",
+        "consumer_pseudo_schema_hash",
+        "consumer_only_pseudo",
+    ):
+        if key in metadata:
+            payload[key] = metadata[key]
+    return payload
 
 
 def generate_deployable_pseudo_view_cache(
@@ -751,6 +799,7 @@ def generate_deployable_pseudo_view_cache(
     prediction_function = predictor or _default_predictor
     schema: dict[str, Any] | None = None
     schema_sha: str | None = None
+    consumer_schema_sha: str | None = None
     view_names: tuple[str, ...] | None = None
     hierarchy_names: tuple[str, ...] | None = None
     frontier_depths: dict[str, int] | None = None
@@ -839,6 +888,7 @@ def generate_deployable_pseudo_view_cache(
                 "checkpoint_sha256": checkpoint["checkpoint_sha256"],
                 "resolved_variant_config_hash": config.resolved_variant_config_hash,
                 "prediction_schema_hash": schema_sha,
+                "consumer_pseudo_schema_hash": consumer_schema_sha,
                 "offline_inputs_loaded": False,
                 "teacher_logits_loaded": False,
                 "offline_target_selected_hypothesis": False,
@@ -887,25 +937,31 @@ def generate_deployable_pseudo_view_cache(
             if not isinstance(predicted, DeployablePseudoViewBatch):
                 raise TypeError("deployable predictor returned the wrong type")
             batch_report = predicted.validate()
+            predicted = predicted.to_consumer_only()
+            batch_report = predicted.validate()
             if predicted.batch_size != hlt_batch.batch_size:
                 raise ValueError("prediction batch size differs from HLT batch size")
             cast_arrays = _cast_prediction_arrays(predicted.arrays, feature_dtype)
+            cast_diagnostics = dict(predicted.diagnostics)
+            cast_diagnostics.pop("consumer_pseudo_schema_hash", None)
             cast_batch = DeployablePseudoViewBatch(
                 arrays=cast_arrays,
                 view_names=predicted.view_names,
                 hierarchy_names=predicted.hierarchy_names,
                 frontier_depths=predicted.frontier_depths,
-                diagnostics=predicted.diagnostics,
-            )
+                diagnostics=cast_diagnostics,
+            ).to_consumer_only()
             cast_report = cast_batch.validate()
             if schema is None:
                 schema = cast_report["schema"]
                 schema_sha = cast_report["schema_hash"]
+                consumer_schema_sha = cast_report["consumer_pseudo_schema_hash"]
                 view_names = cast_batch.view_names
                 hierarchy_names = cast_batch.hierarchy_names
                 frontier_depths = dict(cast_batch.frontier_depths)
             elif (
                 cast_report["schema_hash"] != schema_sha
+                or cast_report["consumer_pseudo_schema_hash"] != consumer_schema_sha
                 or cast_batch.view_names != view_names
                 or cast_batch.hierarchy_names != hierarchy_names
                 or dict(cast_batch.frontier_depths) != frontier_depths
@@ -959,7 +1015,13 @@ def generate_deployable_pseudo_view_cache(
             raise ValueError("generated prediction identities differ from HLT source provenance")
         if label_hasher.hexdigest() != source_provenance["label_hash"]:
             raise ValueError("generated prediction labels differ from HLT source provenance")
-        if schema is None or schema_sha is None or view_names is None or hierarchy_names is None:
+        if (
+            schema is None
+            or schema_sha is None
+            or consumer_schema_sha is None
+            or view_names is None
+            or hierarchy_names is None
+        ):
             raise RuntimeError("deployable prediction produced no schema")
 
         metadata: dict[str, Any] = {
@@ -976,6 +1038,9 @@ def generate_deployable_pseudo_view_cache(
             "frontier_depths": frontier_depths,
             "prediction_schema": schema,
             "prediction_schema_hash": schema_sha,
+            "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+            "consumer_pseudo_schema_hash": consumer_schema_sha,
+            "consumer_only_pseudo": True,
             "source_manifest_hash": source_provenance["source_manifest_hash"],
             "hlt_content_hash": source_provenance["hlt_content_hash"],
             "jet_identity_hash": source_provenance["jet_identity_hash"],
@@ -1132,6 +1197,28 @@ def audit_deployable_pseudo_view_cache(
     frontier_depths = dict(metadata.get("frontier_depths") or {})
     if not hierarchy_names or set(frontier_depths) != set(hierarchy_names):
         problems.append("hierarchy names/depth metadata is incomplete")
+    if metadata.get("consumer_only_pseudo") is True and hierarchy_names:
+        expected_consumer_names = set(
+            consumer_pseudo_array_names(hierarchy_names, frontier_depths)
+        )
+        prediction_schema = dict(metadata.get("prediction_schema") or {})
+        if set(prediction_schema) != expected_consumer_names:
+            problems.append("consumer-only prediction schema contains non-consumer arrays")
+        expected_consumer_hash = canonical_hash(
+            {
+                "contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+                "schema_version": ABPH_CONSUMER_PSEUDO_SCHEMA_VERSION,
+                "arrays": {
+                    name: prediction_schema[name]
+                    for name in sorted(expected_consumer_names)
+                    if name in prediction_schema
+                },
+            }
+        )
+        if metadata.get("consumer_pseudo_schema_hash") != expected_consumer_hash:
+            problems.append("consumer pseudo schema hash mismatch")
+        if metadata.get("consumer_pseudo_contract") != ABPH_CONSUMER_PSEUDO_CONTRACT:
+            problems.append("consumer pseudo contract mismatch")
     if metadata.get("class_mapping_hash") != _class_mapping_hash():
         problems.append("class mapping hash mismatch")
     if metadata.get("hlt_profile") != ABPH_HLT_PROFILE:
@@ -1206,6 +1293,10 @@ def audit_deployable_pseudo_view_cache(
             ):
                 if sidecar.get(name) != metadata.get(name):
                     raise ValueError(f"sidecar {name} binding mismatch")
+            if metadata.get("consumer_only_pseudo") is True and sidecar.get(
+                "consumer_pseudo_schema_hash"
+            ) != metadata.get("consumer_pseudo_schema_hash"):
+                raise ValueError("sidecar consumer pseudo schema binding mismatch")
             for name in (
                 "offline_inputs_loaded",
                 "teacher_logits_loaded",

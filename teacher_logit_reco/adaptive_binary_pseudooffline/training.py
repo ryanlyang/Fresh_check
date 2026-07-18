@@ -29,6 +29,18 @@ from .convergence_schedule import (
     StageScheduleBudget,
     decide_stage_continuation,
 )
+from .checkpoints import (
+    ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT,
+    ABPH_EPHEMERAL_RESUME_CHECKPOINT_CONTRACT,
+    ABPH_RESTART_SEMANTICS_EXACT,
+    ABPH_RESTART_SEMANTICS_WARM_START,
+    build_compact_selected_checkpoint,
+    ephemeral_checkpoint_path,
+    require_exact_resume_checkpoint,
+    streaming_storage_enabled,
+    validate_compact_selected_checkpoint,
+    write_selected_checkpoint,
+)
 from .distributed import (
     DistributedRuntime,
     ReconstructorTrainingModule,
@@ -1578,7 +1590,43 @@ def _checkpoint_payload(
         },
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
+        "exact_resume_supported": True,
+        "restart_semantics": ABPH_RESTART_SEMANTICS_EXACT,
     }
+
+
+def _compact_selected_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a full selected training payload onto the persistent contract."""
+
+    if payload.get("checkpoint_role") not in {"best_stage_model_val", "best_model_val"}:
+        raise ValueError("only selected reconstructor payloads may be compacted")
+    config = dict(payload.get("config", {}))
+    config_hash = str(config.get("config_hash", ""))
+    if not config_hash:
+        raise ValueError("selected reconstructor payload lacks its resolved config hash")
+    return build_compact_selected_checkpoint(
+        model_state_dict=payload["model_state_dict"],
+        checkpoint_role=str(payload["checkpoint_role"]),
+        model_metadata=dict(payload.get("model_metadata", {})),
+        resolved_variant_config=config,
+        resolved_variant_config_hash=config_hash,
+        validation=payload.get("validation"),
+        provenance=dict(payload.get("provenance", {})),
+        runtime_contracts=dict(payload.get("runtime_contracts", {})),
+        schedule_contracts={
+            "schedule_contract": payload.get("schedule_contract"),
+            "campaign_schedule_profile": payload.get("campaign_schedule_profile"),
+        },
+        extra_metadata={
+            "training_contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
+            "optimizer_groups": payload.get("optimizer_groups", []),
+            "distributed_runtime": payload.get("distributed_runtime", {}),
+            "nonfinite_updates": int(payload.get("nonfinite_updates", 0)),
+            "teacher_logits_loaded": False,
+        },
+    )
 
 
 def _load_torch_payload(path: Path, device: Any) -> Mapping[str, Any]:
@@ -1597,7 +1645,13 @@ def load_reconstructor_curriculum_checkpoint(
 ) -> Mapping[str, Any]:
     resolved = resolve_device(device) if isinstance(device, str) else device
     payload = _load_torch_payload(Path(path), resolved)
-    if payload.get("checkpoint_contract") != ABPH_RECONSTRUCTOR_TRAINING_CONTRACT:
+    contract = payload.get("checkpoint_contract")
+    if contract == ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT:
+        validate_compact_selected_checkpoint(payload, require_selected=True)
+    elif contract not in {
+        ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
+        ABPH_EPHEMERAL_RESUME_CHECKPOINT_CONTRACT,
+    }:
         raise ValueError("reconstructor checkpoint contract mismatch")
     if require_selected and payload.get("checkpoint_role") not in {
         "best_stage_model_val",
@@ -1712,6 +1766,13 @@ def train_reconstructor_curriculum(
     torch = require_torch()
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    streaming_checkpoints = streaming_storage_enabled()
+    campaign_root = (
+        output_dir.parent.parent
+        if output_dir.parent.name == "runs"
+        else output_dir.parent
+    )
+    checkpoint_variant_name = output_dir.name
     device = resolve_device(config.device)
     distributed_runtime = initialize_distributed_runtime(
         requested_world_size=int(config.distributed_world_size), device=device
@@ -1788,6 +1849,7 @@ def train_reconstructor_curriculum(
         payload = _collective_checkpoint_load(
             resume_from, runtime=distributed_runtime
         )
+        require_exact_resume_checkpoint(payload)
         saved_distributed = dict(payload.get("distributed_runtime", {}))
         if saved_distributed and (
             int(saved_distributed.get("world_size", -1))
@@ -1920,6 +1982,12 @@ def train_reconstructor_curriculum(
                         "profile_content_hash"
                     ],
                 )
+                if streaming_checkpoints:
+                    payload["checkpoint_contract"] = (
+                        ABPH_EPHEMERAL_RESUME_CHECKPOINT_CONTRACT
+                    )
+                    payload["storage_profile"] = "streaming_30gb_v1"
+                    payload["persistent"] = False
             except BaseException as exc:
                 payload_error = f"{type(exc).__name__}: {exc}"
         payload_error = broadcast_object(distributed_runtime, payload_error)
@@ -1942,14 +2010,25 @@ def train_reconstructor_curriculum(
                     raise RuntimeError("rank zero did not build a checkpoint payload")
                 _atomic_torch_save(path, payload)
                 for alias in aliases:
-                    _atomic_torch_save(alias, payload)
+                    if streaming_checkpoints:
+                        compact = _compact_selected_payload(payload)
+                        write_selected_checkpoint(
+                            alias,
+                            compact,
+                            campaign_root=campaign_root,
+                            artifact_role="selected_reconstructor_checkpoint",
+                            run_id=checkpoint_variant_name,
+                        )
+                    else:
+                        _atomic_torch_save(alias, payload)
             except BaseException as exc:
                 local_error = f"{type(exc).__name__}: {exc}"
         error = broadcast_object(distributed_runtime, local_error)
         if error is not None:
             raise RuntimeError(f"rank-zero checkpoint write failed: {error}")
         barrier(distributed_runtime)
-        digest = _file_sha256(path) if distributed_runtime.is_primary else None
+        digest_path = aliases[0] if aliases and streaming_checkpoints else path
+        digest = _file_sha256(digest_path) if distributed_runtime.is_primary else None
         digest = broadcast_object(distributed_runtime, digest)
         if not isinstance(digest, str) or not digest:
             raise RuntimeError("checkpoint content hash broadcast failed")
@@ -2590,12 +2669,28 @@ def train_reconstructor_curriculum(
         curve["checkpoint_selection_decision"] = selection_decision
         if improved:
             evaluations_without_improvement[state.stage_key] = 0
-            stage_path = output_dir / f"best_{state.stage_key}.pt"
+            stage_path = (
+                ephemeral_checkpoint_path(
+                    variant_name=checkpoint_variant_name,
+                    filename=f"best_{state.stage_key}.pt",
+                )
+                if streaming_checkpoints
+                else output_dir / f"best_{state.stage_key}.pt"
+            )
             best_by_stage[state.stage_key] = {
                 "selection_score": score,
                 "global_update": int(controller.global_update),
                 "checkpoint": str(stage_path),
+                "checkpoint_storage": (
+                    "rank0_ram_ephemeral"
+                    if streaming_checkpoints
+                    else "persistent_shared"
+                ),
             }
+            if streaming_checkpoints and controller.is_final_stage(state):
+                best_by_stage[state.stage_key]["persistent_selected_checkpoint"] = str(
+                    output_dir / "best_model_val.pt"
+                )
         else:
             evaluations_without_improvement[state.stage_key] = (
                 evaluations_without_improvement.get(state.stage_key, 0) + 1
@@ -2691,7 +2786,15 @@ def train_reconstructor_curriculum(
                 "checkpoint_serialization", stage_key=state.stage_key
             ):
                 write_checkpoint_collective(
-                    output_dir / "last.pt", payload
+                    (
+                        ephemeral_checkpoint_path(
+                            variant_name=checkpoint_variant_name,
+                            filename="last.pt",
+                        )
+                        if streaming_checkpoints
+                        else output_dir / "last.pt"
+                    ),
+                    payload,
                 )
         if distributed_runtime.is_primary:
             _atomic_json(
@@ -2729,6 +2832,13 @@ def train_reconstructor_curriculum(
             )
             model.load_state_dict(selected["model_state_dict"], strict=True)
             ema.reset_from(model)
+            if streaming_checkpoints and distributed_runtime.is_primary:
+                selected_path.unlink(missing_ok=True)
+                best_by_stage[state.stage_key]["ephemeral_checkpoint_deleted"] = True
+                if controller.is_final_stage(state):
+                    best_by_stage[state.stage_key]["checkpoint"] = str(
+                        output_dir / "best_model_val.pt"
+                    )
             optimizer.state.clear()
             handoff_optimizer_metadata = (
                 configure_reconstructor_optimizer(optimizer, controller.state(), config)
@@ -2745,7 +2855,15 @@ def train_reconstructor_curriculum(
                     "checkpoint_serialization", stage_key=state.stage_key
                 ):
                     write_checkpoint_collective(
-                        output_dir / "last.pt", payload
+                        (
+                            ephemeral_checkpoint_path(
+                                variant_name=checkpoint_variant_name,
+                                filename="last.pt",
+                            )
+                            if streaming_checkpoints
+                            else output_dir / "last.pt"
+                        ),
+                        payload,
                     )
 
     prefetch_maximum_resident_batches = (
@@ -2781,7 +2899,15 @@ def train_reconstructor_curriculum(
             "checkpoint_serialization", stage_key=final_stage_key
         ):
             write_checkpoint_collective(
-                output_dir / "last.pt", payload
+                (
+                    ephemeral_checkpoint_path(
+                        variant_name=checkpoint_variant_name,
+                        filename="last.pt",
+                    )
+                    if streaming_checkpoints
+                    else output_dir / "last.pt"
+                ),
+                payload,
             )
     complete = bool(controller.complete)
     terminal_checkpoint_present = (
@@ -2794,6 +2920,10 @@ def train_reconstructor_curriculum(
     )
     if complete and not terminal_checkpoint_present:
         raise RuntimeError("completed curriculum produced no terminal model-val checkpoint")
+    if complete and streaming_checkpoints and distributed_runtime.is_primary:
+        ephemeral_checkpoint_path(
+            variant_name=checkpoint_variant_name, filename="last.pt"
+        ).unlink(missing_ok=True)
     runtime_profile = runtime_profiler.write(persist=distributed_runtime.is_primary)
     runtime_profile = broadcast_object(
         distributed_runtime,
@@ -2849,10 +2979,19 @@ def train_reconstructor_curriculum(
                 "events": [],
             }
     best_model_val_sha256 = None
+    best_model_val_content_hash = None
     if complete and distributed_runtime.is_primary:
         best_model_val_sha256 = _file_sha256(output_dir / "best_model_val.pt")
+        if streaming_checkpoints:
+            selected_payload = load_reconstructor_curriculum_checkpoint(
+                output_dir / "best_model_val.pt", device="cpu", require_selected=True
+            )
+            best_model_val_content_hash = selected_payload.get("content_hash")
     best_model_val_sha256 = broadcast_object(
         distributed_runtime, best_model_val_sha256
+    )
+    best_model_val_content_hash = broadcast_object(
+        distributed_runtime, best_model_val_content_hash
     )
     report = {
         "contract": ABPH_RECONSTRUCTOR_TRAINING_CONTRACT,
@@ -2867,6 +3006,9 @@ def train_reconstructor_curriculum(
         "best_model_val_checkpoint_sha256": (
             best_model_val_sha256 if complete else None
         ),
+        "best_model_val_checkpoint_content_hash": (
+            best_model_val_content_hash if complete else None
+        ),
         "selection_split": "model_val",
         "selection_mode": "rollout",
         "rollout_validation_count": len(curves),
@@ -2880,6 +3022,29 @@ def train_reconstructor_curriculum(
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
         "stage_handoff": "restore_best_ema_and_reset_optimizer_moments",
+        "checkpoint_storage": {
+            "profile": (
+                "streaming_30gb_v1" if streaming_checkpoints else "cache_heavy_v1"
+            ),
+            "selected_contract": (
+                ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT
+                if streaming_checkpoints
+                else ABPH_RECONSTRUCTOR_TRAINING_CONTRACT
+            ),
+            "ephemeral_resume_contract": (
+                ABPH_EPHEMERAL_RESUME_CHECKPOINT_CONTRACT
+                if streaming_checkpoints
+                else ABPH_RECONSTRUCTOR_TRAINING_CONTRACT
+            ),
+            "persistent_last_checkpoint": not streaming_checkpoints,
+            "restart_semantics": (
+                ABPH_RESTART_SEMANTICS_WARM_START
+                if streaming_checkpoints
+                else ABPH_RESTART_SEMANTICS_EXACT
+            ),
+            "failed_allocation_loses_optimizer_state": bool(streaming_checkpoints),
+            "compact_selected_is_exact_resume": False,
+        },
         "schedule": {
             "contract": config.curriculum.schedule_contract,
             "policy_label": (

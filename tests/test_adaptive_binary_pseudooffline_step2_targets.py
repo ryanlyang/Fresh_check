@@ -10,6 +10,7 @@ from jetclass_fresh.hlt_cache import (
     DEFAULT_HLT_SEEDS,
     fixed_hlt_params_from_profile,
     generate_and_cache_hlt_view,
+    load_cached_hlt_view,
 )
 from jetclass_fresh.jetclass_data import (
     FILE_PREFIX_TO_LABEL,
@@ -25,6 +26,7 @@ from jetclass_fresh.jetclass_data import (
 )
 from teacher_logit_reco.architecture_view_part import save_cached_offline_view
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
+    ABPH_COMPACT_TARGET_CODEC_NAME,
     ABPH_HLT_DEGRADATION_STRENGTH,
     ABPH_HLT_PROFILE,
     ABPH_LEVEL_CAPACITIES,
@@ -336,4 +338,83 @@ def test_target_cache_refuses_offline_final_test():
             output_cache_dir="unused",
             split="final_test",
             grouping="exclusive_kt",
+        )
+
+
+def test_compact_cache_round_trips_real_targets_and_audits_forensic_identities(tmp_path: Path):
+    manifest = _cache_manifest(n_jets=4)
+    manifest_path = tmp_path / "split_manifest.json.gz"
+    hlt_cache = tmp_path / "hlt"
+    offline_cache = tmp_path / "offline"
+    target_cache = tmp_path / "targets"
+    save_split_manifest(manifest, manifest_path)
+    offline = _offline_view(manifest, "model_train")
+    save_cached_offline_view(offline, offline_cache)
+    generate_and_cache_hlt_view(
+        offline,
+        hlt_cache,
+        seed=DEFAULT_HLT_SEEDS["model_train"],
+        params=fixed_hlt_params_from_profile(
+            ABPH_HLT_PROFILE, ABPH_HLT_DEGRADATION_STRENGTH
+        ),
+        hlt_degradation_strength=ABPH_HLT_DEGRADATION_STRENGTH,
+    )
+    metadata = build_adaptive_binary_target_cache(
+        manifest_path=manifest_path,
+        hlt_cache_dir=hlt_cache,
+        offline_cache_dir=offline_cache,
+        output_cache_dir=target_cache,
+        split="model_train",
+        grouping="exclusive_kt",
+        chunk_size=2,
+        storage_codec=ABPH_COMPACT_TARGET_CODEC_NAME,
+        forensic_jets_per_class=1,
+    )
+    assert metadata["storage_codec"] == ABPH_COMPACT_TARGET_CODEC_NAME
+    assert metadata["feature_dtype"] == "float32"
+    assert metadata["forensic_identity_sample"]["n_jets"] == 4
+    assert all(row["encoded_content_hash"] for row in metadata["shards"])
+    shard = load_adaptive_binary_target_shard(
+        target_cache, "model_train", "exclusive_kt", 0
+    )
+    hlt = load_cached_hlt_view(hlt_cache, "model_train", verify_hash=True)
+    expected = build_adaptive_binary_targets(
+        hlt.tokens[:2],
+        hlt.mask[:2],
+        offline.tokens[:2],
+        offline.mask[:2],
+        jet_ids=tuple(offline.jet_ids[:2]),
+    )
+    expected_arrays = expected.array_dict()
+    observed_arrays = shard.targets.array_dict()
+    assert set(observed_arrays) == set(expected_arrays)
+    for key in expected_arrays:
+        assert observed_arrays[key].dtype == expected_arrays[key].dtype, key
+        assert observed_arrays[key].shape == expected_arrays[key].shape, key
+        assert observed_arrays[key].tobytes() == expected_arrays[key].tobytes(), key
+    assert adaptive_binary_target_invariant_report(shard.targets)["ok"]
+    audit = audit_adaptive_binary_target_cache(
+        target_cache,
+        manifest_path=manifest_path,
+        splits=("model_train",),
+        groupings=("exclusive_kt",),
+    )
+    assert audit["ok"], audit["problems"]
+    report = audit["reports"]["model_train/exclusive_kt"]
+    assert report["storage_codec"] == ABPH_COMPACT_TARGET_CODEC_NAME
+    assert report["forensic_identity_sample_count"] == 4
+
+    shard_path = next(
+        (target_cache / "model_train_exclusive_kt_adaptive_binary_targets").glob(
+            "shard_*.npz"
+        )
+    )
+    with np.load(shard_path, allow_pickle=False) as source:
+        tampered = {key: np.asarray(source[key]) for key in source.files}
+    tampered["payload__root_features"] = tampered["payload__root_features"].copy()
+    tampered["payload__root_features"][0] ^= np.uint8(1)
+    np.savez_compressed(shard_path, **tampered)
+    with pytest.raises(ValueError, match="shard hash mismatch"):
+        load_adaptive_binary_target_shard(
+            target_cache, "model_train", "exclusive_kt", 0
         )

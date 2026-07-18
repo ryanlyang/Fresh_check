@@ -37,6 +37,15 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (  #
 from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (  # noqa: E402
     distributed_environment,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.checkpoints import (  # noqa: E402
+    build_compact_selected_checkpoint,
+    ephemeral_checkpoint_path,
+    load_torch_checkpoint,
+    selected_checkpoint_provenance,
+    selected_model_state,
+    streaming_storage_enabled,
+    write_selected_checkpoint,
+)
 from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     ABPH_LEVEL_CAPACITIES,
     ABPH_RECONSTRUCTOR_VARIANTS,
@@ -202,7 +211,32 @@ def _evaluate_true_offline_particle_branch(
         "final_test_loaded": False,
         "teacher_logits_loaded": False,
     }
-    torch.save(checkpoint_payload, output_dir / "best_model_val.pt")
+    checkpoint_path = output_dir / "best_model_val.pt"
+    if streaming_storage_enabled():
+        compact = build_compact_selected_checkpoint(
+            model_state_dict=checkpoint_payload["model_state_dict"],
+            checkpoint_role="best_model_val",
+            model_metadata={"diagnostic": "D6_true_offline_particles"},
+            resolved_variant_config={"variant_name": "D6_true_offline_particles"},
+            resolved_variant_config_hash=str(resolved_config_hash),
+            validation=metrics,
+            provenance=checkpoint_payload["source_checkpoint_hashes"],
+            extra_metadata={
+                "variant_name": "D6_true_offline_particles",
+                "oracle_model_val_only": True,
+                "oracle_particles_actually_routed_through_pseudo_branch": True,
+                "teacher_logits_loaded": False,
+            },
+        )
+        write_selected_checkpoint(
+            checkpoint_path,
+            compact,
+            campaign_root=root,
+            artifact_role="selected_oracle_diagnostic_checkpoint",
+            run_id="D6_true_offline_particles",
+        )
+    else:
+        torch.save(checkpoint_payload, checkpoint_path)
     return metrics, initialization
 
 
@@ -305,13 +339,8 @@ def _selected_classifier_metrics(
 ) -> dict:
     torch = require_torch()
     resolved_device = resolve_device(device)
-    try:
-        payload = torch.load(checkpoint, map_location=resolved_device, weights_only=False)
-    except TypeError:  # pragma: no cover - older research PyTorch
-        payload = torch.load(checkpoint, map_location=resolved_device)
-    state = payload.get("model_state_dict")
-    if not isinstance(state, dict):
-        raise ValueError(f"selected classifier checkpoint {checkpoint} lacks model_state_dict")
+    payload = load_torch_checkpoint(checkpoint, device=resolved_device)
+    state = selected_model_state(payload)
     model.load_state_dict(state, strict=True)
     model.to(resolved_device).eval()
     maximum = (
@@ -371,21 +400,21 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
         checkpoint = root / "runs" / "A0_hlt_part" / "best_model_val.pt"
         if not checkpoint.is_file():
             raise FileNotFoundError("A1 requires the selected A0 checkpoint")
-        import torch
-
-        try:
-            payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        except TypeError:  # pragma: no cover - older research PyTorch
-            payload = torch.load(checkpoint, map_location="cpu")
-        model.load_state_dict(payload["model_state_dict"], strict=True)
+        payload = load_torch_checkpoint(checkpoint, device="cpu")
+        model.load_state_dict(selected_model_state(payload), strict=True)
         initialization_checkpoint_hash = _sha256(checkpoint)
     epochs = int(os.environ.get("ABPH_TAGGER_EPOCHS", "20"))
     if args.smoke:
         epochs = 1
+    training_output_dir = output_dir
+    if streaming_storage_enabled():
+        training_output_dir = ephemeral_checkpoint_path(
+            variant_name=variant, filename="baseline/best_model_val.pt"
+        ).parent
     if variant == "A4_offline_part_ceiling":
         report = train_offline_teacher(
             OfflineTeacherTrainConfig(
-                output_dir=str(output_dir),
+                output_dir=str(training_output_dir),
                 manifest_path=str(root / "inputs" / "split_manifest" / "split_manifest.json.gz"),
                 data_dir=os.environ.get("ABPH_DATA_DIR", "/home/ryreu/atlas/PracticeTagging/data/jetclass_part1"),
                 seed=seed,
@@ -404,7 +433,7 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
     else:
         report = train_hlt_baseline(
             HLTBaselineTrainConfig(
-                output_dir=str(output_dir),
+                output_dir=str(training_output_dir),
                 cache_dir=str(root / "inputs" / "hlt_cache"),
                 seed=seed,
                 batch_size=int(args.batch_size),
@@ -433,7 +462,7 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
             model=model,
         )
         hlt_view = load_cached_hlt_view(root / "inputs" / "hlt_cache", "model_val", verify_hash=True)
-    checkpoint = output_dir / "best_model_val.pt"
+    checkpoint = training_output_dir / "best_model_val.pt"
     evaluation_view = (
         load_cached_offline_view(
             root / "inputs" / "offline_cache", "model_val", verify_hash=True
@@ -449,6 +478,41 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
         batch_size=int(args.batch_size),
         smoke=bool(args.smoke),
     )
+    if streaming_storage_enabled():
+        payload = load_torch_checkpoint(checkpoint, device="cpu")
+        compact = build_compact_selected_checkpoint(
+            model_state_dict=selected_model_state(payload),
+            checkpoint_role="best_model_val",
+            model_metadata={
+                "model_class": f"{model.__class__.__module__}.{model.__class__.__qualname__}",
+                "baseline_variant": variant,
+            },
+            resolved_variant_config=resolved,
+            resolved_variant_config_hash=str(resolved["resolved_config_hash"]),
+            validation=metrics,
+            provenance={
+                "model_val": _split_provenance(evaluation_view),
+                "initialization_checkpoint_hash": initialization_checkpoint_hash,
+            },
+            runtime_contracts={"training_report_contract": report.get("contract")},
+            schedule_contracts={"epochs": epochs},
+            extra_metadata={
+                "variant_name": variant,
+                "teacher_logits_loaded": False,
+            },
+        )
+        checkpoint = output_dir / "best_model_val.pt"
+        write_selected_checkpoint(
+            checkpoint,
+            compact,
+            campaign_root=root,
+            artifact_role="selected_baseline_checkpoint",
+            run_id=variant,
+        )
+    selected_payload = load_torch_checkpoint(checkpoint, device="cpu")
+    checkpoint_provenance = selected_checkpoint_provenance(
+        checkpoint, selected_payload
+    )
     return {
         "contract": "adaptive_binary_pseudooffline_baseline_run_v1",
         "ok": True,
@@ -457,6 +521,7 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
         "resolved_variant_config_hash": resolved["resolved_config_hash"],
         "selected_checkpoint_hash": _sha256(checkpoint),
         "best_model_val_checkpoint_sha256": _sha256(checkpoint),
+        "selected_checkpoint_provenance": checkpoint_provenance,
         "source_git_commit": "recorded_by_slurm_run_config",
         "source_status_hash": "recorded_by_slurm_run_config",
         "metrics": {"model_val": metrics},
@@ -465,6 +530,9 @@ def _train_baseline(args: argparse.Namespace, resolved: dict, output_dir: Path) 
             "artifact": {
                 "resolved_variant_config_hash": resolved["resolved_config_hash"],
                 "selected_checkpoint_hash": _sha256(checkpoint),
+                "selected_checkpoint_content_hash": checkpoint_provenance.get(
+                    "content_hash"
+                ),
                 "source_git_commit": "recorded_by_slurm_run_config",
                 "source_status_hash": "recorded_by_slurm_run_config",
             },
@@ -525,14 +593,8 @@ def _load_selected_hlt_encoder(
 ) -> dict:
     """Load the selected A0 ParT into a production reconstructor encoder."""
 
-    torch = require_torch()
-    try:
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    except TypeError:  # pragma: no cover - older research PyTorch
-        payload = torch.load(checkpoint, map_location="cpu")
-    state = payload.get("model_state_dict")
-    if not isinstance(state, dict):
-        raise ValueError(f"HLT warm-start checkpoint {checkpoint} lacks model_state_dict")
+    payload = load_torch_checkpoint(checkpoint, device="cpu")
+    state = selected_model_state(payload)
     reference = getattr(model.hlt_encoder, "reference_model", None)
     if reference is None:
         if model.smoke:
@@ -547,6 +609,9 @@ def _load_selected_hlt_encoder(
         "loaded": True,
         "source_variant": "A0_hlt_part",
         "source_checkpoint_sha256": _sha256(checkpoint),
+        "source_checkpoint_provenance": selected_checkpoint_provenance(
+            checkpoint, payload
+        ),
         "missing_keys": list(result.missing_keys),
         "unexpected_keys": list(result.unexpected_keys),
         "strict": True,
@@ -678,16 +743,9 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
             root / "runs" / "A0_hlt_part" / "best_model_val.pt",
         )
     elif source_variant is not None:
-        import torch
-
         source_path = root / "runs" / source_variant / "best_model_val.pt"
-        try:
-            payload = torch.load(source_path, map_location="cpu", weights_only=False)
-        except TypeError:  # pragma: no cover - older research PyTorch
-            payload = torch.load(source_path, map_location="cpu")
-        source_state = payload.get("model_state_dict")
-        if not isinstance(source_state, dict):
-            raise ValueError(f"warm-start checkpoint {source_path} lacks model_state_dict")
+        payload = load_torch_checkpoint(source_path, device="cpu")
+        source_state = selected_model_state(payload)
         current = model.state_dict()
         copied = 0
         for name, value in source_state.items():
@@ -704,6 +762,9 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         model.load_state_dict(current, strict=True)
         warm_start = {
             "loaded": True,
+            "source_checkpoint_provenance": selected_checkpoint_provenance(
+                source_path, payload
+            ),
             "source_variant": source_variant,
             "source_checkpoint_sha256": _sha256(source_path),
             "parameter_tensors": copied,
@@ -1080,7 +1141,10 @@ def main(argv: list[str] | None = None) -> int:
 
         report = train_tagger_variant(args, resolved, output_dir)
     is_primary = True
-    if spec.tier in {"B", "C", "D"} and not args.smoke:
+    if spec.tier in {"B", "C", "D", "E", "F"} and not args.smoke:
+        rank, _world_size, _local_rank = distributed_environment()
+        is_primary = rank == 0
+    elif spec.run_id in {"G0", "G1"} and not args.smoke:
         rank, _world_size, _local_rank = distributed_environment()
         is_primary = rank == 0
     if is_primary:

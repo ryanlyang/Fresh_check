@@ -26,7 +26,15 @@ from jetclass_fresh import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="JetClass ROOT data directory")
+    parser.add_argument(
+        "--data-dir",
+        nargs="+",
+        default=[DEFAULT_DATA_DIR],
+        help=(
+            "One or more JetClass ROOT data directories. Multiple roots are useful for "
+            "high-data runs spanning several JetClass parts."
+        ),
+    )
     parser.add_argument(
         "--out",
         default="checkpoints/jetclass_fresh_splits/split_manifest.json.gz",
@@ -59,8 +67,10 @@ def main() -> int:
         "final_test": args.final_test,
     }
 
+    data_dir = args.data_dir[0] if len(args.data_dir) == 1 else list(args.data_dir)
+    manifest_data_dir = args.data_dir[0] if len(args.data_dir) == 1 else " ".join(args.data_dir)
     records = discover_file_records(
-        args.data_dir,
+        data_dir,
         pattern=args.pattern,
         tree_name=args.tree_name,
         require_all_classes=True,
@@ -68,7 +78,7 @@ def main() -> int:
     )
     manifest = build_split_manifest_from_records(
         records,
-        data_dir=args.data_dir,
+        data_dir=manifest_data_dir,
         split_sizes=split_sizes,
         split_seeds=DEFAULT_SPLIT_SEEDS,
         max_constits=args.max_constits,

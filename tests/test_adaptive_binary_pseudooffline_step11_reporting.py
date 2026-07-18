@@ -257,6 +257,8 @@ def _split_provenance(*, target: bool) -> dict[str, object]:
         "hlt_profile_version": "2.0",
         "hlt_degradation_strength": 2.5,
         "hlt_params_hash": "hlt-params",
+        "consumer_pseudo_schema_hash": "consumer-schema",
+        "consumer_only_pseudo_at_tagger_boundary": True,
     }
     if target:
         payload.update({field: f"target-{field}" for field in ABPH_TARGET_PROVENANCE_FIELDS})

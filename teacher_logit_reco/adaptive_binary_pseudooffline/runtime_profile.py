@@ -191,6 +191,7 @@ class RuntimeProfiler:
                 "updates_failed": 0,
                 "sampled_updates": 0,
                 "sampled_jets": 0,
+                "sampled_jets_scope": "global_effective_batch",
                 "local_batch_size": None,
                 "gradient_accumulation_steps": None,
                 "distributed_world_size": None,

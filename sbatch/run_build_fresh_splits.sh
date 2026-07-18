@@ -24,14 +24,29 @@ source "${SCRIPT_DIR}/common.sh"
 : "${TREE_NAME:=tree}"
 : "${MAX_CONSTITS:=128}"
 : "${SKIP_UNREADABLE_ROOT_FILES:=0}"
+: "${DATA_DIRS:=}"
 
 fresh_setup "$@"
-fresh_require_data_dir
+data_dir_args=()
+if [[ -n "${DATA_DIRS}" ]]; then
+  fresh_split_words data_dir_args "${DATA_DIRS}"
+else
+  fresh_require_data_dir
+  data_dir_args=("${DATA_DIR}")
+fi
+if ! fresh_is_dry_run; then
+  for data_dir_arg in "${data_dir_args[@]}"; do
+    if [[ ! -d "${data_dir_arg}" ]]; then
+      echo "JetClass data directory does not exist on this machine: ${data_dir_arg}" >&2
+      exit 2
+    fi
+  done
+fi
 fresh_refuse_existing_path "${MANIFEST_PATH}"
 
 cmd=(
   "${PYTHON_BIN}" "scripts/build_jetclass_splits.py"
-  --data-dir "${DATA_DIR}"
+  --data-dir "${data_dir_args[@]}"
   --out "${MANIFEST_PATH}"
   --pattern "${ROOT_PATTERN}"
   --tree-name "${TREE_NAME}"

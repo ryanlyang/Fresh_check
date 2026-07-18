@@ -576,6 +576,69 @@ def _target_identity(
     )
 
 
+def reconstruct_target_identity_arrays(
+    *,
+    jet_ids: Sequence[JetIdentity | str | tuple[Any, ...]],
+    layout: AdaptiveBinaryHierarchyLayout,
+    particle_mask: np.ndarray,
+    level_masks: Sequence[np.ndarray],
+    level_membership: Sequence[np.ndarray],
+) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
+    """Rebuild diagnostic node identities from persisted hierarchy structure."""
+
+    valid = np.asarray(particle_mask, dtype=bool)
+    if valid.ndim != 2 or valid.shape[1] != ABPH_MAX_PARTICLES:
+        raise ValueError("particle_mask must have shape [N, 128]")
+    if len(jet_ids) != valid.shape[0]:
+        raise ValueError("jet identity count differs from compact target batch")
+    if len(level_masks) != len(layout.level_capacities) or len(level_membership) != len(
+        layout.level_capacities
+    ):
+        raise ValueError("compact hierarchy depth differs from the active layout")
+    root_identities = np.zeros(valid.shape[0], dtype="S64")
+    identities = tuple(
+        np.zeros((valid.shape[0], capacity), dtype="S64")
+        for capacity in layout.level_capacities
+    )
+    for jet_index, identity in enumerate(jet_ids):
+        jet_key = _jet_identity_key(identity)
+        root_members = tuple(int(value) for value in np.flatnonzero(valid[jet_index]))
+        if not root_members:
+            raise ValueError(f"jet {jet_index} has no valid compact target particles")
+        root_identities[jet_index] = _target_identity(
+            grouping="shared_root",
+            jet_key=jet_key,
+            depth=0,
+            members=root_members,
+        )
+        for depth_index, (mask_values, membership_values) in enumerate(
+            zip(level_masks, level_membership)
+        ):
+            mask = np.asarray(mask_values, dtype=bool)
+            membership = np.asarray(membership_values, dtype=bool)
+            expected_shape = (
+                valid.shape[0],
+                layout.level_capacities[depth_index],
+                ABPH_MAX_PARTICLES,
+            )
+            if membership.shape != expected_shape or mask.shape != expected_shape[:2]:
+                raise ValueError("compact hierarchy mask/membership shape mismatch")
+            for group_index in np.flatnonzero(mask[jet_index]):
+                members = tuple(
+                    int(value)
+                    for value in np.flatnonzero(membership[jet_index, group_index])
+                )
+                if not members:
+                    raise ValueError("active compact hierarchy group has no members")
+                identities[depth_index][jet_index, group_index] = _target_identity(
+                    grouping=layout.grouping,
+                    jet_key=jet_key,
+                    depth=depth_index + 1,
+                    members=members,
+                )
+    return root_identities, identities
+
+
 def build_adaptive_binary_targets(
     hlt_tokens: np.ndarray,
     hlt_mask: np.ndarray,
@@ -851,5 +914,6 @@ __all__ = [
     "build_adaptive_binary_targets",
     "exclusive_binary_partition",
     "require_adaptive_binary_target_invariants",
+    "reconstruct_target_identity_arrays",
     "wrap_phi",
 ]

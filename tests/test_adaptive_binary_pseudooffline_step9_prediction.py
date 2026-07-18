@@ -464,3 +464,12 @@ def test_rollout_and_renderer_outputs_package_all_views_frontiers_and_uncertaint
         "frontier__exclusive_kt__depth_01__hidden"
     ].shape == (batch_size, views, 2, 5)
     assert np.array_equal(packaged.arrays["shared_root_ledger"], root_ledger.numpy())
+    assert packaged.diagnostics["consumer_only_pseudo"] is True
+    assert "particle__exclusive_kt__four_vector" not in packaged.arrays
+    assert "frontier__exclusive_kt__depth_00__source_child_indices" not in packaged.arrays
+    forensic = package_deployable_pseudo_views(
+        output, {"exclusive_kt": tuple(rendered)}, consumer_only=False
+    )
+    assert forensic.diagnostics["consumer_only_pseudo"] is False
+    assert "particle__exclusive_kt__four_vector" in forensic.arrays
+    assert "frontier__exclusive_kt__depth_00__source_child_indices" in forensic.arrays

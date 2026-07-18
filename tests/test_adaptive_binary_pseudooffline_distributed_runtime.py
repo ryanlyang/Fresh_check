@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from jetclass_fresh.jetclass_data import JetIdentity
 from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (
     DistributedRuntime,
     ReconstructorTrainingModule,
+    abort_distributed_runtime,
     all_reduce_min_bool,
     any_structural_error,
     barrier,
@@ -69,6 +72,60 @@ def _compose(result, _context, _weights):
         weighted_terms={"root": loss},
         required_terms=("root",),
     )
+
+
+class _FailBeforeReducer(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value, fail):
+        ctx.fail = bool(fail)
+        return value
+
+    @staticmethod
+    def backward(ctx, gradient):
+        if ctx.fail:
+            raise RuntimeError("injected failure before DDP reducer hooks")
+        return gradient, None
+
+
+def _real_ddp_backward_failure_worker(
+    rank: int, world_size: int, port: int, root: str
+) -> None:
+    os.environ.update(
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+        LOCAL_RANK=str(rank),
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        ABPH_DDP_TIMEOUT_SECONDS="8",
+    )
+    runtime = initialize_distributed_runtime(
+        requested_world_size=world_size, device=torch.device("cpu")
+    )
+    started = time.monotonic()
+    error = None
+    try:
+        model = torch.nn.parallel.DistributedDataParallel(
+            torch.nn.Linear(2, 1, bias=False)
+        )
+        prediction = model(torch.ones(2, 2))
+        loss = _FailBeforeReducer.apply(prediction, rank == 1).sum()
+        loss.backward()
+    except BaseException as exc:
+        error = exc
+        abort_distributed_runtime(runtime)
+    elapsed = time.monotonic() - started
+    result = {
+        "rank": rank,
+        "caught": error is not None,
+        "error": None if error is None else f"{type(error).__name__}: {error}",
+        "elapsed_seconds": elapsed,
+    }
+    Path(root, f"backward_failure_rank_{rank}.json").write_text(
+        json.dumps(result), encoding="utf-8"
+    )
+    if error is None:
+        abort_distributed_runtime(runtime)
+        raise AssertionError("real DDP backward failure did not reach this rank")
 
 
 def _distributed_worker(rank: int, world_size: int, port: int) -> None:
@@ -465,7 +522,12 @@ def _distributed_trainer_worker(rank: int, world_size: int, port: int, root: str
         renderer_distribution_effective_batch_size=4,
         pin_memory=False,
         save_last_checkpoint=False,
-        runtime_profile=RuntimeProfileConfig(enabled=False),
+        runtime_profile=RuntimeProfileConfig(
+            enabled=True,
+            warmup_updates_per_stage=0,
+            sample_interval=1,
+            profile_validation=False,
+        ),
         curriculum=ReconstructorCurriculumConfig(
             root_updates=3,
             hierarchy_updates_per_depth=1,
@@ -671,6 +733,37 @@ def test_two_rank_curriculum_update_uses_no_sync_and_deferred_commit(tmp_path):
         nprocs=2,
         join=True,
     )
+    profile = json.loads(
+        (tmp_path / "rank_0" / "runtime_profile.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    stage = next(iter(profile["stages"].values()))
+    assert stage["sampled_updates"] == 1
+    assert stage["sampled_jets"] == 4
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_available(), reason="torch.distributed is unavailable"
+)
+def test_real_ddp_backward_failure_aborts_all_ranks_within_timeout(tmp_path):
+    torch.multiprocessing.spawn(
+        _real_ddp_backward_failure_worker,
+        args=(2, _free_port(), str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+    rows = [
+        json.loads(
+            (tmp_path / f"backward_failure_rank_{rank}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for rank in range(2)
+    ]
+    assert all(row["caught"] for row in rows)
+    assert max(row["elapsed_seconds"] for row in rows) < 15.0
+    assert "injected failure before DDP reducer hooks" in rows[1]["error"]
 
 
 @pytest.mark.skipif(

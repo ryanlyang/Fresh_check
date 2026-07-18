@@ -589,6 +589,38 @@ def write_adaptive_binary_campaign_report(
                     problems.append(f"{variant_name}/{split} lacks provenance {field}")
                 else:
                     common_values.setdefault((split, field), {})[variant_name] = value
+            if variant_spec(variant_name).tier in {"E", "F"}:
+                if provenance.get("consumer_pseudo_schema_hash") in (None, ""):
+                    problems.append(
+                        f"{variant_name}/{split} lacks consumer-only pseudo schema hash"
+                    )
+                if provenance.get("consumer_only_pseudo_at_tagger_boundary") is not True:
+                    problems.append(
+                        f"{variant_name}/{split} does not attest consumer-only pseudo inputs"
+                    )
+                if report.get("storage_profile") == "streaming_30gb_v1":
+                    execution = _diagnostics(report, "model_val").get(
+                        "pseudo_execution"
+                    )
+                    if not isinstance(execution, Mapping):
+                        problems.append(
+                            f"{variant_name}/model_val lacks frozen pseudo RAM telemetry"
+                        )
+                    elif execution.get("pseudo_representations_written_persistently") is not False:
+                        problems.append(
+                            f"{variant_name}/model_val persisted pseudo representations"
+                        )
+                    elif execution.get("execution_mode") == "joint_differentiable":
+                        pass
+                    else:
+                        for source_split in ("model_train", "model_val"):
+                            row = execution.get(source_split)
+                            if not isinstance(row, Mapping) or row.get(
+                                "execution_mode"
+                            ) not in {"full_rank_cache", "bounded_lru"}:
+                                problems.append(
+                                    f"{variant_name}/{source_split} lacks an approved RAM pseudo mode"
+                                )
             if (
                 bool(resolved["data"].get("requires_offline_targets"))
                 and variant_spec(variant_name).tier != "A"

@@ -18,6 +18,19 @@ from .cache import load_adaptive_binary_target_cache_metadata
 from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
 from .report import ABPH_CAMPAIGN_REPORT_CONTRACT
 from .runtime_acceptance import require_runtime_acceptance
+from .tagger_distributed import require_tagger_ddp_acceptance
+from .bundled_scoring import group_scoring_members, scoring_source_family
+from .storage_quota import (
+    ABPH_CACHE_HEAVY_STORAGE_PROFILE,
+    ABPH_STORAGE_PROFILE_NAMES,
+    require_storage_projection,
+    resolve_storage_profile,
+)
+from .target_mode import (
+    ABPH_RANK_LOCAL_TARGET_MODE,
+    load_target_mode_selection,
+    rank_local_target_metadata,
+)
 from .variants import ABPH_EXPECTED_VARIANT_NAMES, resolve_variant_config, variant_spec
 
 
@@ -95,6 +108,9 @@ ABPH_FUSION_CANDIDATES: Mapping[str, tuple[str, ...]] = {
 }
 ABPH_LOGIT_PREDICTION_MEMBERS: tuple[str, ...] = tuple(
     dict.fromkeys(member for members in ABPH_FUSION_CANDIDATES.values() for member in members)
+)
+ABPH_BUNDLED_SCORING_FAMILIES: Mapping[str, tuple[str, ...]] = (
+    group_scoring_members(ABPH_LOGIT_PREDICTION_MEMBERS)
 )
 ABPH_RUNTIME_BATCH_PROBE_SPECS: tuple[tuple[str, int], ...] = (
     ("root_hierarchy", 256),
@@ -360,6 +376,10 @@ class AdaptiveBinaryCampaignPaths:
         return self.root / "audits" / "actual_target_feasibility.json"
 
     @property
+    def target_mode_report(self) -> Path:
+        return self.root / "audits" / "target_mode_selection.json"
+
+    @property
     def runs(self) -> Path:
         return self.root / "runs"
 
@@ -382,6 +402,10 @@ class AdaptiveBinaryCampaignPaths:
     @property
     def report(self) -> Path:
         return self.root / "report"
+
+    @property
+    def storage(self) -> Path:
+        return self.root / "storage"
 
 
 @dataclass(frozen=True)
@@ -470,7 +494,10 @@ class AdaptiveBinarySubmissionConfig:
     rebuild_predictions: bool = True
     reconstructor_parallelism: str = "ddp4"
     runtime_acceptance_path: str | Path | None = None
+    tagger_ddp_acceptance_path: str | Path | None = None
     allow_debug_single_reconstructor: bool = False
+    storage_profile: str = ABPH_CACHE_HEAVY_STORAGE_PROFILE
+    storage_projection_path: str | Path | None = None
 
     def __post_init__(self) -> None:
         if self.campaign_mode not in {"pilot", "highdata"}:
@@ -479,6 +506,34 @@ class AdaptiveBinarySubmissionConfig:
             raise ValueError(f"unknown stage mode {self.stage_mode!r}")
         if self.cluster not in ABPH_CLUSTER_PROFILES:
             raise ValueError(f"unknown cluster {self.cluster!r}")
+        if self.storage_profile not in ABPH_STORAGE_PROFILE_NAMES:
+            raise ValueError(f"unknown storage profile {self.storage_profile!r}")
+        if self.tagger_ddp_acceptance_path is not None:
+            if self.storage_profile != "streaming_30gb_v1":
+                raise ValueError(
+                    "tagger DDP promotion is valid only for streaming_30gb_v1"
+                )
+            if self.cluster != "tigris":
+                raise ValueError("tagger DDP4 is currently certified only for Tigris")
+        storage_profile = resolve_storage_profile(self.storage_profile)
+        if storage_profile.enforce_quota:
+            if self.storage_projection_path is None:
+                raise PermissionError(
+                    "quota-enforced storage submission requires a measured storage projection"
+                )
+            require_storage_projection(
+                self.storage_projection_path,
+                campaign_root=self.campaign_root,
+                campaign_mode=self.campaign_mode,
+                profile=storage_profile,
+            )
+        elif self.storage_projection_path is not None:
+            require_storage_projection(
+                self.storage_projection_path,
+                campaign_root=self.campaign_root,
+                campaign_mode=self.campaign_mode,
+                profile=storage_profile,
+            )
         if self.reconstructor_parallelism not in ABPH_RECONSTRUCTOR_PARALLELISM_MODES:
             raise ValueError("reconstructor_parallelism must be single or ddp4")
         if self.reconstructor_parallelism == "ddp4" and self.cluster != "tigris":
@@ -570,6 +625,42 @@ class AdaptiveBinarySubmissionConfig:
             "promotion_status": "debug_compatibility",
         }
 
+    @property
+    def tagger_topology(self) -> Mapping[str, Any]:
+        if self.storage_profile != "streaming_30gb_v1":
+            return {
+                "mode": "single",
+                "nodes": 1,
+                "ntasks": 1,
+                "ntasks_per_node": 1,
+                "gpus_per_node": 1,
+                "distributed_world_size": 1,
+                "launcher": "direct",
+                "promotion_status": "persistent_cache_profile_not_promoted",
+            }
+        if self.tagger_ddp_acceptance_path is None:
+            return {
+                "mode": "single",
+                "nodes": 1,
+                "ntasks": 1,
+                "ntasks_per_node": 1,
+                "gpus_per_node": 1,
+                "distributed_world_size": 1,
+                "launcher": "direct",
+                "promotion_status": "single_rank_ram_fallback_gate_absent",
+            }
+        require_tagger_ddp_acceptance(self.tagger_ddp_acceptance_path)
+        return {
+            "mode": "ddp4",
+            "nodes": 4,
+            "ntasks": 4,
+            "ntasks_per_node": 1,
+            "gpus_per_node": 1,
+            "distributed_world_size": 4,
+            "launcher": "srun",
+            "promotion_status": "e7_f0_parity_and_speed_gate_passed",
+        }
+
 
 def _run_dir(paths: AdaptiveBinaryCampaignPaths, member: str) -> Path:
     return paths.runs / member
@@ -577,6 +668,10 @@ def _run_dir(paths: AdaptiveBinaryCampaignPaths, member: str) -> Path:
 
 def _fusion_member_names(name: str) -> tuple[str, ...]:
     return ABPH_FUSION_CANDIDATES[name]
+
+
+def _bundled_scoring_job_key_for_member(member: str) -> str:
+    return f"logit_bundle:{scoring_source_family(member).key}"
 
 
 def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict[str, Any]:
@@ -628,6 +723,9 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
         )
         checked.append(str(paths.root / "audits" / "step1_input_audit.json"))
     if config.stage_mode == "models":
+        from .production import reconstructor_runtime_provenance
+        from .runtime_batch import load_runtime_batch_contract
+
         manifest_report = input_audit.get("manifest")
         hlt_reports = input_audit.get("hlt_splits")
         offline_reports = input_audit.get("offline_splits")
@@ -637,8 +735,16 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
         ):
             raise ValueError("Step-1 input audit lacks split provenance maps")
         manifest_sha = manifest_report.get("manifest_hash")
+        current_hlt_metadata_by_split: dict[str, Mapping[str, Any]] = {}
+        target_metadata_by_grouping: dict[str, Mapping[str, Any]] = {}
         require_actual_target_preflight(paths.preflight_report)
         checked.append(str(paths.preflight_report))
+        target_mode_selection = None
+        if config.storage_profile == "streaming_30gb_v1":
+            target_mode_selection = load_target_mode_selection(
+                paths.target_mode_report, campaign_root=paths.root
+            )
+            checked.append(str(paths.target_mode_report))
         for split in ("model_train", "model_val"):
             current_hlt_metadata = _read_json(
                 paths.hlt_cache / f"{split}_fixed_hlt_metadata.json"
@@ -646,6 +752,7 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
             current_offline_metadata = _read_json(
                 paths.offline_cache / f"{split}_offline_metadata.json"
             )
+            current_hlt_metadata_by_split[split] = current_hlt_metadata
             hlt_expected = hlt_reports.get(split)
             offline_expected = offline_reports.get(split)
             if not isinstance(hlt_expected, Mapping) or not isinstance(
@@ -673,9 +780,24 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
                     f"current offline {split} {key}",
                 )
             for grouping in ("exclusive_kt", "cambridge_aachen"):
-                metadata = load_adaptive_binary_target_cache_metadata(
-                    paths.target_cache, split, grouping
-                )
+                if (
+                    target_mode_selection is not None
+                    and target_mode_selection.get("selected_mode")
+                    == ABPH_RANK_LOCAL_TARGET_MODE
+                ):
+                    metadata = rank_local_target_metadata(
+                        selection=target_mode_selection,
+                        split=split,
+                        grouping=grouping,
+                        n_jets=int(current_hlt_metadata["n_jets"]),
+                        jet_identity_hash_value=str(hlt_expected.get("jet_identity_hash")),
+                    )
+                else:
+                    metadata = load_adaptive_binary_target_cache_metadata(
+                        paths.target_cache, split, grouping
+                    )
+                if split == "model_train":
+                    target_metadata_by_grouping[grouping] = metadata
                 if metadata.get("target_content_hash") in {None, ""}:
                     raise ValueError(f"reused target metadata lacks a hash: {split}/{grouping}")
                 for key, expected in {
@@ -691,12 +813,13 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
                         expected,
                         f"target {split}/{grouping} {key}",
                     )
-                checked.append(
-                    str(
-                        paths.target_cache
-                        / f"{split}_{grouping}_adaptive_binary_targets_metadata.json"
+                if metadata.get("target_mode") != ABPH_RANK_LOCAL_TARGET_MODE:
+                    checked.append(
+                        str(
+                            paths.target_cache
+                            / f"{split}_{grouping}_adaptive_binary_targets_metadata.json"
+                        )
                     )
-                )
         hlt_model_val = hlt_reports.get("model_val")
         offline_model_val = offline_reports.get("model_val")
         if not isinstance(hlt_model_val, Mapping) or not isinstance(
@@ -763,6 +886,42 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
                 f"{split} teacher-logit prediction",
             )
             checked.extend((str(prediction), str(metadata)))
+        expected_world_size = 4 if config.reconstructor_parallelism == "ddp4" else 1
+        for member in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
+            resolved = resolve_variant_config(member)
+            grouping = str(
+                resolved["model"]["hierarchy"].get(
+                    "grouping", "exclusive_kt"
+                )
+            )
+            target_metadata = target_metadata_by_grouping.get(grouping)
+            if target_metadata is None:
+                raise ValueError(
+                    f"active model_train target metadata is missing for {grouping}"
+                )
+            runtime_provenance = reconstructor_runtime_provenance(
+                variant_name=member,
+                target_metadata=target_metadata,
+                hlt_metadata=current_hlt_metadata_by_split["model_train"],
+            )
+            contract_path = (
+                paths.root
+                / "runtime_batch_contracts"
+                / member
+                / "runtime_batch_contract.json"
+            )
+            load_runtime_batch_contract(
+                contract_path,
+                expected_variant_name=member,
+                expected_resolved_variant_config_hash=resolved[
+                    "resolved_config_hash"
+                ],
+                expected_runtime_provenance_hash=canonical_hash(
+                    runtime_provenance
+                ),
+                expected_world_size=expected_world_size,
+            )
+            checked.append(str(contract_path))
     elif config.stage_mode == "predictions":
         require_actual_target_preflight(paths.preflight_report)
         checked.append(str(paths.preflight_report))
@@ -847,8 +1006,9 @@ def _runtime_batch_contract_jobs(
     names: Sequence[str],
     dependencies: Sequence[str],
     common_env: Mapping[str, str],
+    topology: Mapping[str, Any],
 ) -> list[SlurmJobSpec]:
-    """Create measured DDP4 candidate probes and one compiler per variant."""
+    """Create measured topology-matched probes and one compiler per variant."""
 
     jobs: list[SlurmJobSpec] = []
     base_dependencies = tuple(dict.fromkeys(str(value) for value in dependencies))
@@ -868,12 +1028,12 @@ def _runtime_batch_contract_jobs(
                     base_dependencies,
                     gpu=True,
                     environment=common_env,
-                    nodes=4,
-                    ntasks=4,
-                    ntasks_per_node=1,
-                    gpus_per_node=1,
-                    distributed_world_size=4,
-                    launcher="srun",
+                    nodes=int(topology["nodes"]),
+                    ntasks=int(topology["ntasks"]),
+                    ntasks_per_node=int(topology["ntasks_per_node"]),
+                    gpus_per_node=int(topology["gpus_per_node"]),
+                    distributed_world_size=int(topology["distributed_world_size"]),
+                    launcher=str(topology["launcher"]),
                 )
             )
         jobs.append(
@@ -881,12 +1041,81 @@ def _runtime_batch_contract_jobs(
                 _runtime_batch_contract_job_key(name),
                 "runtime_batch_contract",
                 "run_compile_adaptive_binary_runtime_batch_contract.sh",
-                (name,),
+                (name, str(topology["distributed_world_size"])),
                 tuple(probe_keys),
                 environment=common_env,
             )
         )
     return jobs
+
+
+def _logit_scoring_jobs(
+    *,
+    common_env: Mapping[str, str],
+    streaming: bool,
+    reused_preparation: bool,
+) -> list[SlurmJobSpec]:
+    jobs: list[SlurmJobSpec] = []
+    if not streaming:
+        for member in ABPH_LOGIT_PREDICTION_MEMBERS:
+            model_key = (
+                f"variant:{member}"
+                if "__seed" in member
+                else _dependency_job_key(member)
+            )
+            dependencies = (
+                ()
+                if reused_preparation and model_key.startswith("baseline:")
+                else (model_key,)
+            )
+            if not reused_preparation:
+                dependencies = (*dependencies, "input:hlt_cache")
+            jobs.append(
+                SlurmJobSpec(
+                    f"logit_prediction:{member}",
+                    "logit_prediction",
+                    "run_adaptive_binary_prediction.sh",
+                    (member, "model_val", "stack_train", "stack_val"),
+                    tuple(dict.fromkeys(dependencies)),
+                    gpu=True,
+                    environment=common_env,
+                )
+            )
+        return jobs
+    for family_key, members in ABPH_BUNDLED_SCORING_FAMILIES.items():
+        dependencies: list[str] = []
+        for member in members:
+            model_key = (
+                f"variant:{member}"
+                if "__seed" in member
+                else _dependency_job_key(member)
+            )
+            if not (reused_preparation and model_key.startswith("baseline:")):
+                dependencies.append(model_key)
+        if not reused_preparation:
+            dependencies.append("input:hlt_cache")
+        jobs.append(
+            SlurmJobSpec(
+                f"logit_bundle:{family_key}",
+                "logit_bundle",
+                "run_adaptive_binary_bundled_scoring.sh",
+                tuple(members),
+                tuple(dict.fromkeys(dependencies)),
+                gpu=True,
+                environment=common_env,
+            )
+        )
+    return jobs
+
+
+def _fusion_scoring_dependencies(
+    members: Sequence[str], *, streaming: bool
+) -> tuple[str, ...]:
+    if streaming:
+        return tuple(
+            dict.fromkeys(_bundled_scoring_job_key_for_member(member) for member in members)
+        )
+    return tuple(f"logit_prediction:{member}" for member in members)
 
 
 def _seed_member_name(name: str, seed_index: int) -> str:
@@ -916,6 +1145,37 @@ def _variant_dependencies(name: str) -> tuple[str, ...]:
     if bool(resolve_variant_config(name)["data"].get("requires_teacher_logits")):
         dependencies = tuple(dict.fromkeys((*dependencies, "teacher_logits:A4_offline_part_ceiling")))
     return dependencies
+
+
+def _streaming_variant_dependencies(
+    name: str, *, reused_models: bool = False
+) -> tuple[str, ...]:
+    base = (
+        _reused_model_dependencies(name)
+        if reused_models
+        else _variant_dependencies(name)
+    )
+    dependencies = [value for value in base if not value.startswith("prediction:")]
+    tier = variant_spec(name).tier
+    if tier in {"E", "F"} or variant_spec(name).run_id in {"G0", "G1"}:
+        run_id = variant_spec(name).run_id
+        grouping = str(
+            resolve_variant_config(name)["model"]["hierarchy"].get(
+                "grouping", "exclusive_kt"
+            )
+        )
+        source_models = (
+            ("D1_kt32_mh4_particles", "D2_ca32_mh4_particles")
+            if bool(resolve_variant_config(name)["model"]["fusion"].get("dual_hierarchy"))
+            or run_id == "E11"
+            else (
+                ("D2_ca32_mh4_particles",)
+                if grouping == "cambridge_aachen"
+                else ("D1_kt32_mh4_particles",)
+            )
+        )
+        dependencies.extend(_variant_job_key(value) for value in source_models)
+    return tuple(dict.fromkeys(dependencies))
 
 
 def _topological_validate(jobs: Sequence[SlurmJobSpec]) -> None:
@@ -956,6 +1216,9 @@ def _build_reused_model_graph(
     common_env: Mapping[str, str],
     reconstructor_env: Mapping[str, str],
     topology: Mapping[str, Any],
+    tagger_env: Mapping[str, str],
+    tagger_topology: Mapping[str, Any],
+    streaming: bool,
 ) -> list[SlurmJobSpec]:
     """Rebuild B-through-report while treating validated preparation as immutable."""
 
@@ -964,13 +1227,6 @@ def _build_reused_model_graph(
         *ABPH_RECONSTRUCTOR_VARIANTS,
         *ABPH_RENDERER_VARIANTS,
     )
-    jobs.extend(
-        _runtime_batch_contract_jobs(
-            names=reconstructor_names,
-            dependencies=(),
-            common_env=common_env,
-        )
-    )
     for name in reconstructor_names:
         jobs.append(
             SlurmJobSpec(
@@ -978,10 +1234,7 @@ def _build_reused_model_graph(
                 "renderer" if variant_spec(name).tier == "D" else "reconstructor",
                 "run_adaptive_binary_variant.sh",
                 (name,),
-                (
-                    _runtime_batch_contract_job_key(name),
-                    *_reused_model_dependencies(name),
-                ),
+                _reused_model_dependencies(name),
                 gpu=True,
                 environment=reconstructor_env,
                 nodes=int(topology["nodes"]),
@@ -992,35 +1245,36 @@ def _build_reused_model_graph(
                 launcher=str(topology["launcher"]),
             )
         )
-    for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
+    if not streaming:
+        for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
+            jobs.append(
+                SlurmJobSpec(
+                    f"prediction:{name}",
+                    "pseudo_prediction",
+                    "run_adaptive_binary_prediction.sh",
+                    (name, "model_train", "model_val", "stack_train", "stack_val"),
+                    (_variant_job_key(name),),
+                    gpu=True,
+                    environment=common_env,
+                )
+            )
         jobs.append(
             SlurmJobSpec(
-                f"prediction:{name}",
+                "prediction:E7_shared_root_dual",
                 "pseudo_prediction",
                 "run_adaptive_binary_prediction.sh",
-                (name, "model_train", "model_val", "stack_train", "stack_val"),
-                (_variant_job_key(name),),
+                (
+                    "E7_shared_root_dual",
+                    "model_train",
+                    "model_val",
+                    "stack_train",
+                    "stack_val",
+                ),
+                tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
                 gpu=True,
                 environment=common_env,
             )
         )
-    jobs.append(
-        SlurmJobSpec(
-            "prediction:E7_shared_root_dual",
-            "pseudo_prediction",
-            "run_adaptive_binary_prediction.sh",
-            (
-                "E7_shared_root_dual",
-                "model_train",
-                "model_val",
-                "stack_train",
-                "stack_val",
-            ),
-            tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-            gpu=True,
-            environment=common_env,
-        )
-    )
     for name in ABPH_NEURAL_TAGGER_VARIANTS:
         jobs.append(
             SlurmJobSpec(
@@ -1028,9 +1282,19 @@ def _build_reused_model_graph(
                 "tagger",
                 "run_adaptive_binary_variant.sh",
                 (name,),
-                _reused_model_dependencies(name),
+                (
+                    _streaming_variant_dependencies(name, reused_models=True)
+                    if streaming
+                    else _reused_model_dependencies(name)
+                ),
                 gpu=True,
-                environment=common_env,
+                environment=tagger_env,
+                nodes=int(tagger_topology["nodes"]),
+                ntasks=int(tagger_topology["ntasks"]),
+                ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
+                gpus_per_node=int(tagger_topology["gpus_per_node"]),
+                distributed_world_size=int(tagger_topology["distributed_world_size"]),
+                launcher=str(tagger_topology["launcher"]),
             )
         )
     primary_seed = "F0_ce_reco_primary"
@@ -1041,28 +1305,30 @@ def _build_reused_model_graph(
                 "tagger_seed",
                 "run_adaptive_binary_variant.sh",
                 (primary_seed, str(seed_index)),
-                _reused_model_dependencies(primary_seed),
+                (
+                    _streaming_variant_dependencies(
+                        primary_seed, reused_models=True
+                    )
+                    if streaming
+                    else _reused_model_dependencies(primary_seed)
+                ),
                 gpu=True,
-                environment=common_env,
+                environment=tagger_env,
+                nodes=int(tagger_topology["nodes"]),
+                ntasks=int(tagger_topology["ntasks"]),
+                ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
+                gpus_per_node=int(tagger_topology["gpus_per_node"]),
+                distributed_world_size=int(tagger_topology["distributed_world_size"]),
+                launcher=str(tagger_topology["launcher"]),
             )
         )
-    for member in ABPH_LOGIT_PREDICTION_MEMBERS:
-        model_key = (
-            f"variant:{member}"
-            if "__seed" in member
-            else _dependency_job_key(member)
+    jobs.extend(
+        _logit_scoring_jobs(
+            common_env=common_env,
+            streaming=streaming,
+            reused_preparation=True,
         )
-        jobs.append(
-            SlurmJobSpec(
-                f"logit_prediction:{member}",
-                "logit_prediction",
-                "run_adaptive_binary_prediction.sh",
-                (member, "model_val", "stack_train", "stack_val"),
-                () if model_key.startswith("baseline:") else (model_key,),
-                gpu=True,
-                environment=common_env,
-            )
-        )
+    )
     for name in ABPH_POSTHOC_VARIANTS:
         member_names = _fusion_member_names(name)
         jobs.append(
@@ -1071,7 +1337,7 @@ def _build_reused_model_graph(
                 "fusion",
                 "run_adaptive_binary_fusion.sh",
                 (name, *member_names),
-                tuple(f"logit_prediction:{member}" for member in member_names),
+                _fusion_scoring_dependencies(member_names, streaming=streaming),
                 environment=common_env,
             )
         )
@@ -1091,12 +1357,25 @@ def _build_reused_model_graph(
             (
                 *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
                 *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
-                *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-                "prediction:E7_shared_root_dual",
+                *(
+                    ()
+                    if streaming
+                    else (
+                        *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                        "prediction:E7_shared_root_dual",
+                    )
+                ),
                 *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
                 f"variant:{_seed_member_name(primary_seed, 2)}",
                 f"variant:{_seed_member_name(primary_seed, 3)}",
-                *(f"logit_prediction:{member}" for member in ABPH_LOGIT_PREDICTION_MEMBERS),
+                *(
+                    tuple(f"logit_bundle:{name}" for name in ABPH_BUNDLED_SCORING_FAMILIES)
+                    if streaming
+                    else tuple(
+                        f"logit_prediction:{member}"
+                        for member in ABPH_LOGIT_PREDICTION_MEMBERS
+                    )
+                ),
                 *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
                 "diagnostic:tagger_use",
             )
@@ -1126,10 +1405,19 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY": "accelerated_screening_v1",
         "ABPH_DATA_DIR": str(config.data_dir),
         "ABPH_CONFIRM_FINAL_TEST": "1" if config.confirm_final_test else "0",
+        "ABPH_STORAGE_PROFILE": config.storage_profile,
+        "ABPH_STORAGE_CONTRACT_PATH": str(paths.storage / "storage_contract.json"),
+        "ABPH_STORAGE_LEDGER_PATH": str(paths.storage / "quota_ledger.json"),
+        "ABPH_TARGET_MODE_REPORT": str(paths.target_mode_report),
     }
+    if config.storage_projection_path is not None:
+        common_env["ABPH_STORAGE_PROJECTION_PATH"] = str(
+            Path(config.storage_projection_path).resolve()
+        )
     if config.selection_report_path is not None:
         common_env["ABPH_SELECTION_REPORT_PATH"] = str(config.selection_report_path)
     topology = dict(config.reconstructor_topology)
+    tagger_topology = dict(config.tagger_topology)
     reconstructor_env = {
         **common_env,
         "ABPH_RECONSTRUCTOR_PARALLELISM": str(topology["mode"]),
@@ -1141,7 +1429,16 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         "ABPH_DISTRIBUTED_WORLD_SIZE": str(topology["distributed_world_size"]),
         "ABPH_DDP_TIMEOUT_SECONDS": "300",
     }
+    tagger_env = {
+        **common_env,
+        "ABPH_TAGGER_PARALLELISM": str(tagger_topology["mode"]),
+        "ABPH_TAGGER_DISTRIBUTED_WORLD_SIZE": str(
+            tagger_topology["distributed_world_size"]
+        ),
+        "ABPH_DDP_TIMEOUT_SECONDS": "300",
+    }
     jobs: list[SlurmJobSpec] = []
+    streaming = config.storage_profile == "streaming_30gb_v1"
 
     if config.stage_mode == "full":
         jobs.append(SlurmJobSpec("input:splits", "splits", "run_adaptive_binary_inputs.sh", ("splits",), environment=common_env))
@@ -1174,7 +1471,20 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 environment=common_env,
             )
         )
-        jobs.append(SlurmJobSpec("target:cache", "targets", "run_adaptive_binary_targets.sh", ("cache",), ("input:audit",), environment=common_env))
+        target_dependencies: tuple[str, ...] = ("input:audit",)
+        if config.storage_profile == "streaming_30gb_v1":
+            jobs.append(
+                SlurmJobSpec(
+                    "target:mode_preflight",
+                    "preflight",
+                    "run_adaptive_binary_targets.sh",
+                    ("mode_preflight",),
+                    ("input:audit",),
+                    environment=common_env,
+                )
+            )
+            target_dependencies = ("target:mode_preflight",)
+        jobs.append(SlurmJobSpec("target:cache", "targets", "run_adaptive_binary_targets.sh", ("cache",), target_dependencies, environment=common_env))
         jobs.append(SlurmJobSpec("preflight:actual_targets", "preflight", "run_adaptive_binary_targets.sh", ("preflight",), ("target:cache",), environment=common_env))
         reconstructor_names = (
             *ABPH_RECONSTRUCTOR_VARIANTS,
@@ -1185,6 +1495,7 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 names=reconstructor_names,
                 dependencies=("preflight:actual_targets",),
                 common_env=common_env,
+                topology=topology,
             )
         )
         for name in reconstructor_names:
@@ -1208,35 +1519,36 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     launcher=str(topology["launcher"]),
                 )
             )
-        for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
+        if not streaming:
+            for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
+                jobs.append(
+                    SlurmJobSpec(
+                        f"prediction:{name}",
+                        "pseudo_prediction",
+                        "run_adaptive_binary_prediction.sh",
+                        (name, "model_train", "model_val", "stack_train", "stack_val"),
+                        (_variant_job_key(name), "input:hlt_cache"),
+                        gpu=True,
+                        environment=common_env,
+                    )
+                )
             jobs.append(
                 SlurmJobSpec(
-                    f"prediction:{name}",
+                    "prediction:E7_shared_root_dual",
                     "pseudo_prediction",
                     "run_adaptive_binary_prediction.sh",
-                    (name, "model_train", "model_val", "stack_train", "stack_val"),
-                    (_variant_job_key(name), "input:hlt_cache"),
+                    (
+                        "E7_shared_root_dual",
+                        "model_train",
+                        "model_val",
+                        "stack_train",
+                        "stack_val",
+                    ),
+                    tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
                     gpu=True,
                     environment=common_env,
                 )
             )
-        jobs.append(
-            SlurmJobSpec(
-                "prediction:E7_shared_root_dual",
-                "pseudo_prediction",
-                "run_adaptive_binary_prediction.sh",
-                (
-                    "E7_shared_root_dual",
-                    "model_train",
-                    "model_val",
-                    "stack_train",
-                    "stack_val",
-                ),
-                tuple(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-                gpu=True,
-                environment=common_env,
-            )
-        )
         for name in ABPH_NEURAL_TAGGER_VARIANTS:
             jobs.append(
                 SlurmJobSpec(
@@ -1244,9 +1556,19 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     "tagger",
                     "run_adaptive_binary_variant.sh",
                     (name,),
-                    _variant_dependencies(name),
+                    (
+                        _streaming_variant_dependencies(name)
+                        if streaming
+                        else _variant_dependencies(name)
+                    ),
                     gpu=True,
-                    environment=common_env,
+                    environment=tagger_env,
+                    nodes=int(tagger_topology["nodes"]),
+                    ntasks=int(tagger_topology["ntasks"]),
+                    ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
+                    gpus_per_node=int(tagger_topology["gpus_per_node"]),
+                    distributed_world_size=int(tagger_topology["distributed_world_size"]),
+                    launcher=str(tagger_topology["launcher"]),
                 )
             )
         primary_seed = "F0_ce_reco_primary"
@@ -1257,31 +1579,33 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     "tagger_seed",
                     "run_adaptive_binary_variant.sh",
                     (primary_seed, str(seed_index)),
-                    _variant_dependencies(primary_seed),
+                    (
+                        _streaming_variant_dependencies(primary_seed)
+                        if streaming
+                        else _variant_dependencies(primary_seed)
+                    ),
                     gpu=True,
-                    environment=common_env,
+                    environment=tagger_env,
+                    nodes=int(tagger_topology["nodes"]),
+                    ntasks=int(tagger_topology["ntasks"]),
+                    ntasks_per_node=int(tagger_topology["ntasks_per_node"]),
+                    gpus_per_node=int(tagger_topology["gpus_per_node"]),
+                    distributed_world_size=int(tagger_topology["distributed_world_size"]),
+                    launcher=str(tagger_topology["launcher"]),
                 )
             )
-        for member in ABPH_LOGIT_PREDICTION_MEMBERS:
-            model_key = (
-                f"variant:{member}"
-                if "__seed" in member
-                else _dependency_job_key(member)
+        jobs.extend(
+            _logit_scoring_jobs(
+                common_env=common_env,
+                streaming=streaming,
+                reused_preparation=False,
             )
-            jobs.append(
-                SlurmJobSpec(
-                    f"logit_prediction:{member}",
-                    "logit_prediction",
-                    "run_adaptive_binary_prediction.sh",
-                    (member, "model_val", "stack_train", "stack_val"),
-                    (model_key, "input:hlt_cache"),
-                    gpu=True,
-                    environment=common_env,
-                )
-            )
+        )
         for name in ABPH_POSTHOC_VARIANTS:
             member_names = _fusion_member_names(name)
-            members = tuple(f"logit_prediction:{member}" for member in member_names)
+            members = _fusion_scoring_dependencies(
+                member_names, streaming=streaming
+            )
             jobs.append(
                 SlurmJobSpec(
                     _variant_job_key(name),
@@ -1309,12 +1633,28 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     *(f"baseline:{name}" for name in ABPH_BASELINE_VARIANTS),
                     *(_variant_job_key(name) for name in ABPH_RECONSTRUCTOR_VARIANTS),
                     *(_variant_job_key(name) for name in ABPH_RENDERER_VARIANTS),
-                    *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
-                    "prediction:E7_shared_root_dual",
+                    *(
+                        ()
+                        if streaming
+                        else (
+                            *(f"prediction:{name}" for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES),
+                            "prediction:E7_shared_root_dual",
+                        )
+                    ),
                     *(_variant_job_key(name) for name in ABPH_NEURAL_TAGGER_VARIANTS),
                     f"variant:{_seed_member_name(primary_seed, 2)}",
                     f"variant:{_seed_member_name(primary_seed, 3)}",
-                    *(f"logit_prediction:{member}" for member in ABPH_LOGIT_PREDICTION_MEMBERS),
+                    *(
+                        tuple(
+                            f"logit_bundle:{name}"
+                            for name in ABPH_BUNDLED_SCORING_FAMILIES
+                        )
+                        if streaming
+                        else tuple(
+                            f"logit_prediction:{member}"
+                            for member in ABPH_LOGIT_PREDICTION_MEMBERS
+                        )
+                    ),
                     *(_variant_job_key(name) for name in ABPH_POSTHOC_VARIANTS),
                     "diagnostic:tagger_use",
                 )
@@ -1327,9 +1667,17 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                 common_env=common_env,
                 reconstructor_env=reconstructor_env,
                 topology=topology,
+                tagger_env=tagger_env,
+                tagger_topology=tagger_topology,
+                streaming=streaming,
             )
         )
     elif config.stage_mode == "predictions":
+        if streaming:
+            raise ValueError(
+                "the streaming_30gb_v1 profile forbids persistent pseudo-prediction "
+                "stages; score taggers through RAM-backed logit prediction jobs"
+            )
         for name in ABPH_DEPLOYABLE_PSEUDO_SOURCES:
             jobs.append(SlurmJobSpec(f"prediction:{name}", "pseudo_prediction", "run_adaptive_binary_prediction.sh", (name, "model_train", "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
         jobs.append(SlurmJobSpec("prediction:E7_shared_root_dual", "pseudo_prediction", "run_adaptive_binary_prediction.sh", ("E7_shared_root_dual", "model_train", "model_val", "stack_train", "stack_val"), gpu=True, environment=common_env))
@@ -1417,6 +1765,11 @@ def submission_manifest(
         job.key for job in jobs if job.stage in {"reconstructor", "renderer"}
     ]
     topology["parallelism_hash"] = canonical_hash(topology)
+    tagger_topology = dict(config.tagger_topology)
+    tagger_topology["tagger_job_keys"] = [
+        job.key for job in jobs if job.stage in {"tagger", "tagger_seed"}
+    ]
+    tagger_topology["parallelism_hash"] = canonical_hash(tagger_topology)
     runtime_acceptance = None
     if config.runtime_acceptance_path is not None:
         acceptance_path = Path(config.runtime_acceptance_path).resolve()
@@ -1437,6 +1790,39 @@ def submission_manifest(
             "sha256": _sha256_file(acceptance_path),
             "acceptance_content_hash": acceptance["acceptance_content_hash"],
         }
+    tagger_ddp_acceptance = None
+    if config.tagger_ddp_acceptance_path is not None:
+        tagger_acceptance_path = Path(
+            config.tagger_ddp_acceptance_path
+        ).resolve()
+        tagger_acceptance = require_tagger_ddp_acceptance(
+            tagger_acceptance_path
+        )
+        tagger_ddp_acceptance = {
+            "path": str(tagger_acceptance_path),
+            "sha256": _sha256_file(tagger_acceptance_path),
+            "content_hash": tagger_acceptance["content_hash"],
+        }
+    storage_projection = None
+    if config.storage_projection_path is not None:
+        projection_path = Path(config.storage_projection_path).resolve()
+        projection = require_storage_projection(
+            projection_path,
+            campaign_root=config.campaign_root,
+            campaign_mode=config.campaign_mode,
+            profile=config.storage_profile,
+        )
+        storage_projection = {
+            "path": str(projection_path),
+            "sha256": _sha256_file(projection_path),
+            "content_hash": projection["content_hash"],
+            "projected_peak_persistent_bytes": projection[
+                "projected_peak_persistent_bytes"
+            ],
+            "projected_final_retained_bytes": projection[
+                "projected_final_retained_bytes"
+            ],
+        }
     payload = {
         "contract": ABPH_SLURM_ORCHESTRATION_CONTRACT,
         "campaign_root": str(config.paths.root),
@@ -1452,6 +1838,10 @@ def submission_manifest(
         },
         "reconstructor_parallelism": topology,
         "runtime_acceptance": runtime_acceptance,
+        "tagger_parallelism": tagger_topology,
+        "tagger_ddp_acceptance": tagger_ddp_acceptance,
+        "storage_profile": config.storage_profile,
+        "storage_projection": storage_projection,
         "confirm_final_test": config.confirm_final_test,
         "jobs": [job.to_dict() for job in jobs],
     }
@@ -1461,6 +1851,7 @@ def submission_manifest(
 
 __all__ = [
     "ABPH_BASELINE_VARIANTS",
+    "ABPH_BUNDLED_SCORING_FAMILIES",
     "ABPH_CLUSTER_PROFILES",
     "ABPH_DEPLOYABLE_PSEUDO_SOURCES",
     "ABPH_DIAGNOSTIC_VARIANTS",

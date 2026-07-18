@@ -30,4 +30,7 @@ if [[ " $* " == *" final_test "* ]]; then
     --member "${VARIANT}"
 fi
 cmd=("${PYTHON_BIN}" -u "${ABPH_PREDICTION_EXECUTOR}" --variant "${VARIANT}" --campaign-root "${ABPH_ROOT}" --splits "$@" --device "${DEVICE}")
+if [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]]; then
+  cmd=(bash "${PROJECT_DIR}/sbatch/run_with_adaptive_binary_ram_workspace.sh" "${cmd[@]}")
+fi
 fresh_run "${cmd[@]}"

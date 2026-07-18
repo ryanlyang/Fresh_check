@@ -28,7 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--stage-a-batch-size", type=int, default=None)
+    parser.add_argument("--stage2-batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--stage-a-epochs", type=int, default=None)
+    parser.add_argument("--stage2-epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--stage-a-lr", type=float, default=3.0e-4)
     parser.add_argument("--stage2-lr", type=float, default=None)
@@ -94,6 +98,12 @@ def stage_a_command(args: argparse.Namespace, variant: str) -> list[str]:
     if args.data_dir:
         cmd.extend(["--data-dir", args.data_dir])
     cmd = append_common_training_args(cmd, args)
+    if args.stage_a_batch_size is not None:
+        batch_index = cmd.index("--batch-size") + 1
+        cmd[batch_index] = str(args.stage_a_batch_size)
+    if args.stage_a_epochs is not None:
+        epoch_index = cmd.index("--epochs") + 1
+        cmd[epoch_index] = str(args.stage_a_epochs)
     lr_index = cmd.index("--lr") + 1
     cmd[lr_index] = str(args.stage_a_lr)
     return cmd
@@ -118,7 +128,14 @@ def stage2_command(args: argparse.Namespace, variant: str) -> list[str]:
     ]
     if args.hlt_baseline_report:
         cmd.extend(["--hlt-baseline-report", args.hlt_baseline_report])
-    return append_common_training_args(cmd, args)
+    cmd = append_common_training_args(cmd, args)
+    if args.stage2_batch_size is not None:
+        batch_index = cmd.index("--batch-size") + 1
+        cmd[batch_index] = str(args.stage2_batch_size)
+    if args.stage2_epochs is not None:
+        epoch_index = cmd.index("--epochs") + 1
+        cmd[epoch_index] = str(args.stage2_epochs)
+    return cmd
 
 
 def main() -> int:

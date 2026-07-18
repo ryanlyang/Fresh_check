@@ -28,6 +28,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
     require_partial_stage_inputs,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline import orchestration as orchestration_module
+from teacher_logit_reco.adaptive_binary_pseudooffline import runtime_batch as runtime_batch_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -131,7 +132,14 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     )
     graph = build_submission_graph(config)
     keys = [job.key for job in graph]
-    assert len(graph) == 81
+    reconstructor_names = (
+        *orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS,
+        *orchestration_module.ABPH_RENDERER_VARIANTS,
+    )
+    contract_job_count = len(reconstructor_names) * (
+        len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1
+    )
+    assert len(graph) == 81 + contract_job_count
     assert keys[:4] == ["input:splits", "input:hlt_cache", "input:offline_cache", "input:audit"]
     preflight_index = keys.index("preflight:actual_targets")
     for index, job in enumerate(graph):
@@ -159,6 +167,21 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     assert all(job.launcher == "srun" for job in reconstructor_jobs)
     assert all(job.distributed_world_size == 4 for job in reconstructor_jobs)
     assert all(job.nodes == 4 for job in reconstructor_jobs)
+    for name in reconstructor_names:
+        contract_key = f"runtime_batch_contract:{name}"
+        assert contract_key in keys
+        model_job = next(job for job in graph if job.key == f"variant:{name}")
+        assert contract_key in model_job.dependencies
+        probes = [
+            job
+            for job in graph
+            if job.key.startswith(f"runtime_batch_probe:{name}:")
+        ]
+        assert len(probes) == len(
+            orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS
+        )
+        compiler = next(job for job in graph if job.key == contract_key)
+        assert set(compiler.dependencies) == {job.key for job in probes}
 
 
 def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
@@ -260,6 +283,12 @@ def test_models_reuse_is_bound_to_current_cache_and_teacher_artifacts(
             "jet_identity_hash": rows[split]["jet_identity_hash"],
         },
     )
+    loaded_contracts = []
+    monkeypatch.setattr(
+        runtime_batch_module,
+        "load_runtime_batch_contract",
+        lambda path, **kwargs: loaded_contracts.append((Path(path), kwargs)),
+    )
 
     for member, source in (
         ("A0_hlt_part", "hlt"),
@@ -320,6 +349,9 @@ def test_models_reuse_is_bound_to_current_cache_and_teacher_artifacts(
         allow_debug_single_reconstructor=True,
     )
     assert require_partial_stage_inputs(config)["checked"]
+    assert len(loaded_contracts) == len(
+        orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS
+    ) + len(orchestration_module.ABPH_RENDERER_VARIANTS)
 
     hlt_metadata = root / "inputs" / "hlt_cache" / "model_val_fixed_hlt_metadata.json"
     stale = json.loads(hlt_metadata.read_text(encoding="utf-8"))
@@ -371,13 +403,14 @@ def test_ddp4_topology_is_scoped_to_reconstructors(tmp_path: Path) -> None:
     )
     graph = build_submission_graph(config)
     for job in graph:
-        if job.stage in {"reconstructor", "renderer"}:
+        if job.stage in {"reconstructor", "renderer", "runtime_batch_probe"}:
             assert (job.nodes, job.ntasks, job.ntasks_per_node) == (4, 4, 1)
             assert job.resolved_gpus_per_node == 1
             assert job.distributed_world_size == 4
             assert job.launcher == "srun"
-            assert job.environment["ABPH_RECONSTRUCTOR_PARALLELISM"] == "ddp4"
-            assert job.environment["ABPH_DISTRIBUTED_WORLD_SIZE"] == "4"
+            if job.stage in {"reconstructor", "renderer"}:
+                assert job.environment["ABPH_RECONSTRUCTOR_PARALLELISM"] == "ddp4"
+                assert job.environment["ABPH_DISTRIBUTED_WORLD_SIZE"] == "4"
         else:
             assert (job.nodes, job.ntasks, job.ntasks_per_node) == (1, 1, 1)
             assert job.distributed_world_size == 1
@@ -516,7 +549,11 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
     assert result.returncode == 0
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["contract"] == ABPH_SLURM_ORCHESTRATION_CONTRACT
-    assert len(payload["jobs"]) == 81
+    contract_job_count = (
+        len(orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS)
+        + len(orchestration_module.ABPH_RENDERER_VARIANTS)
+    ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
+    assert len(payload["jobs"]) == 81 + contract_job_count
     assert payload["resource_profile"]["account"] == "reu-aisocial"
     assert all("--account=reu-aisocial" in row["command"] for row in payload["submission_commands"])
     assert all(row["environment"].get("ABPH_CONFIRM_FINAL_TEST") == "0" for row in payload["jobs"])
@@ -577,10 +614,13 @@ def test_canonical_submitter_emits_four_node_reconstructor_commands(tmp_path: Pa
     jobs_by_key = {row["key"]: row for row in payload["jobs"]}
     commands_by_key = {row["key"]: row for row in payload["submission_commands"]}
     reconstructor_keys = set(payload["reconstructor_parallelism"]["reconstructor_job_keys"])
+    probe_keys = {
+        key for key, row in jobs_by_key.items() if row["stage"] == "runtime_batch_probe"
+    }
     assert reconstructor_keys
     for key, job in jobs_by_key.items():
         command = commands_by_key[key]["command"]
-        if key in reconstructor_keys:
+        if key in reconstructor_keys or key in probe_keys:
             assert "--nodes=4" in command
             assert "--ntasks=4" in command
             assert "--ntasks-per-node=1" in command
@@ -648,7 +688,11 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
     assert payload["campaign_mode"] == "highdata"
     assert payload["split_sizes"]["model_train"] == 5_000_000
     assert payload["resource_profile"]["partition"] == "tigris"
-    assert len(payload["jobs"]) == 81
+    contract_job_count = (
+        len(orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS)
+        + len(orchestration_module.ABPH_RENDERER_VARIANTS)
+    ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
+    assert len(payload["jobs"]) == 81 + contract_job_count
 
 
 def test_selection_report_hash_is_recomputed(tmp_path: Path) -> None:
@@ -846,6 +890,10 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
     assert "probe_adaptive_binary_runtime_batch.py" in worker
     assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker
     assert "compile_adaptive_binary_runtime_batch_contract.py" in compiler
+    assert "if fresh_is_dry_run" in submitter
+    assert submitter.index("if fresh_is_dry_run") < submitter.index(
+        "submitted=\"$(sbatch"
+    )
     for required in (
         "SLURM_JOB_ID",
         "SLURM_JOB_ACCOUNT",

@@ -20,13 +20,18 @@ if str(REPO_ROOT) not in sys.path:
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device  # noqa: E402
 from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     ABPH_PSEUDO_INPUT_ABLATIONS,
+    ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT,
     ABPH_TAGGER_DIAGNOSTIC_CONTRACT,
     FrozenPseudoBatchSource,
     PseudoViewInputs,
     TaggerDiagnosticOverride,
     ablate_pseudo_inputs,
     build_variant_hierarchy_aware_tagger,
+    build_frozen_reconstructor_ram_source,
     resolve_variant_config,
+    load_torch_checkpoint,
+    selected_model_state,
+    streaming_storage_enabled,
 )
 
 
@@ -53,17 +58,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _torch_load(path: Path, device: Any) -> dict[str, Any]:
-    torch = require_torch()
-    try:
-        payload = torch.load(path, map_location=device, weights_only=False)
-    except TypeError:  # pragma: no cover - old research PyTorch
-        payload = torch.load(path, map_location=device)
+    payload = load_torch_checkpoint(path, device=device)
     if not isinstance(payload, dict):
         raise TypeError(f"checkpoint {path} is not a mapping")
     return payload
 
 
 def _model_state(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("checkpoint_contract") == ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT:
+        return dict(selected_model_state(payload))
     for key in ("model_state_dict", "model_state", "state_dict", "model"):
         value = payload.get(key)
         if isinstance(value, dict):
@@ -85,25 +88,36 @@ def _source_for_variant(
     split: str,
     batch_size: int,
     maximum_batches: int | None,
-) -> FrozenPseudoBatchSource:
+    device: Any,
+    smoke: bool,
+) -> Any:
     resolved = resolve_variant_config(variant)
     run_id = str(resolved["variant"]["run_id"])
     dual = bool(resolved["model"]["fusion"].get("dual_hierarchy"))
     if dual and run_id != "E11":
-        cache_dirs = (root / "pseudo_predictions" / "E7_shared_root_dual" / split,)
+        source_names = ("E7_shared_root_dual",)
         independent = False
     elif run_id == "E11":
-        cache_dirs = (
-            root / "pseudo_predictions" / "D1_kt32_mh4_particles" / split,
-            root / "pseudo_predictions" / "D2_ca32_mh4_particles" / split,
-        )
+        source_names = ("D1_kt32_mh4_particles", "D2_ca32_mh4_particles")
         independent = True
     elif resolved["model"]["hierarchy"].get("grouping") == "cambridge_aachen":
-        cache_dirs = (root / "pseudo_predictions" / "D2_ca32_mh4_particles" / split,)
+        source_names = ("D2_ca32_mh4_particles",)
         independent = False
     else:
-        cache_dirs = (root / "pseudo_predictions" / "D1_kt32_mh4_particles" / split,)
+        source_names = ("D1_kt32_mh4_particles",)
         independent = False
+    if streaming_storage_enabled():
+        return build_frozen_reconstructor_ram_source(
+            root,
+            source_names,
+            split=split,
+            batch_size=max(2, int(batch_size)),
+            device=device,
+            smoke=smoke,
+            independent_roots=independent,
+            maximum_batches=maximum_batches,
+        )
+    cache_dirs = tuple(root / "pseudo_predictions" / name / split for name in source_names)
     for cache_dir in cache_dirs:
         if not cache_dir.is_dir():
             raise FileNotFoundError(f"diagnostic pseudo cache is missing: {cache_dir}")
@@ -119,7 +133,7 @@ def _source_for_variant(
 
 def _evaluate(
     model: Any,
-    source: FrozenPseudoBatchSource,
+    source: Any,
     *,
     device: Any,
     pseudo_transform: Callable[[PseudoViewInputs], PseudoViewInputs] | None = None,
@@ -175,7 +189,9 @@ def _evaluate(
     }
 
 
-def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> list[dict[str, Any]]:
+def _diagnose_variant(
+    args: argparse.Namespace, variant: str, device: Any
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     root = Path(args.campaign_root)
     checkpoint = root / "runs" / variant / "best_model_val.pt"
     if not checkpoint.is_file():
@@ -185,16 +201,17 @@ def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> li
     model.eval()
     maximum_batches = 1 if args.smoke else (int(args.maximum_batches) or None)
 
-    def source() -> FrozenPseudoBatchSource:
-        return _source_for_variant(
-            root,
-            variant,
-            split=args.split,
-            batch_size=args.batch_size,
-            maximum_batches=maximum_batches,
-        )
+    source = _source_for_variant(
+        root,
+        variant,
+        split=args.split,
+        batch_size=args.batch_size,
+        maximum_batches=maximum_batches,
+        device=device,
+        smoke=bool(args.smoke),
+    )
 
-    baseline = _evaluate(model, source(), device=device)
+    baseline = _evaluate(model, source, device=device)
     rows = [{"variant": variant, "diagnostic": "unaltered", **baseline}]
     for ablation in ABPH_PSEUDO_INPUT_ABLATIONS:
         if ablation == "remove_hierarchy_depth":
@@ -210,7 +227,7 @@ def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> li
         else:
             transforms = ((ablation, lambda pseudo, mode=ablation: ablate_pseudo_inputs(pseudo, mode)),)
         for label, transform in transforms:
-            metrics = _evaluate(model, source(), device=device, pseudo_transform=transform)
+            metrics = _evaluate(model, source, device=device, pseudo_transform=transform)
             rows.append(
                 {
                     "variant": variant,
@@ -223,7 +240,7 @@ def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> li
     for index in range(len(model.fusion_stacks)):
         metrics = _evaluate(
             model,
-            source(),
+            source,
             device=device,
             override=lambda index=index: TaggerDiagnosticOverride(
                 model, fusion_location_index=index
@@ -241,7 +258,7 @@ def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> li
     for trust in (0.0, 1.0):
         metrics = _evaluate(
             model,
-            source(),
+            source,
             device=device,
             override=lambda trust=trust: TaggerDiagnosticOverride(model, forced_trust=trust),
         )
@@ -254,15 +271,28 @@ def _diagnose_variant(args: argparse.Namespace, variant: str, device: Any) -> li
                 "loss_delta_vs_unaltered": metrics["loss"] - baseline["loss"],
             }
         )
-    return rows
+    execution = (
+        source.telemetry()
+        if hasattr(source, "telemetry")
+        else {
+            "execution_mode": "persistent_legacy_cache",
+            "pseudo_representations_written_persistently": True,
+        }
+    )
+    if hasattr(source, "close"):
+        source.close()
+    return rows, execution
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     device = resolve_device(args.device)
     rows: list[dict[str, Any]] = []
+    pseudo_execution: dict[str, Any] = {}
     for variant in args.variants:
-        rows.extend(_diagnose_variant(args, str(variant), device))
+        variant_rows, execution = _diagnose_variant(args, str(variant), device)
+        rows.extend(variant_rows)
+        pseudo_execution[str(variant)] = execution
     output_dir = Path(args.campaign_root) / "diagnostics"
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "tagger_use_metrics.csv"
@@ -282,6 +312,11 @@ def main(argv: list[str] | None = None) -> int:
         "final_test_loaded": False,
         "offline_inputs_loaded": False,
         "teacher_logits_loaded": False,
+        "pseudo_execution": pseudo_execution,
+        "pseudo_representations_written_persistently": any(
+            row.get("pseudo_representations_written_persistently") is not False
+            for row in pseudo_execution.values()
+        ),
     }
     _atomic_json(output_dir / "tagger_use_report.json", report)
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -13,31 +13,84 @@ set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/common.sh"
-ACTION="${1:?Usage: run_adaptive_binary_targets.sh <cache|preflight>}"
+ACTION="${1:?Usage: run_adaptive_binary_targets.sh <mode_preflight|cache|preflight>}"
 : "${ABPH_ROOT:=${OUTPUT_ROOT}/adaptive_binary_pseudooffline}"
 : "${ABPH_MANIFEST_PATH:=${ABPH_ROOT}/inputs/split_manifest/split_manifest.json.gz}"
 : "${ABPH_HLT_CACHE_DIR:=${ABPH_ROOT}/inputs/hlt_cache}"
 : "${ABPH_OFFLINE_CACHE_DIR:=${ABPH_ROOT}/inputs/offline_cache}"
 : "${ABPH_TARGET_CACHE_DIR:=${ABPH_ROOT}/targets}"
+: "${ABPH_TARGET_MODE_REPORT:=${ABPH_ROOT}/audits/target_mode_selection.json}"
 : "${ABPH_TARGET_CHUNK_SIZE:=512}"
+: "${ABPH_FORENSIC_JETS_PER_CLASS:=2}"
+: "${ABPH_STORAGE_PROFILE:=cache_heavy_v1}"
+if [[ -z "${ABPH_TARGET_STORAGE_CODEC:-}" ]]; then
+  if [[ "${ABPH_STORAGE_PROFILE}" == "streaming_30gb_v1" ]]; then
+    ABPH_TARGET_STORAGE_CODEC=compact_lossless_v1
+  else
+    ABPH_TARGET_STORAGE_CODEC=legacy_npz_v1
+  fi
+fi
 : "${ABPH_PREFLIGHT_JETS_PER_CLASS:=64}"
 export PYTHONNOUSERSITE=1
 fresh_setup
 case "${ACTION}" in
+  mode_preflight)
+    [[ "${ABPH_STORAGE_PROFILE}" == "streaming_30gb_v1" ]] || {
+      echo "mode_preflight is reserved for streaming_30gb_v1" >&2
+      exit 2
+    }
+    : "${ABPH_STORAGE_PROJECTION_PATH:?Streaming target-mode preflight requires ABPH_STORAGE_PROJECTION_PATH}"
+    source "${PROJECT_DIR}/sbatch/adaptive_binary_ram_workspace.sh"
+    abph_setup_ram_workspace
+    mkdir -p "${ABPH_ROOT}/audits"
+    cmd=("${PYTHON_BIN}" -u scripts/select_adaptive_binary_target_mode.py
+      --campaign-root "${ABPH_ROOT}" --campaign-mode "${ABPH_CAMPAIGN_MODE:-pilot}"
+      --storage-profile "${ABPH_STORAGE_PROFILE}"
+      --storage-projection "${ABPH_STORAGE_PROJECTION_PATH}"
+      --manifest "${ABPH_MANIFEST_PATH}" --hlt-cache-dir "${ABPH_HLT_CACHE_DIR}"
+      --offline-cache-dir "${ABPH_OFFLINE_CACHE_DIR}" --data-dir "${ABPH_DATA_DIR:-${DATA_DIR}}"
+      --jets-per-class "${ABPH_PREFLIGHT_JETS_PER_CLASS}"
+      --target-chunk-size "${ABPH_TARGET_CHUNK_SIZE}"
+      --output "${ABPH_TARGET_MODE_REPORT}"
+      --measurement-output "${ABPH_ROOT}/audits/target_sample_measurement.json")
+    ;;
   cache)
+    if [[ -f "${ABPH_TARGET_MODE_REPORT}" ]]; then
+      selected_mode="$("${PYTHON_BIN}" scripts/validate_adaptive_binary_target_mode.py \
+        --selection "${ABPH_TARGET_MODE_REPORT}" --campaign-root "${ABPH_ROOT}" --print-mode)"
+      if [[ "${selected_mode}" == "rank_local_build" ]]; then
+        echo "Rank-local target mode selected; no persistent target arrays will be built."
+        exit 0
+      fi
+    fi
     cmd=("${PYTHON_BIN}" -u scripts/cache_adaptive_binary_hierarchy_targets.py
       --manifest "${ABPH_MANIFEST_PATH}" --hlt-cache-dir "${ABPH_HLT_CACHE_DIR}"
       --offline-cache-dir "${ABPH_OFFLINE_CACHE_DIR}" --output-cache-dir "${ABPH_TARGET_CACHE_DIR}"
       --splits model_train model_val --groupings exclusive_kt cambridge_aachen
-      --chunk-size "${ABPH_TARGET_CHUNK_SIZE}" --report "${ABPH_TARGET_CACHE_DIR}/step2_target_cache_report.json")
+      --chunk-size "${ABPH_TARGET_CHUNK_SIZE}"
+      --storage-codec "${ABPH_TARGET_STORAGE_CODEC}"
+      --forensic-jets-per-class "${ABPH_FORENSIC_JETS_PER_CLASS}"
+      --report "${ABPH_TARGET_CACHE_DIR}/step2_target_cache_report.json")
     fresh_append_flag_if_enabled cmd --overwrite "${OVERWRITE:-0}"
     ;;
   preflight)
     mkdir -p "${ABPH_ROOT}/audits"
-    cmd=("${PYTHON_BIN}" -u scripts/audit_adaptive_binary_step4_accounting.py
-      --target-cache-dir "${ABPH_TARGET_CACHE_DIR}" --splits model_train model_val
-      --groupings exclusive_kt cambridge_aachen --max-jets-per-class "${ABPH_PREFLIGHT_JETS_PER_CLASS}"
-      --report "${ABPH_ROOT}/audits/actual_target_feasibility.json")
+    if [[ -f "${ABPH_TARGET_MODE_REPORT}" ]]; then
+      selected_mode="$("${PYTHON_BIN}" scripts/validate_adaptive_binary_target_mode.py \
+        --selection "${ABPH_TARGET_MODE_REPORT}" --campaign-root "${ABPH_ROOT}" --print-mode)"
+    else
+      selected_mode="shared_transient_compact"
+    fi
+    if [[ "${selected_mode}" == "rank_local_build" ]]; then
+      cmd=("${PYTHON_BIN}" -u scripts/validate_adaptive_binary_target_mode.py
+        --selection "${ABPH_TARGET_MODE_REPORT}" --campaign-root "${ABPH_ROOT}"
+        --expected-mode rank_local_build)
+    else
+      cmd=("${PYTHON_BIN}" -u scripts/audit_adaptive_binary_step4_accounting.py
+        --target-cache-dir "${ABPH_TARGET_CACHE_DIR}" --splits model_train model_val
+        --groupings exclusive_kt cambridge_aachen --max-jets-per-class "${ABPH_PREFLIGHT_JETS_PER_CLASS}"
+        --report "${ABPH_ROOT}/audits/actual_target_feasibility.json")
+    fi
     ;;
   *) echo "Unknown ABPH target action ${ACTION}" >&2; exit 2 ;;
 esac

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Probe one actual ABPH variant/batch candidate inside a four-rank Tigris allocation.
+# Probe one actual ABPH variant/batch candidate in the requested Slurm topology.
 
 #SBATCH --job-name=abph_batch_probe
 #SBATCH --output=fresh_check_logs/%x_%j.out
@@ -25,19 +25,32 @@ LOCAL_BATCH_SIZE="${3:?Missing local batch size}"
 export PYTHONNOUSERSITE=1
 fresh_setup
 
-mapfile -t hosts < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
-export MASTER_ADDR="${hosts[0]:?Unable to resolve DDP master host}"
-numeric_job_id="${SLURM_JOB_ID%%_*}"
-export MASTER_PORT="$((20000 + numeric_job_id % 20000))"
-output="${ABPH_ROOT}/runtime_batch_measurements/${VARIANT}/ddp4/${STAGE_FAMILY}_b${LOCAL_BATCH_SIZE}.json"
-
-fresh_run srun --nodes=4 --ntasks=4 --ntasks-per-node=1 \
-  --kill-on-bad-exit=1 --cpu-bind=cores --export=ALL \
-  "${PYTHON_BIN}" -u scripts/probe_adaptive_binary_runtime_batch.py \
-  --campaign-root "${ABPH_ROOT}" \
-  --variant "${VARIANT}" \
-  --stage-family "${STAGE_FAMILY}" \
-  --local-batch-size "${LOCAL_BATCH_SIZE}" \
-  --expected-world-size 4 \
-  --output "${output}" \
+world_size="${ABPH_DISTRIBUTED_WORLD_SIZE:-${SLURM_NTASKS:-1}}"
+nodes="${ABPH_DISTRIBUTED_NODES:-${SLURM_JOB_NUM_NODES:-1}}"
+tasks_per_node="${ABPH_DISTRIBUTED_NTASKS_PER_NODE:-1}"
+output="${ABPH_ROOT}/runtime_batch_measurements/${VARIANT}/ddp${world_size}/${STAGE_FAMILY}_b${LOCAL_BATCH_SIZE}.json"
+probe_command=(
+  "${PYTHON_BIN}" -u scripts/probe_adaptive_binary_runtime_batch.py
+  --campaign-root "${ABPH_ROOT}"
+  --variant "${VARIANT}"
+  --stage-family "${STAGE_FAMILY}"
+  --local-batch-size "${LOCAL_BATCH_SIZE}"
+  --expected-world-size "${world_size}"
+  --output "${output}"
   --device "${DEVICE}"
+)
+if [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]]; then
+  probe_command=(bash "${PROJECT_DIR}/sbatch/run_with_adaptive_binary_ram_workspace.sh" "${probe_command[@]}")
+fi
+
+if ((world_size > 1)); then
+  mapfile -t hosts < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+  export MASTER_ADDR="${hosts[0]:?Unable to resolve DDP master host}"
+  numeric_job_id="${SLURM_JOB_ID%%_*}"
+  export MASTER_PORT="$((20000 + numeric_job_id % 20000))"
+  fresh_run srun --nodes="${nodes}" --ntasks="${world_size}" \
+    --ntasks-per-node="${tasks_per_node}" --kill-on-bad-exit=1 \
+    --cpu-bind=cores --export=ALL "${probe_command[@]}"
+else
+  fresh_run "${probe_command[@]}"
+fi

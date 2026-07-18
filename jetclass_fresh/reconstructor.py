@@ -1431,14 +1431,20 @@ def make_reconstruction_loader(dataset, *, batch_size: int, shuffle: bool, num_w
     torch = require_torch()
     generator = torch.Generator()
     generator.manual_seed(int(seed))
+    worker_count = int(num_workers)
+    loader_kwargs = {}
+    if worker_count > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=int(batch_size),
         shuffle=bool(shuffle),
-        num_workers=int(num_workers),
+        num_workers=worker_count,
         pin_memory=torch.cuda.is_available(),
         collate_fn=collate_reconstruction_batch,
         generator=generator,
+        **loader_kwargs,
     )
 
 

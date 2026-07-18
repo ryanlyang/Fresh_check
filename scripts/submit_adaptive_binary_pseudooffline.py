@@ -29,6 +29,18 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (  # 
     require_partial_stage_inputs,
     submission_manifest,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import (  # noqa: E402
+    ABPH_CACHE_HEAVY_STORAGE_PROFILE,
+    ABPH_STORAGE_PROFILE_NAMES,
+    StorageArtifactClass,
+    campaign_storage_audit,
+    initialize_storage_accounting,
+    require_storage_projection,
+    resolve_storage_profile,
+    storage_paths,
+    write_campaign_storage_audit,
+    write_quota_managed_json,
+)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -79,6 +91,26 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("ABPH_RUNTIME_ACCEPTANCE_PATH"),
         help="Immutable Step-10 acceptance artifact required by full DDP4 campaigns.",
     )
+    parser.add_argument(
+        "--tagger-ddp-acceptance",
+        default=os.environ.get("ABPH_TAGGER_DDP_ACCEPTANCE_PATH"),
+        help=(
+            "Immutable E7/F0 parity and >=1.5x speed gate. Streaming taggers "
+            "fall back to single-rank RAM execution when it is omitted."
+        ),
+    )
+    parser.add_argument(
+        "--storage-profile",
+        choices=ABPH_STORAGE_PROFILE_NAMES,
+        default=os.environ.get(
+            "ABPH_STORAGE_PROFILE", ABPH_CACHE_HEAVY_STORAGE_PROFILE
+        ),
+    )
+    parser.add_argument(
+        "--storage-projection",
+        default=os.environ.get("ABPH_STORAGE_PROJECTION_PATH"),
+        help="Measured, cache-bound projection required by quota-enforced profiles.",
+    )
     return parser
 
 
@@ -109,9 +141,12 @@ def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
         },
         reconstructor_parallelism=args.reconstructor_parallelism,
         runtime_acceptance_path=args.runtime_acceptance,
+        tagger_ddp_acceptance_path=args.tagger_ddp_acceptance,
         allow_debug_single_reconstructor=bool(
             args.allow_debug_single_reconstructor
         ),
+        storage_profile=args.storage_profile,
+        storage_projection_path=args.storage_projection,
     )
 
 
@@ -302,6 +337,15 @@ def _write_json_atomic(path: Path, payload: object) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = _config(args)
+    storage_profile = resolve_storage_profile(config.storage_profile)
+    storage_projection = None
+    if config.storage_projection_path is not None:
+        storage_projection = require_storage_projection(
+            config.storage_projection_path,
+            campaign_root=config.campaign_root,
+            campaign_mode=config.campaign_mode,
+            profile=storage_profile,
+        )
     reuse_preflight = require_partial_stage_inputs(config)
     jobs = build_submission_graph(config)
     resource = _resource(args, config)
@@ -310,6 +354,27 @@ def main(argv: list[str] | None = None) -> int:
         stage_mode=args.stage_mode,
         project_dir=project_dir,
     )
+    storage_initialization = initialize_storage_accounting(
+        config.campaign_root,
+        profile=storage_profile,
+        projection=storage_projection,
+        dry_run=bool(args.dry_run) or not storage_profile.enforce_quota,
+    )
+    if storage_profile.enforce_quota and not args.dry_run:
+        canonical_projection = (
+            storage_paths(config.campaign_root)["root"] / "storage_projection.json"
+        )
+        if Path(config.storage_projection_path).resolve() != canonical_projection.resolve():
+            write_quota_managed_json(
+                config.campaign_root,
+                canonical_projection,
+                storage_projection,
+                artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+                artifact_role="storage_projection",
+                source_provenance_hash=str(storage_projection["content_hash"]),
+                run_id="submission_preflight",
+                profile=storage_profile,
+            )
     job_ids, commands = _submit(
         jobs,
         resource=resource,
@@ -327,6 +392,11 @@ def main(argv: list[str] | None = None) -> int:
             "submission_commands": commands,
             "reuse_preflight": reuse_preflight,
             "runtime_executors": runtime_executors,
+            "storage_accounting": {
+                "profile": storage_profile.to_dict(),
+                "initialization": storage_initialization,
+                "dry_run_writes_forbidden": bool(storage_profile.enforce_quota),
+            },
         }
     )
     destination = (
@@ -353,10 +423,57 @@ def main(argv: list[str] | None = None) -> int:
         "path": str(parallelism_path),
         "content_hash": parallelism_content_hash,
     }
-    if not args.dry_run or args.output_manifest:
+    if storage_profile.enforce_quota:
+        root = Path(config.campaign_root).resolve()
+        try:
+            destination.resolve().relative_to(root)
+            parallelism_path.resolve().relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                "quota-enforced campaign manifests must remain beneath campaign root"
+            ) from exc
+        manifest["storage_accounting"]["post_submission_audit_path"] = str(
+            storage_paths(root)["audits"] / "post_submission.json"
+        )
+    should_write = not args.dry_run or (
+        bool(args.output_manifest) and not storage_profile.enforce_quota
+    )
+    if should_write:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(destination, manifest)
-        _write_json_atomic(parallelism_path, parallelism_manifest)
+        if storage_profile.enforce_quota:
+            write_quota_managed_json(
+                config.campaign_root,
+                parallelism_path,
+                parallelism_manifest,
+                artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+                artifact_role="reconstructor_parallelism_manifest",
+                source_provenance_hash=parallelism_content_hash,
+                run_id=f"submission_{config.stage_mode}",
+                profile=storage_profile,
+            )
+            write_quota_managed_json(
+                config.campaign_root,
+                destination,
+                manifest,
+                artifact_class=StorageArtifactClass.PERSISTENT_ESSENTIAL,
+                artifact_role="submission_manifest",
+                source_provenance_hash=str(manifest["graph_hash"]),
+                run_id=f"submission_{config.stage_mode}",
+                profile=storage_profile,
+            )
+            write_campaign_storage_audit(
+                config.campaign_root,
+                profile=storage_profile,
+                label="post_submission",
+            )
+        else:
+            _write_json_atomic(destination, manifest)
+            _write_json_atomic(parallelism_path, parallelism_manifest)
+    elif storage_profile.enforce_quota:
+        manifest["storage_accounting"]["dry_run_audit"] = campaign_storage_audit(
+            config.campaign_root,
+            profile=storage_profile,
+        )
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
 

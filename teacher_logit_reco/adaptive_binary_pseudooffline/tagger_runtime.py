@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -22,6 +23,15 @@ from .prediction_cache import (
     iter_deployable_pseudo_view_shards,
     require_deployable_pseudo_view_cache,
 )
+from .pseudo_ram import (
+    FrozenReconstructorRamSource,
+    SelectedReconstructorPseudoGenerator,
+)
+from .pseudo_consumer import (
+    ABPH_CONSUMER_PSEUDO_CONTRACT,
+    ABPH_CONSUMER_PSEUDO_SCHEMA_VERSION,
+    consumer_pseudo_array_names,
+)
 from .production import (
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryTargetBatchSource,
@@ -29,6 +39,16 @@ from .production import (
     load_selected_reconstructor,
     package_trainable_pseudo_views,
     reconstructor_step,
+)
+from .checkpoints import (
+    ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT,
+    active_storage_profile,
+    build_compact_selected_checkpoint,
+    load_torch_checkpoint,
+    selected_checkpoint_provenance,
+    selected_model_state,
+    streaming_storage_enabled,
+    write_selected_checkpoint,
 )
 from .tagger import (
     HierarchyAwareDualStreamTagger,
@@ -42,6 +62,32 @@ from .training import (
     ReconstructionLossWeights,
     ReconstructorStepContext,
     compose_reconstruction_loss,
+)
+from .ram_workspace import RankLocalWorkspace
+from .distributed import (
+    abort_distributed_runtime,
+    all_gather_objects,
+    all_reduce_float64_pair,
+    all_reduce_min_bool,
+    all_reduce_sum_int,
+    barrier,
+    broadcast_object,
+    destroy_distributed_runtime,
+    gather_error_summaries,
+    initialize_distributed_runtime,
+    verify_common_parameter_state,
+)
+from .distributed_stream import validation_range_row
+from .distributed_validation import (
+    TypedValidationAccumulator,
+    finalize_typed_validation,
+)
+from .tagger_distributed import (
+    TaggerTrainingModule,
+    build_tagger_ddp_wrapper,
+    compile_tagger_global_batch_plan,
+    require_tagger_tensor_mapping,
+    tagger_tensor_mapping_is_finite,
 )
 
 
@@ -127,17 +173,12 @@ def _sha256_file(path: str | Path) -> str:
 
 
 def _torch_load(path: str | Path, *, device: Any = "cpu") -> Mapping[str, Any]:
-    torch = require_torch()
-    try:
-        payload = torch.load(Path(path), map_location=device, weights_only=False)
-    except TypeError:  # pragma: no cover - old research PyTorch
-        payload = torch.load(Path(path), map_location=device)
-    if not isinstance(payload, Mapping):
-        raise TypeError(f"checkpoint {path} is not a mapping")
-    return payload
+    return load_torch_checkpoint(path, device=device)
 
 
 def _state_dict(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    if payload.get("checkpoint_contract") == ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT:
+        return selected_model_state(payload)
     for name in ("model_state_dict", "model_state", "state_dict", "model"):
         value = payload.get(name)
         if isinstance(value, Mapping):
@@ -169,7 +210,7 @@ def _prediction_arrays(
 def _pseudo_batch(
     arrays: Mapping[str, np.ndarray], metadata: Mapping[str, Any]
 ) -> DeployablePseudoViewBatch:
-    return DeployablePseudoViewBatch(
+    batch = DeployablePseudoViewBatch(
         arrays=_prediction_arrays(arrays, metadata),
         view_names=tuple(metadata["view_names"]),
         hierarchy_names=tuple(metadata["hierarchy_names"]),
@@ -184,6 +225,8 @@ def _pseudo_batch(
             "fixed_evaluation_hypotheses": True,
         },
     )
+    batch.validate()
+    return batch.to_consumer_only()
 
 
 def _merge_independent_dual_batches(
@@ -219,6 +262,9 @@ def _merge_independent_dual_batches(
     arrays[f"frontier__{ca_name}__depth_00__mask"] = np.asarray(
         first.arrays[f"frontier__{kt_name}__depth_00__mask"]
     )
+    diagnostics = dict(first.diagnostics)
+    diagnostics.pop("consumer_pseudo_schema_hash", None)
+    diagnostics["consumer_only_pseudo"] = False
     merged = DeployablePseudoViewBatch(
         arrays=arrays,
         view_names=first.view_names,
@@ -227,10 +273,10 @@ def _merge_independent_dual_batches(
             kt_name: int(first.frontier_depths[kt_name]),
             ca_name: int(second.frontier_depths[ca_name]),
         },
-        diagnostics=dict(first.diagnostics),
+        diagnostics=diagnostics,
     )
     merged.validate()
-    return merged, independent
+    return merged.to_consumer_only(), independent
 
 
 @dataclass(frozen=True)
@@ -266,6 +312,10 @@ class FrozenPseudoBatchSource:
         self.batch_size = int(batch_size)
         self.independent_roots = bool(independent_roots)
         self.maximum_batches = maximum_batches
+        self.rank = 0
+        self.world_size = 1
+        self.rank_start = 0
+        self.rank_stop = len(self.hlt.labels)
         if self.batch_size <= 0:
             raise ValueError("tagger batch size must be positive")
         hlt_hash = self.hlt.metadata.get("hlt_content_hash")
@@ -444,6 +494,8 @@ class _PairedHierarchyTargetBatchSource:
         self.target_provenance = _combined_target_metadata_provenance(
             branch_metadata
         )
+        self.rank = primary.rank
+        self.world_size = primary.world_size
 
     @staticmethod
     def _merge(rows: Mapping[str, Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -491,6 +543,18 @@ class _PairedHierarchyTargetBatchSource:
                     )
                 return
             yield self._merge(rows)
+
+    @property
+    def last_validation_range(self):
+        rows = tuple(
+            source.last_validation_range for source in self.sources.values()
+        )
+        if any(row is None for row in rows):
+            return None
+        first = rows[0]
+        if any(row.to_dict() != first.to_dict() for row in rows[1:]):
+            raise ValueError("dual hierarchy validation ranges differ")
+        return first
 
 
 def _teacher_logits(root: Path, split: str, *, required: bool) -> np.ndarray | None:
@@ -668,7 +732,7 @@ def _source_provenance(
     *,
     target_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    hlt = source.hlt if isinstance(source, FrozenPseudoBatchSource) else source.hlt_view
+    hlt = source.hlt if hasattr(source, "hlt") else source.hlt_view
     metadata = hlt.metadata
     labels = np.asarray(hlt.labels, dtype=np.int64)
     result = {
@@ -682,6 +746,44 @@ def _source_provenance(
         "hlt_degradation_strength": metadata.get("hlt_degradation_strength"),
         "hlt_params_hash": metadata.get("hlt_params_hash"),
     }
+    if hasattr(source, "cache_dirs") and hasattr(source, "metadata"):
+        member_hashes: dict[str, str] = {}
+        for cache_dir, pseudo_metadata in zip(source.cache_dirs, source.metadata):
+            hierarchy_names = tuple(pseudo_metadata.get("hierarchy_names") or ())
+            frontier_depths = dict(pseudo_metadata.get("frontier_depths") or {})
+            expected_names = consumer_pseudo_array_names(
+                hierarchy_names, frontier_depths
+            )
+            prediction_schema = dict(pseudo_metadata.get("prediction_schema") or {})
+            missing = [name for name in expected_names if name not in prediction_schema]
+            if missing:
+                raise ValueError(
+                    f"pseudo source {cache_dir} lacks consumer schema arrays: {missing}"
+                )
+            schema_hash = canonical_hash(
+                {
+                    "contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+                    "schema_version": ABPH_CONSUMER_PSEUDO_SCHEMA_VERSION,
+                    "arrays": {
+                        name: prediction_schema[name]
+                        for name in sorted(expected_names)
+                    },
+                }
+            )
+            declared = pseudo_metadata.get("consumer_pseudo_schema_hash")
+            if declared not in (None, schema_hash):
+                raise ValueError(f"pseudo source {cache_dir} consumer schema hash mismatch")
+            member_hashes[cache_dir.name] = schema_hash
+        result.update(
+            {
+                "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+                "consumer_pseudo_schema_hash": canonical_hash(
+                    {"members": member_hashes}
+                ),
+                "consumer_pseudo_member_schema_hashes": member_hashes,
+                "consumer_only_pseudo_at_tagger_boundary": True,
+            }
+        )
     if target_provenance is not None:
         for key in (
             "offline_cache_content_hash",
@@ -824,6 +926,117 @@ def _selected_target_provenance(root: Path, cache_names: Sequence[str]) -> Mappi
     return provenance
 
 
+def build_frozen_pseudo_generators(
+    campaign_root: str | Path,
+    source_names: Sequence[str],
+    *,
+    device: Any,
+    smoke: bool,
+) -> tuple[SelectedReconstructorPseudoGenerator, ...]:
+    """Load the exact selected D1/D2/E7 source family in frozen eval mode."""
+
+    root = Path(campaign_root)
+    names = tuple(str(name) for name in source_names)
+    if names == ("E7_shared_root_dual",):
+        kt_path = root / "runs" / "D1_kt32_mh4_particles" / "best_model_val.pt"
+        ca_path = root / "runs" / "D2_ca32_mh4_particles" / "best_model_val.pt"
+        model = build_shared_root_dual_reconstructor(
+            kt_path, ca_path, device=device, smoke=bool(smoke)
+        )
+        return (
+            SelectedReconstructorPseudoGenerator(
+                model,
+                source_name=names[0],
+                checkpoint_hashes={
+                    "D1_kt32_mh4_particles": _sha256_file(kt_path),
+                    "D2_ca32_mh4_particles": _sha256_file(ca_path),
+                },
+                device=device,
+            ),
+        )
+    allowed = {"D1_kt32_mh4_particles", "D2_ca32_mh4_particles"}
+    if not names or any(name not in allowed for name in names):
+        raise ValueError(f"unsupported frozen pseudo source family: {names}")
+    result = []
+    for name in names:
+        path = root / "runs" / name / "best_model_val.pt"
+        model = load_selected_reconstructor(
+            path,
+            variant_name=name,
+            device=device,
+            smoke=bool(smoke),
+        )
+        result.append(
+            SelectedReconstructorPseudoGenerator(
+                model,
+                source_name=name,
+                checkpoint_hashes={name: _sha256_file(path)},
+                device=device,
+            )
+        )
+    return tuple(result)
+
+
+def _active_ram_workspace(rank: int) -> RankLocalWorkspace:
+    root = os.environ.get("ABPH_RAM_WORKSPACE")
+    if not root:
+        raise RuntimeError(
+            "streaming frozen pseudo sources require the verified ABPH_RAM_WORKSPACE"
+        )
+    return RankLocalWorkspace(
+        root,
+        job_id=str(os.environ.get("SLURM_JOB_ID") or os.environ.get("ABPH_JOB_ID") or "local"),
+        rank=int(rank),
+        create=False,
+    )
+
+
+def build_frozen_reconstructor_ram_source(
+    campaign_root: str | Path,
+    source_names: Sequence[str],
+    *,
+    split: str,
+    batch_size: int,
+    device: Any,
+    smoke: bool,
+    independent_roots: bool = False,
+    maximum_batches: int | None = None,
+    generators: Sequence[SelectedReconstructorPseudoGenerator] | None = None,
+    workspace: RankLocalWorkspace | None = None,
+    execution_mode: str | None = None,
+) -> FrozenReconstructorRamSource:
+    rank = 0 if smoke else int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+    world_size = 1 if smoke else int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
+    active_workspace = workspace or _active_ram_workspace(rank)
+    selected_generators = tuple(generators or build_frozen_pseudo_generators(
+        campaign_root, source_names, device=device, smoke=smoke
+    ))
+    shard_size = int(os.environ.get("ABPH_PSEUDO_RAM_SHARD_SIZE", "2048"))
+    generation_batch_size = int(
+        os.environ.get("ABPH_PSEUDO_GENERATION_BATCH_SIZE", str(batch_size))
+    )
+    lru_raw = int(os.environ.get("ABPH_PSEUDO_LRU_BYTES", "0"))
+    return FrozenReconstructorRamSource(
+        hlt_cache_dir=Path(campaign_root) / "inputs" / "hlt_cache",
+        generators=selected_generators,
+        split=split,
+        batch_size=int(batch_size),
+        shard_size=shard_size,
+        generation_batch_size=generation_batch_size,
+        execution_mode=(
+            str(execution_mode)
+            if execution_mode is not None
+            else os.environ.get("ABPH_PSEUDO_EXECUTION_MODE", "auto")
+        ),
+        lru_capacity_bytes=(None if lru_raw <= 0 else lru_raw),
+        workspace=active_workspace,
+        rank=rank,
+        world_size=world_size,
+        independent_roots=independent_roots,
+        maximum_batches=maximum_batches,
+    )
+
+
 def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
     """Train one registry-resolved E/F/G0/G1 model with real pseudo inputs."""
 
@@ -832,6 +1045,22 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
     variant_name = str(args.variant)
     run_id = str(resolved["variant"]["run_id"])
     device = resolve_device(str(args.device))
+    requested_world_size = (
+        1
+        if bool(args.smoke)
+        else int(os.environ.get("ABPH_TAGGER_DISTRIBUTED_WORLD_SIZE", "1"))
+    )
+    distributed_runtime = initialize_distributed_runtime(
+        requested_world_size=requested_world_size, device=device
+    )
+    if str(getattr(device, "type", device)) == "cuda":
+        device = torch.device("cuda", distributed_runtime.local_rank)
+    global_batch_size = int(args.batch_size)
+    if global_batch_size % distributed_runtime.world_size != 0:
+        raise ValueError(
+            "tagger global batch size must divide exactly across DDP ranks"
+        )
+    local_batch_size = global_batch_size // distributed_runtime.world_size
     seed = 24731 + 1009 * (int(args.seed_index) - 1)
     set_training_seed(seed)
     model = build_variant_hierarchy_aware_tagger(
@@ -896,25 +1125,59 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
     else:
         cache_names = ("D1_kt32_mh4_particles",)
 
-    maximum_batches = 1 if bool(args.smoke) else int(os.environ.get("ABPH_MAX_TAGGER_BATCHES", "0")) or None
-    frozen_train = FrozenPseudoBatchSource(
-        hlt_cache_dir=root / "inputs" / "hlt_cache",
-        cache_dirs=tuple(root / "pseudo_predictions" / name / "model_train" for name in cache_names),
-        split="model_train",
-        batch_size=int(args.batch_size),
-        independent_roots=independent,
-        maximum_batches=maximum_batches,
-    )
-    frozen_val = FrozenPseudoBatchSource(
-        hlt_cache_dir=root / "inputs" / "hlt_cache",
-        cache_dirs=tuple(root / "pseudo_predictions" / name / "model_val" for name in cache_names),
-        split="model_val",
-        batch_size=int(args.batch_size),
-        independent_roots=independent,
-        maximum_batches=maximum_batches,
-    )
-
     joint = resolved["variant"]["tier"] == "F" and run_id not in {"F1", "F4"}
+    maximum_batches = 1 if bool(args.smoke) else int(os.environ.get("ABPH_MAX_TAGGER_BATCHES", "0")) or None
+    frozen_train = None
+    frozen_val = None
+    if not joint:
+        if streaming_storage_enabled():
+            frozen_generators = build_frozen_pseudo_generators(
+                root, cache_names, device=device, smoke=bool(args.smoke)
+            )
+            workspace_rank = distributed_runtime.rank
+            workspace = _active_ram_workspace(workspace_rank)
+            frozen_train = build_frozen_reconstructor_ram_source(
+                root,
+                cache_names,
+                split="model_train",
+                batch_size=local_batch_size,
+                device=device,
+                smoke=bool(args.smoke),
+                independent_roots=independent,
+                maximum_batches=maximum_batches,
+                generators=frozen_generators,
+                workspace=workspace,
+            )
+            frozen_val = build_frozen_reconstructor_ram_source(
+                root,
+                cache_names,
+                split="model_val",
+                batch_size=local_batch_size,
+                device=device,
+                smoke=bool(args.smoke),
+                independent_roots=independent,
+                maximum_batches=maximum_batches,
+                generators=frozen_generators,
+                workspace=workspace,
+            )
+        else:
+            frozen_train = FrozenPseudoBatchSource(
+                hlt_cache_dir=root / "inputs" / "hlt_cache",
+                cache_dirs=tuple(root / "pseudo_predictions" / name / "model_train" for name in cache_names),
+                split="model_train",
+                batch_size=local_batch_size,
+                independent_roots=independent,
+                maximum_batches=maximum_batches,
+            )
+            frozen_val = FrozenPseudoBatchSource(
+                hlt_cache_dir=root / "inputs" / "hlt_cache",
+                cache_dirs=tuple(root / "pseudo_predictions" / name / "model_val" for name in cache_names),
+                split="model_val",
+                batch_size=local_batch_size,
+                independent_roots=independent,
+                maximum_batches=maximum_batches,
+            )
+
     reconstructor = None
     joint_train = None
     joint_val = None
@@ -936,10 +1199,12 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                             target_cache_dir=root / "targets",
                             split=split,
                             grouping=grouping,
-                            batch_size=int(args.batch_size),
+                            batch_size=local_batch_size,
                             shuffle_shards=shuffle,
                             seed=seed,
                             maximum_batches=maximum_batches,
+                            rank=distributed_runtime.rank,
+                            world_size=distributed_runtime.world_size,
                         )
                         for grouping in (
                             "exclusive_kt",
@@ -962,53 +1227,140 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                 target_cache_dir=root / "targets",
                 split="model_train",
                 grouping="exclusive_kt",
-                batch_size=int(args.batch_size),
+                batch_size=local_batch_size,
                 shuffle_shards=True,
                 seed=seed,
                 maximum_batches=maximum_batches,
+                rank=distributed_runtime.rank,
+                world_size=distributed_runtime.world_size,
             )
             joint_val = AdaptiveBinaryTargetBatchSource(
                 hlt_cache_dir=root / "inputs" / "hlt_cache",
                 target_cache_dir=root / "targets",
                 split="model_val",
                 grouping="exclusive_kt",
-                batch_size=int(args.batch_size),
+                batch_size=local_batch_size,
                 shuffle_shards=False,
                 seed=seed,
                 maximum_batches=maximum_batches,
+                rank=distributed_runtime.rank,
+                world_size=distributed_runtime.world_size,
             )
 
     teacher_train = _teacher_logits(root, "model_train", required=objective_config.requires_teacher_logits)
     teacher_val = _teacher_logits(root, "model_val", required=objective_config.requires_teacher_logits)
-    parameters = list(model.parameters()) + ([] if reconstructor is None else list(reconstructor.parameters()))
-    optimizer = torch.optim.AdamW(parameters, lr=2.0e-4, betas=(0.9, 0.95), weight_decay=0.01)
     epochs = 1 if bool(args.smoke) else int(os.environ.get("ABPH_TAGGER_EPOCHS", "20"))
-    total_steps = max(epochs * max(1, math.ceil(len(frozen_train.hlt.labels) / int(args.batch_size))), 1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps, eta_min=1.0e-5
+    scheduling_jets = (
+        len(joint_train.hlt_view.labels)
+        if joint
+        else len(frozen_train.hlt.labels)
     )
+    total_steps = max(epochs * max(1, math.ceil(scheduling_jets / int(args.batch_size))), 1)
     best_accuracy = -1.0
     best_loss = float("inf")
     best_val_metrics: Mapping[str, Any] | None = None
     best_path = output_dir / "best_model_val.pt"
     curves: list[dict[str, Any]] = []
+    validation_hlt_view = joint_val.hlt_view if joint else frozen_val.hlt
+    joint_consumer_schema_hash: str | None = None
 
-    def forward_joint(cpu_batch: Mapping[str, Any], *, split: str, validation: bool):
+    def write_selected_tagger(payload: Mapping[str, Any]) -> None:
+        if not streaming_storage_enabled():
+            torch.save(dict(payload), best_path)
+            return
+        reconstructor_state = payload.get("reconstructor_state_dict")
+        components = (
+            {"reconstructor": reconstructor_state}
+            if isinstance(reconstructor_state, Mapping)
+            else {}
+        )
+        compact = build_compact_selected_checkpoint(
+            model_state_dict=payload["model_state_dict"],
+            component_state_dicts=components,
+            checkpoint_role="best_model_val",
+            model_metadata={
+                "model_class": f"{model.__class__.__module__}.{model.__class__.__qualname__}",
+                "reconstructor_hierarchy_names": payload.get(
+                    "reconstructor_hierarchy_names", []
+                ),
+            },
+            resolved_variant_config=resolved,
+            resolved_variant_config_hash=str(resolved["resolved_config_hash"]),
+            validation=payload.get("model_val"),
+            provenance={
+                "variant_name": variant_name,
+                "hlt_model_val_content_hash": validation_hlt_view.metadata.get(
+                    "hlt_content_hash"
+                ),
+                "target_provenance": _selected_target_provenance(root, cache_names),
+            },
+            runtime_contracts={"contract": ABPH_TAGGER_RUNTIME_CONTRACT},
+            schedule_contracts={
+                "epochs": int(epochs),
+                "scheduler": "cosine_annealing",
+            },
+            extra_metadata={
+                "variant_name": variant_name,
+                "teacher_logits_loaded": bool(
+                    payload.get("teacher_logits_loaded", False)
+                ),
+            },
+        )
+        write_selected_checkpoint(
+            best_path,
+            compact,
+            campaign_root=root,
+            artifact_role="selected_tagger_checkpoint",
+            run_id=variant_name,
+        )
+
+    def forward_tagger_step(
+        active_model: Any,
+        active_reconstructor: Any | None,
+        cpu_batch: Any,
+        split: str,
+        validation: bool,
+    ):
+        nonlocal joint_consumer_schema_hash
+        if not joint:
+            tokens, mask, labels, pseudo, independent_roots = _move_frozen_batch(
+                cpu_batch, device
+            )
+            output = active_model(
+                tokens,
+                mask,
+                pseudo,
+                independent_root_ledgers=independent_roots,
+            )
+            return (
+                output,
+                labels,
+                None,
+                torch.as_tensor(cpu_batch.indices, device=device).long(),
+            )
+        if active_reconstructor is None:
+            raise RuntimeError("joint tagger forward lacks its reconstructor")
         tokens = cpu_batch["hlt_tokens"].to(device)
         mask = cpu_batch["hlt_mask"].to(device).bool()
         labels = cpu_batch["labels"].to(device).long()
-        shared_forward = reconstructor.prepare_shared_reconstruction_forward(
+        shared_forward = active_reconstructor.prepare_shared_reconstruction_forward(
             tokens, mask
         )
-        deployed = reconstructor.deploy_from_shared_reconstruction_forward(
+        deployed = active_reconstructor.deploy_from_shared_reconstruction_forward(
             shared_forward, evaluation_seed=24731
         )
         pseudo = package_trainable_pseudo_views(deployed)
-        output = model(tokens, mask, pseudo)
+        candidate_schema_hash = str(
+            pseudo.diagnostics["consumer_pseudo_schema_hash"]
+        )
+        if joint_consumer_schema_hash not in (None, candidate_schema_hash):
+            raise ValueError("joint differentiable pseudo schema changed between batches")
+        joint_consumer_schema_hash = candidate_schema_hash
+        output = active_model(tokens, mask, pseudo)
         reconstruction = None
         if objective_config.joint_reconstruction > 0.0:
             reconstruction = _joint_reconstruction_loss(
-                reconstructor,
+                active_reconstructor,
                 {
                     **cpu_batch,
                     "hlt_tokens": tokens,
@@ -1021,7 +1373,38 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
             )
         return output, labels, reconstruction, cpu_batch["indices"].to(device)
 
+    if reconstructor is not None:
+        _set_joint_trainability(
+            reconstructor, epoch=0, joint_from_start=(run_id == "F9")
+        )
+    training_module = TaggerTrainingModule(
+        model,
+        reconstructor,
+        forward_tagger_step,
+        compute_tagging_objective,
+        objective_config,
+    ).to(device)
+    parameters = list(training_module.parameters())
+    optimizer = torch.optim.AdamW(
+        parameters, lr=2.0e-4, betas=(0.9, 0.95), weight_decay=0.01
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps, eta_min=1.0e-5
+    )
+    ddp_wrapper: Any = build_tagger_ddp_wrapper(
+        training_module, distributed_runtime, device=device
+    )
+    initial_parameter_state_hash = verify_common_parameter_state(
+        distributed_runtime, training_module
+    )
+
+    ddp_trainability_signature = tuple(
+        (name, bool(parameter.requires_grad))
+        for name, parameter in training_module.named_parameters()
+    )
+
     def run_epoch(*, training: bool, epoch: int) -> dict[str, Any]:
+        nonlocal ddp_wrapper, ddp_trainability_signature
         model.train(training)
         if reconstructor is not None:
             reconstructor.train(training)
@@ -1030,91 +1413,336 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
             )
         else:
             trainability = {}
+        current_signature = tuple(
+            (name, bool(parameter.requires_grad))
+            for name, parameter in training_module.named_parameters()
+        )
+        if distributed_runtime.distributed and current_signature != ddp_trainability_signature:
+            barrier(distributed_runtime)
+            del ddp_wrapper
+            ddp_wrapper = build_tagger_ddp_wrapper(
+                training_module, distributed_runtime, device=device
+            )
+            barrier(distributed_runtime)
+            ddp_trainability_signature = current_signature
+
+        split = "model_train" if training else "model_val"
+        source = (joint_train if training else joint_val) if joint else (
+            frozen_train if training else frozen_val
+        )
+        if training:
+            expected_steps = math.ceil(scheduling_jets / global_batch_size)
+            if maximum_batches is not None:
+                expected_steps = min(expected_steps, int(maximum_batches))
+            iterator = (
+                None
+                if joint
+                else iter(
+                    source.iter_batches(shuffle=True, seed=seed + epoch)
+                )
+            )
+        else:
+            expected_steps = None
+            iterator = iter(
+                source.iter_epoch()
+                if joint
+                else source.iter_batches(shuffle=False, seed=seed + epoch)
+            )
+
         total_loss = 0.0
         correct = 0
         seen = 0
         batches_seen = 0
         evaluation_logits: list[np.ndarray] = []
         evaluation_labels: list[np.ndarray] = []
+        evaluation_indices: list[np.ndarray] = []
         root_provenance = None
-        split = "model_train" if training else "model_val"
-        if joint:
-            iterator: Iterable[Any] = (
-                iter(lambda: joint_train.next_batch(), None)
-                if training
-                else joint_val.iter_epoch()
-            )
-        else:
-            source = frozen_train if training else frozen_val
-            iterator = source.iter_batches(shuffle=training, seed=seed + epoch)
-        maximum = maximum_batches
-        for cpu_batch in iterator:
-            if maximum is not None and batches_seen >= maximum:
+        plan_hashes: list[str] = []
+        accumulator = TypedValidationAccumulator() if not training else None
+        required_terms: tuple[str, ...] = ()
+
+        while True:
+            if training and batches_seen >= int(expected_steps or 0):
                 break
+            local_input_error: BaseException | None = None
+            cpu_batch = None
+            try:
+                if training and joint:
+                    cpu_batch = source.next_batch()
+                else:
+                    cpu_batch = next(iterator)
+            except StopIteration:
+                cpu_batch = None
+            except BaseException as exc:
+                local_input_error = exc
+            input_ok = local_input_error is None and cpu_batch is not None
+            available_ranks = all_reduce_sum_int(
+                distributed_runtime, int(input_ok), device=device
+            )
+            if available_ranks == 0 and not training:
+                break
+            if available_ranks != distributed_runtime.world_size:
+                summaries = gather_error_summaries(
+                    distributed_runtime,
+                    phase="tagger_input",
+                    error=local_input_error or "rank stream ended early",
+                    structural=True,
+                )
+                abort_distributed_runtime(distributed_runtime)
+                raise RuntimeError(f"tagger input ranks diverged: {summaries}")
+            assert cpu_batch is not None
+
+            indices_cpu = (
+                np.asarray(cpu_batch["indices"], dtype=np.int64)
+                if joint
+                else np.asarray(cpu_batch.indices, dtype=np.int64)
+            )
+            if training:
+                immutable_range = (
+                    None
+                    if joint
+                    else (source.rank_start, source.rank_stop)
+                )
+                upstream_hash = (
+                    cpu_batch.get("global_batch_plan_hash") if joint else None
+                )
+                plan = compile_tagger_global_batch_plan(
+                    distributed_runtime,
+                    split=split,
+                    epoch=epoch,
+                    global_update=batches_seen,
+                    indices=indices_cpu,
+                    jet_ids=(source.hlt_view.jet_ids if joint else source.hlt.jet_ids),
+                    immutable_rank_range=immutable_range,
+                    upstream_plan_hash=upstream_hash,
+                )
+                if int(plan["global_effective_batch"]) != global_batch_size:
+                    raise RuntimeError(
+                        "tagger optimizer window differs from the declared global batch"
+                    )
+                plan_hashes.append(str(plan["plan_hash"]))
+
+            teacher = teacher_train if training else teacher_val
+            teacher_batch = (
+                None
+                if teacher is None
+                else torch.as_tensor(teacher[indices_cpu], device=device)
+            )
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            with torch.set_grad_enabled(training):
-                if joint:
-                    output, labels, reconstruction, indices = forward_joint(
-                        cpu_batch, split=split, validation=not training
+            local_forward_error: BaseException | None = None
+            tensors = None
+            try:
+                with torch.set_grad_enabled(training):
+                    tensors = (ddp_wrapper if training else training_module)(
+                        cpu_batch, teacher_batch, split, not training
                     )
-                else:
-                    tokens, mask, labels, pseudo, independent_roots = _move_frozen_batch(cpu_batch, device)
-                    output = model(
-                        tokens,
-                        mask,
-                        pseudo,
-                        independent_root_ledgers=independent_roots,
-                    )
-                    reconstruction = None
-                    indices = torch.as_tensor(cpu_batch.indices, device=device).long()
-                teacher = teacher_train if training else teacher_val
-                teacher_batch = None if teacher is None else torch.as_tensor(teacher[indices.detach().cpu().numpy()], device=device)
-                objective = compute_tagging_objective(
-                    output,
-                    labels,
-                    objective_config,
-                    split=split,
-                    reconstruction_loss=reconstruction,
-                    auxiliary_logits=output.auxiliary_logits,
-                    teacher_logits=teacher_batch,
+                    tensors = require_tagger_tensor_mapping(tensors)
+                    if not tagger_tensor_mapping_is_finite(tensors):
+                        raise FloatingPointError("tagger forward produced nonfinite tensors")
+            except BaseException as exc:
+                local_forward_error = exc
+            globally_forward_ok = all_reduce_min_bool(
+                distributed_runtime,
+                local_forward_error is None,
+                device=device,
+            )
+            if not globally_forward_ok:
+                summaries = gather_error_summaries(
+                    distributed_runtime,
+                    phase="tagger_forward",
+                    error=local_forward_error,
+                    structural=True,
                 )
-                if training:
-                    objective.total.backward()
-                    torch.nn.utils.clip_grad_norm_(parameters, 1.0)
-                    optimizer.step()
-                    scheduler.step()
-            candidate_root = output.diagnostics.get("root_provenance")
-            if isinstance(candidate_root, Mapping) and root_provenance is None:
-                root_provenance = dict(candidate_root)
-            batch_size = int(labels.shape[0])
-            total_loss += float(objective.total.detach().cpu()) * batch_size
-            correct += int((output.logits.argmax(dim=-1) == labels).sum().detach().cpu())
-            if not training:
-                evaluation_logits.append(output.logits.detach().cpu().numpy())
-                evaluation_labels.append(labels.detach().cpu().numpy())
-            seen += batch_size
+                abort_distributed_runtime(distributed_runtime)
+                raise RuntimeError(f"distributed tagger forward failed: {summaries}")
+            assert tensors is not None
+            metadata = training_module.last_metadata or {}
+            required_terms = tuple(metadata.get("required_terms") or ())
+            if root_provenance is None and isinstance(
+                metadata.get("root_provenance"), Mapping
+            ):
+                root_provenance = dict(metadata["root_provenance"])
+
+            batch_count = int(tensors["batch_size_tensor"].item())
+            batch_loss = float(tensors["total_loss"].detach().cpu())
+            batch_correct = int(
+                (
+                    tensors["logits"].argmax(dim=-1) == tensors["labels"]
+                ).sum().detach().cpu()
+            )
+            if training:
+                try:
+                    tensors["total_loss"].backward()
+                except BaseException as exc:
+                    abort_distributed_runtime(distributed_runtime)
+                    raise RuntimeError(
+                        "rank-local DDP tagger backward failed; process group aborted"
+                    ) from exc
+                gradients_finite = all(
+                    parameter.grad is None
+                    or bool(torch.isfinite(parameter.grad).all())
+                    for parameter in parameters
+                )
+                if not all_reduce_min_bool(
+                    distributed_runtime, gradients_finite, device=device
+                ):
+                    abort_distributed_runtime(distributed_runtime)
+                    raise FloatingPointError(
+                        "distributed tagger gradients are nonfinite"
+                    )
+                torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+                optimizer.step()
+                scheduler.step()
+            else:
+                assert accumulator is not None
+                accumulator.add_mean(
+                    "loss.total", batch_loss, batch_count, selection_eligible=True
+                )
+                for name, value in tensors["raw_loss_terms"].items():
+                    accumulator.add_mean(
+                        f"loss.raw.{name}",
+                        float(value.detach().cpu()),
+                        batch_count,
+                    )
+                for name, value in tensors["weighted_loss_terms"].items():
+                    accumulator.add_mean(
+                        f"loss.weighted.{name}",
+                        float(value.detach().cpu()),
+                        batch_count,
+                    )
+                accumulator.add_ratio(
+                    "accuracy",
+                    batch_correct,
+                    batch_count,
+                    denominator_semantics="jets",
+                )
+                accumulator.finish_batch(batch_count)
+                evaluation_logits.append(tensors["logits"].detach().cpu().numpy())
+                evaluation_labels.append(tensors["labels"].detach().cpu().numpy())
+                evaluation_indices.append(tensors["indices"].detach().cpu().numpy())
+            total_loss += batch_loss * batch_count
+            correct += batch_correct
+            seen += batch_count
             batches_seen += 1
-            if joint and training and maximum is None and batches_seen >= math.ceil(len(joint_train.hlt_view.labels) / int(args.batch_size)):
-                break
+
         if seen == 0:
             raise RuntimeError(f"{split} produced no tagger batches")
-        result = {
-            "loss": total_loss / seen,
-            "accuracy": correct / seen,
-            "n_jets": seen,
-            "n_batches": batches_seen,
-            "reconstructor_trainability": trainability,
-            "root_provenance": root_provenance,
-        }
-        if not training:
-            result.update(
-                _detailed_eval_metrics(
-                    np.concatenate(evaluation_logits, axis=0),
-                    np.concatenate(evaluation_labels, axis=0),
-                )
+        if training:
+            reduced_loss, reduced_seen = all_reduce_float64_pair(
+                distributed_runtime, total_loss, seen, device=device
             )
+            global_correct = all_reduce_sum_int(
+                distributed_runtime, correct, device=device
+            )
+            result = {
+                "loss": reduced_loss / reduced_seen,
+                "accuracy": global_correct / reduced_seen,
+                "n_jets": int(reduced_seen),
+                "n_batches": batches_seen,
+                "rank_batches": batches_seen * distributed_runtime.world_size,
+                "reconstructor_trainability": trainability,
+                "root_provenance": root_provenance,
+                "global_batch_plan_hashes": plan_hashes,
+                "global_effective_batch": global_batch_size,
+            }
+        else:
+            local_evaluation_indices = np.concatenate(
+                evaluation_indices, axis=0
+            ).astype(np.int64, copy=False)
+            gathered_indices = all_gather_objects(
+                distributed_runtime, local_evaluation_indices.tolist()
+            )
+            if maximum_batches is not None:
+                ordered_indices = tuple(
+                    int(index) for row in gathered_indices for index in row
+                )
+                if len(ordered_indices) != len(set(ordered_indices)):
+                    raise RuntimeError(
+                        "bounded tagger validation overlaps identities across ranks"
+                    )
+                partial_jet_ids = tuple(
+                    validation_hlt_view.jet_ids[index] for index in ordered_indices
+                )
+                local_start = sum(
+                    len(gathered_indices[rank])
+                    for rank in range(distributed_runtime.rank)
+                )
+                local_stop = local_start + len(local_evaluation_indices)
+                validation_range = validation_range_row(
+                    split=split,
+                    rank=distributed_runtime.rank,
+                    start=local_start,
+                    stop=local_stop,
+                    jet_ids=partial_jet_ids,
+                )
+                expected_validation_jet_ids = partial_jet_ids
+            else:
+                validation_range = (
+                    source.last_validation_range
+                    if joint
+                    else validation_range_row(
+                        split=split,
+                        rank=distributed_runtime.rank,
+                        start=source.rank_start,
+                        stop=source.rank_stop,
+                        jet_ids=source.hlt.jet_ids,
+                    )
+                )
+                expected_validation_jet_ids = validation_hlt_view.jet_ids
+            if validation_range is None:
+                raise RuntimeError("tagger validation lacks immutable range coverage")
+            weights = {
+                name: float(
+                    {
+                        "label_ce": objective_config.label_ce,
+                        "hlt_anchor_ce": objective_config.hlt_anchor_ce,
+                        "joint_reconstruction": objective_config.joint_reconstruction,
+                        "pseudo_aux_ce": objective_config.pseudo_aux_ce,
+                        "hierarchy_aux_ce": objective_config.hierarchy_aux_ce,
+                        "cross_view_agreement": objective_config.cross_view_agreement,
+                        "offline_logit_kd": objective_config.offline_logit_kd,
+                    }[name]
+                )
+                for name in required_terms
+            }
+            reduced = finalize_typed_validation(
+                accumulator,
+                runtime=distributed_runtime,
+                device=device,
+                required_losses=required_terms,
+                effective_weights=weights,
+                validation_range=validation_range,
+                expected_jet_ids=expected_validation_jet_ids,
+                split=split,
+            )
+            gathered = all_gather_objects(
+                distributed_runtime,
+                {
+                    "logits": np.concatenate(evaluation_logits, axis=0),
+                    "labels": np.concatenate(evaluation_labels, axis=0),
+                },
+            )
+            detail = _detailed_eval_metrics(
+                np.concatenate([row["logits"] for row in gathered], axis=0),
+                np.concatenate([row["labels"] for row in gathered], axis=0),
+            )
+            roots = all_gather_objects(distributed_runtime, root_provenance)
+            result = {
+                "loss": float(reduced["selection_score"]),
+                "accuracy": float(reduced["metrics"]["accuracy"]),
+                "n_jets": int(reduced["n_jets"]),
+                "n_batches": int(reduced["n_batches"]),
+                "reconstructor_trainability": trainability,
+                "root_provenance": next(
+                    (row for row in roots if isinstance(row, Mapping)), None
+                ),
+                "validation_reduction": reduced,
+                **detail,
+            }
         return result
+
+    training_started = time.perf_counter()
 
     # E1 is the declared untrained arithmetic mean. It still writes a selected
     # checkpoint so prediction/report tooling has one immutable artifact.
@@ -1123,71 +1751,171 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
         train_metrics = run_epoch(training=True, epoch=epoch)
         val_metrics = run_epoch(training=False, epoch=epoch)
         curves.append({"epoch": epoch, "model_train": train_metrics, "model_val": val_metrics})
-        if val_metrics["accuracy"] > best_accuracy or (
+        selected_this_epoch = val_metrics["accuracy"] > best_accuracy or (
             np.isclose(val_metrics["accuracy"], best_accuracy) and val_metrics["loss"] < best_loss
-        ):
+        )
+        selected_this_epoch = bool(
+            broadcast_object(
+                distributed_runtime,
+                selected_this_epoch if distributed_runtime.is_primary else None,
+            )
+        )
+        if selected_this_epoch:
             best_accuracy = float(val_metrics["accuracy"])
             best_loss = float(val_metrics["loss"])
             best_val_metrics = dict(val_metrics)
-            torch.save(
+            if distributed_runtime.is_primary:
+                write_selected_tagger(
+                    {
+                        "checkpoint_contract": ABPH_TAGGER_RUNTIME_CONTRACT,
+                        "checkpoint_role": "best_model_val",
+                        "variant_name": variant_name,
+                        "resolved_variant_config_hash": resolved["resolved_config_hash"],
+                        "model_state_dict": model.state_dict(),
+                        "reconstructor_state_dict": None if reconstructor is None else reconstructor.state_dict(),
+                        "reconstructor_hierarchy_names": (
+                            [] if reconstructor is None else list(reconstructor.hierarchy_names)
+                        ),
+                        "model_val": val_metrics,
+                        "final_test_loaded": False,
+                        "teacher_logits_loaded": objective_config.requires_teacher_logits,
+                    },
+                )
+            barrier(distributed_runtime)
+    if effective_epochs == 0:
+        val_metrics = run_epoch(training=False, epoch=0)
+        best_accuracy = float(val_metrics["accuracy"])
+        best_loss = float(val_metrics["loss"])
+        best_val_metrics = dict(val_metrics)
+        if distributed_runtime.is_primary:
+            write_selected_tagger(
                 {
                     "checkpoint_contract": ABPH_TAGGER_RUNTIME_CONTRACT,
                     "checkpoint_role": "best_model_val",
                     "variant_name": variant_name,
                     "resolved_variant_config_hash": resolved["resolved_config_hash"],
                     "model_state_dict": model.state_dict(),
-                    "reconstructor_state_dict": None if reconstructor is None else reconstructor.state_dict(),
-                    "reconstructor_hierarchy_names": (
-                        [] if reconstructor is None else list(reconstructor.hierarchy_names)
-                    ),
+                    "reconstructor_state_dict": None,
                     "model_val": val_metrics,
                     "final_test_loaded": False,
-                    "teacher_logits_loaded": objective_config.requires_teacher_logits,
+                    "teacher_logits_loaded": False,
                 },
-                best_path,
             )
-    if effective_epochs == 0:
-        val_metrics = run_epoch(training=False, epoch=0)
-        best_accuracy = float(val_metrics["accuracy"])
-        best_loss = float(val_metrics["loss"])
-        best_val_metrics = dict(val_metrics)
-        torch.save(
-            {
-                "checkpoint_contract": ABPH_TAGGER_RUNTIME_CONTRACT,
-                "checkpoint_role": "best_model_val",
-                "variant_name": variant_name,
-                "resolved_variant_config_hash": resolved["resolved_config_hash"],
-                "model_state_dict": model.state_dict(),
-                "reconstructor_state_dict": None,
-                "model_val": val_metrics,
-                "final_test_loaded": False,
-                "teacher_logits_loaded": False,
-            },
-            best_path,
-        )
+        barrier(distributed_runtime)
         curves.append({"epoch": None, "model_train": None, "model_val": val_metrics})
-    (output_dir / "training_curves.json").write_text(
-        json.dumps(curves, indent=2, sort_keys=True), encoding="utf-8"
+    if distributed_runtime.is_primary:
+        (output_dir / "training_curves.json").write_text(
+            json.dumps(curves, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    barrier(distributed_runtime)
+    elapsed_rows = all_gather_objects(
+        distributed_runtime, float(time.perf_counter() - training_started)
     )
+    training_wall_seconds = max(float(value) for value in elapsed_rows)
+    all_plan_hashes = tuple(
+        str(plan_hash)
+        for row in curves
+        if isinstance(row.get("model_train"), Mapping)
+        for plan_hash in row["model_train"].get("global_batch_plan_hashes", ())
+    )
+    global_batch_plan_ledger = {
+        "contract": "adaptive_binary_tagger_global_batch_plan_ledger_v1",
+        "count": len(all_plan_hashes),
+        "plan_hashes": list(all_plan_hashes),
+        "aggregate_hash": canonical_hash(list(all_plan_hashes)),
+    }
     target_provenance = (
         joint_val.target_provenance
         if isinstance(joint_val, _PairedHierarchyTargetBatchSource)
         else _selected_target_provenance(root, cache_names)
     )
     provenance = _source_provenance(
-        frozen_val,
+        joint_val if joint else frozen_val,
         target_provenance=target_provenance,
     )
+    if joint:
+        if not joint_consumer_schema_hash:
+            raise RuntimeError("joint tagger produced no consumer pseudo schema hash")
+        provenance.update(
+            {
+                "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+                "consumer_pseudo_schema_hash": joint_consumer_schema_hash,
+                "consumer_pseudo_member_schema_hashes": {
+                    "joint_differentiable": joint_consumer_schema_hash
+                },
+                "consumer_only_pseudo_at_tagger_boundary": True,
+            }
+        )
     if best_val_metrics is None:
         raise RuntimeError("tagger training selected no model-validation metrics")
     checkpoint_hash = _sha256_file(best_path)
-    return {
+    checkpoint_payload = _torch_load(best_path, device="cpu")
+    checkpoint_provenance = selected_checkpoint_provenance(
+        best_path, checkpoint_payload
+    )
+    if joint:
+        pseudo_execution = {
+            "execution_mode": "joint_differentiable",
+            "consumer_pseudo_schema_hash": joint_consumer_schema_hash,
+            "pseudo_representations_written_persistently": False,
+            "regenerated_shards": 0,
+            "cache_hit_rate": None,
+        }
+    else:
+        pseudo_execution = {
+            "model_train": (
+                frozen_train.telemetry()
+                if hasattr(frozen_train, "telemetry")
+                else {"execution_mode": "persistent_legacy_cache"}
+            ),
+            "model_val": (
+                frozen_val.telemetry()
+                if hasattr(frozen_val, "telemetry")
+                else {"execution_mode": "persistent_legacy_cache"}
+            ),
+            "pseudo_representations_written_persistently": not streaming_storage_enabled(),
+        }
+    pseudo_execution_rows = all_gather_objects(
+        distributed_runtime,
+        {
+            "rank": distributed_runtime.rank,
+            "source": pseudo_execution,
+        },
+    )
+    pseudo_execution = {
+        "contract": "adaptive_binary_tagger_rank_local_pseudo_execution_v1",
+        "world_size": distributed_runtime.world_size,
+        "rank_sources": list(pseudo_execution_rows),
+        "rank_source_aggregate_hash": canonical_hash(pseudo_execution_rows),
+        "pseudo_representations_written_persistently": any(
+            bool(row["source"].get("pseudo_representations_written_persistently"))
+            for row in pseudo_execution_rows
+        ),
+    }
+    report = {
         "contract": ABPH_TAGGER_RUNTIME_CONTRACT,
         "ok": True,
+        "storage_profile": active_storage_profile(),
         "variant_name": variant_name,
         "variant": dict(resolved["variant"]),
         "resolved_variant_config_hash": resolved["resolved_config_hash"],
         "selected_checkpoint_hash": checkpoint_hash,
+        "selected_checkpoint_provenance": checkpoint_provenance,
+        "distributed_runtime": {
+            "contract": "adaptive_binary_tagger_distributed_runtime_v1",
+            "world_size": distributed_runtime.world_size,
+            "backend": distributed_runtime.backend,
+            "global_effective_batch": global_batch_size,
+            "local_batch_size": local_batch_size,
+            "training_wall_seconds": training_wall_seconds,
+            "initial_parameter_state_hash": initial_parameter_state_hash,
+            "global_batch_plan_ledger": global_batch_plan_ledger,
+            "validation_coverage_hash": best_val_metrics.get(
+                "validation_reduction", {}
+            ).get("validation_coverage", {}).get("validation_coverage_hash"),
+            "rank_zero_only_persistent_writes": True,
+            "bounded_failure_abort": True,
+        },
         "source_git_commit": os.environ.get("FRESH_SOURCE_COMMIT", "recorded_by_slurm_run_config"),
         "source_status_hash": os.environ.get("FRESH_SOURCE_STATUS_HASH", "recorded_by_slurm_run_config"),
         "metrics": {
@@ -1214,6 +1942,9 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
             "artifact": {
                 "resolved_variant_config_hash": resolved["resolved_config_hash"],
                 "selected_checkpoint_hash": checkpoint_hash,
+                "selected_checkpoint_content_hash": checkpoint_provenance.get(
+                    "content_hash"
+                ),
                 "source_git_commit": os.environ.get("FRESH_SOURCE_COMMIT", "recorded_by_slurm_run_config"),
                 "source_status_hash": os.environ.get("FRESH_SOURCE_STATUS_HASH", "recorded_by_slurm_run_config"),
             },
@@ -1232,6 +1963,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                     reconstructor is not None and len(reconstructor.hierarchy_names) == 2
                 ),
                 "root_provenance": curves[-1]["model_val"].get("root_provenance"),
+                "pseudo_execution": pseudo_execution,
             },
             "initialization": initialization_report,
             "objective": objective_config.to_dict(),
@@ -1258,11 +1990,21 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
             },
         },
     }
+    if not joint:
+        for source in (frozen_train, frozen_val):
+            if hasattr(source, "close"):
+                source.close()
+    barrier(distributed_runtime)
+    destroy_distributed_runtime(distributed_runtime)
+    return report
 
 
 __all__ = [
     "ABPH_TAGGER_RUNTIME_CONTRACT",
     "FrozenPseudoBatch",
     "FrozenPseudoBatchSource",
+    "FrozenReconstructorRamSource",
+    "build_frozen_pseudo_generators",
+    "build_frozen_reconstructor_ram_source",
     "train_tagger_variant",
 ]

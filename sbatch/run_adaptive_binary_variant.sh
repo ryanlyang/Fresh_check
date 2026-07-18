@@ -16,6 +16,7 @@ IFS=$'\n\t'
 source "${PROJECT_DIR}/sbatch/common.sh"
 VARIANT="${1:?Usage: run_adaptive_binary_variant.sh <registry-variant>}"
 SEED_INDEX="${2:-1}"
+OUTPUT_DIR_OVERRIDE="${3:-}"
 : "${ABPH_ROOT:=${OUTPUT_ROOT}/adaptive_binary_pseudooffline}"
 : "${ABPH_VARIANT_EXECUTOR:=${PROJECT_DIR}/scripts/train_adaptive_binary_pseudooffline_variant.py}"
 : "${ABPH_JOB_LAUNCHER:=direct}"
@@ -24,6 +25,8 @@ SEED_INDEX="${2:-1}"
 : "${ABPH_DISTRIBUTED_NTASKS_PER_NODE:=1}"
 : "${ABPH_DISTRIBUTED_GPUS_PER_NODE:=1}"
 : "${ABPH_DISTRIBUTED_WORLD_SIZE:=1}"
+: "${ABPH_TAGGER_PARALLELISM:=single}"
+: "${ABPH_TAGGER_DISTRIBUTED_WORLD_SIZE:=${ABPH_DISTRIBUTED_WORLD_SIZE}}"
 export PYTHONNOUSERSITE=1
 fresh_setup
 fresh_require_file "${ABPH_VARIANT_EXECUTOR}"
@@ -32,6 +35,13 @@ if [[ "${VARIANT}" =~ ^[BCD] ]]; then
     --path "${ABPH_ROOT}/audits/actual_target_feasibility.json"
 fi
 cmd=("${PYTHON_BIN}" -u "${ABPH_VARIANT_EXECUTOR}" --variant "${VARIANT}" --seed-index "${SEED_INDEX}" --campaign-root "${ABPH_ROOT}" --device "${DEVICE}")
+if [[ -n "${OUTPUT_DIR_OVERRIDE}" ]]; then
+  cmd+=(--output-dir "${OUTPUT_DIR_OVERRIDE}")
+fi
+rank_cmd=("${cmd[@]}")
+if [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]]; then
+  rank_cmd=(bash "${PROJECT_DIR}/sbatch/run_with_adaptive_binary_ram_workspace.sh" "${cmd[@]}")
+fi
 
 if [[ "${VARIANT}" =~ ^[BCD] ]]; then
   case "${ABPH_RECONSTRUCTOR_PARALLELISM:-single}" in
@@ -58,9 +68,41 @@ if [[ "${VARIANT}" =~ ^[BCD] ]]; then
       exit 2
       ;;
   esac
+elif [[ "${VARIANT}" =~ ^[EF] || "${VARIANT}" =~ ^G[01]_ ]]; then
+  case "${ABPH_TAGGER_PARALLELISM}" in
+    single)
+      [[ "${ABPH_JOB_LAUNCHER}" == "direct" && "${ABPH_TAGGER_DISTRIBUTED_WORLD_SIZE}" == "1" ]] || {
+        echo "single tagger mode requires launcher=direct and world_size=1" >&2
+        exit 2
+      }
+      ;;
+    ddp4)
+      [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]] || {
+        echo "tagger DDP4 is certified only for streaming_30gb_v1" >&2
+        exit 2
+      }
+      [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]] || { echo "tagger ddp4 requires srun" >&2; exit 2; }
+      [[ "${ABPH_DISTRIBUTED_NODES}" == "4" && "${ABPH_DISTRIBUTED_NTASKS}" == "4" ]] || {
+        echo "tagger ddp4 requires four nodes and four tasks" >&2
+        exit 2
+      }
+      [[ "${ABPH_DISTRIBUTED_NTASKS_PER_NODE}" == "1" && "${ABPH_DISTRIBUTED_GPUS_PER_NODE}" == "1" ]] || {
+        echo "tagger ddp4 requires one task and one GPU per node" >&2
+        exit 2
+      }
+      [[ "${ABPH_TAGGER_DISTRIBUTED_WORLD_SIZE}" == "4" ]] || {
+        echo "tagger ddp4 world size must be four" >&2
+        exit 2
+      }
+      ;;
+    *)
+      echo "unsupported ABPH_TAGGER_PARALLELISM=${ABPH_TAGGER_PARALLELISM}" >&2
+      exit 2
+      ;;
+  esac
 else
   [[ "${ABPH_JOB_LAUNCHER}" == "direct" && "${ABPH_DISTRIBUTED_WORLD_SIZE}" == "1" ]] || {
-    echo "only B/C/D reconstructor jobs may use distributed launch" >&2
+    echo "this variant does not support distributed launch" >&2
     exit 2
   }
 fi
@@ -92,7 +134,7 @@ if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
     --kill-on-bad-exit=1 \
     --cpu-bind=cores \
     --export=ALL \
-    "${cmd[@]}"
+    "${rank_cmd[@]}"
 else
-  fresh_run "${cmd[@]}"
+  fresh_run "${rank_cmd[@]}"
 fi

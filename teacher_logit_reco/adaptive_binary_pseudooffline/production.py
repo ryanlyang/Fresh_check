@@ -7,9 +7,12 @@ only the training step; ``deploy`` accepts HLT tensors and nothing privileged.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -26,10 +29,19 @@ from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
 
 from .binary_accounting import AccountingState
 from .cache import (
+    AdaptiveBinaryTargetShard,
     load_adaptive_binary_target_cache_metadata,
     load_adaptive_binary_target_shard,
 )
 from .config import canonical_hash
+from .ram_workspace import RankLocalWorkspace
+from .target_mode import (
+    ABPH_RANK_LOCAL_TARGET_MODE,
+    ABPH_SHARED_TRANSIENT_TARGET_MODE,
+    build_rank_local_offline_view,
+    load_target_mode_selection,
+    rank_local_target_metadata,
+)
 from .distributed_stream import (
     GlobalBatchCursor,
     GlobalBatchPlan,
@@ -71,6 +83,14 @@ from .particle_renderer import (
     RenderedParticleBatch,
 )
 from .prediction_cache import package_deployable_pseudo_views
+from .pseudo_consumer import (
+    ABPH_CONSUMER_FRONTIER_FIELDS,
+    ABPH_CONSUMER_PARTICLE_FIELDS,
+    ABPH_CONSUMER_PSEUDO_CONTRACT,
+    ABPH_RENDERER_ONLY_FRONTIER_FIELDS,
+    ABPH_RENDERER_ONLY_PARTICLE_FIELDS,
+    consumer_pseudo_schema_hash,
+)
 from .root_compiler import CompiledRootState, ROOT_FEATURE_NAMES, compile_root_state
 from .root_model import SemanticRootPrediction, SemanticRootPredictor, SemanticRootPredictorConfig
 from .root_objectives import compute_root_losses, compute_root_metrics
@@ -84,10 +104,16 @@ from .tagger import (
 )
 from .targets import (
     ABPH_LEVEL_CAPACITIES,
+    ABPH_TARGET_BUILDER_CONTRACT,
+    ABPH_TARGET_BUILDER_VERSION,
+    GROUP_FEATURE_NAMES,
     PARTICLE_TARGET_NAMES,
     TOPOLOGY_ACTIVE_TERMINAL,
+    AdaptiveBinaryHierarchyLayout,
     AdaptiveBinaryTargetBatch,
+    build_adaptive_binary_targets,
 )
+from .checkpoints import load_torch_checkpoint, selected_model_state
 from .training import (
     ReconstructorStepContext,
     ReconstructorStepResult,
@@ -268,6 +294,10 @@ def _concatenate_target_batches(
     )
 
 
+def _target_batch_nbytes(targets: AdaptiveBinaryTargetBatch) -> int:
+    return sum(int(value.nbytes) for value in targets.array_dict().values())
+
+
 class AdaptiveBinaryTargetBatchSource:
     """Stateful target-shard reader aligned to the immutable HLT cache."""
 
@@ -285,10 +315,14 @@ class AdaptiveBinaryTargetBatchSource:
         rank: int = 0,
         world_size: int = 1,
         runtime_contract_hash: str = ABPH_PRODUCTION_RUNTIME_CONTRACT,
+        target_mode_report: str | Path | None = None,
+        offline_cache_dir: str | Path | None = None,
+        manifest_path: str | Path | None = None,
+        data_dir: str | Path | None = None,
+        workspace: RankLocalWorkspace | None = None,
     ) -> None:
         if int(batch_size) <= 0:
             raise ValueError("batch_size must be positive")
-        self.hlt_view = load_cached_hlt_view(hlt_cache_dir, split, verify_hash=True)
         self.target_cache_dir = str(target_cache_dir)
         self.split = str(split)
         self.grouping = str(grouping)
@@ -303,9 +337,142 @@ class AdaptiveBinaryTargetBatchSource:
         self.runtime_contract_hash = str(runtime_contract_hash)
         if not self.runtime_contract_hash:
             raise ValueError("target source runtime contract hash is required")
-        metadata = load_adaptive_binary_target_cache_metadata(
-            target_cache_dir, split, grouping
+        report_path = target_mode_report or os.environ.get("ABPH_TARGET_MODE_REPORT")
+        if report_path and not Path(report_path).is_file():
+            if (
+                target_mode_report is not None
+                or os.environ.get("ABPH_STORAGE_PROFILE") == "streaming_30gb_v1"
+            ):
+                raise FileNotFoundError(
+                    f"immutable target-mode selection is missing: {report_path}"
+                )
+            report_path = None
+        self.target_mode = ABPH_SHARED_TRANSIENT_TARGET_MODE
+        self.target_mode_selection: Mapping[str, Any] | None = None
+        if report_path:
+            campaign_root = Path(target_cache_dir).resolve().parent
+            canonical_report = (
+                campaign_root / "audits" / "target_mode_selection.json"
+            ).resolve()
+            if Path(report_path).resolve() != canonical_report:
+                raise ValueError(
+                    "workers must consume the canonical campaign target-mode selection"
+                )
+            self.target_mode_selection = load_target_mode_selection(
+                report_path, campaign_root=campaign_root
+            )
+            self.target_mode = str(self.target_mode_selection["selected_mode"])
+        self._workspace = workspace
+        self._hlt_reservation_id: str | None = None
+        self._rank_local_cache: OrderedDict[
+            tuple[int, int, int], tuple[AdaptiveBinaryTargetShard, str, int]
+        ] = OrderedDict()
+        self._rank_local_cache_bytes = 0
+        self._manifest_path = None if manifest_path is None else Path(manifest_path)
+        self._data_dir = None if data_dir is None else str(data_dir)
+        self._offline_cache_dir = (
+            Path(offline_cache_dir)
+            if offline_cache_dir is not None
+            else Path(target_cache_dir).resolve().parent / "inputs" / "offline_cache"
         )
+        if report_path:
+            self._workspace = self._workspace or RankLocalWorkspace.from_environment(
+                rank=self.rank
+            )
+            hlt_metadata_path = Path(hlt_cache_dir) / f"{split}_fixed_hlt_metadata.json"
+            hlt_metadata = json.loads(hlt_metadata_path.read_text(encoding="utf-8"))
+            expected_hlt_bytes = int(hlt_metadata["n_jets"]) * (
+                128 * 14 * 4 + 128 + 16
+            )
+            self._hlt_reservation_id = self._workspace.reserve(
+                owner=f"target_source:{split}:{grouping}:{self.rank}",
+                role="immutable_hlt_source_view",
+                expected_bytes=max(1, expected_hlt_bytes),
+            )
+        try:
+            self.hlt_view = load_cached_hlt_view(hlt_cache_dir, split, verify_hash=True)
+            if self._workspace is not None and self._hlt_reservation_id is not None:
+                measured_hlt_bytes = sum(
+                    int(value.nbytes)
+                    for value in (
+                        self.hlt_view.tokens,
+                        self.hlt_view.mask,
+                        self.hlt_view.labels,
+                    )
+                )
+                self._workspace.commit(
+                    self._hlt_reservation_id, measured_bytes=measured_hlt_bytes
+                )
+        except Exception:
+            if self._workspace is not None and self._hlt_reservation_id is not None:
+                self._workspace.release(self._hlt_reservation_id)
+            raise
+        if self.target_mode == ABPH_RANK_LOCAL_TARGET_MODE:
+            if self.target_mode_selection is None:
+                raise ValueError("rank-local targets require an immutable mode selection")
+            self._manifest_path = self._manifest_path or (
+                Path(target_cache_dir).resolve().parent
+                / "inputs"
+                / "split_manifest"
+                / "split_manifest.json.gz"
+            )
+            self._data_dir = self._data_dir or str(
+                self.target_mode_selection.get("data_dir") or ""
+            )
+            if not self._manifest_path.is_file() or not self._data_dir:
+                raise FileNotFoundError(
+                    "rank-local target construction requires the manifest and raw data directory"
+                )
+            offline_metadata_path = self._offline_cache_dir / f"{split}_offline_metadata.json"
+            offline_metadata = json.loads(
+                offline_metadata_path.read_text(encoding="utf-8")
+            )
+            split_provenance = dict(
+                self.target_mode_selection.get("source_provenance_by_split", {})
+            ).get(split)
+            if not isinstance(split_provenance, Mapping):
+                raise ValueError(f"rank-local target selection lacks {split} provenance")
+            for label, actual, expected in (
+                (
+                    "manifest",
+                    self.hlt_view.metadata.get("source_manifest_hash"),
+                    split_provenance.get("source_manifest_hash"),
+                ),
+                (
+                    "HLT cache",
+                    self.hlt_view.metadata.get("hlt_content_hash"),
+                    split_provenance.get("hlt_content_hash"),
+                ),
+                (
+                    "offline cache",
+                    offline_metadata.get("offline_content_hash"),
+                    split_provenance.get("offline_content_hash"),
+                ),
+            ):
+                if actual in {None, ""} or actual != expected:
+                    raise ValueError(f"rank-local target selection is stale for {label}")
+            assert self._workspace is not None
+            cache_fraction = float(
+                os.environ.get("ABPH_RANK_LOCAL_TARGET_CACHE_FRACTION", "0.25")
+            )
+            if not 0.0 < cache_fraction <= 0.5:
+                raise ValueError("rank-local target cache fraction must lie in (0, 0.5]")
+            self._rank_local_cache_limit = int(
+                self._workspace.reservation_limit_bytes * cache_fraction
+            )
+            n_jets = len(self.hlt_view.jet_ids)
+            metadata = rank_local_target_metadata(
+                selection=self.target_mode_selection,
+                split=split,
+                grouping=grouping,
+                n_jets=n_jets,
+                jet_identity_hash_value=jet_identity_hash(self.hlt_view.jet_ids),
+            )
+        else:
+            self._rank_local_cache_limit = 0
+            metadata = load_adaptive_binary_target_cache_metadata(
+                target_cache_dir, split, grouping
+            )
         self.metadata = metadata
         self.n_shards = int(metadata["n_shards"])
         self._shard_metadata = tuple(dict(value) for value in metadata.get("shards", ()))
@@ -355,6 +522,94 @@ class AdaptiveBinaryTargetBatchSource:
                 )
             self._active_shard_id = value
         return self._active
+
+    def _evict_rank_local_until(self, expected_bytes: int) -> None:
+        if expected_bytes > self._rank_local_cache_limit:
+            raise MemoryError(
+                "one rank-local target slice exceeds the bounded target-cache allocation"
+            )
+        while (
+            self._rank_local_cache
+            and self._rank_local_cache_bytes + expected_bytes
+            > self._rank_local_cache_limit
+        ):
+            _key, (_shard, reservation_id, measured) = self._rank_local_cache.popitem(
+                last=False
+            )
+            self._rank_local_cache_bytes -= measured
+            assert self._workspace is not None
+            self._workspace.release(reservation_id)
+
+    def _build_rank_local_slice(self, item: ShardSlice) -> AdaptiveBinaryTargetShard:
+        if self.target_mode != ABPH_RANK_LOCAL_TARGET_MODE:
+            raise RuntimeError("rank-local target builder used in shared-cache mode")
+        key = (int(item.shard_id), int(item.local_start), int(item.local_stop))
+        cached = self._rank_local_cache.pop(key, None)
+        if cached is not None:
+            self._rank_local_cache[key] = cached
+            return cached[0]
+        shard_row = self._shard_metadata[int(item.shard_id)]
+        global_start = int(shard_row["start"]) + int(item.local_start)
+        global_stop = int(shard_row["start"]) + int(item.local_stop)
+        identities = tuple(self.hlt_view.jet_ids[global_start:global_stop])
+        measurement = self.target_mode_selection["grouping_measurements"][self.grouping]
+        expected = max(
+            1,
+            math.ceil(
+                float(measurement["logical_bytes_per_jet"])
+                * len(identities)
+                * 1.25
+            )
+            + len(identities) * (128 * 14 * 4 + 128),
+        )
+        self._evict_rank_local_until(expected)
+        assert self._workspace is not None and self._manifest_path is not None
+        reservation_id = self._workspace.reserve(
+            owner=f"target_source:{self.split}:{self.grouping}:{self.rank}",
+            role=f"planned_slice:{item.shard_id}:{item.local_start}:{item.local_stop}",
+            expected_bytes=expected,
+        )
+        try:
+            offline = build_rank_local_offline_view(
+                manifest_path=self._manifest_path,
+                split=self.split,
+                identities=identities,
+                data_dir=self._data_dir,
+            )
+            if tuple(offline.jet_ids) != identities:
+                raise ValueError("rank-local raw ROOT identities differ from the batch plan")
+            targets = build_adaptive_binary_targets(
+                self.hlt_view.tokens[global_start:global_stop],
+                self.hlt_view.mask[global_start:global_stop],
+                offline.tokens,
+                offline.mask,
+                jet_ids=identities,
+                layout=AdaptiveBinaryHierarchyLayout(grouping=self.grouping),
+            )
+            measured = _target_batch_nbytes(targets)
+            self._workspace.commit(reservation_id, measured_bytes=measured)
+        except Exception:
+            self._workspace.release(reservation_id)
+            raise
+        shard = AdaptiveBinaryTargetShard(
+            targets=targets,
+            labels=np.asarray(self.hlt_view.labels[global_start:global_stop]),
+            jet_ids=identities,
+            split=self.split,
+            grouping=self.grouping,
+            shard_index=int(item.shard_id),
+            start=global_start,
+            stop=global_stop,
+            metadata={**self.metadata, "rank_local_slice": key},
+        )
+        try:
+            self._evict_rank_local_until(measured)
+        except Exception:
+            self._workspace.release(reservation_id)
+            raise
+        self._rank_local_cache[key] = (shard, reservation_id, measured)
+        self._rank_local_cache_bytes += measured
+        return shard
 
     def set_runtime_profiler(self, profiler: RuntimeProfiler | None) -> None:
         self._runtime_profiler = profiler
@@ -471,15 +726,23 @@ class AdaptiveBinaryTargetBatchSource:
         background_decompression_seconds = 0.0
         for item in slices:
             shard_started = time.perf_counter()
-            shard = self._load_shard(
-                item.shard_id, profile_runtime=profile_runtime
+            shard = (
+                self._build_rank_local_slice(item)
+                if self.target_mode == ABPH_RANK_LOCAL_TARGET_MODE
+                else self._load_shard(item.shard_id, profile_runtime=profile_runtime)
             )
             if not profile_runtime:
                 background_decompression_seconds += time.perf_counter() - shard_started
-            local_start = int(item.local_start)
-            local_stop = int(item.local_stop)
-            global_start = int(shard.start) + local_start
-            global_stop = int(shard.start) + local_stop
+            if self.target_mode == ABPH_RANK_LOCAL_TARGET_MODE:
+                local_start = 0
+                local_stop = int(shard.stop) - int(shard.start)
+                global_start = int(shard.start)
+                global_stop = int(shard.stop)
+            else:
+                local_start = int(item.local_start)
+                local_stop = int(item.local_stop)
+                global_start = int(shard.start) + local_start
+                global_stop = int(shard.start) + local_stop
             expected_ids = tuple(self.hlt_view.jet_ids[global_start:global_stop])
             actual_ids = tuple(shard.jet_ids[local_start:local_stop])
             if expected_ids != actual_ids:
@@ -631,6 +894,12 @@ class AdaptiveBinaryTargetBatchSource:
             "rank": self.rank,
             "world_size": self.world_size,
             "runtime_contract_hash": self.runtime_contract_hash,
+            "target_mode": self.target_mode,
+            "target_mode_selection_hash": (
+                None
+                if self.target_mode_selection is None
+                else self.target_mode_selection.get("content_hash")
+            ),
             "rank_batch_counter": self._batches_seen,
             "global_cursor": cursor.to_dict(),
             "next_plan_cursor": cursor.to_dict(),
@@ -652,6 +921,15 @@ class AdaptiveBinaryTargetBatchSource:
             raise ValueError("target batch-source rank topology mismatch")
         if payload.get("runtime_contract_hash") != self.runtime_contract_hash:
             raise ValueError("target batch-source runtime contract mismatch")
+        if payload.get("target_mode", ABPH_SHARED_TRANSIENT_TARGET_MODE) != self.target_mode:
+            raise ValueError("target batch-source target mode mismatch")
+        expected_selection_hash = (
+            None
+            if self.target_mode_selection is None
+            else self.target_mode_selection.get("content_hash")
+        )
+        if payload.get("target_mode_selection_hash") != expected_selection_hash:
+            raise ValueError("target batch-source target-mode selection mismatch")
         saved_batch_size = int(payload.get("batch_size", self.batch_size))
         if saved_batch_size <= 0:
             raise ValueError("target batch-source checkpoint batch size is invalid")
@@ -677,6 +955,11 @@ class AdaptiveBinaryTargetBatchSource:
             raise ValueError("checkpoint plan does not lead to the saved next cursor")
         self._active = None
         self._active_shard_id = None
+        if self._workspace is not None:
+            for _shard, reservation_id, _measured in self._rank_local_cache.values():
+                self._workspace.release(reservation_id)
+        self._rank_local_cache.clear()
+        self._rank_local_cache_bytes = 0
 
 
 class _ParameterGroup:
@@ -1414,6 +1697,8 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
 
 def package_trainable_pseudo_views(
     output: AdaptiveBinaryReconstructionOutput,
+    *,
+    consumer_only: bool = True,
 ) -> PseudoViewInputs:
     """Torch-native Step-9 schema that preserves tagger gradients to the renderer."""
 
@@ -1429,27 +1714,11 @@ def package_trainable_pseudo_views(
         ),
     }
     frontier_depths: dict[str, int] = {}
-    particle_fields = (
-        "canonical_features",
-        "side_channels",
-        "four_vector",
-        "mass",
-        "mask",
-        "group_indices",
-        "local_slot_indices",
-        "uncertainty",
-        "slot_hidden",
-    )
-    frontier_fields = (
-        "ledger",
-        "hidden",
-        "support",
-        "uncertainty",
-        "mask",
-        "topology",
-        "parent_indices",
-        "source_child_indices",
-    )
+    particle_fields = ABPH_CONSUMER_PARTICLE_FIELDS
+    frontier_fields = ABPH_CONSUMER_FRONTIER_FIELDS
+    if not consumer_only:
+        particle_fields = (*particle_fields, *ABPH_RENDERER_ONLY_PARTICLE_FIELDS)
+        frontier_fields = (*frontier_fields, *ABPH_RENDERER_ONLY_FRONTIER_FIELDS)
     for name in output.rendered_views:
         rendered = output.rendered_views[name]
         for field_name in particle_fields:
@@ -1468,18 +1737,27 @@ def package_trainable_pseudo_views(
                 arrays[
                     f"frontier__{name}__depth_{depth:02d}__{field_name}"
                 ] = torch.stack([getattr(item, field_name) for item in frontiers], dim=1)
+    diagnostics = {
+        "offline_inputs_loaded": False,
+        "teacher_logits_loaded": False,
+        "offline_target_selected_hypothesis": False,
+        "fixed_evaluation_hypotheses": True,
+        "torch_native_joint_training": True,
+        "consumer_only_pseudo": bool(consumer_only),
+        "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+        "renderer_only_fields_retained": not bool(consumer_only),
+    }
+    diagnostics["consumer_pseudo_schema_hash"] = consumer_pseudo_schema_hash(
+        arrays,
+        hierarchy_names=tuple(output.rendered_views),
+        frontier_depths=frontier_depths,
+    )
     result = PseudoViewInputs(
         arrays=arrays,
         view_names=view_names,
         hierarchy_names=tuple(output.rendered_views),
         frontier_depths=frontier_depths,
-        diagnostics={
-            "offline_inputs_loaded": False,
-            "teacher_logits_loaded": False,
-            "offline_target_selected_hypothesis": False,
-            "fixed_evaluation_hypotheses": True,
-            "torch_native_joint_training": True,
-        },
+        diagnostics=diagnostics,
     )
     result.validate()
     return result
@@ -2050,6 +2328,12 @@ def reconstructor_runtime_provenance(
         "hlt_content_hash": hlt_metadata.get("hlt_content_hash"),
         "offline_cache_content_hash": target_metadata.get("offline_content_hash"),
         "hierarchy_target_content_hash": target_metadata.get("target_content_hash"),
+        "target_mode": target_metadata.get(
+            "target_mode", ABPH_SHARED_TRANSIENT_TARGET_MODE
+        ),
+        "target_mode_selection_hash": target_metadata.get(
+            "target_mode_selection_hash"
+        ),
         "hierarchy_target_schema_hash": canonical_hash(
             {
                 "root": target_metadata.get("root_feature_names"),
@@ -2084,13 +2368,8 @@ def load_selected_reconstructor(
     model = AdaptiveBinaryReconstructorModel(
         hierarchy_names=(grouping,), variant_name=variant_name, smoke=bool(smoke)
     )
-    try:
-        payload = torch.load(Path(checkpoint_path), map_location=device, weights_only=False)
-    except TypeError:  # pragma: no cover - older research PyTorch
-        payload = torch.load(Path(checkpoint_path), map_location=device)
-    state = payload.get("model_state_dict")
-    if not isinstance(state, Mapping):
-        raise ValueError("selected reconstructor checkpoint has no model_state_dict")
+    payload = load_torch_checkpoint(checkpoint_path, device=device)
+    state = selected_model_state(payload)
     model.load_state_dict(state, strict=True)
     model.to(device)
     return model
@@ -2113,14 +2392,8 @@ def build_shared_root_dual_reconstructor(
     torch = require_torch()
 
     def state(path: str | Path) -> Mapping[str, Any]:
-        try:
-            payload = torch.load(Path(path), map_location=device, weights_only=False)
-        except TypeError:  # pragma: no cover
-            payload = torch.load(Path(path), map_location=device)
-        values = payload.get("model_state_dict")
-        if not isinstance(values, Mapping):
-            raise ValueError(f"reconstructor checkpoint {path} lacks model_state_dict")
-        return values
+        payload = load_torch_checkpoint(path, device=device)
+        return selected_model_state(payload)
 
     kt_state = state(kt_checkpoint_path)
     ca_state = state(ca_checkpoint_path)

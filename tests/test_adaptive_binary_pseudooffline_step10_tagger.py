@@ -12,6 +12,10 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.tagger import (
     PseudoViewInputs,
     TreeRelationBias,
     WeaverStagewiseParticleTransformer,
+    build_variant_hierarchy_aware_tagger,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (
+    ABPH_NEURAL_TAGGER_VARIANTS,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.hypothesis_distribution import (
     ABPH_PRIMARY_HYPOTHESIS_NAMES,
@@ -19,13 +23,18 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.hypothesis_distribution im
 from teacher_logit_reco.adaptive_binary_pseudooffline.prediction_cache import (
     DeployablePseudoViewBatch,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.pseudo_consumer import (
+    ABPH_RENDERER_ONLY_FRONTIER_FIELDS,
+    ABPH_RENDERER_ONLY_PARTICLE_FIELDS,
+    consumer_pseudo_array_names,
+    renderer_only_array_names,
+)
 
 
-def _synthetic_inputs(*, dual: bool = False, views: int = 3):
+def _synthetic_inputs(*, dual: bool = False, views: int = 3, latent_dim: int = 4):
     torch.manual_seed(1210)
     batch = 2
     particles = 128
-    latent_dim = 4
     hierarchy_names = (
         ("exclusive_kt", "cambridge_aachen") if dual else ("exclusive_kt",)
     )
@@ -154,6 +163,113 @@ def _model(*, dual: bool = False, independent_roots: bool = False):
         dual_hierarchy=dual,
         independent_roots=independent_roots,
     )
+
+
+def _differentiable_copy(pseudo):
+    arrays = {}
+    for name, value in pseudo.arrays.items():
+        copied = value.detach().clone()
+        if copied.is_floating_point():
+            copied.requires_grad_(True)
+        arrays[name] = copied
+    return PseudoViewInputs(
+        arrays=arrays,
+        view_names=pseudo.view_names,
+        hierarchy_names=pseudo.hierarchy_names,
+        frontier_depths=pseudo.frontier_depths,
+        diagnostics=pseudo.diagnostics,
+    )
+
+
+@pytest.mark.parametrize("dual", (False, True))
+def test_consumer_only_pseudo_matches_full_logits_and_gradients(dual):
+    hlt, hlt_mask, template = _synthetic_inputs(dual=dual)
+    full = _differentiable_copy(template)
+    consumer_source = _differentiable_copy(template)
+    consumer = consumer_source.to_consumer_only()
+    expected_names = set(
+        consumer_pseudo_array_names(
+            consumer.hierarchy_names, consumer.frontier_depths
+        )
+    )
+    assert set(consumer.arrays) == expected_names
+    assert not (
+        set(consumer.arrays)
+        & set(renderer_only_array_names(consumer.hierarchy_names, consumer.frontier_depths))
+    )
+    retained = "particle__exclusive_kt__canonical_features"
+    assert consumer.arrays[retained] is consumer_source.arrays[retained]
+
+    full_model = _model(dual=dual).eval()
+    with torch.no_grad():
+        full_model(hlt, hlt_mask, template)
+    consumer_model = copy.deepcopy(full_model).eval()
+    full_logits = full_model(hlt, hlt_mask, full).logits
+    consumer_logits = consumer_model(hlt, hlt_mask, consumer).logits
+    torch.testing.assert_close(full_logits, consumer_logits, rtol=0.0, atol=0.0)
+
+    full_logits.square().mean().backward()
+    consumer_logits.square().mean().backward()
+    for (full_name, full_parameter), (consumer_name, consumer_parameter) in zip(
+        full_model.named_parameters(), consumer_model.named_parameters()
+    ):
+        assert full_name == consumer_name
+        if full_parameter.grad is None or consumer_parameter.grad is None:
+            assert full_parameter.grad is None and consumer_parameter.grad is None
+        else:
+            torch.testing.assert_close(
+                full_parameter.grad,
+                consumer_parameter.grad,
+                rtol=0.0,
+                atol=0.0,
+            )
+    torch.testing.assert_close(
+        full.arrays[retained].grad,
+        consumer.arrays[retained].grad,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_consumer_contract_lists_every_removed_renderer_field():
+    _, _, pseudo = _synthetic_inputs(dual=True)
+    removed = set(renderer_only_array_names(pseudo.hierarchy_names, pseudo.frontier_depths))
+    for hierarchy in pseudo.hierarchy_names:
+        assert all(
+            f"particle__{hierarchy}__{field}" in removed
+            for field in ABPH_RENDERER_ONLY_PARTICLE_FIELDS
+        )
+        for depth in range(pseudo.frontier_depths[hierarchy]):
+            assert all(
+                f"frontier__{hierarchy}__depth_{depth:02d}__{field}" in removed
+                for field in ABPH_RENDERER_ONLY_FRONTIER_FIELDS
+            )
+
+
+@pytest.mark.parametrize("variant_name", ABPH_NEURAL_TAGGER_VARIANTS)
+def test_every_registered_neural_tagger_reads_consumer_schema(variant_name):
+    model = build_variant_hierarchy_aware_tagger(variant_name, smoke=True).eval()
+    hlt, hlt_mask, pseudo = _synthetic_inputs(
+        dual=model.dual_hierarchy,
+        views=3,
+        latent_dim=64,
+    )
+    pseudo = pseudo.to_consumer_only()
+    independent_roots = None
+    if model.independent_roots:
+        root = pseudo.arrays["shared_root_ledger"]
+        independent_roots = {
+            "exclusive_kt": root,
+            "cambridge_aachen": root + 0.125,
+        }
+    with torch.no_grad():
+        output = model(
+            hlt,
+            hlt_mask,
+            pseudo,
+            independent_root_ledgers=independent_roots,
+        )
+    assert output.logits.shape == (hlt.shape[0], 10)
 
 
 class _FakeEmbed(torch.nn.Module):

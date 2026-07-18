@@ -29,7 +29,19 @@ else:
     _ModuleBase = nn.Module
 
 from .prediction_cache import DeployablePseudoViewBatch
+from .pseudo_consumer import (
+    ABPH_CONSUMER_PSEUDO_CONTRACT,
+    consumer_pseudo_schema_hash,
+    project_consumer_pseudo_arrays,
+    validate_consumer_pseudo_arrays,
+)
 from .schemas import ABPH_MAX_PARTICLES
+from .checkpoints import (
+    ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT,
+    load_torch_checkpoint,
+    selected_checkpoint_provenance,
+    selected_model_state,
+)
 
 
 ABPH_HIERARCHY_TAGGER_CONTRACT = "adaptive_binary_hierarchy_tagger_v1"
@@ -131,19 +143,42 @@ class PseudoViewInputs:
     ) -> "PseudoViewInputs":
         _require_torch()
         batch.validate()
+        batch = batch.to_consumer_only()
         converted: dict[str, Any] = {}
         for name, value in batch.arrays.items():
             tensor = torch.as_tensor(value, device=device)
             if dtype is not None and tensor.is_floating_point():
                 tensor = tensor.to(dtype=dtype)
             converted[str(name)] = tensor
-        return cls(
+        result = cls(
             arrays=converted,
             view_names=tuple(batch.view_names),
             hierarchy_names=tuple(batch.hierarchy_names),
             frontier_depths={str(k): int(v) for k, v in batch.frontier_depths.items()},
             diagnostics=dict(batch.diagnostics),
         )
+        return result.to_consumer_only()
+
+    def to_consumer_only(self) -> "PseudoViewInputs":
+        arrays = project_consumer_pseudo_arrays(
+            self.arrays,
+            hierarchy_names=self.hierarchy_names,
+            frontier_depths=self.frontier_depths,
+        )
+        diagnostics = {
+            **dict(self.diagnostics),
+            "consumer_only_pseudo": True,
+            "consumer_pseudo_contract": ABPH_CONSUMER_PSEUDO_CONTRACT,
+            "consumer_pseudo_schema_hash": consumer_pseudo_schema_hash(
+                arrays,
+                hierarchy_names=self.hierarchy_names,
+                frontier_depths=self.frontier_depths,
+            ),
+            "renderer_only_fields_retained": False,
+        }
+        result = replace(self, arrays=arrays, diagnostics=diagnostics)
+        result.validate()
+        return result
 
     def validate(self) -> None:
         if self.diagnostics.get("offline_inputs_loaded") is not False:
@@ -164,6 +199,16 @@ class PseudoViewInputs:
             self.hierarchy_names
         ):
             raise ValueError("pseudo input requires unique hierarchy names")
+        if self.diagnostics.get("consumer_only_pseudo") is True:
+            consumer_report = validate_consumer_pseudo_arrays(
+                self.arrays,
+                hierarchy_names=self.hierarchy_names,
+                frontier_depths=self.frontier_depths,
+                exact=True,
+            )
+            declared_consumer_hash = self.diagnostics.get("consumer_pseudo_schema_hash")
+            if declared_consumer_hash != consumer_report["schema_hash"]:
+                raise ValueError("consumer pseudo schema hash mismatch")
         for hierarchy in self.hierarchy_names:
             depth_count = int(self.frontier_depths.get(hierarchy, 0))
             if not 1 <= depth_count <= 6:
@@ -1519,19 +1564,22 @@ class HierarchyAwareDualStreamTagger(_ModuleBase):
 
 def _checkpoint_state_dict(path: str | Path) -> Mapping[str, Any]:
     _require_torch()
-    try:
-        payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-    except TypeError:  # pragma: no cover - older research-compute PyTorch
-        payload = torch.load(Path(path), map_location="cpu")
-    if not isinstance(payload, Mapping):
-        raise TypeError(f"checkpoint {path} is not a mapping")
+    payload = load_torch_checkpoint(path, device="cpu")
+    return _checkpoint_payload_state_dict(payload, label=str(path))
+
+
+def _checkpoint_payload_state_dict(
+    payload: Mapping[str, Any], *, label: str
+) -> Mapping[str, Any]:
+    if payload.get("checkpoint_contract") == ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT:
+        return selected_model_state(payload)
     for key in ("model_state", "model_state_dict", "state_dict", "model"):
         value = payload.get(key)
         if isinstance(value, Mapping):
             return value
     if payload and all(isinstance(key, str) for key in payload):
         return payload
-    raise KeyError(f"checkpoint {path} has no model state")
+    raise KeyError(f"checkpoint {label} has no model state")
 
 
 def _load_reference_state(backbone: Any, state: Mapping[str, Any], *, strict: bool) -> Any:
@@ -1557,15 +1605,27 @@ def load_dual_stream_warm_starts(
 ) -> dict[str, Any]:
     """Load the selected A0 HLT and A4 offline checkpoints into separate streams."""
 
+    hlt_payload = load_torch_checkpoint(hlt_checkpoint, device="cpu")
+    offline_payload = load_torch_checkpoint(offline_checkpoint, device="cpu")
     hlt_result = _load_reference_state(
-        model.hlt_backbone, _checkpoint_state_dict(hlt_checkpoint), strict=strict
+        model.hlt_backbone,
+        _checkpoint_payload_state_dict(hlt_payload, label=str(hlt_checkpoint)),
+        strict=strict,
     )
     pseudo_result = _load_reference_state(
-        model.pseudo_backbone, _checkpoint_state_dict(offline_checkpoint), strict=strict
+        model.pseudo_backbone,
+        _checkpoint_payload_state_dict(offline_payload, label=str(offline_checkpoint)),
+        strict=strict,
     )
     return {
         "hlt_checkpoint": str(Path(hlt_checkpoint).resolve()),
         "offline_checkpoint": str(Path(offline_checkpoint).resolve()),
+        "hlt_checkpoint_provenance": selected_checkpoint_provenance(
+            hlt_checkpoint, hlt_payload
+        ),
+        "offline_checkpoint_provenance": selected_checkpoint_provenance(
+            offline_checkpoint, offline_payload
+        ),
         "hlt_missing_keys": list(hlt_result.missing_keys),
         "hlt_unexpected_keys": list(hlt_result.unexpected_keys),
         "pseudo_missing_keys": list(pseudo_result.missing_keys),

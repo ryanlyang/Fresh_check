@@ -443,7 +443,11 @@ def test_f0_joint_objective_updates_both_hierarchy_branches_from_one_model():
         shared_forward, evaluation_seed=24731
     )
     # This is the exact pseudo-view object consumed by the F0 CE path.
-    package_trainable_pseudo_views(shared_deployment).validate()
+    consumer_pseudo = package_trainable_pseudo_views(shared_deployment)
+    consumer_pseudo.validate()
+    assert consumer_pseudo.diagnostics["consumer_only_pseudo"] is True
+    assert "particle__exclusive_kt__four_vector" not in consumer_pseudo.arrays
+    assert "frontier__exclusive_kt__depth_00__source_child_indices" not in consumer_pseudo.arrays
     deployment_renderer_counts = dict(renderer_forward_counts)
     loss = _joint_reconstruction_loss(
         model,
