@@ -24,7 +24,13 @@ def _rebuild_dataclass(value: Any, converted: Mapping[str, Any]) -> Any:
 
 
 def prepare_contiguous_cpu_batch(value: Any, *, pin_memory: bool) -> Any:
-    """Recursively convert arrays/tensors to contiguous, optionally pinned CPU tensors."""
+    """Prepare numeric model inputs while preserving nonnumeric CPU metadata.
+
+    Target batches intentionally carry byte-encoded hierarchy identities alongside
+    numeric supervision arrays. PyTorch cannot represent those identity arrays, and
+    they are provenance rather than model inputs, so keep them as contiguous NumPy
+    arrays throughout staging.
+    """
 
     torch = require_torch()
     if isinstance(value, Mapping):
@@ -50,7 +56,10 @@ def prepare_contiguous_cpu_batch(value: Any, *, pin_memory: bool) -> Any:
             prepare_contiguous_cpu_batch(item, pin_memory=pin_memory) for item in value
         ]
     if isinstance(value, np.ndarray):
-        tensor = torch.from_numpy(np.ascontiguousarray(value))
+        contiguous = np.ascontiguousarray(value)
+        if contiguous.dtype.kind not in "biufc":
+            return contiguous
+        tensor = torch.from_numpy(contiguous)
     elif isinstance(value, torch.Tensor):
         if value.device.type != "cpu":
             raise ValueError("the CPU prefetch worker received a non-CPU tensor")

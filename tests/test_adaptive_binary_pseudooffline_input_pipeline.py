@@ -92,6 +92,36 @@ def test_recursive_cpu_preparation_preserves_dataclass_and_contiguity():
     assert prepared.mask.dtype == torch.bool
 
 
+def test_cpu_preparation_preserves_nonnumeric_identity_arrays():
+    root_identities = np.asarray([b"root-a", b"root-b"], dtype="S64")
+    level_identities = np.asarray(
+        [["group-a", "group-b"], ["group-c", ""]], dtype=np.str_
+    )[:, ::-1]
+    batch = _NestedBatch(
+        values={
+            "features": np.arange(6, dtype=np.float32).reshape(2, 3),
+            "root_identities": root_identities,
+            "level_identities": level_identities,
+        },
+        mask=np.ones((2, 1), dtype=bool),
+    )
+
+    prepared = prepare_contiguous_cpu_batch(batch, pin_memory=False)
+    staged = BatchTransferStager(torch.device("cpu")).stage(prepared).wait()
+
+    assert isinstance(staged.values["features"], torch.Tensor)
+    assert isinstance(staged.values["root_identities"], np.ndarray)
+    assert isinstance(staged.values["level_identities"], np.ndarray)
+    assert staged.values["root_identities"].flags.c_contiguous
+    assert staged.values["level_identities"].flags.c_contiguous
+    np.testing.assert_array_equal(
+        staged.values["root_identities"], root_identities
+    )
+    np.testing.assert_array_equal(
+        staged.values["level_identities"], level_identities
+    )
+
+
 def test_prefetch_is_bounded_ordered_and_commits_only_on_consumption():
     source = _FakePlannedSource()
     main_thread = threading.get_ident()
