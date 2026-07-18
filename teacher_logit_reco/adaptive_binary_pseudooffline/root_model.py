@@ -136,19 +136,19 @@ class SemanticRootPrediction:
         return int(self.p4_residual_mean.shape[0])
 
     def count_probabilities(self) -> Any:
-        return self.count_logits.softmax(dim=-1)
+        return self.count_logits.float().softmax(dim=-1)
 
     def type_count_fractions(self) -> Any:
-        return self.type_count_logits.softmax(dim=-1)
+        return self.type_count_logits.float().softmax(dim=-1)
 
     def type_pt_fractions(self) -> Any:
-        return self.type_pt_logits.softmax(dim=-1)
+        return self.type_pt_logits.float().softmax(dim=-1)
 
     def type_energy_fractions(self) -> Any:
-        return self.type_energy_logits.softmax(dim=-1)
+        return self.type_energy_logits.float().softmax(dim=-1)
 
     def charge_probabilities(self) -> Any:
-        return self.charge_logits.softmax(dim=-1)
+        return self.charge_logits.float().softmax(dim=-1)
 
 
 class _SemanticQueryBlock(_ModuleBase):

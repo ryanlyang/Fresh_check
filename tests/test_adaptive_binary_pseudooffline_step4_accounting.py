@@ -240,6 +240,45 @@ def test_near_massless_parent_uses_documented_collinear_branch():
     torch.testing.assert_close(first + second, parent)
 
 
+def test_tolerance_accepted_parent_mass_roundoff_is_projected_before_split():
+    type_counts = (2, 0, 0, 0, 0, 0)
+    floor = 2.0 * _MASS[0]
+    represented_mass = floor - 1.0e-5
+    energy = 20.0
+    pz = math.sqrt(energy * energy - represented_mass * represented_mass)
+    parent = AccountingState.from_ledger(
+        _ledger(
+            (energy, 0.0, 0.0, pz),
+            type_counts,
+            0,
+            dtype=torch.float64,
+        )
+    )
+    prediction = _random_prediction(1, dtype=torch.float64)
+
+    compiled = compile_binary_split(
+        parent,
+        prediction,
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+        child_one_count_override=torch.tensor((1,)),
+        child_one_type_counts_override=torch.tensor(((1, 0, 0, 0, 0, 0),)),
+    )
+
+    assert compiled.diagnostics["ok"]
+    torch.testing.assert_close(
+        compiled.child_four_vector.sum(dim=1),
+        parent.four_vector,
+        rtol=0.0,
+        atol=1.0e-11,
+    )
+    torch.testing.assert_close(
+        compiled.child_minimum_mass_budget.sum(dim=1),
+        parent.minimum_mass_budget,
+        rtol=0.0,
+        atol=2.0e-8,
+    )
+
+
 def test_singleton_is_forced_terminal_and_has_no_physical_empty_child():
     parent = AccountingState.from_ledger(
         _ledger((3.0, 0.0, 0.0, 0.0), (0, 1, 0, 0, 0, 0), 0)

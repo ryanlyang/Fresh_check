@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import csv
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -117,6 +118,7 @@ class LocalResidualFieldTaggerTrainConfig:
     teacher_logits_val_path: str | None = None
     teacher_logits_stack_val_path: str | None = None
     selection_metric: str = "accuracy"
+    min_selection_valid_fraction: float = 0.99
     verify_hash: bool = True
     require_manifest_match: bool = True
     save_last_checkpoint: bool = True
@@ -184,6 +186,9 @@ class LocalResidualFieldTaggerTrainConfig:
         self.selection_metric = str(self.selection_metric)
         if self.selection_metric not in LOCAL_RESIDUAL_FIELD_TAGGER_SELECTION_METRICS:
             raise ValueError(f"selection_metric must be one of {LOCAL_RESIDUAL_FIELD_TAGGER_SELECTION_METRICS}")
+        self.min_selection_valid_fraction = float(self.min_selection_valid_fraction)
+        if self.min_selection_valid_fraction <= 0.0 or self.min_selection_valid_fraction > 1.0:
+            raise ValueError("min_selection_valid_fraction must be in (0, 1]")
         self.max_train_jets = _optional_positive_int(self.max_train_jets, field_name="max_train_jets")
         self.max_val_jets = _optional_positive_int(self.max_val_jets, field_name="max_val_jets")
         self.max_stack_val_jets = _optional_positive_int(self.max_stack_val_jets, field_name="max_stack_val_jets")
@@ -306,13 +311,48 @@ def _selection_score(metrics: Mapping[str, Any], metric_name: str) -> tuple[floa
     return numeric, numeric
 
 
+def _metrics_valid_for_selection(
+    metrics: Mapping[str, Any],
+    *,
+    expected_n_jets: int,
+    min_valid_fraction: float,
+) -> tuple[bool, str]:
+    expected = int(expected_n_jets)
+    if expected <= 0:
+        return False, "expected validation jet count is zero"
+    try:
+        seen = int(metrics.get("n_jets", 0) or 0)
+    except (TypeError, ValueError):
+        seen = 0
+    min_seen = int(math.ceil(float(expected) * float(min_valid_fraction)))
+    if seen < min_seen:
+        return (
+            False,
+            f"finite validation coverage {seen}/{expected} below required {min_seen} "
+            f"({float(min_valid_fraction):.4f})",
+        )
+    try:
+        loss = float(metrics.get("loss"))
+    except (TypeError, ValueError):
+        return False, "loss is missing or not numeric"
+    if not np.isfinite(loss):
+        return False, "loss is not finite"
+    return True, ""
+
+
 def _write_epoch_metrics_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flattened: list[dict[str, Any]] = []
     for row in rows:
         payload: dict[str, Any] = {"epoch": row.get("epoch")}
-        for split in ("train", "model_val", "stack_val"):
-            metrics = row.get(split)
+        split_keys = (
+            ("train", "train"),
+            ("model_val", "model_val"),
+            ("stack_val", "stack_val"),
+            ("best_model_val_reloaded_stack_val", "best_model_val_reloaded_stack_val"),
+        )
+        for split_key, split_prefix in split_keys:
+            metrics = row.get(split_key)
             if not isinstance(metrics, Mapping):
                 continue
             for key in (
@@ -323,10 +363,20 @@ def _write_epoch_metrics_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> N
                 "accuracy",
                 "macro_per_class_accuracy",
                 "n_jets",
+                "attempted_jets",
+                "valid_fraction",
+                "total_batches",
+                "finite_batches",
                 "nonfinite_batches",
+                "nonfinite_grad_batches",
+                "nonfinite_fraction",
+                "valid_for_selection",
+                "selection_valid_fraction_required",
+                "selection_expected_n_jets",
+                "selection_rejection_reason",
             ):
                 if key in metrics:
-                    payload[f"{split}_{key}"] = metrics.get(key)
+                    payload[f"{split_prefix}_{key}"] = metrics.get(key)
         flattened.append(payload)
     fieldnames: list[str] = []
     for row in flattened:
@@ -519,6 +569,20 @@ def _kd_loss(logits: Any, teacher_logits: Any, *, temperature: float) -> Any:
     ) * (temp * temp)
 
 
+def _model_gradients_are_finite(model: LocalResidualFieldAugmentedParT) -> bool:
+    torch = require_torch()
+    status = None
+    for param in model.parameters():
+        grad = param.grad
+        if grad is None:
+            continue
+        finite = torch.isfinite(grad).all()
+        status = finite if status is None else status & finite
+    if status is None:
+        return True
+    return bool(status.detach().cpu().item())
+
+
 def _run_epoch(
     model: LocalResidualFieldAugmentedParT,
     loader: Any,
@@ -544,12 +608,19 @@ def _run_epoch(
     kd_sum = 0.0
     reco_sum = 0.0
     seen = 0
+    attempted_jets = 0
+    total_batches = 0
+    finite_batches = 0
     nonfinite_batches = 0
+    nonfinite_grad_batches = 0
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
         for batch in loader:
             batch = move_local_particle_residual_field_batch_to_device(batch, device)
             batch = _subset_batch_fields(batch, selected_indices)
+            batch_size = int(batch["labels"].numel())
+            attempted_jets += batch_size
+            total_batches += 1
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with amp_autocast_context(bool(amp_enabled)):
@@ -567,7 +638,6 @@ def _run_epoch(
                 )
                 logits = output.logits
                 ce_loss = criterion(logits, batch["labels"])
-                batch_size = int(batch["labels"].numel())
                 loss = ce_loss / float(max(batch_size, 1))
                 kd_value = logits.new_zeros(())
                 if float(config.kd_loss_weight) > 0.0:
@@ -598,6 +668,8 @@ def _run_epoch(
                     loss = loss + float(config.reconstructor_loss_weight) * reco_value
             if not bool(torch.isfinite(loss).detach().cpu().item()) or not bool(torch.isfinite(logits).all().detach().cpu().item()):
                 nonfinite_batches += 1
+                if training:
+                    optimizer.zero_grad(set_to_none=True)
                 continue
             if training:
                 assert optimizer is not None
@@ -605,13 +677,28 @@ def _run_epoch(
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     if float(grad_clip_norm) > 0.0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        gradients_finite = bool(torch.isfinite(grad_norm).detach().cpu().item())
+                    else:
+                        gradients_finite = _model_gradients_are_finite(model)
+                    if not gradients_finite:
+                        nonfinite_grad_batches += 1
+                        optimizer.zero_grad(set_to_none=True)
+                        scaler.update()
+                        continue
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
                     if float(grad_clip_norm) > 0.0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip_norm))
+                        gradients_finite = bool(torch.isfinite(grad_norm).detach().cpu().item())
+                    else:
+                        gradients_finite = _model_gradients_are_finite(model)
+                    if not gradients_finite:
+                        nonfinite_grad_batches += 1
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                     optimizer.step()
             labels = batch["labels"].detach().cpu().numpy().astype(np.int64)
             logits_np = logits.detach().float().cpu().numpy()
@@ -619,12 +706,27 @@ def _run_epoch(
             labels_chunks.append(labels)
             batch_size = int(labels.shape[0])
             seen += batch_size
+            finite_batches += 1
             ce_sum += float(ce_loss.detach().cpu().item())
             kd_sum += float(kd_value.detach().cpu().item()) * batch_size
             reco_sum += float(reco_value.detach().cpu().item()) * batch_size
             loss_sum += float(loss.detach().cpu().item()) * batch_size
+    attempted = int(attempted_jets)
+    total = int(total_batches)
+    nonfinite_total = int(nonfinite_batches + nonfinite_grad_batches)
+    valid_fraction = float(seen) / float(attempted) if attempted > 0 else 0.0
+    nonfinite_fraction = float(nonfinite_total) / float(total) if total > 0 else 0.0
+    base_counts = {
+        "attempted_jets": attempted,
+        "valid_fraction": valid_fraction,
+        "total_batches": total,
+        "finite_batches": int(finite_batches),
+        "nonfinite_batches": int(nonfinite_batches),
+        "nonfinite_grad_batches": int(nonfinite_grad_batches),
+        "nonfinite_fraction": nonfinite_fraction,
+    }
     if seen == 0:
-        return {"n_jets": 0, "loss": float("nan"), "accuracy": 0.0, "nonfinite_batches": int(nonfinite_batches)}
+        return {"n_jets": 0, "loss": float("nan"), "accuracy": 0.0, **base_counts}
     logits_all = np.concatenate(logits_chunks, axis=0)
     labels_all = np.concatenate(labels_chunks, axis=0)
     preds = np.argmax(logits_all, axis=1).astype(np.int64)
@@ -639,7 +741,7 @@ def _run_epoch(
     metrics["cross_entropy"] = ce_sum / float(seen)
     metrics["kd_loss"] = kd_sum / float(seen)
     metrics["reconstructor_loss"] = reco_sum / float(seen)
-    metrics["nonfinite_batches"] = int(nonfinite_batches)
+    metrics.update(base_counts)
     return metrics
 
 
@@ -772,6 +874,8 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
     best_metric_value = float("nan")
     best_metrics: Mapping[str, Any] = {}
     epochs_without_improvement = 0
+    expected_val_n_jets = len(val_dataset)
+    expected_stack_val_n_jets = len(stack_val_dataset)
     for epoch in range(int(config.epochs)):
         train_metrics = _run_epoch(
             model,
@@ -800,10 +904,21 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
                 field_groups=selected_field_groups,
                 selected_indices=tuple(range(len(selected_field_names))),
             )
+        val_ok, val_rejection_reason = _metrics_valid_for_selection(
+            val_metrics,
+            expected_n_jets=int(expected_val_n_jets),
+            min_valid_fraction=float(config.min_selection_valid_fraction),
+        )
+        val_metrics = dict(val_metrics)
+        val_metrics["valid_for_selection"] = bool(val_ok)
+        val_metrics["selection_valid_fraction_required"] = float(config.min_selection_valid_fraction)
+        val_metrics["selection_expected_n_jets"] = int(expected_val_n_jets)
+        if val_rejection_reason:
+            val_metrics["selection_rejection_reason"] = str(val_rejection_reason)
         row = {"epoch": int(epoch), "train": train_metrics, "model_val": val_metrics}
         curves.append(row)
         score, raw_value = _selection_score(val_metrics, str(config.selection_metric))
-        if np.isfinite(score) and score > best_score:
+        if bool(val_ok) and np.isfinite(score) and score > best_score:
             best_epoch = int(epoch)
             best_score = float(score)
             best_metric_value = float(raw_value)
@@ -844,7 +959,10 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
             break
 
     if best_epoch < 0 or not (output_dir / "best_model_val.pt").exists():
-        raise RuntimeError("tagger training did not produce best_model_val.pt")
+        raise RuntimeError(
+            "tagger training did not produce best_model_val.pt; no validation epoch met "
+            f"the minimum finite-coverage requirement ({float(config.min_selection_valid_fraction):.4f})."
+        )
     best_payload = _torch_load_checkpoint(output_dir / "best_model_val.pt", map_location=device)
     model.load_state_dict(best_payload["model_state_dict"])
     with torch.no_grad():
@@ -861,10 +979,26 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
             field_groups=selected_field_groups,
             selected_indices=tuple(range(len(selected_field_names))),
         )
+    stack_ok, stack_rejection_reason = _metrics_valid_for_selection(
+        stack_val_metrics,
+        expected_n_jets=int(expected_stack_val_n_jets),
+        min_valid_fraction=float(config.min_selection_valid_fraction),
+    )
+    stack_val_metrics = dict(stack_val_metrics)
+    stack_val_metrics["valid_for_selection"] = bool(stack_ok)
+    stack_val_metrics["selection_valid_fraction_required"] = float(config.min_selection_valid_fraction)
+    stack_val_metrics["selection_expected_n_jets"] = int(expected_stack_val_n_jets)
+    if stack_rejection_reason:
+        stack_val_metrics["selection_rejection_reason"] = str(stack_rejection_reason)
     if curves:
         curves[-1]["best_model_val_reloaded_stack_val"] = stack_val_metrics
         save_json(output_dir / "training_curves.json", {"epochs": curves, "selection_metric": config.selection_metric})
         _write_epoch_metrics_csv(diagnostics_dir / "epoch_metrics.csv", curves)
+    if not bool(stack_ok):
+        raise RuntimeError(
+            "best_model_val checkpoint produced invalid stack_val coverage: "
+            f"{stack_rejection_reason}"
+        )
     report = {
         "ok": True,
         "contract": LOCAL_RESIDUAL_FIELD_TAGGER_TRAIN_CONTRACT,

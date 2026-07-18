@@ -473,6 +473,35 @@ def test_step5_kd_requested_fails_when_teacher_logits_are_missing(tmp_path: Path
         train_local_residual_field_tagger(config)
 
 
+def test_step5_selection_rejects_tiny_finite_validation_subset():
+    ok, reason = tagger_train_module._metrics_valid_for_selection(
+        {"n_jets": 1024, "loss": 0.5, "accuracy": 0.9},
+        expected_n_jets=1_000_000,
+        min_valid_fraction=0.99,
+    )
+
+    assert ok is False
+    assert "finite validation coverage 1024/1000000" in reason
+
+    ok, reason = tagger_train_module._metrics_valid_for_selection(
+        {"n_jets": 990_000, "loss": 0.5, "accuracy": 0.9},
+        expected_n_jets=1_000_000,
+        min_valid_fraction=0.99,
+    )
+
+    assert ok is True
+    assert reason == ""
+
+    ok, reason = tagger_train_module._metrics_valid_for_selection(
+        {"n_jets": 1_000_000, "loss": float("nan"), "accuracy": 0.9},
+        expected_n_jets=1_000_000,
+        min_valid_fraction=0.99,
+    )
+
+    assert ok is False
+    assert reason == "loss is not finite"
+
+
 def test_step5_teacher_logits_resolver_accepts_pd10_prediction_cache_layout(tmp_path: Path):
     root = tmp_path / "teacher_logits"
     offline_dir = root / "offline_part_teacher_10class"

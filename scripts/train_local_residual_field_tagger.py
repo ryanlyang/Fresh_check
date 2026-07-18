@@ -89,6 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--teacher-logits-val-path", default="")
     parser.add_argument("--teacher-logits-stack-val-path", default="")
     parser.add_argument("--selection-metric", default="accuracy", choices=LOCAL_RESIDUAL_FIELD_TAGGER_SELECTION_METRICS)
+    parser.add_argument("--min-selection-valid-fraction", type=float, default=0.99)
     parser.add_argument("--no-verify-hash", action="store_true")
     parser.add_argument("--allow-missing-manifest-match", action="store_true")
     parser.add_argument("--no-save-last-checkpoint", action="store_true")
@@ -147,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         teacher_logits_val_path=args.teacher_logits_val_path or None,
         teacher_logits_stack_val_path=args.teacher_logits_stack_val_path or None,
         selection_metric=str(args.selection_metric),
+        min_selection_valid_fraction=float(args.min_selection_valid_fraction),
         verify_hash=not bool(args.no_verify_hash),
         require_manifest_match=not bool(args.allow_missing_manifest_match),
         save_last_checkpoint=not bool(args.no_save_last_checkpoint),

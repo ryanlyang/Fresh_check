@@ -530,19 +530,20 @@ class _HierarchyLevelDecoder(_ModuleBase):
                     if output_index >= next_capacity:
                         raise RuntimeError("recursive hierarchy exceeded its fixed level capacity")
                     child_ledger = compiled.child_ledger[flat_index, child_index]
-                    ledger[batch_index, output_index] = child_ledger
+                    ledger[batch_index, output_index] = child_ledger.to(ledger.dtype)
                     child_support = support_from_ledger(
                         child_ledger[None, :], support_extra[flat_index, child_index][None, :]
                     )[0]
-                    support[batch_index, output_index] = child_support
-                    hidden[batch_index, output_index] = (
+                    support[batch_index, output_index] = child_support.to(support.dtype)
+                    child_hidden = (
                         context[batch_index, parent_index]
                         + child_hidden_delta[flat_index, child_index]
                         + self.child_ledger_projection(child_ledger[None, :])[0]
                     )
+                    hidden[batch_index, output_index] = child_hidden.to(hidden.dtype)
                     uncertainty[batch_index, output_index] = child_uncertainty[
                         flat_index, child_index
-                    ]
+                    ].to(uncertainty.dtype)
                     count = int(compiled.child_constituent_count[flat_index, child_index])
                     topology[batch_index, output_index] = int(
                         TOPOLOGY_ACTIVE_TERMINAL
@@ -557,12 +558,18 @@ class _HierarchyLevelDecoder(_ModuleBase):
                 output_index = write_offsets[batch_index]
                 if output_index >= next_capacity:
                     raise RuntimeError("terminal carries exceeded their fixed level capacity")
-                ledger[batch_index, output_index] = frontier.ledger[batch_index, parent_index]
-                hidden[batch_index, output_index] = context[batch_index, parent_index]
-                support[batch_index, output_index] = frontier.support[batch_index, parent_index]
+                ledger[batch_index, output_index] = frontier.ledger[
+                    batch_index, parent_index
+                ].to(ledger.dtype)
+                hidden[batch_index, output_index] = context[
+                    batch_index, parent_index
+                ].to(hidden.dtype)
+                support[batch_index, output_index] = frontier.support[
+                    batch_index, parent_index
+                ].to(support.dtype)
                 uncertainty[batch_index, output_index] = frontier.uncertainty[
                     batch_index, parent_index
-                ]
+                ].to(uncertainty.dtype)
                 topology[batch_index, output_index] = int(TOPOLOGY_ACTIVE_TERMINAL)
                 parent_indices[batch_index, output_index] = parent_index
                 source_child_indices[batch_index, output_index] = -1

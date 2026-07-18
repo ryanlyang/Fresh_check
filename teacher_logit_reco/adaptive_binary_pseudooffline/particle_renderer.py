@@ -280,7 +280,9 @@ def _minimum_cost_square_assignment(cost: Any) -> Any:
 
 def _quota_sinkhorn(logits: Any, quotas: Any, *, temperature: float, iterations: int) -> Any:
     torch = require_torch()
-    scores = torch.as_tensor(logits)
+    # Reductions such as logsumexp are promoted by AMP. Keep the complete
+    # transport in FP32 so indexed publication cannot cross BF16/FP32 dtypes.
+    scores = torch.as_tensor(logits).float()
     counts = torch.as_tensor(quotas, device=scores.device).long()
     n_slots = int(scores.shape[0])
     if counts.shape != (len(ABPH_PID_CATEGORIES),) or int(counts.sum()) != n_slots:
@@ -316,7 +318,7 @@ def allocate_particle_types(
     counts = torch.as_tensor(group_type_counts, device=scores.device).long()
     if scores.shape != (*layout.mask.shape, len(ABPH_PID_CATEGORIES)):
         raise ValueError("particle type logits have the wrong shape")
-    soft = torch.zeros_like(scores)
+    soft = torch.zeros(scores.shape, dtype=torch.float32, device=scores.device)
     hard_indices = torch.full(layout.mask.shape, -1, dtype=torch.long, device=scores.device)
     for batch_index in range(scores.shape[0]):
         groups = torch.unique(layout.group_indices[batch_index, layout.mask[batch_index]])
@@ -344,7 +346,7 @@ def allocate_particle_types(
             hard_indices[batch_index, slots] = expanded_types[assignment]
     hard = torch.nn.functional.one_hot(
         hard_indices.clamp_min(0), num_classes=len(ABPH_PID_CATEGORIES)
-    ).to(scores.dtype) * layout.mask.unsqueeze(-1)
+    ).to(soft.dtype) * layout.mask.unsqueeze(-1)
     straight_through = hard + soft - soft.detach()
     hard_counts = torch.zeros_like(counts)
     for group_index in range(counts.shape[1]):
@@ -421,7 +423,9 @@ def _charge_soft_probabilities(
     temperature: float,
 ) -> Any:
     torch = require_torch()
-    scores = torch.as_tensor(logits)
+    # The constrained expectation solve is a numerical projection, not a
+    # neural layer. FP32 also makes its indexed caller dtype-stable under AMP.
+    scores = torch.as_tensor(logits).float()
     permitted = torch.as_tensor(allowed, device=scores.device).bool()
     support = scores.new_tensor(_CHARGE_SUPPORT)
     lower = scores.new_tensor(-40.0)
@@ -455,7 +459,7 @@ def allocate_particle_charges(
     if scores.shape != (*layout.mask.shape, 3):
         raise ValueError("charge logits must have shape [B, 128, 3]")
     allowed_all = _allowed_charge_mask(hard_pid_indices)
-    soft = torch.zeros_like(scores)
+    soft = torch.zeros(scores.shape, dtype=torch.float32, device=scores.device)
     hard = torch.zeros(layout.mask.shape, dtype=torch.long, device=scores.device)
     for batch_index in range(scores.shape[0]):
         groups = torch.unique(layout.group_indices[batch_index, layout.mask[batch_index]])
@@ -478,7 +482,7 @@ def allocate_particle_charges(
                 scores[batch_index, slots], local_allowed, target
             )
     expected = (soft * scores.new_tensor(_CHARGE_SUPPORT)).sum(dim=-1)
-    straight_through = hard.to(scores.dtype) + expected - expected.detach()
+    straight_through = hard.to(soft.dtype) + expected - expected.detach()
     hard_group_charge = torch.zeros_like(targets)
     for group_index in range(targets.shape[1]):
         member = layout.mask & (layout.group_indices == group_index)
@@ -926,11 +930,15 @@ class ConstrainedParticleRenderer(_ModuleBase):
             group_charge,
             temperature=self.config.charge_temperature,
         )
-        mass_table = slots.new_tensor(_PID_MASSES)
+        mass_table = torch.tensor(
+            _PID_MASSES, dtype=torch.float32, device=slots.device
+        )
         minimum_mass = type_allocation.straight_through_one_hot @ mass_table
-        mass = torch.zeros(layout.mask.shape, dtype=slots.dtype, device=slots.device)
+        # Exact phase-space projection runs in FP32/FP64. Preserve its output
+        # in FP32 rather than assigning it into BF16 buffers under autocast.
+        mass = torch.zeros(layout.mask.shape, dtype=torch.float32, device=slots.device)
         four_vector = torch.zeros(
-            (*layout.mask.shape, 4), dtype=slots.dtype, device=slots.device
+            (*layout.mask.shape, 4), dtype=torch.float32, device=slots.device
         )
         raw_spatial = self.rest_spatial_head(slots)
         energy_fraction_logits = self.energy_fraction_head(slots).squeeze(-1)
@@ -963,11 +971,11 @@ class ConstrainedParticleRenderer(_ModuleBase):
                     ).clamp_min(0.0)
                     group_fraction = torch.sigmoid(
                         self.group_mass_fraction_head(final.hidden[batch_index, group_index])
-                    ).squeeze(-1)
+                    ).squeeze(-1).float()
                     local_mass = local_minimum + (
                         available
                         * group_fraction
-                        * mass_logits[batch_index, member].softmax(dim=0)
+                        * mass_logits[batch_index, member].float().softmax(dim=0)
                     )
                 if self.config.exact_nbody_projection:
                     local_p4, phase = project_n_body_phase_space(
@@ -1004,8 +1012,8 @@ class ConstrainedParticleRenderer(_ModuleBase):
                             .cpu()
                         ),
                     }
-                four_vector[batch_index, member] = local_p4
-                mass[batch_index, member] = local_mass
+                four_vector[batch_index, member] = local_p4.to(four_vector.dtype)
+                mass[batch_index, member] = local_mass.to(mass.dtype)
                 phase_branches[phase["branch"]] = phase_branches.get(phase["branch"], 0) + 1
                 maximum_local_residual = max(
                     maximum_local_residual, float(phase["closure_max_residual"])

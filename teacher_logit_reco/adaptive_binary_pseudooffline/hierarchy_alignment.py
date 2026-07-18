@@ -567,11 +567,15 @@ def align_frontier(
         real = transport[:-1, :-1]
         to_null = transport[:-1, -1]
         from_null = transport[-1, :-1]
-        real_transport[batch_index][pred_indices[:, None], target_indices[None, :]] = real
-        pred_null[batch_index, pred_indices] = to_null
-        target_null[batch_index, target_indices] = from_null
+        real_transport[batch_index][pred_indices[:, None], target_indices[None, :]] = real.to(
+            real_transport.dtype
+        )
+        pred_null[batch_index, pred_indices] = to_null.to(pred_null.dtype)
+        target_null[batch_index, target_indices] = from_null.to(target_null.dtype)
         allowed_full[batch_index][pred_indices[:, None], target_indices[None, :]] = allowed
-        costs_full[batch_index][pred_indices[:, None], target_indices[None, :]] = pair_cost
+        costs_full[batch_index][pred_indices[:, None], target_indices[None, :]] = pair_cost.to(
+            costs_full.dtype
+        )
         normalization = (pred_mass.sum() + target_mass.sum()).clamp_min(1.0)
         losses.append(
             (
@@ -582,10 +586,12 @@ def align_frontier(
         )
         target_members = membership[batch_index, target_indices].to(real.dtype)
         per_particle = real / target_mass[None, :].clamp_min(1.0)
-        particle_weights[batch_index, pred_indices] = per_particle @ target_members
+        particle_weights[batch_index, pred_indices] = (
+            per_particle @ target_members
+        ).to(particle_weights.dtype)
         target_null_particles[batch_index] = (
             from_null / target_mass.clamp_min(1.0)
-        ) @ target_members
+        ).matmul(target_members).to(target_null_particles.dtype)
     loss = torch.stack(losses).mean()
     hard_assignment = torch.full(
         (batch, ABPH_MAX_PARTICLES), -1, dtype=torch.long, device=predicted.ledger.device

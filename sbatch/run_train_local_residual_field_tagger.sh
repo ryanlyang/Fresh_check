@@ -47,6 +47,7 @@ RUN_ID="${1:?Usage: sbatch run_train_local_residual_field_tagger.sh <A/B/D/E/F r
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_TRAIN_JETS:=}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_VAL_JETS:=}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_MAX_STACK_VAL_JETS:=}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_MIN_SELECTION_VALID_FRACTION:=0.99}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_SAVE_LAST_CHECKPOINT:=1}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_DISABLE_AMP:=0}"
 : "${LOCAL_RESIDUAL_FIELD_CONTROL_SEED:=9173}"
@@ -230,6 +231,7 @@ cmd=(
   --reconstructor-loss-weight "${reco_loss_weight}"
   --kd-loss-weight "${kd_loss_weight}"
   --kd-temperature "${LOCAL_RESIDUAL_FIELD_TAGGER_KD_TEMPERATURE}"
+  --min-selection-valid-fraction "${LOCAL_RESIDUAL_FIELD_TAGGER_MIN_SELECTION_VALID_FRACTION}"
 )
 if [[ -n "${reco_checkpoint}" ]]; then cmd+=(--reconstructor-checkpoint "${reco_checkpoint}"); fi
 if [[ -n "${baseline_checkpoint}" ]]; then cmd+=(--baseline-checkpoint "${baseline_checkpoint}"); fi

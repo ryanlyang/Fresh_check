@@ -355,6 +355,45 @@ def test_phase4_rolls_and_renders_hypothesis_zero_exactly_once(monkeypatch):
     ][0]
 
 
+@pytest.mark.parametrize(
+    ("variant_name", "context_factory"),
+    (
+        (
+            "B1_semantic_query_root",
+            lambda: _phase2_context(32, (2, 4, 8, 16, 32)),
+        ),
+        ("D1_kt32_mh4_particles", _phase4_context),
+    ),
+)
+def test_production_reconstructor_step_is_bfloat16_autocast_safe(
+    variant_name, context_factory
+):
+    torch.manual_seed(971)
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name=variant_name, smoke=True
+    ).train()
+    if variant_name == "D1_kt32_mh4_particles":
+        model.renderer.config = replace(
+            model.renderer.config, phase_space_iterations=64
+        )
+    context = context_factory()
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        result = reconstructor_step(model, _reconstruction_batch(), context)
+    loss = compose_reconstruction_loss(
+        result, context, ReconstructionLossWeights()
+    ).total
+
+    assert loss.dtype == torch.float32
+    assert bool(torch.isfinite(loss))
+    assert all(term.dtype == torch.float32 for term in result.loss_terms.values())
+    loss.backward()
+    assert any(
+        parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
+        for parameter in model.parameters()
+    )
+
+
 def test_split_phase4_forward_matches_reference_losses_and_gradients():
     optimized = AdaptiveBinaryReconstructorModel(
         variant_name="D1_kt32_mh4_particles", smoke=True

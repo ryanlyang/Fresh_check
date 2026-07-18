@@ -569,7 +569,7 @@ def compile_binary_split(
         if bool(((parent.constituent_count == 1) & (topology == int(TOPOLOGY_ACTIVE_SPLIT))).any()):
             raise ValueError("a singleton parent cannot be split")
     split_mask = topology == int(TOPOLOGY_ACTIVE_SPLIT)
-    learned_split_probability = prediction.topology_logits.softmax(dim=-1)[:, 1]
+    learned_split_probability = prediction.topology_logits.float().softmax(dim=-1)[:, 1]
     learned_split_probability = torch.where(
         parent.constituent_count == 1,
         torch.zeros_like(learned_split_probability),
@@ -588,7 +588,7 @@ def compile_binary_split(
     )
     if int(split_indices.numel()):
         parent_count = parent.constituent_count[split_indices]
-        count_logits = prediction.count_logits[split_indices]
+        count_logits = prediction.count_logits[split_indices].float()
         support = torch.arange(1, ABPH_BINARY_COUNT_SUPPORT + 1, device=device)
         count_mask = support[None, :] < parent_count[:, None]
         if not bool(count_mask.any(dim=-1).all()):
@@ -652,18 +652,33 @@ def compile_binary_split(
         floors = minimum_mass_budget(hard_types.reshape(-1, len(ABPH_PID_CATEGORIES))).reshape(-1, 2)
         parent_p4 = parent.four_vector[split_indices]
         parent_mass = _invariant_mass(parent_p4)
-        available = parent_mass - floors.sum(dim=-1)
+        floor_sum = floors.sum(dim=-1)
+        available = parent_mass - floor_sum
         parent_mass_tolerance = (
             ABPH_MASS_PRECISION_ABS_TOLERANCE
             + ABPH_MASS_PRECISION_ENERGY_FACTOR * parent_p4[:, 0].abs()
         )
         if bool((available < -parent_mass_tolerance).any()):
             raise ValueError("child type allocations imply mass floors above the parent mass")
-        available = available.clamp_min(0.0)
-        mass_fractions = prediction.mass_allocation_logits[split_indices].softmax(dim=-1)
-        masses = floors + available[:, None] * mass_fractions[:, :2]
+        # A highly boosted FP32 p4 can recover an invariant mass a few ulps
+        # below its exact additive floor. The audit explicitly accepts that
+        # representational error, so the phase-space input must use the same
+        # contract rather than pass an impossible floor sum to a stricter
+        # downstream check. Only tolerance-accepted rows are projected, and
+        # their hard minimum-mass ledger remains unchanged for supervision.
+        representable_scale = torch.where(
+            floor_sum > parent_mass,
+            parent_mass / floor_sum.clamp_min(1.0e-12),
+            torch.ones_like(parent_mass),
+        )
+        phase_space_floors = floors * representable_scale[:, None]
+        available = (parent_mass - phase_space_floors.sum(dim=-1)).clamp_min(0.0)
+        mass_fractions = prediction.mass_allocation_logits[split_indices].float().softmax(dim=-1)
+        masses = phase_space_floors + available[:, None] * mass_fractions[:, :2]
         direction = prediction.direction_raw[split_indices]
-        collinear_fraction = torch.sigmoid(prediction.collinear_fraction_raw[split_indices])
+        collinear_fraction = torch.sigmoid(
+            prediction.collinear_fraction_raw[split_indices].float()
+        )
         target_p4 = None
         if child_four_vector_override is not None:
             target_p4 = torch.as_tensor(
@@ -719,7 +734,9 @@ def compile_binary_split(
             tuple(parent.ledger[split_indices, ROOT_FEATURE_INDEX[name]] for name in ABPH_AUXILIARY_ADDITIVE_NAMES),
             dim=-1,
         )
-        auxiliary_fraction = torch.sigmoid(prediction.auxiliary_fraction_logits[split_indices])
+        auxiliary_fraction = torch.sigmoid(
+            prediction.auxiliary_fraction_logits[split_indices].float()
+        )
         additive_children = torch.stack(
             (parent_additive * auxiliary_fraction, parent_additive * (1.0 - auxiliary_fraction)),
             dim=1,
