@@ -891,6 +891,16 @@ def test_streaming_bootstrap_is_projection_and_runtime_gate_ordered() -> None:
     assert submitter.index("CONDA_BASE:=") < submitter.index('source "${PROJECT_DIR}/sbatch/common.sh"')
     assert "submit_adaptive_binary_runtime_batch_probes_tigris.sh" in submitter
     assert "submit_adaptive_binary_runtime_acceptance_tigris.sh" in submitter
+    for isolated_evidence in (
+        "ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT",
+        "ABPH_RUNTIME_BATCH_CONTRACT_ROOT",
+        "ABPH_RUNTIME_BATCH_PROBE_MANIFEST",
+        "ABPH_SINGLE_PATH_ACCEPTANCE_PATH",
+    ):
+        assert (
+            f'export {isolated_evidence}="${{ABPH_BOOTSTRAP_EVIDENCE_ROOT}}/'
+            in submitter
+        )
     assert "--dependency=\"afterok:${report_job_id}\"" in submitter
     assert "ABPH_APPROVE_PREPARED_ROOT_PRUNE" in submitter
     assert "ABPH_CONFIRM_PREPARED_ROOT_IDLE" in submitter
@@ -918,8 +928,11 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
     assert "CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
     assert "afterok:" in submitter
     assert "probe_adaptive_binary_runtime_batch.py" in worker
+    assert "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}" in worker
     assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker
     assert "compile_adaptive_binary_runtime_batch_contract.py" in compiler
+    assert "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}" in compiler
+    assert "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}" in compiler
     assert "if fresh_is_dry_run" in submitter
     assert submitter.index("if fresh_is_dry_run") < submitter.index(
         "submitted=\"$(sbatch"

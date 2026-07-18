@@ -38,6 +38,10 @@ fresh_require_file "${ABPH_PREPARED_ROOT}/runs/A0_hlt_part/best_model_val.pt"
 }
 mkdir -p "${ABPH_BOOTSTRAP_EVIDENCE_ROOT}"
 projection="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/storage_projection.json"
+export ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_measurements"
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_contracts"
+export ABPH_RUNTIME_BATCH_PROBE_MANIFEST="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_probes.tsv"
+export ABPH_SINGLE_PATH_ACCEPTANCE_PATH="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_acceptance/single_path_acceptance.json"
 
 fresh_run "${PYTHON_BIN}" scripts/build_adaptive_binary_bootstrap_storage_projection.py \
   --prepared-root "${ABPH_PREPARED_ROOT}" \
@@ -51,7 +55,7 @@ export ABPH_RUNTIME_ACCEPTANCE_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_acc
 
 bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh" \
   B1_semantic_query_root D1_kt32_mh4_particles
-probe_manifest="${ABPH_PREPARED_ROOT}/submission_logs/abph_runtime_batch_probes.tsv"
+probe_manifest="${ABPH_RUNTIME_BATCH_PROBE_MANIFEST}"
 mapfile -t contract_job_ids < <(awk -F $'\t' '$2 == "compile" {print $4}' "${probe_manifest}")
 [[ "${#contract_job_ids[@]}" -eq 2 ]] || {
   echo "Expected exactly two runtime batch contract jobs" >&2

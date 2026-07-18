@@ -118,6 +118,29 @@ def _phase2_context(capacity: int, supervised_capacities: tuple[int, ...]):
     )
 
 
+def _phase1_context() -> ReconstructorStepContext:
+    return ReconstructorStepContext(
+        curriculum=CurriculumState(
+            stage_index=0,
+            stage_key="phase1_root",
+            phase=1,
+            phase_name="root_pretraining",
+            global_update=1,
+            stage_update=1,
+            stage_maximum_updates=2,
+            active_capacity=1,
+            stage_progress=0.5,
+            teacher_forcing_probability=1.0,
+            distribution_weight=0.0,
+            supervised_capacities=(),
+        ),
+        split="model_train",
+        mode="teacher_forced",
+        validation=False,
+        teacher_forcing_probability=1.0,
+    )
+
+
 def _phase4_context() -> ReconstructorStepContext:
     return ReconstructorStepContext(
         curriculum=CurriculumState(
@@ -235,6 +258,19 @@ def test_c0_and_c8_training_losses_reach_their_distinct_heads():
         parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
         for parameter in unconstrained.unconstrained_child_heads[0].parameters()
     )
+
+
+def test_phase1_root_pretraining_reports_no_rollout_without_unbound_state():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="B1_semantic_query_root", smoke=True
+    ).eval()
+
+    result = reconstructor_step(model, _reconstruction_batch(), _phase1_context())
+
+    assert result.metrics["mode"] == "teacher_forced"
+    assert result.metrics["rollout_forward_executed"] is False
+    assert result.metrics["hypothesis_zero_reused"] is False
+    assert set(result.loss_terms) == {"root"}
 
 
 def test_teacher_forced_phase2_omits_the_inactive_rollout_forward():

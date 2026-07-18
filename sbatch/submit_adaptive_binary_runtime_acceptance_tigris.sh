@@ -15,7 +15,10 @@ fresh_activate_env
 : "${ABPH_RUNTIME_ACCEPTANCE_ROOT:=${ABPH_ROOT}/audits/runtime_acceptance}"
 : "${ABPH_SBATCH_ACCOUNT:=reu-aisocial}"
 : "${ABPH_SBATCH_PARTITION:=tigris}"
-export ABPH_ROOT ABPH_RUNTIME_ACCEPTANCE_ROOT PYTHONNOUSERSITE=1
+: "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
+: "${ABPH_SINGLE_PATH_ACCEPTANCE_PATH:=${ABPH_ROOT}/audits/runtime_reference/single_path_acceptance.json}"
+export ABPH_ROOT ABPH_RUNTIME_ACCEPTANCE_ROOT ABPH_RUNTIME_BATCH_CONTRACT_ROOT
+export ABPH_SINGLE_PATH_ACCEPTANCE_PATH PYTHONNOUSERSITE=1
 
 for required in \
   "${ABPH_ROOT}/audits/actual_target_feasibility.json" \
@@ -23,8 +26,8 @@ for required in \
   fresh_require_file "${required}"
 done
 contract_paths=(
-  "${ABPH_ROOT}/runtime_batch_contracts/B1_semantic_query_root/runtime_batch_contract.json"
-  "${ABPH_ROOT}/runtime_batch_contracts/D1_kt32_mh4_particles/runtime_batch_contract.json"
+  "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/B1_semantic_query_root/runtime_batch_contract.json"
+  "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/D1_kt32_mh4_particles/runtime_batch_contract.json"
 )
 if [[ -z "${ABPH_RUNTIME_BATCH_DEPENDENCY:-}" ]]; then
   for required in "${contract_paths[@]}"; do fresh_require_file "${required}"; done

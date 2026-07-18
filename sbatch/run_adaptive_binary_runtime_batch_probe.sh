@@ -22,13 +22,14 @@ VARIANT="${1:?Usage: worker <variant> <stage-family> <local-batch-size>}"
 STAGE_FAMILY="${2:?Missing stage family}"
 LOCAL_BATCH_SIZE="${3:?Missing local batch size}"
 : "${ABPH_ROOT:?Set ABPH_ROOT}"
+: "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT:=${ABPH_ROOT}/runtime_batch_measurements}"
 export PYTHONNOUSERSITE=1
 fresh_setup
 
 world_size="${ABPH_DISTRIBUTED_WORLD_SIZE:-${SLURM_NTASKS:-1}}"
 nodes="${ABPH_DISTRIBUTED_NODES:-${SLURM_JOB_NUM_NODES:-1}}"
 tasks_per_node="${ABPH_DISTRIBUTED_NTASKS_PER_NODE:-1}"
-output="${ABPH_ROOT}/runtime_batch_measurements/${VARIANT}/ddp${world_size}/${STAGE_FAMILY}_b${LOCAL_BATCH_SIZE}.json"
+output="${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}/${VARIANT}/ddp${world_size}/${STAGE_FAMILY}_b${LOCAL_BATCH_SIZE}.json"
 probe_command=(
   "${PYTHON_BIN}" -u scripts/probe_adaptive_binary_runtime_batch.py
   --campaign-root "${ABPH_ROOT}"

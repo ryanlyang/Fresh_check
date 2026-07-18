@@ -13,7 +13,11 @@ fresh_activate_env
 : "${ABPH_ROOT:?Set ABPH_ROOT to a prepared campaign root}"
 : "${ABPH_SBATCH_ACCOUNT:=reu-aisocial}"
 : "${ABPH_SBATCH_PARTITION:=tigris}"
-export ABPH_ROOT PYTHONNOUSERSITE=1
+: "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT:=${ABPH_ROOT}/runtime_batch_measurements}"
+: "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
+: "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST:=${ABPH_ROOT}/submission_logs/abph_runtime_batch_probes.tsv}"
+export ABPH_ROOT ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT PYTHONNOUSERSITE=1
 
 fresh_require_file "${ABPH_ROOT}/audits/actual_target_feasibility.json"
 fresh_require_file "${ABPH_ROOT}/runs/A0_hlt_part/best_model_val.pt"
@@ -33,7 +37,7 @@ fi
 
 probe_worker="${PROJECT_DIR}/sbatch/run_adaptive_binary_runtime_batch_probe.sh"
 compile_worker="${PROJECT_DIR}/sbatch/run_compile_adaptive_binary_runtime_batch_contract.sh"
-manifest="${ABPH_ROOT}/submission_logs/abph_runtime_batch_probes.tsv"
+manifest="${ABPH_RUNTIME_BATCH_PROBE_MANIFEST}"
 mkdir -p "$(dirname "${manifest}")"
 printf 'variant\tstage_family\tlocal_batch_size\tjob_id\n' > "${manifest}"
 

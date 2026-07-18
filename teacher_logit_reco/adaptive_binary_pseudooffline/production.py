@@ -1975,6 +1975,7 @@ def reconstructor_step(
     particle_loss = None
     particle_auxiliary = None
     distribution_loss = None
+    rollout_required = False
     hypothesis_zero_reused = False
     tensors_to_check = [prediction.p4_residual_mean, compiled.root_ledger]
 
