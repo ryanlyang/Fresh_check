@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from scripts.train_constrained_coarse_to_fine import build_parser
 from teacher_logit_reco.constrained_coarse_to_fine import (
     CTierReconstructorOutput,
     CoarseToFineReconstructorOutput,
@@ -194,7 +195,7 @@ def test_step_scheduler_warmup_cosine_state_is_resume_stable() -> None:
     assert resumed.current_lrs() == pytest.approx(scheduler.current_lrs())
 
 
-def test_accelerated_profiles_require_last_checkpoint() -> None:
+def test_candidate_and_approved_profiles_require_last_checkpoint() -> None:
     with pytest.raises(ValueError, match="require save_last_checkpoint"):
         CoarseToFineTrainConfig(
             output_dir="out",
@@ -202,10 +203,21 @@ def test_accelerated_profiles_require_last_checkpoint() -> None:
             hlt_cache_dir="hlt",
             offline_cache_dir="offline",
             target_cache_dir="targets",
-            runtime_profile="bf16_calibration",
+            runtime_profile="accelerated_candidate_v1",
             precision_mode="bf16_forward_fp32_loss",
             save_last_checkpoint=False,
         )
+
+
+def test_exploratory_pilot_profile_is_accepted_by_training_cli() -> None:
+    args = build_parser().parse_args(
+        [
+            "--output-dir", "out", "--manifest", "manifest.json.gz",
+            "--hlt-cache-dir", "hlt", "--offline-cache-dir", "offline",
+            "--target-cache-dir", "targets", "--runtime-profile", "bf16_exploratory_pilot_v1",
+        ]
+    )
+    assert args.runtime_profile == "bf16_exploratory_pilot_v1"
 
 
 def test_candidate_and_approved_profiles_forbid_skipped_nonfinite_batches() -> None:
