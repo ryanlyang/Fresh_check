@@ -223,7 +223,14 @@ def compile_shape_features(shape_raw: Any) -> Any:
     eta_second = torch.nn.functional.softplus(raw[:, 2])
     phi_second = torch.nn.functional.softplus(raw[:, 3])
     correlation = torch.tanh(raw[:, 4])
-    cross = correlation * torch.sqrt((eta_second * phi_second).clamp_min(0.0))
+    covariance_product = eta_second * phi_second
+    covariance_scale = torch.sqrt(covariance_product.clamp_min(1.0e-12))
+    covariance_scale = torch.where(
+        covariance_product > 1.0e-12,
+        covariance_scale,
+        torch.zeros_like(covariance_scale),
+    )
+    cross = correlation * covariance_scale
     radial_first = torch.nn.functional.softplus(raw[:, 5])
     radial_second = radial_first.square() + torch.nn.functional.softplus(raw[:, 6])
     chol0 = torch.nn.functional.softplus(raw[:, 7])

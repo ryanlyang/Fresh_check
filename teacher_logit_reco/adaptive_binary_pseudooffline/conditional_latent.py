@@ -345,7 +345,13 @@ def _rational_quadratic_spline(
         discriminant = (
             quadratic_b.square() - 4.0 * quadratic_a * quadratic_c
         ).clamp_min(0.0)
-        denominator = -quadratic_b - torch.sqrt(discriminant)
+        discriminant_root = torch.sqrt(discriminant.clamp_min(1.0e-12))
+        discriminant_root = torch.where(
+            discriminant > 1.0e-12,
+            discriminant_root,
+            torch.zeros_like(discriminant_root),
+        )
+        denominator = -quadratic_b - discriminant_root
         safe_denominator = torch.where(
             denominator.abs() < 1.0e-12,
             torch.where(
