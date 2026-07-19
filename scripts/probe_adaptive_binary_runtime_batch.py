@@ -39,6 +39,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (  # no
     destroy_distributed_runtime,
     distributed_environment,
     initialize_distributed_runtime,
+    prepare_model_for_distributed_training,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.input_pipeline import (  # noqa: E402
     _move_nested_to_device,
@@ -141,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     provenance_hash = canonical_hash(provenance)
     model = AdaptiveBinaryReconstructorModel(
         hierarchy_names=(grouping,), variant_name=args.variant, smoke=False
+    )
+    model = prepare_model_for_distributed_training(
+        model,
+        requested_world_size=world_size,
+        device=device,
     ).to(device)
     module_groups = model.module_groups()
     optimizer = build_reconstructor_optimizer(model, module_groups)

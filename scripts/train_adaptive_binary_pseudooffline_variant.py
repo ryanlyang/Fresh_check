@@ -36,6 +36,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (  #
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (  # noqa: E402
     distributed_environment,
+    prepare_model_for_distributed_training,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.checkpoints import (  # noqa: E402
     build_compact_selected_checkpoint,
@@ -786,6 +787,11 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
             "source_checkpoint_sha256": _sha256(source_path),
             "parameter_tensors": copied,
         }
+    model = prepare_model_for_distributed_training(
+        model,
+        requested_world_size=requested_world_size,
+        device=args.device,
+    )
     train_source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
         target_cache_dir=root / "targets",

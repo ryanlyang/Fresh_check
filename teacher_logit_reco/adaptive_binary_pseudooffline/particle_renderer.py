@@ -542,6 +542,13 @@ def _boost_rest_to_lab(rest_four_vector: Any, parent_four_vector: Any, parent_ma
     return torch.cat((energy[:, None], spatial), dim=-1)
 
 
+def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
+    torch = require_torch()
+    values = torch.as_tensor(values)
+    rooted = torch.sqrt(values.clamp_min(float(epsilon)))
+    return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
+
+
 def project_n_body_phase_space(
     parent_four_vector: Any,
     raw_rest_spatial: Any,
@@ -566,7 +573,7 @@ def project_n_body_phase_space(
     if count <= 0 or masses.shape != (count,) or fractions_raw.shape != (count,):
         raise ValueError("N-body particle dimensions are inconsistent")
     mass_squared = parent[0].square() - parent[1:].square().sum()
-    parent_mass = torch.sqrt(mass_squared.clamp_min(0.0))
+    parent_mass = _stable_nonnegative_sqrt(mass_squared)
     feasibility_tolerance = 2.0e-5 * parent_mass.abs().clamp_min(1.0)
     if bool((masses < 0.0).any()) or bool(
         masses.sum() > parent_mass + feasibility_tolerance
@@ -599,16 +606,22 @@ def project_n_body_phase_space(
     mean_norm = centered.norm(dim=-1).mean().clamp_min(1.0e-8)
     upper = parent_mass / mean_norm
     for _ in range(16):
-        upper_energy = torch.sqrt((upper * centered).square().sum(dim=-1) + masses.square()).sum()
+        upper_energy = _stable_nonnegative_sqrt(
+            (upper * centered).square().sum(dim=-1) + masses.square()
+        ).sum()
         upper = torch.where(upper_energy < parent_mass, 2.0 * upper, upper)
     for _ in range(int(iterations)):
         middle = 0.5 * (lower + upper)
-        energy = torch.sqrt((middle * centered).square().sum(dim=-1) + masses.square()).sum()
+        energy = _stable_nonnegative_sqrt(
+            (middle * centered).square().sum(dim=-1) + masses.square()
+        ).sum()
         lower = torch.where(energy < parent_mass, middle, lower)
         upper = torch.where(energy < parent_mass, upper, middle)
     scale = 0.5 * (lower + upper)
     spatial = scale * centered
-    rest_energy = torch.sqrt(spatial.square().sum(dim=-1) + masses.square())
+    rest_energy = _stable_nonnegative_sqrt(
+        spatial.square().sum(dim=-1) + masses.square()
+    )
     rest = torch.cat((rest_energy[:, None], spatial), dim=-1)
     lab = _boost_rest_to_lab(rest, parent, parent_mass)
     residual = (lab.sum(dim=0) - parent).abs().max()
@@ -958,8 +971,8 @@ class ConstrainedParticleRenderer(_ModuleBase):
                 parent_p4 = torch.stack(
                     tuple(parent[ROOT_FEATURE_INDEX[name]] for name in ("energy", "px", "py", "pz"))
                 )
-                parent_mass = torch.sqrt(
-                    (parent_p4[0].square() - parent_p4[1:].square().sum()).clamp_min(0.0)
+                parent_mass = _stable_nonnegative_sqrt(
+                    parent_p4[0].square() - parent_p4[1:].square().sum()
                 )
                 local_minimum = minimum_mass[batch_index, member]
                 if int(member.numel()) == 1:
@@ -996,8 +1009,8 @@ class ConstrainedParticleRenderer(_ModuleBase):
                         )
                         + local_mass
                     )
-                    momentum = torch.sqrt(
-                        (energy.square() - local_mass.square()).clamp_min(0.0)
+                    momentum = _stable_nonnegative_sqrt(
+                        energy.square() - local_mass.square()
                     )
                     local_p4 = torch.cat(
                         (energy[:, None], direction * momentum[:, None]), dim=-1

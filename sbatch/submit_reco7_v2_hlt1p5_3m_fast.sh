@@ -29,7 +29,8 @@ fresh_prepare_submitter
 
 # Faster defaults for the old reco7 path. Stage A is usually much lighter than
 # the frozen-reconstructor dual-view Particle Transformer, so it gets the larger
-# physical batch. Both stages use AMP unless explicitly disabled.
+# physical batch. Tigris/GH200 showed fp16 AMP overflows in this older
+# reconstructor path, so this runner defaults to fp32 unless explicitly changed.
 : "${RECO7_V2_FAST_BASELINE_BATCH_SIZE:=192}"
 : "${RECO7_V2_FAST_RECO_BATCH_SIZE:=128}"
 : "${RECO7_V2_FAST_STAGE_A_BATCH_SIZE:=256}"
@@ -43,7 +44,7 @@ fresh_prepare_submitter
 : "${RECO7_V2_FAST_WEIGHT_DECAY:=0.0001}"
 : "${RECO7_V2_FAST_EARLY_STOP_PATIENCE:=4}"
 : "${RECO7_V2_FAST_NUM_WORKERS:=8}"
-: "${RECO7_V2_FAST_NO_AMP:=0}"
+: "${RECO7_V2_FAST_NO_AMP:=1}"
 : "${RECO7_V2_FAST_COMPILE_MODEL:=0}"
 : "${RECO7_V2_FAST_MODEL_SIZE:=base}"
 : "${RECO7_V2_FAST_READ_CHUNK_SIZE:=50000}"

@@ -89,10 +89,28 @@ def measure_full_optimizer_step(
             forward_completed = True
             (loss / float(accumulation)).backward()
         backward_completed = True
-        active = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        active_named = [
+            (name, parameter)
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        ]
+        active = [parameter for _name, parameter in active_named]
         gradients = [parameter.grad for parameter in active if parameter.grad is not None]
-        if not gradients or not all(bool(torch.isfinite(value).all()) for value in gradients):
-            raise FloatingPointError("full-step probe gradients are absent or nonfinite")
+        if not gradients:
+            raise FloatingPointError("full-step probe gradients are absent")
+        nonfinite = [
+            (name, int((~torch.isfinite(parameter.grad)).sum().item()))
+            for name, parameter in active_named
+            if parameter.grad is not None
+            and not bool(torch.isfinite(parameter.grad).all())
+        ]
+        if nonfinite:
+            preview = ", ".join(
+                f"{name}({count})" for name, count in nonfinite[:8]
+            )
+            raise FloatingPointError(
+                "full-step probe gradients are nonfinite: " + preview
+            )
         norm = torch.nn.utils.clip_grad_norm_(active, float(gradient_clip_norm))
         if not bool(torch.isfinite(norm)):
             raise FloatingPointError("full-step probe clipped gradient norm is nonfinite")

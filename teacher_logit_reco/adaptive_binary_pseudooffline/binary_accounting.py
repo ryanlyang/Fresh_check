@@ -190,16 +190,25 @@ class CompiledBinarySplit:
         return AccountingState.from_ledger(self.child_ledger[:, index], validate=False)
 
 
+def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
+    """Square root with finite zero-boundary gradients for physical invariants."""
+
+    torch = require_torch()
+    values = torch.as_tensor(values)
+    rooted = torch.sqrt(values.clamp_min(float(epsilon)))
+    return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
+
+
 def _invariant_mass(four_vector: Any) -> Any:
     torch = require_torch()
     p4 = torch.as_tensor(four_vector)
-    return torch.sqrt(
+    return _stable_nonnegative_sqrt(
         (
             p4[..., 0].square()
             - p4[..., 1].square()
             - p4[..., 2].square()
             - p4[..., 3].square()
-        ).clamp_min(0.0)
+        )
     )
 
 
@@ -425,7 +434,7 @@ def two_body_phase_space_split(
         (safe_mass.square() - (mass_one + mass_two).square())
         * (safe_mass.square() - (mass_one - mass_two).square())
     ).clamp_min(0.0)
-    momentum = torch.sqrt(kallen) / (2.0 * safe_mass)
+    momentum = _stable_nonnegative_sqrt(kallen) / (2.0 * safe_mass)
     energy_one_rest = (safe_mass.square() + mass_one.square() - mass_two.square()) / (2.0 * safe_mass)
     momentum_one_rest = momentum[:, None] * direction
 
@@ -876,7 +885,10 @@ def binary_accounting_audit(
         )
         if bool((mass_floor_margin < -child_mass_tolerance).any()):
             problems.append("child mass lies below its minimum budget")
-        if bool((mass_sum_margin < -parent_mass_tolerance).any()):
+        mass_sum_tolerance = (
+            parent_mass_tolerance + child_mass_tolerance.sum(dim=-1)
+        )
+        if bool((mass_sum_margin < -mass_sum_tolerance).any()):
             problems.append("child masses exceed the parent mass")
         max_p4 = float(p4_residual.abs().max().detach().cpu())
         mean_p4 = float(p4_residual.abs().mean().detach().cpu())
@@ -885,6 +897,9 @@ def binary_accounting_audit(
         max_charge = int(charge_residual.abs().max().detach().cpu())
         minimum_floor_margin = float(mass_floor_margin.min().detach().cpu())
         minimum_mass_sum_margin = float(mass_sum_margin.min().detach().cpu())
+        minimum_mass_sum_tolerance_margin = float(
+            (mass_sum_margin + mass_sum_tolerance).min().detach().cpu()
+        )
         scalar_pt_residual = child_scalar_pt[split].sum(dim=1) - parent.scalar_sum_pt[split]
         type_energy_residual = child_type_energy[split].sum(dim=1) - parent.type_energy[split]
         type_pt_residual = child_type_pt[split].sum(dim=1) - parent.type_scalar_pt[split]
@@ -893,6 +908,7 @@ def binary_accounting_audit(
         max_p4 = mean_p4 = float(zero.detach().cpu())
         max_count = max_type = max_charge = 0
         minimum_floor_margin = minimum_mass_sum_margin = 0.0
+        minimum_mass_sum_tolerance_margin = 0.0
         scalar_pt_residual = zero.reshape(1)
         type_energy_residual = zero.reshape(1)
         type_pt_residual = zero.reshape(1)
@@ -922,6 +938,7 @@ def binary_accounting_audit(
             "max_charge_residual": max_charge,
             "minimum_mass_floor_margin": minimum_floor_margin,
             "minimum_parent_mass_remainder": minimum_mass_sum_margin,
+            "minimum_parent_mass_tolerance_remainder": minimum_mass_sum_tolerance_margin,
         },
         "soft": {
             "scalar_pt_consistency_mae": float(scalar_pt_residual.abs().mean().detach().cpu()),

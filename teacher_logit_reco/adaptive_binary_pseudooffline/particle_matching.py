@@ -581,7 +581,7 @@ def compute_particle_observables(rendered: RenderedParticleBatch) -> Mapping[str
     phi_axis = torch.atan2(sin_axis, cos_axis)
     delta_eta = eta - eta_axis[:, None]
     delta_phi = wrap_phi_tensor(phi - phi_axis[:, None])
-    radius = torch.sqrt(delta_eta.square() + delta_phi.square())
+    radius = torch.sqrt(delta_eta.square() + delta_phi.square() + 1.0e-12)
     radial_edges = (0.05, 0.10, 0.20, 0.40, 0.80)
     radial_profile = []
     previous = 0.0
@@ -593,7 +593,9 @@ def compute_particle_observables(rendered: RenderedParticleBatch) -> Mapping[str
     radial_profile.append((pt * mask * (radius >= previous)).sum(dim=1) / total_pt)
     pair_delta_eta = eta[:, :, None] - eta[:, None, :]
     pair_delta_phi = wrap_phi_tensor(phi[:, :, None] - phi[:, None, :])
-    pair_radius = torch.sqrt(pair_delta_eta.square() + pair_delta_phi.square())
+    pair_radius = torch.sqrt(
+        pair_delta_eta.square() + pair_delta_phi.square() + 1.0e-12
+    )
     pair_mask = mask[:, :, None] & mask[:, None, :]
     upper = torch.triu(
         torch.ones((ABPH_MAX_PARTICLES, ABPH_MAX_PARTICLES), dtype=torch.bool, device=mask.device),
@@ -613,6 +615,7 @@ def compute_particle_observables(rendered: RenderedParticleBatch) -> Mapping[str
             torch.sqrt(
                 (eta - axis_eta_two[:, index : index + 1]).square()
                 + wrap_phi_tensor(phi - axis_phi_two[:, index : index + 1]).square()
+                + 1.0e-12
             )
             for index in range(2)
         ),
@@ -652,7 +655,7 @@ def _canonical_observables(features: Any, mask: Any) -> Mapping[str, Any]:
     )
     delta_eta = eta - eta_axis[:, None]
     delta_phi = wrap_phi_tensor(phi - phi_axis[:, None])
-    radius = torch.sqrt(delta_eta.square() + delta_phi.square())
+    radius = torch.sqrt(delta_eta.square() + delta_phi.square() + 1.0e-12)
     radial = []
     lower = 0.0
     for upper in (0.05, 0.10, 0.20, 0.40, 0.80):
@@ -665,7 +668,9 @@ def _canonical_observables(features: Any, mask: Any) -> Mapping[str, Any]:
     leading = sorted_pt[:, :4] / total_pt[:, None]
     pair_delta_eta = eta[:, :, None] - eta[:, None, :]
     pair_delta_phi = wrap_phi_tensor(phi[:, :, None] - phi[:, None, :])
-    pair_radius = torch.sqrt(pair_delta_eta.square() + pair_delta_phi.square())
+    pair_radius = torch.sqrt(
+        pair_delta_eta.square() + pair_delta_phi.square() + 1.0e-12
+    )
     pair_valid = valid[:, :, None] & valid[:, None, :]
     upper_triangle = torch.triu(
         torch.ones(
@@ -687,6 +692,7 @@ def _canonical_observables(features: Any, mask: Any) -> Mapping[str, Any]:
             torch.sqrt(
                 (eta - axes_eta[:, index : index + 1]).square()
                 + wrap_phi_tensor(phi - axes_phi[:, index : index + 1]).square()
+                + 1.0e-12
             )
             for index in range(2)
         ),

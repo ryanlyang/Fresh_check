@@ -54,6 +54,7 @@ from .distributed import (
     build_stage_ddp_wrapper,
     gather_error_summaries,
     initialize_distributed_runtime,
+    require_distributed_normalization_contract,
     require_standard_tensor_mapping,
     tensor_mapping_is_finite,
     verify_common_parameter_state,
@@ -1812,6 +1813,11 @@ def train_reconstructor_curriculum(
     if distributed_runtime.distributed and not bool(config.asynchronous_prefetch):
         raise ValueError("distributed ABPH training requires deferred-commit prefetch")
     model.to(device)
+    require_distributed_normalization_contract(
+        model,
+        distributed_runtime,
+        device=device,
+    )
     optimizer = build_reconstructor_optimizer(
         model,
         module_groups,

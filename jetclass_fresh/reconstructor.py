@@ -1514,27 +1514,45 @@ def run_reconstruction_epoch(
                         f"Non-finite Stage A reconstruction loss in batch {batch_index}: {diag}"
                     )
             if is_train:
+                grad_norm_value = float("nan")
+                skipped_nonfinite_grad = False
                 if scaler is not None and autocast_enabled:
                     scaler.scale(loss).backward()
                     if grad_clip_norm and grad_clip_norm > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(),
                             float(grad_clip_norm),
-                            error_if_nonfinite=True,
+                            error_if_nonfinite=False,
                         )
-                    scaler.step(optimizer)
-                    scaler.update()
+                        grad_norm_value = float(grad_norm.detach().item())
+                        skipped_nonfinite_grad = not bool(torch.isfinite(grad_norm))
+                    if skipped_nonfinite_grad:
+                        # Let GradScaler lower its scale after an overflow instead of
+                        # killing long cluster jobs on one unstable AMP batch.
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        scaler.step(optimizer)
+                        scaler.update()
                 else:
                     loss.backward()
                     if grad_clip_norm and grad_clip_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(),
                             float(grad_clip_norm),
-                            error_if_nonfinite=True,
+                            error_if_nonfinite=False,
                         )
-                    optimizer.step()
+                        grad_norm_value = float(grad_norm.detach().item())
+                        skipped_nonfinite_grad = not bool(torch.isfinite(grad_norm))
+                    if skipped_nonfinite_grad:
+                        optimizer.zero_grad(set_to_none=True)
+                    else:
+                        optimizer.step()
             row = {key: float(value.detach().item()) for key, value in diagnostics.items()}
+            if is_train:
+                row["grad_norm"] = grad_norm_value
+                row["skipped_nonfinite_grad_batch"] = 1.0 if skipped_nonfinite_grad else 0.0
             row["n_jets"] = int(batch["hlt_tokens"].shape[0])
             rows.append(row)
     return summarize_loss_dict(rows)

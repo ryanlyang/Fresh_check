@@ -79,6 +79,13 @@ def inverse_softplus(values: Any, *, epsilon: float = ABPH_ROOT_EPSILON) -> Any:
     return positive + torch.log(-torch.expm1(-positive))
 
 
+def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
+    torch = require_torch()
+    values = torch.as_tensor(values)
+    rooted = torch.sqrt(values.clamp_min(float(epsilon)))
+    return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
+
+
 @dataclass(frozen=True)
 class RootPhysicalKinematics:
     pt: Any
@@ -297,11 +304,11 @@ def kinematics_from_four_vector(four_vector: Any) -> RootPhysicalKinematics:
     if p4.shape[-1] != 4:
         raise ValueError("four_vector must end with [energy, px, py, pz]")
     energy, px, py, pz = p4.unbind(dim=-1)
-    pt = torch.sqrt((px.square() + py.square()).clamp_min(0.0))
+    pt = _stable_nonnegative_sqrt(px.square() + py.square())
     phi = wrap_phi_tensor(torch.atan2(py, px))
     eta = torch.asinh(pz / pt.clamp_min(ABPH_ROOT_EPSILON))
     mass_squared = energy.square() - px.square() - py.square() - pz.square()
-    mass = torch.sqrt(mass_squared.clamp_min(0.0))
+    mass = _stable_nonnegative_sqrt(mass_squared)
     return RootPhysicalKinematics(pt, eta, phi, mass, energy, px, py, pz)
 
 
@@ -315,7 +322,7 @@ def kinematics_from_pt_eta_phi_mass(pt: Any, eta: Any, phi: Any, mass: Any) -> R
     py = pt * torch.sin(phi)
     pz = pt * torch.sinh(eta)
     momentum_squared = pt.square() + pz.square()
-    energy = torch.sqrt((momentum_squared + mass.square()).clamp_min(0.0))
+    energy = _stable_nonnegative_sqrt(momentum_squared + mass.square())
     return RootPhysicalKinematics(pt, eta, phi, mass, energy, px, py, pz)
 
 

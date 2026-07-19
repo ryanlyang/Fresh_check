@@ -291,6 +291,18 @@ def parameter_state_hash(model: Any) -> str:
     return digest.hexdigest()
 
 
+def _parameter_state_entry_hashes(model: Any) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for name, value in sorted(model.state_dict().items()):
+        tensor = value.detach().cpu().contiguous()
+        digest = hashlib.sha256()
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(np.asarray(tensor.shape, dtype=np.int64).tobytes())
+        digest.update(tensor.numpy().tobytes())
+        hashes[name] = digest.hexdigest()
+    return hashes
+
+
 def verify_common_parameter_state(
     runtime: DistributedRuntime, model: Any
 ) -> str:
@@ -301,8 +313,73 @@ def verify_common_parameter_state(
     gathered: list[str | None] = [None] * runtime.world_size
     torch.distributed.all_gather_object(gathered, local_hash)
     if any(value != local_hash for value in gathered):
-        raise RuntimeError("ABPH model parameter hashes differ across ranks")
+        local_entries = _parameter_state_entry_hashes(model)
+        gathered_entries: list[dict[str, str] | None] = [None] * runtime.world_size
+        torch.distributed.all_gather_object(gathered_entries, local_entries)
+        entry_names = sorted(
+            {name for row in gathered_entries if row is not None for name in row}
+        )
+        differing = [
+            name
+            for name in entry_names
+            if len(
+                {
+                    None if row is None else row.get(name)
+                    for row in gathered_entries
+                }
+            )
+            > 1
+        ]
+        preview = ", ".join(differing[:12]) or "unknown state entries"
+        suffix = "" if len(differing) <= 12 else f" (+{len(differing) - 12} more)"
+        raise RuntimeError(
+            "ABPH model parameter hashes differ across ranks; mismatched state: "
+            f"{preview}{suffix}"
+        )
     return local_hash
+
+
+def prepare_model_for_distributed_training(
+    model: Any,
+    *,
+    requested_world_size: int,
+    device: Any,
+) -> Any:
+    """Make rank-local normalization state globally consistent before DDP wrap."""
+
+    torch = require_torch()
+    if int(requested_world_size) <= 1:
+        return model
+    if str(getattr(device, "type", device)).split(":", 1)[0] != "cuda":
+        return model
+    return torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+
+def require_distributed_normalization_contract(
+    model: Any,
+    runtime: DistributedRuntime,
+    *,
+    device: Any,
+) -> None:
+    """Reject CUDA DDP models that retain rank-local BatchNorm buffers."""
+
+    if not runtime.distributed:
+        return
+    if str(getattr(device, "type", device)).split(":", 1)[0] != "cuda":
+        return
+    torch = require_torch()
+    batch_norm = torch.nn.modules.batchnorm._BatchNorm
+    remaining = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, batch_norm)
+        and not isinstance(module, torch.nn.SyncBatchNorm)
+    ]
+    if remaining:
+        preview = ", ".join(remaining[:8])
+        raise RuntimeError(
+            "CUDA DDP model retains rank-local BatchNorm modules: " + preview
+        )
 
 
 def _detach_metadata(value: Any) -> Any:
@@ -451,6 +528,8 @@ __all__ = [
     "gather_error_summaries",
     "initialize_distributed_runtime",
     "parameter_state_hash",
+    "prepare_model_for_distributed_training",
+    "require_distributed_normalization_contract",
     "require_standard_tensor_mapping",
     "tensor_mapping_is_finite",
     "verify_common_parameter_state",

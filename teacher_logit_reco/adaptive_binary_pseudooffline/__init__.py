@@ -207,6 +207,8 @@ from .distributed import (
     gather_error_summaries,
     initialize_distributed_runtime,
     parameter_state_hash,
+    prepare_model_for_distributed_training,
+    require_distributed_normalization_contract,
     require_standard_tensor_mapping,
     tensor_mapping_is_finite,
     verify_common_parameter_state,
