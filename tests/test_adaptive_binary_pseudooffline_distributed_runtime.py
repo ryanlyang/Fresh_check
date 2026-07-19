@@ -568,7 +568,9 @@ def _distributed_checkpoint_worker(rank: int, world_size: int, port: int, root: 
         MASTER_PORT=str(port),
         ABPH_DDP_TIMEOUT_SECONDS="60",
     )
-    torch.manual_seed(51)
+    # Deliberately start each rank from a different live/EMA state. DDP makes
+    # rank zero's live model canonical, and the trainer must do the same for EMA.
+    torch.manual_seed(51 + rank)
     model = _TrainerModel()
     source = _TrainerSource(rank)
     validation = _TrainerValidation(rank)

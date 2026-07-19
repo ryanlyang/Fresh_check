@@ -1077,6 +1077,27 @@ class ExponentialMovingAverage:
             for name, value in model.state_dict().items()
         }
 
+    def synchronize(self, runtime: DistributedRuntime) -> None:
+        """Make rank zero's EMA snapshot canonical across all training ranks."""
+
+        if not runtime.distributed:
+            return
+        schema = tuple(
+            (
+                name,
+                str(value.dtype),
+                tuple(int(dimension) for dimension in value.shape),
+            )
+            for name, value in sorted(self.shadow.items())
+        )
+        schemas = all_gather_objects(runtime, schema)
+        if any(candidate != schema for candidate in schemas):
+            raise RuntimeError("EMA state schemas differ across ranks")
+        torch = require_torch()
+        with torch.no_grad():
+            for name in sorted(self.shadow):
+                torch.distributed.broadcast(self.shadow[name], src=0)
+
     @contextmanager
     def applied(self, model: Any):
         online = {
@@ -1900,6 +1921,11 @@ def train_reconstructor_curriculum(
             for value in saved_trainer_state.get("distributed_error_events", ())
         ]
 
+    # DDP synchronizes the live module when its wrapper is constructed, but EMA
+    # is created earlier and resume state is rank-local. Keep one canonical
+    # shadow trajectory rather than allowing rank seeds to leak into selection.
+    ema.synchronize(distributed_runtime)
+
     transfer_stager = BatchTransferStager(
         device, non_blocking=bool(config.nonblocking_transfer)
     )
@@ -2592,6 +2618,7 @@ def train_reconstructor_curriculum(
             validation_owner, "set_batch_size"
         ):
             validation_owner.set_batch_size(int(validation_local_batch_size))
+        verify_common_parameter_state(distributed_runtime, model)
         with ema.applied(model):
             verify_common_parameter_state(distributed_runtime, model)
             validation = evaluate_reconstructor_rollout(
