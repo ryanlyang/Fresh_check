@@ -671,6 +671,7 @@ def compile_binary_split(
         )
         floors = minimum_mass_budget(hard_types.reshape(-1, len(ABPH_PID_CATEGORIES))).reshape(-1, 2)
         parent_p4 = parent.four_vector[split_indices]
+        original_parent_p4 = parent_p4
         parent_mass = _invariant_mass(parent_p4)
         floor_sum = floors.sum(dim=-1)
         available = parent_mass - floor_sum
@@ -680,21 +681,19 @@ def compile_binary_split(
         )
         if bool((available < -parent_mass_tolerance).any()):
             raise ValueError("child type allocations imply mass floors above the parent mass")
-        # A highly boosted FP32 p4 can recover an invariant mass a few ulps
-        # below its exact additive floor. The audit explicitly accepts that
-        # representational error, so the phase-space input must use the same
-        # contract rather than pass an impossible floor sum to a stricter
-        # downstream check. Only tolerance-accepted rows are projected, and
-        # their hard minimum-mass ledger remains unchanged for supervision.
-        representable_scale = torch.where(
-            floor_sum > parent_mass,
-            parent_mass / floor_sum.clamp_min(1.0e-12),
-            torch.ones_like(parent_mass),
-        )
-        phase_space_floors = floors * representable_scale[:, None]
-        available = (parent_mass - phase_space_floors.sum(dim=-1)).clamp_min(0.0)
+        # The state audit admits the bounded cancellation error of a highly
+        # boosted FP32 p4. Generated descendants cannot inherit that deficit:
+        # scaling their discrete type-conditioned floors would create ledgers
+        # that pass this transition but fail when reused as recursive parents.
+        # Raise only the detached representational energy of an accepted
+        # parent, then construct both children against their exact hard floors.
+        # The resulting correction remains covered by the existing p4 closure
+        # tolerance and does not alter any learned or discrete accounting term.
+        parent_p4 = make_four_vector_mass_representable(parent_p4, floor_sum)
+        parent_mass = _invariant_mass(parent_p4)
+        available = (parent_mass - floor_sum).clamp_min(0.0)
         mass_fractions = prediction.mass_allocation_logits[split_indices].float().softmax(dim=-1)
-        masses = phase_space_floors + available[:, None] * mass_fractions[:, :2]
+        masses = floors + available[:, None] * mass_fractions[:, :2]
         direction = prediction.direction_raw[split_indices]
         collinear_fraction = torch.sigmoid(
             prediction.collinear_fraction_raw[split_indices].float()
@@ -710,6 +709,11 @@ def compile_binary_split(
                 target_p4 = target_p4[split_indices]
             if target_p4.shape != (len(split_indices), 2, 4):
                 raise ValueError("child four-vector override has the wrong shape")
+            # Target replay validates the immutable target against the original
+            # compiled parent. It must not be compared with the rollout-only
+            # representability correction above.
+            parent_p4 = original_parent_p4
+            parent_mass = _invariant_mass(parent_p4)
             closure = (target_p4.sum(dim=1) - parent_p4).abs()
             tolerance = ABPH_BINARY_P4_ABS_TOLERANCE + ABPH_BINARY_P4_REL_TOLERANCE * parent_p4.abs()
             if bool((closure > tolerance).any()):

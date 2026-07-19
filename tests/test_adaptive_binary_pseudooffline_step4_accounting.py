@@ -10,6 +10,8 @@ import torch
 from jetclass_fresh.jetclass_data import JetIdentity, RAW_TOKEN_DIM
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_AUXILIARY_ADDITIVE_NAMES,
+    ABPH_BINARY_P4_ABS_TOLERANCE,
+    ABPH_BINARY_P4_REL_TOLERANCE,
     ABPH_MIN_REQUIRED_BINARY_LOSS_WEIGHT,
     ABPH_MAX_PARTICLES,
     ABPH_PID_CATEGORIES,
@@ -300,18 +302,21 @@ def test_tolerance_accepted_parent_mass_roundoff_is_projected_before_split():
     )
 
     assert compiled.diagnostics["ok"]
-    torch.testing.assert_close(
-        compiled.child_four_vector.sum(dim=1),
-        parent.four_vector,
-        rtol=0.0,
-        atol=1.0e-11,
+    residual = (compiled.child_four_vector.sum(dim=1) - parent.four_vector).abs()
+    tolerance = (
+        ABPH_BINARY_P4_ABS_TOLERANCE
+        + ABPH_BINARY_P4_REL_TOLERANCE * parent.four_vector.abs()
     )
+    assert bool((residual <= tolerance).all())
     torch.testing.assert_close(
         compiled.child_minimum_mass_budget.sum(dim=1),
         parent.minimum_mass_budget,
         rtol=0.0,
         atol=2.0e-8,
     )
+    for child_index in range(2):
+        child = AccountingState.from_ledger(compiled.child_ledger[:, child_index])
+        assert accounting_state_audit(child)["minimum_mass_margin_min"] >= 0.0
 
 
 def test_boosted_float32_children_remain_valid_recursive_parents():
@@ -337,6 +342,37 @@ def test_boosted_float32_children_remain_valid_recursive_parents():
     for child_index in range(2):
         child = AccountingState.from_ledger(compiled.child_ledger[:, child_index])
         assert accounting_state_audit(child)["ok"]
+
+
+def test_tolerance_accepted_boosted_parent_does_not_scale_recursive_child_floors():
+    type_counts = (2, 0, 0, 0, 0, 0)
+    # This lightlike FP32 representation is accepted for a 1 TeV boosted state
+    # because its missing sub-GeV mass lies inside the explicit cancellation
+    # tolerance. The split compiler must repair that representation rather
+    # than reduce either child's exact type-conditioned mass floor.
+    parent = AccountingState.from_ledger(
+        _ledger((1000.0, 0.0, 0.0, 1000.0), type_counts, 0)
+    )
+    assert accounting_state_audit(parent)["minimum_mass_margin_min"] < 0.0
+    prediction = _random_prediction(1)
+    compiled = compile_binary_split(
+        parent,
+        prediction,
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+        child_one_count_override=torch.tensor((1,)),
+        child_one_type_counts_override=torch.tensor(((1, 0, 0, 0, 0, 0),)),
+        child_one_charge_override=torch.tensor((1,)),
+    )
+    assert compiled.diagnostics["ok"]
+    torch.testing.assert_close(
+        compiled.child_minimum_mass_budget.sum(dim=1),
+        parent.minimum_mass_budget,
+        rtol=0.0,
+        atol=2.0e-8,
+    )
+    for child_index in range(2):
+        child = AccountingState.from_ledger(compiled.child_ledger[:, child_index])
+        assert accounting_state_audit(child)["minimum_mass_margin_min"] >= 0.0
 
 
 def test_singleton_is_forced_terminal_and_has_no_physical_empty_child():
