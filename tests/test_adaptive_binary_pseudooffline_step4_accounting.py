@@ -353,7 +353,7 @@ def test_tolerance_accepted_boosted_parent_does_not_scale_recursive_child_floors
     parent = AccountingState.from_ledger(
         _ledger((1000.0, 0.0, 0.0, 1000.0), type_counts, 0)
     )
-    assert accounting_state_audit(parent)["minimum_mass_margin_min"] < 0.0
+    assert accounting_state_audit(parent)["minimum_mass_margin_min"] >= 0.0
     prediction = _random_prediction(1)
     compiled = compile_binary_split(
         parent,
@@ -373,6 +373,33 @@ def test_tolerance_accepted_boosted_parent_does_not_scale_recursive_child_floors
     for child_index in range(2):
         child = AccountingState.from_ledger(compiled.child_ledger[:, child_index])
         assert accounting_state_audit(child)["minimum_mass_margin_min"] >= 0.0
+
+
+def test_material_mass_deficit_is_not_hidden_by_ledger_canonicalization():
+    type_counts = (128, 0, 0, 0, 0, 0)
+    # Representing 128 massive charged hadrons with a lightlike 1 TeV p4 would
+    # require an O(100 MeV) energy change, far outside the p4 closure contract.
+    # This is physical inconsistency, not floating-point cancellation.
+    with pytest.raises(ValueError, match="four-vector mass lies below"):
+        AccountingState.from_ledger(
+            _ledger((1000.0, 0.0, 0.0, 1000.0), type_counts, 0)
+        )
+
+
+def test_component_safe_correction_handles_mass_domain_cancellation():
+    type_counts = (8, 0, 0, 0, 0, 0)
+    raw = _ledger((1000.0, 0.0, 0.0, 1000.0), type_counts, 0)
+    floor = float(raw[0, ROOT_FEATURE_INDEX["minimum_mass_budget"]])
+    mass_tolerance = 3.0e-5 + 5.0e-4 * 1000.0
+    assert floor > mass_tolerance
+
+    state = AccountingState.from_ledger(raw)
+    report = accounting_state_audit(state)
+    assert report["ok"]
+    assert report["minimum_mass_margin_min"] >= 0.0
+    energy_correction = float(state.four_vector[0, 0] - raw[0, ROOT_FEATURE_INDEX["energy"]])
+    component_tolerance = ABPH_BINARY_P4_ABS_TOLERANCE + ABPH_BINARY_P4_REL_TOLERANCE * 1000.0
+    assert 0.0 < energy_correction <= component_tolerance
 
 
 def test_singleton_is_forced_terminal_and_has_no_physical_empty_child():

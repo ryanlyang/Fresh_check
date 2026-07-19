@@ -109,19 +109,42 @@ class AccountingState:
                 f"accounting ledger must have shape [B, >= {len(ROOT_FEATURE_NAMES)}]"
             )
         values = values[:, : len(ROOT_FEATURE_NAMES)]
+        type_counts = torch.stack(
+            tuple(
+                values[:, ROOT_FEATURE_INDEX[f"count_{name}"]].round().to(torch.long)
+                for name in ABPH_PID_CATEGORIES
+            ),
+            dim=-1,
+        )
+        four_vector = torch.stack(
+            tuple(values[:, ROOT_FEATURE_INDEX[name]] for name in ("energy", "px", "py", "pz")),
+            dim=-1,
+        )
+        expected_floor = minimum_mass_budget(type_counts)
+        representable = make_four_vector_mass_representable(four_vector, expected_floor)
+        energy_correction = (representable[:, 0] - four_vector[:, 0]).abs()
+        component_tolerance = (
+            ABPH_BINARY_P4_ABS_TOLERANCE
+            + ABPH_BINARY_P4_REL_TOLERANCE * four_vector[:, 0].abs()
+        )
+        repairable = energy_correction <= component_tolerance
+        repaired_energy = torch.where(
+            repairable,
+            representable[:, 0],
+            four_vector[:, 0],
+        )
+        # Ledger accounting is an exact recursive interface. Canonicalize only
+        # representational deficits whose required energy change is already
+        # inside the compiler's declared component-space closure tolerance.
+        # A physically material deficit remains untouched and fails the normal
+        # mass-floor audit below.
+        values = values.clone()
+        values[:, ROOT_FEATURE_INDEX["energy"]] = repaired_energy
+        four_vector = torch.cat((repaired_energy[:, None], four_vector[:, 1:]), dim=-1)
         state = cls(
-            four_vector=torch.stack(
-                tuple(values[:, ROOT_FEATURE_INDEX[name]] for name in ("energy", "px", "py", "pz")),
-                dim=-1,
-            ),
+            four_vector=four_vector,
             constituent_count=values[:, ROOT_FEATURE_INDEX["constituent_count"]].round().to(torch.long),
-            type_counts=torch.stack(
-                tuple(
-                    values[:, ROOT_FEATURE_INDEX[f"count_{name}"]].round().to(torch.long)
-                    for name in ABPH_PID_CATEGORIES
-                ),
-                dim=-1,
-            ),
+            type_counts=type_counts,
             integer_charge=values[:, ROOT_FEATURE_INDEX["integer_charge"]].round().to(torch.long),
             minimum_mass_budget=values[:, ROOT_FEATURE_INDEX["minimum_mass_budget"]],
             scalar_sum_pt=values[:, ROOT_FEATURE_INDEX["scalar_sum_pt"]],
