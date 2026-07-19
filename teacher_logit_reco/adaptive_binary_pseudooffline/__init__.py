@@ -903,6 +903,8 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "abort_distributed_runtime",
     "barrier",
     "broadcast_object",
+    "prepare_model_for_distributed_training",
+    "require_distributed_normalization_contract",
     "finalize_typed_validation",
     "reconstruction_materially_improved",
     "relative_reconstruction_improvement",

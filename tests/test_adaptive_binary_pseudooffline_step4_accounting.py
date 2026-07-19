@@ -240,6 +240,36 @@ def test_near_massless_parent_uses_documented_collinear_branch():
     torch.testing.assert_close(first + second, parent)
 
 
+def test_exactly_lightlike_compiler_has_finite_prediction_gradients():
+    parent = AccountingState.from_ledger(
+        _ledger((80.0, 0.0, 0.0, 80.0), (0, 0, 2, 0, 0, 0), 0)
+    )
+    prediction = _random_prediction(1, requires_grad=True)
+    compiled = compile_binary_split(
+        parent,
+        prediction,
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+        child_one_count_override=torch.tensor((1,)),
+        child_one_type_counts_override=torch.tensor(((0, 0, 1, 0, 0, 0),)),
+    )
+    assert compiled.diagnostics["ok"]
+    objective = (
+        compiled.child_four_vector.square().mean()
+        + compiled.relaxed_split_probability.mean()
+        + compiled.relaxed_child_constituent_count.square().mean()
+        + compiled.relaxed_child_type_counts.square().mean()
+        + compiled.child_scalar_sum_pt.square().mean()
+    )
+    objective.backward()
+    gradients = [
+        getattr(prediction, field.name).grad
+        for field in fields(prediction)
+        if getattr(prediction, field.name).grad is not None
+    ]
+    assert gradients
+    assert all(bool(torch.isfinite(gradient).all()) for gradient in gradients)
+
+
 def test_tolerance_accepted_parent_mass_roundoff_is_projected_before_split():
     type_counts = (2, 0, 0, 0, 0, 0)
     floor = 2.0 * _MASS[0]

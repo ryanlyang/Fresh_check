@@ -27,6 +27,8 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (
     gather_error_summaries,
     initialize_distributed_runtime,
     parameter_state_hash,
+    prepare_model_for_distributed_training,
+    require_distributed_normalization_contract,
     require_standard_tensor_mapping,
     tensor_mapping_is_finite,
     verify_common_parameter_state,
@@ -687,6 +689,37 @@ def test_single_rank_wrapper_exposes_loss_terms_and_gradients():
     with torch.no_grad():
         model.weight.add_(1.0)
     assert parameter_state_hash(model) != before
+
+
+def test_cuda_ddp_preparation_converts_rank_local_batch_norm():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 4),
+        torch.nn.BatchNorm1d(4),
+        torch.nn.ReLU(),
+    )
+    state_names = tuple(model.state_dict())
+    converted = prepare_model_for_distributed_training(
+        model,
+        requested_world_size=4,
+        device="cuda",
+    )
+    assert isinstance(converted[1], torch.nn.SyncBatchNorm)
+    assert tuple(converted.state_dict()) == state_names
+    require_distributed_normalization_contract(
+        converted,
+        DistributedRuntime(0, 4, 0, "nccl", "cuda"),
+        device="cuda",
+    )
+
+
+def test_cuda_ddp_contract_rejects_unconverted_batch_norm():
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4))
+    with pytest.raises(RuntimeError, match="rank-local BatchNorm"):
+        require_distributed_normalization_contract(
+            model,
+            DistributedRuntime(0, 4, 0, "nccl", "cuda"),
+            device="cuda",
+        )
 
 
 @pytest.mark.skipif(
