@@ -213,6 +213,31 @@ def test_step9_report_fails_when_required_run_missing(tmp_path: Path) -> None:
     assert any("missing required tagger run_report for D5" in problem for problem in report["problems"])
 
 
+def test_step9_report_rejects_tiny_finite_tagger_validation_subset(tmp_path: Path) -> None:
+    _write_campaign(tmp_path)
+    path = tmp_path / "taggers" / "D5" / "run_report.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["best_model_val"]["n_jets"] = 1
+    payload["best_model_val"]["nonfinite_batches"] = 99
+    _write_json(path, payload)
+
+    report = build_local_residual_field_report(
+        LocalResidualFieldReportConfig(
+            output_dir=str(tmp_path / "final_report"),
+            tagger_root=str(tmp_path / "taggers"),
+            reconstructor_root=str(tmp_path / "reconstructors"),
+            fusion_dir=str(tmp_path / "fusion"),
+            prediction_dir=str(tmp_path / "predictions"),
+            required_tagger_run_ids=("A0", "D5"),
+            required_reconstructor_run_ids=("C0",),
+            require_fusion=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert any("tagger D5 model_val finite metric coverage 1/100" in problem for problem in report["problems"])
+
+
 def test_step9_report_fails_when_required_fusion_groups_are_missing(tmp_path: Path) -> None:
     _write_campaign(tmp_path, fusion_groups=("G0",))
     report = build_local_residual_field_report(

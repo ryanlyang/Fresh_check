@@ -50,6 +50,7 @@ REPORT_SPLITS: tuple[str, ...] = ("model_val", "stack_val", "final_test")
 ORACLE_RUN_IDS: tuple[str, ...] = ("B0", "B1", "B2", "B3", "B4")
 CONTROL_RUN_IDS: tuple[str, ...] = ("F0", "F1", "F2", "F3", "F4", "F5")
 FIELD_IMPORTANCE_RUN_IDS: tuple[str, ...] = ("E0", "E1", "E2", "E3", "E4", "E5", "E6")
+MIN_TAGGER_METRIC_VALID_FRACTION = 0.99
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,56 @@ def _metric_value(metrics: Mapping[str, Any], *names: str) -> Any:
     return None
 
 
+def _int_value(value: Any) -> int | None:
+    try:
+        output = int(value)
+    except (TypeError, ValueError):
+        return None
+    return output if output >= 0 else None
+
+
+def _expected_n_jets(report: Mapping[str, Any], metrics: Mapping[str, Any], split: str) -> int | None:
+    for value in (
+        _path_value(report, ("dataset_metadata", split, "n_jets")),
+        _path_value(report, ("dataset_metadata", split, "selected_n_jets")),
+        metrics.get("selection_expected_n_jets"),
+        metrics.get("attempted_jets"),
+    ):
+        output = _int_value(value)
+        if output is not None and output > 0:
+            return output
+    return None
+
+
+def _tagger_metric_coverage_problem(
+    *,
+    run_id: str,
+    report: Mapping[str, Any],
+    split: str,
+    metrics: Mapping[str, Any],
+) -> str | None:
+    expected = _expected_n_jets(report, metrics, split)
+    if expected is None:
+        return f"tagger {run_id} {split} metrics are missing expected jet-count provenance"
+    seen = _int_value(metrics.get("n_jets"))
+    if seen is None:
+        return f"tagger {run_id} {split} metrics are missing n_jets"
+    min_seen = int(math.ceil(float(expected) * MIN_TAGGER_METRIC_VALID_FRACTION))
+    if seen < min_seen:
+        return (
+            f"tagger {run_id} {split} finite metric coverage {seen}/{expected} "
+            f"is below required {min_seen} ({MIN_TAGGER_METRIC_VALID_FRACTION:.4f})"
+        )
+    if metrics.get("valid_for_selection") is False:
+        reason = metrics.get("selection_rejection_reason") or "valid_for_selection=false"
+        return f"tagger {run_id} {split} metrics were rejected during training: {reason}"
+    if _float(metrics.get("loss")) is None and _float(metrics.get("cross_entropy")) is None:
+        return f"tagger {run_id} {split} loss/cross_entropy is missing or nonfinite"
+    if _float(metrics.get("accuracy")) is None:
+        return f"tagger {run_id} {split} accuracy is missing or nonfinite"
+    return None
+
+
 def _prediction_metadata_path(prediction_dir: str | Path | None, run_id: str, split: str) -> Path | None:
     if not prediction_dir:
         return None
@@ -308,11 +359,29 @@ def _tagger_metric_rows(
             metrics = _split_metrics(report, split)
             if not isinstance(metrics, Mapping):
                 continue
+            coverage_problem = _tagger_metric_coverage_problem(
+                run_id=run_id,
+                report=report,
+                split=split,
+                metrics=metrics,
+            )
+            if coverage_problem:
+                problems.append(coverage_problem)
+                continue
             rows.append(_tagger_metric_row(run_id, report, split, metrics, deployable_final_test=False))
         final_metrics = _prediction_final_test_metrics(prediction_dir, run_id) or _split_metrics(report, "final_test")
         if final_metrics:
             if not bool(confirm_final_test):
                 problems.append(f"final_test metrics found for tagger {run_id} but confirm_final_test is false")
+                continue
+            coverage_problem = _tagger_metric_coverage_problem(
+                run_id=run_id,
+                report=report,
+                split="final_test",
+                metrics=final_metrics,
+            )
+            if coverage_problem:
+                problems.append(coverage_problem)
                 continue
             rows.append(_tagger_metric_row(run_id, report, "final_test", final_metrics, deployable_final_test=True))
     return rows
@@ -336,6 +405,17 @@ def _tagger_metric_row(
         "macro_per_class_accuracy": _metric_value(metrics, "macro_per_class_accuracy"),
         "macro_auc": _metric_value(metrics, "macro_auc", "auc_macro"),
         "n_jets": _metric_value(metrics, "n_jets"),
+        "attempted_jets": _metric_value(metrics, "attempted_jets"),
+        "valid_fraction": _metric_value(metrics, "valid_fraction"),
+        "total_batches": _metric_value(metrics, "total_batches"),
+        "finite_batches": _metric_value(metrics, "finite_batches"),
+        "nonfinite_batches": _metric_value(metrics, "nonfinite_batches"),
+        "nonfinite_grad_batches": _metric_value(metrics, "nonfinite_grad_batches"),
+        "nonfinite_fraction": _metric_value(metrics, "nonfinite_fraction"),
+        "valid_for_selection": _metric_value(metrics, "valid_for_selection"),
+        "selection_expected_n_jets": _metric_value(metrics, "selection_expected_n_jets"),
+        "selection_valid_fraction_required": _metric_value(metrics, "selection_valid_fraction_required"),
+        "selection_rejection_reason": _metric_value(metrics, "selection_rejection_reason"),
         "best_epoch": report.get("best_epoch"),
         "selection_metric": report.get("selection_metric"),
         "best_model_selection_metric_value": report.get("best_model_selection_metric_value"),

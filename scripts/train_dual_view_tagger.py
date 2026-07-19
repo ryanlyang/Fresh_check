@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -12,8 +13,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from jetclass_fresh.dual_view import DualViewTaggerTrainConfig, train_dual_view_tagger  # noqa: E402
-from jetclass_fresh.hlt_baseline import save_json  # noqa: E402
+from jetclass_fresh.hlt_baseline import resolve_device, save_json  # noqa: E402
 from jetclass_fresh.reconstructor import RECONSTRUCTOR_VARIANT_NAMES  # noqa: E402
+from teacher_logit_reco.constrained_coarse_to_fine.runtime import (  # noqa: E402
+    configure_torch_native_triton_fallback,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +54,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    runtime_compatibility = configure_torch_native_triton_fallback(resolve_device(args.device))
+    print(json.dumps({"runtime_compatibility": runtime_compatibility}, sort_keys=True), flush=True)
     output_dir = args.output_dir or f"checkpoints/jetclass_fresh_reco7/{args.variant}/stage2_dual_view"
     config = DualViewTaggerTrainConfig(
         output_dir=output_dir,
@@ -79,6 +85,7 @@ def main() -> int:
         max_train_jets=args.max_train_jets,
         max_val_jets=args.max_val_jets,
     )
+    report["runtime_compatibility"] = runtime_compatibility
     save_json(Path(output_dir) / "run_report.json", report)
     return 0
 

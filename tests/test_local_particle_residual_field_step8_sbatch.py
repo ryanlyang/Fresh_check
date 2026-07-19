@@ -43,14 +43,17 @@ def test_step8_submitter_queues_inputs_reconstructors_taggers_predictions_and_fu
 
 def test_step8_runner_scripts_call_expected_python_entrypoints():
     split_builder = _read("run_build_fresh_splits.sh")
+    tagger_runner = _read("run_train_local_residual_field_tagger.sh")
     assert "scripts/cache_local_particle_residual_fields.py" in _read("run_cache_local_particle_residual_fields.sh")
     assert "scripts/train_local_residual_reconstructor.py" in _read("run_train_local_residual_reconstructor.sh")
-    assert "scripts/train_local_residual_field_tagger.py" in _read("run_train_local_residual_field_tagger.sh")
+    assert "scripts/train_local_residual_field_tagger.py" in tagger_runner
     assert "scripts/predict_local_residual_field_tagger.py" in _read("run_predict_local_residual_field_tagger.sh")
     assert "scripts/run_local_residual_field_fusion.py" in _read("run_local_residual_field_fusion.sh")
     assert "scripts/write_local_residual_field_report.py" in _read("run_write_local_residual_field_report.sh")
     assert "SKIP_UNREADABLE_ROOT_FILES" in split_builder
     assert "--skip-unreadable-files" in split_builder
+    assert "LOCAL_RESIDUAL_FIELD_TAGGER_MIN_SELECTION_VALID_FRACTION:=0.99" in tagger_runner
+    assert "--min-selection-valid-fraction" in tagger_runner
     assert "LOCAL_RESIDUAL_FIELD_TARGET_DTYPE:=float16" in _read("run_cache_local_particle_residual_fields.sh")
     assert "LOCAL_RESIDUAL_FIELD_INCLUDE_FINAL_TEST_TARGETS:=0" in _read("run_cache_local_particle_residual_fields.sh")
 

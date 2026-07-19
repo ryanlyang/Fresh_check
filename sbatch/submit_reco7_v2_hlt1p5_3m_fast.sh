@@ -48,6 +48,8 @@ fresh_prepare_submitter
 : "${RECO7_V2_FAST_MODEL_SIZE:=base}"
 : "${RECO7_V2_FAST_READ_CHUNK_SIZE:=50000}"
 : "${RECO7_V2_FAST_HLT_SPLITS:=model_train model_val stack_train stack_val final_test}"
+: "${RECO7_V2_FAST_TORCH_NATIVE_TRITON:=disable}"
+: "${RECO7_V2_FAST_TORCH_NATIVE_TRITON_PROBE:=1}"
 
 : "${RECO7_V2_FAST_SPLIT_TIME:=08:00:00}"
 : "${RECO7_V2_FAST_SPLIT_MEM:=64G}"
@@ -146,6 +148,8 @@ common_env=(
   "PYTHON_BIN=${PYTHON_BIN}"
   "DEVICE=${DEVICE}"
   "OVERWRITE=${OVERWRITE}"
+  "CONSTRAINED_C2F_TORCH_NATIVE_TRITON=${RECO7_V2_FAST_TORCH_NATIVE_TRITON}"
+  "CONSTRAINED_C2F_TORCH_NATIVE_TRITON_PROBE=${RECO7_V2_FAST_TORCH_NATIVE_TRITON_PROBE}"
   "MANIFEST_PATH=${manifest_path}"
   "HLT_CACHE_DIR=${hlt_cache_dir}"
   "HLT_BASELINE_DIR=${hlt_baseline_dir}"
@@ -264,6 +268,8 @@ reco7_v2_hlt1p5_3m_fast_submission:
     final_test: ${RECO7_V2_FAST_FINAL_TEST_SIZE}
   speed_knobs:
     no_amp: ${RECO7_V2_FAST_NO_AMP}
+    torch_native_triton: ${RECO7_V2_FAST_TORCH_NATIVE_TRITON}
+    torch_native_triton_probe: ${RECO7_V2_FAST_TORCH_NATIVE_TRITON_PROBE}
     baseline_batch_size: ${RECO7_V2_FAST_BASELINE_BATCH_SIZE}
     stage_a_batch_size: ${RECO7_V2_FAST_STAGE_A_BATCH_SIZE}
     stage2_batch_size: ${RECO7_V2_FAST_STAGE2_BATCH_SIZE}
