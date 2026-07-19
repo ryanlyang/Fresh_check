@@ -86,6 +86,43 @@ def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
     return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
 
 
+def make_four_vector_mass_representable(
+    four_vector: Any,
+    minimum_mass: Any,
+) -> Any:
+    """Raise energy minimally so a rounded p4 retains its compiled mass floor.
+
+    Highly boosted float32 four-vectors can lose a small invariant mass through
+    cancellation even when they were constructed from an exactly feasible
+    ``(pt, eta, phi, mass)`` tuple.  The one-ULP detached correction preserves
+    gradients through the physical energy projection while making the stored
+    representation satisfy the same hard floor on its next use.
+    """
+
+    torch = require_torch()
+    p4 = torch.as_tensor(four_vector)
+    floor = torch.as_tensor(
+        minimum_mass,
+        device=p4.device,
+        dtype=torch.float64,
+    ).clamp_min(0.0)
+    if p4.shape[-1] != 4 or floor.shape != p4.shape[:-1]:
+        raise ValueError("mass representability requires p4 [..., 4] and mass [...]")
+    spatial_squared = p4[..., 1:].to(torch.float64).square().sum(dim=-1)
+    required_energy = torch.sqrt(spatial_squared + floor.square())
+    projected = torch.maximum(p4[..., 0].to(torch.float64), required_energy)
+    rounded = projected.to(p4.dtype)
+    rounded_mass_squared = (
+        rounded.to(torch.float64).square() - spatial_squared
+    )
+    needs_ulp = rounded_mass_squared < floor.square()
+    upward = torch.nextafter(rounded, torch.full_like(rounded, float("inf")))
+    representable = torch.where(needs_ulp, upward, rounded)
+    # nextafter is a representational operation, not part of the learned map.
+    representable = rounded + (representable - rounded).detach()
+    return torch.cat((representable.unsqueeze(-1), p4[..., 1:]), dim=-1)
+
+
 @dataclass(frozen=True)
 class RootPhysicalKinematics:
     pt: Any
@@ -307,8 +344,9 @@ def kinematics_from_four_vector(four_vector: Any) -> RootPhysicalKinematics:
     pt = _stable_nonnegative_sqrt(px.square() + py.square())
     phi = wrap_phi_tensor(torch.atan2(py, px))
     eta = torch.asinh(pz / pt.clamp_min(ABPH_ROOT_EPSILON))
-    mass_squared = energy.square() - px.square() - py.square() - pz.square()
-    mass = _stable_nonnegative_sqrt(mass_squared)
+    work = p4.to(torch.float64)
+    mass_squared = work[..., 0].square() - work[..., 1:].square().sum(dim=-1)
+    mass = _stable_nonnegative_sqrt(mass_squared).to(p4.dtype)
     return RootPhysicalKinematics(pt, eta, phi, mass, energy, px, py, pz)
 
 
@@ -322,7 +360,12 @@ def kinematics_from_pt_eta_phi_mass(pt: Any, eta: Any, phi: Any, mass: Any) -> R
     py = pt * torch.sin(phi)
     pz = pt * torch.sinh(eta)
     momentum_squared = pt.square() + pz.square()
-    energy = _stable_nonnegative_sqrt(momentum_squared + mass.square())
+    provisional_energy = _stable_nonnegative_sqrt(momentum_squared + mass.square())
+    representable = make_four_vector_mass_representable(
+        torch.stack((provisional_energy, px, py, pz), dim=-1),
+        mass,
+    )
+    energy = representable[..., 0]
     return RootPhysicalKinematics(pt, eta, phi, mass, energy, px, py, pz)
 
 
@@ -528,6 +571,7 @@ __all__ = [
     "inverse_softplus",
     "kinematics_from_four_vector",
     "kinematics_from_pt_eta_phi_mass",
+    "make_four_vector_mass_representable",
     "root_ledger_kinematics",
     "root_physical_to_residual",
     "root_residual_to_physical",

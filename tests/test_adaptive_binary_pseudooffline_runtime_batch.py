@@ -178,9 +178,19 @@ def test_contract_is_hash_bound_immutable_and_expected_input_checked(tmp_path):
 
 
 def test_full_step_probe_materializes_gradients_adamw_and_ema_on_cpu():
-    model = torch.nn.Linear(2, 1)
+    inner_model = torch.nn.Linear(2, 1)
+
+    class TrainingWrapper(torch.nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def forward(self, values):
+            return self.model(values)
+
+    model = TrainingWrapper(inner_model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
-    ema = ExponentialMovingAverage(model, 0.99)
+    ema = ExponentialMovingAverage(inner_model, 0.99)
 
     def batch_factory(batch_size):
         return torch.ones(batch_size, 2)

@@ -17,6 +17,7 @@ from .root_compiler import (
 from .root_transforms import (
     ROOT_FEATURE_INDEX,
     ROOT_SHAPE_FEATURE_NAMES,
+    make_four_vector_mass_representable,
 )
 from .root_compiler import compile_shape_features
 from .schemas import ABPH_EFFECTIVE_MASS_GEV, ABPH_MAX_PARTICLES, ABPH_PID_CATEGORIES
@@ -202,12 +203,13 @@ def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
 def _invariant_mass(four_vector: Any) -> Any:
     torch = require_torch()
     p4 = torch.as_tensor(four_vector)
+    work = p4.to(torch.float64)
     return _stable_nonnegative_sqrt(
         (
-            p4[..., 0].square()
-            - p4[..., 1].square()
-            - p4[..., 2].square()
-            - p4[..., 3].square()
+            work[..., 0].square()
+            - work[..., 1].square()
+            - work[..., 2].square()
+            - work[..., 3].square()
         )
     )
 
@@ -402,7 +404,8 @@ def two_body_phase_space_split(
 
     torch = require_torch()
     parent_input = torch.as_tensor(parent_four_vector)
-    work_dtype = torch.float64 if parent_input.dtype == torch.float64 else torch.float32
+    output_dtype = parent_input.dtype
+    work_dtype = torch.float64
     parent = parent_input.to(work_dtype)
     masses = torch.as_tensor(child_masses, device=parent.device, dtype=work_dtype)
     direction_values = torch.as_tensor(direction_raw, device=parent.device, dtype=work_dtype)
@@ -456,7 +459,15 @@ def two_body_phase_space_split(
     collinear_one = parent * alpha[:, None]
     child_one = torch.where(near_massless[:, None], collinear_one, regular_one)
     child_two = parent - child_one
-    closure = (child_one + child_two - parent).abs().amax(dim=-1)
+    child_one = make_four_vector_mass_representable(
+        child_one.to(output_dtype), mass_one.to(output_dtype)
+    )
+    child_two = make_four_vector_mass_representable(
+        child_two.to(output_dtype), mass_two.to(output_dtype)
+    )
+    closure = (
+        child_one + child_two - parent_input.to(output_dtype)
+    ).abs().amax(dim=-1)
     diagnostics = {
         "near_massless_mask": near_massless,
         "near_massless_count": int(near_massless.sum().detach().cpu()),

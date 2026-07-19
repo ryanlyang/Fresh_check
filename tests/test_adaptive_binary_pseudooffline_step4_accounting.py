@@ -37,6 +37,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.targets import (
     TOPOLOGY_ACTIVE_SPLIT,
     TOPOLOGY_ACTIVE_TERMINAL,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.root_transforms import (
+    make_four_vector_mass_representable,
+)
 
 
 _MASS = (0.13957039, 0.0, 0.0, 0.00051099895, 0.1056583755, 0.0)
@@ -180,7 +183,9 @@ def test_random_valid_parents_conserve_every_hard_channel():
     assert compiled.diagnostics["hard"]["max_count_residual"] == 0
     assert compiled.diagnostics["hard"]["max_type_count_residual"] == 0
     assert compiled.diagnostics["hard"]["max_charge_residual"] == 0
-    assert compiled.diagnostics["hard"]["max_four_vector_residual"] <= 1e-5
+    # One representability ULP may be added to each child energy so its stored
+    # float32 p4 retains the compiled mass floor on the next hierarchy level.
+    assert compiled.diagnostics["hard"]["max_four_vector_residual"] <= 2e-5
     assert torch.equal(
         compiled.child_type_counts.sum(dim=2), compiled.child_constituent_count
     )
@@ -307,6 +312,31 @@ def test_tolerance_accepted_parent_mass_roundoff_is_projected_before_split():
         rtol=0.0,
         atol=2.0e-8,
     )
+
+
+def test_boosted_float32_children_remain_valid_recursive_parents():
+    type_counts = (2, 0, 0, 0, 0, 0)
+    floor = torch.tensor((2.0 * _MASS[0],), dtype=torch.float32)
+    p4 = make_four_vector_mass_representable(
+        torch.tensor(((1000.0, 0.0, 0.0, 1000.0),), dtype=torch.float32),
+        floor,
+    )
+    parent = AccountingState.from_ledger(
+        _ledger(tuple(float(value) for value in p4[0]), type_counts, 0)
+    )
+    prediction = _random_prediction(1)
+    compiled = compile_binary_split(
+        parent,
+        prediction,
+        topology_override=torch.tensor((int(TOPOLOGY_ACTIVE_SPLIT),)),
+        child_one_count_override=torch.tensor((1,)),
+        child_one_type_counts_override=torch.tensor(((1, 0, 0, 0, 0, 0),)),
+        child_one_charge_override=torch.tensor((1,)),
+    )
+    assert compiled.diagnostics["ok"]
+    for child_index in range(2):
+        child = AccountingState.from_ledger(compiled.child_ledger[:, child_index])
+        assert accounting_state_audit(child)["ok"]
 
 
 def test_singleton_is_forced_terminal_and_has_no_physical_empty_child():

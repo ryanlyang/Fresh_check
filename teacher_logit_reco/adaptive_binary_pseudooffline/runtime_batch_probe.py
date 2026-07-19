@@ -118,7 +118,14 @@ def measure_full_optimizer_step(
         optimizer.step()
         stepped = True
         if hasattr(ema, "update"):
-            ema.update(model.module if is_ddp else model)
+            ema_source = model.module if is_ddp else model
+            # DDP wraps ReconstructorTrainingModule, whose child ``model`` is
+            # the reconstructor tracked by EMA. Updating from the wrapper adds
+            # a spurious ``model.`` prefix and rejects an otherwise valid step.
+            nested_model = getattr(ema_source, "model", None)
+            if isinstance(nested_model, torch.nn.Module):
+                ema_source = nested_model
+            ema.update(ema_source)
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}"
     finally:
