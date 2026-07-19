@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import sys
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -108,6 +110,14 @@ def _probe_state(resolved: dict, family: str) -> CurriculumState:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     torch = require_torch()
+    # Every candidate must measure the same initialization.  Otherwise batch
+    # calibration is confounded by independently sampled model weights and can
+    # reject an otherwise valid topology because one random initialization has
+    # an unstable first backward pass.
+    torch.manual_seed(24731)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(24731)
+    np.random.seed(24731)
     rank, world_size, _local_rank = distributed_environment()
     if world_size != int(args.expected_world_size):
         raise ValueError("Slurm world size differs from the requested probe topology")

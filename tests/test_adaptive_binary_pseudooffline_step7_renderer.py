@@ -25,6 +25,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.particle_matching import (
 from teacher_logit_reco.adaptive_binary_pseudooffline.particle_renderer import (
     ConstrainedParticleRenderer,
     ParticleRendererConfig,
+    _invariant_mass_float64,
     allocate_particle_charges,
     allocate_particle_types,
     exact_particle_slot_layout,
@@ -200,6 +201,33 @@ def test_n_body_phase_space_is_differentiable_and_closes_massive_parent():
     assert diagnostics["branch"] == "massive_rest_frame"
     particles[:, 0].square().sum().backward()
     assert raw.grad is not None and float(raw.grad.abs().sum()) > 0.0
+
+
+def test_boosted_parent_mass_budget_uses_projector_precision():
+    # Float32 cancellation overestimates this stored p4's mass by about 1.2%.
+    # Renderer budgeting must use the projector's float64 interpretation or it
+    # can allocate particle masses that the exact projection cannot realize.
+    parent = torch.tensor((1000.00048828125, 1000.0, 0.0, 0.0), dtype=torch.float32)
+    parent_mass = _invariant_mass_float64(parent)
+    float32_mass = torch.sqrt(
+        (parent[0].square() - parent[1:].square().sum()).clamp_min(0.0)
+    )
+    assert float(float32_mass) > float(parent_mass)
+
+    minimum = torch.tensor((0.13957, 0.13957), dtype=torch.float64)
+    available = 0.999 * parent_mass - minimum.sum()
+    masses = minimum + available * torch.tensor((0.55, 0.45), dtype=torch.float64)
+    particles, diagnostics = project_n_body_phase_space(
+        parent,
+        torch.tensor(((0.2, 0.1, -0.3), (-0.1, 0.4, 0.2)), dtype=torch.float64),
+        masses,
+        torch.zeros(2, dtype=torch.float64),
+    )
+
+    torch.testing.assert_close(
+        particles.sum(dim=0), parent, atol=2.0e-3, rtol=2.0e-6
+    )
+    assert diagnostics["branch"] == "massive_rest_frame"
 
 
 def test_massless_phase_space_branch_closes_without_a_fake_mass_floor():

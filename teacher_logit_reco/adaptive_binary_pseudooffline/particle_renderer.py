@@ -549,6 +549,19 @@ def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
     return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
 
 
+def _invariant_mass_float64(four_vector: Any) -> Any:
+    """Return invariant mass using one cancellation-resistant representation."""
+
+    torch = require_torch()
+    p4 = torch.as_tensor(four_vector)
+    if p4.shape[-1] != 4:
+        raise ValueError("invariant mass expects a four-vector ending in [4]")
+    work = p4.to(torch.float64)
+    return _stable_nonnegative_sqrt(
+        work[..., 0].square() - work[..., 1:].square().sum(dim=-1)
+    )
+
+
 def project_n_body_phase_space(
     parent_four_vector: Any,
     raw_rest_spatial: Any,
@@ -572,8 +585,7 @@ def project_n_body_phase_space(
     count = int(raw.shape[0])
     if count <= 0 or masses.shape != (count,) or fractions_raw.shape != (count,):
         raise ValueError("N-body particle dimensions are inconsistent")
-    mass_squared = parent[0].square() - parent[1:].square().sum()
-    parent_mass = _stable_nonnegative_sqrt(mass_squared)
+    parent_mass = _invariant_mass_float64(parent)
     feasibility_tolerance = 2.0e-5 * parent_mass.abs().clamp_min(1.0)
     if bool((masses < 0.0).any()) or bool(
         masses.sum() > parent_mass + feasibility_tolerance
@@ -971,10 +983,12 @@ class ConstrainedParticleRenderer(_ModuleBase):
                 parent_p4 = torch.stack(
                     tuple(parent[ROOT_FEATURE_INDEX[name]] for name in ("energy", "px", "py", "pz"))
                 )
-                parent_mass = _stable_nonnegative_sqrt(
-                    parent_p4[0].square() - parent_p4[1:].square().sum()
-                )
-                local_minimum = minimum_mass[batch_index, member]
+                # Compute the available mass in the exact same float64 domain
+                # used by ``project_n_body_phase_space``.  A float32 invariant
+                # mass here can be materially different for boosted cells and
+                # make a valid allocation appear infeasible after projection.
+                parent_mass = _invariant_mass_float64(parent_p4)
+                local_minimum = minimum_mass[batch_index, member].to(torch.float64)
                 if int(member.numel()) == 1:
                     local_mass = parent_mass[None]
                 else:
@@ -984,11 +998,14 @@ class ConstrainedParticleRenderer(_ModuleBase):
                     ).clamp_min(0.0)
                     group_fraction = torch.sigmoid(
                         self.group_mass_fraction_head(final.hidden[batch_index, group_index])
-                    ).squeeze(-1).float()
+                    ).squeeze(-1).to(torch.float64)
                     local_mass = local_minimum + (
                         available
                         * group_fraction
-                        * mass_logits[batch_index, member].float().softmax(dim=0)
+                        * mass_logits[batch_index, member]
+                        .float()
+                        .softmax(dim=0)
+                        .to(torch.float64)
                     )
                 if self.config.exact_nbody_projection:
                     local_p4, phase = project_n_body_phase_space(

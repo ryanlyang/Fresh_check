@@ -928,6 +928,9 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
     assert "CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
     assert "afterok:" in submitter
     assert "probe_adaptive_binary_runtime_batch.py" in worker
+    assert "torch.manual_seed(24731)" in probe
+    assert "torch.cuda.manual_seed_all(24731)" in probe
+    assert "np.random.seed(24731)" in probe
     assert "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}" in worker
     assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker
     assert "compile_adaptive_binary_runtime_batch_contract.py" in compiler
