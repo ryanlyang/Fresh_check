@@ -54,6 +54,8 @@ def test_step8_runner_scripts_call_expected_python_entrypoints():
     assert "--skip-unreadable-files" in split_builder
     assert "LOCAL_RESIDUAL_FIELD_TAGGER_MIN_SELECTION_VALID_FRACTION:=0.99" in tagger_runner
     assert "--min-selection-valid-fraction" in tagger_runner
+    assert "LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_CLIP_VALUE:=8.0" in tagger_runner
+    assert "--residual-field-clip-value" in tagger_runner
     assert "LOCAL_RESIDUAL_FIELD_TARGET_DTYPE:=float16" in _read("run_cache_local_particle_residual_fields.sh")
     assert "LOCAL_RESIDUAL_FIELD_INCLUDE_FINAL_TEST_TARGETS:=0" in _read("run_cache_local_particle_residual_fields.sh")
 

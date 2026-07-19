@@ -24,6 +24,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${VERIFY_HLT_CACHE_ARRAYS:=0}"
 
 fresh_setup "$@"
+fresh_register_diagnostics_dir "${V2_STEP7_AUDIT_DIR}" "v2_step11_audit_reco7_plus_hlt_preflight"
 fresh_require_file "${MANIFEST_PATH}"
 fresh_require_file "${V2_STEP7_FUSION_DIR}/fusion_report.json"
 fresh_refuse_existing_dir "${V2_STEP7_AUDIT_DIR}"

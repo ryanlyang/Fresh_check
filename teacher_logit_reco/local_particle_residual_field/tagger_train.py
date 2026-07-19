@@ -99,6 +99,7 @@ class LocalResidualFieldTaggerTrainConfig:
     baseline_checkpoint: str | None = None
     require_baseline_warm_start: bool = False
     residual_field_scale: float = 1.0
+    residual_field_clip_value: float = 8.0
     field_dropout: float = 0.0
     control_seed: int = 9173
     control_noise_scale: float = 1.0
@@ -151,6 +152,7 @@ class LocalResidualFieldTaggerTrainConfig:
             "reconstructor_loss_weight",
             "kd_loss_weight",
             "residual_field_scale",
+            "residual_field_clip_value",
             "reconstructor_uncertainty_loss_weight",
             "reconstructor_consistency_loss_weight",
         ):
@@ -522,6 +524,7 @@ def _build_model(
         field_source=str(config.field_source),
         model_size=str(config.model_size),
         residual_field_scale=float(config.residual_field_scale),
+        residual_field_clip_value=float(config.residual_field_clip_value),
         field_dropout=float(config.field_dropout),
         field_names=tuple(selected_field_names),
         field_groups=selected_field_groups,

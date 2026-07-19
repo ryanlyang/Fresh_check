@@ -27,6 +27,7 @@ source "${SCRIPT_DIR}/common.sh"
 : "${CONFIRM_FINAL_TEST:=1}"
 
 fresh_setup "$@"
+fresh_register_diagnostics_dir "${V2_STEP7_FUSION_DIR}" "v2_step10_fuse_reco7_plus_hlt_preflight"
 fresh_require_file "${HLT_CACHE_DIR}/stack_train_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_CACHE_DIR}/stack_val_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_CACHE_DIR}/final_test_fixed_hlt_metadata.json"

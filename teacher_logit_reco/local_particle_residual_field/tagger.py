@@ -102,6 +102,7 @@ class LocalResidualFieldTaggerConfig:
     field_source: str = RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR
     model_size: str = "base"
     residual_field_scale: float = 1.0
+    residual_field_clip_value: float = 8.0
     field_dropout: float = 0.0
     field_names: Sequence[str] = field(default_factory=tuple)
     field_groups: Mapping[str, Sequence[int]] = field(default_factory=dict)
@@ -124,10 +125,14 @@ class LocalResidualFieldTaggerConfig:
         scale = float(self.residual_field_scale)
         if scale < 0.0:
             raise ValueError("residual_field_scale must be non-negative")
+        clip_value = float(self.residual_field_clip_value)
+        if clip_value < 0.0:
+            raise ValueError("residual_field_clip_value must be non-negative")
         dropout = float(self.field_dropout)
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("field_dropout must be in [0, 1)")
         object.__setattr__(self, "residual_field_scale", scale)
+        object.__setattr__(self, "residual_field_clip_value", clip_value)
         object.__setattr__(self, "field_dropout", dropout)
         names = tuple(str(name) for name in self.field_names)
         if names and len(names) != int(self.field_dim):
@@ -413,6 +418,12 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             mask_features = mask_features[:, None, :]
         mask_features = mask_features.to(device=features.device, dtype=torch.bool)
         field_features = field_features * mask_features.to(dtype=field_features.dtype)
+        clip_value = float(self.config.residual_field_clip_value)
+        if clip_value > 0.0:
+            field_features = torch.nan_to_num(field_features, nan=0.0, posinf=clip_value, neginf=-clip_value)
+            field_features = field_features.clamp(min=-clip_value, max=clip_value)
+        else:
+            field_features = torch.nan_to_num(field_features, nan=0.0, posinf=0.0, neginf=0.0)
         field_features = self.field_dropout(field_features) * float(self.config.residual_field_scale)
         augmented = torch.cat([features, field_features], dim=1)
         return augmented, field_features
@@ -491,6 +502,7 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             "augmented_feature_dim": int(augmented.shape[1]),
             "base_feature_dim": int(features.shape[1]),
             "field_dim": int(field_features.shape[1]),
+            "residual_field_clip_value": float(self.config.residual_field_clip_value),
             **_masked_field_stats(fields, field_mask),
         }
         if isinstance(control_diagnostics, Mapping):

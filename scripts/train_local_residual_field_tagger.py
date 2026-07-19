@@ -70,6 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baseline-checkpoint", default="")
     parser.add_argument("--require-baseline-warm-start", action="store_true")
     parser.add_argument("--residual-field-scale", type=float, default=1.0)
+    parser.add_argument("--residual-field-clip-value", type=float, default=8.0)
     parser.add_argument("--field-dropout", type=float, default=0.0)
     parser.add_argument("--control-seed", type=int, default=9173)
     parser.add_argument("--control-noise-scale", type=float, default=1.0)
@@ -129,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         baseline_checkpoint=args.baseline_checkpoint or None,
         require_baseline_warm_start=bool(args.require_baseline_warm_start),
         residual_field_scale=float(args.residual_field_scale),
+        residual_field_clip_value=float(args.residual_field_clip_value),
         field_dropout=float(args.field_dropout),
         control_seed=int(args.control_seed),
         control_noise_scale=float(args.control_noise_scale),

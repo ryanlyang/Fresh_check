@@ -46,6 +46,7 @@ esac
 OUTPUT_DIR="${V2_STEP7_RECO_ROOT}/${VARIANT}"
 
 fresh_setup "$@"
+fresh_register_diagnostics_dir "${OUTPUT_DIR}" "v2_step7_train_${VARIANT}_preflight"
 fresh_require_data_dir
 fresh_require_file "${MANIFEST_PATH}"
 fresh_require_file "${HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"

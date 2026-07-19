@@ -195,6 +195,45 @@ def test_step5_oracle_fields_are_concatenated_to_part_features():
     assert output.diagnostics["field_source"] == RESIDUAL_FIELD_SOURCE_ORACLE
 
 
+def test_step5_residual_feature_channels_are_finite_clipped_before_part():
+    dataset = _dataset("model_train", n_jets=3)
+    batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
+    bad_fields = batch["target_fields"].clone()
+    bad_fields[0, 0, 0] = float("nan")
+    bad_fields[0, 1, 1] = float("inf")
+    bad_fields[1, 0, 2] = -float("inf")
+    bad_fields[1, 1, 3] = 1234.0
+    model = LocalResidualFieldAugmentedParT(
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE,
+            residual_field_clip_value=4.0,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(FIELD_NAMES), num_classes=3),
+    )
+
+    output = model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        tokens=batch["tokens"],
+        raw_mask=batch["raw_mask"],
+        target_fields=bad_fields,
+        return_outputs=True,
+    )
+
+    residual_channels = output.augmented_features[:, -len(FIELD_NAMES) :, :]
+    assert torch.isfinite(residual_channels).all()
+    assert float(residual_channels.abs().max().item()) <= 4.0
+    assert residual_channels[0, 0, 0].item() == 0.0
+    assert residual_channels[0, 1, 1].item() == 4.0
+    assert residual_channels[1, 2, 0].item() == -4.0
+
+
 def test_step5_hlt_only_uses_clean_part_input_without_zero_field_channels():
     dataset = _dataset("model_train", n_jets=3)
     batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
