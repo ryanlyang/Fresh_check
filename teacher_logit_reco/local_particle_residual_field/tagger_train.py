@@ -31,14 +31,20 @@ from .data import (
     move_local_particle_residual_field_batch_to_device,
 )
 from .model import LocalResidualFieldReconstructorConfig
+from .oracle_teacher import build_oracle_teacher_reuse_contract
 from .tagger import (
     LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+    ORACLE_RESIDUAL_FIELD_SOURCES,
     RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
     RESIDUAL_FIELD_SOURCE_HLT_ONLY,
     RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
     RESIDUAL_FIELD_SOURCE_CROSS_JET_SHUFFLE,
     RESIDUAL_FIELD_SOURCE_LEARNED_NO_TARGET,
     RESIDUAL_FIELD_SOURCE_ORACLE,
+    RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+    RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+    RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+    RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
     RESIDUAL_FIELD_SOURCES,
     LocalResidualFieldControlConfig,
     LocalResidualFieldAugmentedParT,
@@ -56,6 +62,7 @@ from .train import (
 
 
 LOCAL_RESIDUAL_FIELD_TAGGER_TRAIN_CONTRACT = "local_particle_residual_field_augmented_part_train_v1"
+LOCAL_RESIDUAL_FIELD_ORACLE_TEACHER_CONFIG_CONTRACT = "local_residual_field_oracle_teacher_config_v1"
 LOCAL_RESIDUAL_FIELD_TAGGER_SELECTION_METRICS = (
     "accuracy",
     "loss",
@@ -101,6 +108,10 @@ class LocalResidualFieldTaggerTrainConfig:
     residual_field_scale: float = 1.0
     residual_field_clip_value: float = 8.0
     field_dropout: float = 0.0
+    oracle_field_alpha: float = 1.0
+    oracle_field_noise_std: float = 0.0
+    oracle_field_dropout: float = 0.0
+    oracle_field_group_dropout: float = 0.0
     control_seed: int = 9173
     control_noise_scale: float = 1.0
     control_random_match_target_std: bool = True
@@ -153,12 +164,14 @@ class LocalResidualFieldTaggerTrainConfig:
             "kd_loss_weight",
             "residual_field_scale",
             "residual_field_clip_value",
+            "oracle_field_alpha",
+            "oracle_field_noise_std",
             "reconstructor_uncertainty_loss_weight",
             "reconstructor_consistency_loss_weight",
         ):
             value = float(getattr(self, name))
-            if value < 0.0:
-                raise ValueError(f"{name} must be non-negative")
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
             setattr(self, name, value)
         if float(self.reconstructor_huber_beta) <= 0.0:
             raise ValueError("reconstructor_huber_beta must be positive")
@@ -166,6 +179,11 @@ class LocalResidualFieldTaggerTrainConfig:
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError("field_dropout must be in [0, 1)")
         self.field_dropout = dropout
+        for name in ("oracle_field_dropout", "oracle_field_group_dropout"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0 or value >= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1)")
+            setattr(self, name, value)
         self.control_seed = int(self.control_seed)
         self.control_noise_scale = float(self.control_noise_scale)
         if self.control_noise_scale < 0.0:
@@ -178,6 +196,30 @@ class LocalResidualFieldTaggerTrainConfig:
         if self.learned_control_dropout < 0.0 or self.learned_control_dropout >= 1.0:
             raise ValueError("learned_control_dropout must be in [0, 1)")
         self.field_subset = tuple(str(value).strip() for value in self.field_subset if str(value).strip())
+        if self.field_source == RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET and not self.field_subset:
+            raise ValueError("oracle_field_subset requires a non-empty field_subset")
+        if self.field_source not in {
+            RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+            RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+        } and any(
+            value > 0.0
+            for value in (
+                float(self.oracle_field_noise_std),
+                float(self.oracle_field_dropout),
+                float(self.oracle_field_group_dropout),
+            )
+        ):
+            raise ValueError(
+                f"field_source={self.field_source!r} does not apply oracle corruption; use "
+                "oracle_noisy or oracle_dropout"
+            )
+        if self.field_source == RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT:
+            if float(self.oracle_field_noise_std) > 0.0:
+                raise ValueError("oracle_dropout does not apply Gaussian noise; use oracle_noisy")
+            if float(self.oracle_field_dropout) <= 0.0 and float(self.oracle_field_group_dropout) <= 0.0:
+                raise ValueError("oracle_dropout requires oracle_field_dropout or oracle_field_group_dropout")
+        if self.field_source == RESIDUAL_FIELD_SOURCE_ORACLE_NOISY and float(self.oracle_field_noise_std) <= 0.0:
+            raise ValueError("oracle_noisy requires a positive oracle_field_noise_std")
         self.reconstructor_field_group_weights = {
             str(key): float(value)
             for key, value in dict(self.reconstructor_field_group_weights or {}).items()
@@ -286,7 +328,7 @@ def _load_tagger_dataset(
         manifest_path=config.manifest_path,
         max_jets=max_jets,
         teacher_logits_path=_teacher_logits_path(config, split),
-        include_oracle_fields=config.field_source == RESIDUAL_FIELD_SOURCE_ORACLE,
+        include_oracle_fields=config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES,
         verify_hash=bool(config.verify_hash),
         require_manifest_match=bool(config.require_manifest_match),
         require_teacher_logits_metadata=_teacher_logits_path(config, split) is not None,
@@ -526,6 +568,10 @@ def _build_model(
         residual_field_scale=float(config.residual_field_scale),
         residual_field_clip_value=float(config.residual_field_clip_value),
         field_dropout=float(config.field_dropout),
+        oracle_field_alpha=float(config.oracle_field_alpha),
+        oracle_field_noise_std=float(config.oracle_field_noise_std),
+        oracle_field_dropout=float(config.oracle_field_dropout),
+        oracle_field_group_dropout=float(config.oracle_field_group_dropout),
         field_names=tuple(selected_field_names),
         field_groups=selected_field_groups,
         source_field_indices=source_field_indices,
@@ -776,6 +822,48 @@ def _checkpoint_payload(
     return payload
 
 
+def _oracle_teacher_config_payload(
+    *,
+    output_dir: Path,
+    config: LocalResidualFieldTaggerTrainConfig,
+    model: LocalResidualFieldAugmentedParT,
+    selected_indices: Sequence[int],
+    selected_field_names: Sequence[str],
+    selected_field_groups: Mapping[str, Sequence[int]],
+    dataset_metadata: Mapping[str, Any],
+    best_epoch: int | None = None,
+    best_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    role = (
+        "oracle_teacher_candidate"
+        if str(config.field_source) in set(ORACLE_RESIDUAL_FIELD_SOURCES) | {"zero"}
+        else "tagger"
+    )
+    payload = {
+        "contract": LOCAL_RESIDUAL_FIELD_ORACLE_TEACHER_CONFIG_CONTRACT,
+        "role": role,
+        "teacher_id": str(output_dir.name),
+        "output_dir": str(output_dir),
+        "checkpoint": str(output_dir / "best_model_val.pt"),
+        "field_source": str(config.field_source),
+        "oracle_field_alpha": float(config.oracle_field_alpha),
+        "oracle_field_noise_std": float(config.oracle_field_noise_std),
+        "oracle_field_dropout": float(config.oracle_field_dropout),
+        "oracle_field_group_dropout": float(config.oracle_field_group_dropout),
+        "field_subset": list(config.field_subset),
+        "selected_field_indices": [int(index) for index in selected_indices],
+        "selected_field_names": list(selected_field_names),
+        "selected_field_groups": _jsonable(selected_field_groups),
+        "model_config": model.config.to_dict(),
+        "train_config": _jsonable(asdict(config)),
+        "dataset_metadata": _jsonable(dataset_metadata),
+        "best_epoch": None if best_epoch is None else int(best_epoch),
+        "best_model_val": _jsonable(best_metrics or {}),
+    }
+    payload["reuse_contract"] = build_oracle_teacher_reuse_contract(payload)
+    return payload
+
+
 def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfig) -> dict[str, Any]:
     torch = require_torch()
     set_training_seed(int(config.seed))
@@ -869,7 +957,19 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
         "selected_field_groups": _jsonable(selected_field_groups),
         "teacher_logits_paths": dict(teacher_logits_paths),
     }
+    teacher_config = _oracle_teacher_config_payload(
+        output_dir=output_dir,
+        config=config,
+        model=model,
+        selected_indices=selected_indices,
+        selected_field_names=selected_field_names,
+        selected_field_groups=selected_field_groups,
+        dataset_metadata=dataset_metadata,
+        best_epoch=None,
+        best_metrics=None,
+    )
     save_json(output_dir / "source_metadata.json", source_metadata)
+    save_json(output_dir / "teacher_config.json", teacher_config)
 
     curves: list[dict[str, Any]] = []
     best_epoch = -1
@@ -1023,15 +1123,31 @@ def train_local_residual_field_tagger(config: LocalResidualFieldTaggerTrainConfi
         "selected_field_names": list(selected_field_names),
         "selected_field_groups": _jsonable(selected_field_groups),
         "teacher_logits_paths": dict(teacher_logits_paths),
+        "teacher_config": str(output_dir / "teacher_config.json"),
         "model_config": model.config.to_dict(),
         "dataset_metadata": _jsonable(dataset_metadata),
     }
+    teacher_config = _oracle_teacher_config_payload(
+        output_dir=output_dir,
+        config=config,
+        model=model,
+        selected_indices=selected_indices,
+        selected_field_names=selected_field_names,
+        selected_field_groups=selected_field_groups,
+        dataset_metadata=dataset_metadata,
+        best_epoch=int(best_epoch),
+        best_metrics=best_metrics,
+    )
+    report["teacher_reuse_contract"] = _jsonable(teacher_config["reuse_contract"])
+    report["teacher_reuse_contract_hash"] = str(teacher_config["reuse_contract"]["reuse_contract_hash"])
+    save_json(output_dir / "teacher_config.json", teacher_config)
     save_json(output_dir / "run_report.json", report)
     return report
 
 
 __all__ = [
     "LOCAL_RESIDUAL_FIELD_TAGGER_TRAIN_CONTRACT",
+    "LOCAL_RESIDUAL_FIELD_ORACLE_TEACHER_CONFIG_CONTRACT",
     "LOCAL_RESIDUAL_FIELD_TAGGER_SELECTION_METRICS",
     "LocalResidualFieldTaggerTrainConfig",
     "train_local_residual_field_tagger",

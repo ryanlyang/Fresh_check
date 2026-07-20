@@ -72,6 +72,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--residual-field-scale", type=float, default=1.0)
     parser.add_argument("--residual-field-clip-value", type=float, default=8.0)
     parser.add_argument("--field-dropout", type=float, default=0.0)
+    parser.add_argument("--oracle-field-alpha", type=float, default=1.0)
+    parser.add_argument("--oracle-field-noise-std", type=float, default=0.0)
+    parser.add_argument("--oracle-field-dropout", type=float, default=0.0)
+    parser.add_argument("--oracle-field-group-dropout", type=float, default=0.0)
     parser.add_argument("--control-seed", type=int, default=9173)
     parser.add_argument("--control-noise-scale", type=float, default=1.0)
     parser.add_argument("--control-random-unit-std", action="store_true")
@@ -132,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         residual_field_scale=float(args.residual_field_scale),
         residual_field_clip_value=float(args.residual_field_clip_value),
         field_dropout=float(args.field_dropout),
+        oracle_field_alpha=float(args.oracle_field_alpha),
+        oracle_field_noise_std=float(args.oracle_field_noise_std),
+        oracle_field_dropout=float(args.oracle_field_dropout),
+        oracle_field_group_dropout=float(args.oracle_field_group_dropout),
         control_seed=int(args.control_seed),
         control_noise_scale=float(args.control_noise_scale),
         control_random_match_target_std=not bool(args.control_random_unit_std),

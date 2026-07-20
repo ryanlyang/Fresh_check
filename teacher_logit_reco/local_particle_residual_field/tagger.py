@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -48,12 +49,23 @@ LOCAL_RESIDUAL_FIELD_TAGGER_STEP = "local_particle_residual_field_step5_augmente
 RESIDUAL_FIELD_SOURCE_ZERO = "zero"
 RESIDUAL_FIELD_SOURCE_HLT_ONLY = "hlt_only"
 RESIDUAL_FIELD_SOURCE_ORACLE = "oracle"
+RESIDUAL_FIELD_SOURCE_ORACLE_SCALED = "oracle_scaled"
+RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET = "oracle_field_subset"
+RESIDUAL_FIELD_SOURCE_ORACLE_NOISY = "oracle_noisy"
+RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT = "oracle_dropout"
 RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR = "frozen_reconstructor"
 RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR = "joint_reconstructor"
+ORACLE_RESIDUAL_FIELD_SOURCES = (
+    RESIDUAL_FIELD_SOURCE_ORACLE,
+    RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+    RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+    RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+    RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+)
 RESIDUAL_FIELD_SOURCES = (
     RESIDUAL_FIELD_SOURCE_HLT_ONLY,
     RESIDUAL_FIELD_SOURCE_ZERO,
-    RESIDUAL_FIELD_SOURCE_ORACLE,
+    *ORACLE_RESIDUAL_FIELD_SOURCES,
     RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
     RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
     *CONTROL_RESIDUAL_FIELD_SOURCES,
@@ -76,6 +88,17 @@ def normalize_residual_field_source(value: str) -> str:
         "oracle": RESIDUAL_FIELD_SOURCE_ORACLE,
         "target": RESIDUAL_FIELD_SOURCE_ORACLE,
         "targets": RESIDUAL_FIELD_SOURCE_ORACLE,
+        "oracle_scaled": RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+        "scaled_oracle": RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+        "alpha_oracle": RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+        "oracle_field_subset": RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+        "oracle_subset": RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+        "subset_oracle": RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+        "oracle_noisy": RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+        "noisy_oracle": RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+        "oracle_noise": RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+        "oracle_dropout": RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+        "dropout_oracle": RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
         "frozen": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
         "frozen_reco": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
         "frozen_reconstructor": RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
@@ -104,6 +127,10 @@ class LocalResidualFieldTaggerConfig:
     residual_field_scale: float = 1.0
     residual_field_clip_value: float = 8.0
     field_dropout: float = 0.0
+    oracle_field_alpha: float = 1.0
+    oracle_field_noise_std: float = 0.0
+    oracle_field_dropout: float = 0.0
+    oracle_field_group_dropout: float = 0.0
     field_names: Sequence[str] = field(default_factory=tuple)
     field_groups: Mapping[str, Sequence[int]] = field(default_factory=dict)
     source_field_indices: Sequence[int] = field(default_factory=tuple)
@@ -134,6 +161,36 @@ class LocalResidualFieldTaggerConfig:
         object.__setattr__(self, "residual_field_scale", scale)
         object.__setattr__(self, "residual_field_clip_value", clip_value)
         object.__setattr__(self, "field_dropout", dropout)
+        alpha = float(self.oracle_field_alpha)
+        if not math.isfinite(alpha) or alpha < 0.0:
+            raise ValueError("oracle_field_alpha must be finite and non-negative")
+        noise_std = float(self.oracle_field_noise_std)
+        if not math.isfinite(noise_std) or noise_std < 0.0:
+            raise ValueError("oracle_field_noise_std must be finite and non-negative")
+        oracle_dropout = float(self.oracle_field_dropout)
+        if not math.isfinite(oracle_dropout) or oracle_dropout < 0.0 or oracle_dropout >= 1.0:
+            raise ValueError("oracle_field_dropout must be finite and in [0, 1)")
+        group_dropout = float(self.oracle_field_group_dropout)
+        if not math.isfinite(group_dropout) or group_dropout < 0.0 or group_dropout >= 1.0:
+            raise ValueError("oracle_field_group_dropout must be finite and in [0, 1)")
+        if source not in {
+            RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+            RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+        } and any(value > 0.0 for value in (noise_std, oracle_dropout, group_dropout)):
+            raise ValueError(
+                f"field_source={source!r} does not apply oracle corruption; use "
+                "oracle_noisy or oracle_dropout"
+            )
+        if source == RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT and noise_std > 0.0:
+            raise ValueError("oracle_dropout does not apply Gaussian noise; use oracle_noisy")
+        if source == RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT and oracle_dropout <= 0.0 and group_dropout <= 0.0:
+            raise ValueError("oracle_dropout requires oracle_field_dropout or oracle_field_group_dropout")
+        if source == RESIDUAL_FIELD_SOURCE_ORACLE_NOISY and noise_std <= 0.0:
+            raise ValueError("oracle_noisy requires a positive oracle_field_noise_std")
+        object.__setattr__(self, "oracle_field_alpha", alpha)
+        object.__setattr__(self, "oracle_field_noise_std", noise_std)
+        object.__setattr__(self, "oracle_field_dropout", oracle_dropout)
+        object.__setattr__(self, "oracle_field_group_dropout", group_dropout)
         names = tuple(str(name) for name in self.field_names)
         if names and len(names) != int(self.field_dim):
             raise ValueError("field_names length must match field_dim")
@@ -148,6 +205,10 @@ class LocalResidualFieldTaggerConfig:
                     raise ValueError(f"field group {group!r} index {index} outside field_dim={self.field_dim}")
         object.__setattr__(self, "field_groups", groups)
         source_indices = tuple(int(index) for index in self.source_field_indices)
+        if source_indices and len(source_indices) != int(self.field_dim):
+            raise ValueError("source_field_indices length must match field_dim")
+        if len(set(source_indices)) != len(source_indices):
+            raise ValueError("source_field_indices must be unique")
         for index in source_indices:
             if index < 0:
                 raise ValueError("source_field_indices must be non-negative")
@@ -297,6 +358,102 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             log_sigma=log_sigma,
         )
 
+    def _field_valid_mask(self, *, fields: Any, mask: Any, raw_mask: Any | None) -> Any:
+        torch = require_torch()
+        field_mask = raw_mask if raw_mask is not None else mask
+        if field_mask.ndim == 3:
+            field_mask = field_mask.squeeze(1)
+        field_mask = field_mask.to(device=fields.device, dtype=torch.bool)
+        if field_mask.shape != fields.shape[:2]:
+            raise ValueError(
+                f"residual-field mask shape {tuple(field_mask.shape)} is incompatible with "
+                f"fields shape {tuple(fields.shape)}"
+            )
+        return field_mask[:, :, None].to(dtype=fields.dtype)
+
+    def _sanitize_residual_fields(self, fields: Any, valid_mask: Any) -> Any:
+        torch = require_torch()
+        clip_value = float(self.config.residual_field_clip_value)
+        fields = fields * valid_mask
+        if clip_value > 0.0:
+            fields = torch.nan_to_num(fields, nan=0.0, posinf=clip_value, neginf=-clip_value)
+            fields = fields.clamp(min=-clip_value, max=clip_value)
+        else:
+            fields = torch.nan_to_num(fields, nan=0.0, posinf=0.0, neginf=0.0)
+        return fields * valid_mask
+
+    def _transform_oracle_fields(self, fields: Any, *, mask: Any, raw_mask: Any | None) -> tuple[Any, Mapping[str, Any]]:
+        torch = require_torch()
+        fields = self._select_source_fields(fields)
+        valid_mask = self._field_valid_mask(fields=fields, mask=mask, raw_mask=raw_mask)
+        valid_values = valid_mask.expand_as(fields).to(dtype=torch.bool)
+        source = self.config.field_source
+        alpha = float(self.config.oracle_field_alpha)
+        transformed = fields * alpha
+        noise_std = float(self.config.oracle_field_noise_std)
+        field_dropout = float(self.config.oracle_field_dropout)
+        group_dropout = float(self.config.oracle_field_group_dropout)
+        corruption_active = bool(self.training and source in {
+            RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+            RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+        })
+        input_nonfinite = (~torch.isfinite(fields)) & valid_values
+        element_drop_mask = torch.zeros_like(valid_values)
+        group_drop_events = 0
+        group_draws = 0
+        if bool(corruption_active) and noise_std > 0.0:
+            transformed = transformed + torch.randn_like(transformed) * noise_std * valid_mask
+        if bool(corruption_active) and field_dropout > 0.0:
+            keep_bool = torch.rand_like(transformed) >= field_dropout
+            element_drop_mask = (~keep_bool) & valid_values
+            transformed = transformed * keep_bool.to(dtype=transformed.dtype)
+        if bool(corruption_active) and group_dropout > 0.0:
+            for group, indices in dict(self.config.field_groups).items():
+                group_indices = tuple(int(index) for index in indices)
+                if not group_indices:
+                    continue
+                index_tensor = torch.as_tensor(group_indices, device=transformed.device, dtype=torch.long)
+                if int(index_tensor.max().detach().cpu().item()) >= int(transformed.shape[-1]):
+                    raise ValueError(
+                        f"field group {group!r} index {int(index_tensor.max().detach().cpu().item())} "
+                        f"outside transformed field dim {int(transformed.shape[-1])}"
+                    )
+                keep_group_bool = torch.rand((int(transformed.shape[0]), 1, 1), device=transformed.device) >= group_dropout
+                keep_group = keep_group_bool.to(dtype=transformed.dtype)
+                group_draws += int(keep_group_bool.numel())
+                group_drop_events += int((~keep_group_bool).detach().sum().cpu().item())
+                group_values = transformed.index_select(dim=-1, index=index_tensor) * keep_group
+                transformed = transformed.index_copy(dim=-1, index=index_tensor, source=group_values)
+        clip_value = float(self.config.residual_field_clip_value)
+        pre_sanitize_nonfinite = (~torch.isfinite(transformed)) & valid_values
+        clipped_values = torch.zeros_like(valid_values)
+        if clip_value > 0.0:
+            clipped_values = torch.isfinite(transformed) & (transformed.abs() > clip_value) & valid_values
+        transformed = self._sanitize_residual_fields(transformed, valid_mask)
+        valid_value_count = int(valid_values.detach().sum().cpu().item())
+        denominator = float(max(valid_value_count, 1))
+        diagnostics = {
+            "oracle_field_transform": True,
+            "oracle_field_source": source,
+            "oracle_field_alpha": alpha,
+            "oracle_field_noise_std": noise_std,
+            "oracle_field_dropout": field_dropout,
+            "oracle_field_group_dropout": group_dropout,
+            "oracle_field_corruption_active": bool(corruption_active),
+            "oracle_field_selected_indices": [int(index) for index in self.config.source_field_indices],
+            "oracle_field_selected_names": list(self.config.field_names),
+            "oracle_field_valid_value_count": valid_value_count,
+            "oracle_field_input_nonfinite_count": int(input_nonfinite.detach().sum().cpu().item()),
+            "oracle_field_pre_sanitize_nonfinite_count": int(pre_sanitize_nonfinite.detach().sum().cpu().item()),
+            "oracle_field_clipped_value_count": int(clipped_values.detach().sum().cpu().item()),
+            "oracle_field_clip_fraction": float(clipped_values.detach().sum().cpu().item()) / denominator,
+            "oracle_field_element_dropout_count": int(element_drop_mask.detach().sum().cpu().item()),
+            "oracle_field_element_dropout_fraction": float(element_drop_mask.detach().sum().cpu().item()) / denominator,
+            "oracle_field_group_dropout_events": int(group_drop_events),
+            "oracle_field_group_dropout_draws": int(group_draws),
+        }
+        return transformed, diagnostics
+
     def set_reconstructor_trainable(self, trainable: bool) -> dict[str, int]:
         total = 0
         changed = 0
@@ -348,13 +505,13 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             fields = self._select_source_fields(fields)
             return fields, fields.transpose(1, 2).contiguous(), None, None
         source = self.config.field_source
-        if source == RESIDUAL_FIELD_SOURCE_ORACLE:
+        if source in ORACLE_RESIDUAL_FIELD_SOURCES:
             fields = oracle_fields if oracle_fields is not None else target_fields
             if fields is None:
                 raise ValueError("oracle residual-field source requires oracle_fields or target_fields")
             fields = fields.to(device=features.device, dtype=features.dtype)
-            fields = self._select_source_fields(fields)
-            return fields, fields.transpose(1, 2).contiguous(), None, None
+            fields, diagnostics = self._transform_oracle_fields(fields, mask=mask, raw_mask=raw_mask)
+            return fields, fields.transpose(1, 2).contiguous(), None, diagnostics
         if source == RESIDUAL_FIELD_SOURCE_ZERO:
             fields = torch.zeros((batch_size, particles, int(self.config.field_dim)), device=features.device, dtype=features.dtype)
             return fields, fields.transpose(1, 2).contiguous(), None, None
@@ -505,9 +662,13 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             "residual_field_clip_value": float(self.config.residual_field_clip_value),
             **_masked_field_stats(fields, field_mask),
         }
-        if isinstance(control_diagnostics, Mapping):
+        if isinstance(control_diagnostics, Mapping) and self.config.field_source in CONTROL_RESIDUAL_FIELD_SOURCES:
             diagnostics["control_contract"] = LOCAL_RESIDUAL_FIELD_CONTROL_CONTRACT
             diagnostics["control_diagnostics"] = dict(control_diagnostics)
+        elif isinstance(control_diagnostics, Mapping):
+            diagnostics["source_diagnostics"] = dict(control_diagnostics)
+            if control_diagnostics.get("oracle_field_transform"):
+                diagnostics["oracle_field_transform"] = dict(control_diagnostics)
         if reco_output is not None:
             diagnostics["reconstructor_contract"] = LOCAL_RESIDUAL_RECONSTRUCTOR_CONTRACT
             diagnostics["reconstructor_variant"] = getattr(getattr(self.reconstructor, "config", None), "variant", None)
@@ -687,8 +848,13 @@ __all__ = [
     "RESIDUAL_FIELD_SOURCE_HLT_ONLY",
     "RESIDUAL_FIELD_SOURCE_ZERO",
     "RESIDUAL_FIELD_SOURCE_ORACLE",
+    "RESIDUAL_FIELD_SOURCE_ORACLE_SCALED",
+    "RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET",
+    "RESIDUAL_FIELD_SOURCE_ORACLE_NOISY",
+    "RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT",
     "RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR",
     "RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR",
+    "ORACLE_RESIDUAL_FIELD_SOURCES",
     "RESIDUAL_FIELD_SOURCES",
     "LocalResidualFieldTaggerConfig",
     "LocalResidualFieldTaggerOutput",

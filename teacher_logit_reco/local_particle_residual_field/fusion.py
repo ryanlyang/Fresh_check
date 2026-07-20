@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -37,11 +38,11 @@ from .data import (
 )
 from .tagger import (
     LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+    ORACLE_RESIDUAL_FIELD_SOURCES,
     RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
     RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
     RESIDUAL_FIELD_SOURCE_HLT_ONLY,
     RESIDUAL_FIELD_SOURCE_LEARNED_NO_TARGET,
-    RESIDUAL_FIELD_SOURCE_ORACLE,
     RESIDUAL_FIELD_SOURCE_ZERO,
     LocalResidualFieldAugmentedParT,
 )
@@ -61,6 +62,14 @@ LOCAL_RESIDUAL_FIELD_FUSION_MODES = (
 
 LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS = ("stack_train", "stack_val", "final_test")
 LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT = "stack_train"
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass
@@ -371,10 +380,10 @@ def _load_hlt_only_prediction_dataset(
 def _prediction_dataset(config: LocalResidualFieldPredictionConfig, split: str, *, model: LocalResidualFieldAugmentedParT):
     split_name = str(split)
     deployable_no_target = (
-        model.config.field_source != RESIDUAL_FIELD_SOURCE_ORACLE
+        model.config.field_source not in ORACLE_RESIDUAL_FIELD_SOURCES
         and not _requires_target_fields_for_prediction(model)
     )
-    if split_name == "final_test" and model.config.field_source != RESIDUAL_FIELD_SOURCE_ORACLE:
+    if split_name == "final_test" and model.config.field_source not in ORACLE_RESIDUAL_FIELD_SOURCES:
         if not deployable_no_target:
             raise ValueError(
                 f"refusing deployment final_test prediction for target-dependent field source "
@@ -390,7 +399,7 @@ def _prediction_dataset(config: LocalResidualFieldPredictionConfig, split: str, 
             split=str(split),
             manifest_path=config.manifest_path,
             max_jets=config.max_jets,
-            include_oracle_fields=model.config.field_source == RESIDUAL_FIELD_SOURCE_ORACLE,
+            include_oracle_fields=model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES,
             allow_final_test_targets=bool(split == "final_test" and config.confirm_final_test),
             verify_hash=bool(config.verify_hash),
             require_manifest_match=bool(config.require_manifest_match),
@@ -440,7 +449,20 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
     device = resolve_device(str(config.device))
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     model, payload = load_local_residual_field_tagger_from_checkpoint(config.checkpoint, device=device)
-    if model.config.field_source == RESIDUAL_FIELD_SOURCE_ORACLE and "final_test" in config.splits and not bool(config.allow_oracle_final_test):
+    checkpoint_path = Path(config.checkpoint)
+    checkpoint_hash = _sha256_file(checkpoint_path)
+    teacher_config_path = checkpoint_path.with_name("teacher_config.json")
+    teacher_config: dict[str, Any] = {}
+    if teacher_config_path.exists():
+        loaded_teacher_config = json.loads(teacher_config_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_teacher_config, Mapping):
+            raise ValueError(f"teacher_config.json is not an object: {teacher_config_path}")
+        teacher_config = dict(loaded_teacher_config)
+    if (
+        model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES
+        and "final_test" in config.splits
+        and not bool(config.allow_oracle_final_test)
+    ):
         raise ValueError("refusing to cache final_test oracle predictions without allow_oracle_final_test=True")
     output_dir = Path(config.prediction_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -466,14 +488,37 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
         logits, labels = _collect_prediction_logits(model, loader, device=device, amp_enabled=bool(amp_enabled))
         if not np.array_equal(labels, dataset.labels):
             raise ValueError(f"prediction labels do not match dataset labels for split {split}")
+        oracle_teacher_diagnostic = bool(teacher_config.get("role") == "oracle_teacher_candidate")
+        uses_true_fields = bool(model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES)
+        runtime_inputs = (
+            "HLT_plus_true_residual_fields"
+            if uses_true_fields
+            else "HLT_plus_zero_residual_fields"
+            if oracle_teacher_diagnostic and model.config.field_source == RESIDUAL_FIELD_SOURCE_ZERO
+            else "HLT_only"
+        )
         metadata = {
             "contract": LOCAL_RESIDUAL_FIELD_PREDICTION_CONTRACT,
             "model_contract": LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
             "checkpoint": str(config.checkpoint),
+            "checkpoint_hash": checkpoint_hash,
             "checkpoint_epoch": payload.get("epoch"),
             "field_source": str(model.config.field_source),
             "model_config": model.config.to_dict(),
             "dataset_metadata": _jsonable(dataset.metadata),
+            "teacher_id": teacher_config.get("teacher_id"),
+            "teacher_role": teacher_config.get("role"),
+            "oracle_teacher_diagnostic": oracle_teacher_diagnostic,
+            "teacher_config": str(teacher_config_path) if teacher_config else None,
+            "teacher_config_hash": _sha256_file(teacher_config_path) if teacher_config else None,
+            "teacher_reuse_contract_hash": (
+                teacher_config.get("reuse_contract", {}).get("reuse_contract_hash")
+                if isinstance(teacher_config.get("reuse_contract"), Mapping)
+                else None
+            ),
+            "runtime_inputs": runtime_inputs,
+            "uses_true_fields": uses_true_fields,
+            "deployable": bool(not oracle_teacher_diagnostic and not uses_true_fields),
         }
         block = PredictionBlock(
             model_name=str(config.model_name),

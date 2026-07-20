@@ -870,6 +870,10 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "--kill-on-bad-exit=1" in worker
     assert "run_adaptive_binary_ddp_acceptance_smoke.py" in worker
     assert "--runtime-reference-benchmark" in worker
+    assert "cleanup_benchmark_checkpoints" in worker
+    assert "trap cleanup_benchmark_checkpoints EXIT" in worker
+    assert '"${output_root}" != "${acceptance_root}"/*' in worker
+    assert "-name '*.pt'" in worker
     assert "write_adaptive_binary_runtime_acceptance.py" in compiler
     assert "--single-path-acceptance" in compiler
 

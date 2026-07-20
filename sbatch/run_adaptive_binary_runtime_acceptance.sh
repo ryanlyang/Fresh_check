@@ -46,6 +46,23 @@ case "${ABPH_RECONSTRUCTOR_PARALLELISM}" in
 esac
 
 profile_root="${ABPH_RUNTIME_ACCEPTANCE_ROOT}/${ABPH_RECONSTRUCTOR_PARALLELISM}"
+cleanup_benchmark_checkpoints() {
+  [[ "${MODE}" == "benchmark" || "${MODE}" == "benchmark_uninstrumented" ]] || return 0
+  [[ -n "${output_dir:-}" ]] || return 0
+  local acceptance_root output_root
+  acceptance_root="$(realpath -m "${ABPH_RUNTIME_ACCEPTANCE_ROOT}")"
+  output_root="$(realpath -m "${output_dir}")"
+  if [[ "${output_root}" != "${acceptance_root}"/* ]]; then
+    echo "Refusing runtime checkpoint cleanup outside acceptance root: ${output_root}" >&2
+    return 0
+  fi
+  if [[ -d "${output_root}" ]]; then
+    find "${output_root}" -type f \
+      \( -name '*.pt' -o -name '*.pt.tmp.*' \) -print -delete
+  fi
+}
+trap cleanup_benchmark_checkpoints EXIT
+
 case "${MODE}" in
   smoke)
     output_dir="${profile_root}/transport_smoke"

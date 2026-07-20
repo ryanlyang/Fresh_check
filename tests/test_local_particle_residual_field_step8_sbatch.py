@@ -48,6 +48,22 @@ def test_step8_runner_scripts_call_expected_python_entrypoints():
     assert "scripts/train_local_residual_reconstructor.py" in _read("run_train_local_residual_reconstructor.sh")
     assert "scripts/train_local_residual_field_tagger.py" in tagger_runner
     assert "scripts/predict_local_residual_field_tagger.py" in _read("run_predict_local_residual_field_tagger.sh")
+    oracle_cache_runner = _read("run_cache_local_residual_oracle_teacher_logits.sh")
+    assert "scripts/predict_local_residual_field_tagger.py" in oracle_cache_runner
+    assert "scripts/validate_local_residual_oracle_teacher_logits.py" in oracle_cache_runner
+    assert "model_train model_val stack_train stack_val" in oracle_cache_runner
+    assert "Refusing to cache final_test oracle teacher logits" in oracle_cache_runner
+    assert "ALLOW_PARTIAL_SPLITS:=0" in oracle_cache_runner
+    assert '${split}_metadata.json' in oracle_cache_runner
+    assert "first-stage logit caching allows only O0, Ofull, or Orobust_light" in oracle_cache_runner
+    registration_runner = _read("run_register_local_residual_oracle_teacher.sh")
+    assert "scripts/register_local_residual_oracle_teacher.py" in registration_runner
+    assert "O0, Ofull, or Orobust_light" in registration_runner
+    assert "--manifest-path" in registration_runner
+    assert "--hlt-cache-dir" in registration_runner
+    assert "--target-cache-dir" in registration_runner
+    assert "LOCAL_RESIDUAL_FIELD_ORACLE_REUSE_CANDIDATE_DIRS" in registration_runner
+    assert "--candidate-run-dir" in registration_runner
     assert "scripts/run_local_residual_field_fusion.py" in _read("run_local_residual_field_fusion.sh")
     assert "scripts/write_local_residual_field_report.py" in _read("run_write_local_residual_field_report.sh")
     assert "SKIP_UNREADABLE_ROOT_FILES" in split_builder
@@ -56,6 +72,11 @@ def test_step8_runner_scripts_call_expected_python_entrypoints():
     assert "--min-selection-valid-fraction" in tagger_runner
     assert "LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_CLIP_VALUE:=8.0" in tagger_runner
     assert "--residual-field-clip-value" in tagger_runner
+    assert "LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_ALPHA:=1.0" in tagger_runner
+    assert "--oracle-field-alpha" in tagger_runner
+    assert "--oracle-field-noise-std" in tagger_runner
+    assert "--oracle-field-dropout" in tagger_runner
+    assert "--oracle-field-group-dropout" in tagger_runner
     assert "LOCAL_RESIDUAL_FIELD_TARGET_DTYPE:=float16" in _read("run_cache_local_particle_residual_fields.sh")
     assert "LOCAL_RESIDUAL_FIELD_INCLUDE_FINAL_TEST_TARGETS:=0" in _read("run_cache_local_particle_residual_fields.sh")
 
@@ -88,6 +109,10 @@ def test_step8_tier_a_is_clean_hlt_controls_and_b0_is_one_radius_oracle():
     assert 'A1)\n    field_source="hlt_only"' in text
     assert 'A2)\n    field_source="hlt_only"' in text
     assert 'B0)\n    field_source="oracle"\n    field_subset=("r0p02.*")' in text
+    assert 'O0)\n    field_source="zero"' in text
+    assert 'Ofull)\n    field_source="oracle_scaled"' in text
+    assert 'Orobust_light)\n    field_source="oracle_noisy"' in text
+    assert 'oracle_field_noise_std="${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_NOISE_STD}"' in text
     assert 'F5) field_source="zero"; use_baseline_if_available ;;' in text
     assert 'if [[ "${field_source}" != "hlt_only" ]]; then' in text
 

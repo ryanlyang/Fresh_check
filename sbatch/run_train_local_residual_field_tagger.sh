@@ -42,6 +42,13 @@ RUN_ID="${1:?Usage: sbatch run_train_local_residual_field_tagger.sh <A/B/D/E/F r
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_FIELD_DROPOUT:=0.0}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_SCALE:=1.0}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_CLIP_VALUE:=8.0}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_ALPHA:=1.0}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_NOISE_STD:=0.0}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_DROPOUT:=0.0}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_GROUP_DROPOUT:=0.0}"
+: "${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_NOISE_STD:=0.05}"
+: "${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_FIELD_DROPOUT:=0.10}"
+: "${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_GROUP_DROPOUT:=0.0}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_RECON_LOSS_WEIGHT:=0.10}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_KD_LOSS_WEIGHT:=0.25}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_KD_TEMPERATURE:=2.0}"
@@ -64,6 +71,10 @@ reco_loss_weight="0.0"
 kd_loss_weight="0.0"
 field_subset=()
 seed="${LOCAL_RESIDUAL_FIELD_TAGGER_SEED}"
+oracle_field_alpha="${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_ALPHA}"
+oracle_field_noise_std="${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_NOISE_STD}"
+oracle_field_dropout="${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_DROPOUT}"
+oracle_field_group_dropout="${LOCAL_RESIDUAL_FIELD_TAGGER_ORACLE_FIELD_GROUP_DROPOUT}"
 
 use_c0_checkpoint() { reco_checkpoint="${LOCAL_RESIDUAL_FIELD_RECON_ROOT}/C0/best_model_val.pt"; }
 use_recon_checkpoint() {
@@ -102,6 +113,20 @@ require_kd_logits() {
 }
 
 case "${RUN_ID}" in
+  O0)
+    field_source="zero"
+    ;;
+  Ofull)
+    field_source="oracle_scaled"
+    oracle_field_alpha="1.0"
+    ;;
+  Orobust_light)
+    field_source="oracle_noisy"
+    oracle_field_alpha="1.0"
+    oracle_field_noise_std="${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_NOISE_STD}"
+    oracle_field_dropout="${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_FIELD_DROPOUT}"
+    oracle_field_group_dropout="${LOCAL_RESIDUAL_FIELD_ORACLE_ROBUST_LIGHT_GROUP_DROPOUT}"
+    ;;
   A0)
     field_source="hlt_only"
     ;;
@@ -229,6 +254,10 @@ cmd=(
   --residual-field-scale "${LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_SCALE}"
   --residual-field-clip-value "${LOCAL_RESIDUAL_FIELD_TAGGER_RESIDUAL_CLIP_VALUE}"
   --field-dropout "${LOCAL_RESIDUAL_FIELD_TAGGER_FIELD_DROPOUT}"
+  --oracle-field-alpha "${oracle_field_alpha}"
+  --oracle-field-noise-std "${oracle_field_noise_std}"
+  --oracle-field-dropout "${oracle_field_dropout}"
+  --oracle-field-group-dropout "${oracle_field_group_dropout}"
   --control-seed "${LOCAL_RESIDUAL_FIELD_CONTROL_SEED}"
   --reconstructor-loss-weight "${reco_loss_weight}"
   --kd-loss-weight "${kd_loss_weight}"

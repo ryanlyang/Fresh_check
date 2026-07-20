@@ -19,6 +19,11 @@ from teacher_logit_reco.local_particle_residual_field import (
     LocalResidualFieldTaggerTrainConfig,
     RESIDUAL_FIELD_SOURCE_HLT_ONLY,
     RESIDUAL_FIELD_SOURCE_ORACLE,
+    RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+    RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+    RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+    RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+    RESIDUAL_FIELD_SOURCE_ZERO,
     collate_local_particle_residual_field_batch,
     train_local_residual_field_tagger,
     warm_start_local_residual_field_tagger_part,
@@ -298,6 +303,228 @@ def test_step5_field_subset_changes_actual_part_input_tensor():
     assert torch.allclose(output.residual_fields, batch["target_fields"][..., :2])
 
 
+def test_curriculum_step1_oracle_scaled_source_applies_alpha_before_part_input():
+    dataset = _dataset("model_train", n_jets=3)
+    batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
+    model = LocalResidualFieldAugmentedParT(
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+            oracle_field_alpha=0.25,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(FIELD_NAMES), num_classes=3),
+    )
+
+    output = model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        tokens=batch["tokens"],
+        raw_mask=batch["raw_mask"],
+        target_fields=batch["target_fields"],
+        return_outputs=True,
+    )
+
+    expected = batch["target_fields"] * 0.25
+    assert torch.allclose(output.residual_fields, expected)
+    assert torch.allclose(output.augmented_features[:, -len(FIELD_NAMES) :, :], expected.transpose(1, 2))
+    assert output.diagnostics["field_source"] == RESIDUAL_FIELD_SOURCE_ORACLE_SCALED
+    assert output.diagnostics["oracle_field_transform"]["oracle_field_alpha"] == 0.25
+
+
+def test_curriculum_step1_alpha_endpoints_preserve_masks_and_sanitize_nonfinite_fields():
+    dataset = _dataset("model_train", n_jets=3)
+    batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
+    target = batch["target_fields"].clone()
+    target[:, 3:, :] = 123.0
+    target[0, 0, 0] = float("nan")
+    target[0, 1, 1] = float("inf")
+
+    outputs = {}
+    for alpha in (0.0, 1.0):
+        model = LocalResidualFieldAugmentedParT(
+            LocalResidualFieldTaggerConfig(
+                num_classes=3,
+                field_dim=len(FIELD_NAMES),
+                field_source=RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+                oracle_field_alpha=alpha,
+                field_names=FIELD_NAMES,
+                field_groups=FIELD_GROUPS,
+            ),
+            part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(FIELD_NAMES), num_classes=3),
+        )
+        model.eval()
+        outputs[alpha] = model(
+            batch["points"],
+            batch["features"],
+            batch["lorentz_vectors"],
+            batch["mask"],
+            raw_mask=batch["raw_mask"],
+            target_fields=target,
+            return_outputs=True,
+        )
+
+    blank_model = LocalResidualFieldAugmentedParT(
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ZERO,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(FIELD_NAMES), num_classes=3),
+    )
+    blank_model.eval()
+    blank = blank_model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        raw_mask=batch["raw_mask"],
+        return_outputs=True,
+    )
+    assert torch.equal(outputs[0.0].residual_fields, blank.residual_fields)
+    assert torch.equal(outputs[0.0].residual_features, blank.residual_features)
+    valid = batch["raw_mask"][:, :, None].expand_as(target)
+    expected_alpha_one = torch.nan_to_num(target, nan=0.0, posinf=8.0, neginf=-8.0).clamp(-8.0, 8.0)
+    expected_alpha_one = expected_alpha_one * valid.to(dtype=target.dtype)
+    assert torch.allclose(outputs[1.0].residual_fields, expected_alpha_one)
+    assert torch.count_nonzero(outputs[1.0].residual_fields[~valid]) == 0
+    diagnostics = outputs[1.0].diagnostics["oracle_field_transform"]
+    assert diagnostics["oracle_field_input_nonfinite_count"] == 2
+    assert diagnostics["oracle_field_pre_sanitize_nonfinite_count"] == 2
+
+
+def test_curriculum_step1_oracle_subset_selects_noncontiguous_physical_columns():
+    dataset = _dataset("model_train", n_jets=3)
+    batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
+    selected_indices = (0, 3, 5)
+    selected_names = tuple(FIELD_NAMES[index] for index in selected_indices)
+    model = LocalResidualFieldAugmentedParT(
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(selected_indices),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
+            field_names=selected_names,
+            field_groups={"selected": tuple(range(len(selected_indices)))},
+            source_field_indices=selected_indices,
+        ),
+        part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(selected_indices), num_classes=3),
+    )
+
+    output = model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        raw_mask=batch["raw_mask"],
+        target_fields=batch["target_fields"],
+        return_outputs=True,
+    )
+
+    expected = batch["target_fields"].index_select(-1, torch.tensor(selected_indices))
+    assert torch.allclose(output.residual_fields, expected)
+    assert output.diagnostics["oracle_field_transform"]["oracle_field_selected_indices"] == list(selected_indices)
+    assert output.diagnostics["oracle_field_transform"]["oracle_field_selected_names"] == list(selected_names)
+
+
+def test_curriculum_step1_noisy_dropout_is_seeded_and_eval_is_clean():
+    dataset = _dataset("model_train", n_jets=3)
+    batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
+    model = LocalResidualFieldAugmentedParT(
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+            oracle_field_alpha=1.0,
+            oracle_field_noise_std=0.2,
+            oracle_field_dropout=0.25,
+            oracle_field_group_dropout=0.5,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        part_model=FakePart(input_dim=len(PF_FEATURE_NAMES) + len(FIELD_NAMES), num_classes=3),
+    )
+
+    def forward_fields(seed: int):
+        torch.manual_seed(seed)
+        return model(
+            batch["points"],
+            batch["features"],
+            batch["lorentz_vectors"],
+            batch["mask"],
+            raw_mask=batch["raw_mask"],
+            target_fields=batch["target_fields"],
+            return_outputs=True,
+        )
+
+    model.train()
+    first = forward_fields(31415)
+    repeated = forward_fields(31415)
+    changed = forward_fields(27182)
+    assert torch.equal(first.residual_fields, repeated.residual_fields)
+    assert not torch.equal(first.residual_fields, changed.residual_fields)
+    assert first.diagnostics["oracle_field_transform"]["oracle_field_corruption_active"] is True
+
+    model.eval()
+    clean = forward_fields(31415)
+    assert torch.allclose(clean.residual_fields, batch["target_fields"])
+    assert clean.diagnostics["oracle_field_transform"]["oracle_field_corruption_active"] is False
+
+
+def test_curriculum_step1_named_modes_validate_and_record_distinct_contracts():
+    configs = (
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+            oracle_field_alpha=0.5,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+            oracle_field_noise_std=0.1,
+            oracle_field_dropout=0.2,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        LocalResidualFieldTaggerConfig(
+            num_classes=3,
+            field_dim=len(FIELD_NAMES),
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+            oracle_field_dropout=0.2,
+            oracle_field_group_dropout=0.3,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+    )
+    assert [config.to_dict()["field_source"] for config in configs] == [
+        RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+        RESIDUAL_FIELD_SOURCE_ORACLE_NOISY,
+        RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+    ]
+    with pytest.raises(ValueError, match="positive oracle_field_noise_std"):
+        LocalResidualFieldTaggerConfig(field_source=RESIDUAL_FIELD_SOURCE_ORACLE_NOISY)
+    with pytest.raises(ValueError, match="does not apply Gaussian noise"):
+        LocalResidualFieldTaggerConfig(
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_DROPOUT,
+            oracle_field_dropout=0.1,
+            oracle_field_noise_std=0.1,
+        )
+    with pytest.raises(ValueError, match="finite"):
+        LocalResidualFieldTaggerConfig(
+            field_source=RESIDUAL_FIELD_SOURCE_ORACLE_SCALED,
+            oracle_field_alpha=float("nan"),
+        )
+
+
 def test_step5_joint_reconstructor_fields_feed_part_features():
     dataset = _dataset("model_train", n_jets=3)
     batch = collate_local_particle_residual_field_batch([dataset[0], dataset[1]])
@@ -401,6 +628,18 @@ def test_step5_tagger_train_smoke_writes_checkpoint_and_reports(
     assert report["best_epoch"] >= 0
     assert (output_dir / "best_model_val.pt").exists()
     assert (output_dir / "last.pt").exists()
+    teacher_config = json.loads((output_dir / "teacher_config.json").read_text(encoding="utf-8"))
+    assert teacher_config["contract"] == "local_residual_field_oracle_teacher_config_v1"
+    assert teacher_config["role"] == "oracle_teacher_candidate"
+    assert teacher_config["field_source"] == RESIDUAL_FIELD_SOURCE_ORACLE
+    assert teacher_config["best_epoch"] == report["best_epoch"]
+    assert teacher_config["reuse_contract"]["contract"] == "local_residual_field_oracle_teacher_reuse_v1"
+    assert teacher_config["reuse_contract"]["reuse_contract_hash"] == report["teacher_reuse_contract_hash"]
+    assert set(teacher_config["reuse_contract"]["split_provenance"]) == {
+        "model_train",
+        "model_val",
+        "stack_val",
+    }
 
 
 def test_step5_tagger_training_field_subset_reports_selected_shape(
@@ -423,7 +662,7 @@ def test_step5_tagger_training_field_subset_reports_selected_shape(
         output_dir=str(tmp_path / "tagger_subset"),
         hlt_cache_dir="unused_hlt",
         target_cache_dir="unused_targets",
-        field_source=RESIDUAL_FIELD_SOURCE_ORACLE,
+        field_source=RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET,
         field_subset=("pt_density",),
         num_classes=3,
         label_names=("a", "b", "c"),
@@ -448,7 +687,7 @@ def test_step5_tagger_training_field_subset_reports_selected_shape(
     assert (output_dir / "training_curves.json").exists()
     assert (output_dir / "diagnostics" / "epoch_metrics.csv").exists()
     saved = json.loads((output_dir / "run_report.json").read_text(encoding="utf-8"))
-    assert saved["field_source"] == RESIDUAL_FIELD_SOURCE_ORACLE
+    assert saved["field_source"] == RESIDUAL_FIELD_SOURCE_ORACLE_FIELD_SUBSET
 
 
 def test_step5_hlt_only_training_does_not_require_target_fields(
