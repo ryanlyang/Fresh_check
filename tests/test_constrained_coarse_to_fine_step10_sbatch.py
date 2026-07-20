@@ -405,6 +405,7 @@ def test_step10_graph_queues_complete_reconstructor_and_depth_families() -> None
     assert "--direct-particle-decoding" in reconstructor
     assert 'hierarchy_loss_weight="0.0"' in reconstructor
     assert "Cdirect-unconstrained/best_model_val.pt" in tagger
+    assert tagger.count("--reconstructor-variant canonical=C5_uncertainty") == 2
     assert "--d-model 320 --num-heads 10 --hlt-encoder-layers 8" in tagger
 
 

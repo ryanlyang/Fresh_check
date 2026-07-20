@@ -135,11 +135,15 @@ case "${variant}" in
     ;;
   E5)
     source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/C5-no-slot/best_model_val.pt")
-    variant_args+=(--reconstructor-variant canonical=C5)
+    # C5-no-slot retains C5's decoder implementation; its saved slot-config
+    # variant is C5_uncertainty while its zero slot-loss is checked separately.
+    variant_args+=(--reconstructor-variant canonical=C5_uncertainty)
     ;;
   E4)
     source_args+=(--reconstructor-source "canonical=${CONSTRAINED_C2F_RECON_ROOT}/Cdirect-unconstrained/best_model_val.pt")
-    variant_args+=(--reconstructor-variant canonical=C5)
+    # The direct control changes accounting/decoding flags, not the saved C5
+    # slot-decoder variant identity.
+    variant_args+=(--reconstructor-variant canonical=C5_uncertainty)
     ;;
   E6) ;;
 esac
