@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hlt-cache-dir", default="checkpoints/jetclass_fresh_hlt_cache")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--output-root", default="checkpoints/jetclass_fresh_reco7")
+    parser.add_argument(
+        "--stage-a-root",
+        default=None,
+        help="Root containing variant/stage_a checkpoints for Stage2-only reruns. Defaults to --output-root.",
+    )
     parser.add_argument("--hlt-baseline-report", default=None)
     parser.add_argument("--variants", nargs="+", choices=RECONSTRUCTOR_VARIANT_NAMES, default=list(RECONSTRUCTOR_VARIANT_NAMES))
     parser.add_argument("--stage", choices=["stage-a", "stage2", "both"], default="both")
@@ -45,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-jets", type=int, default=None)
     parser.add_argument("--max-val-jets", type=int, default=None)
     parser.add_argument("--model-size", choices=["base", "tiny"], default="base", help="Stage2 dual-view Particle Transformer size")
+    parser.add_argument(
+        "--stage2-architecture",
+        choices=["cross_attention_fusion", "particle_transformer_concat"],
+        default="cross_attention_fusion",
+        help="Stage2 dual-view classifier architecture.",
+    )
     return parser.parse_args()
 
 
@@ -111,7 +122,8 @@ def stage_a_command(args: argparse.Namespace, variant: str) -> list[str]:
 
 def stage2_command(args: argparse.Namespace, variant: str) -> list[str]:
     output_dir = Path(args.output_root) / variant / "stage2_dual_view"
-    checkpoint = Path(args.output_root) / variant / "stage_a" / "best_model_val.pt"
+    stage_a_root = Path(args.stage_a_root) if args.stage_a_root else Path(args.output_root)
+    checkpoint = stage_a_root / variant / "stage_a" / "best_model_val.pt"
     cmd = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "train_dual_view_tagger.py"),
@@ -125,6 +137,8 @@ def stage2_command(args: argparse.Namespace, variant: str) -> list[str]:
         variant,
         "--model-size",
         args.model_size,
+        "--architecture",
+        args.stage2_architecture,
     ]
     if args.hlt_baseline_report:
         cmd.extend(["--hlt-baseline-report", args.hlt_baseline_report])

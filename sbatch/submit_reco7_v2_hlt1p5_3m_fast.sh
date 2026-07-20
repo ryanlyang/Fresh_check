@@ -47,6 +47,7 @@ fresh_prepare_submitter
 : "${RECO7_V2_FAST_NO_AMP:=1}"
 : "${RECO7_V2_FAST_COMPILE_MODEL:=0}"
 : "${RECO7_V2_FAST_MODEL_SIZE:=base}"
+: "${RECO7_V2_FAST_STAGE2_ARCHITECTURE:=cross_attention_fusion}"
 : "${RECO7_V2_FAST_READ_CHUNK_SIZE:=50000}"
 : "${RECO7_V2_FAST_HLT_SPLITS:=model_train model_val stack_train stack_val final_test}"
 : "${RECO7_V2_FAST_TORCH_NATIVE_TRITON:=disable}"
@@ -220,6 +221,7 @@ for variant in "${variant_args[@]}"; do
     "NUM_WORKERS=${RECO7_V2_FAST_NUM_WORKERS}" \
     "NO_AMP=${RECO7_V2_FAST_NO_AMP}" \
     "MODEL_SIZE=${RECO7_V2_FAST_MODEL_SIZE}" \
+    "STAGE2_ARCHITECTURE=${RECO7_V2_FAST_STAGE2_ARCHITECTURE}" \
     -- --dependency="afterok:${baseline_jid}" --time="${RECO7_V2_FAST_RECO_TIME}" \
     --gres="${RECO7_V2_FAST_GPU_GRES}" \
     --mem="${RECO7_V2_FAST_RECO_MEM}" --cpus-per-task="${RECO7_V2_FAST_NUM_WORKERS}" \
@@ -269,6 +271,7 @@ reco7_v2_hlt1p5_3m_fast_submission:
     final_test: ${RECO7_V2_FAST_FINAL_TEST_SIZE}
   speed_knobs:
     no_amp: ${RECO7_V2_FAST_NO_AMP}
+    stage2_architecture: ${RECO7_V2_FAST_STAGE2_ARCHITECTURE}
     torch_native_triton: ${RECO7_V2_FAST_TORCH_NATIVE_TRITON}
     torch_native_triton_probe: ${RECO7_V2_FAST_TORCH_NATIVE_TRITON_PROBE}
     baseline_batch_size: ${RECO7_V2_FAST_BASELINE_BATCH_SIZE}

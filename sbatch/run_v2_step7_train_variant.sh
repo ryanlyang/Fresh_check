@@ -19,6 +19,9 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 source "${SCRIPT_DIR}/common.sh"
 
 : "${MODEL_SIZE:=base}"
+: "${STAGE:=both}"
+: "${STAGE2_ARCHITECTURE:=cross_attention_fusion}"
+: "${STAGE_A_ROOT:=}"
 : "${NO_AMP:=1}"
 : "${STAGE_A_LR:=0.0003}"
 : "${STAGE2_LR:=}"
@@ -44,6 +47,7 @@ case " ${RECO7_VARIANTS} " in
 esac
 
 OUTPUT_DIR="${V2_STEP7_RECO_ROOT}/${VARIANT}"
+STAGE_A_SOURCE_ROOT="${STAGE_A_ROOT:-${V2_STEP7_RECO_ROOT}}"
 
 fresh_setup "$@"
 fresh_register_diagnostics_dir "${OUTPUT_DIR}" "v2_step7_train_${VARIANT}_preflight"
@@ -53,6 +57,9 @@ fresh_require_file "${HLT_CACHE_DIR}/model_train_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_CACHE_DIR}/model_val_fixed_hlt_metadata.json"
 fresh_require_file "${HLT_BASELINE_DIR}/best_model_val.pt"
 fresh_require_file "${HLT_BASELINE_REPORT}"
+if [[ "${STAGE}" == "stage2" ]]; then
+  fresh_require_file "${STAGE_A_SOURCE_ROOT}/${VARIANT}/stage_a/best_model_val.pt"
+fi
 fresh_claim_new_dir "${OUTPUT_DIR}"
 
 cmd=(
@@ -61,9 +68,10 @@ cmd=(
   --hlt-cache-dir "${HLT_CACHE_DIR}"
   --data-dir "${DATA_DIR}"
   --output-root "${V2_STEP7_RECO_ROOT}"
+  --stage-a-root "${STAGE_A_SOURCE_ROOT}"
   --hlt-baseline-report "${HLT_BASELINE_REPORT}"
   --variants "${VARIANT}"
-  --stage both
+  --stage "${STAGE}"
   --batch-size "${BATCH_SIZE}"
   --epochs "${EPOCHS}"
   --lr "${LR}"
@@ -73,6 +81,7 @@ cmd=(
   --device "${DEVICE}"
   --early-stop-patience "${EARLY_STOP_PATIENCE}"
   --model-size "${MODEL_SIZE}"
+  --stage2-architecture "${STAGE2_ARCHITECTURE}"
 )
 fresh_append_flag_if_enabled cmd --no-amp "${NO_AMP}"
 fresh_append_optional_arg cmd --stage2-lr "${STAGE2_LR}"
@@ -89,8 +98,12 @@ fresh_write_run_config "${OUTPUT_DIR}" "v2_step7_train_${VARIANT}" "${cmd[@]}"
 fresh_run "${cmd[@]}"
 
 if ! fresh_is_dry_run; then
-  fresh_require_file "${OUTPUT_DIR}/stage_a/best_model_val.pt"
-  fresh_require_file "${OUTPUT_DIR}/stage_a/model_val_reconstruction_report.json"
-  fresh_require_file "${OUTPUT_DIR}/stage2_dual_view/best_model_val.pt"
-  fresh_require_file "${OUTPUT_DIR}/stage2_dual_view/model_val_report.json"
+  if [[ "${STAGE}" == "both" || "${STAGE}" == "stage-a" ]]; then
+    fresh_require_file "${OUTPUT_DIR}/stage_a/best_model_val.pt"
+    fresh_require_file "${OUTPUT_DIR}/stage_a/model_val_reconstruction_report.json"
+  fi
+  if [[ "${STAGE}" == "both" || "${STAGE}" == "stage2" ]]; then
+    fresh_require_file "${OUTPUT_DIR}/stage2_dual_view/best_model_val.pt"
+    fresh_require_file "${OUTPUT_DIR}/stage2_dual_view/model_val_report.json"
+  fi
 fi

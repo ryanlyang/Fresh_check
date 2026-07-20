@@ -10,10 +10,12 @@ from jetclass_fresh.dual_view import (
     CORRECTED_VIEW_FEATURE_NAMES,
     DUAL_VIEW_EXPERIMENT_STEP,
     DualViewTaggerTrainConfig,
+    build_corrected_inputs_for_tagger,
     build_dual_view_tagger,
     build_soft_corrected_view_torch,
     detect_dual_view_architecture_from_state_dict,
 )
+from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
 from jetclass_fresh.jetclass_data import JetIdentity, JetView
 from jetclass_fresh.reconstructor import RECONSTRUCTOR_VARIANT_NAMES
 
@@ -90,6 +92,7 @@ class DualViewStep8ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.variant, "m2_base")
         self.assertEqual(cfg.train_split, "model_train")
         self.assertEqual(cfg.val_split, "model_val")
+        self.assertEqual(cfg.architecture, "cross_attention_fusion")
         self.assertEqual(cfg.max_constits, 128)
         self.assertIn("m2_antioverlap", RECONSTRUCTOR_VARIANT_NAMES)
 
@@ -146,11 +149,28 @@ if TORCH_AVAILABLE:
         def __init__(self, num_classes=10):
             super().__init__()
             self.logits = torch.nn.Parameter(torch.zeros(num_classes))
+            self.config = {"architecture": "cross_attention_fusion"}
 
         def forward(self, hlt_inputs, reco_inputs):
             batch_size = hlt_inputs["features"].shape[0]
             self._last_hlt_shape = tuple(hlt_inputs["features"].shape)
             self._last_reco_shape = tuple(reco_inputs.features.shape)
+            return self.logits.unsqueeze(0).expand(batch_size, -1)
+
+    class DummyPartDualTagger(torch.nn.Module):
+        def __init__(self, num_classes=10):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.zeros(num_classes))
+            self.config = {
+                "architecture": "particle_transformer_concat",
+                "corrected_view_feature_names": list(PF_FEATURE_NAMES),
+            }
+
+        def forward(self, hlt_inputs, reco_inputs):
+            batch_size = hlt_inputs["features"].shape[0]
+            self._last_hlt_shape = tuple(hlt_inputs["features"].shape)
+            self._last_reco_shape = tuple(reco_inputs["features"].shape)
+            self._last_reco_is_part_inputs = isinstance(reco_inputs, dict)
             return self.logits.unsqueeze(0).expand(batch_size, -1)
 
 
@@ -232,6 +252,25 @@ class DualViewStep8TorchTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits).all())
         self.assertEqual(tagger.config["architecture"], "cross_attention_fusion")
         self.assertEqual(tagger.config["corrected_view_feature_names"], list(CORRECTED_VIEW_FEATURE_NAMES))
+
+    def test_particle_transformer_concat_corrected_inputs_use_reco_candidates(self):
+        view = make_hlt_view(n_jets=2, n_constits=5)
+        hlt_tokens = torch.from_numpy(view.tokens).float()
+        hlt_mask = torch.from_numpy(view.mask).bool()
+        reco_output = make_parent_aligned_reconstruction_output(hlt_tokens, hlt_mask)
+        tagger = DummyPartDualTagger()
+
+        corrected_inputs = build_corrected_inputs_for_tagger(
+            tagger,
+            hlt_tokens,
+            hlt_mask,
+            reco_output,
+            max_constits=5,
+        )
+
+        self.assertIsInstance(corrected_inputs, dict)
+        self.assertEqual(corrected_inputs["features"].shape, (2, len(PF_FEATURE_NAMES), 5))
+        self.assertEqual(corrected_inputs["mask"].shape, (2, 1, 5))
 
     def test_cross_attention_tagger_checkpoint_roundtrip(self):
         view = make_hlt_view(n_jets=2, n_constits=5)
@@ -327,6 +366,24 @@ class DualViewStep8TorchTests(unittest.TestCase):
         self.assertEqual(tagger._last_hlt_shape, (2, 17, 5))
         self.assertEqual(tagger._last_reco_shape, (2, len(CORRECTED_VIEW_FEATURE_NAMES), 5))
 
+    def test_run_dual_view_epoch_with_part_dual_view_uses_part_inputs(self):
+        dataset = HLTTokenDataset(make_hlt_view(n_jets=4))
+        loader = make_hlt_token_loader(dataset, batch_size=2, shuffle=False, num_workers=0, seed=909)
+        tagger = DummyPartDualTagger()
+        metrics = run_dual_view_epoch(
+            tagger,
+            DummyReconstructor(),
+            loader,
+            device=torch.device("cpu"),
+            criterion=torch.nn.CrossEntropyLoss(),
+            max_constits=5,
+        )
+        self.assertEqual(metrics["n_jets"], 4)
+        self.assertEqual(metrics["accuracy"], 1.0)
+        self.assertTrue(tagger._last_reco_is_part_inputs)
+        self.assertEqual(tagger._last_hlt_shape, (2, len(PF_FEATURE_NAMES), 5))
+        self.assertEqual(tagger._last_reco_shape, (2, len(PF_FEATURE_NAMES), 5))
+
     def test_train_cross_attention_tagger_tiny_subset_with_injected_reconstructor(self):
         train_view = make_hlt_view("model_train", n_jets=6)
         val_view = make_hlt_view("model_val", n_jets=4)
@@ -357,6 +414,35 @@ class DualViewStep8TorchTests(unittest.TestCase):
         self.assertTrue(report["no_final_test_evaluation"])
         self.assertTrue(report["reconstructor_frozen"])
         self.assertGreaterEqual(report["best_model_val_accuracy"], 0.0)
+
+    def test_train_part_dual_view_tiny_subset_with_injected_tagger(self):
+        train_view = make_hlt_view("model_train", n_jets=6)
+        val_view = make_hlt_view("model_val", n_jets=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = DualViewTaggerTrainConfig(
+                output_dir=tmp,
+                hlt_cache_dir="/unused",
+                reconstructor_checkpoint="/unused",
+                architecture="particle_transformer_concat",
+                epochs=1,
+                batch_size=2,
+                device="cpu",
+                amp=False,
+                early_stop_patience=2,
+                max_constits=5,
+            )
+            report = train_dual_view_tagger(
+                cfg,
+                tagger=DummyPartDualTagger(),
+                reconstructor=DummyReconstructor(),
+                train_view=train_view,
+                val_view=val_view,
+            )
+            checkpoint = torch.load(Path(tmp) / "best_model_val.pt", map_location="cpu")
+            self.assertEqual(report["dual_view_architecture"], "particle_transformer_concat")
+            self.assertEqual(report["corrected_view_feature_names"], list(PF_FEATURE_NAMES))
+            self.assertEqual(checkpoint["model_config"]["architecture"], "particle_transformer_concat")
+            self.assertEqual(checkpoint["corrected_view_feature_names"], list(PF_FEATURE_NAMES))
 
 
 if __name__ == "__main__":

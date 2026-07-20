@@ -63,6 +63,8 @@ CORRECTED_VIEW_SUPPORT_FEATURE_NAMES = [
     "budget_efficiency_share",
 ]
 CORRECTED_VIEW_FEATURE_NAMES = CORRECTED_VIEW_BASE_FEATURE_NAMES + CORRECTED_VIEW_SUPPORT_FEATURE_NAMES
+DUAL_VIEW_ARCHITECTURES = ("cross_attention_fusion", "particle_transformer_concat")
+PARTICLE_TRANSFORMER_DUAL_VIEW_ARCHITECTURES = ("particle_transformer_concat", "particle_transformer_dual_view")
 
 
 @dataclass
@@ -103,6 +105,7 @@ class DualViewTaggerTrainConfig:
     max_train_batches: int | None = None
     max_val_batches: int | None = None
     model_size: str = "base"
+    architecture: str = "cross_attention_fusion"
     compile_model: bool = False
     max_constits: int = 128
     reco_weight_threshold: float = 0.0
@@ -966,7 +969,7 @@ def build_dual_view_tagger(
     reco_weight_threshold: float = 0.0,
     architecture: str | None = None,
 ):
-    if architecture in ("particle_transformer_concat", "particle_transformer_dual_view"):
+    if architecture in PARTICLE_TRANSFORMER_DUAL_VIEW_ARCHITECTURES:
         return DualViewParticleTransformerTagger(
             num_classes=num_classes,
             model_size=model_size,
@@ -987,6 +990,44 @@ def build_dual_view_tagger(
         num_layers=num_layers,
         feedforward_dim=feedforward_dim,
         dropout=dropout,
+    )
+
+
+def dual_view_corrected_feature_names(architecture: str | None) -> List[str]:
+    if architecture in PARTICLE_TRANSFORMER_DUAL_VIEW_ARCHITECTURES:
+        return list(PF_FEATURE_NAMES)
+    return list(CORRECTED_VIEW_FEATURE_NAMES)
+
+
+def _tagger_architecture(tagger) -> str:
+    return str(getattr(tagger, "config", {}).get("architecture", "cross_attention_fusion"))
+
+
+def build_corrected_inputs_for_tagger(
+    tagger,
+    hlt_tokens,
+    hlt_mask,
+    reconstruction,
+    *,
+    max_constits: int = 128,
+    reco_weight_threshold: float = 0.0,
+):
+    """Build the corrected-view input expected by the selected Stage2 tagger."""
+
+    architecture = _tagger_architecture(tagger)
+    if architecture in PARTICLE_TRANSFORMER_DUAL_VIEW_ARCHITECTURES:
+        return build_part_inputs_torch(
+            reconstruction.tokens,
+            reconstruction.candidate_mask,
+            weights=reconstruction.weights,
+            max_constits=max_constits,
+            weight_threshold=reco_weight_threshold,
+        )
+    return build_soft_corrected_view_torch(
+        hlt_tokens,
+        hlt_mask,
+        reconstruction,
+        weight_threshold=reco_weight_threshold,
     )
 
 
@@ -1049,11 +1090,13 @@ def run_dual_view_epoch(
                     batch["hlt_mask"],
                     max_constits=max_constits,
                 )
-                corrected_inputs = build_soft_corrected_view_torch(
+                corrected_inputs = build_corrected_inputs_for_tagger(
+                    tagger,
                     batch["hlt_tokens"],
                     batch["hlt_mask"],
                     reco,
-                    weight_threshold=reco_weight_threshold,
+                    max_constits=max_constits,
+                    reco_weight_threshold=reco_weight_threshold,
                 )
                 logits = tagger(hlt_inputs, corrected_inputs)
                 loss = criterion(logits, batch["labels"])
@@ -1101,6 +1144,8 @@ def dual_view_checkpoint_payload(
     metrics: Mapping[str, Any],
     reconstructor_payload: Mapping[str, Any] | None,
 ):
+    model_config = getattr(tagger, "config", {})
+    architecture = str(model_config.get("architecture", config.architecture))
     return {
         "epoch": int(epoch),
         "model_state_dict": tagger.state_dict(),
@@ -1110,8 +1155,10 @@ def dual_view_checkpoint_payload(
         "label_names": list(LABEL_NAMES),
         "pf_feature_names": list(PF_FEATURE_NAMES),
         "hlt_feature_names": list(PF_FEATURE_NAMES),
-        "corrected_view_feature_names": list(CORRECTED_VIEW_FEATURE_NAMES),
-        "model_config": getattr(tagger, "config", {}),
+        "corrected_view_feature_names": list(
+            model_config.get("corrected_view_feature_names", dual_view_corrected_feature_names(architecture))
+        ),
+        "model_config": model_config,
         "reconstructor_checkpoint": config.reconstructor_checkpoint,
         "reconstructor_epoch": None if reconstructor_payload is None else reconstructor_payload.get("epoch"),
         "experiment_step": DUAL_VIEW_EXPERIMENT_STEP,
@@ -1185,10 +1232,21 @@ def train_dual_view_tagger(
         for param in reconstructor.parameters():
             param.requires_grad_(False)
 
-    tagger = tagger or build_dual_view_tagger(num_classes=len(LABEL_NAMES), model_size=config.model_size)
+    tagger = tagger or build_dual_view_tagger(
+        num_classes=len(LABEL_NAMES),
+        model_size=config.model_size,
+        architecture=config.architecture,
+        max_constits=config.max_constits,
+        reco_weight_threshold=config.reco_weight_threshold,
+    )
     tagger = tagger.to(device)
     if config.compile_model and hasattr(torch, "compile"):
         tagger = torch.compile(tagger)
+    tagger_config = dict(getattr(tagger, "config", {}))
+    dual_view_architecture = str(tagger_config.get("architecture", config.architecture))
+    corrected_view_feature_names = list(
+        tagger_config.get("corrected_view_feature_names", dual_view_corrected_feature_names(dual_view_architecture))
+    )
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(tagger.parameters(), lr=float(config.lr), weight_decay=float(config.weight_decay))
@@ -1205,10 +1263,11 @@ def train_dual_view_tagger(
         "reconstructor_checkpoint": config.reconstructor_checkpoint,
         "reconstructor_epoch": None if reconstructor_payload is None else reconstructor_payload.get("epoch"),
         "hlt_baseline_reference": baseline_report,
-        "dual_view_architecture": "cross_attention_fusion",
-        "corrected_view_feature_names": list(CORRECTED_VIEW_FEATURE_NAMES),
+        "dual_view_architecture": dual_view_architecture,
+        "corrected_view_feature_names": corrected_view_feature_names,
+        "model_config": tagger_config,
         "leakage_rule": (
-            "Dual-view tagger consumes cached fixed-HLT tokens and a parent-aligned soft corrected view "
+            "Dual-view tagger consumes cached fixed-HLT tokens and a corrected/reconstructed view "
             "built from the frozen reconstructor output. Offline constituents are not loaded by Stage B training."
         ),
         "no_stack_or_final_test_partitions_loaded": True,
@@ -1299,7 +1358,9 @@ def train_dual_view_tagger(
     report = {
         "experiment_step": DUAL_VIEW_EXPERIMENT_STEP,
         "variant": config.variant,
-        "dual_view_architecture": "cross_attention_fusion",
+        "dual_view_architecture": dual_view_architecture,
+        "corrected_view_feature_names": corrected_view_feature_names,
+        "model_config": tagger_config,
         "best_epoch": int(best_epoch),
         "best_model_val_accuracy": float(best_val_accuracy),
         "best_model_val_loss": float(best_val_loss),

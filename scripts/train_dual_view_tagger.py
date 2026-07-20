@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-jets", type=int, default=None, help="Debug-only limit after loading model_train HLT cache")
     parser.add_argument("--max-val-jets", type=int, default=None, help="Debug-only limit after loading model_val HLT cache")
     parser.add_argument("--model-size", choices=["base", "tiny"], default="base")
+    parser.add_argument(
+        "--architecture",
+        choices=["cross_attention_fusion", "particle_transformer_concat"],
+        default="cross_attention_fusion",
+        help="Stage2 dual-view classifier architecture.",
+    )
     parser.add_argument("--compile-model", action="store_true")
     parser.add_argument("--max-constits", type=int, default=128)
     parser.add_argument("--reco-weight-threshold", type=float, default=0.0)
@@ -75,6 +81,7 @@ def main() -> int:
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         model_size=args.model_size,
+        architecture=args.architecture,
         compile_model=args.compile_model,
         max_constits=args.max_constits,
         reco_weight_threshold=args.reco_weight_threshold,
