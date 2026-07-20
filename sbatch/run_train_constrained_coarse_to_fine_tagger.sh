@@ -109,7 +109,7 @@ case "${variant}" in
   D6)
     for index in 0 1 2 3; do
       source_args+=(--reconstructor-source "stochastic_${index}@${index}=${CONSTRAINED_C2F_RECON_ROOT}/C6/best_model_val.pt")
-      variant_args+=(--reconstructor-variant "stochastic_${index}=C6")
+      variant_args+=(--reconstructor-variant "stochastic_${index}=C6_multiview")
     done
     ;;
   D7)
