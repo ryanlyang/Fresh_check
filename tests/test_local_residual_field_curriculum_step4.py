@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
 from teacher_logit_reco.local_particle_residual_field import (
     FIELD_GATE_MODE_LEARNED_SIGMOID,
+    FREEZE_PHASE_FULL_GENTLE_UNFREEZE,
+    FREEZE_PHASE_RESIDUAL_PATH_WARMUP,
+    FREEZE_PHASE_UPPER_UNFREEZE,
+    LOCAL_RESIDUAL_FIELD_CURRICULUM_DEPLOYABLE_CONTRACT,
     LocalResidualFieldAugmentedParT,
     LocalResidualFieldCurriculumJointConfig,
     LocalResidualFieldCurriculumJointModel,
@@ -216,6 +221,10 @@ def test_step4_joint_model_routes_predicted_fields_through_frozen_oracle_consume
     assert any(parameter.grad is not None for parameter in model.reconstructor.parameters())
     assert output.diagnostics["oracle_consumer"]["consumer_id"] == "Ofull"
     assert output.diagnostics["oracle_consumer"]["alpha"] == 0.5
+    deployable = model.deployable_checkpoint_payload()
+    assert deployable["oracle_consumer_included"] is False
+    assert deployable["model_config"]["oracle_consumer_config"] is None
+    assert not any("oracle" in key for key in model.state_dict())
 
 
 def test_step4_residual_projection_reset_edits_only_residual_input_columns():
@@ -262,3 +271,143 @@ def test_step4_freeze_phase_reports_trainable_groups():
 
     assert phase3["phase"] == "full_gentle_unfreeze"
     assert phase3["student"]["trainable"] == phase3["student"]["total"]
+
+
+def test_step4_p7b_oracle_initialization_applies_checkpoint_surgery_and_reset(
+    tmp_path: Path,
+):
+    checkpoint = tmp_path / "Ofull" / "best_model_val.pt"
+    _write_fake_oracle_checkpoint(checkpoint)
+    source_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    source_weight = source_payload["model_state_dict"]["part_model.proj.weight"]
+    model = LocalResidualFieldCurriculumJointModel(
+        LocalResidualFieldCurriculumJointConfig(
+            reconstructor_config=_reco_config(),
+            student_config=_student_config(),
+            student_init_source="Ofull",
+            student_init_checkpoint=str(checkpoint),
+            require_student_init_checkpoint=True,
+            residual_projection_reset="scale",
+            residual_projection_scale=0.1,
+            initial_gate_bias_prob=0.1,
+            freeze_schedule="residual_path_warmup_then_upper_unfreeze",
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        student=_student(),
+    )
+    base_dim = int(model.student.config.base_feature_dim)
+    weight = model.student.part_model.proj.weight.detach()
+
+    assert torch.allclose(weight[:, :base_dim], source_weight[:, :base_dim])
+    assert torch.allclose(weight[:, base_dim:], source_weight[:, base_dim:] * 0.1)
+    assert model.student_initialization_report["warm_start_applied"] is True
+    assert len(model.student_initialization_report["student_init_checkpoint_hash"]) == 64
+    assert model.residual_projection_reset_report["mode"] == "scale"
+    assert model.residual_projection_reset_report["matched_parameter_count"] == 1
+    adaptation = model.adaptation_report()
+    assert adaptation["student_init_source"] == "Ofull"
+    assert adaptation["residual_projection_reset_mode"] == "scale"
+    assert adaptation["initial_gate_bias_prob"] == pytest.approx(0.1)
+    assert adaptation["freeze_schedule"]["name"] == "residual_path_warmup_then_upper_unfreeze"
+
+
+def test_step4_named_freeze_schedule_builds_disjoint_reported_optimizer_groups():
+    model = LocalResidualFieldCurriculumJointModel(
+        LocalResidualFieldCurriculumJointConfig(
+            reconstructor_config=_reco_config(),
+            student_config=_student_config(),
+            freeze_schedule="residual_path_warmup_then_upper_unfreeze",
+            freeze_phase1_epochs=2,
+            freeze_phase2_epochs=3,
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        ),
+        student=_student(),
+    )
+
+    phase1 = model.apply_freeze_schedule(0)
+    assert phase1["phase"] == FREEZE_PHASE_RESIDUAL_PATH_WARMUP
+    assert {group["name"] for group in phase1["optimizer_groups"]} == {
+        "predictor",
+        "confidence_heads",
+        "student_residual_projection",
+    }
+    optimizer, optimizer_report = model.build_optimizer()
+    assert len(optimizer.param_groups) == len(optimizer_report["groups"])
+    assert all(group["learning_rate"] > 0.0 for group in optimizer_report["groups"])
+
+    phase2 = model.apply_freeze_schedule(2)
+    assert phase2["phase"] == FREEZE_PHASE_UPPER_UNFREEZE
+    guarded_phase3 = model.apply_freeze_schedule(5, validation_stable=False)
+    assert guarded_phase3["phase"] == FREEZE_PHASE_UPPER_UNFREEZE
+    phase3 = model.apply_freeze_schedule(5, validation_stable=True)
+    assert phase3["phase"] == FREEZE_PHASE_FULL_GENTLE_UNFREEZE
+    assert phase3["student"]["trainable"] == phase3["student"]["total"]
+    assert any(group["name"] == "student_body" for group in phase3["optimizer_groups"])
+    adaptation = model.adaptation_report()
+    assert adaptation["current_phase"] == FREEZE_PHASE_FULL_GENTLE_UNFREEZE
+    assert adaptation["optimizer_groups"]
+    assert adaptation["optimizer_group_learning_rates"]["student_body"] > 0.0
+    assert adaptation["trainable_parameter_counts"]["student"]["trainable"] > 0
+
+
+def test_step4_deployable_checkpoint_round_trip_is_oracle_free_and_hlt_only(
+    tmp_path: Path,
+):
+    model = LocalResidualFieldCurriculumJointModel(
+        LocalResidualFieldCurriculumJointConfig(
+            reconstructor_config=_reco_config(),
+            student_config=_student_config(),
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+            normalization_metadata={"target_mean": [0.0] * len(FIELD_NAMES)},
+            provenance_hashes={"manifest_hash": "manifest"},
+        ),
+        student=_student(),
+    ).eval()
+    batch = _batch()
+    expected = model(**batch).student_logits.detach()
+    checkpoint = tmp_path / "deployable.pt"
+
+    save_report = model.save_deployable_checkpoint(checkpoint, extra_metadata={"run_id": "P7a"})
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+
+    assert save_report["contract"] == LOCAL_RESIDUAL_FIELD_CURRICULUM_DEPLOYABLE_CONTRACT
+    assert payload["oracle_consumer_included"] is False
+    assert payload["model_config"]["oracle_consumer_config"] is None
+    assert payload["model_config"]["student_init_checkpoint"] is None
+    assert not any(str(key).startswith("oracle") for state_name in (
+        "reconstructor_state_dict",
+        "student_state_dict",
+        "confidence_heads_state_dict",
+    ) for key in payload[state_name])
+
+    loaded = LocalResidualFieldCurriculumJointModel.from_deployable_checkpoint(
+        checkpoint,
+        student=_student(),
+        device="cpu",
+    )
+    inference_batch = {key: value for key, value in batch.items() if key != "target_fields"}
+    actual = loaded(**inference_batch).student_logits.detach()
+
+    assert loaded.oracle_consumer is None
+    assert torch.allclose(actual, expected)
+    assert loaded.config.normalization_metadata == {"target_mean": [0.0] * len(FIELD_NAMES)}
+    assert loaded.config.provenance_hashes == {"manifest_hash": "manifest"}
+
+
+def test_step4_oracle_initialized_student_requires_explicit_p7b_adaptation_policy(
+    tmp_path: Path,
+):
+    checkpoint = tmp_path / "Ofull" / "best_model_val.pt"
+    _write_fake_oracle_checkpoint(checkpoint)
+    with pytest.raises(ValueError, match="explicit residual projection reset policy"):
+        LocalResidualFieldCurriculumJointConfig(
+            reconstructor_config=_reco_config(),
+            student_config=_student_config(),
+            student_init_source="Ofull",
+            student_init_checkpoint=str(checkpoint),
+            field_names=FIELD_NAMES,
+            field_groups=FIELD_GROUPS,
+        )

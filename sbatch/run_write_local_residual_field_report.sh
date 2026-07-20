@@ -28,6 +28,13 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LOCAL_RESIDUAL_FIELD_REQUIRED_RECON_RUN_IDS:=C0 C1 C2 C3 C4 C5 C6}"
 : "${LOCAL_RESIDUAL_FIELD_REQUIRED_FUSION_GROUPS:=G0 G1 G2 G3}"
 : "${LOCAL_RESIDUAL_FIELD_REQUIRE_FUSION:=1}"
+: "${LOCAL_RESIDUAL_FIELD_CURRICULUM_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/curriculum}"
+: "${LOCAL_RESIDUAL_FIELD_ORACLE_DIAGNOSTICS_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/oracle_diagnostics}"
+: "${LOCAL_RESIDUAL_FIELD_CURRICULUM_DIAGNOSTICS_ROOT:=${LOCAL_RESIDUAL_FIELD_CURRICULUM_ROOT}}"
+: "${LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_JSON:=${LOCAL_RESIDUAL_FIELD_ROOT}/selected_consumer.json}"
+: "${LOCAL_RESIDUAL_FIELD_REQUIRED_CURRICULUM_RUN_IDS:=P0 P2 P4 P7a P7b Q0 Q3}"
+: "${LOCAL_RESIDUAL_FIELD_REQUIRE_CURRICULUM:=0}"
+: "${LOCAL_RESIDUAL_FIELD_PAIRED_CONSUMER_MODE:=0}"
 
 fresh_setup "$@"
 if [[ ! -f "scripts/write_local_residual_field_report.py" ]]; then
@@ -54,6 +61,21 @@ cmd=(
 if fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_REQUIRE_FUSION}"; then
   cmd+=(--require-fusion)
 fi
+if fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_REQUIRE_CURRICULUM}"; then
+  fresh_require_dir "${LOCAL_RESIDUAL_FIELD_CURRICULUM_ROOT}"
+  fresh_require_dir "${LOCAL_RESIDUAL_FIELD_ORACLE_DIAGNOSTICS_ROOT}"
+  fresh_require_file "${LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_JSON}"
+  fresh_split_words required_curriculum_ids "${LOCAL_RESIDUAL_FIELD_REQUIRED_CURRICULUM_RUN_IDS}"
+  cmd+=(
+    --curriculum-root "${LOCAL_RESIDUAL_FIELD_CURRICULUM_ROOT}"
+    --oracle-diagnostics-root "${LOCAL_RESIDUAL_FIELD_ORACLE_DIAGNOSTICS_ROOT}"
+    --curriculum-diagnostics-root "${LOCAL_RESIDUAL_FIELD_CURRICULUM_DIAGNOSTICS_ROOT}"
+    --selected-consumer-json "${LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_JSON}"
+    --required-curriculum-run-ids "${required_curriculum_ids[@]}"
+    --require-curriculum
+  )
+fi
+fresh_append_flag_if_enabled cmd --paired-consumer-mode "${LOCAL_RESIDUAL_FIELD_PAIRED_CONSUMER_MODE}"
 if fresh_bool_enabled "${CONFIRM_FINAL_TEST:-0}"; then
   cmd+=(--confirm-final-test --require-final-test-provenance)
 fi
@@ -66,4 +88,9 @@ if ! fresh_is_dry_run; then
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/provenance_audit.json"
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/tagger_metrics.csv"
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/reconstructor_metrics.csv"
+  if fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_REQUIRE_CURRICULUM}"; then
+    fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/deployable_leaderboard.csv"
+    fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/consumer_selection.csv"
+    fresh_require_file "${LOCAL_RESIDUAL_FIELD_REPORT_DIR}/curriculum_student_metrics.csv"
+  fi
 fi

@@ -14,6 +14,13 @@
 set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+# This worker is Tigris-specific. Pin its operational defaults before
+# common.sh supplies the repository-wide Weaver/legacy-data fallbacks. The
+# ABPH-prefixed overrides remain available for deliberate alternate setups.
+CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"
+CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
+DATA_DIR="${ABPH_DATA_DIR:-/home/ryreu/atlas/PracticeTagging/data/jetclass_part1}"
+export CONDA_BASE CONDA_ENV DATA_DIR
 source "${PROJECT_DIR}/sbatch/common.sh"
 MODE="${1:?Usage: run_adaptive_binary_runtime_acceptance.sh <smoke|benchmark|benchmark_uninstrumented> [variant]}"
 VARIANT="${2:-}"

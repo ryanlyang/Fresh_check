@@ -166,7 +166,7 @@ selection_reason
 selection_primary_split: model_val
 selection_confirmation_split: stack_val
 model_val_alpha_curve
-stack_val_alpha_curve_confirmation
+stack_val_alpha_curve
 ```
 
 Stage 1b queues only after `selected_consumer.json` exists and passes

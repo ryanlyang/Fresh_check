@@ -184,6 +184,11 @@ def _sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_json_hash(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def normalize_alpha_schedule(value: str | None) -> str:
     key = str(value or ALPHA_SCHEDULE_FIXED).strip().lower().replace("-", "_")
     aliases = {
@@ -318,8 +323,8 @@ class LocalResidualFieldCurriculumJointConfig:
         reset_mode = normalize_residual_projection_reset(self.residual_projection_reset)
         object.__setattr__(self, "residual_projection_reset", reset_mode)
         reset_scale = float(self.residual_projection_scale)
-        if reset_scale < 0.0:
-            raise ValueError("residual_projection_scale must be non-negative")
+        if not math.isfinite(reset_scale) or reset_scale < 0.0:
+            raise ValueError("residual_projection_scale must be finite and non-negative")
         object.__setattr__(self, "residual_projection_scale", reset_scale)
         oracle = self.oracle_consumer_config
         if oracle is not None and not isinstance(oracle, FrozenOracleConsumerConfig):
@@ -328,10 +333,19 @@ class LocalResidualFieldCurriculumJointConfig:
             oracle = FrozenOracleConsumerConfig(**payload)
             object.__setattr__(self, "oracle_consumer_config", oracle)
         names = tuple(str(name) for name in (self.field_names or reco.field_names or student.field_names or ()))
-        if names and len(names) != int(reco.field_dim):
-            raise ValueError("field_names must match the reconstructor field_dim")
+        if len(names) != int(reco.field_dim):
+            raise ValueError("a complete field_names schema must match the reconstructor field_dim")
+        if reco.field_names and tuple(reco.field_names) != names:
+            raise ValueError("joint field_names do not match the reconstructor field schema")
+        if student.field_names and tuple(student.field_names) != names:
+            raise ValueError("joint field_names do not match the student field schema")
         object.__setattr__(self, "field_names", names)
         groups = _field_groups_to_dict(self.field_groups or reco.field_groups or student.field_groups)
+        grouped_indices = [int(index) for indices in groups.values() for index in indices]
+        if len(grouped_indices) != len(set(grouped_indices)):
+            raise ValueError("joint field_groups contain duplicate field indices")
+        if set(grouped_indices) != set(range(int(reco.field_dim))):
+            raise ValueError("joint field_groups must cover every residual field exactly once")
         object.__setattr__(self, "field_groups", groups)
         student_init_source = str(self.student_init_source or "").strip()
         if student_init_source not in STUDENT_INIT_SOURCES:
@@ -349,6 +363,10 @@ class LocalResidualFieldCurriculumJointConfig:
                 raise ValueError("oracle-initialized P7b requires student_init_checkpoint")
             if reset_mode == RESIDUAL_PROJECTION_RESET_NONE:
                 raise ValueError("oracle-initialized P7b requires an explicit residual projection reset policy")
+            if reset_mode == RESIDUAL_PROJECTION_RESET_SCALE and not (0.0 <= reset_scale < 1.0):
+                raise ValueError("oracle-initialized P7b scale policy must shrink residual projection weights")
+            if gate_prob > 0.5:
+                raise ValueError("oracle-initialized P7b requires a conservative initial_gate_bias_prob <= 0.5")
             if freeze_schedule != FREEZE_SCHEDULE_RESIDUAL_WARMUP_THEN_UPPER:
                 raise ValueError(
                     "oracle-initialized P7b requires freeze_schedule="
@@ -442,6 +460,9 @@ def _coerce_epoch_value_points(
             normalized_value = _finite_float(value, name=value_key, minimum=0.0)
         output.append((epoch, normalized_value))
     output.sort(key=lambda pair: pair[0])
+    epochs = [epoch for epoch, _ in output]
+    if len(epochs) != len(set(epochs)):
+        raise ValueError("schedule point epochs must be unique")
     return tuple(output)
 
 
@@ -514,17 +535,23 @@ def _scheduled_scalar(
         end = _finite_float(spec.get("end", default), name=f"{value_name}.end", minimum=0.0)
         start_epoch = int(spec.get("start_epoch", 0))
         end_epoch = int(spec.get("end_epoch", max(int(total_epochs or 1) - 1, start_epoch + 1)))
-        if end_epoch <= start_epoch:
+        if start_epoch < 0 or end_epoch < 0:
+            raise ValueError(f"{value_name} linear schedule epochs must be non-negative")
+        if end_epoch < start_epoch:
+            raise ValueError(f"{value_name} linear schedule end_epoch must be >= start_epoch")
+        if end_epoch == start_epoch:
             return end if int(epoch) >= end_epoch else start
         progress = max(0.0, min(1.0, float(int(epoch) - start_epoch) / float(end_epoch - start_epoch)))
         return start + (end - start) * progress
     if kind == LOSS_WEIGHT_SCHEDULE_PIECEWISE:
         points = _coerce_epoch_value_points(spec.get("points", ()), value_key="value")
+        if not points:
+            raise ValueError(f"{value_name} piecewise schedule requires points")
         return _piecewise_value(points, epoch=int(epoch), default=float(default))
     if kind == LOSS_WEIGHT_SCHEDULE_SIGMOID:
         start = _finite_float(spec.get("start", default), name=f"{value_name}.start", minimum=0.0)
         end = _finite_float(spec.get("end", default), name=f"{value_name}.end", minimum=0.0)
-        midpoint = _finite_float(spec.get("midpoint", 0.5), name=f"{value_name}.midpoint")
+        midpoint = _finite_float(spec.get("midpoint", 0.5), name=f"{value_name}.midpoint", minimum=0.0)
         sharpness = _finite_float(spec.get("sharpness", 12.0), name=f"{value_name}.sharpness", minimum=0.0)
         return _sigmoid_value(
             epoch=int(epoch),
@@ -537,14 +564,6 @@ def _scheduled_scalar(
     raise AssertionError(f"unhandled loss weight schedule {kind!r}")
 
 
-def _extract_selected_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    for key in ("selected", "selection", "selected_consumer"):
-        value = payload.get(key)
-        if isinstance(value, Mapping):
-            return value
-    return payload
-
-
 @dataclass(frozen=True)
 class SelectedConsumerRecord:
     """Consumer selected by Stage 1a for Stage 1b students."""
@@ -552,6 +571,11 @@ class SelectedConsumerRecord:
     selected_consumer_id: str
     selected_alpha_endpoint: float | None = None
     source_path: str | None = None
+    source_hash: str | None = None
+    selection_source: str = ""
+    selection_reason: str = ""
+    model_val_alpha_curve: Mapping[str, Any] = field(default_factory=dict)
+    stack_val_alpha_curve: Mapping[str, Any] = field(default_factory=dict)
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -560,12 +584,16 @@ class SelectedConsumerRecord:
             raise ValueError("selected_consumer_id is required")
         object.__setattr__(self, "selected_consumer_id", consumer_id)
         if self.selected_alpha_endpoint is not None:
-            object.__setattr__(
-                self,
-                "selected_alpha_endpoint",
-                _finite_float(self.selected_alpha_endpoint, name="selected_alpha_endpoint", minimum=0.0),
-            )
+            endpoint = _finite_float(self.selected_alpha_endpoint, name="selected_alpha_endpoint", minimum=0.0)
+            if endpoint > 1.0:
+                raise ValueError("selected_alpha_endpoint must be in [0, 1]")
+            object.__setattr__(self, "selected_alpha_endpoint", endpoint)
         object.__setattr__(self, "source_path", None if self.source_path is None else str(self.source_path))
+        object.__setattr__(self, "source_hash", None if self.source_hash is None else str(self.source_hash))
+        object.__setattr__(self, "selection_source", str(self.selection_source or "").strip())
+        object.__setattr__(self, "selection_reason", str(self.selection_reason or "").strip())
+        object.__setattr__(self, "model_val_alpha_curve", dict(self.model_val_alpha_curve or {}))
+        object.__setattr__(self, "stack_val_alpha_curve", dict(self.stack_val_alpha_curve or {}))
         object.__setattr__(self, "payload", dict(self.payload or {}))
 
     def to_dict(self) -> dict[str, Any]:
@@ -574,32 +602,74 @@ class SelectedConsumerRecord:
             "selected_consumer_id": str(self.selected_consumer_id),
             "selected_alpha_endpoint": self.selected_alpha_endpoint,
             "source_path": self.source_path,
+            "source_hash": self.source_hash,
+            "selection_source": self.selection_source,
+            "selection_reason": self.selection_reason,
+            "model_val_alpha_curve": dict(self.model_val_alpha_curve),
+            "stack_val_alpha_curve": dict(self.stack_val_alpha_curve),
             "payload": dict(self.payload),
         }
 
 
 def load_selected_consumer_record(path: str | Path) -> SelectedConsumerRecord:
     selected_path = Path(path)
+    if not selected_path.is_file():
+        raise FileNotFoundError(f"selected consumer artifact does not exist: {selected_path}")
     payload = json.loads(selected_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError(f"selected consumer artifact {selected_path} is not a JSON object")
-    selected = _extract_selected_mapping(payload)
-    consumer_id = (
-        selected.get("selected_consumer_id")
-        or selected.get("consumer_id")
-        or selected.get("consumer")
-        or selected.get("selected_id")
+    if payload.get("contract") != LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_CONTRACT:
+        raise ValueError(
+            f"selected consumer contract {payload.get('contract')!r} != "
+            f"{LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_CONTRACT!r}"
+        )
+    required = (
+        "selected_consumer_id",
+        "selected_alpha_endpoint",
+        "selection_source",
+        "selection_reason",
+        "model_val_alpha_curve",
+        "stack_val_alpha_curve",
     )
-    endpoint = (
-        selected.get("selected_alpha_endpoint")
-        or selected.get("alpha_endpoint")
-        or selected.get("selected_alpha")
-        or selected.get("alpha")
-    )
+    missing = [name for name in required if name not in payload]
+    if missing:
+        raise ValueError(f"selected_consumer.json is missing required fields: {missing}")
+    consumer_id = str(payload.get("selected_consumer_id") or "").strip()
+    if consumer_id not in {"Ofull", "Orobust_light"}:
+        raise ValueError("selected_consumer_id must be Ofull or Orobust_light for the first-stage pilot")
+    endpoint = payload.get("selected_alpha_endpoint")
+    selection_source = str(payload.get("selection_source") or "").strip()
+    selection_reason = str(payload.get("selection_reason") or "").strip()
+    if not selection_source or not selection_reason:
+        raise ValueError("selected_consumer.json requires non-empty selection_source and selection_reason")
+    model_curve = payload.get("model_val_alpha_curve")
+    stack_curve = payload.get("stack_val_alpha_curve")
+    if not isinstance(model_curve, Mapping) or not model_curve:
+        raise ValueError("model_val_alpha_curve must be a non-empty object")
+    if not isinstance(stack_curve, Mapping) or not stack_curve:
+        raise ValueError("stack_val_alpha_curve must be a non-empty object")
+    endpoint_value = _finite_float(endpoint, name="selected_alpha_endpoint", minimum=0.0)
+    for curve_name, curve in (
+        ("model_val_alpha_curve", model_curve),
+        ("stack_val_alpha_curve", stack_curve),
+    ):
+        curve_alphas: list[float] = []
+        for key in curve:
+            try:
+                curve_alphas.append(float(key))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{curve_name} key {key!r} is not an alpha value") from exc
+        if not any(math.isclose(alpha, endpoint_value, rel_tol=0.0, abs_tol=1.0e-8) for alpha in curve_alphas):
+            raise ValueError(f"{curve_name} does not contain selected_alpha_endpoint={endpoint_value}")
     return SelectedConsumerRecord(
-        selected_consumer_id=str(consumer_id or ""),
-        selected_alpha_endpoint=None if endpoint is None else float(endpoint),
+        selected_consumer_id=consumer_id,
+        selected_alpha_endpoint=endpoint_value,
         source_path=str(selected_path),
+        source_hash=_sha256_file(selected_path),
+        selection_source=selection_source,
+        selection_reason=selection_reason,
+        model_val_alpha_curve=dict(model_curve),
+        stack_val_alpha_curve=dict(stack_curve),
         payload=dict(payload),
     )
 
@@ -627,29 +697,38 @@ class LocalResidualFieldCurriculumSchedulerConfig:
     selected_consumer_id: str | None = None
     selected_alpha_endpoint: float | None = None
     selected_consumer_path: str | None = None
+    selected_consumer_hash: str | None = None
+    selected_consumer_source_report: str | None = None
     selected_consumer_payload: Mapping[str, Any] = field(default_factory=dict)
     paired_consumer_mode: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "alpha_schedule", normalize_alpha_schedule(self.alpha_schedule))
         if self.fixed_alpha is not None:
-            object.__setattr__(self, "fixed_alpha", _finite_float(self.fixed_alpha, name="fixed_alpha", minimum=0.0))
+            fixed_alpha = _finite_float(self.fixed_alpha, name="fixed_alpha", minimum=0.0)
+            if fixed_alpha > 1.0:
+                raise ValueError("fixed_alpha must be in [0, 1]")
+            object.__setattr__(self, "fixed_alpha", fixed_alpha)
         if self.selected_alpha_endpoint is not None:
-            object.__setattr__(
-                self,
-                "selected_alpha_endpoint",
-                _finite_float(self.selected_alpha_endpoint, name="selected_alpha_endpoint", minimum=0.0),
-            )
+            endpoint = _finite_float(self.selected_alpha_endpoint, name="selected_alpha_endpoint", minimum=0.0)
+            if endpoint > 1.0:
+                raise ValueError("selected_alpha_endpoint must be in [0, 1]")
+            object.__setattr__(self, "selected_alpha_endpoint", endpoint)
         object.__setattr__(
             self,
             "sigmoid_alpha_start",
             _finite_float(self.sigmoid_alpha_start, name="sigmoid_alpha_start", minimum=0.0),
         )
+        if float(self.sigmoid_alpha_start) > 1.0:
+            raise ValueError("sigmoid_alpha_start must be in [0, 1]")
         if self.sigmoid_alpha_end is not None:
+            sigmoid_end = _finite_float(self.sigmoid_alpha_end, name="sigmoid_alpha_end", minimum=0.0)
+            if sigmoid_end > 1.0:
+                raise ValueError("sigmoid_alpha_end must be in [0, 1]")
             object.__setattr__(
                 self,
                 "sigmoid_alpha_end",
-                _finite_float(self.sigmoid_alpha_end, name="sigmoid_alpha_end", minimum=0.0),
+                sigmoid_end,
             )
         object.__setattr__(
             self,
@@ -666,13 +745,27 @@ class LocalResidualFieldCurriculumSchedulerConfig:
             value_key="alpha",
             allow_selected_endpoint=True,
         )
+        for _, alpha in points:
+            if not isinstance(alpha, str) and float(alpha) > 1.0:
+                raise ValueError("piecewise alpha values must be in [0, 1]")
+        if self.alpha_schedule == ALPHA_SCHEDULE_PIECEWISE and not points:
+            raise ValueError("piecewise_alpha schedule requires at least one schedule point")
         object.__setattr__(self, "piecewise_alpha", points)
         weights = {
             str(name): _finite_float(value, name=f"loss_weights.{name}", minimum=0.0)
             for name, value in dict(self.loss_weights or {}).items()
         }
         object.__setattr__(self, "loss_weights", weights)
-        object.__setattr__(self, "loss_weight_schedule", dict(self.loss_weight_schedule or {}))
+        loss_weight_schedule = dict(self.loss_weight_schedule or {})
+        for name, spec in loss_weight_schedule.items():
+            _scheduled_scalar(
+                spec,
+                epoch=0,
+                total_epochs=2,
+                default=float(weights.get(str(name), 0.0)),
+                value_name=f"loss_weight.{name}",
+            )
+        object.__setattr__(self, "loss_weight_schedule", loss_weight_schedule)
         teacher_sequence: list[dict[str, Any]] = []
         for item in self.teacher_sequence or ():
             payload = dict(item)
@@ -684,19 +777,51 @@ class LocalResidualFieldCurriculumSchedulerConfig:
                 payload["consumer_id"] = payload["selected_consumer_id"]
             if "consumer_id" not in payload:
                 raise ValueError("teacher_sequence entries must include consumer_id")
-            payload["consumer_id"] = str(payload["consumer_id"])
+            payload["consumer_id"] = str(payload["consumer_id"]).strip()
+            if not payload["consumer_id"]:
+                raise ValueError("teacher_sequence consumer_id must be non-empty")
+            payload.pop("selected_consumer_id", None)
+            payload.pop("alpha", None)
             teacher_sequence.append(payload)
         teacher_sequence.sort(key=lambda item: int(item["epoch"]))
+        teacher_epochs = [int(item["epoch"]) for item in teacher_sequence]
+        if len(teacher_epochs) != len(set(teacher_epochs)):
+            raise ValueError("teacher_sequence epochs must be unique")
         object.__setattr__(self, "teacher_sequence", tuple(teacher_sequence))
         consumer_id = None if self.selected_consumer_id is None else str(self.selected_consumer_id).strip()
+        if consumer_id and consumer_id not in {"Ofull", "Orobust_light"}:
+            raise ValueError("selected_consumer_id must be Ofull or Orobust_light")
         object.__setattr__(self, "selected_consumer_id", consumer_id or None)
         object.__setattr__(
             self,
             "selected_consumer_path",
             None if self.selected_consumer_path is None else str(self.selected_consumer_path),
         )
+        object.__setattr__(
+            self,
+            "selected_consumer_hash",
+            None if self.selected_consumer_hash is None else str(self.selected_consumer_hash),
+        )
+        object.__setattr__(
+            self,
+            "selected_consumer_source_report",
+            None if self.selected_consumer_source_report is None else str(self.selected_consumer_source_report),
+        )
         object.__setattr__(self, "selected_consumer_payload", dict(self.selected_consumer_payload or {}))
         object.__setattr__(self, "paired_consumer_mode", bool(self.paired_consumer_mode))
+        if consumer_id and not bool(self.paired_consumer_mode):
+            mismatched = sorted(
+                {
+                    str(item["consumer_id"])
+                    for item in teacher_sequence
+                    if str(item["consumer_id"]) != consumer_id
+                }
+            )
+            if mismatched:
+                raise ValueError(
+                    f"non-paired Stage 1b teacher_sequence may only use selected consumer {consumer_id}; "
+                    f"got {mismatched}"
+                )
 
     @classmethod
     def from_selected_consumer(
@@ -704,7 +829,7 @@ class LocalResidualFieldCurriculumSchedulerConfig:
         config: "LocalResidualFieldCurriculumSchedulerConfig | Mapping[str, Any] | None" = None,
         *,
         selected_consumer_path: str | Path | None = None,
-        require_selected_consumer: bool = False,
+        require_selected_consumer: bool = True,
         confirm_paired_consumers: bool | None = None,
         env: Mapping[str, str] | None = None,
     ) -> "LocalResidualFieldCurriculumSchedulerConfig":
@@ -716,6 +841,8 @@ class LocalResidualFieldCurriculumSchedulerConfig:
             payload["selected_consumer_id"] = record.selected_consumer_id
             payload["selected_alpha_endpoint"] = record.selected_alpha_endpoint
             payload["selected_consumer_path"] = record.source_path
+            payload["selected_consumer_hash"] = record.source_hash
+            payload["selected_consumer_source_report"] = record.selection_source
             payload["selected_consumer_payload"] = record.payload
             payload["paired_consumer_mode"] = False
             if bool(require_selected_consumer) and record.selected_alpha_endpoint is None:
@@ -749,6 +876,8 @@ class LocalResidualFieldCurriculumSchedulerConfig:
             "selected_consumer_id": self.selected_consumer_id,
             "selected_alpha_endpoint": self.selected_alpha_endpoint,
             "selected_consumer_path": self.selected_consumer_path,
+            "selected_consumer_hash": self.selected_consumer_hash,
+            "selected_consumer_source_report": self.selected_consumer_source_report,
             "selected_consumer_payload": dict(self.selected_consumer_payload or {}),
             "paired_consumer_mode": bool(self.paired_consumer_mode),
         }
@@ -771,6 +900,55 @@ class LocalResidualFieldCurriculumScheduler:
         self.total_epochs = None if total_epochs is None else int(total_epochs)
         if self.total_epochs is not None and self.total_epochs <= 0:
             raise ValueError("total_epochs must be positive when provided")
+        self._validate_stage1b_selection()
+
+    def _validate_stage1b_selection(self) -> None:
+        if not self.config.paired_consumer_mode:
+            if not self.config.selected_consumer_path:
+                raise ValueError(
+                    "Stage 1b scheduler must read selected_consumer.json unless paired-consumer mode is confirmed"
+                )
+            if not self.config.selected_consumer_hash:
+                raise ValueError("selected_consumer.json hash is required for Stage 1b provenance")
+            record = load_selected_consumer_record(self.config.selected_consumer_path)
+            if record.source_hash != self.config.selected_consumer_hash:
+                raise ValueError("selected_consumer.json changed after scheduler configuration")
+            if self.config.selected_consumer_id is None or self.config.selected_alpha_endpoint is None:
+                raise ValueError("selected_consumer.json must resolve both consumer ID and alpha endpoint")
+            if record.selected_consumer_id != self.config.selected_consumer_id or not math.isclose(
+                float(record.selected_alpha_endpoint),
+                float(self.config.selected_alpha_endpoint),
+                rel_tol=0.0,
+                abs_tol=1.0e-8,
+            ):
+                raise ValueError("scheduler consumer or alpha endpoint does not match selected_consumer.json")
+            if dict(record.payload) != dict(self.config.selected_consumer_payload):
+                raise ValueError("scheduler selected-consumer payload does not match selected_consumer.json")
+        else:
+            if self.config.selected_consumer_id is None and not self.config.teacher_sequence:
+                raise ValueError(
+                    "paired-consumer mode requires an explicit selected_consumer_id or teacher_sequence"
+                )
+            if (
+                self.config.selected_consumer_id is None
+                and self.config.teacher_sequence
+                and int(self.config.teacher_sequence[0]["epoch"]) != 0
+            ):
+                raise ValueError("paired-consumer teacher_sequence must define the active consumer at epoch 0")
+        if self.config.alpha_schedule == ALPHA_SCHEDULE_FIXED:
+            if self.config.fixed_alpha is None and self.config.selected_alpha_endpoint is None:
+                raise ValueError("fixed_alpha schedule requires an explicit fixed or selected alpha endpoint")
+        elif self.config.alpha_schedule == ALPHA_SCHEDULE_PIECEWISE:
+            if int(self.config.piecewise_alpha[0][0]) != 0 and self.config.fixed_alpha is None:
+                raise ValueError("piecewise_alpha must start at epoch 0 unless fixed_alpha supplies the initial value")
+            if any(
+                isinstance(value, str) and self.config.selected_alpha_endpoint is None
+                for _, value in self.config.piecewise_alpha
+            ):
+                raise ValueError("piecewise selected_endpoint requires selected_alpha_endpoint")
+        elif self.config.alpha_schedule == ALPHA_SCHEDULE_SIGMOID:
+            if self.config.sigmoid_alpha_end is None and self.config.selected_alpha_endpoint is None:
+                raise ValueError("sigmoid_alpha schedule requires an explicit end or selected alpha endpoint")
 
     def _alpha_endpoint(self) -> float:
         if self.config.selected_alpha_endpoint is not None:
@@ -780,11 +958,16 @@ class LocalResidualFieldCurriculumScheduler:
         if self.config.fixed_alpha is not None:
             return float(self.config.fixed_alpha)
         if self.config.piecewise_alpha:
-            return float(self.config.piecewise_alpha[-1][1])
-        return 1.0
+            value = self.config.piecewise_alpha[-1][1]
+            if isinstance(value, str):
+                raise ValueError("selected_endpoint is unresolved")
+            return float(value)
+        raise ValueError("curriculum alpha endpoint is unresolved; refusing to guess")
 
     def alpha_for_epoch(self, epoch: int, *, total_epochs: int | None = None) -> float:
         selected_total = self.total_epochs if total_epochs is None else int(total_epochs)
+        if selected_total is not None and selected_total <= 0:
+            raise ValueError("total_epochs must be positive when provided")
         epoch = int(epoch)
         if epoch < 0:
             raise ValueError("epoch must be non-negative")
@@ -810,7 +993,13 @@ class LocalResidualFieldCurriculumScheduler:
             )
         raise AssertionError(f"unhandled alpha schedule {schedule!r}")
 
-    def teacher_for_epoch(self, epoch: int) -> dict[str, Any]:
+    def teacher_for_epoch(
+        self,
+        epoch: int,
+        *,
+        alpha: float | None = None,
+        total_epochs: int | None = None,
+    ) -> dict[str, Any]:
         selected: dict[str, Any] = {}
         for item in self.config.teacher_sequence:
             start_epoch = int(item.get("epoch", item.get("start_epoch", 0)))
@@ -827,11 +1016,17 @@ class LocalResidualFieldCurriculumScheduler:
             selected["consumer_id"] = str(consumer_id)
         selected.setdefault("selected_consumer_id", self.config.selected_consumer_id)
         selected.setdefault("selected_alpha_endpoint", self.config.selected_alpha_endpoint)
-        selected.setdefault("alpha", self.alpha_for_epoch(epoch))
+        selected["alpha"] = float(
+            self.alpha_for_epoch(epoch, total_epochs=total_epochs) if alpha is None else alpha
+        )
         return selected
 
     def loss_weights_for_epoch(self, epoch: int, *, total_epochs: int | None = None) -> dict[str, float]:
         selected_total = self.total_epochs if total_epochs is None else int(total_epochs)
+        if selected_total is not None and selected_total <= 0:
+            raise ValueError("total_epochs must be positive when provided")
+        if int(epoch) < 0:
+            raise ValueError("epoch must be non-negative")
         output = dict(self.config.loss_weights)
         for name, spec in dict(self.config.loss_weight_schedule).items():
             output[str(name)] = _scheduled_scalar(
@@ -845,7 +1040,7 @@ class LocalResidualFieldCurriculumScheduler:
 
     def state_for_epoch(self, epoch: int, *, total_epochs: int | None = None) -> dict[str, Any]:
         alpha = self.alpha_for_epoch(epoch, total_epochs=total_epochs)
-        teacher = self.teacher_for_epoch(epoch)
+        teacher = self.teacher_for_epoch(epoch, alpha=alpha, total_epochs=total_epochs)
         return {
             "contract": LOCAL_RESIDUAL_FIELD_CURRICULUM_SCHEDULER_CONTRACT,
             "epoch": int(epoch),
@@ -858,6 +1053,8 @@ class LocalResidualFieldCurriculumScheduler:
             "selected_consumer_id": self.config.selected_consumer_id,
             "selected_alpha_endpoint": self.config.selected_alpha_endpoint,
             "selected_consumer_path": self.config.selected_consumer_path,
+            "selected_consumer_hash": self.config.selected_consumer_hash,
+            "selected_consumer_source_report": self.config.selected_consumer_source_report,
             "paired_consumer_mode": bool(self.config.paired_consumer_mode),
         }
 
@@ -870,11 +1067,20 @@ class LocalResidualFieldCurriculumScheduler:
         return [self.state_for_epoch(epoch, total_epochs=count) for epoch in range(count)]
 
     def run_report_payload(self, num_epochs: int | None = None) -> dict[str, Any]:
+        config_payload = self.config.to_dict()
+        epochs = self.epoch_report(num_epochs)
         return {
             "contract": LOCAL_RESIDUAL_FIELD_CURRICULUM_SCHEDULER_CONTRACT,
-            "config": self.config.to_dict(),
+            "config": config_payload,
+            "config_hash": _stable_json_hash(config_payload),
             "selected_consumer": dict(self.config.selected_consumer_payload or {}),
-            "epochs": self.epoch_report(num_epochs),
+            "selected_consumer_path": self.config.selected_consumer_path,
+            "selected_consumer_hash": self.config.selected_consumer_hash,
+            "selected_consumer_source_report": self.config.selected_consumer_source_report,
+            "selection_source": self.config.selected_consumer_payload.get("selection_source"),
+            "selection_reason": self.config.selected_consumer_payload.get("selection_reason"),
+            "epochs": epochs,
+            "epoch_count": len(epochs),
         }
 
     def write_report(self, path: str | Path, *, num_epochs: int | None = None) -> dict[str, Any]:
@@ -954,6 +1160,7 @@ class _ConfidenceHeads(_ModuleBase):
         initial_prob: float,
         log_var_min: float,
         log_var_max: float,
+        field_groups: Mapping[str, Sequence[int]] | None = None,
     ) -> None:
         torch = require_torch()
         super().__init__()
@@ -962,6 +1169,7 @@ class _ConfidenceHeads(_ModuleBase):
         self.mode = normalize_field_gate_mode(mode)
         self.log_var_min = float(log_var_min)
         self.log_var_max = float(log_var_max)
+        self.field_groups = _confidence_field_groups(self.field_dim, field_groups)
 
         def head() -> Any:
             return torch.nn.Sequential(
@@ -984,6 +1192,16 @@ class _ConfidenceHeads(_ModuleBase):
             bias = math.log(float(initial_prob) / max(1.0 - float(initial_prob), 1.0e-12))
             torch.nn.init.constant_(self.field_gate_head[-1].bias, bias)
 
+    def _broadcast_group_means(self, values: Any) -> Any:
+        """Tie field-wise values within each configured reliability group."""
+
+        torch = require_torch()
+        output = torch.zeros_like(values)
+        for indices in self.field_groups:
+            group_mean = values[..., list(indices)].mean(dim=-1, keepdim=True)
+            output[..., list(indices)] = group_mean.expand(*group_mean.shape[:-1], len(indices))
+        return output
+
     def forward(self, *, hidden: Any, base_fields: Any, mask: Any) -> _ConfidenceHeadOutput:
         torch = require_torch()
         valid = mask.unsqueeze(-1).to(dtype=base_fields.dtype)
@@ -994,10 +1212,12 @@ class _ConfidenceHeads(_ModuleBase):
         if self.mode == FIELD_GATE_MODE_NONE:
             gate = torch.ones_like(pred_fields)
         elif self.mode == FIELD_GATE_MODE_UNCERTAINTY_INVERSE:
-            gate = torch.exp(-torch.nn.functional.softplus(field_log_var))
+            grouped_log_var = self._broadcast_group_means(field_log_var)
+            gate = torch.exp(-torch.nn.functional.softplus(grouped_log_var))
         else:
-            gate = torch.sigmoid(self.field_gate_head(hidden).to(dtype=base_fields.dtype))
-        gate = gate * valid
+            gate_logits = self.field_gate_head(hidden).to(dtype=base_fields.dtype)
+            gate = torch.sigmoid(self._broadcast_group_means(gate_logits))
+        gate = torch.nan_to_num(gate, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0) * valid
         uncertainty = torch.exp(0.5 * field_log_var) * valid
         return _ConfidenceHeadOutput(
             pred_fields_raw=pred_fields,
@@ -1008,22 +1228,77 @@ class _ConfidenceHeads(_ModuleBase):
         )
 
 
+def _confidence_field_groups(
+    field_dim: int,
+    field_groups: Mapping[str, Sequence[int]] | None,
+) -> tuple[tuple[int, ...], ...]:
+    """Return a complete, non-overlapping grouping for gate calibration."""
+
+    field_dim = int(field_dim)
+    if field_dim <= 0:
+        raise ValueError("field_dim must be positive")
+    if not field_groups:
+        return tuple((index,) for index in range(field_dim))
+    groups: list[tuple[int, ...]] = []
+    seen: set[int] = set()
+    for group_name, raw_indices in dict(field_groups).items():
+        indices = tuple(int(index) for index in raw_indices)
+        if not indices:
+            raise ValueError(f"confidence field group {group_name!r} must not be empty")
+        for index in indices:
+            if index < 0 or index >= field_dim:
+                raise ValueError(f"confidence field group {group_name!r} contains out-of-range index {index}")
+            if index in seen:
+                raise ValueError(f"confidence field groups contain duplicate field index {index}")
+            seen.add(index)
+        groups.append(indices)
+    missing = sorted(set(range(field_dim)) - seen)
+    if missing:
+        raise ValueError(f"confidence field groups do not cover field indices {missing}")
+    return tuple(groups)
+
+
 def confidence_reliability_target(
     *,
     pred_fields: Any,
     target_fields: Any,
     mask: Any,
     error_scale: float = 1.0,
+    field_groups: Mapping[str, Sequence[int]] | None = None,
 ) -> Any:
-    """Soft reliability target: close field predictions should receive high gate values."""
+    """Build detached group-wise reliability targets in normalized field units."""
 
     torch = require_torch()
-    scale = max(float(error_scale), 1.0e-8)
-    target = target_fields.to(device=pred_fields.device, dtype=pred_fields.dtype)
-    error = (pred_fields - target).abs()
-    reliability = torch.exp(-error / scale)
+    scale = float(error_scale)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("error_scale must be finite and positive")
+    if pred_fields.ndim != 3:
+        raise ValueError(f"pred_fields must have shape [batch, particles, fields], got {tuple(pred_fields.shape)}")
+    target = target_fields.detach().to(device=pred_fields.device, dtype=pred_fields.dtype)
+    if target.shape != pred_fields.shape:
+        raise ValueError(
+            f"target_fields shape {tuple(target.shape)} does not match pred_fields {tuple(pred_fields.shape)}"
+        )
+    valid_mask = mask
+    if valid_mask.ndim == 3 and valid_mask.shape[1] == 1:
+        valid_mask = valid_mask.squeeze(1)
+    if valid_mask.shape != pred_fields.shape[:2]:
+        raise ValueError(
+            f"field mask shape {tuple(valid_mask.shape)} is incompatible with fields {tuple(pred_fields.shape)}"
+        )
+    valid_mask = valid_mask.to(device=pred_fields.device, dtype=torch.bool)
+    groups = _confidence_field_groups(int(pred_fields.shape[-1]), field_groups)
+    error = (pred_fields.detach() - target).abs()
+    reliability = torch.zeros_like(error)
+    for indices in groups:
+        group_error = error[..., list(indices)].mean(dim=-1, keepdim=True)
+        group_reliability = torch.exp(-group_error / scale)
+        reliability[..., list(indices)] = group_reliability.expand(
+            *group_reliability.shape[:-1], len(indices)
+        )
     reliability = torch.nan_to_num(reliability, nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
-    return reliability * mask.unsqueeze(-1).to(dtype=reliability.dtype)
+    reliability = reliability * valid_mask.unsqueeze(-1).to(dtype=reliability.dtype)
+    return reliability.detach()
 
 
 def compute_confidence_gate_loss(
@@ -1035,6 +1310,7 @@ def compute_confidence_gate_loss(
     mode: str,
     loss_weight: float,
     error_scale: float,
+    field_groups: Mapping[str, Sequence[int]] | None = None,
 ) -> tuple[Any | None, Any | None, dict[str, Any]]:
     """Compute the light reliability loss used by Step 6 confidence gates."""
 
@@ -1048,25 +1324,53 @@ def compute_confidence_gate_loss(
     }
     if target_fields is None or weight <= 0.0 or gate_mode == FIELD_GATE_MODE_NONE:
         return None, None, diagnostics
-    valid = mask.unsqueeze(-1).expand_as(gate)
-    if not bool(valid.detach().any().cpu().item()):
+    if gate.shape != pred_fields.shape:
+        raise ValueError(f"gate shape {tuple(gate.shape)} does not match pred_fields {tuple(pred_fields.shape)}")
+    valid_mask = mask
+    if valid_mask.ndim == 3 and valid_mask.shape[1] == 1:
+        valid_mask = valid_mask.squeeze(1)
+    if valid_mask.shape != gate.shape[:2]:
+        raise ValueError(f"field mask shape {tuple(valid_mask.shape)} is incompatible with gate {tuple(gate.shape)}")
+    valid_mask = valid_mask.to(device=gate.device, dtype=torch.bool)
+    groups = _confidence_field_groups(int(gate.shape[-1]), field_groups)
+    if not bool(valid_mask.detach().any().cpu().item()):
         zero = gate.new_zeros(())
-        diagnostics.update({"gate_supervision_enabled": True, "gate_reliability_loss": 0.0, "valid_gate_values": 0})
+        diagnostics.update(
+            {
+                "gate_supervision_enabled": True,
+                "gate_reliability_loss": 0.0,
+                "gate_reliability_loss_unweighted": 0.0,
+                "gate_loss_type": "mse",
+                "gate_group_count": len(groups),
+                "valid_gate_values": 0,
+            }
+        )
         return zero, torch.zeros_like(gate), diagnostics
     reliability = confidence_reliability_target(
         pred_fields=pred_fields,
         target_fields=target_fields,
         mask=mask,
         error_scale=float(error_scale),
+        field_groups=field_groups,
     )
-    gate_clamped = gate.clamp(min=1.0e-6, max=1.0 - 1.0e-6)
-    bce = -(reliability * torch.log(gate_clamped) + (1.0 - reliability) * torch.log(1.0 - gate_clamped))
-    loss = bce[valid].mean() * weight
+    group_gate_values = []
+    group_target_values = []
+    for indices in groups:
+        group_gate_values.append(gate[..., list(indices)].mean(dim=-1))
+        group_target_values.append(reliability[..., indices[0]])
+    grouped_gate = torch.stack(group_gate_values, dim=-1)
+    grouped_target = torch.stack(group_target_values, dim=-1)
+    valid = valid_mask.unsqueeze(-1).expand_as(grouped_gate)
+    unweighted_loss = torch.nn.functional.mse_loss(grouped_gate[valid], grouped_target[valid])
+    loss = unweighted_loss * weight
     diagnostics.update(
         {
             "gate_supervision_enabled": True,
             "gate_reliability_loss": float(loss.detach().cpu().item()),
-            "gate_reliability_target_mean": float(reliability.detach()[valid].mean().cpu().item()),
+            "gate_reliability_loss_unweighted": float(unweighted_loss.detach().cpu().item()),
+            "gate_reliability_target_mean": float(grouped_target.detach()[valid].mean().cpu().item()),
+            "gate_loss_type": "mse",
+            "gate_group_count": len(groups),
             "valid_gate_values": int(valid.detach().sum().cpu().item()),
         }
     )
@@ -1122,8 +1426,8 @@ def reset_or_scale_student_residual_projection(
             "edited_value_count": 0,
         }
     reset_scale = float(scale)
-    if reset_scale < 0.0:
-        raise ValueError("scale must be non-negative")
+    if not math.isfinite(reset_scale) or reset_scale < 0.0:
+        raise ValueError("scale must be finite and non-negative")
     base_dim = int(student.config.base_feature_dim)
     augmented_dim = int(student.config.augmented_feature_dim)
     if augmented_dim <= base_dim:
@@ -1237,6 +1541,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
             initial_prob=float(self.config.initial_gate_bias_prob),
             log_var_min=float(self.config.gate_log_var_min),
             log_var_max=float(self.config.gate_log_var_max),
+            field_groups=self.config.field_groups,
         )
         if oracle_consumer is not None:
             self.oracle_consumer = oracle_consumer
@@ -1356,6 +1661,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
     def freeze_schedule_report(self) -> dict[str, Any]:
         return {
             "name": str(self.config.freeze_schedule),
+            "automatic_transitions": self.config.freeze_schedule != FREEZE_SCHEDULE_NONE,
             "phase1": {
                 "phase": FREEZE_PHASE_RESIDUAL_PATH_WARMUP,
                 "start_epoch": 0,
@@ -1461,6 +1767,25 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
         }
         return optimizer, report
 
+    def adaptation_report(self) -> dict[str, Any]:
+        gate_prob = float(self.config.initial_gate_bias_prob)
+        gate_bias = math.log(gate_prob / max(1.0 - gate_prob, 1.0e-12))
+        return {
+            "contract": LOCAL_RESIDUAL_FIELD_CURRICULUM_JOINT_CONTRACT,
+            "student_init_source": str(self.config.student_init_source),
+            "student_initialization": dict(self.student_initialization_report),
+            "residual_projection_reset_mode": str(self.config.residual_projection_reset),
+            "residual_projection_scale": float(self.config.residual_projection_scale),
+            "residual_projection_reset": dict(self.residual_projection_reset_report),
+            "initial_gate_bias_prob": gate_prob,
+            "initial_gate_bias": gate_bias,
+            "freeze_schedule": self.freeze_schedule_report(),
+            "current_phase": self.current_freeze_phase,
+            "optimizer_group_learning_rates": dict(self.config.optimizer_group_learning_rates),
+            "optimizer_groups": self.optimizer_group_report(),
+            "trainable_parameter_counts": self.trainability_report(phase=self.current_freeze_phase),
+        }
+
     def forward(
         self,
         points: Any,
@@ -1488,8 +1813,13 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
         )
         pred_raw = head_output.pred_fields_raw
         gate = head_output.field_gate
-        pred_effective = pred_raw * gate
-        pred_effective = torch.nan_to_num(pred_effective, nan=0.0, posinf=0.0, neginf=0.0)
+        field_clip_value = float(self.config.student_config.residual_field_clip_value)
+        pred_for_effective = torch.nan_to_num(pred_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        clipped_values = torch.zeros_like(pred_for_effective, dtype=torch.bool)
+        if field_clip_value > 0.0:
+            clipped_values = torch.isfinite(pred_raw) & (pred_raw.abs() > field_clip_value)
+            pred_for_effective = pred_for_effective.clamp(min=-field_clip_value, max=field_clip_value)
+        pred_effective = pred_for_effective * gate
         pred_effective = pred_effective * valid_mask.unsqueeze(-1).to(dtype=pred_effective.dtype)
         field_uncertainty = head_output.field_uncertainty
         field_gate_loss, field_reliability_target, gate_loss_diagnostics = compute_confidence_gate_loss(
@@ -1500,6 +1830,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
             mode=str(self.config.field_gate_mode),
             loss_weight=float(self.config.gate_reliability_loss_weight),
             error_scale=float(self.config.gate_reliability_error_scale),
+            field_groups=self.config.field_groups,
         )
 
         student_output = self.student(
@@ -1547,6 +1878,13 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
                 float(pred_effective.detach()[valid_mask].abs().mean().cpu().item())
                 if bool(valid_mask.detach().any().cpu().item())
                 else 0.0
+            ),
+            "pred_fields_raw_nonfinite_count": int(
+                ((~torch.isfinite(pred_raw)) & valid_mask.unsqueeze(-1)).detach().sum().cpu().item()
+            ),
+            "pred_fields_clip_value": field_clip_value,
+            "pred_fields_clipped_value_count": int(
+                (clipped_values & valid_mask.unsqueeze(-1)).detach().sum().cpu().item()
             ),
             "field_delta_abs_mean": (
                 float(head_output.field_delta.detach()[valid_mask].abs().mean().cpu().item())

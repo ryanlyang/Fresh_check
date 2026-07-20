@@ -230,6 +230,35 @@ def test_boosted_parent_mass_budget_uses_projector_precision():
     assert diagnostics["branch"] == "massive_rest_frame"
 
 
+def test_low_energy_boosted_phase_space_does_not_drop_small_rest_energies():
+    # Each massless child's rest-frame squared momentum is below 1e-12.  These
+    # are still physical nonzero energies and must not be rounded to zero by
+    # the projector before the large boost back to the lab frame.
+    parent = torch.tensor(
+        (0.023276751950584193, 0.0189, -0.0106, -0.0086),
+        dtype=torch.float64,
+    )
+    spatial_norm = torch.linalg.vector_norm(parent[1:])
+    parent[1:] *= (parent[0] * (1.0 - 3.083934e-8)) / spatial_norm
+    raw = torch.Generator().manual_seed(29)
+    raw_spatial = torch.randn(17, 3, generator=raw, dtype=torch.float64)
+    raw_spatial.requires_grad_(True)
+
+    particles, diagnostics = project_n_body_phase_space(
+        parent,
+        raw_spatial,
+        torch.zeros(17, dtype=torch.float64),
+        torch.zeros(17, dtype=torch.float64),
+    )
+
+    torch.testing.assert_close(particles.sum(dim=0), parent, atol=2.0e-9, rtol=2.0e-7)
+    assert diagnostics["branch"] == "massive_rest_frame"
+    assert diagnostics["closure_max_residual"] < 2.0e-9
+    particles[:, 0].square().sum().backward()
+    assert raw_spatial.grad is not None
+    assert torch.isfinite(raw_spatial.grad).all()
+
+
 def test_massless_phase_space_branch_closes_without_a_fake_mass_floor():
     parent = torch.tensor((9.0, 9.0, 0.0, 0.0), dtype=torch.float64)
     particles, diagnostics = project_n_body_phase_space(

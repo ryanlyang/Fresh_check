@@ -9,6 +9,25 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .curriculum import load_selected_consumer_record
+from .curriculum_report import (
+    A0_LABEL,
+    O0_LABEL,
+    ALPHA_DIAGNOSTIC_IDS,
+    RUNTIME_COLUMNS,
+    baseline_columns,
+    classify_result_row,
+    consumer_selection_rows,
+    curriculum_student_rows,
+    curriculum_training_rows,
+    load_diagnostic_rows,
+    oracle_curve_rows,
+    paired_tables,
+    pilot_base_run_id,
+    scan_curriculum_reports,
+    validate_stage1b_reports,
+)
+
 
 LOCAL_RESIDUAL_FIELD_REPORT_CONTRACT = "local_particle_residual_field_report_v1"
 LOCAL_RESIDUAL_FIELD_REPORT_STEP = "local_particle_residual_field_step9_final_report"
@@ -63,19 +82,27 @@ class LocalResidualFieldReportConfig:
     fusion_dir: str | None = None
     prediction_dir: str | None = None
     target_cache_dir: str | None = None
+    curriculum_root: str | None = None
+    oracle_diagnostics_root: str | None = None
+    curriculum_diagnostics_root: str | None = None
+    selected_consumer_json: str | None = None
     required_tagger_run_ids: tuple[str, ...] = DEFAULT_REQUIRED_TAGGER_RUN_IDS
     required_reconstructor_run_ids: tuple[str, ...] = DEFAULT_REQUIRED_RECONSTRUCTOR_RUN_IDS
     required_fusion_groups: tuple[str, ...] = DEFAULT_REQUIRED_FUSION_GROUPS
+    required_curriculum_run_ids: tuple[str, ...] = field(default_factory=tuple)
     require_fusion: bool = False
     allow_missing_runs: bool = False
     confirm_final_test: bool = False
     require_final_test_provenance: bool = False
+    require_curriculum: bool = False
+    paired_consumer_mode: bool = False
     summary_title: str = "Local Particle Residual Field Report"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "required_tagger_run_ids", _clean_ids(self.required_tagger_run_ids))
         object.__setattr__(self, "required_reconstructor_run_ids", _clean_ids(self.required_reconstructor_run_ids))
         object.__setattr__(self, "required_fusion_groups", _clean_ids(self.required_fusion_groups))
+        object.__setattr__(self, "required_curriculum_run_ids", _clean_ids(self.required_curriculum_run_ids))
 
 
 def _clean_ids(values: Sequence[str]) -> tuple[str, ...]:
@@ -858,6 +885,67 @@ def _best_row(rows: Sequence[Mapping[str, Any]], *, split: str, metric: str, hig
     return best
 
 
+def _annotate_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    reports: Mapping[str, Mapping[str, Any]] | None = None,
+    family: str,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    report_map = dict(reports or {})
+    for row in rows:
+        run_id = str(row.get("run_id") or row.get("group") or "")
+        output.append(classify_result_row(row, report=report_map.get(run_id), family=family))
+    return output
+
+
+def _diagnostic_annotation(rows: Sequence[Mapping[str, Any]], *, reports: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = _annotate_rows(rows, reports=reports, family="diagnostic")
+    for row in output:
+        row["deployable"] = False
+        row["selection_allowed"] = False
+        row["result_category"] = "derived_diagnostic"
+    return output
+
+
+def _strict_deployable_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in rows
+        if row.get("deployable") is True
+        and row.get("runtime_inputs") == "HLT_only"
+        and row.get("uses_true_fields") is False
+        and row.get("uses_offline_particles") is False
+        and row.get("uses_teacher_logits_at_runtime") is False
+    ]
+
+
+def _with_a0_gaps(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    baseline_by_split = {
+        str(row.get("split")): row
+        for row in rows
+        if str(row.get("run_id")) == "A0"
+    }
+    output: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        baseline = baseline_by_split.get(str(row.get("split")))
+        accuracy = _float(row.get("accuracy"))
+        baseline_accuracy = _float(baseline.get("accuracy")) if baseline else None
+        cross_entropy = _float(row.get("cross_entropy"))
+        baseline_ce = _float(baseline.get("cross_entropy")) if baseline else None
+        row["headline_baseline_run_id"] = "A0"
+        row["headline_baseline_label"] = A0_LABEL
+        row["accuracy_gap_vs_A0"] = (
+            None if accuracy is None or baseline_accuracy is None else accuracy - baseline_accuracy
+        )
+        row["cross_entropy_gap_vs_A0"] = (
+            None if cross_entropy is None or baseline_ce is None else cross_entropy - baseline_ce
+        )
+        output.append(row)
+    return output
+
+
 def _summary_markdown(
     *,
     config: LocalResidualFieldReportConfig,
@@ -865,6 +953,9 @@ def _summary_markdown(
     tagger_rows: Sequence[Mapping[str, Any]],
     reconstructor_rows: Sequence[Mapping[str, Any]],
     fusion_rows: Sequence[Mapping[str, Any]],
+    deployable_rows: Sequence[Mapping[str, Any]] = (),
+    oracle_diagnostic_rows: Sequence[Mapping[str, Any]] = (),
+    offline_reference_rows: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     lines = [
         f"# {config.summary_title}",
@@ -872,14 +963,17 @@ def _summary_markdown(
         f"- Contract: `{LOCAL_RESIDUAL_FIELD_REPORT_CONTRACT}`",
         f"- OK: `{bool(report.get('ok'))}`",
         f"- Problems: `{len(report.get('problems') or [])}`",
+        f"- `A0`: {A0_LABEL} (headline denominator)",
+        f"- `O0`: {O0_LABEL} (not an HLT floor)",
         "",
     ]
     if report.get("problems"):
         lines.append("## Problems")
         lines.extend(f"- {problem}" for problem in report.get("problems") or [])
         lines.append("")
-    best_stack = _best_row(tagger_rows, split="stack_val", metric="accuracy", higher_is_better=True)
-    best_final = _best_row(tagger_rows, split="final_test", metric="accuracy", higher_is_better=True)
+    primary_rows = list(deployable_rows or tagger_rows)
+    best_stack = _best_row(primary_rows, split="stack_val", metric="accuracy", higher_is_better=True)
+    best_final = _best_row(primary_rows, split="final_test", metric="accuracy", higher_is_better=True)
     best_reco = _best_row(reconstructor_rows, split="stack_val", metric="mae", higher_is_better=False)
     best_fusion = _best_row(fusion_rows, split="final_test", metric="accuracy", higher_is_better=True)
     lines.append("## Main Signals")
@@ -905,6 +999,12 @@ def _summary_markdown(
         )
     if not any((best_stack, best_final, best_reco, best_fusion)):
         lines.append("- No metric rows were available.")
+    lines.append("")
+    lines.append("## Automatic Result Separation")
+    lines.append(f"- Deployable leaderboard rows: `{len(deployable_rows)}`")
+    lines.append(f"- Oracle diagnostic rows: `{len(oracle_diagnostic_rows)}`")
+    lines.append(f"- Offline-particle reference rows: `{len(offline_reference_rows)}`")
+    lines.append("- Individual checkpoints are selectable on `model_val` only; final-test rows are never selectable.")
     lines.append("")
     lines.append("## Outputs")
     for name, path in dict(report.get("outputs") or {}).items():
@@ -941,18 +1041,100 @@ def build_local_residual_field_report(config: LocalResidualFieldReportConfig) ->
         confirm_final_test=bool(config.confirm_final_test),
         problems=problems,
     )
-    reconstructor_rows = _reconstructor_metric_rows(reconstructor_reports)
-    fusion_rows = _fusion_rows(
+    tagger_rows = _annotate_rows(tagger_rows, reports=tagger_reports, family="tagger")
+    reconstructor_rows = _annotate_rows(
+        _reconstructor_metric_rows(reconstructor_reports),
+        reports=reconstructor_reports,
+        family="training",
+    )
+    for row in reconstructor_rows:
+        row["deployable"] = False
+        row["selection_allowed"] = False
+        row["result_category"] = "reconstructor_training_diagnostic"
+    fusion_rows = _annotate_rows(_fusion_rows(
         config.fusion_dir,
         require_fusion=bool(config.require_fusion),
         required_fusion_groups=tuple(config.required_fusion_groups),
         problems=problems,
+    ), family="fusion")
+
+    curriculum_reports = scan_curriculum_reports(config.curriculum_root)
+    if bool(config.require_curriculum) and not config.curriculum_root:
+        problems.append("curriculum_root is required when require_curriculum=true")
+    for run_id in config.required_curriculum_run_ids:
+        if run_id not in curriculum_reports:
+            problems.append(f"missing required curriculum run_report for {run_id}")
+    for run_id, curriculum_report in sorted(curriculum_reports.items()):
+        if curriculum_report.get("ok") is not True:
+            problems.append(f"curriculum run {run_id} is not ok: ok={curriculum_report.get('ok')!r}")
+    selected = validate_stage1b_reports(
+        curriculum_reports,
+        selected_consumer_json=config.selected_consumer_json,
+        paired_consumer_mode=bool(config.paired_consumer_mode),
+        problems=problems,
     )
-    oracle_rows = _gap_rows(tagger_rows, baseline_run="A0", candidate_run_ids=ORACLE_RUN_IDS, output_kind="oracle")
+    if selected is None and config.selected_consumer_json and not bool(config.paired_consumer_mode):
+        try:
+            selected = load_selected_consumer_record(config.selected_consumer_json)
+        except Exception as exc:
+            problems.append(f"invalid selected_consumer.json: {exc}")
+    curriculum_rows = curriculum_student_rows(
+        curriculum_reports,
+        confirm_final_test=bool(config.confirm_final_test),
+        problems=problems,
+    )
+    curriculum_training = curriculum_training_rows(curriculum_reports)
+    oracle_teacher_rows = oracle_curve_rows(
+        config.oracle_diagnostics_root or config.curriculum_root,
+        selected=selected,
+    )
+    selection_rows = consumer_selection_rows(oracle_teacher_rows, selected=selected)
+    stage1b_present = any(
+        pilot_base_run_id(run_id) in ("P2", "P4", "P7a", "P7b", "Q0", "Q3")
+        for run_id in curriculum_reports
+    )
+    selection_sources = {str(row.get("run_id")) for row in selection_rows}
+    if (stage1b_present or bool(config.require_curriculum)) and not bool(config.paired_consumer_mode):
+        missing_diagnostics = [run_id for run_id in ALPHA_DIAGNOSTIC_IDS if run_id not in selection_sources]
+        if missing_diagnostics:
+            problems.append(
+                "consumer_selection.csv is missing Stage 1a diagnostics: " + " ".join(missing_diagnostics)
+            )
+
+    diagnostic_tables = {
+        name: load_diagnostic_rows(
+            config.curriculum_diagnostics_root or config.curriculum_root,
+            name,
+            reports=curriculum_reports,
+        )
+        for name in (
+            "alpha_mix_diagnostics",
+            "teacher_student_agreement",
+            "field_error_where_oracle_helps",
+            "gate_calibration",
+        )
+    }
+
+    oracle_gap_rows = _diagnostic_annotation(
+        _gap_rows(tagger_rows, baseline_run="A0", candidate_run_ids=ORACLE_RUN_IDS, output_kind="oracle"),
+        reports=tagger_reports,
+    )
     control_rows = []
     control_rows.extend(_gap_rows(tagger_rows, baseline_run="A0", candidate_run_ids=CONTROL_RUN_IDS, output_kind="control_vs_A0"))
     control_rows.extend(_gap_rows(tagger_rows, baseline_run="D5", candidate_run_ids=CONTROL_RUN_IDS, output_kind="control_vs_D5"))
-    field_rows = _field_importance_rows(tagger_rows)
+    control_rows = _diagnostic_annotation(control_rows, reports=tagger_reports)
+    field_rows = _diagnostic_annotation(_field_importance_rows(tagger_rows), reports=tagger_reports)
+
+    all_primary_rows = [*tagger_rows, *curriculum_rows, *fusion_rows]
+    deployable_rows = _with_a0_gaps(_strict_deployable_rows(all_primary_rows))
+    oracle_diagnostic_rows = [
+        dict(row) for row in [*tagger_rows, *curriculum_rows, *fusion_rows, *oracle_teacher_rows]
+        if row.get("result_category") == "oracle_diagnostic"
+    ]
+    offline_reference_rows = [
+        dict(row) for row in [*tagger_rows, *curriculum_rows, *fusion_rows]
+        if row.get("result_category") == "offline_reference"
+    ]
     provenance = _provenance_audit(
         tagger_reports=tagger_reports,
         reconstructor_reports=reconstructor_reports,
@@ -970,6 +1152,17 @@ def build_local_residual_field_report(config: LocalResidualFieldReportConfig) ->
         "control_gap_csv": str(output_dir / "control_gap.csv"),
         "field_importance_csv": str(output_dir / "field_importance.csv"),
         "fusion_metrics_csv": str(output_dir / "fusion_metrics.csv"),
+        "oracle_teacher_curve_csv": str(output_dir / "oracle_teacher_curve.csv"),
+        "curriculum_student_metrics_csv": str(output_dir / "curriculum_student_metrics.csv"),
+        "alpha_mix_diagnostics_csv": str(output_dir / "alpha_mix_diagnostics.csv"),
+        "teacher_student_agreement_csv": str(output_dir / "teacher_student_agreement.csv"),
+        "field_error_where_oracle_helps_csv": str(output_dir / "field_error_where_oracle_helps.csv"),
+        "gate_calibration_csv": str(output_dir / "gate_calibration.csv"),
+        "deployable_leaderboard_csv": str(output_dir / "deployable_leaderboard.csv"),
+        "oracle_diagnostics_csv": str(output_dir / "oracle_diagnostics.csv"),
+        "offline_reference_csv": str(output_dir / "offline_reference.csv"),
+        "curriculum_training_diagnostics_csv": str(output_dir / "curriculum_training_diagnostics.csv"),
+        "consumer_selection_csv": str(output_dir / "consumer_selection.csv"),
         "provenance_audit_json": str(output_dir / "provenance_audit.json"),
         "summary_md": str(output_dir / "summary.md"),
         "run_report_json": str(output_dir / "run_report.json"),
@@ -982,16 +1175,65 @@ def build_local_residual_field_report(config: LocalResidualFieldReportConfig) ->
         "n_tagger_reports": len(tagger_reports),
         "n_reconstructor_reports": len(reconstructor_reports),
         "n_fusion_rows": len(fusion_rows),
+        "n_curriculum_reports": len(curriculum_reports),
+        "n_deployable_rows": len(deployable_rows),
+        "n_oracle_diagnostic_rows": len(oracle_diagnostic_rows),
+        "n_offline_reference_rows": len(offline_reference_rows),
+        "selected_consumer_id": None if selected is None else selected.selected_consumer_id,
+        "selected_alpha_endpoint": None if selected is None else selected.selected_alpha_endpoint,
         "problems": problems,
         "outputs": outputs,
     }
 
-    _write_csv(output_dir / "tagger_metrics.csv", tagger_rows)
-    _write_csv(output_dir / "reconstructor_metrics.csv", reconstructor_rows)
-    _write_csv(output_dir / "oracle_gap.csv", oracle_rows)
-    _write_csv(output_dir / "control_gap.csv", control_rows)
-    _write_csv(output_dir / "field_importance.csv", field_rows)
-    _write_csv(output_dir / "fusion_metrics.csv", fusion_rows)
+    common_fields = ["run_id", "baseline_run_id", "baseline_label", "run_label", "O0_label", *RUNTIME_COLUMNS]
+    _write_csv(output_dir / "tagger_metrics.csv", tagger_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "reconstructor_metrics.csv", reconstructor_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "oracle_gap.csv", oracle_gap_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "control_gap.csv", control_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "field_importance.csv", field_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "fusion_metrics.csv", fusion_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "oracle_teacher_curve.csv", oracle_teacher_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "curriculum_student_metrics.csv", curriculum_rows, fieldnames=common_fields)
+    _write_csv(
+        output_dir / "alpha_mix_diagnostics.csv",
+        diagnostic_tables["alpha_mix_diagnostics"],
+        fieldnames=common_fields,
+    )
+    _write_csv(
+        output_dir / "teacher_student_agreement.csv",
+        diagnostic_tables["teacher_student_agreement"],
+        fieldnames=common_fields,
+    )
+    _write_csv(
+        output_dir / "field_error_where_oracle_helps.csv",
+        diagnostic_tables["field_error_where_oracle_helps"],
+        fieldnames=common_fields,
+    )
+    _write_csv(output_dir / "gate_calibration.csv", diagnostic_tables["gate_calibration"], fieldnames=common_fields)
+    _write_csv(output_dir / "deployable_leaderboard.csv", deployable_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "oracle_diagnostics.csv", oracle_diagnostic_rows, fieldnames=common_fields)
+    _write_csv(output_dir / "offline_reference.csv", offline_reference_rows, fieldnames=common_fields)
+    _write_csv(
+        output_dir / "curriculum_training_diagnostics.csv",
+        curriculum_training,
+        fieldnames=common_fields,
+    )
+    _write_csv(output_dir / "consumer_selection.csv", selection_rows, fieldnames=common_fields)
+
+    if bool(config.paired_consumer_mode):
+        paired_student = paired_tables(curriculum_rows)
+        paired_deployable = paired_tables(deployable_rows)
+        comparison_path = output_dir / "paired_consumer_comparison.csv"
+        _write_csv(comparison_path, curriculum_rows, fieldnames=common_fields)
+        outputs["paired_consumer_comparison_csv"] = str(comparison_path)
+        for consumer_id in ("Ofull", "Orobust_light"):
+            safe_name = consumer_id
+            student_path = output_dir / f"curriculum_student_metrics_{safe_name}.csv"
+            leaderboard_path = output_dir / f"deployable_leaderboard_{safe_name}.csv"
+            _write_csv(student_path, paired_student[consumer_id], fieldnames=common_fields)
+            _write_csv(leaderboard_path, paired_deployable[consumer_id], fieldnames=common_fields)
+            outputs[f"curriculum_student_metrics_{safe_name}_csv"] = str(student_path)
+            outputs[f"deployable_leaderboard_{safe_name}_csv"] = str(leaderboard_path)
     _write_json(output_dir / "provenance_audit.json", provenance)
     (output_dir / "summary.md").write_text(
         _summary_markdown(
@@ -1000,6 +1242,9 @@ def build_local_residual_field_report(config: LocalResidualFieldReportConfig) ->
             tagger_rows=tagger_rows,
             reconstructor_rows=reconstructor_rows,
             fusion_rows=fusion_rows,
+            deployable_rows=deployable_rows,
+            oracle_diagnostic_rows=oracle_diagnostic_rows,
+            offline_reference_rows=offline_reference_rows,
         ),
         encoding="utf-8",
     )

@@ -30,6 +30,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fusion-dir", default="")
     parser.add_argument("--prediction-dir", default="")
     parser.add_argument("--target-cache-dir", default="")
+    parser.add_argument("--curriculum-root", default="")
+    parser.add_argument("--oracle-diagnostics-root", default="")
+    parser.add_argument("--curriculum-diagnostics-root", default="")
+    parser.add_argument("--selected-consumer-json", default="")
     parser.add_argument(
         "--required-tagger-run-ids",
         nargs="+",
@@ -49,6 +53,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Fusion groups that must appear in fusion_metrics.csv when --require-fusion is set.",
     )
     parser.add_argument("--require-fusion", action="store_true")
+    parser.add_argument(
+        "--required-curriculum-run-ids",
+        nargs="*",
+        default=[],
+        help="Curriculum run IDs that must exist (for example P0 P2 P4 P7a P7b Q0 Q3).",
+    )
+    parser.add_argument("--require-curriculum", action="store_true")
+    parser.add_argument(
+        "--paired-consumer-mode",
+        action="store_true",
+        help="Explicitly report Ofull and Orobust_light Stage 1b campaigns in separate tables.",
+    )
     parser.add_argument("--allow-missing-runs", action="store_true")
     parser.add_argument("--confirm-final-test", action="store_true")
     parser.add_argument("--require-final-test-provenance", action="store_true")
@@ -66,10 +82,17 @@ def main(argv: list[str] | None = None) -> int:
             fusion_dir=args.fusion_dir or None,
             prediction_dir=args.prediction_dir or None,
             target_cache_dir=args.target_cache_dir or None,
+            curriculum_root=args.curriculum_root or None,
+            oracle_diagnostics_root=args.oracle_diagnostics_root or None,
+            curriculum_diagnostics_root=args.curriculum_diagnostics_root or None,
+            selected_consumer_json=args.selected_consumer_json or None,
             required_tagger_run_ids=tuple(args.required_tagger_run_ids),
             required_reconstructor_run_ids=tuple(args.required_reconstructor_run_ids),
             required_fusion_groups=tuple(args.required_fusion_groups),
+            required_curriculum_run_ids=tuple(args.required_curriculum_run_ids),
             require_fusion=bool(args.require_fusion),
+            require_curriculum=bool(args.require_curriculum),
+            paired_consumer_mode=bool(args.paired_consumer_mode),
             allow_missing_runs=bool(args.allow_missing_runs),
             confirm_final_test=bool(args.confirm_final_test),
             require_final_test_provenance=bool(args.require_final_test_provenance),

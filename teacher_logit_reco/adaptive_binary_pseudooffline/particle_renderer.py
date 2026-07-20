@@ -545,8 +545,17 @@ def _boost_rest_to_lab(rest_four_vector: Any, parent_four_vector: Any, parent_ma
 def _stable_nonnegative_sqrt(values: Any, *, epsilon: float = 1.0e-12) -> Any:
     torch = require_torch()
     values = torch.as_tensor(values)
-    rooted = torch.sqrt(values.clamp_min(float(epsilon)))
-    return torch.where(values > float(epsilon), rooted, torch.zeros_like(rooted))
+    # Do not quantize small positive values to zero.  The phase-space solver
+    # operates in float64 and legitimately encounters squared momenta below
+    # 1e-12 for low-energy, highly boosted groups.  Dropping those energies
+    # prevents the rest-frame children from closing to their parent and the
+    # boost magnifies the discrepancy.  Replacing only the non-positive input
+    # before sqrt keeps that branch finite without changing positive values.
+    del epsilon  # Retained in the signature for compatibility with callers.
+    positive = values > 0.0
+    safe_values = torch.where(positive, values, torch.ones_like(values))
+    rooted = torch.sqrt(safe_values)
+    return torch.where(positive, rooted, torch.zeros_like(rooted))
 
 
 def _invariant_mass_float64(four_vector: Any) -> Any:

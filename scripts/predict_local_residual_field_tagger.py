@@ -25,7 +25,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prediction-dir", required=True)
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--hlt-cache-dir", required=True)
-    parser.add_argument("--target-cache-dir", required=True)
+    parser.add_argument(
+        "--target-cache-dir",
+        default="",
+        help="Required only for oracle or other target-dependent legacy taggers; curriculum checkpoints are HLT-only.",
+    )
     parser.add_argument("--manifest-path", default="")
     parser.add_argument("--splits", nargs="+", default=["stack_train", "stack_val", "final_test"])
     parser.add_argument("--batch-size", type=int, default=128)
@@ -49,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             prediction_dir=args.prediction_dir,
             model_name=args.model_name,
             hlt_cache_dir=args.hlt_cache_dir,
-            target_cache_dir=args.target_cache_dir,
+            target_cache_dir=args.target_cache_dir or None,
             manifest_path=args.manifest_path or None,
             splits=tuple(args.splits),
             batch_size=int(args.batch_size),

@@ -36,6 +36,11 @@ from .data import (
     make_local_particle_residual_field_loader,
     move_local_particle_residual_field_batch_to_device,
 )
+from .curriculum import (
+    LOCAL_RESIDUAL_FIELD_CURRICULUM_DEPLOYABLE_CONTRACT,
+    LOCAL_RESIDUAL_FIELD_CURRICULUM_JOINT_CONTRACT,
+    LocalResidualFieldCurriculumJointModel,
+)
 from .tagger import (
     LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
     ORACLE_RESIDUAL_FIELD_SOURCES,
@@ -80,7 +85,7 @@ class LocalResidualFieldPredictionConfig:
     prediction_dir: str
     model_name: str
     hlt_cache_dir: str
-    target_cache_dir: str
+    target_cache_dir: str | None = None
     manifest_path: str | None = None
     splits: tuple[str, ...] = LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS
     batch_size: int = 128
@@ -101,7 +106,7 @@ class LocalResidualFieldPredictionConfig:
         if not self.model_name:
             raise ValueError("model_name must be non-empty")
         self.hlt_cache_dir = str(self.hlt_cache_dir)
-        self.target_cache_dir = str(self.target_cache_dir)
+        self.target_cache_dir = None if not self.target_cache_dir else str(self.target_cache_dir)
         self.manifest_path = None if not self.manifest_path else str(self.manifest_path)
         self.splits = tuple(str(split) for split in self.splits)
         if not self.splits:
@@ -150,6 +155,8 @@ class LocalResidualFieldFusionConfig:
                 raise ValueError("fusion group names must be non-empty")
             if not clean_members:
                 raise ValueError(f"fusion group {clean_name!r} has no members")
+            if len(clean_members) != len(set(clean_members)):
+                raise ValueError(f"fusion group {clean_name!r} contains duplicate members")
             normalized_groups[clean_name] = clean_members
         if not normalized_groups:
             raise ValueError("at least one fusion group is required")
@@ -339,8 +346,13 @@ def load_local_residual_field_tagger_from_checkpoint(
     checkpoint: str | Path,
     *,
     device: Any = "cpu",
-) -> tuple[LocalResidualFieldAugmentedParT, Mapping[str, Any]]:
+) -> tuple[Any, Mapping[str, Any]]:
     payload = _torch_load_checkpoint(checkpoint, map_location=device)
+    if not isinstance(payload, Mapping):
+        raise ValueError("local residual-field checkpoint must contain a mapping")
+    if payload.get("contract") == LOCAL_RESIDUAL_FIELD_CURRICULUM_DEPLOYABLE_CONTRACT:
+        model = LocalResidualFieldCurriculumJointModel.from_deployable_checkpoint(payload, device=device)
+        return model, payload
     model_config = dict(payload.get("model_config") or {})
     model_config.pop("contract", None)
     model_config.pop("augmented_feature_dim", None)
@@ -379,19 +391,23 @@ def _load_hlt_only_prediction_dataset(
 
 def _prediction_dataset(config: LocalResidualFieldPredictionConfig, split: str, *, model: LocalResidualFieldAugmentedParT):
     split_name = str(split)
+    if isinstance(model, LocalResidualFieldCurriculumJointModel):
+        return _load_hlt_only_prediction_dataset(config, split)
     deployable_no_target = (
         model.config.field_source not in ORACLE_RESIDUAL_FIELD_SOURCES
         and not _requires_target_fields_for_prediction(model)
     )
+    if deployable_no_target:
+        return _load_hlt_only_prediction_dataset(config, split)
     if split_name == "final_test" and model.config.field_source not in ORACLE_RESIDUAL_FIELD_SOURCES:
-        if not deployable_no_target:
-            raise ValueError(
-                f"refusing deployment final_test prediction for target-dependent field source "
-                f"{model.config.field_source!r}"
-            )
-        return _load_hlt_only_prediction_dataset(config, split)
-    if split_name == "stack_train" and deployable_no_target:
-        return _load_hlt_only_prediction_dataset(config, split)
+        raise ValueError(
+            f"refusing deployment final_test prediction for target-dependent field source "
+            f"{model.config.field_source!r}"
+        )
+    if not config.target_cache_dir:
+        raise ValueError(
+            f"target_cache_dir is required for target-dependent prediction source {model.config.field_source!r}"
+        )
     return load_local_particle_residual_field_dataset(
         LocalParticleResidualFieldDatasetConfig(
             hlt_cache_dir=config.hlt_cache_dir,
@@ -408,7 +424,7 @@ def _prediction_dataset(config: LocalResidualFieldPredictionConfig, split: str, 
 
 
 def _collect_prediction_logits(
-    model: LocalResidualFieldAugmentedParT,
+    model: Any,
     loader: Any,
     *,
     device: Any,
@@ -422,19 +438,35 @@ def _collect_prediction_logits(
         for batch in loader:
             batch = move_local_particle_residual_field_batch_to_device(batch, device)
             with amp_autocast_context(bool(amp_enabled)):
-                output = model(
-                    batch["points"],
-                    batch["features"],
-                    batch["lorentz_vectors"],
-                    batch["mask"],
-                    tokens=batch["tokens"],
-                    raw_mask=batch["raw_mask"],
-                    indices=batch["indices"],
-                    target_fields=batch.get("target_fields"),
-                    oracle_fields=batch.get("oracle_fields"),
-                    return_outputs=True,
-                )
-            logits = output.logits.detach().float().cpu().numpy()
+                if isinstance(model, LocalResidualFieldCurriculumJointModel):
+                    if model.oracle_consumer is not None:
+                        raise ValueError("deployable curriculum prediction model unexpectedly contains an oracle consumer")
+                    output = model(
+                        batch["points"],
+                        batch["features"],
+                        batch["lorentz_vectors"],
+                        batch["mask"],
+                        tokens=batch["tokens"],
+                        raw_mask=batch["raw_mask"],
+                        indices=batch["indices"],
+                        target_fields=None,
+                        return_outputs=True,
+                    )
+                else:
+                    output = model(
+                        batch["points"],
+                        batch["features"],
+                        batch["lorentz_vectors"],
+                        batch["mask"],
+                        tokens=batch["tokens"],
+                        raw_mask=batch["raw_mask"],
+                        indices=batch["indices"],
+                        target_fields=batch.get("target_fields"),
+                        oracle_fields=batch.get("oracle_fields"),
+                        return_outputs=True,
+                    )
+            output_logits = output.student_logits if hasattr(output, "student_logits") else output.logits
+            logits = output_logits.detach().float().cpu().numpy()
             if not np.isfinite(logits).all():
                 raise FloatingPointError("local residual-field prediction logits contain non-finite values")
             logits_chunks.append(logits)
@@ -449,6 +481,7 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
     device = resolve_device(str(config.device))
     amp_enabled = bool(config.amp and getattr(device, "type", str(device)) == "cuda")
     model, payload = load_local_residual_field_tagger_from_checkpoint(config.checkpoint, device=device)
+    curriculum_deployable = isinstance(model, LocalResidualFieldCurriculumJointModel)
     checkpoint_path = Path(config.checkpoint)
     checkpoint_hash = _sha256_file(checkpoint_path)
     teacher_config_path = checkpoint_path.with_name("teacher_config.json")
@@ -459,7 +492,8 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
             raise ValueError(f"teacher_config.json is not an object: {teacher_config_path}")
         teacher_config = dict(loaded_teacher_config)
     if (
-        model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES
+        not curriculum_deployable
+        and model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES
         and "final_test" in config.splits
         and not bool(config.allow_oracle_final_test)
     ):
@@ -488,8 +522,37 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
         logits, labels = _collect_prediction_logits(model, loader, device=device, amp_enabled=bool(amp_enabled))
         if not np.array_equal(labels, dataset.labels):
             raise ValueError(f"prediction labels do not match dataset labels for split {split}")
-        oracle_teacher_diagnostic = bool(teacher_config.get("role") == "oracle_teacher_candidate")
-        uses_true_fields = bool(model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES)
+        checkpoint_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+        oracle_teacher_diagnostic = bool(
+            not curriculum_deployable and teacher_config.get("role") == "oracle_teacher_candidate"
+        )
+        uses_true_fields = bool(
+            not curriculum_deployable and model.config.field_source in ORACLE_RESIDUAL_FIELD_SOURCES
+        )
+        field_source = "curriculum_predicted" if curriculum_deployable else str(model.config.field_source)
+        model_contract = (
+            LOCAL_RESIDUAL_FIELD_CURRICULUM_JOINT_CONTRACT
+            if curriculum_deployable
+            else LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT
+        )
+        student_checkpoint_hash = checkpoint_hash
+        predictor_checkpoint_hash = checkpoint_hash if curriculum_deployable else None
+        predictor_checkpoint = None
+        if not curriculum_deployable:
+            train_config = payload.get("config") if isinstance(payload.get("config"), Mapping) else {}
+            predictor_checkpoint = train_config.get("reconstructor_checkpoint")
+            if predictor_checkpoint and Path(str(predictor_checkpoint)).is_file():
+                predictor_checkpoint_hash = _sha256_file(str(predictor_checkpoint))
+            elif model.config.field_source in {
+                RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR,
+                RESIDUAL_FIELD_SOURCE_JOINT_RECONSTRUCTOR,
+            }:
+                predictor_checkpoint_hash = checkpoint_hash
+        teacher_used_during_training = (
+            checkpoint_metadata.get("teacher_used_during_training")
+            if curriculum_deployable
+            else teacher_config.get("teacher_id")
+        )
         runtime_inputs = (
             "HLT_plus_true_residual_fields"
             if uses_true_fields
@@ -499,14 +562,22 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
         )
         metadata = {
             "contract": LOCAL_RESIDUAL_FIELD_PREDICTION_CONTRACT,
-            "model_contract": LOCAL_RESIDUAL_FIELD_TAGGER_CONTRACT,
+            "model_contract": model_contract,
             "checkpoint": str(config.checkpoint),
             "checkpoint_hash": checkpoint_hash,
+            "student_checkpoint_hash": student_checkpoint_hash,
+            "predictor_checkpoint": predictor_checkpoint,
+            "predictor_checkpoint_hash": predictor_checkpoint_hash,
+            "component_checkpoint_storage": (
+                "joint_deployable_checkpoint" if curriculum_deployable else "tagger_checkpoint"
+            ),
             "checkpoint_epoch": payload.get("epoch"),
-            "field_source": str(model.config.field_source),
-            "model_config": model.config.to_dict(),
+            "field_source": field_source,
+            "model_config": payload.get("model_config") if curriculum_deployable else model.config.to_dict(),
             "dataset_metadata": _jsonable(dataset.metadata),
-            "teacher_id": teacher_config.get("teacher_id"),
+            "run_id": checkpoint_metadata.get("run_id") if curriculum_deployable else None,
+            "teacher_used_during_training": teacher_used_during_training,
+            "teacher_id": teacher_config.get("teacher_id") if not curriculum_deployable else None,
             "teacher_role": teacher_config.get("role"),
             "oracle_teacher_diagnostic": oracle_teacher_diagnostic,
             "teacher_config": str(teacher_config_path) if teacher_config else None,
@@ -518,7 +589,11 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
             ),
             "runtime_inputs": runtime_inputs,
             "uses_true_fields": uses_true_fields,
+            "uses_offline_particles": False,
+            "uses_teacher_logits_at_runtime": False,
             "deployable": bool(not oracle_teacher_diagnostic and not uses_true_fields),
+            "split": str(split),
+            "selection_allowed": str(split) != "final_test",
         }
         block = PredictionBlock(
             model_name=str(config.model_name),
@@ -536,6 +611,16 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
         "prediction_dir": str(output_dir),
         "model_name": str(config.model_name),
         "checkpoint": str(config.checkpoint),
+        "checkpoint_hash": checkpoint_hash,
+        "student_checkpoint_hash": checkpoint_hash,
+        "predictor_checkpoint_hash": checkpoint_hash if curriculum_deployable else None,
+        "teacher_used_during_training": (
+            payload.get("metadata", {}).get("teacher_used_during_training")
+            if curriculum_deployable and isinstance(payload.get("metadata"), Mapping)
+            else teacher_config.get("teacher_id")
+        ),
+        "runtime_inputs": "HLT_only" if curriculum_deployable else None,
+        "curriculum_deployable_checkpoint": bool(curriculum_deployable),
         "splits": list(config.splits),
         "split_reports": _jsonable(split_reports),
     }
@@ -555,6 +640,60 @@ def _load_group_blocks(prediction_dir: str | Path, members: Sequence[str], split
         raise FileNotFoundError(f"Missing prediction blocks for split {split}: {', '.join(missing)}")
     validate_prediction_alignment(blocks)
     return blocks
+
+
+def _preflight_fusion_blocks(config: LocalResidualFieldFusionConfig) -> dict[tuple[str, str], list[PredictionBlock]]:
+    """Resolve every selected group member/split before any fusion output is written."""
+
+    cache: dict[tuple[str, str], list[PredictionBlock]] = {}
+    missing: list[str] = []
+    invalid: list[str] = []
+    required_splits = tuple(dict.fromkeys((str(config.fit_split), *config.splits)))
+    for group_name, members in config.groups.items():
+        for split in required_splits:
+            try:
+                cache[(str(group_name), str(split))] = _load_group_blocks(
+                    config.prediction_dir,
+                    members,
+                    split,
+                    verify_hash=bool(config.verify_hash),
+                )
+            except FileNotFoundError as exc:
+                missing.append(f"{group_name}/{split}: {exc}")
+            except ValueError as exc:
+                invalid.append(f"{group_name}/{split}: {exc}")
+    if missing:
+        raise FileNotFoundError("Missing prediction blocks for selected fusion members: " + "; ".join(missing))
+    if invalid:
+        raise ValueError("Invalid selected-member prediction alignment: " + "; ".join(invalid))
+    return cache
+
+
+def _fused_runtime_metadata(blocks: Sequence[PredictionBlock]) -> dict[str, Any]:
+    metadata = [dict(block.metadata or {}) for block in blocks]
+    runtime_values = {str(item.get("runtime_inputs") or "unknown") for item in metadata}
+    return {
+        "runtime_inputs": next(iter(runtime_values)) if len(runtime_values) == 1 else "mixed",
+        "uses_true_fields": any(bool(item.get("uses_true_fields")) for item in metadata),
+        "uses_offline_particles": any(bool(item.get("uses_offline_particles")) for item in metadata),
+        "uses_teacher_logits_at_runtime": any(
+            bool(item.get("uses_teacher_logits_at_runtime")) for item in metadata
+        ),
+        "deployable": all(item.get("deployable") is True for item in metadata),
+        "selection_allowed": all(item.get("selection_allowed") is not False for item in metadata),
+        "student_checkpoint_hashes": {
+            str(block.model_name): item.get("student_checkpoint_hash")
+            for block, item in zip(blocks, metadata)
+        },
+        "predictor_checkpoint_hashes": {
+            str(block.model_name): item.get("predictor_checkpoint_hash")
+            for block, item in zip(blocks, metadata)
+        },
+        "teachers_used_during_training": {
+            str(block.model_name): item.get("teacher_used_during_training")
+            for block, item in zip(blocks, metadata)
+        },
+    }
 
 
 def _uniform_logits(blocks: Sequence[PredictionBlock]) -> np.ndarray:
@@ -597,7 +736,11 @@ def _fit_scalar_weights(blocks: Sequence[PredictionBlock], *, trials: int, seed:
 
 def _write_fusion_metric_table(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["group", "mode", "split", "accuracy", "cross_entropy", "macro_per_class_accuracy", "n_jets", "members", "weights"]
+    fieldnames = [
+        "group", "mode", "split", "accuracy", "cross_entropy", "macro_per_class_accuracy", "n_jets",
+        "members", "weights", "runtime_inputs", "uses_true_fields", "uses_offline_particles",
+        "uses_teacher_logits_at_runtime", "deployable", "selection_allowed",
+    ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -605,6 +748,7 @@ def _write_fusion_metric_table(path: Path, rows: Sequence[Mapping[str, Any]]) ->
 
 
 def run_local_residual_field_fusion(config: LocalResidualFieldFusionConfig) -> dict[str, Any]:
+    preflight_blocks = _preflight_fusion_blocks(config)
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
@@ -614,12 +758,15 @@ def run_local_residual_field_fusion(config: LocalResidualFieldFusionConfig) -> d
         "output_dir": str(output_dir),
         "splits": list(config.splits),
         "fit_split": str(config.fit_split),
+        "selected_member_predictions_complete": True,
+        "preflight_split_count": len(set((str(config.fit_split), *config.splits))),
         "groups": {},
     }
     metric_rows: list[dict[str, Any]] = []
     for group_name, members in config.groups.items():
         group_report: dict[str, Any] = {"members": list(members), "fusion_modes": {}}
-        fit_blocks = _load_group_blocks(config.prediction_dir, members, config.fit_split, verify_hash=bool(config.verify_hash))
+        fit_blocks = preflight_blocks[(str(group_name), str(config.fit_split))]
+        group_report["member_provenance"] = _fused_runtime_metadata(fit_blocks)
         scalar_fit: dict[str, Any] | None = None
         if LOCAL_RESIDUAL_FIELD_FUSION_MODE_SCALAR_WEIGHTED_LOGIT_MEAN in config.fusion_modes:
             scalar_fit = _fit_scalar_weights(
@@ -635,10 +782,11 @@ def run_local_residual_field_fusion(config: LocalResidualFieldFusionConfig) -> d
                 weights = np.asarray(scalar_fit["weights"], dtype=np.float32)
                 mode_report["fit"] = scalar_fit
             for split in config.splits:
-                blocks = _load_group_blocks(config.prediction_dir, members, split, verify_hash=bool(config.verify_hash))
+                blocks = preflight_blocks[(str(group_name), str(split))]
                 logits = _uniform_logits(blocks) if weights is None else _weighted_logits(blocks, weights)
                 metrics = _metrics_from_logits(logits, blocks[0].labels, label_names=LABEL_NAMES)
-                mode_report["metrics"][split] = _jsonable(metrics)
+                runtime_metadata = _fused_runtime_metadata(blocks)
+                mode_report["metrics"][split] = _jsonable({**metrics, **runtime_metadata, "split": str(split)})
                 metric_rows.append(
                     {
                         "group": group_name,
@@ -650,6 +798,13 @@ def run_local_residual_field_fusion(config: LocalResidualFieldFusionConfig) -> d
                         "n_jets": metrics.get("n_jets"),
                         "members": " ".join(members),
                         "weights": "" if weights is None else " ".join(f"{float(value):.8g}" for value in weights),
+                        **{
+                            key: runtime_metadata[key]
+                            for key in (
+                                "runtime_inputs", "uses_true_fields", "uses_offline_particles",
+                                "uses_teacher_logits_at_runtime", "deployable", "selection_allowed",
+                            )
+                        },
                     }
                 )
             group_report["fusion_modes"][mode] = mode_report

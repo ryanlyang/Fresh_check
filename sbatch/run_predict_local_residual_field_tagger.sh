@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cache prediction logits for one local residual-field tagger run.
+# Cache prediction logits for one legacy tagger or deployable curriculum run.
 
 #SBATCH --job-name=lprf_pred
 #SBATCH --output=fresh_check_logs/%x_%j.out
@@ -25,6 +25,8 @@ RUN_ID="${1:?Usage: sbatch run_predict_local_residual_field_tagger.sh <tagger ru
 : "${LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/inputs/hlt_cache}"
 : "${LOCAL_RESIDUAL_FIELD_TARGET_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/targets}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/taggers}"
+: "${LOCAL_RESIDUAL_FIELD_PREDICT_MODEL_ROOT:=${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}}"
+: "${LOCAL_RESIDUAL_FIELD_PREDICT_CHECKPOINT:=}"
 : "${LOCAL_RESIDUAL_FIELD_PREDICTION_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/predictions}"
 : "${LOCAL_RESIDUAL_FIELD_PREDICT_SPLITS:=stack_train stack_val final_test}"
 : "${LOCAL_RESIDUAL_FIELD_PREDICT_BATCH_SIZE:=128}"
@@ -33,7 +35,7 @@ RUN_ID="${1:?Usage: sbatch run_predict_local_residual_field_tagger.sh <tagger ru
 : "${LOCAL_RESIDUAL_FIELD_PREDICT_DISABLE_AMP:=0}"
 : "${LOCAL_RESIDUAL_FIELD_ALLOW_ORACLE_FINAL_TEST:=0}"
 
-CHECKPOINT="${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/${RUN_ID}/best_model_val.pt"
+CHECKPOINT="${LOCAL_RESIDUAL_FIELD_PREDICT_CHECKPOINT:-${LOCAL_RESIDUAL_FIELD_PREDICT_MODEL_ROOT}/${RUN_ID}/best_model_val.pt}"
 
 fresh_setup "$@"
 fresh_require_file "${CHECKPOINT}"

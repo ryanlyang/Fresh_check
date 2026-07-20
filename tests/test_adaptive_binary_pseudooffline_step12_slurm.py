@@ -874,6 +874,11 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "trap cleanup_benchmark_checkpoints EXIT" in worker
     assert '"${output_root}" != "${acceptance_root}"/*' in worker
     assert "-name '*.pt'" in worker
+    common_index = worker.index('source "${PROJECT_DIR}/sbatch/common.sh"')
+    worker_prefix = worker[:common_index]
+    assert 'CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"' in worker_prefix
+    assert 'CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"' in worker_prefix
+    assert "jetclass_part1" in worker_prefix
     assert "write_adaptive_binary_runtime_acceptance.py" in compiler
     assert "--single-path-acceptance" in compiler
 

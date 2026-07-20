@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Tigris wrapper for the dependency-safe curriculum pilot.
+
+set -euo pipefail
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${PD10_DATA_DIR:=/home/ryreu/atlas/PracticeTagging/data}"
+: "${OUTPUT_ROOT:=${PROJECT_DIR}/checkpoints}"
+: "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
+: "${CONDA_ENV:=atlas_kd_tigris}"
+: "${PYTHONNOUSERSITE:=1}"
+: "${DEVICE:=cuda}"
+: "${LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=reu-aisocial}"
+: "${LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION:=tigris}"
+: "${LOCAL_RESIDUAL_FIELD_GPU_GRES:=gpu:gh200:1}"
+: "${LOCAL_RESIDUAL_FIELD_GPU_CPUS_PER_TASK:=16}"
+: "${LOCAL_RESIDUAL_FIELD_GPU_MEM:=500G}"
+: "${LOCAL_RESIDUAL_FIELD_CPU_CPUS_PER_TASK:=4}"
+: "${LOCAL_RESIDUAL_FIELD_CPU_MEM:=32G}"
+export PROJECT_DIR PD10_DATA_DIR OUTPUT_ROOT CONDA_BASE CONDA_ENV PYTHONNOUSERSITE DEVICE
+export LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT LOCAL_RESIDUAL_FIELD_SBATCH_PARTITION
+export LOCAL_RESIDUAL_FIELD_GPU_GRES LOCAL_RESIDUAL_FIELD_GPU_CPUS_PER_TASK LOCAL_RESIDUAL_FIELD_GPU_MEM
+export LOCAL_RESIDUAL_FIELD_CPU_CPUS_PER_TASK LOCAL_RESIDUAL_FIELD_CPU_MEM
+bash "${PROJECT_DIR}/sbatch/submit_lprf_curriculum_pilot.sh"

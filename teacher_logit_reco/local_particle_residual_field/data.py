@@ -529,9 +529,13 @@ def collate_local_particle_residual_field_batch(
         batch["oracle_fields"] = torch.from_numpy(oracle_fields).float()
         batch["oracle_features"] = torch.from_numpy(np.transpose(oracle_fields, (0, 2, 1))).float()
         batch["oracle_mask"] = torch.from_numpy(oracle_mask).bool()
-    if all("teacher_logits" in sample for sample in samples):
-        teacher_logits = np.stack([np.asarray(sample["teacher_logits"], dtype=np.float32) for sample in samples], axis=0)
-        batch["teacher_logits"] = torch.from_numpy(teacher_logits).float()
+    for logit_key in ("teacher_logits", "oracle_teacher_logits", "offline_teacher_logits"):
+        if all(logit_key in sample for sample in samples):
+            teacher_logits = np.stack(
+                [np.asarray(sample[logit_key], dtype=np.float32) for sample in samples],
+                axis=0,
+            )
+            batch[logit_key] = torch.from_numpy(teacher_logits).float()
     return batch
 
 

@@ -26,6 +26,15 @@ source "${SCRIPT_DIR}/common.sh"
 : "${LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT:=stack_train}"
 : "${LOCAL_RESIDUAL_FIELD_FUSION_SCALAR_WEIGHT_TRIALS:=128}"
 : "${LOCAL_RESIDUAL_FIELD_FUSION_CONTROL_SEED:=4079}"
+: "${LOCAL_RESIDUAL_FIELD_SELECTED_STUDENT_JSON:=}"
+
+if [[ -n "${LOCAL_RESIDUAL_FIELD_SELECTED_STUDENT_JSON}" ]]; then
+  fresh_require_file "${LOCAL_RESIDUAL_FIELD_SELECTED_STUDENT_JSON}"
+  selected_p="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["selected_run_id"])' "${LOCAL_RESIDUAL_FIELD_SELECTED_STUDENT_JSON}")"
+  case "${selected_p}" in P2|P4|P7a|P7b) ;; *) echo "G0 selector returned invalid deployable P run ${selected_p}" >&2; exit 2 ;; esac
+  LOCAL_RESIDUAL_FIELD_FUSION_GROUPS="G0:A0,${selected_p}"
+  LOCAL_RESIDUAL_FIELD_REQUIRED_FUSION_GROUPS="G0"
+fi
 
 fresh_setup "$@"
 fresh_require_dir "${LOCAL_RESIDUAL_FIELD_PREDICTION_DIR}"
