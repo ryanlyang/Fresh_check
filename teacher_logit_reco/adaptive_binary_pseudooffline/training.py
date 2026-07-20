@@ -1428,67 +1428,111 @@ def evaluate_reconstructor_rollout(
     transfer_stager = BatchTransferStager(
         device, non_blocking=bool(config.nonblocking_transfer)
     )
-    local_error: BaseException | None = None
-    try:
-        with torch.no_grad():
-            while True:
+    with torch.no_grad():
+        while True:
+            cpu_batch = None
+            source_error: BaseException | None = None
+            try:
+                with profile_span(runtime_profiler, "validation_source_wait"):
+                    cpu_batch = next(iterator)
+            except StopIteration:
+                pass
+            except BaseException as exc:
+                source_error = exc
+
+            source_succeeded = all_reduce_min_bool(
+                runtime, source_error is None, device=device
+            )
+            if not source_succeeded:
+                errors = gather_error_summaries(
+                    runtime,
+                    phase="distributed_validation_source",
+                    error=source_error,
+                    structural=True,
+                )
+                raise RuntimeError(
+                    "distributed validation failed before reduction: "
+                    + json.dumps(list(errors), sort_keys=True)
+                )
+
+            active_ranks = all_reduce_sum_int(
+                runtime, int(cpu_batch is not None), device=device
+            )
+            if active_ranks == 0:
+                break
+
+            batch_error: BaseException | None = None
+            if cpu_batch is not None:
                 try:
-                    with profile_span(runtime_profiler, "validation_source_wait"):
-                        cpu_batch = next(iterator)
-                except StopIteration:
-                    break
-                with profile_span(runtime_profiler, "pinned_memory_staging"):
-                    prepared_batch = prepare_contiguous_cpu_batch(
-                        cpu_batch,
-                        pin_memory=bool(config.pin_memory and device.type == "cuda"),
-                    )
-                with profile_span(runtime_profiler, "host_to_device"):
-                    staged_batch = transfer_stager.stage(prepared_batch)
-                    batch = staged_batch.wait()
-                with profile_span(runtime_profiler, "model_step_total"):
-                    with _autocast(device, config):
-                        result = step_function(model, batch, context)
-                with profile_span(runtime_profiler, "loss_composition"):
-                    with torch.autocast(device_type=device.type, enabled=False):
-                        composed = compose_reconstruction_loss(
-                            result, context, config.loss_weights
+                    with profile_span(runtime_profiler, "pinned_memory_staging"):
+                        prepared_batch = prepare_contiguous_cpu_batch(
+                            cpu_batch,
+                            pin_memory=bool(
+                                config.pin_memory and device.type == "cuda"
+                            ),
                         )
-                weight = int(result.batch_size)
-                current_effective_weights = dict(composed.effective_weights)
-                if effective_weights is None:
-                    effective_weights = current_effective_weights
-                elif current_effective_weights != effective_weights:
-                    raise RuntimeError(
-                        "model-val objective weights changed within one evaluation"
-                    )
-                additive_row = {
-                    "loss.total": float(composed.total.detach().float().cpu()),
-                    **{
-                        f"loss.raw.{name}": float(value.detach().float().cpu())
-                        for name, value in composed.raw_terms.items()
-                    },
-                    **{
-                        f"loss.weighted.{name}": float(value.detach().float().cpu())
-                        for name, value in composed.weighted_terms.items()
-                    },
-                }
-                for name, value in additive_row.items():
-                    accumulator.add_mean(
-                        name,
-                        value,
-                        weight,
-                        selection_eligible=name == "loss.total",
-                    )
-                for name, value in _scalar_metrics(result.metrics).items():
-                    accumulator.add_non_additive(name, value, weight)
-                accumulator.finish_batch(weight)
-        if effective_weights is None:
-            raise RuntimeError("rollout model validation produced no batches")
-    except BaseException as exc:
-        local_error = exc
-    validation_succeeded = all_reduce_min_bool(
-        runtime, local_error is None, device=device
-    )
+                    with profile_span(runtime_profiler, "host_to_device"):
+                        staged_batch = transfer_stager.stage(prepared_batch)
+                        batch = staged_batch.wait()
+                    with profile_span(runtime_profiler, "model_step_total"):
+                        with _autocast(device, config):
+                            result = step_function(model, batch, context)
+                    with profile_span(runtime_profiler, "loss_composition"):
+                        with torch.autocast(device_type=device.type, enabled=False):
+                            composed = compose_reconstruction_loss(
+                                result, context, config.loss_weights
+                            )
+                    weight = int(result.batch_size)
+                    current_effective_weights = dict(composed.effective_weights)
+                    if effective_weights is None:
+                        effective_weights = current_effective_weights
+                    elif current_effective_weights != effective_weights:
+                        raise RuntimeError(
+                            "model-val objective weights changed within one evaluation"
+                        )
+                    additive_row = {
+                        "loss.total": float(composed.total.detach().float().cpu()),
+                        **{
+                            f"loss.raw.{name}": float(value.detach().float().cpu())
+                            for name, value in composed.raw_terms.items()
+                        },
+                        **{
+                            f"loss.weighted.{name}": float(value.detach().float().cpu())
+                            for name, value in composed.weighted_terms.items()
+                        },
+                    }
+                    for name, value in additive_row.items():
+                        accumulator.add_mean(
+                            name,
+                            value,
+                            weight,
+                            selection_eligible=name == "loss.total",
+                        )
+                    for name, value in _scalar_metrics(result.metrics).items():
+                        accumulator.add_non_additive(name, value, weight)
+                    accumulator.finish_batch(weight)
+                except BaseException as exc:
+                    batch_error = exc
+
+            batch_succeeded = all_reduce_min_bool(
+                runtime, batch_error is None, device=device
+            )
+            if not batch_succeeded:
+                errors = gather_error_summaries(
+                    runtime,
+                    phase="distributed_validation_batch",
+                    error=batch_error,
+                    structural=True,
+                )
+                raise RuntimeError(
+                    "distributed validation failed before reduction: "
+                    + json.dumps(list(errors), sort_keys=True)
+                )
+
+    local_error: BaseException | None = None
+    if effective_weights is None:
+        local_error = RuntimeError("rollout model validation produced no batches")
+    validation_succeeded = all_reduce_min_bool(runtime, local_error is None, device=device)
     if not validation_succeeded:
         errors = gather_error_summaries(
             runtime,

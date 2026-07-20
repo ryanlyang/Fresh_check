@@ -57,7 +57,7 @@ def _step(model, batch, _context):
         raise RuntimeError("injected rank-local compiler failure")
     prediction = model(batch["x"])
     loss = (prediction - batch["target"]).square().mean()
-    return SimpleNamespace(
+    return ReconstructorStepResult(
         loss_terms={"root": loss},
         metrics={"mean_prediction": prediction.detach().mean()},
         batch_size=int(prediction.shape[0]),
@@ -370,6 +370,83 @@ def _distributed_validation_failure_worker(
                 torch.device("cpu"),
                 distributed_runtime=runtime,
             )
+    finally:
+        destroy_distributed_runtime(runtime)
+
+
+def _distributed_skewed_validation_worker(
+    rank: int, world_size: int, port: int
+) -> None:
+    os.environ.update(
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+        LOCAL_RANK=str(rank),
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        ABPH_DDP_TIMEOUT_SECONDS="2",
+    )
+    runtime = initialize_distributed_runtime(
+        requested_world_size=world_size, device=torch.device("cpu")
+    )
+    try:
+        identities = tuple(
+            JetIdentity(file="HToBB_010.root", entry=index, label=index)
+            for index in range(3)
+        )
+        start, stop = ((0, 1), (1, 3))[rank]
+        owner = SimpleNamespace(
+            hlt_view=SimpleNamespace(jet_ids=identities),
+            last_validation_range=None,
+        )
+
+        def batches():
+            for index in range(start, stop):
+                if rank == 1:
+                    # Each wait is below the collective timeout, while their sum is
+                    # above it. Per-round heartbeats must prevent cumulative skew.
+                    time.sleep(1.25)
+                yield {
+                    "x": torch.tensor([[1.0 + index, 2.0]]),
+                    "target": torch.ones(1, 1),
+                }
+            owner.last_validation_range = validation_range_row(
+                split="model_val",
+                rank=rank,
+                start=start,
+                stop=stop,
+                jet_ids=identities,
+            )
+
+        curriculum = ReconstructorCurriculumConfig(
+            root_updates=1,
+            hierarchy_updates_per_depth=1,
+            renderer_updates=1,
+            distribution_updates=1,
+            maximum_capacity=1,
+            hierarchy_capacities=(),
+            renderer_enabled=False,
+            distribution_enabled=False,
+        )
+        config = ReconstructorTrainerConfig(
+            output_dir="unused",
+            device="cpu",
+            amp=False,
+            distributed_world_size=2,
+            pin_memory=False,
+            curriculum=curriculum,
+        )
+        result = evaluate_reconstructor_rollout(
+            torch.nn.Linear(2, 1),
+            batches(),
+            CurriculumController(curriculum).state(),
+            _step,
+            config,
+            torch.device("cpu"),
+            distributed_runtime=runtime,
+            validation_owner=owner,
+        )
+        assert result["n_jets"] == 3
+        assert result["validation_coverage"]["n_jets"] == 3
     finally:
         destroy_distributed_runtime(runtime)
 
@@ -752,6 +829,18 @@ def test_two_rank_validation_reduces_typed_losses_and_exact_identity_coverage():
 def test_two_rank_validation_failure_is_consensual_before_reduction():
     torch.multiprocessing.spawn(
         _distributed_validation_failure_worker,
+        args=(2, _free_port()),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_available(), reason="torch.distributed is unavailable"
+)
+def test_two_rank_validation_heartbeats_bound_skew_and_pad_uneven_tails():
+    torch.multiprocessing.spawn(
+        _distributed_skewed_validation_worker,
         args=(2, _free_port()),
         nprocs=2,
         join=True,
