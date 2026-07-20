@@ -344,6 +344,20 @@ class LocalResidualFieldCurriculumJointConfig:
         object.__setattr__(self, "require_student_init_checkpoint", bool(self.require_student_init_checkpoint))
         freeze_schedule = normalize_freeze_schedule(self.freeze_schedule)
         object.__setattr__(self, "freeze_schedule", freeze_schedule)
+        if student_init_source in {"Ofull", "Orobust_light"}:
+            if init_checkpoint is None:
+                raise ValueError("oracle-initialized P7b requires student_init_checkpoint")
+            if reset_mode == RESIDUAL_PROJECTION_RESET_NONE:
+                raise ValueError("oracle-initialized P7b requires an explicit residual projection reset policy")
+            if freeze_schedule != FREEZE_SCHEDULE_RESIDUAL_WARMUP_THEN_UPPER:
+                raise ValueError(
+                    "oracle-initialized P7b requires freeze_schedule="
+                    f"{FREEZE_SCHEDULE_RESIDUAL_WARMUP_THEN_UPPER}"
+                )
+            if oracle is not None and oracle.consumer_id and str(oracle.consumer_id) != student_init_source:
+                raise ValueError(
+                    f"student_init_source {student_init_source!r} != oracle consumer {oracle.consumer_id!r}"
+                )
         for name in ("freeze_phase1_epochs", "freeze_phase2_epochs"):
             value = int(getattr(self, name))
             if value <= 0:
@@ -1170,6 +1184,13 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
         )
         self.reconstructor = reconstructor or build_local_residual_field_reconstructor(self.config.reconstructor_config)
         self.student = student or LocalResidualFieldAugmentedParT(self.config.student_config)
+        if getattr(self.student, "reconstructor", None) is not None or getattr(
+            self.student, "control_generator", None
+        ) is not None:
+            raise ValueError(
+                "deployable curriculum student must consume explicit predicted fields and cannot own a second "
+                "reconstructor or control generator"
+            )
         self.student_initialization_report: dict[str, Any] = {
             "student_init_source": str(self.config.student_init_source),
             "student_init_checkpoint": self.config.student_init_checkpoint,
@@ -1181,6 +1202,21 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
             init_path = Path(self.config.student_init_checkpoint)
             if not init_path.is_file():
                 raise FileNotFoundError(f"student initialization checkpoint does not exist: {init_path}")
+            if self.config.student_init_source in {"Ofull", "Orobust_light"}:
+                teacher_config_path = init_path.with_name("teacher_config.json")
+                if not teacher_config_path.is_file():
+                    raise FileNotFoundError(
+                        f"oracle student initialization is missing teacher_config.json: {teacher_config_path}"
+                    )
+                teacher_config = json.loads(teacher_config_path.read_text(encoding="utf-8"))
+                if not isinstance(teacher_config, Mapping):
+                    raise ValueError("oracle student teacher_config.json must contain an object")
+                artifact_teacher_id = str(teacher_config.get("teacher_id") or "")
+                if artifact_teacher_id != self.config.student_init_source:
+                    raise ValueError(
+                        f"student initialization artifact teacher_id {artifact_teacher_id!r} != "
+                        f"student_init_source {self.config.student_init_source!r}"
+                    )
             warm_start_report = warm_start_local_residual_field_tagger_part(
                 self.student,
                 init_path,
@@ -1569,6 +1605,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
         deployable_config["oracle_consumer_included"] = False
         deployable_config["student_init_checkpoint"] = None
         deployable_config["require_student_init_checkpoint"] = False
+        deployable_config["student_init_source"] = "A0"
         deployable_config["residual_projection_reset"] = RESIDUAL_PROJECTION_RESET_NONE
         deployable_config["residual_projection_scale"] = 1.0
         return {
@@ -1645,6 +1682,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
         clean_config["oracle_consumer_config"] = None
         clean_config["student_init_checkpoint"] = None
         clean_config["require_student_init_checkpoint"] = False
+        clean_config["student_init_source"] = "A0"
         clean_config["residual_projection_reset"] = RESIDUAL_PROJECTION_RESET_NONE
         clean_config["residual_projection_scale"] = 1.0
         model = cls(
@@ -1672,6 +1710,7 @@ class LocalResidualFieldCurriculumJointModel(_ModuleBase):
 
 __all__ = [
     "LOCAL_RESIDUAL_FIELD_CURRICULUM_JOINT_CONTRACT",
+    "LOCAL_RESIDUAL_FIELD_CURRICULUM_DEPLOYABLE_CONTRACT",
     "LOCAL_RESIDUAL_FIELD_CURRICULUM_SCHEDULER_CONTRACT",
     "LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_CONTRACT",
     "FIELD_GATE_MODE_NONE",
@@ -1696,6 +1735,11 @@ __all__ = [
     "FREEZE_PHASE_UPPER_UNFREEZE",
     "FREEZE_PHASE_FULL_GENTLE_UNFREEZE",
     "FREEZE_PHASES",
+    "FREEZE_SCHEDULE_NONE",
+    "FREEZE_SCHEDULE_RESIDUAL_WARMUP_THEN_UPPER",
+    "FREEZE_SCHEDULES",
+    "STUDENT_INIT_SOURCES",
+    "DEFAULT_OPTIMIZER_GROUP_LEARNING_RATES",
     "SelectedConsumerRecord",
     "LocalResidualFieldCurriculumSchedulerConfig",
     "LocalResidualFieldCurriculumScheduler",
@@ -1708,6 +1752,7 @@ __all__ = [
     "confidence_reliability_target",
     "compute_confidence_gate_loss",
     "normalize_field_gate_mode",
+    "normalize_freeze_schedule",
     "normalize_loss_weight_schedule",
     "normalize_residual_projection_reset",
     "reset_or_scale_student_residual_projection",
