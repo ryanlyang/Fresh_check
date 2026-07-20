@@ -11,6 +11,7 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 : "${LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE:=stage1a}"
 : "${LOCAL_RESIDUAL_FIELD_CURRICULUM_MODE:=first_stage_pilot}"
 : "${LOCAL_RESIDUAL_FIELD_CURRICULUM_CONFIRM_FULL_FAMILY:=0}"
+: "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY:=}"
 : "${LOCAL_RESIDUAL_FIELD_ROOT:=${OUTPUT_ROOT}/local_particle_residual_field_curriculum/first_stage_pilot}"
 : "${LOCAL_RESIDUAL_FIELD_MANIFEST_PATH:=${LOCAL_RESIDUAL_FIELD_ROOT}/inputs/split_manifest.json.gz}"
 : "${LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/inputs/hlt_cache}"
@@ -84,6 +85,17 @@ dependency_token_is_valid() {
   [[ "$1" =~ ^[0-9]+$ ]] || { fresh_is_dry_run && [[ "$1" =~ ^DRYRUN_[A-Za-z0-9_]+$ ]]; }
 }
 
+dependency_chain_is_valid() {
+  local chain="$1" token
+  local -a tokens=()
+  [[ -n "${chain}" ]] || return 0
+  IFS=: read -r -a tokens <<< "${chain}"
+  ((${#tokens[@]} > 0)) || return 1
+  for token in "${tokens[@]}"; do
+    dependency_token_is_valid "${token}" || return 1
+  done
+}
+
 submit_job() {
   local label="$1" class="$2" dependency="$3" export_overrides="$4"
   shift 4
@@ -118,6 +130,11 @@ join_colon() {
   printf '%s\n' "${output}"
 }
 
+dependency_chain_is_valid "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY}" || {
+  echo "LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY must be a colon-separated Slurm job-ID chain" >&2
+  exit 2
+}
+
 teacher_complete() {
   [[ -f "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/$1/best_model_val.pt" \
     && -f "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/$1/teacher_config.json" \
@@ -140,7 +157,9 @@ total_training_jobs=$((before_training_jobs + after_training_jobs))
 ((after_training_jobs <= LOCAL_RESIDUAL_FIELD_MAX_GPU_TRAINING_JOBS_AFTER_SELECTOR)) || { echo "post-selector GPU training job limit exceeded" >&2; exit 2; }
 ((total_training_jobs <= LOCAL_RESIDUAL_FIELD_MAX_GPU_TRAINING_JOBS_TOTAL)) || { echo "total GPU training job limit exceeded" >&2; exit 2; }
 
-if [[ "${LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE}" != select_consumer ]] && ! fresh_is_dry_run; then
+if [[ "${LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE}" != select_consumer ]] \
+  && [[ -z "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY}" ]] \
+  && ! fresh_is_dry_run; then
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/best_model_val.pt"
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/run_report.json"
   fresh_require_file "${LOCAL_RESIDUAL_FIELD_RECON_ROOT}/C0/best_model_val.pt"
@@ -157,8 +176,8 @@ record_job() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "${mani
 
 input_audit_jid=""
 if [[ "${LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE}" != select_consumer ]]; then
-  input_audit_jid="$(submit_job lprf_input_audit cpu "" "" "${SCRIPT_DIR}/run_validate_local_residual_curriculum_reused_inputs.sh")"
-  record_job inputs audit reused_inputs "${input_audit_jid}" ""
+  input_audit_jid="$(submit_job lprf_input_audit cpu "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY}" "" "${SCRIPT_DIR}/run_validate_local_residual_curriculum_reused_inputs.sh")"
+  record_job inputs audit reused_inputs "${input_audit_jid}" "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY}"
 fi
 
 declare -A stage1a_jobs=()

@@ -44,6 +44,7 @@ def test_step10_requested_submitters_and_job_runners_exist() -> None:
     for name in (
         "submit_lprf_curriculum_pilot.sh",
         "submit_lprf_curriculum_tigris_pilot.sh",
+        "submit_lprf_curriculum_tigris_rebuild_and_pilot.sh",
         "submit_lprf_curriculum_highdata.sh",
         "submit_lprf_curriculum_tigris_highdata.sh",
         "run_evaluate_local_residual_oracle_alpha.sh",
@@ -103,13 +104,39 @@ def test_step10_stage1b_runner_reads_selector_and_keeps_q0_oracle_path_disabled(
 
 
 def test_step10_tigris_wrappers_use_full_account_and_disable_user_site() -> None:
-    for name in ("submit_lprf_curriculum_tigris_pilot.sh", "submit_lprf_curriculum_tigris_highdata.sh"):
+    for name in (
+        "submit_lprf_curriculum_tigris_pilot.sh",
+        "submit_lprf_curriculum_tigris_highdata.sh",
+        "submit_lprf_curriculum_tigris_rebuild_and_pilot.sh",
+    ):
         text = _read(name)
         assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=reu-aisocial" in text
         assert "LOCAL_RESIDUAL_FIELD_SBATCH_ACCOUNT:=reu-aisoc}" not in text
         assert "PYTHONNOUSERSITE:=1" in text
         assert "export PROJECT_DIR PD10_DATA_DIR OUTPUT_ROOT CONDA_BASE CONDA_ENV PYTHONNOUSERSITE DEVICE" in text
         assert "gpu:gh200:1" in text
+
+
+def test_step10_rebuild_wrapper_queues_full_first_stage_after_a0_and_c0() -> None:
+    wrapper = _read("submit_lprf_curriculum_tigris_rebuild_and_pilot.sh")
+    bootstrap = _read("submit_local_particle_residual_field_experiment.sh")
+    curriculum = _read("submit_lprf_curriculum_pilot.sh")
+    audit = _read("run_validate_local_residual_curriculum_reused_inputs.sh")
+
+    assert "LOCAL_RESIDUAL_FIELD_RECON_RUN_IDS=C0" in wrapper
+    assert "LOCAL_RESIDUAL_FIELD_TAGGER_RUN_IDS=A0" in wrapper
+    for disabled in ("TEACHER_LOGITS", "PREDICTIONS", "FUSION", "REPORT"):
+        assert f"LOCAL_RESIDUAL_FIELD_SUBMIT_{disabled}=0" in wrapper
+    assert "LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE=full_first_stage" in wrapper
+    assert 'LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY="${bootstrap_dependency}"' in wrapper
+    assert "submit_lprf_curriculum_tigris_pilot.sh" in wrapper
+
+    assert 'bootstrap_reco_jid="${reco_jobs[C0]:-}"' in bootstrap
+    assert 'bootstrap_a0_jid="${tagger_jobs[A0]:-}"' in bootstrap
+    assert 'printf \'%s\\n\' "${bootstrap_dependency}"' in bootstrap
+    assert 'submit_job lprf_input_audit cpu "${LOCAL_RESIDUAL_FIELD_CURRICULUM_UPSTREAM_DEPENDENCY}"' in curriculum
+    assert 'fresh_require_file "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/best_model_val.pt"' in audit
+    assert 'fresh_require_file "${LOCAL_RESIDUAL_FIELD_RECON_ROOT}/C0/best_model_val.pt"' in audit
 
 
 def test_step10_highdata_is_off_by_default_and_requires_actual_uplift_gate() -> None:

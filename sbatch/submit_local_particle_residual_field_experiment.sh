@@ -67,6 +67,7 @@ fi
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_PREDICTIONS:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_FUSION:=1}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMIT_REPORT:=1}"
+: "${LOCAL_RESIDUAL_FIELD_BOOTSTRAP_DEPENDENCY_FILE:=}"
 : "${LOCAL_RESIDUAL_FIELD_RECON_RUN_IDS:=C0 C1 C2 C3 C4 C5 C6}"
 : "${LOCAL_RESIDUAL_FIELD_TAGGER_RUN_IDS:=A0 A1 A2 B0 B1 B2 B3 B4 D0 D1 D2 D3 D4 D5 D5_seed1 D5_seed2 D5_seed3 D6 E0 E1 E2 E3 E4 E5 E6 F0 F1 F2 F3 F4 F5}"
 : "${LOCAL_RESIDUAL_FIELD_PREDICT_RUN_IDS:=A0 D5 D5_seed1 D5_seed2 D5_seed3 D6 E6 E5 E3}"
@@ -614,7 +615,19 @@ if fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_SUBMIT_REPORT}"; then
   report_jid="$(submit_job local_residual_report "${args[@]}")"
 fi
 
-{
+if [[ -n "${LOCAL_RESIDUAL_FIELD_BOOTSTRAP_DEPENDENCY_FILE}" ]]; then
+  bootstrap_reco_jid="${reco_jobs[C0]:-}"
+  bootstrap_a0_jid="${tagger_jobs[A0]:-}"
+  if [[ -z "${bootstrap_reco_jid}" || -z "${bootstrap_a0_jid}" ]]; then
+    echo "bootstrap dependency receipt requires newly submitted C0 and A0 jobs" >&2
+    exit 2
+  fi
+  bootstrap_dependency="$(join_nonempty_by_colon "${bootstrap_reco_jid}" "${bootstrap_a0_jid}")"
+  mkdir -p "$(dirname "${LOCAL_RESIDUAL_FIELD_BOOTSTRAP_DEPENDENCY_FILE}")"
+  printf '%s\n' "${bootstrap_dependency}" > "${LOCAL_RESIDUAL_FIELD_BOOTSTRAP_DEPENDENCY_FILE}"
+fi
+
+write_submitted_jobs_json() {
   echo "{"
   echo "  \"root\": \"${LOCAL_RESIDUAL_FIELD_ROOT}\","
   echo "  \"splits\": \"${split_jid}\","
@@ -626,7 +639,12 @@ fi
   echo "  \"fusion\": \"${fusion_jid}\","
   echo "  \"report\": \"${report_jid}\""
   echo "}"
-} | tee "${submitter_log_dir}/submitted_jobs.json"
+}
+if fresh_is_dry_run; then
+  write_submitted_jobs_json
+else
+  write_submitted_jobs_json | tee "${submitter_log_dir}/submitted_jobs.json"
+fi
 
 echo "local_residual_field_submission_complete:"
 echo "  root: ${LOCAL_RESIDUAL_FIELD_ROOT}"

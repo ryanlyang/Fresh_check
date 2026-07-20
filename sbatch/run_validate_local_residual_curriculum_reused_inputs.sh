@@ -18,6 +18,8 @@ source "${PROJECT_DIR}/sbatch/common.sh"
 : "${LOCAL_RESIDUAL_FIELD_HLT_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/inputs/hlt_cache}"
 : "${LOCAL_RESIDUAL_FIELD_OFFLINE_CACHE_DIR:=}"
 : "${LOCAL_RESIDUAL_FIELD_TARGET_CACHE_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/targets}"
+: "${LOCAL_RESIDUAL_FIELD_RECON_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/reconstructors}"
+: "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT:=${LOCAL_RESIDUAL_FIELD_ROOT}/taggers}"
 : "${LOCAL_RESIDUAL_FIELD_OFFLINE_TEACHER_LOGITS_DIR:=}"
 : "${LOCAL_RESIDUAL_FIELD_HLT_PROFILE:=fixed_hlt_v2_realistic}"
 : "${LOCAL_RESIDUAL_FIELD_HLT_DEGRADATION_STRENGTH:=2.5}"
@@ -29,6 +31,9 @@ source "${PROJECT_DIR}/sbatch/common.sh"
 : "${LOCAL_RESIDUAL_FIELD_REUSED_INPUT_AUDIT:=${LOCAL_RESIDUAL_FIELD_ROOT}/input_audit/reused_inputs_report.json}"
 
 fresh_setup "$@"
+fresh_require_file "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/best_model_val.pt"
+fresh_require_file "${LOCAL_RESIDUAL_FIELD_TAGGER_ROOT}/A0/run_report.json"
+fresh_require_file "${LOCAL_RESIDUAL_FIELD_RECON_ROOT}/C0/best_model_val.pt"
 if ! fresh_bool_enabled "${LOCAL_RESIDUAL_FIELD_REUSE_SPLIT_MANIFEST}"; then
   echo "Step 10 submitters currently require an existing split manifest; build it before launching the pilot" >&2
   exit 2
