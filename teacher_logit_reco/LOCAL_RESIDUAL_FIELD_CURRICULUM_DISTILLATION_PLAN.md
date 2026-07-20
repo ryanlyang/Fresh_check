@@ -129,6 +129,82 @@ and
 all final-test decisions remain HLT-only
 ```
 
+## Pilot-Only Execution Contract
+
+The full campaign is intentionally broad, but the first pilot must be small and
+decision-oriented. The first-stage pilot queues only the minimal evidence set:
+
+```text
+oracle teachers:
+  O0, O2, O4
+
+deployable predictor-students:
+  P0, P2, P4, P7
+
+ablations:
+  Q0, Q3
+
+fusion:
+  G0 only
+```
+
+This is the first-stage prune. Do not queue `O1/O3/O5/O6/O7`,
+`P1/P3/P5/P6/P8`, `Q1/Q2/Q4/Q5`, or `G1/G2/G3` until the pilot gates below
+are passed.
+
+Expected first-stage job count:
+
+```text
+new GPU training jobs if A0/A4 are reused: 9
+new GPU training jobs if A0/A4 must be rerun: 11
+required fusion/report jobs: 2
+optional alpha-mix diagnostic jobs: 2
+```
+
+Infrastructure cache jobs are separate. If the split, HLT cache, offline cache,
+target residual-field cache, or offline teacher logits are missing, rebuild
+them first and do not count that as evidence for the model ladder.
+
+Pilot budget guardrails:
+
+```text
+max first-stage GPU training jobs: 11
+max oracle teacher training jobs: 3 unless an existing full-oracle B-tier run is reused
+max walltime per pilot model job: cluster-specific, but fail/requeue rather than silently truncating reports
+max report attempts before inspection: 1
+```
+
+First-stage pass conditions:
+
+```text
+O0/O2/O4 alpha curve is non-degenerate
+best deployable P run beats A0 by >= 0.3 pp on stack_val
+or G0 beats A0 by >= 0.5 pp on stack_val
+validation valid_fraction >= 0.99 for selected checkpoints
+nonfinite train/eval batches are near zero and explicitly reported
+final-test deployable rows have runtime_inputs = HLT_only
+```
+
+First-stage stop conditions:
+
+```text
+O2 and O4 do not beat O0 by at least 0.2 pp on model_val
+alpha response is strongly non-monotonic and no intermediate teacher beats A0
+P2/P4/P7 all fail to beat P0
+any selected run has validation coverage below 0.99
+any report mixes oracle diagnostics into the deployable leaderboard
+```
+
+If the alpha curve is non-monotonic, do not blindly continue to stronger
+teachers. Select the best stable teacher seen so far and rerun only the
+corresponding deployable student. For example:
+
+```text
+if O2 > O4, train from O2 rather than ramping to O4
+if O4 is unstable but O2 is useful, use O2 as the curriculum endpoint
+if O0/O2/O4 are flat, stop and revise the residual-field target or predictor
+```
+
 ## Existing Components Reused
 
 This plan builds on the existing local residual field setup:
