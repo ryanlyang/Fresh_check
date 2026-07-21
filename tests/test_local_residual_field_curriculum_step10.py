@@ -118,6 +118,13 @@ def test_step10_tigris_wrappers_use_full_account_and_disable_user_site() -> None
         assert "export PROJECT_DIR PD10_DATA_DIR OUTPUT_ROOT CONDA_BASE CONDA_ENV PYTHONNOUSERSITE DEVICE" in text
         assert "gpu:gh200:1" in text
 
+    pilot = _read("submit_lprf_curriculum_tigris_pilot.sh")
+    assert "CONFIRM_FINAL_TEST:=1" in pilot
+    assert "DEVICE CONFIRM_FINAL_TEST" in pilot
+
+    generic = _read("submit_lprf_curriculum_pilot.sh")
+    assert generic.index('CONFIRM_FINAL_TEST:=1') < generic.index('source "${PROJECT_DIR}/sbatch/common.sh"')
+
 
 def test_step10_rebuild_wrapper_queues_full_first_stage_after_a0_and_c0() -> None:
     wrapper = _read("submit_lprf_curriculum_tigris_rebuild_and_pilot.sh")

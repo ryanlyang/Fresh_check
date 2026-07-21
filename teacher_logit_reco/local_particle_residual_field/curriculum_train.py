@@ -619,6 +619,17 @@ def _build_joint_model(
 ) -> tuple[LocalResidualFieldCurriculumJointModel, dict[str, Any]]:
     field_names = tuple(str(name) for name in train_dataset.field_names)
     field_groups = {str(name): tuple(int(index) for index in indices) for name, indices in train_dataset.field_groups.items()}
+    predictor_payload = _load_predictor_warm_start_payload(config.predictor_warm_start_checkpoint)
+    checkpoint_reconstructor_config = _predictor_reconstructor_config(predictor_payload)
+    dataset_max_particles = int(train_dataset.tokens.shape[1])
+    reconstructor_max_particles = int(
+        checkpoint_reconstructor_config.get("max_particles", dataset_max_particles)
+    )
+    if reconstructor_max_particles < dataset_max_particles:
+        raise ValueError(
+            "predictor warm-start max_particles is smaller than the curriculum dataset width: "
+            f"{reconstructor_max_particles} < {dataset_max_particles}"
+        )
     reconstructor_config = LocalResidualFieldReconstructorConfig(
         field_dim=len(field_names),
         field_names=field_names,
@@ -629,7 +640,10 @@ def _build_joint_model(
         context_layers=int(config.reconstructor_context_layers),
         dropout=float(config.reconstructor_dropout),
         attention_dropout=float(config.reconstructor_attention_dropout),
-        max_particles=int(train_dataset.tokens.shape[1]),
+        # Preserve the checkpoint's rank-embedding capacity.  The standalone
+        # C0 trainer intentionally uses the model default (256), even when the
+        # cached HLT tensors contain only 128 particle slots.
+        max_particles=reconstructor_max_particles,
     )
     student_config = LocalResidualFieldTaggerConfig(
         num_classes=int(config.num_classes),
@@ -699,25 +713,50 @@ def _build_joint_model(
             f"oracle teacher checkpoint consumer {model.oracle_consumer.consumer_id!r} differs from "
             f"selected P7a consumer {resolved.selected_consumer_id!r}"
         )
-    warm_report = _warm_start_predictor(model, config.predictor_warm_start_checkpoint)
+    warm_report = _warm_start_predictor(
+        model,
+        config.predictor_warm_start_checkpoint,
+        payload=predictor_payload,
+    )
     return model, warm_report
 
 
-def _warm_start_predictor(model: LocalResidualFieldCurriculumJointModel, path: str | None) -> dict[str, Any]:
-    report = {"requested": bool(path), "applied": False, "checkpoint": path, "checkpoint_hash": None, "confidence_heads_loaded": False}
+def _load_predictor_warm_start_payload(path: str | None) -> Mapping[str, Any] | None:
     if not path:
-        return report
+        return None
     checkpoint = Path(path)
     if not checkpoint.is_file():
         raise FileNotFoundError(f"predictor warm-start checkpoint does not exist: {checkpoint}")
     payload = _torch_load_checkpoint(checkpoint, map_location="cpu")
     if not isinstance(payload, Mapping):
         raise ValueError("predictor warm-start checkpoint must contain a mapping")
+    return payload
+
+
+def _predictor_reconstructor_config(payload: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    if payload is None:
+        return {}
     raw_model_config = payload.get("model_config")
-    checkpoint_reconstructor_config: Mapping[str, Any] = {}
-    if isinstance(raw_model_config, Mapping):
-        nested = raw_model_config.get("reconstructor_config")
-        checkpoint_reconstructor_config = nested if isinstance(nested, Mapping) else raw_model_config
+    if not isinstance(raw_model_config, Mapping):
+        return {}
+    nested = raw_model_config.get("reconstructor_config")
+    return nested if isinstance(nested, Mapping) else raw_model_config
+
+
+def _warm_start_predictor(
+    model: LocalResidualFieldCurriculumJointModel,
+    path: str | None,
+    *,
+    payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    report = {"requested": bool(path), "applied": False, "checkpoint": path, "checkpoint_hash": None, "confidence_heads_loaded": False}
+    if not path:
+        return report
+    checkpoint = Path(path)
+    if payload is None:
+        payload = _load_predictor_warm_start_payload(path)
+    assert payload is not None
+    checkpoint_reconstructor_config = _predictor_reconstructor_config(payload)
     checkpoint_field_names = tuple(str(name) for name in checkpoint_reconstructor_config.get("field_names", ()))
     current_field_names = tuple(str(name) for name in model.config.field_names)
     if checkpoint_field_names and checkpoint_field_names != current_field_names:

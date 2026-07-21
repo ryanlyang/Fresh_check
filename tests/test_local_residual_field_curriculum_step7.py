@@ -317,6 +317,50 @@ def test_step7_tiny_p0_training_writes_oracle_free_checkpoint_and_reports(tmp_pa
     assert curves["epochs"][0]["model_val"]["valid_fraction"] == 1.0
 
 
+def test_step7_predictor_warm_start_preserves_checkpoint_rank_capacity(tmp_path: Path, monkeypatch):
+    source = _tiny_joint().reconstructor
+    checkpoint = tmp_path / "c0.pt"
+    torch.save(
+        {
+            "model_config": source.config.to_dict(),
+            "model_state_dict": source.state_dict(),
+        },
+        checkpoint,
+    )
+    config = _config(
+        tmp_path,
+        "P0",
+        predictor_warm_start_checkpoint=str(checkpoint),
+        reconstructor_d_model=8,
+        reconstructor_num_heads=2,
+        reconstructor_num_layers=1,
+        reconstructor_context_layers=1,
+        reconstructor_dropout=0.0,
+        reconstructor_attention_dropout=0.0,
+    )
+    joint_model_class = LocalResidualFieldCurriculumJointModel
+
+    def build_joint(joint_config):
+        student = LocalResidualFieldAugmentedParT(
+            joint_config.student_config,
+            part_model=FakePart(len(PF_FEATURE_NAMES) + 2, 3),
+        )
+        return joint_model_class(joint_config, student=student)
+
+    monkeypatch.setattr(curriculum_train_module, "LocalResidualFieldCurriculumJointModel", build_joint)
+
+    model, warm_start = curriculum_train_module._build_joint_model(
+        config,
+        resolve_curriculum_run(config),
+        TinyDataset(),
+        device=torch.device("cpu"),
+    )
+
+    assert model.reconstructor.config.max_particles == 4
+    assert tuple(model.reconstructor.rank_embedding.weight.shape) == (4, 8)
+    assert warm_start["applied"] is True
+
+
 def test_step7_cli_exposes_all_required_training_inputs():
     script = ROOT / "scripts" / "train_local_residual_field_curriculum_student.py"
     spec = spec_from_file_location("curriculum_step7_cli", script)

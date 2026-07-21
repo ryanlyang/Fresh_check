@@ -5,6 +5,10 @@ set -euo pipefail
 IFS=$'\n\t'
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+# This submitter deliberately queues HLT-only final-test evaluation during
+# Stage 1b. Set its default before common.sh installs the repository-wide
+# fail-closed default of zero.
+: "${CONFIRM_FINAL_TEST:=1}"
 source "${PROJECT_DIR}/sbatch/common.sh"
 SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 
@@ -52,8 +56,6 @@ SCRIPT_DIR="${PROJECT_DIR}/sbatch"
 : "${LOCAL_RESIDUAL_FIELD_CPU_CPUS_PER_TASK:=2}"
 : "${LOCAL_RESIDUAL_FIELD_CPU_MEM:=8G}"
 : "${LOCAL_RESIDUAL_FIELD_SUBMISSION_LOG_DIR:=${LOCAL_RESIDUAL_FIELD_ROOT}/submission_logs/curriculum_$(date +%Y%m%d_%H%M%S)}"
-: "${CONFIRM_FINAL_TEST:=1}"
-
 case "${LOCAL_RESIDUAL_FIELD_CURRICULUM_STAGE}" in
   stage1a|select_consumer|stage1b|full_first_stage) ;;
   *)
