@@ -203,10 +203,6 @@ def write_teacher_logit_cache(
     if identities.shape != truth.shape:
         raise ValueError("event identities do not align with target logits")
     split_hash = str(stack_train_distill_manifest_sha256)
-    if len(split_hash) != 64 or canonical_sha256(split_hash) == split_hash:
-        # The second condition is simply an inexpensive guard against passing
-        # an unhashed semantic token; valid SHA values virtually never satisfy it.
-        pass
     if len(split_hash) != 64 or any(character not in "0123456789abcdef" for character in split_hash):
         raise ValueError("stack_train_distill manifest identity must be SHA-256")
     if not str(temperature_convention).strip():
@@ -277,6 +273,8 @@ def cache_bound_teacher_logits(
     actual_checkpoint = sha256_file(checkpoint_path)
     if actual_checkpoint != binding.get("checkpoint_sha256"):
         raise ValueError("checkpoint bytes disagree with immutable teacher binding")
+    if getattr(forward_fn, "checkpoint_sha256", None) != actual_checkpoint:
+        raise ValueError("teacher forward callback is not bound to the checkpoint hash")
     selected_namespace = str(binding["target_cache_namespace"] if namespace is None else namespace)
     condition = _cache_condition_for_namespace(selected_namespace)
     logit_parts: list[np.ndarray] = []
@@ -433,6 +431,69 @@ def verify_equal_field_zero_kd(
     }
 
 
+def verify_teacher_identity_chain(
+    *,
+    binding: Mapping[str, Any],
+    cache_manifest: Mapping[str, Any],
+    live_teacher_config: Mapping[str, Any],
+    bundle_config: Mapping[str, Any],
+    primary_selection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Require one checkpoint/binding identity from selection through bundle."""
+
+    validate_teacher_binding(
+        binding,
+        expected_kind=str(binding["binding_kind"]),
+        primary_selection=primary_selection,
+    )
+    validate_content_hash(
+        cache_manifest,
+        expected_contract=PREDICTION_ANCHORED_TEACHER_LOGIT_CACHE_CONTRACT,
+    )
+    validate_content_hash(
+        live_teacher_config,
+        expected_contract=PREDICTION_ANCHORED_LIVE_TEACHER_CONFIG_CONTRACT,
+    )
+    validate_content_hash(bundle_config)
+    checkpoint = str(binding["checkpoint_sha256"])
+    binding_hash = str(binding["content_hash"])
+    checkpoint_fields = {
+        "cache.checkpoint_sha256": cache_manifest.get("checkpoint_sha256"),
+        "cache.live_checkpoint_sha256": cache_manifest.get("live_checkpoint_sha256"),
+        "live.checkpoint_sha256": live_teacher_config.get("checkpoint_sha256"),
+        "bundle.teacher_checkpoint_sha256": bundle_config.get("teacher_checkpoint_sha256"),
+    }
+    if primary_selection is not None:
+        checkpoint_fields["selection.checkpoint_sha256"] = primary_selection.get(
+            "checkpoint_sha256"
+        )
+    for name, value in checkpoint_fields.items():
+        if value != checkpoint:
+            raise ValueError(f"teacher identity chain changed {name}")
+    binding_fields = {
+        "cache.teacher_binding_sha256": cache_manifest.get("teacher_binding_sha256"),
+        "live.teacher_binding_sha256": live_teacher_config.get("teacher_binding_sha256"),
+        "bundle.teacher_binding_sha256": bundle_config.get("teacher_binding_sha256"),
+    }
+    for name, value in binding_fields.items():
+        if value != binding_hash:
+            raise ValueError(f"teacher identity chain changed {name}")
+    if not bool(cache_manifest.get("checkpoint_refit_forbidden")) or not bool(
+        live_teacher_config.get("checkpoint_refit_forbidden")
+    ):
+        raise ValueError("teacher identity chain permits a post-cache refit")
+    return {
+        "ok": True,
+        "checkpoint_sha256": checkpoint,
+        "teacher_binding_sha256": binding_hash,
+        "cache_manifest_sha256": cache_manifest["content_hash"],
+        "live_teacher_config_sha256": live_teacher_config["content_hash"],
+        "bundle_config_sha256": bundle_config["content_hash"],
+        "same_checkpoint_selection_target_live_bundle": True,
+        "checkpoint_refit_forbidden": True,
+    }
+
+
 __all__ = [
     "PREDICTION_ANCHORED_TEACHER_LOGIT_CACHE_CONTRACT",
     "PREDICTION_ANCHORED_LIVE_TEACHER_CONFIG_CONTRACT",
@@ -445,4 +506,5 @@ __all__ = [
     "load_teacher_logit_cache",
     "verify_cached_direct_agreement",
     "verify_equal_field_zero_kd",
+    "verify_teacher_identity_chain",
 ]

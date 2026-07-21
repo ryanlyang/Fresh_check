@@ -26,6 +26,7 @@ from .bridge_campaign import PAIRED_SEED_IDS
 from .bridge_consumer import T10_ALL50_CLEAN, T10_CLEAN, T10_ROBUST
 from .bridge_contracts import (
     canonical_sha256,
+    sha256_file,
     validate_content_hash,
     with_content_hash,
     write_immutable_json,
@@ -80,6 +81,18 @@ def _finite(value: Any, *, name: str) -> float:
     return result
 
 
+def _all_numeric_finite(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return all(_all_numeric_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_all_numeric_finite(item) for item in value)
+    if isinstance(value, (bool, str)) or value is None:
+        return True
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return math.isfinite(float(value))
+    return True
+
+
 def _softmax(logits: np.ndarray) -> np.ndarray:
     shifted = logits - np.max(logits, axis=1, keepdims=True)
     exponent = np.exp(shifted)
@@ -110,7 +123,10 @@ def _weighted_auc(scores: np.ndarray, positive: np.ndarray, weights: np.ndarray)
         cursor = stop
     tpr = np.asarray(tp, dtype=np.float64) / positive_weight
     fpr = np.asarray(fp, dtype=np.float64) / negative_weight
-    return float(np.trapz(tpr, fpr))
+    # Keep compatibility with both NumPy 1.x and 2.x without relying on the
+    # renamed trapz/trapezoid public symbol.
+    widths = fpr[1:] - fpr[:-1]
+    return float(np.sum(widths * (tpr[1:] + tpr[:-1]) * 0.5))
 
 
 def _background_rejection(
@@ -413,6 +429,13 @@ def build_consumer_replica_evaluation(
             class_order=class_order,
             sample_weights=weights,
         )
+    if not np.allclose(
+        np.asarray(logits_by_condition["f0"], dtype=np.float32),
+        np.asarray(logits_by_condition["rho_0.000"], dtype=np.float32),
+        atol=1.0e-6,
+        rtol=1.0e-5,
+    ):
+        raise AssertionError("rho=0 response logits do not reproduce the same consumer on f0")
     bridge_logits = np.asarray(logits_by_condition["rho_0.100"])
     f0_logits = np.asarray(logits_by_condition["f0"])
     bridge_correct = (np.argmax(bridge_logits, axis=1) == truth).astype(np.float64)
@@ -491,6 +514,127 @@ def build_consumer_replica_evaluation(
         f0_correct=f0_correct,
         event_ids=identities,
         sample_weights=weights,
+    )
+
+
+def evaluate_bound_consumer_conditions(
+    *,
+    run_id: str,
+    seed_id: int,
+    checkpoint_path: str | Path,
+    checkpoint_sha256: str,
+    recipe_sha256: str,
+    split_sha256: str,
+    ram_audit_sha256: str,
+    class_order: Sequence[str],
+    batches: Sequence[Mapping[str, Any]],
+    forward_fn: Any,
+    matched_compute_f0_accuracy: float,
+    bootstrap_seed: int = 4_180_101,
+    bootstrap_resamples: int = 4_000,
+    provenance_valid: bool = True,
+) -> ConsumerReplicaEvaluation:
+    """Run every response/control condition through one bound checkpoint.
+
+    ``forward_fn(batch, condition)`` must expose ``checkpoint_sha256``.  This
+    small adapter contract prevents a caller from accidentally evaluating the
+    target side with one consumer and controls with another.
+    """
+
+    expected_checkpoint = _sha256(checkpoint_sha256, name="checkpoint_sha256")
+    checkpoint = Path(checkpoint_path)
+    if checkpoint.is_symlink() or not checkpoint.is_file():
+        raise FileNotFoundError(f"consumer checkpoint is absent or unsafe: {checkpoint}")
+    if sha256_file(checkpoint) != expected_checkpoint:
+        raise ValueError("consumer evaluation checkpoint bytes changed")
+    if getattr(forward_fn, "checkpoint_sha256", None) != expected_checkpoint:
+        raise ValueError("consumer forward callback is not bound to the checkpoint hash")
+    required_conditions = (
+        "f0",
+        *REQUIRED_RESPONSE_KEYS,
+        *BRIDGE_CONTROLS,
+        *REQUIRED_DIAGNOSTIC_KEYS,
+    )
+    logit_parts: dict[str, list[np.ndarray]] = {
+        condition: [] for condition in required_conditions
+    }
+    label_parts: list[np.ndarray] = []
+    event_ids: list[str] = []
+    weight_parts: list[np.ndarray] = []
+    slice_parts: dict[str, list[np.ndarray]] = {}
+    try:
+        import torch
+
+        no_grad = torch.no_grad
+    except ImportError:  # pragma: no cover - production has torch
+        from contextlib import nullcontext
+
+        no_grad = nullcontext
+    for batch in batches:
+        if not {"labels", "event_ids"}.issubset(batch):
+            raise ValueError("same-consumer evaluation batch lacks labels/event_ids")
+        labels = np.asarray(batch["labels"], dtype=np.int64)
+        ids = [str(value) for value in batch["event_ids"]]
+        if labels.ndim != 1 or len(ids) != len(labels):
+            raise ValueError("same-consumer evaluation batch identities do not align")
+        weights = np.asarray(
+            batch.get("sample_weights", np.ones(len(labels), dtype=np.float64)),
+            dtype=np.float64,
+        )
+        if weights.shape != labels.shape:
+            raise ValueError("same-consumer evaluation batch weights do not align")
+        with no_grad():
+            for condition in required_conditions:
+                raw_output = forward_fn(batch, condition)
+                output = getattr(raw_output, "logits", raw_output)
+                try:
+                    if isinstance(output, torch.Tensor):
+                        output = output.detach().float().cpu().numpy()
+                except NameError:  # pragma: no cover
+                    pass
+                logits = np.asarray(output, dtype=np.float32)
+                if logits.shape != (len(labels), len(class_order)):
+                    raise ValueError(
+                        f"consumer condition {condition!r} logits do not align with its batch"
+                    )
+                logit_parts[condition].append(logits)
+        raw_slices = batch.get("slices", {})
+        if not isinstance(raw_slices, Mapping):
+            raise ValueError("same-consumer evaluation slices must be a mapping")
+        if slice_parts and set(raw_slices) != set(slice_parts):
+            raise ValueError("same-consumer evaluation slice inventory changed between batches")
+        for name, groups in raw_slices.items():
+            values = np.asarray(groups)
+            if values.shape != labels.shape:
+                raise ValueError(f"evaluation slice {name!r} does not align with its batch")
+            slice_parts.setdefault(str(name), []).append(values)
+        label_parts.append(labels)
+        event_ids.extend(ids)
+        weight_parts.append(weights)
+    if not label_parts:
+        raise ValueError("same-consumer evaluation received no batches")
+    return build_consumer_replica_evaluation(
+        run_id=run_id,
+        seed_id=seed_id,
+        checkpoint_sha256=expected_checkpoint,
+        recipe_sha256=recipe_sha256,
+        split_sha256=split_sha256,
+        ram_audit_sha256=ram_audit_sha256,
+        class_order=class_order,
+        labels=np.concatenate(label_parts),
+        event_ids=event_ids,
+        logits_by_condition={
+            condition: np.concatenate(parts, axis=0)
+            for condition, parts in logit_parts.items()
+        },
+        matched_compute_f0_accuracy=matched_compute_f0_accuracy,
+        sample_weights=np.concatenate(weight_parts),
+        slices={
+            name: np.concatenate(parts, axis=0) for name, parts in slice_parts.items()
+        },
+        bootstrap_seed=bootstrap_seed,
+        bootstrap_resamples=bootstrap_resamples,
+        provenance_valid=provenance_valid,
     )
 
 
@@ -768,12 +912,29 @@ def finalize_consumer_confirmation(
         raise ValueError("confirmation used a different consumer checkpoint")
     if str(confirmation.get("bridge_recipe_sha256")) != preconfirmation["bridge_recipe_sha256"]:
         raise ValueError("confirmation used a different bridge recipe")
-    f0_accuracy = _finite(confirmation.get("f0_accuracy"), name="confirmation f0_accuracy")
-    bridge_accuracy = _finite(
-        confirmation.get("bridge_0p10_accuracy"), name="confirmation bridge accuracy"
+    try:
+        raw_f0_accuracy = float(confirmation.get("f0_accuracy"))
+        raw_bridge_accuracy = float(confirmation.get("bridge_0p10_accuracy"))
+    except (TypeError, ValueError):
+        raw_f0_accuracy = math.nan
+        raw_bridge_accuracy = math.nan
+    all_metrics_finite = (
+        math.isfinite(raw_f0_accuracy)
+        and math.isfinite(raw_bridge_accuracy)
+        and _all_numeric_finite(confirmation)
     )
-    delta = bridge_accuracy - f0_accuracy
-    passed = delta >= 0 and bool(confirmation.get("provenance_valid"))
+    f0_accuracy = raw_f0_accuracy if all_metrics_finite else None
+    bridge_accuracy = raw_bridge_accuracy if all_metrics_finite else None
+    delta = (
+        raw_bridge_accuracy - raw_f0_accuracy
+        if all_metrics_finite
+        else None
+    )
+    passed = (
+        delta is not None
+        and delta >= 0
+        and bool(confirmation.get("provenance_valid"))
+    )
     record = {
         "split": "stack_val_consumer",
         "access_receipt_sha256": access_receipt["content_hash"],
@@ -781,8 +942,8 @@ def finalize_consumer_confirmation(
         "bridge_recipe_sha256": preconfirmation["bridge_recipe_sha256"],
         "f0_accuracy": f0_accuracy,
         "bridge_0p10_accuracy": bridge_accuracy,
-        "delta_same": float(delta),
-        "all_metrics_finite": True,
+        "delta_same": None if delta is None else float(delta),
+        "all_metrics_finite": bool(all_metrics_finite),
         "provenance_valid": bool(confirmation.get("provenance_valid")),
         "passed": bool(passed),
     }
@@ -875,6 +1036,11 @@ def build_teacher_binding(
         for key, value in expected_fields.items():
             if primary_selection.get(key) != value:
                 raise ValueError(f"primary binding disagrees with selection field {key!r}")
+        if (
+            primary_selection.get("recipe_aggregate_metrics", {}).get("content_hash")
+            != aggregate["content_hash"]
+        ):
+            raise ValueError("primary binding aggregate is not the locked selected aggregate")
         selection_hash = primary_selection["content_hash"]
     elif primary_selection is not None:
         raise ValueError("non-primary binding must not reuse the primary selection")
@@ -882,6 +1048,21 @@ def build_teacher_binding(
         raise ValueError("teacher aggregate does not identify a paired median replica")
     if str(aggregate.get("median_checkpoint_sha256")) != checkpoint:
         raise ValueError("teacher binding checkpoint is not the aggregate median")
+    if binding_kind == "all50" and str(run_id) != T10_ALL50_CLEAN:
+        raise ValueError("all50 binding must use T10_all50_clean")
+    if binding_kind in {"primary", "alternate"} and not bool(aggregate.get("eligible")):
+        raise ValueError("physical45 binding recipe did not pass aggregate validity")
+    checkpoint_file = Path(checkpoint_path)
+    if checkpoint_file.is_symlink() or not checkpoint_file.is_file():
+        raise FileNotFoundError(f"bound teacher checkpoint is absent or unsafe: {checkpoint_file}")
+    actual_checkpoint_sha256 = sha256_file(checkpoint_file)
+    if actual_checkpoint_sha256 != checkpoint:
+        raise ValueError("bound teacher checkpoint bytes disagree with checkpoint_sha256")
+    if binding_kind == "primary" and primary_selection.get("checkpoint_path") not in {
+        None,
+        str(checkpoint_path),
+    }:
+        raise ValueError("primary binding checkpoint path differs from the locked selection")
     artifact = with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_TEACHER_BINDING_CONTRACT,
@@ -893,6 +1074,8 @@ def build_teacher_binding(
             "selected_median_seed_id": int(aggregate["median_seed_id"]),
             "checkpoint_path": str(checkpoint_path),
             "checkpoint_sha256": checkpoint,
+            "checkpoint_size_bytes": int(checkpoint_file.stat().st_size),
+            "checkpoint_bytes_verified": True,
             "channel_policy": channel_policy,
             "bridge_recipe_sha256": bridge_recipe,
             "validation_manifest_hashes": dict(validation_manifest_hashes),
@@ -905,7 +1088,11 @@ def build_teacher_binding(
             "deployable": False,
         }
     )
-    validate_teacher_binding(artifact)
+    validate_teacher_binding(
+        artifact,
+        expected_kind=binding_kind,
+        primary_selection=primary_selection,
+    )
     return artifact
 
 
@@ -934,6 +1121,15 @@ def validate_teacher_binding(
         raise ValueError("teacher binding circularly references a cache artifact")
     if not bool(binding.get("checkpoint_refit_forbidden")):
         raise ValueError("teacher binding permits a post-cache refit")
+    checkpoint_path = Path(str(binding.get("checkpoint_path")))
+    if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
+        raise FileNotFoundError(f"bound teacher checkpoint is absent or unsafe: {checkpoint_path}")
+    if sha256_file(checkpoint_path) != binding.get("checkpoint_sha256"):
+        raise ValueError("bound teacher checkpoint bytes changed")
+    if int(binding.get("checkpoint_size_bytes", -1)) != int(checkpoint_path.stat().st_size):
+        raise ValueError("bound teacher checkpoint size changed")
+    if not bool(binding.get("checkpoint_bytes_verified")):
+        raise ValueError("teacher binding did not verify checkpoint bytes")
     if kind == "primary":
         if primary_selection is None:
             raise ValueError("validating a primary binding requires its selection")
@@ -974,6 +1170,7 @@ __all__ = [
     "slice_classification_metrics",
     "paired_bootstrap_difference",
     "build_consumer_replica_evaluation",
+    "evaluate_bound_consumer_conditions",
     "aggregate_consumer_evaluations",
     "select_bridge_consumer_preconfirmation",
     "finalize_consumer_confirmation",

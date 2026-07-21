@@ -382,6 +382,17 @@ def capture_training_lineage(
 ) -> TrainingLineageSnapshot:
     import torch
 
+    dropout_seed = int(dropout_stream_seed)
+    robust_seed = int(robust_sampler_seed)
+    if not 0 <= dropout_seed < 2**32 or not 0 <= robust_seed < 2**32:
+        raise ValueError("branch RNG seeds must fit unsigned 32-bit streams")
+    # The recorded continuation stream is the actual stream captured below,
+    # not merely a descriptive seed in the audit artifact.
+    random.seed(dropout_seed)
+    np.random.seed(dropout_seed)
+    torch.manual_seed(dropout_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(dropout_seed)
     payload = {
         "contract": PREDICTION_ANCHORED_BRANCH_LINEAGE_CONTRACT,
         "model_state_dict": deepcopy(model.state_dict()),
@@ -394,8 +405,8 @@ def capture_training_lineage(
         "cuda_rng_states": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
         "batch_plan_sha256": batch_plan.content_hash,
         "evaluation_steps": tuple(batch_plan.evaluation_steps),
-        "dropout_stream_seed": int(dropout_stream_seed),
-        "robust_sampler_seed": int(robust_sampler_seed),
+        "dropout_stream_seed": dropout_seed,
+        "robust_sampler_seed": robust_seed,
     }
     encoded = _state_bytes(payload)
     return TrainingLineageSnapshot(
@@ -407,8 +418,8 @@ def capture_training_lineage(
         amp_scaler_state_hash=None if amp_scaler is None else _state_hash(payload["amp_scaler_state_dict"]),
         batch_plan_sha256=batch_plan.content_hash,
         evaluation_steps=tuple(batch_plan.evaluation_steps),
-        dropout_stream_seed=int(dropout_stream_seed),
-        robust_sampler_seed=int(robust_sampler_seed),
+        dropout_stream_seed=dropout_seed,
+        robust_sampler_seed=robust_seed,
     )
 
 
@@ -924,7 +935,11 @@ def fit_bridge_corruption_scale(
         raise ValueError("corruption-scale fit has no valid particles")
     mean = sums / count
     std = np.sqrt(np.maximum(squares / count - mean * mean, 0.0))
-    if not parent_hashes or any(len(str(value)) != 64 for value in parent_hashes.values()):
+    if not parent_hashes or any(
+        len(str(value)) != 64
+        or any(character not in "0123456789abcdef" for character in str(value).lower())
+        for value in parent_hashes.values()
+    ):
         raise ValueError("corruption-scale fit requires SHA-256 parents")
     return with_content_hash(
         {
@@ -1082,6 +1097,8 @@ class RobustBridgeSampler:
             raise ValueError("robust sampler state seed mismatch")
         if not np.array_equal(np.asarray(state["corruption_scale"], dtype=np.float32), self.corruption_scale):
             raise ValueError("robust sampler corruption scale changed")
+        if state.get("config") != self.config.to_dict():
+            raise ValueError("robust sampler configuration changed across resume")
         self.rng.bit_generator.state = deepcopy(state["rng_state"])
         self._condition_buffer = [str(value) for value in state["condition_buffer"]]
         self.draw_counts = {str(key): int(value) for key, value in state["draw_counts"].items()}
@@ -1134,11 +1151,18 @@ def run_exact_step_training(
     amp_scaler: Any | None = None,
     evaluation_fn: Callable[[Any, int], Mapping[str, Any]] | None = None,
     grad_clip_norm: float = 0.0,
+    selection_metric: str | None = None,
+    selection_cross_entropy_metric: str = "cross_entropy",
+    selection_state: MutableMapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the exact predeclared batches/steps and evaluation opportunities."""
 
     import torch
 
+    if (selection_metric is None) != (selection_state is None):
+        raise ValueError("selection_metric and selection_state must be supplied together")
+    if selection_metric is not None and evaluation_fn is None:
+        raise ValueError("model_val_stop checkpoint selection requires evaluation_fn")
     model.train()
     initial_rng_hash = _state_hash(
         {
@@ -1152,6 +1176,7 @@ def run_exact_step_training(
     evaluations: list[dict[str, Any]] = []
     batch_hashes: list[str] = []
     evaluation_set = set(batch_plan.evaluation_steps)
+    best_score: tuple[float, float, int] | None = None
     for step_index, indices in enumerate(batch_plan.batches, start=1):
         batch = batch_resolver(indices)
         optimizer.zero_grad(set_to_none=True)
@@ -1186,11 +1211,30 @@ def run_exact_step_training(
                 with torch.no_grad():
                     metrics = dict(evaluation_fn(model, step_index))
                 evaluations.append({"step": step_index, "metrics": metrics})
+                if selection_metric is not None and selection_state is not None:
+                    primary = _metric(metrics, selection_metric)
+                    cross_entropy = _metric(metrics, selection_cross_entropy_metric)
+                    score = (primary, -cross_entropy, -step_index)
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        selection_state.clear()
+                        selection_state.update(
+                            {
+                                "step": int(step_index),
+                                "primary_metric": str(selection_metric),
+                                "primary_value": float(primary),
+                                "cross_entropy_metric": str(selection_cross_entropy_metric),
+                                "cross_entropy_value": float(cross_entropy),
+                                "model_state_dict": deepcopy(model.state_dict()),
+                            }
+                        )
                 model.train()
     if len(losses) != batch_plan.steps:
         raise AssertionError("consumer training did not consume its exact optimizer-step budget")
     if tuple(item["step"] for item in evaluations) != tuple(batch_plan.evaluation_steps):
         raise AssertionError("consumer training changed evaluation opportunities")
+    if selection_state is not None and "model_state_dict" not in selection_state:
+        raise AssertionError("no model_val_stop checkpoint was selected")
     final_rng_hash = _state_hash(
         {
             "python": random.getstate(),
@@ -1215,6 +1259,14 @@ def run_exact_step_training(
         "amp_scaler_state_sha256": None if amp_scaler is None else _state_hash(amp_scaler.state_dict()),
         "initial_global_rng_sha256": initial_rng_hash,
         "final_global_rng_sha256": final_rng_hash,
+        "selected_checkpoint_step": (
+            None if selection_state is None else int(selection_state["step"])
+        ),
+        "selected_checkpoint_model_state_sha256": (
+            None
+            if selection_state is None
+            else _state_hash(selection_state["model_state_dict"])
+        ),
     }
 
 
@@ -1231,10 +1283,14 @@ class ContinuationBranch:
     amp_scaler: Any | None = None
     evaluation_fn: Callable[[Any, int], Mapping[str, Any]] | None = None
     robust_sampler: RobustBridgeSampler | None = None
+    selection_metric: str = "accuracy"
+    selection_cross_entropy_metric: str = "cross_entropy"
 
     def __post_init__(self) -> None:
         if self.run_id not in TPRED_BRANCH_RUN_IDS:
             raise ValueError("continuation branch must be one of the four Tpred children")
+        if self.evaluation_fn is None:
+            raise ValueError("scientific continuation branches require model_val_stop evaluation")
         if self.run_id == T10_ROBUST and self.robust_sampler is None:
             raise ValueError("T10_robust must expose its separate recorded sampler state")
         if self.run_id != T10_ROBUST and self.robust_sampler is not None:
@@ -1269,6 +1325,11 @@ def run_tpred_continuation_branches(
     robust_sampler_state: dict[str, Any] | None = None
     for run_id in TPRED_BRANCH_RUN_IDS:
         branch = by_id[run_id]
+        if branch.robust_sampler is not None:
+            if int(branch.robust_sampler.seed) != int(snapshot.robust_sampler_seed):
+                raise ValueError("T10_robust sampler seed differs from the recorded branch stream")
+            if int(branch.robust_sampler.total_draws) != 0:
+                raise ValueError("T10_robust sampler must begin from its pristine recorded stream")
         restored = restore_training_lineage(
             snapshot,
             model=branch.model,
@@ -1278,6 +1339,7 @@ def run_tpred_continuation_branches(
             restore_rng=True,
         )
         restored_states[run_id] = restored
+        selected_state: dict[str, Any] = {}
         report = run_exact_step_training(
             model=branch.model,
             optimizer=branch.optimizer,
@@ -1288,6 +1350,9 @@ def run_tpred_continuation_branches(
             loss_fn=branch.loss_fn,
             evaluation_fn=branch.evaluation_fn,
             grad_clip_norm=grad_clip_norm,
+            selection_metric=branch.selection_metric,
+            selection_cross_entropy_metric=branch.selection_cross_entropy_metric,
+            selection_state=selected_state,
         )
         reports[run_id] = report
         model_config = getattr(branch.model, "config", None)
@@ -1300,7 +1365,9 @@ def run_tpred_continuation_branches(
                 if hasattr(model_config, "to_dict")
                 else deepcopy(model_config)
             ),
-            "model_state_dict": deepcopy(branch.model.state_dict()),
+            "model_state_dict": deepcopy(selected_state["model_state_dict"]),
+            "selected_model_val_stop_step": int(selected_state["step"]),
+            "epoch": int(selected_state["step"]),
             "parent_hashes": {"tpred_ram_snapshot_sha256": snapshot.content_hash},
             "channel_policy": consumer_run_specs()[run_id].channel_policy,
             "weights_only": True,
@@ -1361,6 +1428,8 @@ def run_a0_long_from_ram_lineage(
     evaluation_fn: Callable[[Any, int], Mapping[str, Any]] | None = None,
     grad_clip_norm: float = 0.0,
     seed_id: int,
+    selection_metric: str = "accuracy",
+    selection_cross_entropy_metric: str = "cross_entropy",
 ) -> dict[str, Any]:
     """Run A0_C250_LONG as an exact-budget continuation of A0_C250."""
 
@@ -1376,6 +1445,7 @@ def run_a0_long_from_ram_lineage(
         amp_scaler=amp_scaler,
         restore_rng=True,
     )
+    selected_state: dict[str, Any] = {}
     report = run_exact_step_training(
         model=model,
         optimizer=optimizer,
@@ -1386,6 +1456,9 @@ def run_a0_long_from_ram_lineage(
         loss_fn=loss_fn,
         evaluation_fn=evaluation_fn,
         grad_clip_norm=grad_clip_norm,
+        selection_metric=selection_metric,
+        selection_cross_entropy_metric=selection_cross_entropy_metric,
+        selection_state=selected_state,
     )
     return {
         "report": report,
@@ -1412,7 +1485,9 @@ def run_a0_long_from_ram_lineage(
                 if hasattr(getattr(model, "config", None), "to_dict")
                 else deepcopy(getattr(model, "config", None))
             ),
-            "model_state_dict": deepcopy(model.state_dict()),
+            "model_state_dict": deepcopy(selected_state["model_state_dict"]),
+            "selected_model_val_stop_step": int(selected_state["step"]),
+            "epoch": int(selected_state["step"]),
             "parent_hashes": {"a0_c250_ram_snapshot_sha256": snapshot.content_hash},
             "channel_policy": None,
             "weights_only": True,
@@ -1484,9 +1559,12 @@ def aggregate_paired_replicas(
         "gain_metric": gain_metric,
         "cross_entropy_metric": cross_entropy_metric,
         "primary_mean": float(primary.mean()),
+        "primary_sample_std": float(primary.std(ddof=1)),
         "primary_population_std": float(primary.std(ddof=0)),
         "gain_mean": None if gains is None else float(gains.mean()),
+        "gain_sample_std": None if gains is None else float(gains.std(ddof=1)),
         "cross_entropy_mean": float(cross_entropy.mean()),
+        "cross_entropy_sample_std": float(cross_entropy.std(ddof=1)),
         "ordering": [
             primary_metric,
             gain_metric or "constant_zero",
@@ -1577,6 +1655,7 @@ def publish_paired_replicas(
     checkpoint_path = root / "median_weights.pt"
     torch.save(retained, checkpoint_path)
     measured_bytes = int(checkpoint_path.stat().st_size)
+    checkpoint_sha256 = sha256_file(checkpoint_path)
     metrics_artifact = with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_CONSUMER_PUBLICATION_CONTRACT,
@@ -1585,6 +1664,7 @@ def publish_paired_replicas(
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "median_seed_id": median_seed,
             "retained_checkpoint": checkpoint_path.name,
+            "retained_checkpoint_sha256": checkpoint_sha256,
             "measured_state_bytes": measured_bytes,
             "nonmedian_weights_persisted": False,
             "optimizer_state_persisted": False,
@@ -1610,6 +1690,7 @@ def publish_paired_replicas(
         "aggregate": str(root / "aggregate_metrics.json"),
         "publication": str(root / "publication.json"),
         "measured_state_bytes": measured_bytes,
+        "checkpoint_sha256": checkpoint_sha256,
         "persistent_artifacts": names,
     }
 
