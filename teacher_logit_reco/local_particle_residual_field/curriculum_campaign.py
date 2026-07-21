@@ -392,7 +392,7 @@ def select_curriculum_consumer(
             for candidate in candidates
         ],
     }
-    save_json(output_path, artifact)
+    save_json(Path(output_path), artifact)
     return artifact
 
 
@@ -454,7 +454,7 @@ def select_best_curriculum_student(
         "runtime_inputs": "HLT_only",
         "deployable": True,
     }
-    save_json(output_path, artifact)
+    save_json(Path(output_path), artifact)
     return artifact
 
 

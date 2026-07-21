@@ -234,7 +234,8 @@ def test_step10_selector_is_model_val_primary_and_prefers_smooth_close_consumer(
     )
     output = tmp_path / "selected_consumer.json"
 
-    selected = select_curriculum_consumer((ofull, robust), output_path=output)
+    # CLI callers supply argparse strings, so exercise the real boundary here.
+    selected = select_curriculum_consumer((ofull, robust), output_path=str(output))
 
     assert selected["contract"] == LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_CONTRACT
     assert selected["selected_consumer_id"] == "Orobust_light"
@@ -276,10 +277,12 @@ def test_step10_best_p_selection_uses_model_val_then_close_tie_confirmation(tmp_
         _student_report("P7a", 0.7305, 0.735),
         _student_report("P7b", 0.7250, 0.750),
     )
-    selected = select_best_curriculum_student(reports, output_path=tmp_path / "selected_p.json")
+    output = tmp_path / "selected_p.json"
+    selected = select_best_curriculum_student(reports, output_path=str(output))
     assert selected["contract"] == LOCAL_RESIDUAL_FIELD_STUDENT_SELECTION_CONTRACT
     assert selected["selected_run_id"] == "P7a"
     assert selected["selection_primary_split"] == "model_val"
+    assert json.loads(output.read_text(encoding="utf-8"))["selected_run_id"] == "P7a"
 
 
 def test_step10_pilot_gate_accepts_student_or_fusion_uplift(tmp_path: Path) -> None:
