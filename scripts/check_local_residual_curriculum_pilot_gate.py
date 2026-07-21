@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         maximum_nonfinite_fraction=args.maximum_nonfinite_fraction,
     )
     if args.output:
-        save_json(args.output, result)
+        save_json(Path(args.output), result)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

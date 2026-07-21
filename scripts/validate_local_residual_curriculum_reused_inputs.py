@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         "expected_hlt_degradation_strength": args.expected_hlt_degradation_strength,
         "audits": audits,
     }
-    save_json(args.output, report)
+    save_json(Path(args.output), report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 

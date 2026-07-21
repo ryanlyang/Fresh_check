@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import scripts.check_local_residual_curriculum_pilot_gate as pilot_gate_script
+import scripts.validate_local_residual_curriculum_reused_inputs as reused_inputs_script
 from teacher_logit_reco.local_particle_residual_field.curriculum import (
     LOCAL_RESIDUAL_FIELD_SELECTED_CONSUMER_CONTRACT,
 )
@@ -160,6 +162,56 @@ def test_step10_reused_cache_audit_enforces_hashes_profile_and_strength() -> Non
     assert "--expected-hlt-degradation-strength" in runner
     for field in ("source_manifest_hash", "hlt_content_hash", "offline_content_hash", "target_content_hash"):
         assert field in script
+
+
+def test_step10_reused_cache_audit_writes_output_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "nested" / "reused_inputs_report.json"
+    monkeypatch.setattr(reused_inputs_script, "load_split_manifest", lambda path: {"path": str(path)})
+    monkeypatch.setattr(reused_inputs_script, "manifest_hash", lambda manifest: "manifest_hash")
+    monkeypatch.setattr(
+        reused_inputs_script,
+        "_audit_metadata_dir",
+        lambda *args, **kwargs: [{"path": "metadata.json", "content_hashes": {"hlt_content_hash": "hlt"}}],
+    )
+
+    result = reused_inputs_script.main(
+        [
+            "--manifest-path",
+            str(tmp_path / "manifest.json.gz"),
+            "--hlt-cache-dir",
+            str(tmp_path / "hlt_cache"),
+            "--expected-hlt-profile",
+            "fixed_hlt_v2_realistic",
+            "--expected-hlt-degradation-strength",
+            "2.5",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["ok"] is True
+
+
+def test_step10_pilot_gate_cli_writes_optional_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "nested" / "pilot_gate.json"
+    monkeypatch.setattr(
+        pilot_gate_script,
+        "evaluate_pilot_gate",
+        lambda *args, **kwargs: {"ok": True, "decision": "promote"},
+    )
+
+    result = pilot_gate_script.main(
+        [
+            "--report-dir",
+            str(tmp_path / "report"),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == {"decision": "promote", "ok": True}
 
 
 def test_step10_selector_is_model_val_primary_and_prefers_smooth_close_consumer(tmp_path: Path) -> None:

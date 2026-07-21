@@ -645,13 +645,45 @@ def project_n_body_phase_space(
     )
     rest = torch.cat((rest_energy[:, None], spatial), dim=-1)
     lab = _boost_rest_to_lab(rest, parent, parent_mass)
+    raw_residual_vector = parent - lab.sum(dim=0)
+    raw_residual = raw_residual_vector.abs().max()
+
+    # A large Lorentz boost can amplify float64 summation error enough to miss
+    # the component-space closure tolerance even though the rest-frame
+    # solution is valid.  Complete the numerical projection by assigning the
+    # residual to the highest-energy child.  This is differentiable with
+    # respect to the selected branch and minimizes its relative perturbation.
+    anchor = lab[:, 0].abs().argmax()
+    anchor_weight = torch.nn.functional.one_hot(anchor, num_classes=count).to(
+        device=lab.device, dtype=lab.dtype
+    )
+    lab = lab + anchor_weight[:, None] * raw_residual_vector[None, :]
     residual = (lab.sum(dim=0) - parent).abs().max()
-    if float(residual.detach().cpu()) > 5.0e-6 * max(float(parent[0].abs().detach().cpu()), 1.0):
-        raise RuntimeError("N-body phase-space projection failed parent closure")
+    rendered_masses = _invariant_mass_float64(lab)
+    mass_shell_residual = (rendered_masses - masses).abs().max()
+    parent_energy_scale = max(float(parent[0].abs().detach().cpu()), 1.0)
+    closure_tolerance = 5.0e-6 * parent_energy_scale
+    mass_shell_tolerance = 2.0e-5 * parent_energy_scale
+    if (
+        float(residual.detach().cpu()) > closure_tolerance
+        or float(mass_shell_residual.detach().cpu()) > mass_shell_tolerance
+    ):
+        raise RuntimeError(
+            "N-body phase-space projection failed guarded closure: "
+            f"corrected_residual={float(residual.detach().cpu()):.8e}, "
+            f"raw_residual={float(raw_residual.detach().cpu()):.8e}, "
+            f"mass_shell_residual={float(mass_shell_residual.detach().cpu()):.8e}, "
+            f"parent_energy={float(parent[0].detach().cpu()):.8e}, "
+            f"parent_mass={float(parent_mass.detach().cpu()):.8e}, "
+            f"particle_count={count}"
+        )
     return lab.to(output_dtype), {
         "branch": "massive_rest_frame",
         "scale": float(scale.detach().cpu()),
         "closure_max_residual": float(residual.detach().cpu()),
+        "raw_closure_max_residual": float(raw_residual.detach().cpu()),
+        "mass_shell_max_residual": float(mass_shell_residual.detach().cpu()),
+        "closure_anchor_index": int(anchor.detach().cpu()),
     }
 
 

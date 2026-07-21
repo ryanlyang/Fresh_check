@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from jetclass_fresh.jetclass_data import JetIdentity, RAW_TOKEN_DIM
+import teacher_logit_reco.adaptive_binary_pseudooffline.particle_renderer as particle_renderer_module
 from teacher_logit_reco.adaptive_binary_pseudooffline.binary_accounting import AccountingState
 from teacher_logit_reco.adaptive_binary_pseudooffline.hierarchy_alignment import (
     RendererTargetMap,
@@ -257,6 +258,36 @@ def test_low_energy_boosted_phase_space_does_not_drop_small_rest_energies():
     particles[:, 0].square().sum().backward()
     assert raw_spatial.grad is not None
     assert torch.isfinite(raw_spatial.grad).all()
+
+
+def test_n_body_projection_corrects_boost_roundoff_and_rechecks_mass_shell(monkeypatch):
+    original_boost = particle_renderer_module._boost_rest_to_lab
+
+    def biased_boost(rest_four_vector, parent_four_vector, parent_mass):
+        result = original_boost(rest_four_vector, parent_four_vector, parent_mass)
+        anchor = result[:, 0].abs().argmax()
+        bias = torch.zeros_like(result)
+        bias[anchor, 0] = 8.0e-5
+        return result + bias
+
+    monkeypatch.setattr(particle_renderer_module, "_boost_rest_to_lab", biased_boost)
+    parent = torch.tensor((20.0, 3.0, -2.0, 4.0), dtype=torch.float64)
+    masses = torch.tensor((0.14, 0.0, 0.01, 0.1), dtype=torch.float64)
+    generator = torch.Generator().manual_seed(51)
+    particles, diagnostics = project_n_body_phase_space(
+        parent,
+        torch.randn(4, 3, generator=generator, dtype=torch.float64),
+        masses,
+        torch.zeros(4, dtype=torch.float64),
+    )
+
+    torch.testing.assert_close(particles.sum(dim=0), parent, atol=2.0e-10, rtol=2.0e-10)
+    torch.testing.assert_close(
+        _invariant_mass_float64(particles), masses, atol=2.0e-8, rtol=2.0e-7
+    )
+    assert diagnostics["raw_closure_max_residual"] >= 7.9e-5
+    assert diagnostics["closure_max_residual"] < 2.0e-10
+    assert diagnostics["mass_shell_max_residual"] < 2.0e-8
 
 
 def test_massless_phase_space_branch_closes_without_a_fake_mass_floor():
