@@ -309,6 +309,7 @@ def build_matched_wrong_event_map(
     seed: int,
     bin_edges: Mapping[str, Sequence[float]] | None = None,
     logical_block_size: int = 8192,
+    source_block_ids: Sequence[int] | np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build the within-class/block deterministic derangement from Section 10."""
 
@@ -334,7 +335,14 @@ def build_matched_wrong_event_map(
     )
     permutation = np.full(n_events, -1, dtype=np.int64)
     merge_records: list[dict[str, Any]] = []
-    blocks = np.arange(n_events, dtype=np.int64) // block_size
+    if source_block_ids is None:
+        blocks = np.arange(n_events, dtype=np.int64) // block_size
+        block_policy = "compact_position_blocks"
+    else:
+        blocks = np.asarray(source_block_ids, dtype=np.int64)
+        if blocks.shape != (n_events,) or np.any(blocks < 0):
+            raise ValueError("source_block_ids must be nonnegative and align with events")
+        block_policy = "explicit_original_source_blocks"
     for block in np.unique(blocks):
         for label in np.unique(labels_array[blocks == block]):
             population = np.flatnonzero((blocks == block) & (labels_array == label))
@@ -378,6 +386,8 @@ def build_matched_wrong_event_map(
         "contract": MATCHED_WRONG_EVENT_MAP_CONTRACT,
         "seed": int(seed),
         "logical_block_size": block_size,
+        "block_policy": block_policy,
+        "source_block_ids_sha256": canonical_sha256(blocks.tolist()),
         "bin_edges": {key: [float(v) for v in values] for key, values in edges.items()},
         "event_order_sha256": canonical_sha256(identity_text),
         "permutation": permutation.tolist(),

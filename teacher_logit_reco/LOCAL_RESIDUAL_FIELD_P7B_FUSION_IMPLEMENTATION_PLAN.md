@@ -7,6 +7,23 @@ experiment. It starts from the completed first-stage pilot, preserves the
 existing `A0` and `P7b` checkpoints, and adds one genuinely independent HLT
 Particle Transformer.
 
+Implementation progress as of 2026-07-22:
+
+```text
+Step 1: complete - campaign contracts and locked candidate registry
+Step 2: complete - audited A0_seed1 recipe, CLIs, Slurm wrapper, and tests
+Step 3: complete - immutable source audit, oracle-free P7b load proof, and GPU gates
+Step 4: complete - stack-only A0_seed1 cache plus hash-validated A0/P7b reuse and binary metrics
+Step 5: complete - strict frozen ParT representation extraction, hash-attested caches, CLI, and Slurm wrapper
+Step 6: complete - shared metrics, frozen-threshold rejection, complementarity, uncertainty, and pilot reproduction audit
+Step 7: complete - leakage-safe L0-L5 fitting, locked validation grids, immutable stack-only artifacts, and tests
+Step 8: complete - frozen-feature R0-R4 heads, fusion-only checkpoints, gate/correction diagnostics, and tests
+Step 9: complete - matched candidate runner, three-seed stability union, two-role selector, and immutable selection bundle
+Step 10: complete - selection-only final evaluator, full hash/deployment gates, frozen thresholds, and paired uncertainty
+Step 11: complete - immutable reports, raw-metric gate, current-final provenance, and measured end-to-end runtime
+Step 12: complete - dependency-safe Slurm graph, hash-validated resume, and interrupted-artifact quarantine
+```
+
 The experiment compares:
 
 ```text
@@ -303,9 +320,10 @@ Representation candidates use screening seed `5101`. Form the union of the
 best two representation families from each group, then rerun every family in
 that union for both groups with seeds `5102` and `5103`. This keeps the stability
 budget symmetric even when the initial group rankings differ. Ranking uses mean
-stack-val performance over the three heads and records the variance. The final
-artifact averages the three cheap head outputs unless the selector chooses a
-deterministic linear method.
+stack-val performance over the three heads and records the variance for R1--R4.
+R0 is explicitly a fixed-seed linear head: seed `5101` drives selection and
+deployment, while seeds `5102` and `5103` are retained as stability diagnostics.
+The final R1--R4 artifact averages the three cheap head outputs.
 
 ### Predeclared champions
 
@@ -546,6 +564,10 @@ a pristine confirmation manifest is supplied.
 
 ### Step 11: Reporting
 
+**Implementation status: complete.** The immutable report writer, frozen
+F_method-recipe replay on F_seed, selection-gated runtime benchmark, provenance
+audit, and all eleven required Markdown/JSON/CSV outputs are implemented.
+
 Prefer:
 
 ```text
@@ -561,6 +583,11 @@ Every fusion row needs nonempty `run_id`, `group_id`, and `candidate_id`; do not
 repeat the previous `best tagger: None` presentation defect.
 
 ### Step 12: Slurm orchestration
+
+**Implementation status: complete.** Generic and Tigris submitters implement
+the supported stages, immutable-artifact resume, print-only mode, the frozen
+representation-stability union, and the complete `afterok` graph through
+selection, final evaluation, runtime measurement, and reporting.
 
 Add:
 

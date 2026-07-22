@@ -17,13 +17,16 @@ from teacher_logit_reco.local_particle_residual_field.bridge_consumer import (  
     PAIRED_SEED_IDS,
     STEP3_RUN_IDS,
     T10_CLEAN,
+    T10_ALL50_CLEAN,
     T10_ROBUST,
     ConsumerCampaignConfig,
     ReplicaResult,
     build_consumer_replica_manifest,
+    publish_evaluated_teacher_replica,
     publish_paired_replicas,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
+    load_hashed_json,
     write_immutable_json,
 )
 
@@ -42,7 +45,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default="", help="immutable plan JSON for plan mode")
     parser.add_argument("--output-dir", default="", help="empty publication directory for publish mode")
     parser.add_argument("--replica-dir", default="", help="directory containing seed checkpoint/metric pairs")
+    parser.add_argument(
+        "--selection-aggregate",
+        default="",
+        help="teacher model_val_select aggregate; retains its exact evaluated replica bytes",
+    )
     parser.add_argument("--run-id", choices=STEP3_RUN_IDS)
+    parser.add_argument("--reservations", default="", help="immutable campaign reservations")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -101,27 +110,41 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("publish mode cannot use --dry-run")
     if not args.run_id or not args.replica_dir or not args.output_dir:
         raise ValueError("publish mode requires --run-id, --replica-dir, and --output-dir")
-    replicas = _load_replicas(Path(args.replica_dir), args.run_id)
-    is_bridge_teacher = args.run_id in {T10_CLEAN, T10_ROBUST}
-    publication = publish_paired_replicas(
-        replicas,
-        output_dir=args.output_dir,
-        primary_metric=(
-            "model_val_select.bridge_accuracy"
-            if is_bridge_teacher
-            else "model_val_stop.accuracy"
-        ),
-        cross_entropy_metric=(
-            "model_val_select.bridge_cross_entropy"
-            if is_bridge_teacher
-            else "model_val_stop.cross_entropy"
-        ),
-        gain_metric=(
-            "model_val_select.same_consumer_bridge_gain"
-            if is_bridge_teacher
-            else None
-        ),
+    if not args.reservations:
+        raise ValueError("production publication requires --reservations")
+    reservations = load_hashed_json(
+        args.reservations, expected_contract="prediction_anchored_step9_campaign_reservations_v1"
     )
+    reservation_bytes = int(reservations["run_reservations_bytes"][args.run_id])
+    if reservation_bytes <= 0:
+        raise PermissionError("run has no positive persistent reservation")
+    replicas = _load_replicas(Path(args.replica_dir), args.run_id)
+    is_bridge_teacher = args.run_id in {T10_CLEAN, T10_ROBUST, T10_ALL50_CLEAN}
+    if is_bridge_teacher:
+        if not args.selection_aggregate:
+            raise ValueError("teacher publication requires --selection-aggregate")
+        aggregate_path = Path(args.selection_aggregate)
+        if aggregate_path.is_symlink() or not aggregate_path.is_file():
+            raise FileNotFoundError("teacher selection aggregate is absent or unsafe")
+        aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
+        publication = publish_evaluated_teacher_replica(
+            run_id=args.run_id,
+            selection_aggregate=aggregate,
+            replica_checkpoint_paths={
+                int(seed): Path(args.replica_dir) / f"{args.run_id}__seed{seed}.pt"
+                for seed in PAIRED_SEED_IDS
+            },
+            output_dir=args.output_dir,
+            reservation_bytes=reservation_bytes,
+        )
+    else:
+        if args.selection_aggregate:
+            raise ValueError("non-teacher publication cannot use --selection-aggregate")
+        publication = publish_paired_replicas(
+            replicas,
+            output_dir=args.output_dir,
+            reservation_bytes=reservation_bytes,
+        )
     print(json.dumps({"manifest_sha256": manifest["content_hash"], **publication}, indent=2, sort_keys=True))
     return 0
 

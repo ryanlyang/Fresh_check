@@ -174,6 +174,7 @@ from .curriculum_train import (
     train_local_residual_field_curriculum,
 )
 from .fusion import (
+    LOCAL_RESIDUAL_FIELD_BINARY_PROJECTION_PAIRS,
     LOCAL_RESIDUAL_FIELD_FUSION_CONTRACT,
     LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS,
     LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT,
@@ -190,6 +191,38 @@ from .fusion import (
     load_local_residual_field_tagger_from_checkpoint,
     run_local_residual_field_fusion,
 )
+from .fusion_campaign import *  # noqa: F401,F403
+from .fusion_campaign import __all__ as _P7B_FUSION_CAMPAIGN_EXPORTS
+from .fusion_seed_control import *  # noqa: F401,F403
+from .fusion_seed_control import __all__ as _P7B_FUSION_SEED_EXPORTS
+from .fusion_sources import *  # noqa: F401,F403
+from .fusion_sources import __all__ as _P7B_FUSION_SOURCE_EXPORTS
+from .fusion_features import *  # noqa: F401,F403
+from .fusion_features import __all__ as _P7B_FUSION_FEATURE_EXPORTS
+from .fusion_metrics import *  # noqa: F401,F403
+from .fusion_metrics import __all__ as _P7B_FUSION_METRIC_EXPORTS
+from .fusion_metric_audit import *  # noqa: F401,F403
+from .fusion_metric_audit import __all__ as _P7B_FUSION_METRIC_AUDIT_EXPORTS
+from .fusion_late import *  # noqa: F401,F403
+from .fusion_late import __all__ as _P7B_FUSION_LATE_EXPORTS
+from .fusion_models import *  # noqa: F401,F403
+from .fusion_models import __all__ as _P7B_FUSION_MODEL_EXPORTS
+from .fusion_train import *  # noqa: F401,F403
+from .fusion_train import __all__ as _P7B_FUSION_TRAIN_EXPORTS
+from .fusion_selection import *  # noqa: F401,F403
+from .fusion_selection import __all__ as _P7B_FUSION_SELECTION_EXPORTS
+from .fusion_final import *  # noqa: F401,F403
+from .fusion_final import __all__ as _P7B_FUSION_FINAL_EXPORTS
+from .fusion_replay import *  # noqa: F401,F403
+from .fusion_replay import __all__ as _P7B_FUSION_REPLAY_EXPORTS
+from .fusion_runtime import *  # noqa: F401,F403
+from .fusion_runtime import __all__ as _P7B_FUSION_RUNTIME_EXPORTS
+from .fusion_campaign_report import *  # noqa: F401,F403
+from .fusion_campaign_report import __all__ as _P7B_FUSION_REPORT_EXPORTS
+from .fusion_stability import *  # noqa: F401,F403
+from .fusion_stability import __all__ as _P7B_FUSION_STABILITY_EXPORTS
+from .fusion_bootstrap_audit import *  # noqa: F401,F403
+from .fusion_bootstrap_audit import __all__ as _P7B_FUSION_BOOTSTRAP_EXPORTS
 from .report import (
     DEFAULT_REQUIRED_FUSION_GROUPS,
     DEFAULT_REQUIRED_RECONSTRUCTOR_RUN_IDS,
@@ -306,7 +339,21 @@ from .bridge_execution import (
     validate_prediction_anchored_execution_spec,
     write_prediction_anchored_execution_spec,
 )
-from .bridge_numerical import run_streamed_r0_from_execution_spec
+from .bridge_numerical import (
+    prepare_bridge_inputs_from_execution_spec,
+    run_streamed_r0_from_execution_spec,
+)
+from .bridge_consumer_execution import (
+    PREDICTION_ANCHORED_CONSUMER_EXECUTION_CONTRACT,
+    confirm_selected_consumer_from_execution_spec,
+    run_consumer_campaign_from_execution_spec,
+)
+from .bridge_teacher_execution import (
+    PREDICTION_ANCHORED_TEACHER_BINDING_SET_CONTRACT,
+    PREDICTION_ANCHORED_TEACHER_CACHE_EXECUTION_CONTRACT,
+    bind_teacher_set_from_execution_spec,
+    cache_teacher_logits_from_execution_spec,
+)
 from .bridge_evaluation import (
     PRIMARY_TEACHER_NAMESPACE,
     ALL50_TEACHER_NAMESPACE,
@@ -524,6 +571,12 @@ from .bridge_campaign_policy import *  # noqa: F401,F403
 from .bridge_campaign_policy import __all__ as _STEP9_POLICY_EXPORTS
 from .bridge_production import *  # noqa: F401,F403
 from .bridge_production import __all__ as _STEP10_PRODUCTION_EXPORTS
+from .bridge_reconstruction_execution import *  # noqa: F401,F403
+from .bridge_reconstruction_execution import __all__ as _RECONSTRUCTION_EXECUTION_EXPORTS
+from .bridge_deployment_execution import *  # noqa: F401,F403
+from .bridge_deployment_execution import __all__ as _DEPLOYMENT_EXECUTION_EXPORTS
+from .bridge_report_execution import *  # noqa: F401,F403
+from .bridge_report_execution import __all__ as _REPORT_EXECUTION_EXPORTS
 from .bridge_consumer import (
     A0_C250,
     A0_C250_LONG,
@@ -578,6 +631,7 @@ from .bridge_consumer import (
     weights_only_payload,
     measure_weights_payload_bytes,
     publish_paired_replicas,
+    publish_evaluated_teacher_replica,
     record_step3_registry_measurements,
 )
 
@@ -736,6 +790,7 @@ __all__ = list(dict.fromkeys([
     "LOCAL_RESIDUAL_FIELD_FUSION_CONTRACT",
     "LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS",
     "LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT",
+    "LOCAL_RESIDUAL_FIELD_BINARY_PROJECTION_PAIRS",
     "LOCAL_RESIDUAL_FIELD_FUSION_MODE_SCALAR_WEIGHTED_LOGIT_MEAN",
     "LOCAL_RESIDUAL_FIELD_FUSION_MODE_UNIFORM_LOGIT_MEAN",
     "LOCAL_RESIDUAL_FIELD_FUSION_MODES",
@@ -849,6 +904,14 @@ __all__ = list(dict.fromkeys([
     "validate_prediction_anchored_execution_spec",
     "write_prediction_anchored_execution_spec",
     "run_streamed_r0_from_execution_spec",
+    "prepare_bridge_inputs_from_execution_spec",
+    "PREDICTION_ANCHORED_CONSUMER_EXECUTION_CONTRACT",
+    "confirm_selected_consumer_from_execution_spec",
+    "run_consumer_campaign_from_execution_spec",
+    "PREDICTION_ANCHORED_TEACHER_BINDING_SET_CONTRACT",
+    "PREDICTION_ANCHORED_TEACHER_CACHE_EXECUTION_CONTRACT",
+    "bind_teacher_set_from_execution_spec",
+    "cache_teacher_logits_from_execution_spec",
     "A0_C250",
     "A0_C250_LONG",
     "A0_S500",
@@ -902,6 +965,7 @@ __all__ = list(dict.fromkeys([
     "weights_only_payload",
     "measure_weights_payload_bytes",
     "publish_paired_replicas",
+    "publish_evaluated_teacher_replica",
     "record_step3_registry_measurements",
     "PRIMARY_TEACHER_NAMESPACE",
     "ALL50_TEACHER_NAMESPACE",
@@ -1022,4 +1086,4 @@ __all__ = list(dict.fromkeys([
     "particle_capacity_match",
     "measure_step6_registry_states",
     "tiny_train_reload_step6_model",
-] + list(_STEP7_HLG_EXPORTS) + list(_STEP8_SEMANTIC_EXPORTS) + list(_STEP9_POLICY_EXPORTS) + list(_STEP10_PRODUCTION_EXPORTS)))
+] + list(_STEP7_HLG_EXPORTS) + list(_STEP8_SEMANTIC_EXPORTS) + list(_STEP9_POLICY_EXPORTS) + list(_STEP10_PRODUCTION_EXPORTS) + list(_RECONSTRUCTION_EXECUTION_EXPORTS) + list(_DEPLOYMENT_EXECUTION_EXPORTS) + list(_REPORT_EXECUTION_EXPORTS) + list(_P7B_FUSION_CAMPAIGN_EXPORTS) + list(_P7B_FUSION_SEED_EXPORTS) + list(_P7B_FUSION_SOURCE_EXPORTS) + list(_P7B_FUSION_FEATURE_EXPORTS) + list(_P7B_FUSION_METRIC_EXPORTS) + list(_P7B_FUSION_METRIC_AUDIT_EXPORTS) + list(_P7B_FUSION_LATE_EXPORTS) + list(_P7B_FUSION_MODEL_EXPORTS) + list(_P7B_FUSION_TRAIN_EXPORTS) + list(_P7B_FUSION_SELECTION_EXPORTS) + list(_P7B_FUSION_FINAL_EXPORTS) + list(_P7B_FUSION_REPLAY_EXPORTS) + list(_P7B_FUSION_RUNTIME_EXPORTS) + list(_P7B_FUSION_REPORT_EXPORTS) + list(_P7B_FUSION_STABILITY_EXPORTS) + list(_P7B_FUSION_BOOTSTRAP_EXPORTS)))

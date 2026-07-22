@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan, measure, or publish the Step 5 prediction-anchored C0 sweep."""
+"""Plan/measure C0 or execute/publish a packed reconstruction sweep."""
 
 from __future__ import annotations
 
@@ -16,16 +16,22 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     C0_CANONICAL_RUN_IDS,
     C0CampaignConfig,
-    C0ReplicaResult,
+    RECONSTRUCTION_RUN_IDS,
+    ReconstructionCampaignConfig,
+    ReconstructionReplicaResult,
     build_c0_campaign_manifest,
     measure_c0_registry_states,
-    publish_c0_paired_replicas,
+    publish_reconstruction_paired_replicas,
+    publish_l0_early_replay_manifest,
+    run_reconstruction_pack_from_execution_spec,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (  # noqa: E402
     PAIRED_SEED_IDS,
     validate_campaign_registry,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
+    load_hashed_json,
+    sha256_file,
     validate_content_hash,
     write_immutable_json,
 )
@@ -33,13 +39,39 @@ from teacher_logit_reco.local_particle_residual_field.bridge_contracts import ( 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("plan", "measure", "publish"), default="plan")
+    parser.add_argument(
+        "--mode",
+        choices=(
+            "plan",
+            "measure",
+            "execute",
+            "publish",
+            "publish-l0-early",
+            "publish-l0-postteacher",
+        ),
+        default="plan",
+    )
     parser.add_argument("--scaler", default="", help="immutable physical45 scaler JSON")
     parser.add_argument("--registry", default="", help="campaign registry JSON for measure mode")
     parser.add_argument("--output", default="", help="immutable plan JSON")
     parser.add_argument("--output-dir", default="", help="empty measure/publication directory")
     parser.add_argument("--replica-dir", default="", help="seed checkpoint/metric directory")
-    parser.add_argument("--run-id", choices=C0_CANONICAL_RUN_IDS)
+    parser.add_argument("--execution-report", default="", help="immutable RAM/storage telemetry report")
+    parser.add_argument("--run-id", choices=RECONSTRUCTION_RUN_IDS)
+    parser.add_argument("--reservations", default="", help="immutable campaign reservations")
+    parser.add_argument("--execution-spec", default="")
+    parser.add_argument("--graph", default="")
+    parser.add_argument("--node-id", default="")
+    parser.add_argument("--artifact-root", default="")
+    parser.add_argument("--r0-checkpoint", default="")
+    parser.add_argument("--r0-registration", default="")
+    parser.add_argument("--all50-scaler", default="")
+    parser.add_argument("--absolute-scaler", default="")
+    parser.add_argument("--deployed-resource-reference", default="")
+    parser.add_argument("--ram-root", default="")
+    parser.add_argument("--allocation-id", default="")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--shard-size", type=int, default=8192)
     parser.add_argument("--field-warmup-steps", type=int, default=2_000)
     parser.add_argument("--phase2-epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -53,6 +85,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--test-capacity-bytes", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--allow-unverified-test-root", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -83,25 +117,26 @@ def _campaign_config(args: argparse.Namespace) -> C0CampaignConfig:
     )
 
 
-def _load_replicas(root: Path, run_id: str) -> list[C0ReplicaResult]:
+def _load_replicas(root: Path, run_id: str) -> list[ReconstructionReplicaResult]:
     import torch
 
-    replicas: list[C0ReplicaResult] = []
+    replicas: list[ReconstructionReplicaResult] = []
     for seed in PAIRED_SEED_IDS:
         checkpoint = root / f"{run_id}__seed{seed}.pt"
         metrics_path = root / f"{run_id}__seed{seed}.metrics.json"
         if checkpoint.is_symlink() or not checkpoint.is_file():
-            raise FileNotFoundError(f"missing/unsafe C0 replica checkpoint: {checkpoint}")
+            raise FileNotFoundError(f"missing/unsafe reconstruction replica checkpoint: {checkpoint}")
         if metrics_path.is_symlink() or not metrics_path.is_file():
-            raise FileNotFoundError(f"missing/unsafe C0 replica metrics: {metrics_path}")
+            raise FileNotFoundError(f"missing/unsafe reconstruction replica metrics: {metrics_path}")
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         replicas.append(
-            C0ReplicaResult(
+            ReconstructionReplicaResult(
                 run_id=run_id,
                 seed_id=int(seed),
                 metrics=metrics,
                 weights_payload=payload,
+                source_checkpoint_sha256=sha256_file(checkpoint),
             )
         )
     return replicas
@@ -109,15 +144,89 @@ def _load_replicas(root: Path, run_id: str) -> list[C0ReplicaResult]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.mode == "publish":
+    if args.mode in {"publish", "publish-l0-early", "publish-l0-postteacher"}:
         if args.dry_run:
             raise ValueError("publish mode cannot use --dry-run")
         if not args.run_id or not args.replica_dir or not args.output_dir:
             raise ValueError("publish mode requires --run-id, --replica-dir, and --output-dir")
-        result = publish_c0_paired_replicas(
-            _load_replicas(Path(args.replica_dir), args.run_id),
-            output_dir=args.output_dir,
+        if not args.reservations:
+            raise ValueError("production publication requires --reservations")
+        reservations = load_hashed_json(
+            args.reservations,
+            expected_contract="prediction_anchored_step9_campaign_reservations_v1",
         )
+        reservation_bytes = int(reservations["run_reservations_bytes"][args.run_id])
+        if reservation_bytes <= 0:
+            raise PermissionError("run has no positive persistent reservation")
+        replicas = _load_replicas(Path(args.replica_dir), args.run_id)
+        if args.mode == "publish-l0-early":
+            result = publish_l0_early_replay_manifest(
+                replicas, output_dir=args.output_dir
+            )
+        else:
+            result = publish_reconstruction_paired_replicas(
+                replicas,
+                output_dir=args.output_dir,
+                l0_postteacher=args.mode == "publish-l0-postteacher",
+                reservation_bytes=reservation_bytes,
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
+    if args.mode == "execute":
+        required = {
+            "--execution-spec": args.execution_spec,
+            "--graph": args.graph,
+            "--node-id": args.node_id,
+            "--artifact-root": args.artifact_root,
+            "--r0-checkpoint": args.r0_checkpoint,
+            "--r0-registration": args.r0_registration,
+            "--scaler": args.scaler,
+            "--all50-scaler": args.all50_scaler,
+            "--replica-dir": args.replica_dir,
+            "--ram-root": args.ram_root,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError("execute mode is missing " + ", ".join(missing))
+        if args.dry_run:
+            raise ValueError("execute mode dry-run is handled by the immutable graph planner")
+        result = run_reconstruction_pack_from_execution_spec(
+            args.execution_spec,
+            graph_path=args.graph,
+            node_id=args.node_id,
+            artifact_root=args.artifact_root,
+            r0_checkpoint_path=args.r0_checkpoint,
+            r0_registration_path=args.r0_registration,
+            physical45_scaler_path=args.scaler,
+            all50_scaler_path=args.all50_scaler,
+            absolute_scaler_path=args.absolute_scaler or None,
+            deployed_reference_path=args.deployed_resource_reference or None,
+            replica_output_dir=args.replica_dir,
+            ram_root=args.ram_root,
+            allocation_id=args.allocation_id or None,
+            device=args.device,
+            shard_size=int(args.shard_size),
+            config=ReconstructionCampaignConfig(
+                field_warmup_steps=args.field_warmup_steps,
+                phase2_epochs=args.phase2_epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                grad_clip_norm=args.grad_clip_norm,
+                kd_temperature=args.kd_temperature,
+                early_stop_patience=args.early_stop_patience,
+                c0_model_width=args.model_width,
+                dropout=args.dropout,
+            ),
+            capacity_bytes=(int(args.test_capacity_bytes) or None),
+            allow_unverified_test_root=bool(args.allow_unverified_test_root),
+        )
+        if args.execution_report:
+            result = dict(result)
+            result["execution_report_publication"] = write_immutable_json(
+                args.execution_report, result
+            )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 

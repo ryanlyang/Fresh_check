@@ -147,7 +147,7 @@ def _teacher_group(row: Mapping[str, Any]) -> str:
     if family == "all50":
         return "all50_selected_bridge_teacher"
     if family == "alternate_teacher":
-        return "alternate_selected_bridge_teacher"
+        return "physical45_alternate_bridge_teacher"
     if run_id == "D10_N3_nonprivileged_teacher_kd":
         return "physical45_selected_teacher_on_f0_control"
     return "physical45_selected_bridge_teacher"
@@ -184,6 +184,7 @@ def build_prediction_anchored_tigris_graph(
     registry: Mapping[str, Any],
     *,
     reservations: Mapping[str, Any],
+    execution_spec: Mapping[str, Any],
     artifact_root: str,
     pack_size: int = MAX_CONFIGS_PER_PACK,
 ) -> dict[str, Any]:
@@ -193,8 +194,21 @@ def build_prediction_anchored_tigris_graph(
     validate_content_hash(
         reservations, expected_contract=PREDICTION_ANCHORED_CAMPAIGN_RESERVATION_CONTRACT
     )
+    validate_content_hash(
+        execution_spec, expected_contract="prediction_anchored_execution_spec_v1"
+    )
     if reservations.get("registry_sha256") != registry["content_hash"]:
         raise ValueError("Step 10 reservations are bound to another registry")
+    child_manifest = execution_spec.get("child_manifest", {})
+    parent_manifest = execution_spec.get("parent_manifest", {})
+    expected_bindings = {
+        "execution_spec_sha256": execution_spec["content_hash"],
+        "child_manifest_sha256": child_manifest.get("content_hash"),
+        "parent_manifest_file_sha256": parent_manifest.get("sha256"),
+    }
+    for name, expected in expected_bindings.items():
+        if reservations.get(name) != expected:
+            raise ValueError(f"Step 10 reservations have a different {name}")
     if not str(artifact_root).strip():
         raise ValueError("production graph requires an explicit artifact root")
     if int(pack_size) <= 0 or int(pack_size) > 4:
@@ -347,7 +361,7 @@ def build_prediction_anchored_tigris_graph(
             )
         )
     if bool(registry["alternate_teacher_valid"]):
-        namespace = "alternate_selected_bridge_teacher"
+        namespace = "physical45_alternate_bridge_teacher"
         cache_nodes.append("b5_cache_alternate")
         nodes.append(
             _node(
@@ -371,6 +385,21 @@ def build_prediction_anchored_tigris_graph(
             resources=cpu,
             shared_source_group="teacher_release_gate",
             requires_selected_consumer=True,
+        )
+    )
+    nodes.append(
+        _node(
+            node_id="b6_l0_postteacher_eval_paired3",
+            stage="B6",
+            runner="run_train_prediction_anchored_bridge_reconstructor.sh",
+            arguments=("b6_l0_postteacher_eval_paired3",),
+            dependencies=("b3_l0_paired3", "b5_release_postteacher"),
+            configuration_run_ids=(),
+            resources=gpu,
+            shared_source_group="l0_postteacher_common_model_val_select",
+            teacher_namespace="physical45_selected_bridge_teacher",
+            requires_selected_consumer=True,
+            persistent_reservation_bytes=0,
         )
     )
 
@@ -420,7 +449,9 @@ def build_prediction_anchored_tigris_graph(
                 )
             )
 
-    selection_dependencies = sorted(b6_nodes + ["b3_l0_paired3"])
+    selection_dependencies = sorted(
+        b6_nodes + ["b6_l0_postteacher_eval_paired3"]
+    )
     nodes.append(
         _node(
             node_id="b6_aggregate_select_deployable",
@@ -494,6 +525,7 @@ def build_prediction_anchored_tigris_graph(
             "profile": PAIRED_PROFILE,
             "registry_sha256": registry["content_hash"],
             "reservations_sha256": reservations["content_hash"],
+            **expected_bindings,
             "artifact_root": str(Path(artifact_root)),
             "account": TIGRIS_ACCOUNT,
             "partition": TIGRIS_PARTITION,
@@ -524,13 +556,25 @@ def build_prediction_anchored_tigris_graph(
             "node_reservations_total_bytes": reserved_by_nodes,
             "node_reservations_reconciled": True,
             "production_submission_ready": True,
-            "actual_submission_requires_configured_scientific_executors": True,
+            "actual_submission_requires_configured_scientific_executors": False,
+            "repository_owned_deployable_export": True,
+            "repository_owned_hlt_only_final_test": True,
         }
     )
 
 
 def validate_prediction_anchored_tigris_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
     validate_content_hash(graph, expected_contract=PREDICTION_ANCHORED_PRODUCTION_GRAPH_CONTRACT)
+    for name in (
+        "registry_sha256",
+        "reservations_sha256",
+        "execution_spec_sha256",
+        "child_manifest_sha256",
+        "parent_manifest_file_sha256",
+    ):
+        value = str(graph.get(name, ""))
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"production graph has an invalid {name}")
     if graph.get("account") != TIGRIS_ACCOUNT or graph.get("partition") != TIGRIS_PARTITION:
         raise ValueError("production graph changed its Tigris account/partition")
     if not bool(graph.get("python_no_user_site")):
@@ -754,10 +798,10 @@ def build_allocation_launch_manifest(
     worker_count = max(gpu_workers, 1)
     commands = {
         "B0": "scripts/run_prediction_anchored_bridge_campaign.py",
-        "B1": "scripts/register_prediction_anchored_r0.py",
-        "B2": "scripts/audit_prediction_anchored_bridge_inputs.py",
+        "B1": "scripts/train_prediction_anchored_r0.py",
+        "B2": "scripts/prepare_prediction_anchored_bridge_inputs.py",
         "B2_recipe": "scripts/write_prediction_anchored_bridge_recipe.py",
-        "B3_consumer": "scripts/train_prediction_anchored_bridge_consumer.py",
+        "B3_consumer": "scripts/execute_prediction_anchored_bridge_consumers.py",
         "B3_reconstructor": "scripts/train_prediction_anchored_bridge_reconstructor.py",
         "B4": "scripts/select_prediction_anchored_bridge_consumer.py",
         "B5_cache": "scripts/cache_prediction_anchored_bridge_logits.py",

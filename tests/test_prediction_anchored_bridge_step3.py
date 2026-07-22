@@ -260,6 +260,38 @@ def test_robust_sampler_exact_cycle_frequencies_and_pass_through_channels():
         consumer_fields_for_run("T10_robust", f0, truth, mask)
 
 
+def test_consumer_checkpoint_selection_uses_accuracy_pool_then_ce_then_earliest():
+    model = torch.nn.Linear(1, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    plan = build_continuation_batch_plan(
+        seed_id=101,
+        n_examples=3,
+        batch_size=1,
+        steps=3,
+        evaluation_steps=(1, 2, 3),
+    )
+    values = {
+        1: {"accuracy": 0.80000, "cross_entropy": 0.20},
+        2: {"accuracy": 0.80005, "cross_entropy": 0.30},
+        3: {"accuracy": 0.79999, "cross_entropy": 0.10},
+    }
+    selected = {}
+    report = run_exact_step_training(
+        model=model,
+        optimizer=optimizer,
+        batch_plan=plan,
+        batch_resolver=lambda indices: torch.as_tensor(indices, dtype=torch.float32).view(-1, 1),
+        loss_fn=lambda current, batch, step: current(batch).square().mean(),
+        evaluation_fn=lambda current, step: values[step],
+        selection_metric="accuracy",
+        selection_state=selected,
+    )
+    assert selected["best_primary_value"] == pytest.approx(0.80005)
+    assert selected["step"] == 3
+    assert selected["cross_entropy_value"] == pytest.approx(0.10)
+    assert report["selected_checkpoint_step"] == 3
+
+
 def test_exact_step_engine_and_weights_only_ordered_median_publication(tmp_path):
     torch.manual_seed(3)
     x = torch.randn(12, 2)

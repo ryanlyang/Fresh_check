@@ -1403,6 +1403,42 @@ def build_bridge_quantile_reference(
     )
 
 
+def build_bridge_quantile_reference_from_standardized_corrections(
+    standardized_corrections: np.ndarray,
+    sigma_delta: Sequence[float],
+    *,
+    stack_train_distill_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Build the same compact reference from RAM-only valid-particle values."""
+
+    if not _valid_sha256(stack_train_distill_manifest_sha256):
+        raise ValueError("quantile reference requires stack_train_distill manifest SHA-256")
+    values = np.asarray(standardized_corrections, dtype=np.float64)
+    sigma = np.asarray(sigma_delta, dtype=np.float64)[:45]
+    if values.ndim != 2 or values.shape[1] != 45 or values.shape[0] == 0:
+        raise ValueError("standardized correction reference must have shape [N,45]")
+    if not np.isfinite(values).all() or sigma.shape != (45,) or np.any(sigma <= 0):
+        raise ValueError("standardized correction reference is non-finite or has invalid scales")
+    levels = np.linspace(0.0, 1.0, QUANTILE_COUNT, dtype=np.float64)
+    quantiles = np.quantile(values, levels, axis=0).astype(np.float64)
+    return with_content_hash(
+        {
+            "contract": PREDICTION_ANCHORED_QUANTILE_REFERENCE_CONTRACT,
+            "fit_split": "stack_train_distill",
+            "stack_train_distill_manifest_sha256": stack_train_distill_manifest_sha256,
+            "quantile_count": QUANTILE_COUNT,
+            "physical_channel_count": 45,
+            "dtype": "float64",
+            "quantile_level_convention": "linspace_0_1_inclusive_1001",
+            "quantiles": quantiles.tolist(),
+            "sigma_delta_sha256": canonical_sha256(sigma.tolist()),
+            "valid_particle_count": int(values.shape[0]),
+            "dense_training_field_persisted": False,
+            "persistent_array_shape": [QUANTILE_COUNT, 45],
+        }
+    )
+
+
 def bridge_distribution_distance(
     reference: Mapping[str, Any],
     f_hat: np.ndarray,
@@ -2056,6 +2092,7 @@ __all__ = [
     "run_small_field_perturbation_audit",
     "correction_bridge_alignment",
     "build_bridge_quantile_reference",
+    "build_bridge_quantile_reference_from_standardized_corrections",
     "bridge_distribution_distance",
     "evaluate_reliability_only_response",
     "compute_gain_and_recovery",

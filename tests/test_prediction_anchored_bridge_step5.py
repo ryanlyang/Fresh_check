@@ -200,7 +200,7 @@ def test_c0_zero_initialization_numerical_spaces_and_five_channel_pass_through()
         )
     bad_f0 = torch.as_tensor(batch["f0"]).clone()
     padding = ~torch.as_tensor(batch["mask"])
-    bad_f0[padding, 0] = 1.0
+    bad_f0[..., 0][padding] = 1.0
     with pytest.raises(ValueError, match="padded"):
         model(
             torch.as_tensor(batch["hlt_tokens"]),

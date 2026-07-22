@@ -16,6 +16,7 @@ import json
 import math
 from pathlib import Path
 import random
+import shutil
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 import numpy as np
@@ -1176,7 +1177,9 @@ def run_exact_step_training(
     evaluations: list[dict[str, Any]] = []
     batch_hashes: list[str] = []
     evaluation_set = set(batch_plan.evaluation_steps)
-    best_score: tuple[float, float, int] | None = None
+    best_primary: float | None = None
+    primary_tolerance = 0.0001
+    cross_entropy_tolerance = 1.0e-6
     for step_index, indices in enumerate(batch_plan.batches, start=1):
         batch = batch_resolver(indices)
         optimizer.zero_grad(set_to_none=True)
@@ -1214,9 +1217,31 @@ def run_exact_step_training(
                 if selection_metric is not None and selection_state is not None:
                     primary = _metric(metrics, selection_metric)
                     cross_entropy = _metric(metrics, selection_cross_entropy_metric)
-                    score = (primary, -cross_entropy, -step_index)
-                    if best_score is None or score > best_score:
-                        best_score = score
+                    best_primary = (
+                        primary if best_primary is None else max(best_primary, primary)
+                    )
+                    current_primary = selection_state.get("primary_value")
+                    current_ce = selection_state.get("cross_entropy_value")
+                    current_step = selection_state.get("step")
+                    current_in_pool = (
+                        current_primary is not None
+                        and best_primary - float(current_primary) <= primary_tolerance
+                    )
+                    candidate_in_pool = (
+                        best_primary - float(primary) <= primary_tolerance
+                    )
+                    choose_candidate = candidate_in_pool and not current_in_pool
+                    if candidate_in_pool and current_in_pool:
+                        assert current_ce is not None and current_step is not None
+                        choose_candidate = (
+                            cross_entropy < float(current_ce) - cross_entropy_tolerance
+                            or (
+                                abs(cross_entropy - float(current_ce))
+                                <= cross_entropy_tolerance
+                                and step_index < int(current_step)
+                            )
+                        )
+                    if choose_candidate:
                         selection_state.clear()
                         selection_state.update(
                             {
@@ -1225,6 +1250,8 @@ def run_exact_step_training(
                                 "primary_value": float(primary),
                                 "cross_entropy_metric": str(selection_cross_entropy_metric),
                                 "cross_entropy_value": float(cross_entropy),
+                                "accuracy_pool_tolerance": primary_tolerance,
+                                "cross_entropy_tolerance": cross_entropy_tolerance,
                                 "model_state_dict": deepcopy(model.state_dict()),
                             }
                         )
@@ -1235,6 +1262,8 @@ def run_exact_step_training(
         raise AssertionError("consumer training changed evaluation opportunities")
     if selection_state is not None and "model_state_dict" not in selection_state:
         raise AssertionError("no model_val_stop checkpoint was selected")
+    if selection_state is not None:
+        selection_state["best_primary_value"] = float(best_primary)
     final_rng_hash = _state_hash(
         {
             "python": random.getstate(),
@@ -1634,6 +1663,7 @@ def publish_paired_replicas(
     primary_metric: str = "model_val_stop.accuracy",
     cross_entropy_metric: str = "model_val_stop.cross_entropy",
     gain_metric: str | None = None,
+    reservation_bytes: int | None = None,
 ) -> dict[str, Any]:
     import torch
 
@@ -1646,14 +1676,18 @@ def publish_paired_replicas(
     root = Path(output_dir)
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"consumer publication directory is not empty: {root}")
-    root.mkdir(parents=True, exist_ok=True)
     median_seed = int(aggregate["median_seed_id"])
     median = next(item for item in replicas if int(item.seed_id) == median_seed)
     retained = weights_only_payload(median.weights_payload)
     retained["run_id"] = median.run_id
     retained["seed_id"] = median_seed
+    encoded_checkpoint = _state_bytes(retained)
+    if reservation_bytes is not None and len(encoded_checkpoint) > int(reservation_bytes):
+        raise PermissionError("consumer checkpoint exceeds its predeclared run reservation")
+    root.mkdir(parents=True, exist_ok=True)
     checkpoint_path = root / "median_weights.pt"
-    torch.save(retained, checkpoint_path)
+    with checkpoint_path.open("xb") as handle:
+        handle.write(encoded_checkpoint)
     measured_bytes = int(checkpoint_path.stat().st_size)
     checkpoint_sha256 = sha256_file(checkpoint_path)
     metrics_artifact = with_content_hash(
@@ -1666,6 +1700,8 @@ def publish_paired_replicas(
             "retained_checkpoint": checkpoint_path.name,
             "retained_checkpoint_sha256": checkpoint_sha256,
             "measured_state_bytes": measured_bytes,
+            "reserved_bytes": reservation_bytes,
+            "reservation_enforced_before_publication": reservation_bytes is not None,
             "nonmedian_weights_persisted": False,
             "optimizer_state_persisted": False,
             "scheduler_state_persisted": False,
@@ -1691,6 +1727,116 @@ def publish_paired_replicas(
         "publication": str(root / "publication.json"),
         "measured_state_bytes": measured_bytes,
         "checkpoint_sha256": checkpoint_sha256,
+        "persistent_artifacts": names,
+    }
+
+
+def publish_evaluated_teacher_replica(
+    *,
+    run_id: str,
+    selection_aggregate: Mapping[str, Any],
+    replica_checkpoint_paths: Mapping[int, str | Path],
+    output_dir: str | Path,
+    reservation_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Retain the exact evaluation-selected teacher checkpoint bytes.
+
+    Teacher selection evidence records the SHA-256 of the temporary replica
+    that was actually forwarded on ``model_val_select``.  Re-serializing that
+    payload under ``median_weights.pt`` would produce a different byte hash and
+    break the later selection -> binding -> cache identity chain.  This
+    publisher therefore copies the selected file byte-for-byte and rejects any
+    disagreement with the immutable evaluation aggregate.
+    """
+
+    from .bridge_evaluation import (
+        PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
+    )
+    from .bridge_contracts import validate_content_hash
+
+    validate_content_hash(
+        selection_aggregate,
+        expected_contract=PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
+    )
+    if str(selection_aggregate.get("run_id")) != str(run_id):
+        raise ValueError("teacher selection aggregate belongs to another run")
+    if run_id not in {T10_CLEAN, T10_ROBUST, T10_ALL50_CLEAN}:
+        raise ValueError("evaluated teacher publication requires a T10 recipe")
+    seed = int(selection_aggregate["median_seed_id"])
+    if seed not in PAIRED_SEED_IDS or set(int(value) for value in replica_checkpoint_paths) != set(
+        PAIRED_SEED_IDS
+    ):
+        raise ValueError("teacher publication requires all paired replica paths")
+    source = Path(replica_checkpoint_paths[seed])
+    if source.is_symlink() or not source.is_file():
+        raise FileNotFoundError(f"selected teacher replica is absent or unsafe: {source}")
+    expected_sha = str(selection_aggregate["median_checkpoint_sha256"])
+    if sha256_file(source) != expected_sha:
+        raise ValueError("selected teacher replica bytes disagree with evaluation evidence")
+    measured_source_bytes = int(source.stat().st_size)
+    if reservation_bytes is not None and measured_source_bytes > int(reservation_bytes):
+        raise PermissionError("evaluated teacher checkpoint exceeds its predeclared run reservation")
+
+    root = Path(output_dir)
+    if root.exists() and any(root.iterdir()):
+        raise FileExistsError(f"consumer publication directory is not empty: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = root / "median_weights.pt"
+    with source.open("rb") as reader, checkpoint_path.open("xb") as writer:
+        shutil.copyfileobj(reader, writer, length=8 * 1024 * 1024)
+    if sha256_file(checkpoint_path) != expected_sha:
+        raise RuntimeError("byte-exact teacher checkpoint publication changed its SHA-256")
+
+    import torch
+
+    loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(loaded, Mapping) or "model_state_dict" not in loaded:
+        raise ValueError("published teacher checkpoint is not a weights payload")
+    forbidden = {
+        "optimizer_state_dict", "scheduler_state_dict", "amp_scaler_state_dict",
+        "generated_fields", "f_true", "f0", "h0", "bridge_fields",
+    }
+    if forbidden.intersection(loaded):
+        raise ValueError("evaluated teacher checkpoint contains forbidden persistent state")
+
+    write_immutable_json(root / "aggregate_metrics.json", selection_aggregate)
+    publication = with_content_hash(
+        {
+            "contract": PREDICTION_ANCHORED_CONSUMER_PUBLICATION_CONTRACT,
+            "run_id": str(run_id),
+            "aggregate_sha256": selection_aggregate["content_hash"],
+            "aggregate_contract": PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
+            "paired_seed_ids": list(PAIRED_SEED_IDS),
+            "median_seed_id": seed,
+            "retained_checkpoint": checkpoint_path.name,
+            "retained_checkpoint_sha256": expected_sha,
+            "measured_state_bytes": int(checkpoint_path.stat().st_size),
+            "reserved_bytes": reservation_bytes,
+            "reservation_enforced_before_publication": reservation_bytes is not None,
+            "byte_exact_evaluated_replica": True,
+            "nonmedian_weights_persisted": False,
+            "optimizer_state_persisted": False,
+            "scheduler_state_persisted": False,
+            "generated_fields_persisted": False,
+            "persistent_artifact_allowlist": [
+                "aggregate_metrics.json", "median_weights.pt", "publication.json"
+            ],
+        }
+    )
+    write_immutable_json(root / "publication.json", publication)
+    names = sorted(path.name for path in root.iterdir())
+    if names != ["aggregate_metrics.json", "median_weights.pt", "publication.json"]:
+        raise RuntimeError(f"teacher publication wrote unexpected artifacts: {names}")
+    return {
+        "ok": True,
+        "contract": PREDICTION_ANCHORED_CONSUMER_PUBLICATION_CONTRACT,
+        "run_id": str(run_id),
+        "median_seed_id": seed,
+        "checkpoint": str(checkpoint_path),
+        "aggregate": str(root / "aggregate_metrics.json"),
+        "publication": str(root / "publication.json"),
+        "checkpoint_sha256": expected_sha,
+        "byte_exact_evaluated_replica": True,
         "persistent_artifacts": names,
     }
 

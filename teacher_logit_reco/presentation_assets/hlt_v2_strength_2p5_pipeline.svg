@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="820" viewBox="0 0 1320 820">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head" />
+</marker>
+<style>
+
+        .bg { fill: #f7f3ea; }
+        .title { font: 700 32px Arial, sans-serif; fill: #17202a; }
+        .subtitle { font: 18px Arial, sans-serif; fill: #425466; }
+        .section-label { font: 700 15px Arial, sans-serif; letter-spacing: .08em; fill: #566573; }
+        .cloud { fill: #ffffff; stroke: #243447; stroke-width: 1.4; }
+        .cloud-title { font: 700 18px Arial, sans-serif; fill: #17202a; }
+        .caption { font: 13px Arial, sans-serif; fill: #53616f; }
+        .jet-ellipse { fill: #dbeafe; stroke: #6b8fbf; stroke-width: 1; opacity: .45; }
+        .particle { stroke: #17202a; stroke-width: .55; }
+        .offline-particle { fill: #2f80ed; }
+        .hlt-particle { fill: #e4572e; }
+        .step-box { fill: #fffaf2; stroke: #c08a3e; stroke-width: 1.2; }
+        .step-title { font: 700 15px Arial, sans-serif; fill: #17202a; }
+        .step-line { font: 13px Arial, sans-serif; fill: #36454f; }
+        .arrow { stroke: #566573; stroke-width: 2.2; fill: none; }
+        .arrow-head { fill: #566573; }
+        .callout { fill: #17202a; }
+        .callout-text { font: 700 18px Arial, sans-serif; fill: #ffffff; }
+        .callout-small { font: 14px Arial, sans-serif; fill: #eef4ff; }
+        .table { fill: #ffffff; stroke: #85929e; stroke-width: 1.2; }
+        .table-head { fill: #243447; }
+        .table-head-text { font: 700 14px Arial, sans-serif; fill: #ffffff; }
+        .table-key { font: 13px Arial, sans-serif; fill: #243447; }
+        .table-val { font: 700 13px Arial, sans-serif; fill: #17202a; }
+        .note { font: 14px Arial, sans-serif; fill: #425466; }
+        
+</style>
+</defs>
+<rect x="0" y="0" width="1320" height="820" class="bg" />
+<text x="55.0" y="62.0" text-anchor="start" class="title">Pseudo-HLT v2 View at Strength 2.5</text>
+<text x="55.0" y="94.0" text-anchor="start" class="subtitle">A deterministic stress-test degradation: offline JetClass particles are converted into a matched HLT-like particle set.</text>
+<text x="55.0" y="142.0" text-anchor="start" class="section-label">CONSTITUENT VIEW</text>
+<rect x="55.0" y="165.0" width="230.0" height="170.0" rx="8.0" class="cloud" />
+<text x="170.0" y="191.0" text-anchor="middle" class="cloud-title">Offline jet</text>
+<ellipse cx="170.0" cy="259.0" rx="82" ry="52" class="jet-ellipse" />
+<circle cx="145.0" cy="249.9" r="2.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="161.1" cy="290.4" r="4.5" class="particle offline-particle" opacity="0.90" />
+<circle cx="161.9" cy="243.5" r="2.3" class="particle offline-particle" opacity="0.90" />
+<circle cx="181.6" cy="259.7" r="4.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="118.1" cy="263.4" r="2.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="167.0" cy="258.5" r="6.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="151.2" cy="268.7" r="4.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="165.0" cy="245.0" r="5.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="130.6" cy="270.5" r="3.4" class="particle offline-particle" opacity="0.90" />
+<circle cx="158.2" cy="210.6" r="4.8" class="particle offline-particle" opacity="0.90" />
+<circle cx="135.6" cy="283.0" r="2.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="140.5" cy="289.1" r="4.0" class="particle offline-particle" opacity="0.90" />
+<circle cx="188.5" cy="232.3" r="2.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="128.8" cy="265.5" r="4.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="165.3" cy="241.1" r="3.2" class="particle offline-particle" opacity="0.90" />
+<circle cx="194.8" cy="262.2" r="2.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="204.1" cy="249.5" r="2.3" class="particle offline-particle" opacity="0.90" />
+<circle cx="167.6" cy="263.3" r="6.0" class="particle offline-particle" opacity="0.90" />
+<circle cx="162.5" cy="281.2" r="2.7" class="particle offline-particle" opacity="0.90" />
+<circle cx="223.6" cy="271.3" r="6.5" class="particle offline-particle" opacity="0.90" />
+<circle cx="195.5" cy="263.6" r="5.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="173.7" cy="275.4" r="4.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="235.6" cy="254.5" r="2.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="166.7" cy="265.9" r="4.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="173.6" cy="268.2" r="4.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="196.0" cy="268.8" r="2.7" class="particle offline-particle" opacity="0.90" />
+<circle cx="211.2" cy="255.4" r="6.1" class="particle offline-particle" opacity="0.90" />
+<circle cx="170.2" cy="256.6" r="6.0" class="particle offline-particle" opacity="0.90" />
+<circle cx="158.0" cy="254.7" r="5.1" class="particle offline-particle" opacity="0.90" />
+<circle cx="211.9" cy="262.4" r="5.5" class="particle offline-particle" opacity="0.90" />
+<circle cx="178.1" cy="254.7" r="3.4" class="particle offline-particle" opacity="0.90" />
+<circle cx="149.8" cy="296.3" r="4.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="159.5" cy="244.1" r="5.0" class="particle offline-particle" opacity="0.90" />
+<circle cx="170.9" cy="277.2" r="4.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="198.0" cy="278.6" r="5.3" class="particle offline-particle" opacity="0.90" />
+<circle cx="189.5" cy="256.9" r="3.9" class="particle offline-particle" opacity="0.90" />
+<circle cx="190.2" cy="275.2" r="2.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="180.5" cy="251.9" r="2.8" class="particle offline-particle" opacity="0.90" />
+<circle cx="146.0" cy="277.4" r="4.0" class="particle offline-particle" opacity="0.90" />
+<circle cx="181.9" cy="273.6" r="5.7" class="particle offline-particle" opacity="0.90" />
+<circle cx="104.8" cy="269.1" r="2.6" class="particle offline-particle" opacity="0.90" />
+<circle cx="172.0" cy="233.3" r="4.8" class="particle offline-particle" opacity="0.90" />
+<text x="170.0" y="317.0" text-anchor="middle" class="caption">offline-like constituent set</text>
+<rect x="1035.0" y="165.0" width="230.0" height="170.0" rx="8.0" class="cloud" />
+<text x="1150.0" y="191.0" text-anchor="middle" class="cloud-title">Pseudo-HLT jet</text>
+<ellipse cx="1150.0" cy="259.0" rx="82" ry="52" class="jet-ellipse" />
+<circle cx="1145.8" cy="290.9" r="4.6" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1140.4" cy="245.4" r="2.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1161.6" cy="258.6" r="4.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1143.4" cy="256.4" r="6.0" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1128.8" cy="265.0" r="5.0" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1142.9" cy="248.5" r="5.5" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1109.5" cy="273.5" r="3.8" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1136.4" cy="207.6" r="4.9" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1172.0" cy="233.1" r="2.8" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1107.9" cy="266.4" r="3.5" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1144.4" cy="240.1" r="2.8" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1173.8" cy="264.7" r="2.3" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1181.2" cy="247.5" r="2.7" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1147.8" cy="259.8" r="6.7" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1146.2" cy="283.8" r="2.4" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1205.9" cy="269.7" r="5.1" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1179.2" cy="266.3" r="4.6" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1157.5" cy="271.6" r="4.0" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1141.8" cy="263.3" r="3.9" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1155.8" cy="266.6" r="3.9" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1172.8" cy="267.3" r="3.0" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1192.2" cy="252.3" r="6.3" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1150.6" cy="256.2" r="5.8" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1139.5" cy="257.1" r="4.9" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1193.2" cy="262.1" r="5.5" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1157.0" cy="254.1" r="3.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1131.9" cy="294.5" r="5.6" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1139.4" cy="246.9" r="5.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1182.5" cy="280.1" r="4.8" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1168.5" cy="257.8" r="4.2" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1173.6" cy="272.2" r="2.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1156.6" cy="248.5" r="2.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1121.1" cy="275.4" r="3.1" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1163.8" cy="274.6" r="6.6" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1089.4" cy="271.1" r="3.0" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1147.3" cy="231.1" r="5.5" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1151.8" cy="286.9" r="6.2" class="particle hlt-particle" opacity="0.55" />
+<circle cx="1153.8" cy="255.8" r="7.2" class="particle hlt-particle" opacity="0.90" />
+<circle cx="1137.9" cy="290.5" r="7.2" class="particle hlt-particle" opacity="0.90" />
+<text x="1150.0" y="317.0" text-anchor="middle" class="caption">fewer, smeared, merged tokens</text>
+<line x1="285.0" y1="250.0" x2="340.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="350.0" y="188.0" width="165.0" height="124.0" rx="8.0" class="step-box" />
+<text x="432.5" y="216.0" text-anchor="middle" class="step-title">1. Threshold</text>
+<text x="366.0" y="243.0" text-anchor="start" class="step-line">drop very soft</text>
+<text x="366.0" y="263.0" text-anchor="start" class="step-line">constituents</text>
+<text x="366.0" y="283.0" text-anchor="start" class="step-line">pT &lt; 0.5 GeV</text>
+<line x1="515.0" y1="250.0" x2="525.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="525.0" y="188.0" width="165.0" height="124.0" rx="8.0" class="step-box" />
+<text x="607.5" y="216.0" text-anchor="middle" class="step-title">2. Merge</text>
+<text x="541.0" y="243.0" text-anchor="start" class="step-line">nearby particles</text>
+<text x="541.0" y="263.0" text-anchor="start" class="step-line">DeltaR &lt; 0.00625</text>
+<text x="541.0" y="283.0" text-anchor="start" class="step-line">prob = 0.625</text>
+<line x1="690.0" y1="250.0" x2="700.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="700.0" y="188.0" width="165.0" height="124.0" rx="8.0" class="step-box" />
+<text x="782.5" y="216.0" text-anchor="middle" class="step-title">3. Efficiency</text>
+<text x="716.0" y="243.0" text-anchor="start" class="step-line">pT turn-on</text>
+<text x="716.0" y="263.0" text-anchor="start" class="step-line">eta plateau</text>
+<text x="716.0" y="283.0" text-anchor="start" class="step-line">density loss</text>
+<line x1="865.0" y1="250.0" x2="875.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="875.0" y="188.0" width="165.0" height="124.0" rx="8.0" class="step-box" />
+<text x="957.5" y="216.0" text-anchor="middle" class="step-title">4. Smear</text>
+<text x="891.0" y="243.0" text-anchor="start" class="step-line">pT and axis</text>
+<text x="891.0" y="263.0" text-anchor="start" class="step-line">rare tails</text>
+<text x="891.0" y="283.0" text-anchor="start" class="step-line">local reassignment</text>
+<line x1="1040.0" y1="250.0" x2="1050.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<line x1="1040.0" y1="250.0" x2="1035.0" y2="250.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="55" y="390" width="415" height="120" rx="10" class="callout" />
+<text x="80.0" y="426.0" text-anchor="start" class="callout-text">Strength convention</text>
+<text x="80.0" y="456.0" text-anchor="start" class="callout-small">0.0 = exact offline identity</text>
+<text x="80.0" y="481.0" text-anchor="start" class="callout-small">1.0 = mild realistic target point</text>
+<text x="80.0" y="506.0" text-anchor="start" class="callout-small">2.5 = amplified stress-test degradation</text>
+<text x="525.0" y="407.0" text-anchor="start" class="section-label">EFFECTIVE PARAMETERS AT STRENGTH 2.5</text>
+<rect x="525.0" y="425.0" width="740.0" height="315.0" rx="8.0" class="table" />
+<rect x="525" y="425" width="740" height="36" rx="8" class="table-head" />
+<text x="548.0" y="449.0" text-anchor="start" class="table-head-text">Parameter</text>
+<text x="900.0" y="449.0" text-anchor="start" class="table-head-text">Effective value</text>
+<rect x="526" y="469.0" width="738" height="26" fill="#f4f7fa" />
+<text x="548.0" y="486.0" text-anchor="start" class="table-key">pT threshold</text>
+<text x="900.0" y="486.0" text-anchor="start" class="table-val">0.5 GeV</text>
+<text x="548.0" y="512.0" text-anchor="start" class="table-key">Merge radius</text>
+<text x="900.0" y="512.0" text-anchor="start" class="table-val">0.00625</text>
+<rect x="526" y="521.0" width="738" height="26" fill="#f4f7fa" />
+<text x="548.0" y="538.0" text-anchor="start" class="table-key">Merge probability</text>
+<text x="900.0" y="538.0" text-anchor="start" class="table-val">0.625</text>
+<text x="548.0" y="564.0" text-anchor="start" class="table-key">Barrel plateau</text>
+<text x="900.0" y="564.0" text-anchor="start" class="table-val">0.9975</text>
+<rect x="526" y="573.0" width="738" height="26" fill="#f4f7fa" />
+<text x="548.0" y="590.0" text-anchor="start" class="table-key">Endcap plateau</text>
+<text x="900.0" y="590.0" text-anchor="start" class="table-val">0.99</text>
+<text x="548.0" y="616.0" text-anchor="start" class="table-key">Barrel pT50 / width</text>
+<text x="900.0" y="616.0" text-anchor="start" class="table-val">0.5 / 0.15</text>
+<rect x="526" y="625.0" width="738" height="26" fill="#f4f7fa" />
+<text x="548.0" y="642.0" text-anchor="start" class="table-key">Endcap pT50 / width</text>
+<text x="900.0" y="642.0" text-anchor="start" class="table-val">0.875 / 0.2</text>
+<text x="548.0" y="668.0" text-anchor="start" class="table-key">Density loss scale</text>
+<text x="900.0" y="668.0" text-anchor="start" class="table-val">0.0375</text>
+<rect x="526" y="677.0" width="738" height="26" fill="#f4f7fa" />
+<text x="548.0" y="694.0" text-anchor="start" class="table-key">Smear scale</text>
+<text x="900.0" y="694.0" text-anchor="start" class="table-val">0.5</text>
+<text x="548.0" y="720.0" text-anchor="start" class="table-key">Reassignment scale</text>
+<text x="900.0" y="720.0" text-anchor="start" class="table-val">0.375</text>
+<text x="55.0" y="580.0" text-anchor="start" class="section-label">Slide phrasing</text>
+<text x="55.0" y="612.0" text-anchor="start" class="note">We do not change the label or the underlying physics event.</text>
+<text x="55.0" y="638.0" text-anchor="start" class="note">We only create a second detector-resolution view paired one-to-one with the offline jet.</text>
+<text x="55.0" y="664.0" text-anchor="start" class="note">At training time, offline and pseudo-HLT can both be used; at inference time, only pseudo-HLT is available.</text>
+<text x="55.0" y="707.0" text-anchor="start" class="note">Best short name: fixed_hlt_v2_realistic, strength=2.5</text>
+<text x="55.0" y="733.0" text-anchor="start" class="note">Use this as a stress test, not as a claim about an exact CMS/ATLAS HLT response.</text>
+</svg>

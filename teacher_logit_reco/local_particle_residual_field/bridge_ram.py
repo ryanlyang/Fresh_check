@@ -1028,6 +1028,7 @@ class PredictionAnchoredBridgeProvider:
             seed=int(seed),
             bin_edges=bin_edges,
             logical_block_size=self.hlt.shard_size,
+            source_block_ids=requested // int(self.hlt.shard_size),
         )
 
     def ordered_training_indices(self, indices: Sequence[int], *, seed: int) -> np.ndarray:

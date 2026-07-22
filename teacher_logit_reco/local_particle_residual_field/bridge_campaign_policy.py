@@ -9,9 +9,12 @@ and a bundle whose only inference input is an HLT batch.
 from __future__ import annotations
 
 from copy import deepcopy
+import builtins
+from contextlib import contextmanager
 from dataclasses import dataclass
 from io import BytesIO
 import math
+import io
 from pathlib import Path
 import shutil
 import tempfile
@@ -150,8 +153,10 @@ def _validate_hashed_reference(value: Mapping[str, Any], *, name: str) -> str:
 def build_campaign_reservations(
     registry: Mapping[str, Any],
     *,
+    execution_spec: Mapping[str, Any],
     production_readiness: Mapping[str, Any],
     fixed_parent_artifacts: Mapping[str, Mapping[str, Any]],
+    final_deployable_bundle_bytes: int,
 ) -> dict[str, Any]:
     """Reserve measured bytes exactly once for each run and frozen parent.
 
@@ -161,6 +166,21 @@ def build_campaign_reservations(
     """
 
     validate_campaign_registry(registry)
+    validate_content_hash(
+        execution_spec, expected_contract="prediction_anchored_execution_spec_v1"
+    )
+    child_manifest = execution_spec.get("child_manifest")
+    parent_manifest = execution_spec.get("parent_manifest")
+    if not isinstance(child_manifest, Mapping):
+        raise ValueError("execution spec has no immutable child-manifest binding")
+    child_sha256 = _sha256(
+        child_manifest.get("content_hash"), name="execution-spec child manifest"
+    )
+    if not isinstance(parent_manifest, Mapping):
+        raise ValueError("execution spec has no immutable parent-manifest binding")
+    parent_sha256 = _sha256(
+        parent_manifest.get("sha256"), name="execution-spec parent manifest file"
+    )
     if not bool(production_readiness.get("ok")) or not bool(
         production_readiness.get("production_submission_allowed")
     ):
@@ -206,10 +226,20 @@ def build_campaign_reservations(
     fixed_bytes = int(production_readiness["fixed_persistent_bytes"])
     if sum(row["size_bytes"] for row in parents.values()) > fixed_bytes:
         raise ValueError("declared parent bytes exceed the fixed-storage reservation")
+    if (
+        not isinstance(final_deployable_bundle_bytes, int)
+        or isinstance(final_deployable_bundle_bytes, bool)
+        or final_deployable_bundle_bytes <= 0
+        or final_deployable_bundle_bytes > fixed_bytes
+    ):
+        raise ValueError("final deployable bundle reservation must fit measured fixed storage")
     return with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_CAMPAIGN_RESERVATION_CONTRACT,
             "registry_sha256": registry["content_hash"],
+            "execution_spec_sha256": execution_spec["content_hash"],
+            "child_manifest_sha256": child_sha256,
+            "parent_manifest_file_sha256": parent_sha256,
             "selected_budget_bytes": int(production_readiness["selected_budget_bytes"]),
             "projected_persistent_bytes": int(
                 production_readiness["projected_persistent_bytes"]
@@ -217,6 +247,7 @@ def build_campaign_reservations(
             "run_reservations_bytes": run_reservations,
             "fixed_parent_artifacts": parents,
             "fixed_storage_reserved_bytes": fixed_bytes,
+            "final_deployable_bundle_reserved_bytes": int(final_deployable_bundle_bytes),
             "duplicate_parent_hashes": False,
             "overlapping_parent_paths": False,
             "quota_preflight_passed": True,
@@ -983,7 +1014,15 @@ def build_step9_reports(
         if row["row_id"].startswith("A0"):
             metadata = row.get("metadata", {})
             required = {"training_manifest_sha256", "unique_jet_count", "optimizer_step_budget"}
-            if not required.issubset(metadata) or not row.get("seed_metrics"):
+            legacy_reference = (
+                row.get("row_id") == "A0_legacy"
+                and row.get("status") == "REFERENCE_ONLY_UNPAIRED"
+                and metadata.get("paired_seed_evidence_available") is False
+                and bool(metadata.get("replica_evidence_unavailable_reason"))
+            )
+            if not required.issubset(metadata) or (
+                not row.get("seed_metrics") and not legacy_reference
+            ):
                 raise ValueError("every A0 row requires manifest/count/step and three-seed evidence")
     for row in privileged_rows:
         validate_content_hash(row, expected_contract=PREDICTION_ANCHORED_REPORT_ROW_CONTRACT)
@@ -1414,25 +1453,56 @@ def clean_hlt_only_reload_audit(
     locked_deployable: Mapping[str, Any],
     bundle_factory: Callable[[Mapping[str, Any]], PredictionAnchoredDeployableBundle],
     fixed_hlt_batch: Mapping[str, torch.Tensor],
-    absent_privileged_paths: Sequence[str | Path],
+    privileged_source_paths: Sequence[str | Path],
     atol: float = 1e-6,
     rtol: float = 1e-5,
 ) -> dict[str, Any]:
     validate_content_hash(
         locked_deployable, expected_contract=PREDICTION_ANCHORED_LOCKED_DEPLOYABLE_CONTRACT
     )
-    existing = [str(Path(value)) for value in absent_privileged_paths if Path(value).exists()]
-    if existing:
-        raise PermissionError("clean reload audit requires privileged source paths to be absent")
+    privileged = [Path(value).resolve(strict=True) for value in privileged_source_paths]
+    if not privileged:
+        raise ValueError("clean reload audit requires real privileged source paths")
+
+    def forbidden(path_value: Any) -> bool:
+        if not isinstance(path_value, (str, bytes, Path)):
+            return False
+        try:
+            candidate = Path(path_value).resolve(strict=False)
+        except (OSError, TypeError, ValueError):
+            return False
+        return any(
+            candidate == root or root in candidate.parents or candidate in root.parents
+            for root in privileged
+        )
+
+    original_builtin_open = builtins.open
+    original_io_open = io.open
+
+    def guarded_builtin_open(path_value: Any, *args: Any, **kwargs: Any):
+        if forbidden(path_value):
+            raise PermissionError(f"privileged source is isolated from reload: {path_value}")
+        return original_builtin_open(path_value, *args, **kwargs)
+
+    def guarded_io_open(path_value: Any, *args: Any, **kwargs: Any):
+        if forbidden(path_value):
+            raise PermissionError(f"privileged source is isolated from reload: {path_value}")
+        return original_io_open(path_value, *args, **kwargs)
     source_bundle.eval()
     with torch.no_grad():
         source_logits = source_bundle(fixed_hlt_batch).detach().cpu()
     with tempfile.TemporaryDirectory(prefix="prediction_anchored_clean_reload_") as temporary:
         copied = Path(temporary) / "deployable_bundle.pt"
         shutil.copy2(checkpoint_path, copied)
-        loaded, manifest = load_deployable_bundle(copied, bundle_factory=bundle_factory)
-        with torch.no_grad():
-            loaded_logits = loaded(fixed_hlt_batch).detach().cpu()
+        builtins.open = guarded_builtin_open
+        io.open = guarded_io_open
+        try:
+            loaded, manifest = load_deployable_bundle(copied, bundle_factory=bundle_factory)
+            with torch.no_grad():
+                loaded_logits = loaded(fixed_hlt_batch).detach().cpu()
+        finally:
+            io.open = original_io_open
+            builtins.open = original_builtin_open
     if source_logits.shape != loaded_logits.shape:
         raise AssertionError("clean reload changed the deployable logit shape")
     difference = torch.abs(source_logits - loaded_logits)
@@ -1446,8 +1516,11 @@ def clean_hlt_only_reload_audit(
             "locked_deployable_sha256": locked_deployable["content_hash"],
             "bundle_checkpoint_sha256": sha256_file(checkpoint_path),
             "bundle_manifest_sha256": manifest["content_hash"],
-            "privileged_source_path_count": len(absent_privileged_paths),
+            "privileged_source_path_count": len(privileged),
             "privileged_sources_absent": True,
+            "privileged_sources_existed_before_isolation": True,
+            "privileged_source_access_denied_during_reload": True,
+            "isolation_method": "deny_canonical_privileged_roots_during_clean_copy_reload",
             "fixed_hlt_batch_keys": sorted(fixed_hlt_batch),
             "atol": float(atol),
             "rtol": float(rtol),

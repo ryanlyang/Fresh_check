@@ -46,6 +46,14 @@ def _measured_registry(*, alternate=False):
     return record_registry_measurements(registry, measurements)
 
 
+def _execution_spec():
+    return with_content_hash({
+        "contract": "prediction_anchored_execution_spec_v1",
+        "child_manifest": {"content_hash": "a" * 64},
+        "parent_manifest": {"sha256": "b" * 64},
+    })
+
+
 def _reservations(registry, tmp_path: Path):
     readiness = require_production_ready(
         registry,
@@ -58,7 +66,8 @@ def _reservations(registry, tmp_path: Path):
         "metadata": {"sha256": "3" * 64, "size_bytes": 512, "path": tmp_path / "metadata"},
     }
     return build_campaign_reservations(
-        registry, production_readiness=readiness, fixed_parent_artifacts=parents
+        registry, execution_spec=_execution_spec(), production_readiness=readiness,
+        fixed_parent_artifacts=parents, final_deployable_bundle_bytes=512,
     )
 
 
@@ -171,17 +180,20 @@ def test_reservations_reconcile_quota_and_reject_duplicate_parents(tmp_path):
     }
     with pytest.raises(ValueError, match="duplicated"):
         build_campaign_reservations(
-            registry, production_readiness=readiness, fixed_parent_artifacts=duplicate
+            registry, execution_spec=_execution_spec(), production_readiness=readiness,
+            fixed_parent_artifacts=duplicate, final_deployable_bundle_bytes=512,
         )
     over_quota = dict(readiness)
     over_quota["projected_persistent_bytes"] = over_quota["selected_budget_bytes"] + 1
     with pytest.raises(PermissionError, match="exceeds"):
         build_campaign_reservations(
             registry,
+            execution_spec=_execution_spec(),
             production_readiness=over_quota,
             fixed_parent_artifacts={
                 "r0": {"sha256": "1" * 64, "size_bytes": 10, "path": tmp_path / "only"}
             },
+            final_deployable_bundle_bytes=512,
         )
 
 
@@ -438,13 +450,17 @@ def test_single_hlt_only_bundle_export_and_clean_reload(tmp_path):
     loaded, loaded_manifest = load_deployable_bundle(path, bundle_factory=lambda _: _bundle())
     assert loaded_manifest["content_hash"] == manifest["content_hash"]
     assert torch.equal(source(_hlt_batch()), loaded(_hlt_batch()))
+    offline = tmp_path / "offline.npz"
+    target_logits = tmp_path / "target_logits.npz"
+    offline.write_bytes(b"offline")
+    target_logits.write_bytes(b"logits")
     audit = clean_hlt_only_reload_audit(
         source,
         checkpoint_path=path,
         locked_deployable=locked,
         bundle_factory=lambda _: _bundle(),
         fixed_hlt_batch=_hlt_batch(),
-        absent_privileged_paths=[tmp_path / "offline", tmp_path / "target_logits"],
+        privileged_source_paths=[offline, target_logits],
     )
     assert audit["passed"] is True
     assert audit["max_abs_logit_difference"] == 0.0

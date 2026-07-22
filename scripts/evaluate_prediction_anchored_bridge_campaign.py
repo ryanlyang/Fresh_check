@@ -18,6 +18,7 @@ from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     aggregate_deployable_configuration,
     build_deployable_confirmation,
     build_step9_reports,
+    build_step9_reports_from_publications,
     finalize_deployable_confirmation,
     select_deployable_preconfirmation,
     validate_final_test_request,
@@ -51,7 +52,15 @@ def _parser() -> argparse.ArgumentParser:
 
     reports = sub.add_parser("reports", help="build the three disjoint Step 9 report tables")
     reports.add_argument("--registry", required=True)
-    reports.add_argument("--evidence", required=True)
+    reports.add_argument(
+        "--evidence",
+        default="",
+        help="legacy explicit evidence JSON; production should assemble from --artifact-root",
+    )
+    reports.add_argument("--execution-spec", default="")
+    reports.add_argument("--artifact-root", default="")
+    reports.add_argument("--graph", default="")
+    reports.add_argument("--evidence-output", default="")
     reports.add_argument("--output", required=True)
 
     final = sub.add_parser("validate-final-test", help="fail closed unless final-test is HLT-only and unlocked")
@@ -69,6 +78,7 @@ def _replica(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = _parser().parse_args()
+    auxiliary_publications: dict[str, Any] = {}
     if args.command == "select":
         registry = load_hashed_json(args.registry)
         raw = _json(args.evidence)
@@ -100,17 +110,40 @@ def main() -> int:
         output = args.output
     elif args.command == "reports":
         registry = load_hashed_json(args.registry)
-        evidence = _json(args.evidence)
-        result = build_step9_reports(
-            registry,
-            baseline_deployable_rows=evidence["baseline_deployable_rows"],
-            privileged_rows=evidence["privileged_rows"],
-            ablation_rows=evidence.get("ablation_rows", {}),
-            run_outcomes=evidence["run_outcomes"],
-            persistent_telemetry=evidence["persistent_telemetry"],
-            ram_telemetry=evidence["ram_telemetry"],
-        )
-        action = "build_step9_reports"
+        if args.evidence:
+            if args.execution_spec or args.artifact_root or args.graph or args.evidence_output:
+                raise ValueError("--evidence cannot be mixed with automatic report assembly")
+            evidence = _json(args.evidence)
+            result = build_step9_reports(
+                registry,
+                baseline_deployable_rows=evidence["baseline_deployable_rows"],
+                privileged_rows=evidence["privileged_rows"],
+                ablation_rows=evidence.get("ablation_rows", {}),
+                run_outcomes=evidence["run_outcomes"],
+                persistent_telemetry=evidence["persistent_telemetry"],
+                ram_telemetry=evidence["ram_telemetry"],
+            )
+            action = "build_step9_reports_from_explicit_evidence"
+        else:
+            if not args.execution_spec or not args.artifact_root:
+                raise ValueError(
+                    "automatic reports require --execution-spec and --artifact-root"
+                )
+            graph = None if not args.graph else load_hashed_json(args.graph)
+            evidence, result = build_step9_reports_from_publications(
+                registry,
+                execution_spec_path=args.execution_spec,
+                artifact_root=args.artifact_root,
+                graph=graph,
+            )
+            evidence_output = args.evidence_output or str(
+                Path(args.output).with_name("automatic_report_evidence.json")
+            )
+            auxiliary_publications["automatic_report_evidence"] = {
+                "output": evidence_output,
+                "artifact": evidence,
+            }
+            action = "build_step9_reports_from_campaign_publications"
         output = args.output
     else:
         locked = load_hashed_json(args.locked_deployable)
@@ -136,8 +169,23 @@ def main() -> int:
             )
         )
     else:
+        for name, row in auxiliary_publications.items():
+            row["publication"] = write_step9_decision_artifact(
+                row.pop("output"), row.pop("artifact")
+            )
         publication = write_step9_decision_artifact(output, result)
-        print(json.dumps({"dry_run": False, "action": action, "publication": publication}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "dry_run": False,
+                    "action": action,
+                    "publication": publication,
+                    "auxiliary_publications": auxiliary_publications,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     return 0
 
 

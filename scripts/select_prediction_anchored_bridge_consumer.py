@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
     load_hashed_json,
+    sha256_file,
     write_immutable_json,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_evaluation import (  # noqa: E402
@@ -36,8 +37,10 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument("--robust-aggregate", required=True)
     select.add_argument("--clean-checkpoint", required=True)
     select.add_argument("--robust-checkpoint", required=True)
-    select.add_argument("--f0-checkpoint-sha256", required=True)
-    select.add_argument("--bridge-recipe-sha256", required=True)
+    select.add_argument("--f0-checkpoint-sha256", default="")
+    select.add_argument("--f0-checkpoint", default="")
+    select.add_argument("--bridge-recipe-sha256", default="")
+    select.add_argument("--bridge-recipe", default="")
     select.add_argument("--output", required=True)
     select.add_argument("--dry-run", action="store_true")
 
@@ -77,12 +80,26 @@ def _plain_json(path: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "select":
+        if bool(args.f0_checkpoint_sha256) == bool(args.f0_checkpoint):
+            raise ValueError("select requires exactly one of --f0-checkpoint-sha256/--f0-checkpoint")
+        if bool(args.bridge_recipe_sha256) == bool(args.bridge_recipe):
+            raise ValueError("select requires exactly one of --bridge-recipe-sha256/--bridge-recipe")
         clean = load_hashed_json(args.clean_aggregate)
         robust = load_hashed_json(args.robust_aggregate)
+        f0_sha256 = (
+            str(args.f0_checkpoint_sha256)
+            if args.f0_checkpoint_sha256
+            else sha256_file(args.f0_checkpoint)
+        )
+        bridge_sha256 = (
+            str(args.bridge_recipe_sha256)
+            if args.bridge_recipe_sha256
+            else load_hashed_json(args.bridge_recipe)["content_hash"]
+        )
         artifact = select_bridge_consumer_preconfirmation(
             [clean, robust],
-            f0_checkpoint_sha256=args.f0_checkpoint_sha256,
-            bridge_recipe_sha256=args.bridge_recipe_sha256,
+            f0_checkpoint_sha256=f0_sha256,
+            bridge_recipe_sha256=bridge_sha256,
             selected_checkpoint_paths={
                 "T10_clean": args.clean_checkpoint,
                 "T10_robust": args.robust_checkpoint,

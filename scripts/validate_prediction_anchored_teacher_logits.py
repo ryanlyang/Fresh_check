@@ -26,7 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binding", required=True)
     parser.add_argument("--namespace-dir", required=True)
-    parser.add_argument("--stack-train-distill-sha256", required=True)
+    parser.add_argument("--stack-train-distill-sha256", default="")
+    parser.add_argument("--execution-spec", default="")
     parser.add_argument("--selected-consumer", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -34,6 +35,18 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if bool(args.stack_train_distill_sha256) == bool(args.execution_spec):
+        raise ValueError(
+            "provide exactly one of --execution-spec/--stack-train-distill-sha256"
+        )
+    if args.execution_spec:
+        spec = load_hashed_json(args.execution_spec)
+        child = load_hashed_json(spec["child_manifest"]["path"])
+        if child["content_hash"] != spec["child_manifest"]["content_hash"]:
+            raise ValueError("execution spec child manifest binding changed")
+        split_sha256 = child["children"]["stack_train_distill"]["content_hash"]
+    else:
+        split_sha256 = str(args.stack_train_distill_sha256)
     binding = load_hashed_json(args.binding)
     selected = load_hashed_json(args.selected_consumer) if args.selected_consumer else None
     live = build_live_teacher_config(binding, primary_selection=selected)
@@ -56,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         args.namespace_dir,
         binding=binding,
         live_teacher_config=live,
-        stack_train_distill_manifest_sha256=args.stack_train_distill_sha256,
+        stack_train_distill_manifest_sha256=split_sha256,
         primary_selection=selected,
     )
     output = {

@@ -14,7 +14,6 @@ import torch
 
 from jetclass_fresh.fusion import (
     PredictionBlock,
-    classification_metrics_from_logits,
     load_prediction_block,
     save_prediction_block,
     softmax_np,
@@ -53,6 +52,11 @@ from .tagger import (
 )
 from .train import _jsonable, _torch_load_checkpoint
 
+from .fusion_metrics import (
+    local_residual_field_binary_projection_metrics,
+    local_residual_field_multiclass_metrics,
+)
+
 
 LOCAL_RESIDUAL_FIELD_PREDICTION_CONTRACT = "local_particle_residual_field_predictions_v1"
 LOCAL_RESIDUAL_FIELD_FUSION_CONTRACT = "local_particle_residual_field_fusion_v1"
@@ -67,6 +71,17 @@ LOCAL_RESIDUAL_FIELD_FUSION_MODES = (
 
 LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS = ("stack_train", "stack_val", "final_test")
 LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT = "stack_train"
+LOCAL_RESIDUAL_FIELD_BINARY_PROJECTION_PAIRS = (
+    ("QCD", "Hbb"),
+    ("QCD", "Hcc"),
+    ("QCD", "Hgg"),
+    ("QCD", "H4q"),
+    ("QCD", "Hqql"),
+    ("QCD", "Zqq"),
+    ("QCD", "Wqq"),
+    ("QCD", "Tbqq"),
+    ("QCD", "Tbl"),
+)
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -313,32 +328,32 @@ def _make_prediction_loader(dataset: Any, *, batch_size: int, num_workers: int, 
 
 
 def _metrics_from_logits(logits: np.ndarray, labels: np.ndarray, *, label_names: Sequence[str]) -> dict[str, Any]:
-    base = classification_metrics_from_logits(logits, labels)
-    preds = np.argmax(logits, axis=1).astype(np.int64)
     names = tuple(str(name) for name in label_names)
     n_classes = int(logits.shape[1])
     if len(names) != n_classes:
         names = tuple(str(index) for index in range(n_classes))
-    confusion = np.zeros((n_classes, n_classes), dtype=np.int64)
-    for true_label, pred_label in zip(labels, preds):
-        if 0 <= int(true_label) < n_classes and 0 <= int(pred_label) < n_classes:
-            confusion[int(true_label), int(pred_label)] += 1
-    per_class = []
-    for index, name in enumerate(names):
-        support = int(confusion[index].sum())
-        correct = int(confusion[index, index])
-        per_class.append(
-            {
-                "class_index": int(index),
-                "class_name": str(name),
-                "support": support,
-                "correct": correct,
-                "accuracy": correct / float(support) if support else 0.0,
-            }
+    base = local_residual_field_multiclass_metrics(logits, labels, label_names=names)
+    base["per_class_accuracy"] = [
+        {
+            "class_index": row["class_index"],
+            "class_name": row["class_name"],
+            "support": row["support"],
+            "correct": row["correct"],
+            "accuracy": row["accuracy"],
+        }
+        for row in base["per_class"]
+    ]
+    if "QCD" in names:
+        binary = local_residual_field_binary_projection_metrics(
+            logits,
+            labels,
+            label_names=names,
         )
-    base["confusion_matrix"] = confusion.astype(int).tolist()
-    base["per_class_accuracy"] = per_class
-    base["macro_per_class_accuracy"] = float(np.mean([row["accuracy"] for row in per_class])) if per_class else 0.0
+        base["binary_projection_metrics_contract"] = binary["contract"]
+        base["binary_projection_signal_efficiencies"] = binary["signal_efficiencies"]
+        base["binary_projection_metrics"] = binary["projections"]
+    else:
+        base["binary_projection_metrics"] = {}
     return base
 
 
@@ -560,6 +575,7 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
             if oracle_teacher_diagnostic and model.config.field_source == RESIDUAL_FIELD_SOURCE_ZERO
             else "HLT_only"
         )
+        prediction_metrics = _metrics_from_logits(logits, labels, label_names=LABEL_NAMES)
         metadata = {
             "contract": LOCAL_RESIDUAL_FIELD_PREDICTION_CONTRACT,
             "model_contract": model_contract,
@@ -594,6 +610,14 @@ def cache_local_residual_field_tagger_predictions(config: LocalResidualFieldPred
             "deployable": bool(not oracle_teacher_diagnostic and not uses_true_fields),
             "split": str(split),
             "selection_allowed": str(split) != "final_test",
+            "metrics": prediction_metrics,
+            "binary_projection_metrics_contract": prediction_metrics.get(
+                "binary_projection_metrics_contract"
+            ),
+            "binary_projection_signal_efficiencies": prediction_metrics.get(
+                "binary_projection_signal_efficiencies"
+            ),
+            "binary_projection_metrics": prediction_metrics["binary_projection_metrics"],
         }
         block = PredictionBlock(
             model_name=str(config.model_name),
@@ -823,6 +847,7 @@ __all__ = [
     "LOCAL_RESIDUAL_FIELD_FUSION_MODES",
     "LOCAL_RESIDUAL_FIELD_FUSION_DEFAULT_SPLITS",
     "LOCAL_RESIDUAL_FIELD_FUSION_FIT_SPLIT",
+    "LOCAL_RESIDUAL_FIELD_BINARY_PROJECTION_PAIRS",
     "LocalResidualFieldPredictionConfig",
     "LocalResidualFieldFusionConfig",
     "LocalResidualFieldParticleViewFusion",

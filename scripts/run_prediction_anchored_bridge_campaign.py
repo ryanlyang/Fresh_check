@@ -60,6 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--registry", default="", help="final measured Step 8 registry")
     parser.add_argument("--reservations", default="", help="Step 9 measured reservation artifact")
+    parser.add_argument("--execution-spec", default="", help="immutable scientific execution specification")
     parser.add_argument("--artifact-root", default="", help="immutable production campaign root")
     parser.add_argument("--production-output", default="", help="immutable graph/rehearsal/ledger JSON")
     parser.add_argument("--graph", default="", help="existing production graph for ledger finalization")
@@ -159,15 +160,17 @@ def main(argv: list[str] | None = None) -> int:
                 graph, job_ids=parsed, include_final_test=bool(args.include_final_test)
             )
         else:
-            if not args.registry or not args.reservations or not args.artifact_root:
+            if not args.registry or not args.reservations or not args.execution_spec or not args.artifact_root:
                 raise ValueError(
-                    f"{args.campaign_action} requires --registry, --reservations, and --artifact-root"
+                    f"{args.campaign_action} requires --registry, --reservations, --execution-spec, and --artifact-root"
                 )
             registry = load_hashed_json(args.registry)
             reservations = load_hashed_json(args.reservations)
+            execution_spec = load_hashed_json(args.execution_spec)
             graph = build_prediction_anchored_tigris_graph(
                 registry,
                 reservations=reservations,
+                execution_spec=execution_spec,
                 artifact_root=args.artifact_root,
                 pack_size=int(args.pack_size),
             )

@@ -227,6 +227,10 @@ def save_prediction_block(block: PredictionBlock, prediction_dir: str | Path, *,
     }
     np.savez_compressed(npz_path, **arrays)
     content_hash = hash_arrays(arrays)
+    metrics = classification_metrics_from_logits(logits, block.labels)
+    supplied_metrics = block.metadata.get("metrics")
+    if isinstance(supplied_metrics, Mapping):
+        metrics.update(dict(supplied_metrics))
     metadata = {
         **block.metadata,
         "model_name": block.model_name,
@@ -239,7 +243,7 @@ def save_prediction_block(block: PredictionBlock, prediction_dir: str | Path, *,
         "n_jets": int(len(block.labels)),
         "num_classes": int(logits.shape[1]),
         "prediction_finite_check": finite_report,
-        "metrics": classification_metrics_from_logits(logits, block.labels),
+        "metrics": metrics,
     }
     save_json(meta_path, metadata)
     return metadata

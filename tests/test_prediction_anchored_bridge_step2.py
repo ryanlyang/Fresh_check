@@ -400,6 +400,35 @@ def test_matched_derangement_and_all_five_controls():
     np.testing.assert_array_equal(radius[..., 45:], f0[..., 45:])
 
 
+def test_matched_derangement_preserves_explicit_original_blocks_and_frozen_bins():
+    tokens, mask = _tokens(16, 4)
+    labels = np.repeat([0, 1], 8)
+    event_ids = [f"reordered-child-{index}" for index in range(16)]
+    # Compact child positions alternate between two original source blocks.
+    # A position-derived block assignment would therefore be scientifically wrong.
+    source_blocks = np.tile([1, 0], 8).astype(np.int64)
+    frozen_edges = {
+        "multiplicity": [3.5, 4.5],
+        "jet_pt": [0.0, 10.0, 100.0],
+        "jet_mass": [0.0, 10.0, 100.0],
+    }
+    mapping = build_matched_wrong_event_map(
+        tokens=tokens,
+        mask=mask,
+        labels=labels,
+        event_ids=event_ids,
+        seed=71,
+        bin_edges=frozen_edges,
+        logical_block_size=8,
+        source_block_ids=source_blocks,
+    )
+    permutation = np.asarray(mapping["permutation"], dtype=np.int64)
+    np.testing.assert_array_equal(source_blocks, source_blocks[permutation])
+    np.testing.assert_array_equal(labels, labels[permutation])
+    assert mapping["block_policy"] == "explicit_original_source_blocks"
+    assert mapping["bin_edges"] == frozen_edges
+
+
 def test_scaler_sparse_fallback_inactive_ordering_and_inverse():
     n = 101
     f0 = np.zeros((n, 1, 50), dtype=np.float32)

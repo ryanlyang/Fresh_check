@@ -14,6 +14,11 @@ args=("${PYTHON_BIN}" -u scripts/submit_prediction_anchored_bridge_graph.py
   --graph "${PREDICTION_ANCHORED_GRAPH}"
   --ledger-output "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/job_ledgers/submission.json")
 if [[ "${PREDICTION_ANCHORED_EXECUTE:-0}" == "1" ]]; then
+  : "${PAB_REGISTRY:?Set PAB_REGISTRY to the measured Step-8 registry}"
+  : "${PAB_RESERVATIONS:?Set PAB_RESERVATIONS to the graph-bound reservation artifact}"
+  : "${PAB_EXECUTION_SPEC:?Set PAB_EXECUTION_SPEC to the immutable site-local binding}"
+  args+=(--registry "${PAB_REGISTRY}" --reservations "${PAB_RESERVATIONS}" \
+    --execution-spec "${PAB_EXECUTION_SPEC}")
   args+=(--execute)
 else
   args+=(--dry-run)

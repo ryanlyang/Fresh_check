@@ -49,6 +49,14 @@ def _registry(*, alternate: bool = False, measured: bool = True):
     return value
 
 
+def _execution_spec():
+    return with_content_hash({
+        "contract": "prediction_anchored_execution_spec_v1",
+        "child_manifest": {"content_hash": "a" * 64},
+        "parent_manifest": {"sha256": "b" * 64},
+    })
+
+
 def _reservations(registry, tmp_path: Path, *, budget_gib: int = 5):
     readiness = require_production_ready(
         registry,
@@ -57,12 +65,14 @@ def _reservations(registry, tmp_path: Path, *, budget_gib: int = 5):
     )
     return build_campaign_reservations(
         registry,
+        execution_spec=_execution_spec(),
         production_readiness=readiness,
         fixed_parent_artifacts={
             "r0": {"sha256": "1" * 64, "size_bytes": 512, "path": tmp_path / "r0.pt"},
             "consumer": {"sha256": "2" * 64, "size_bytes": 512, "path": tmp_path / "t10.pt"},
             "metadata": {"sha256": "3" * 64, "size_bytes": 512, "path": tmp_path / "metadata"},
         },
+        final_deployable_bundle_bytes=512,
     )
 
 
@@ -71,6 +81,7 @@ def _graph(tmp_path: Path, *, alternate: bool = False, budget_gib: int = 5):
     return build_prediction_anchored_tigris_graph(
         registry,
         reservations=_reservations(registry, tmp_path, budget_gib=budget_gib),
+        execution_spec=_execution_spec(),
         artifact_root=str(tmp_path / "campaign"),
     )
 
@@ -111,10 +122,14 @@ def test_alternate_teacher_adds_binding_cache_and_exactly_54_runnable_rows(tmp_p
 
 def test_graph_refuses_unmeasured_and_accepts_measured_five_and_six_gib_modes(tmp_path):
     unmeasured = _registry(measured=False)
+    execution_spec = _execution_spec()
     fake_reservations = with_content_hash(
         {
             "contract": "prediction_anchored_step9_campaign_reservations_v1",
             "registry_sha256": unmeasured["content_hash"],
+            "execution_spec_sha256": execution_spec["content_hash"],
+            "child_manifest_sha256": execution_spec["child_manifest"]["content_hash"],
+            "parent_manifest_file_sha256": execution_spec["parent_manifest"]["sha256"],
             "projected_persistent_bytes": 1,
             "selected_budget_bytes": 5 * 1024**3,
             "run_reservations_bytes": {
@@ -125,7 +140,8 @@ def test_graph_refuses_unmeasured_and_accepts_measured_five_and_six_gib_modes(tm
     )
     with pytest.raises(PermissionError, match="UNMEASURED"):
         build_prediction_anchored_tigris_graph(
-            unmeasured, reservations=fake_reservations, artifact_root=str(tmp_path)
+            unmeasured, reservations=fake_reservations,
+            execution_spec=execution_spec, artifact_root=str(tmp_path)
         )
     five = _graph(tmp_path / "five", budget_gib=5)
     six = _graph(tmp_path / "six", budget_gib=6)
@@ -160,6 +176,16 @@ def test_selected_consumer_and_sealed_confirmations_are_ordered_fail_closed(tmp_
     assert nodes["b4_confirm_consumer"]["requires_selected_consumer"] is False
     assert nodes["b5_bind_teachers"]["dependencies"] == ["b4_confirm_consumer"]
     assert nodes["b5_bind_teachers"]["requires_selected_consumer"] is True
+    l0_eval = nodes["b6_l0_postteacher_eval_paired3"]
+    assert l0_eval["configuration_run_ids"] == []
+    assert l0_eval["dependencies"] == ["b3_l0_paired3", "b5_release_postteacher"]
+    assert l0_eval["requires_selected_consumer"] is True
+    assert "b6_l0_postteacher_eval_paired3" in nodes[
+        "b6_aggregate_select_deployable"
+    ]["dependencies"]
+    assert "b3_l0_paired3" not in nodes["b6_aggregate_select_deployable"][
+        "dependencies"
+    ]
     assert nodes["b6_confirm_deployable"]["dependencies"] == ["b6_aggregate_select_deployable"]
     assert nodes["final_test_hlt_only"]["protected_final_test"] is True
     assert graph["final_test_automatic_submission"] is False
@@ -278,7 +304,7 @@ def test_submit_cli_is_non_submitting_without_explicit_execute(tmp_path):
     assert "submitted_jobs" not in payload
 
 
-def test_execute_refuses_unconfigured_scientific_executors_before_sbatch(tmp_path):
+def test_execute_requires_explicit_scientific_bindings_before_sbatch(tmp_path):
     graph_path = tmp_path / "graph.json"
     write_immutable_json(graph_path, _graph(tmp_path))
     environment = os.environ.copy()
@@ -302,12 +328,24 @@ def test_execute_refuses_unconfigured_scientific_executors_before_sbatch(tmp_pat
         cwd=REPO_ROOT, capture_output=True, text=True, env=environment,
     )
     assert completed.returncode != 0
-    assert "PAB_CONSUMER_EXECUTOR" in completed.stderr
-    assert "definitely-not-a-real-sbatch" not in completed.stderr
+    assert "PAB_DEPLOYABLE_EXPORT_EXECUTOR" not in completed.stderr
+    assert "PAB_FINAL_TEST_EXECUTOR" not in completed.stderr
+    assert "PAB_RECONSTRUCTOR_EXECUTOR" not in completed.stderr
+    assert "PAB_CONSUMER_EXECUTOR" not in completed.stderr
+    assert "PAB_TEACHER_FORWARD_EXECUTOR" not in completed.stderr
+    assert "explicit scientific bindings" in completed.stderr
+    assert "--registry" in completed.stderr
+    assert "--reservations" in completed.stderr
+    assert "--execution-spec" in completed.stderr
 
 
 def test_required_clis_help_and_tigris_shell_contracts():
     clis = (
+        "train_prediction_anchored_r0.py",
+        "prepare_prediction_anchored_bridge_inputs.py",
+        "execute_prediction_anchored_bridge_consumers.py",
+        "confirm_prediction_anchored_bridge_consumer.py",
+        "bind_prediction_anchored_bridge_teachers.py",
         "audit_prediction_anchored_bridge_inputs.py",
         "write_prediction_anchored_bridge_recipe.py",
         "train_prediction_anchored_bridge_consumer.py",
@@ -316,6 +354,7 @@ def test_required_clis_help_and_tigris_shell_contracts():
         "train_prediction_anchored_bridge_reconstructor.py",
         "run_prediction_anchored_bridge_campaign.py",
         "evaluate_prediction_anchored_bridge_campaign.py",
+        "deploy_prediction_anchored_bridge.py",
         "submit_prediction_anchored_bridge_graph.py",
         "run_prediction_anchored_bridge_allocation.py",
         "inspect_prediction_anchored_bridge_graph.py",
@@ -334,12 +373,24 @@ def test_required_clis_help_and_tigris_shell_contracts():
             assert "#SBATCH --nodes=1" in text
             assert "#SBATCH --mem=" in text
         assert "reu-aisoc\n" not in text
+    cache_shell = (
+        REPO_ROOT / "sbatch" / "run_cache_prediction_anchored_bridge_logits.sh"
+    ).read_text(encoding="utf-8")
+    assert "PAB_TEACHER_FORWARD_EXECUTOR" not in cache_shell
+    assert "--execution-spec" in cache_shell
+    assert "--r0-checkpoint" in cache_shell
     common = (REPO_ROOT / "sbatch" / "prediction_anchored_bridge_common.sh").read_text(encoding="utf-8")
     assert "Only allocation leader rank 0" in common
     assert "restart" in common.lower() and "whole" in common.lower()
     assert "/dev/shm/prediction_anchored_bridge/" in common
     prepare = (REPO_ROOT / "sbatch" / "run_prepare_prediction_anchored_bridge_ram.sh").read_text(encoding="utf-8")
     assert "fresh_run env" in prepare and "-u PAB_OFFLINE_NPZ" in prepare
+    submit = (REPO_ROOT / "sbatch" / "submit_prediction_anchored_bridge_pilot.sh").read_text(
+        encoding="utf-8"
+    )
+    for value in ("PAB_REGISTRY", "PAB_RESERVATIONS", "PAB_EXECUTION_SPEC"):
+        assert f'${{{value}:?' in submit
+        assert f'--{value.removeprefix("PAB_").lower().replace("_", "-")}' in submit
     bash = shutil.which("bash") if os.name != "nt" else None
     git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if os.name == "nt" and git_bash.is_file():
