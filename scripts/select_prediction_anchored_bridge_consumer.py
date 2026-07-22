@@ -39,12 +39,14 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument("--f0-checkpoint-sha256", required=True)
     select.add_argument("--bridge-recipe-sha256", required=True)
     select.add_argument("--output", required=True)
+    select.add_argument("--dry-run", action="store_true")
 
     confirm = subparsers.add_parser("confirm", help="apply the sealed one-shot confirmation")
     confirm.add_argument("--preconfirmation", required=True)
     confirm.add_argument("--confirmation-metrics", required=True)
     confirm.add_argument("--access-receipt", required=True)
     confirm.add_argument("--output-dir", required=True)
+    confirm.add_argument("--dry-run", action="store_true")
 
     bind = subparsers.add_parser("bind", help="bind a primary/all50/alternate median teacher")
     bind.add_argument("--kind", choices=("primary", "all50", "alternate"), required=True)
@@ -56,7 +58,9 @@ def _parser() -> argparse.ArgumentParser:
     bind.add_argument("--model-val-select-sha256", required=True)
     bind.add_argument("--stack-val-consumer-sha256", required=True)
     bind.add_argument("--selected-consumer", default="")
+    bind.add_argument("--all50-scaler", default="")
     bind.add_argument("--output", required=True)
+    bind.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -84,8 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                 "T10_robust": args.robust_checkpoint,
             },
         )
-        publication = write_immutable_json(args.output, artifact)
-        print(json.dumps({"selection": artifact, "publication": publication}, indent=2, sort_keys=True))
+        publication = None if args.dry_run else write_immutable_json(args.output, artifact)
+        print(json.dumps({"dry_run": bool(args.dry_run), "selection": artifact, "publication": publication}, indent=2, sort_keys=True))
         return 0
 
     if args.command == "confirm":
@@ -96,9 +100,9 @@ def main(argv: list[str] | None = None) -> int:
             preconfirmation,
             confirmation,
             access_receipt=access_receipt,
-            output_dir=args.output_dir,
+            output_dir=None if args.dry_run else args.output_dir,
         )
-        print(json.dumps(artifact, indent=2, sort_keys=True))
+        print(json.dumps({"dry_run": bool(args.dry_run), "confirmation": artifact}, indent=2, sort_keys=True))
         return 0 if artifact.get("status") == "CONFIRMED_LOCKED" else 2
 
     aggregate = load_hashed_json(args.aggregate)
@@ -107,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("primary binding requires --selected-consumer")
     if args.kind != "primary" and selected is not None:
         raise ValueError("non-primary bindings must not receive --selected-consumer")
+    if args.kind != "all50" and args.all50_scaler:
+        raise ValueError("only an all50 binding may receive --all50-scaler")
+    all50_scaler = load_hashed_json(args.all50_scaler) if args.all50_scaler else None
     channel, namespace = {
         "primary": ("physical45", PRIMARY_TEACHER_NAMESPACE),
         "all50": ("all50", ALL50_TEACHER_NAMESPACE),
@@ -126,12 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         target_cache_namespace=namespace,
         bridge_recipe_sha256=args.bridge_recipe_sha256,
         primary_selection=selected,
+        all50_scaler_artifact=all50_scaler,
     )
-    publication = write_immutable_json(args.output, artifact)
-    print(json.dumps({"binding": artifact, "publication": publication}, indent=2, sort_keys=True))
+    publication = None if args.dry_run else write_immutable_json(args.output, artifact)
+    print(json.dumps({"dry_run": bool(args.dry_run), "binding": artifact, "publication": publication}, indent=2, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

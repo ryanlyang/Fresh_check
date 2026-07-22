@@ -347,7 +347,10 @@ def allocate_particle_types(
     hard = torch.nn.functional.one_hot(
         hard_indices.clamp_min(0), num_classes=len(ABPH_PID_CATEGORIES)
     ).to(soft.dtype) * layout.mask.unsqueeze(-1)
-    straight_through = hard + soft - soft.detach()
+    # Parenthesize the zero-valued gradient carrier so the forward value is
+    # exactly the hard quota assignment rather than a rounded (hard + soft)
+    # subtraction under mixed precision.
+    straight_through = hard + (soft - soft.detach())
     hard_counts = torch.zeros_like(counts)
     for group_index in range(counts.shape[1]):
         member = layout.mask & (layout.group_indices == group_index)
@@ -374,6 +377,22 @@ def allocate_particle_types(
             "hard_assignment": "minimum_cost_quota_expansion_hungarian",
         },
     )
+
+
+def _type_conditioned_minimum_mass(type_allocation: TypeAllocation, mass_table: Any) -> Any:
+    """Return exact hard PID masses with straight-through type gradients."""
+
+    torch = require_torch()
+    hard = torch.as_tensor(type_allocation.hard_one_hot).float()
+    straight_through = torch.as_tensor(type_allocation.straight_through_one_hot).float()
+    table = torch.as_tensor(mass_table, device=hard.device).float()
+    # A BF16 matmul can accumulate a material mass-floor error over 128 slots.
+    # Elementwise FP32 accounting keeps the physical forward value identical
+    # to the discrete PID assignment while retaining the relaxed gradient.
+    with torch.autocast(device_type=hard.device.type, enabled=False):
+        hard_mass = (hard * table).sum(dim=-1)
+        relaxed_mass = (straight_through * table).sum(dim=-1)
+        return hard_mass + (relaxed_mass - relaxed_mass.detach())
 
 
 def _allowed_charge_mask(hard_pid_indices: Any) -> Any:
@@ -596,10 +615,19 @@ def project_n_body_phase_space(
         raise ValueError("N-body particle dimensions are inconsistent")
     parent_mass = _invariant_mass_float64(parent)
     feasibility_tolerance = 2.0e-5 * parent_mass.abs().clamp_min(1.0)
-    if bool((masses < 0.0).any()) or bool(
-        masses.sum() > parent_mass + feasibility_tolerance
+    minimum_mass = masses.min()
+    mass_sum = masses.sum()
+    if bool(minimum_mass < 0.0) or bool(
+        mass_sum > parent_mass + feasibility_tolerance
     ):
-        raise ValueError("particle masses are infeasible for the parent invariant mass")
+        raise ValueError(
+            "particle masses are infeasible for the parent invariant mass: "
+            f"minimum_particle_mass={float(minimum_mass.detach().cpu()):.8e}, "
+            f"particle_mass_sum={float(mass_sum.detach().cpu()):.8e}, "
+            f"parent_mass={float(parent_mass.detach().cpu()):.8e}, "
+            f"tolerance={float(feasibility_tolerance.detach().cpu()):.8e}, "
+            f"particle_count={count}"
+        )
     if count == 1:
         return parent[None, :].to(output_dtype), {
             "branch": "single_particle_exact_parent",
@@ -999,7 +1027,7 @@ class ConstrainedParticleRenderer(_ModuleBase):
         mass_table = torch.tensor(
             _PID_MASSES, dtype=torch.float32, device=slots.device
         )
-        minimum_mass = type_allocation.straight_through_one_hot @ mass_table
+        minimum_mass = _type_conditioned_minimum_mass(type_allocation, mass_table)
         # Exact phase-space projection runs in FP32/FP64. Preserve its output
         # in FP32 rather than assigning it into BF16 buffers under autocast.
         mass = torch.zeros(layout.mask.shape, dtype=torch.float32, device=slots.device)

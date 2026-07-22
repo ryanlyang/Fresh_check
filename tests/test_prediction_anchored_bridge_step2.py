@@ -224,6 +224,65 @@ def test_one_open_staging_streamed_truth_and_r0_agree(tmp_path):
     ledger.cleanup()
 
 
+def test_named_pair_staging_opens_each_parent_source_once_and_finalizes_together(tmp_path):
+    model_root = tmp_path / "model"
+    stack_root = tmp_path / "stack"
+    model_root.mkdir()
+    stack_root.mkdir()
+    model_paths, model_arrays = _write_source_pair(model_root, n=7)
+    stack_paths, stack_arrays = _write_source_pair(stack_root, n=9)
+    ledger = AllocationRamLedger(
+        tmp_path / "ram_named",
+        allocation_id="named",
+        capacity_bytes=64 * 1024 * 1024,
+        allow_unverified_test_root=True,
+    )
+    stager = AllocationNpzStager(ledger, rank=0, world_size=1)
+    staged, report = stager.stage_named_pairs(
+        {
+            "model_train": {
+                "hlt_npz": model_paths["hlt"][0],
+                "hlt_metadata": model_paths["hlt"][1],
+                "offline_npz": model_paths["offline"][0],
+                "offline_metadata": model_paths["offline"][1],
+            },
+            "stack_train": {
+                "hlt_npz": stack_paths["hlt"][0],
+                "hlt_metadata": stack_paths["hlt"][1],
+                "offline_npz": stack_paths["offline"][0],
+                "offline_metadata": stack_paths["offline"][1],
+            },
+        },
+        shard_size=3,
+    )
+    assert list(staged) == ["model_train", "stack_train"]
+    assert report["source_namespaces"] == ["model_train", "stack_train"]
+    assert report["all_persistent_npz_open_counts_equal_one"] is True
+    assert len(report["persistent_npz_open_counts"]) == 4
+    assert ledger.snapshot()["raw_stage_finalized"] is True
+    assert len(stager.raw_reservation_ids) == 2
+    np.testing.assert_array_equal(
+        staged["model_train"][0].read_indices([6, 0])["tokens"],
+        model_arrays["hlt"]["tokens"][[6, 0]],
+    )
+    np.testing.assert_array_equal(
+        staged["stack_train"][1].read_indices([8, 1])["tokens"],
+        stack_arrays["offline"]["tokens"][[8, 1]],
+    )
+    with pytest.raises(RuntimeError, match="refusing a persistent reopen"):
+        AllocationNpzStager(ledger).stage_named_pairs(
+            {
+                "again": {
+                    "hlt_npz": model_paths["hlt"][0],
+                    "hlt_metadata": model_paths["hlt"][1],
+                    "offline_npz": model_paths["offline"][0],
+                    "offline_metadata": model_paths["offline"][1],
+                }
+            }
+        )
+    ledger.cleanup()
+
+
 def test_derived_lru_regenerates_without_touching_raw(tmp_path):
     ledger = AllocationRamLedger(
         tmp_path,

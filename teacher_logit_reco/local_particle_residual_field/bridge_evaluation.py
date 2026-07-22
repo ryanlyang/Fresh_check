@@ -20,6 +20,7 @@ from .bridge import (
     BRIDGE_CHANNEL_ALL50,
     BRIDGE_CHANNEL_PHYSICAL45,
     BRIDGE_CONTROLS,
+    PREDICTION_ANCHORED_BRIDGE_SCALER_CONTRACT,
     RESPONSE_RHOS,
 )
 from .bridge_campaign import PAIRED_SEED_IDS
@@ -1000,6 +1001,7 @@ def build_teacher_binding(
     target_cache_namespace: str,
     bridge_recipe_sha256: str,
     primary_selection: Mapping[str, Any] | None = None,
+    all50_scaler_artifact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind an exact median teacher before any target-logit cache exists."""
 
@@ -1044,6 +1046,28 @@ def build_teacher_binding(
         selection_hash = primary_selection["content_hash"]
     elif primary_selection is not None:
         raise ValueError("non-primary binding must not reuse the primary selection")
+    all50_scaler_hash = None
+    all50_extra_statistics = None
+    if all50_scaler_artifact is not None:
+        if binding_kind != "all50":
+            raise ValueError("only the all50 binding may contain all50 correction scales")
+        validate_content_hash(
+            all50_scaler_artifact,
+            expected_contract=PREDICTION_ANCHORED_BRIDGE_SCALER_CONTRACT,
+        )
+        if (
+            all50_scaler_artifact.get("channel_policy") != BRIDGE_CHANNEL_ALL50
+            or all50_scaler_artifact.get("fit_split") != "stack_train_distill"
+        ):
+            raise ValueError("all50 correction scales must be fit on stack_train_distill")
+        all50_scaler_hash = all50_scaler_artifact["content_hash"]
+        all50_extra_statistics = {
+            name: list(all50_scaler_artifact[name][45:])
+            for name in (
+                "q99_delta", "sigma_delta", "trust_scale", "epsilon",
+                "active", "sparse_nonzero_fallback",
+            )
+        }
     if int(aggregate.get("median_seed_id", -1)) not in PAIRED_SEED_IDS:
         raise ValueError("teacher aggregate does not identify a paired median replica")
     if str(aggregate.get("median_checkpoint_sha256")) != checkpoint:
@@ -1085,6 +1109,11 @@ def build_teacher_binding(
             "binding_created_before_cache": True,
             "checkpoint_refit_forbidden": True,
             "cache_artifact_sha256": None,
+            "all50_correction_scaler_sha256": all50_scaler_hash,
+            "all50_extra_correction_statistics": all50_extra_statistics,
+            "all50_extra_statistics_fit_split": (
+                "stack_train_distill" if all50_scaler_hash is not None else None
+            ),
             "deployable": False,
         }
     )
@@ -1121,6 +1150,24 @@ def validate_teacher_binding(
         raise ValueError("teacher binding circularly references a cache artifact")
     if not bool(binding.get("checkpoint_refit_forbidden")):
         raise ValueError("teacher binding permits a post-cache refit")
+    all50_scaler_hash = binding.get("all50_correction_scaler_sha256")
+    all50_statistics = binding.get("all50_extra_correction_statistics")
+    if kind == "all50" and all50_scaler_hash is not None:
+        _sha256(all50_scaler_hash, name="all50_correction_scaler_sha256")
+        if binding.get("all50_extra_statistics_fit_split") != "stack_train_distill":
+            raise ValueError("all50 extra correction statistics used another fit split")
+        expected_statistics = {
+            "q99_delta", "sigma_delta", "trust_scale", "epsilon",
+            "active", "sparse_nonzero_fallback",
+        }
+        if not isinstance(all50_statistics, Mapping) or set(all50_statistics) != expected_statistics:
+            raise ValueError("all50 binding correction statistics are incomplete")
+        if any(not isinstance(all50_statistics[name], list) or len(all50_statistics[name]) != 5 for name in expected_statistics):
+            raise ValueError("all50 binding must contain exactly five extra-channel statistics")
+    elif all50_scaler_hash is not None or all50_statistics is not None or binding.get(
+        "all50_extra_statistics_fit_split"
+    ) is not None:
+        raise ValueError("non-all50 binding contains all50 correction statistics")
     checkpoint_path = Path(str(binding.get("checkpoint_path")))
     if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
         raise FileNotFoundError(f"bound teacher checkpoint is absent or unsafe: {checkpoint_path}")

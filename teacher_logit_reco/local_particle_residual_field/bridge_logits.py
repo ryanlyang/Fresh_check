@@ -226,6 +226,9 @@ def write_teacher_logit_cache(
             "checkpoint_sha256": binding["checkpoint_sha256"],
             "live_checkpoint_sha256": live_teacher_config["checkpoint_sha256"],
             "bridge_recipe_sha256": binding["bridge_recipe_sha256"],
+            "all50_correction_scaler_sha256": binding.get(
+                "all50_correction_scaler_sha256"
+            ),
             "channel_policy": binding["channel_policy"],
             "field_condition": _cache_condition_for_namespace(selected_namespace),
             "rho_endpoint": 0.0 if selected_namespace == N3_F0_TEACHER_NAMESPACE else 0.10,
@@ -351,6 +354,9 @@ def load_teacher_logit_cache(
         "checkpoint_sha256": binding["checkpoint_sha256"],
         "live_checkpoint_sha256": live_teacher_config["checkpoint_sha256"],
         "stack_train_distill_manifest_sha256": str(stack_train_distill_manifest_sha256),
+        "all50_correction_scaler_sha256": binding.get(
+            "all50_correction_scaler_sha256"
+        ),
     }
     for key, value in expected.items():
         if manifest.get(key) != value:

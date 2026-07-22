@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--namespace-dir", required=True)
     parser.add_argument("--stack-train-distill-sha256", required=True)
     parser.add_argument("--selected-consumer", default="")
+    parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -36,6 +37,21 @@ def main(argv: list[str] | None = None) -> int:
     binding = load_hashed_json(args.binding)
     selected = load_hashed_json(args.selected_consumer) if args.selected_consumer else None
     live = build_live_teacher_config(binding, primary_selection=selected)
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "binding_sha256": binding["content_hash"],
+                    "live_teacher_config": live,
+                    "namespace_dir_would_be": str(Path(args.namespace_dir)),
+                    "same_checkpoint_target_and_live_required": True,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     manifest, arrays = load_teacher_logit_cache(
         args.namespace_dir,
         binding=binding,
@@ -60,4 +76,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

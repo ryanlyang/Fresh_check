@@ -26,7 +26,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.particle_matching import (
 from teacher_logit_reco.adaptive_binary_pseudooffline.particle_renderer import (
     ConstrainedParticleRenderer,
     ParticleRendererConfig,
+    ParticleSlotLayout,
     _invariant_mass_float64,
+    _type_conditioned_minimum_mass,
     allocate_particle_charges,
     allocate_particle_types,
     exact_particle_slot_layout,
@@ -288,6 +290,41 @@ def test_n_body_projection_corrects_boost_roundoff_and_rechecks_mass_shell(monke
     assert diagnostics["raw_closure_max_residual"] >= 7.9e-5
     assert diagnostics["closure_max_residual"] < 2.0e-10
     assert diagnostics["mass_shell_max_residual"] < 2.0e-8
+
+
+def test_pid_mass_floor_is_exact_fp32_under_bfloat16_autocast():
+    mask = torch.ones(1, ABPH_MAX_PARTICLES, dtype=torch.bool)
+    layout = ParticleSlotLayout(
+        group_indices=torch.zeros_like(mask, dtype=torch.long),
+        local_slot_indices=torch.arange(ABPH_MAX_PARTICLES)[None, :],
+        mask=mask,
+        group_counts=torch.full((1, 1), ABPH_MAX_PARTICLES, dtype=torch.long),
+        diagnostics={},
+    )
+    counts = torch.zeros(1, 1, len(ABPH_PID_CATEGORIES), dtype=torch.long)
+    counts[0, 0, 0] = ABPH_MAX_PARTICLES
+    logits = torch.randn(
+        1,
+        ABPH_MAX_PARTICLES,
+        len(ABPH_PID_CATEGORIES),
+        requires_grad=True,
+    )
+    allocation = allocate_particle_types(
+        logits,
+        layout,
+        counts,
+        temperature=0.2,
+        sinkhorn_iterations=8,
+    )
+    table = torch.tensor(particle_renderer_module._PID_MASSES, dtype=torch.float32)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        masses = _type_conditioned_minimum_mass(allocation, table)
+
+    expected = torch.full((1, ABPH_MAX_PARTICLES), table[0], dtype=torch.float32)
+    torch.testing.assert_close(masses, expected, atol=0.0, rtol=0.0)
+    masses.sum().backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
 
 
 def test_massless_phase_space_branch_closes_without_a_fake_mass_floor():

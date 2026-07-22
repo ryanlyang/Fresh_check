@@ -349,6 +349,13 @@ class PredictionAnchoredC0Correction(torch.nn.Module):
             raise ValueError("C0 h0 must have shape [B,P,160]")
         if not torch.isfinite(tokens).all() or not torch.isfinite(anchor).all() or not torch.isfinite(frozen_h0).all():
             raise ValueError("C0 inputs contain non-finite values")
+        padding = ~valid
+        if bool(padding.any()) and (
+            bool(torch.count_nonzero(tokens[padding]))
+            or bool(torch.count_nonzero(anchor[padding]))
+            or bool(torch.count_nonzero(frozen_h0[padding]))
+        ):
+            raise ValueError("C0 padded raw/f0/h0 inputs must be exactly zero")
         standardized_f0 = self.scalers.conditioning_standardize(
             anchor, valid, input_space=f0_space
         )

@@ -156,6 +156,58 @@ class PredictionAnchoredSplitConfig:
 LOCKED_PILOT_SPLIT_CONFIG = PredictionAnchoredSplitConfig()
 
 
+def prediction_anchored_split_config_from_payload(
+    payload: Mapping[str, Any],
+) -> PredictionAnchoredSplitConfig:
+    """Reconstruct and validate the exact split config embedded in a manifest."""
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("split config payload must be an object")
+    raw_counts = payload.get("parent_split_counts")
+    raw_partitions = payload.get("partitions")
+    raw_classes = payload.get("class_names")
+    if not isinstance(raw_counts, Mapping) or not isinstance(raw_partitions, list):
+        raise ValueError("split config payload is missing counts or partitions")
+    if not isinstance(raw_classes, list):
+        raise ValueError("split config payload is missing class_names")
+    partitions: list[ParentPartitionSpec] = []
+    for raw_partition in raw_partitions:
+        if not isinstance(raw_partition, Mapping) or not isinstance(
+            raw_partition.get("children"), list
+        ):
+            raise ValueError("invalid split partition payload")
+        children = tuple(
+            ChildSplitSpec(
+                name=str(child["name"]),
+                count=int(child["count"]),
+                purpose=str(child["purpose"]),
+                seal_kind=(
+                    None if child.get("seal_kind") is None else str(child["seal_kind"])
+                ),
+            )
+            for child in raw_partition["children"]
+        )
+        partitions.append(
+            ParentPartitionSpec(
+                parent_split=str(raw_partition["parent_split"]),
+                seed=int(raw_partition["seed"]),
+                children=children,
+            )
+        )
+    config = PredictionAnchoredSplitConfig(
+        contract=str(payload.get("contract", "")),
+        class_names=tuple(str(value) for value in raw_classes),
+        parent_split_counts=tuple(
+            (name, int(raw_counts[name])) for name in SPLIT_ORDER
+        ),
+        partitions=tuple(partitions),
+    )
+    _require_split_config(config)
+    if config.to_payload() != dict(payload):
+        raise ValueError("split config payload is not canonical")
+    return config
+
+
 @dataclass(frozen=True)
 class SplitAccessRule:
     purpose: str

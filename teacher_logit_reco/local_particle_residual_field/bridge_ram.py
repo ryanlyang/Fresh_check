@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import threading
 import time
@@ -379,6 +380,7 @@ class AllocationNpzStager:
             raise ValueError("invalid stager rank/world_size")
         self.persistent_npz_open_counts: dict[str, int] = {}
         self.raw_reservation_id: str | None = None
+        self.raw_reservation_ids: list[str] = []
 
     @staticmethod
     def _validate_loaded(name: str, arrays: Mapping[str, np.ndarray], metadata: Mapping[str, Any]) -> tuple[str, tuple[JetIdentity, ...]]:
@@ -427,6 +429,71 @@ class AllocationNpzStager:
                 shard_size=shard_size,
             )
 
+    def stage_named_pairs(
+        self,
+        pairs: Mapping[str, Mapping[str, str | Path]],
+        *,
+        shard_size: int = DEFAULT_RAW_SHARD_SIZE,
+    ) -> tuple[dict[str, tuple[StagedSource, StagedSource, dict[str, Any]]], dict[str, Any]]:
+        """Stage several disjoint parent splits in one allocation-wide raw stage.
+
+        Each namespace must provide ``hlt_npz``, ``hlt_metadata``,
+        ``offline_npz``, and ``offline_metadata``.  Every compressed source is
+        opened exactly once, all resulting raw shards remain non-evictable,
+        and the ledger is finalized only after every namespace is committed.
+        """
+
+        if not pairs:
+            raise ValueError("at least one named HLT/offline source pair is required")
+        required = {"hlt_npz", "hlt_metadata", "offline_npz", "offline_metadata"}
+        normalized: list[tuple[str, Mapping[str, str | Path]]] = []
+        for raw_name, source in pairs.items():
+            name = str(raw_name)
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+                raise ValueError(f"unsafe raw-stage namespace {name!r}")
+            missing = sorted(required - set(source))
+            extra = sorted(set(source) - required)
+            if missing or extra:
+                raise ValueError(
+                    f"raw-stage namespace {name!r} has missing={missing}, extra={extra}"
+                )
+            normalized.append((name, source))
+        normalized.sort(key=lambda item: item[0])
+        with _locked_file(self.ledger.root / "raw_stage.lock"):
+            raw_root = self.ledger.root / "raw"
+            if bool(self.ledger.snapshot().get("raw_stage_finalized")) or raw_root.exists():
+                raise RuntimeError("allocation raw sources were already staged; refusing a persistent reopen")
+            staged: dict[str, tuple[StagedSource, StagedSource, dict[str, Any]]] = {}
+            for name, source in normalized:
+                staged[name] = self._stage_pair_locked(
+                    hlt_npz=source["hlt_npz"],
+                    hlt_metadata=source["hlt_metadata"],
+                    offline_npz=source["offline_npz"],
+                    offline_metadata=source["offline_metadata"],
+                    shard_size=shard_size,
+                    stage_root=raw_root / name,
+                    source_namespace=name,
+                    finalize_raw=False,
+                )
+            self.ledger.finalize_raw_stage()
+            report = with_content_hash(
+                {
+                    "contract": PREDICTION_ANCHORED_RAW_STAGE_CONTRACT,
+                    "allocation_id": self.ledger.allocation_id,
+                    "source_namespaces": [name for name, _ in normalized],
+                    "namespace_reports": {
+                        name: result[2] for name, result in staged.items()
+                    },
+                    "persistent_npz_open_counts": dict(self.persistent_npz_open_counts),
+                    "all_persistent_npz_open_counts_equal_one": all(
+                        count == 1 for count in self.persistent_npz_open_counts.values()
+                    ),
+                    "raw_non_evictable": True,
+                    "persistent_field_tensors_written": False,
+                }
+            )
+            return staged, report
+
     def _stage_pair_locked(
         self,
         *,
@@ -435,6 +502,9 @@ class AllocationNpzStager:
         offline_npz: str | Path,
         offline_metadata: str | Path,
         shard_size: int = DEFAULT_RAW_SHARD_SIZE,
+        stage_root: Path | None = None,
+        source_namespace: str | None = None,
+        finalize_raw: bool = True,
     ) -> tuple[StagedSource, StagedSource, dict[str, Any]]:
         if self.rank != 0:
             raise RuntimeError("only allocation rank 0 may open persistent compressed sources")
@@ -482,12 +552,18 @@ class AllocationNpzStager:
                 source_file_hashes[name] = digest.hexdigest()
                 lazy_sources[name] = data
             raw_preflight_bytes = 2 * projected_uncompressed_bytes + 2 * 1024 * 1024
-            self.raw_reservation_id = self.ledger.reserve(
+            reservation_id = self.ledger.reserve(
                 owner="rank0",
-                role="aligned_hlt_offline_raw_stage_and_decompression_peak",
+                role=(
+                    "aligned_hlt_offline_raw_stage_and_decompression_peak"
+                    if source_namespace is None
+                    else f"aligned_hlt_offline_raw_stage_and_decompression_peak:{source_namespace}"
+                ),
                 expected_bytes=raw_preflight_bytes,
                 category="raw",
             )
+            self.raw_reservation_id = reservation_id
+            self.raw_reservation_ids.append(reservation_id)
             for name, data in lazy_sources.items():
                 arrays = {
                     array_name: np.asarray(data[array_name], dtype=_DTYPES[array_name]).copy()
@@ -508,7 +584,7 @@ class AllocationNpzStager:
             offline_units = metadata_by_name["offline"].get(unit_key)
             if hlt_units is not None and offline_units is not None and hlt_units != offline_units:
                 raise ValueError(f"HLT/offline {unit_key} metadata are incompatible")
-        stage_root = self.ledger.root / "raw"
+        stage_root = self.ledger.root / "raw" if stage_root is None else Path(stage_root)
         stage_root.mkdir(parents=True, exist_ok=False)
         manifests: dict[str, dict[str, Any]] = {}
         measured_bytes = 0
@@ -571,8 +647,9 @@ class AllocationNpzStager:
         # Release decompressed process copies; the verified RAM shards are now
         # the sole allocation source.
         loaded.clear()
-        self.ledger.commit(self.raw_reservation_id, measured_bytes=measured_bytes)
-        self.ledger.finalize_raw_stage()
+        self.ledger.commit(reservation_id, measured_bytes=measured_bytes)
+        if finalize_raw:
+            self.ledger.finalize_raw_stage()
         hlt_stage = StagedSource("hlt", stage_root / "hlt", manifests["hlt"])
         offline_stage = StagedSource("offline", stage_root / "offline", manifests["offline"])
         hlt_stage.verify_shards()
@@ -581,6 +658,7 @@ class AllocationNpzStager:
             {
                 "contract": PREDICTION_ANCHORED_RAW_STAGE_CONTRACT,
                 "allocation_id": self.ledger.allocation_id,
+                "source_namespace": source_namespace,
                 "n_events": hlt_stage.n_events,
                 "shard_size": logical_size,
                 "world_size": self.world_size,
