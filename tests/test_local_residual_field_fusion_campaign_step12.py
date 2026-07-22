@@ -24,6 +24,10 @@ def test_step12_submitters_cover_all_stages_and_dependency_gates() -> None:
     assert "'%T|%r'" in generic
     assert "DependencyNeverSatisfied" in generic
     assert "action=cancel_and_resubmit" in generic and 'scancel "${job_id}"' in generic
+    assert "normalize_dependency" in generic
+    assert "dependency_chain_changed" in generic
+    assert 'active_submission_job "${label}" "${completion}" "${dependency}"' in generic
+    assert '"$(normalize_dependency "${dependency}")" >>"${SUBMISSION_MANIFEST}"' in generic
     assert "reu-aisocial" in generic and "reu-aisocial" in tigris
     assert "PYTHONNOUSERSITE=1" in tigris
     assert 'CONDA_BASE:=/home/ryreu/miniconda3' in tigris

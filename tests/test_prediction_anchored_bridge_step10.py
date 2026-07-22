@@ -186,6 +186,9 @@ def test_selected_consumer_and_sealed_confirmations_are_ordered_fail_closed(tmp_
     assert "b3_l0_paired3" not in nodes["b6_aggregate_select_deployable"][
         "dependencies"
     ]
+    assert set(nodes["b6_aggregate_select_deployable"]["afterany_dependencies"]) == set(
+        nodes["b6_aggregate_select_deployable"]["dependencies"]
+    )
     assert nodes["b6_confirm_deployable"]["dependencies"] == ["b6_aggregate_select_deployable"]
     assert nodes["final_test_hlt_only"]["protected_final_test"] is True
     assert graph["final_test_automatic_submission"] is False
@@ -261,6 +264,8 @@ def test_scheduler_success_consumer_failure_confirmation_failure_and_preemption(
     assert row["status"] == "PREEMPTED_RESTART_WHOLE_CONFIGURATION_PACK"
     assert row["partial_replica_resume_allowed"] is False
     assert row["restart_scope"] == "whole_configuration_pack"
+    assert preempted["statuses"]["b6_aggregate_select_deployable"] == "COMPLETED"
+    assert preempted["statuses"]["b6_report_export_reload"] == "COMPLETED"
 
 
 def test_render_and_local_cpu_rehearsal_never_submit(tmp_path):
@@ -353,6 +358,7 @@ def test_required_clis_help_and_tigris_shell_contracts():
         "cache_prediction_anchored_bridge_logits.py",
         "train_prediction_anchored_bridge_reconstructor.py",
         "run_prediction_anchored_bridge_campaign.py",
+        "build_prediction_anchored_bridge_reservations.py",
         "evaluate_prediction_anchored_bridge_campaign.py",
         "deploy_prediction_anchored_bridge.py",
         "submit_prediction_anchored_bridge_graph.py",

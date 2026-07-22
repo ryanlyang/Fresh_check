@@ -28,7 +28,8 @@ case "${ACTION}" in
     pab_require_env PAB_EXECUTION_SPEC
     fresh_run "${PYTHON_BIN}" -u scripts/run_prediction_anchored_bridge_campaign.py \
       --campaign-action validate-production --registry "${PAB_REGISTRY}" \
-      --reservations "${PAB_RESERVATIONS}" --artifact-root "${PREDICTION_ANCHORED_ARTIFACT_ROOT}" \
+      --reservations "${PAB_RESERVATIONS}" --execution-spec "${PAB_EXECUTION_SPEC}" \
+      --artifact-root "${PREDICTION_ANCHORED_ARTIFACT_ROOT}" \
       --dry-run
     fresh_run "${PYTHON_BIN}" -u scripts/train_prediction_anchored_r0.py \
       --execution-spec "${PAB_EXECUTION_SPEC}" --output-dir "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/r0" \

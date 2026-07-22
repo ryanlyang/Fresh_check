@@ -109,26 +109,45 @@ submit_job() {
   fi
 }
 
+normalize_dependency() {
+  local dependency="$1" ids
+  [[ -n "${dependency}" ]] || { echo ""; return 0; }
+  dependency="${dependency#--dependency=afterok:}"
+  ids="$(printf '%s\n' "${dependency//:/$'\n'}" | sed '/^$/d' | sort -n | paste -sd: -)"
+  [[ -n "${ids}" ]] && echo "--dependency=afterok:${ids}" || echo ""
+}
+
 active_submission_job() {
-  local label="$1" completion="$2" job_id status state reason
+  local label="$1" completion="$2" expected_dependency="$3"
+  local record job_id recorded_dependency status state reason
   fresh_is_dry_run && return 1
   [[ -f "${SUBMISSION_MANIFEST}" ]] || return 1
-  job_id="$(awk -F '\t' -v label="${label}" -v completion="${completion}" '
-    $2 == label && $3 == completion { job_id = $4 }
-    END { print job_id }
+  record="$(awk -F '\t' -v label="${label}" -v completion="${completion}" '
+    $2 == label && $3 == completion { job_id = $4; dependency = $5 }
+    END { if (job_id != "") printf "%s\t%s", job_id, dependency }
   ' "${SUBMISSION_MANIFEST}")"
+  job_id="${record%%$'\t'*}"
+  recorded_dependency=""
+  [[ "${record}" == *$'\t'* ]] && recorded_dependency="${record#*$'\t'}"
   [[ -n "${job_id}" ]] || return 1
   status="$(squeue -h -j "${job_id}" -o '%T|%r' 2>/dev/null | head -n 1 || true)"
   [[ -n "${status}" ]] || return 1
   state="${status%%|*}"
   reason="${status#*|}"
+  expected_dependency="$(normalize_dependency "${expected_dependency}")"
+  recorded_dependency="$(normalize_dependency "${recorded_dependency}")"
+  if [[ "${recorded_dependency}" != "${expected_dependency}" ]]; then
+    echo "resume_label=${label} stale_job=${job_id} reason=dependency_chain_changed recorded=${recorded_dependency:-none} expected=${expected_dependency:-none} action=cancel_and_resubmit" >&2
+    scancel "${job_id}" 2>/dev/null || true
+    return 1
+  fi
   case "${state}" in
     BOOT_FAIL|CANCELLED|COMPLETED|DEADLINE|FAILED|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|TIMEOUT)
       echo "resume_label=${label} stale_job=${job_id} state=${state} reason=${reason} action=resubmit" >&2
       return 1
       ;;
   esac
-  if [[ "${reason}" == "DependencyNeverSatisfied" ]]; then
+  if [[ "${reason}" == *DependencyNeverSatisfied* ]]; then
     echo "resume_label=${label} stale_job=${job_id} state=${state} reason=${reason} action=cancel_and_resubmit" >&2
     scancel "${job_id}" 2>/dev/null || true
     return 1
@@ -155,13 +174,15 @@ resume_or_submit() {
     fi
   fi
   local active_job submitted_job
-  if active_job="$(active_submission_job "${label}" "${completion}")"; then
+  if active_job="$(active_submission_job "${label}" "${completion}" "${dependency}")"; then
     echo "${active_job}"
     return 0
   fi
   submitted_job="$(submit_job "${label}" "${dependency}" "${script}" "$@")"
   if ! fresh_is_dry_run; then
-    printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${label}" "${completion}" "${submitted_job}" >>"${SUBMISSION_MANIFEST}"
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${label}" "${completion}" "${submitted_job}" \
+      "$(normalize_dependency "${dependency}")" >>"${SUBMISSION_MANIFEST}"
   fi
   echo "${submitted_job}"
 }
