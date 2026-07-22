@@ -25,13 +25,16 @@ A0_TRAINING_SEED = 20421
 A0_SEED1_TRAINING_SEED = 20522
 A0_SEED1_ALLOWED_CONFIG_DIFFERENCES = frozenset({"output_dir", "seed"})
 
-_FORBIDDEN_RUNTIME_OR_TRAINING_INPUT_FIELDS = (
-    "baseline_checkpoint",
-    "reconstructor_checkpoint",
+_TEACHER_INPUT_FIELDS = (
     "teacher_logits_dir",
     "teacher_logits_train_path",
     "teacher_logits_val_path",
     "teacher_logits_stack_val_path",
+)
+_FORBIDDEN_RUNTIME_OR_TRAINING_INPUT_FIELDS = (
+    "baseline_checkpoint",
+    "reconstructor_checkpoint",
+    *_TEACHER_INPUT_FIELDS,
 )
 
 
@@ -43,14 +46,25 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _normalize_train_config(value: LocalResidualFieldTaggerTrainConfig | Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_train_config(
+    value: LocalResidualFieldTaggerTrainConfig | Mapping[str, Any],
+    *,
+    scrub_inactive_teacher_inputs: bool = False,
+) -> dict[str, Any]:
     if isinstance(value, LocalResidualFieldTaggerTrainConfig):
         config = value
     elif isinstance(value, Mapping):
         config = LocalResidualFieldTaggerTrainConfig(**dict(value))
     else:
         raise TypeError("tagger train config must be a LocalResidualFieldTaggerTrainConfig or mapping")
-    return json.loads(json.dumps(asdict(config), sort_keys=True, allow_nan=False))
+    normalized = json.loads(json.dumps(asdict(config), sort_keys=True, allow_nan=False))
+    # Legacy A0 launchers propagated a global teacher-logit directory even
+    # though A0 had kd_loss_weight=0. Canonicalize those semantically inactive
+    # paths away so the independent seed neither loads nor depends on them.
+    if scrub_inactive_teacher_inputs and float(normalized.get("kd_loss_weight", 0.0)) == 0.0:
+        for field_name in _TEACHER_INPUT_FIELDS:
+            normalized[field_name] = None
+    return normalized
 
 
 def extract_a0_train_config(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -67,7 +81,7 @@ def extract_a0_train_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     for candidate in candidates:
         if isinstance(candidate, Mapping):
-            return _normalize_train_config(candidate)
+            return _normalize_train_config(candidate, scrub_inactive_teacher_inputs=True)
     raise ValueError("A0 metadata does not contain a tagger training config mapping")
 
 
@@ -78,7 +92,7 @@ def build_a0_seed1_train_config(
 ) -> dict[str, Any]:
     """Clone A0's normalized config while changing only seed and output directory."""
 
-    source = _normalize_train_config(a0_config)
+    source = _normalize_train_config(a0_config, scrub_inactive_teacher_inputs=True)
     candidate = dict(source)
     candidate["output_dir"] = str(output_dir)
     candidate["seed"] = A0_SEED1_TRAINING_SEED
@@ -110,7 +124,7 @@ def audit_a0_seed1_recipe(
 ) -> dict[str, Any]:
     """Return a fail-closed audit of the independent HLT seed recipe."""
 
-    a0 = _normalize_train_config(a0_config)
+    a0 = _normalize_train_config(a0_config, scrub_inactive_teacher_inputs=True)
     candidate = _normalize_train_config(candidate_config)
     differences = _config_differences(a0, candidate)
     problems: list[str] = []

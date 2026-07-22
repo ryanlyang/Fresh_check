@@ -76,6 +76,7 @@ def _teacher_aggregate(run_id: str) -> dict:
                 "diagnostics": {
                     "oracle_physical45": _classification(0.75 + offset),
                     "oracle_all50": _classification(0.76 + offset),
+                    "reliability5_only": _classification(0.705 + offset),
                     "zero_field_consumer_diagnostic": _classification(0.20 + offset),
                 },
                 "negative_controls": {"zero_delta": _classification(0.70 + offset)},

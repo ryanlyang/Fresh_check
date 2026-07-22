@@ -12,11 +12,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teacher_logit_reco.local_particle_residual_field import require_post_teacher_release  # noqa: E402
-from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
-    load_hashed_json,
-    write_immutable_json,
-)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +22,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", default="")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    from teacher_logit_reco.local_particle_residual_field.bridge_semantic_evidence import (
+        require_post_teacher_release,
+    )
+    from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (
+        load_hashed_json,
+        write_immutable_json,
+    )
     artifact = require_post_teacher_release(
         load_hashed_json(args.registry),
         selected_consumer=load_hashed_json(args.selected_consumer),

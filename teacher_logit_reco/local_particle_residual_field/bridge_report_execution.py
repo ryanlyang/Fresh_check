@@ -211,7 +211,9 @@ def _paired_publication_row(
         }
         for row in seeds:
             metrics = row.get("metrics", row)
-            select = metrics.get("model_val_select", metrics)
+            select = metrics.get(
+                "model_val_select", metrics.get("model_val_stop", metrics)
+            )
             baseline_row = baseline_by_seed[int(row["seed_id"])]
             baseline_metrics = baseline_row.get("metrics", baseline_row)
             baseline_select = baseline_metrics.get(

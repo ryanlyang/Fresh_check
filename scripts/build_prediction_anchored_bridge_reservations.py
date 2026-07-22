@@ -13,21 +13,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teacher_logit_reco.local_particle_residual_field import build_campaign_reservations  # noqa: E402
-from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (  # noqa: E402
-    validate_campaign_registry,
-)
-from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
-    canonical_sha256,
-    load_hashed_json,
-    sha256_file,
-    validate_content_hash,
-    write_immutable_json,
-)
-from teacher_logit_reco.local_particle_residual_field.bridge_execution import (  # noqa: E402
-    PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT,
-    validate_prediction_anchored_execution_spec,
-)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -48,6 +33,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _measure(path_text: str) -> dict[str, object]:
+    from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (
+        canonical_sha256,
+        sha256_file,
+    )
     root = Path(path_text).resolve()
     if root.is_symlink() or not root.exists():
         raise FileNotFoundError(f"missing/unsafe fixed parent: {root}")
@@ -78,6 +67,21 @@ def _measure(path_text: str) -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (
+        validate_campaign_registry,
+    )
+    from teacher_logit_reco.local_particle_residual_field.bridge_campaign_policy import (
+        build_campaign_reservations,
+    )
+    from teacher_logit_reco.local_particle_residual_field.bridge_execution import (
+        PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT,
+        validate_prediction_anchored_execution_spec,
+    )
+    from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (
+        load_hashed_json,
+        validate_content_hash,
+        write_immutable_json,
+    )
     registry = load_hashed_json(args.registry)
     validate_campaign_registry(registry)
     measurement = load_hashed_json(args.step8_measurement)

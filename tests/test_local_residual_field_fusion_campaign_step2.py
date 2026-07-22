@@ -56,6 +56,21 @@ def test_step2_candidate_changes_only_seed_and_output_dir(tmp_path: Path) -> Non
     assert {row["path"] for row in audit["differences"]} == A0_SEED1_ALLOWED_CONFIG_DIFFERENCES
 
 
+def test_step2_inactive_legacy_teacher_paths_are_scrubbed_from_seed_control(tmp_path: Path) -> None:
+    a0 = asdict(_a0_config(tmp_path))
+    a0["teacher_logits_dir"] = "/legacy/globally_propagated/teacher_logits"
+    a0["teacher_logits_train_path"] = "/legacy/train.npz"
+    assert a0["kd_loss_weight"] == 0.0
+
+    candidate = build_a0_seed1_train_config(a0, output_dir=tmp_path / "A0_seed1")
+    audit = audit_a0_seed1_recipe(a0, candidate)
+
+    assert audit["ok"] is True
+    assert candidate["teacher_logits_dir"] is None
+    assert candidate["teacher_logits_train_path"] is None
+    assert {row["path"] for row in audit["differences"]} == A0_SEED1_ALLOWED_CONFIG_DIFFERENCES
+
+
 @pytest.mark.parametrize(
     ("field_name", "bad_value"),
     (
