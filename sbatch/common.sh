@@ -1221,24 +1221,16 @@ fresh_activate_env() {
     echo "CONDA_BASE is set, but conda.sh was not found: ${explicit_conda_sh}" >&2
     return 2
   fi
-  # On Tigris, `command -v conda` may resolve to the Python entry point at
-  # condabin/conda.  Some batch shells try to interpret that Python file as a
-  # shell script.  Prefer the supported shell initialization file directly.
-  local conda_sh="${HOME}/miniconda3/etc/profile.d/conda.sh"
-  if [[ -f "${conda_sh}" ]]; then
-    # shellcheck disable=SC1090
-    source "${conda_sh}"
+  if command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
     conda activate "${CONDA_ENV}"
     fresh_prepend_conda_library_paths
     return 0
   fi
-  if command -v conda >/dev/null 2>&1; then
-    local conda_hook
-    if ! conda_hook="$(conda shell.bash hook)"; then
-      echo "The discovered conda command could not produce a Bash hook: $(command -v conda)" >&2
-      return 2
-    fi
-    eval "${conda_hook}"
+  local conda_sh="${CONDA_BASE:-${HOME}/miniconda3}/etc/profile.d/conda.sh"
+  if [[ -f "${conda_sh}" ]]; then
+    # shellcheck disable=SC1090
+    source "${conda_sh}"
     conda activate "${CONDA_ENV}"
     fresh_prepend_conda_library_paths
     return 0

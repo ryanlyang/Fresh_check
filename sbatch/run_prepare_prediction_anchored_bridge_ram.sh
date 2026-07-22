@@ -100,6 +100,7 @@ case "${ACTION}" in
     ;;
   B5_RELEASE)
     pab_require_env PAB_EXECUTION_SPEC
+    pab_require_env PAB_REGISTRY
     for pair in \
       "primary.json:physical45_selected_bridge_teacher" \
       "all50.json:all50_selected_bridge_teacher" \
@@ -120,6 +121,11 @@ case "${ACTION}" in
         --namespace-dir "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/teacher_logits/physical45_alternate_bridge_teacher" \
         --execution-spec "${PAB_EXECUTION_SPEC}" "${dry_flag[@]}"
     fi
+    fresh_run "${PYTHON_BIN}" -u scripts/release_prediction_anchored_bridge_postteacher.py \
+      --registry "${PAB_REGISTRY}" --selected-consumer "${selected}" \
+      --primary-binding "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bindings/primary.json" \
+      --output "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/selection/post_teacher_release.json" \
+      "${dry_flag[@]}"
     ;;
   B6_SELECT)
     pab_require_env PAB_REGISTRY

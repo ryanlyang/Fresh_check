@@ -543,9 +543,11 @@ def assemble_step9_report_evidence(
 
     publications: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for run_id in STEP3_RUN_IDS:
-        publications[run_id] = _load_publication_pair(
-            root / "consumers" / run_id, run_id=run_id, reconstruction=False
-        )
+        publication_root = root / "consumers" / run_id
+        if (publication_root / "publication.json").is_file():
+            publications[run_id] = _load_publication_pair(
+                publication_root, run_id=run_id, reconstruction=False
+            )
     for registry_row in registry["runs"]:
         run_id = str(registry_row["canonical_run_id"])
         if run_id in STEP3_RUN_IDS or registry_row["execution_status"] != "RUNNABLE":
@@ -678,24 +680,25 @@ def assemble_step9_report_evidence(
                 hlt_only_reload_passed=None,
             )
         )
-    all50_aggregate = publications[T10_ALL50_CLEAN][0]
-    for condition, suffix in (
-        ("bridge_0p10", "bridge_0.10"),
-        ("reliability5_only", "reliability5_only"),
-        ("oracle_physical45", "physical45_oracle"),
-        ("oracle_all50", "full50_oracle"),
-        ("zero_field_consumer_diagnostic", "zero_field"),
-    ):
-        privileged_rows.append(
-            _condition_row(
-                row_id=f"T10_all50_clean({suffix})",
-                condition=condition,
-                selected_aggregate=all50_aggregate,
-                section="privileged_oracle",
-                deployable=False,
-                hlt_only_reload_passed=None,
+    if T10_ALL50_CLEAN in publications:
+        all50_aggregate = publications[T10_ALL50_CLEAN][0]
+        for condition, suffix in (
+            ("bridge_0p10", "bridge_0.10"),
+            ("reliability5_only", "reliability5_only"),
+            ("oracle_physical45", "physical45_oracle"),
+            ("oracle_all50", "full50_oracle"),
+            ("zero_field_consumer_diagnostic", "zero_field"),
+        ):
+            privileged_rows.append(
+                _condition_row(
+                    row_id=f"T10_all50_clean({suffix})",
+                    condition=condition,
+                    selected_aggregate=all50_aggregate,
+                    section="privileged_oracle",
+                    deployable=False,
+                    hlt_only_reload_passed=None,
+                )
             )
-        )
     alternate_binding_path = root / "bindings" / "alternate.json"
     if alternate_binding_path.is_file():
         alternate_binding = load_hashed_json(alternate_binding_path)

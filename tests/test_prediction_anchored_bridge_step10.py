@@ -359,6 +359,7 @@ def test_required_clis_help_and_tigris_shell_contracts():
         "train_prediction_anchored_bridge_reconstructor.py",
         "run_prediction_anchored_bridge_campaign.py",
         "build_prediction_anchored_bridge_reservations.py",
+        "release_prediction_anchored_bridge_postteacher.py",
         "evaluate_prediction_anchored_bridge_campaign.py",
         "deploy_prediction_anchored_bridge.py",
         "submit_prediction_anchored_bridge_graph.py",

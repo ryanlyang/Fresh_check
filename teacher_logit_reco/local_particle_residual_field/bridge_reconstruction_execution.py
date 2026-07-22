@@ -1456,6 +1456,26 @@ def run_reconstruction_pack_from_execution_spec(
         )
         if selected.get("status") != "CONFIRMED_LOCKED":
             raise PermissionError("B6 refuses an unconfirmed or guessed primary consumer")
+    if node.get("stage") == "B6":
+        release = load_hashed_json(
+            Path(artifact_root) / "selection" / "post_teacher_release.json",
+            expected_contract="prediction_anchored_post_teacher_release_v1",
+        )
+        release_selected = selected or load_hashed_json(
+            selected_path,
+            expected_contract=PREDICTION_ANCHORED_SELECTED_CONSUMER_CONTRACT,
+        )
+        if release.get("selected_consumer_sha256") != release_selected["content_hash"]:
+            raise ValueError("B6 post-teacher release belongs to another selected consumer")
+        released = set(release.get("released_post_teacher_run_ids", []))
+        missing_release = [
+            value for value in run_ids if value != L0_RUN_ID and value not in released
+        ]
+        if missing_release:
+            raise PermissionError(
+                "B6 run IDs are absent from the explicit post-teacher release: "
+                + ", ".join(missing_release)
+            )
 
     early_l0_manifest = None
     if l0_postteacher_replay:

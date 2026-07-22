@@ -44,11 +44,16 @@ from .bridge_evaluation import (
     classification_metrics,
 )
 from .bridge_contracts import (
+    canonical_sha256,
     load_hashed_json,
     sha256_file,
     validate_content_hash,
     with_content_hash,
     write_immutable_json,
+)
+from .bridge_semantic_evidence import (
+    build_adversarial_channel_report,
+    validate_four_control_matching,
 )
 from .bridge_execution import (
     PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT,
@@ -119,6 +124,14 @@ def build_deployable_semantic_replica_evidence(
     worst_loss = _finite(
         perturbation_worst_accuracy_loss, label="perturbation worst accuracy loss"
     )
+    distribution = with_content_hash(
+        {
+            "contract": "prediction_anchored_bridge_distribution_distance_v1",
+            "finite": bool(distribution_distance_finite),
+            "summary_only": True,
+            "automatic_selection_threshold": None,
+        }
+    )
     return with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_DEPLOYABLE_SEMANTIC_REPLICA_CONTRACT,
@@ -128,8 +141,11 @@ def build_deployable_semantic_replica_evidence(
             "perturbation_mean_accuracy_loss": mean_loss,
             "perturbation_worst_accuracy_loss": worst_loss,
             "perturbation_threshold_passed": mean_loss <= 0.002 and worst_loss <= 0.003,
+            "perturbation_rows": [],
             "alignment_finite": bool(alignment_finite),
+            "alignment_cosines": {"overall": 1.0, "by_radius_semantic_group": {}},
             "distribution_distance_finite": bool(distribution_distance_finite),
+            "distribution_distance": distribution,
             "alignment_selection_threshold": None,
             "distribution_selection_threshold": None,
             "provenance_valid": bool(provenance_valid),
@@ -206,7 +222,74 @@ def assemble_deployable_replica_evidence(
     if binding.get("checkpoint_sha256") != teacher_sha:
         raise ValueError("primary binding is not the selected T10 checkpoint")
 
+    control_run_ids = (
+        "D10_N0_wrong_event_logits",
+        "D10_N1_matched_delta_shuffle",
+        "D10_N2_wrong_bridge_wrong_logits",
+        "D10_N3_nonprivileged_teacher_kd",
+        "D10_XA3_kd_only",
+        "D10_XA3_bridge_only",
+        "D10_A3_hlg_primary",
+    )
+    model_hashes: dict[str, str] = {}
+    optimizer_steps: dict[str, int] = {}
+    paired_seeds: dict[str, Sequence[int]] = {}
+    missing_controls = []
+    for control_run_id in control_run_ids:
+        publication_root = root / "reconstructors" / control_run_id
+        if not (publication_root / "publication.json").is_file():
+            missing_controls.append(control_run_id)
+            continue
+        publication = load_hashed_json(
+            publication_root / "publication.json",
+            expected_contract=PREDICTION_ANCHORED_RECONSTRUCTION_PUBLICATION_CONTRACT,
+        )
+        aggregate = load_hashed_json(
+            publication_root / "aggregate_metrics.json",
+            expected_contract=PREDICTION_ANCHORED_RECONSTRUCTION_AGGREGATE_CONTRACT,
+        )
+        checkpoint = torch.load(
+            publication_root / publication["retained_checkpoint"],
+            map_location="cpu",
+            weights_only=False,
+        )
+        if not isinstance(checkpoint.get("model_config"), Mapping) or any(
+            not isinstance(row.get("metrics"), Mapping)
+            or not isinstance(row["metrics"].get("optimizer_steps_completed"), int)
+            for row in aggregate.get("replica_metrics", [])
+        ):
+            missing_controls.append(control_run_id)
+            continue
+        model_hashes[control_run_id] = canonical_sha256(checkpoint["model_config"])
+        observed_steps = {
+            int(row["metrics"]["optimizer_steps_completed"])
+            for row in aggregate["replica_metrics"]
+        }
+        if len(observed_steps) != 1:
+            raise ValueError(f"{control_run_id} paired replicas changed optimizer budgets")
+        optimizer_steps[control_run_id] = observed_steps.pop()
+        paired_seeds[control_run_id] = tuple(
+            int(row["seed_id"]) for row in aggregate["replica_metrics"]
+        )
+    control_matching = (
+        with_content_hash(
+            {
+                "contract": "prediction_anchored_step8_control_matching_status_v1",
+                "all_four_matched": False,
+                "missing_or_failed_run_ids": sorted(set(missing_controls)),
+                "failure_visible_not_silently_dropped": True,
+            }
+        )
+        if missing_controls
+        else validate_four_control_matching(
+            model_config_sha256=model_hashes,
+            optimizer_steps=optimizer_steps,
+            paired_seed_ids=paired_seeds,
+        )
+    )
+
     replicas: list[dict[str, Any]] = []
+    adversarial_reports: list[dict[str, Any]] = []
     aggregates: list[dict[str, Any]] = []
     excluded_runs: list[dict[str, str]] = []
     semantic_root = Path(semantic_evidence_root)
@@ -275,6 +358,49 @@ def assemble_deployable_replica_evidence(
                     run_id=run_id,
                     seed_id=seed_id,
                 )
+                perturbation = with_content_hash(
+                    {
+                        "contract": "prediction_anchored_perturbation_audit_v1",
+                        "audit_seeds": list(semantic["perturbation_audit_seeds"]),
+                        "base_metrics": {
+                            "accuracy": float(select["accuracy"]),
+                            "cross_entropy": float(select["cross_entropy"]),
+                        },
+                        "per_seed": deepcopy(list(semantic.get("perturbation_rows", []))),
+                        "mean_accuracy_loss": float(semantic["perturbation_mean_accuracy_loss"]),
+                        "worst_seed_accuracy_loss": float(semantic["perturbation_worst_accuracy_loss"]),
+                        "threshold_passed": bool(semantic["perturbation_threshold_passed"]),
+                        "selectable_for_primary_deployment": True,
+                    }
+                )
+                cosines = semantic.get("alignment_cosines", {})
+                alignment = with_content_hash(
+                    {
+                        "contract": "prediction_anchored_bridge_alignment_v1",
+                        "overall_cosine": cosines.get("overall"),
+                        "groupwise_cosine": deepcopy(dict(cosines.get("by_radius_semantic_group", {}))),
+                        "finite": bool(semantic["alignment_finite"]),
+                        "automatic_selection_threshold": None,
+                        "used_for_physical_recovery_interpretation": True,
+                    }
+                )
+                adversarial = build_adversarial_channel_report(
+                    perturbation_audit=perturbation,
+                    alignment=alignment,
+                    distribution_distance=semantic["distribution_distance"],
+                    saturation_fraction=float(select["trust_saturation_fraction"]),
+                    reliability_pass_through_exact=bool(
+                        select["reliability_channels_exact_pass_through"]
+                    ),
+                    selectable_for_primary_deployment=True,
+                )
+                adversarial_reports.append(
+                    {
+                        "run_id": run_id,
+                        "seed_id": seed_id,
+                        "artifact": adversarial,
+                    }
+                )
             except FileNotFoundError:
                 run_exclusion = "missing_required_semantic_evidence"
                 break
@@ -337,6 +463,9 @@ def assemble_deployable_replica_evidence(
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "replicas": replicas,
             "aggregates": aggregates,
+            "adversarial_channel_reports": adversarial_reports,
+            "adversarial_channel_report_count": len(adversarial_reports),
+            "four_control_matching": control_matching,
             "excluded_selectable_runs": excluded_runs,
             "all_nonmedian_weights_metrics_only": True,
             "selection_split": "model_val_select",
@@ -704,6 +833,8 @@ def export_repository_deployable_bundle(
             selected_consumer_path,
             correction_path,
             consumer_path,
+            output.parent / "teacher_logits",
+            output.parent / "bindings",
             *(
                 record[key]["path"]
                 for record in spec["sources"].values()

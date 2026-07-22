@@ -30,6 +30,9 @@ from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign_policy import (
     build_campaign_reservations,
 )
+from teacher_logit_reco.local_particle_residual_field.bridge_semantic_evidence import (
+    require_post_teacher_release,
+)
 from teacher_logit_reco.local_particle_residual_field.bridge_execution import (
     build_prediction_anchored_execution_spec,
     validate_prediction_anchored_execution_spec,
@@ -624,6 +627,12 @@ def test_consumer_executor_trains_all_paired_rows_and_selection_evidence_in_ram(
     registry = record_registry_measurements(
         registry, {row["canonical_run_id"]: 1024 for row in registry["runs"]}
     )
+    release = require_post_teacher_release(
+        registry,
+        selected_consumer=json.loads(selected_path.read_text()),
+        primary_binding=json.loads((tmp_path / "bindings" / "primary.json").read_text()),
+    )
+    write_immutable_json(tmp_path / "selection" / "post_teacher_release.json", release)
     readiness = require_production_ready(
         registry, fixed_persistent_bytes=4096, selected_budget_bytes=5 * 1024**3
     )

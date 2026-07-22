@@ -30,9 +30,12 @@ def test_step12_submitters_cover_all_stages_and_dependency_gates() -> None:
     assert '"$(normalize_dependency "${dependency}")" >>"${SUBMISSION_MANIFEST}"' in generic
     assert "reu-aisocial" in generic and "reu-aisocial" in tigris
     assert "PYTHONNOUSERSITE=1" in tigris
-    assert 'CONDA_BASE:=/home/ryreu/miniconda3' in tigris
-    assert "export PROJECT_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_BASE CONDA_ENV" in tigris
-    assert common.index('local conda_sh="${HOME}/miniconda3/etc/profile.d/conda.sh"') < common.index("if command -v conda")
+    assert 'LPRF_FUSION_CONDA_BASE:=/home/ryreu/miniforge3-aarch64' in tigris
+    assert 'LPRF_FUSION_CONDA_ENV:=atlas_kd_tigris' in tigris
+    assert 'CONDA_BASE="${LPRF_FUSION_CONDA_BASE}"' in tigris
+    assert 'CONDA_ENV="${LPRF_FUSION_CONDA_ENV}"' in tigris
+    assert "export PROJECT_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_BASE CONDA_ENV DEVICE" in tigris
+    assert 'source "${explicit_conda_sh}"' in common
 
 
 def test_step12_every_new_tigris_job_uses_common_setup_and_full_account() -> None:
