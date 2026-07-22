@@ -365,6 +365,9 @@ def test_exact_step_engine_and_weights_only_ordered_median_publication(tmp_path)
     assert "optimizer_state_dict" not in checkpoint
     assert "generated_fields" not in checkpoint
     assert checkpoint["seed_id"] == 303
+    assert publication["measured_total_persistent_bytes"] == sum(
+        path.stat().st_size for path in (tmp_path / "published").iterdir()
+    )
     with pytest.raises(PermissionError, match="reservation"):
         publish_paired_replicas(
             replicas,
@@ -372,7 +375,7 @@ def test_exact_step_engine_and_weights_only_ordered_median_publication(tmp_path)
             primary_metric="model_val_select.bridge_accuracy",
             cross_entropy_metric="model_val_select.bridge_cross_entropy",
             gain_metric="model_val_select.same_consumer_bridge_gain",
-            reservation_bytes=1,
+            reservation_bytes=publication["measured_state_bytes"] + 1,
         )
     assert not (tmp_path / "overrun").exists()
 

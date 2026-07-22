@@ -178,9 +178,15 @@ def test_general_paired_publication_retains_only_ordered_median_weights(tmp_path
     assert payload["weights_only"] is True
     assert payload["optimizer_state_persisted"] is False
     assert payload["generated_fields_persisted"] is False
+    publication = json.loads((tmp_path / "published" / "publication.json").read_text())
+    assert publication["measured_total_persistent_bytes"] == sum(
+        path.stat().st_size for path in (tmp_path / "published").iterdir()
+    )
     with pytest.raises(PermissionError, match="reservation"):
         publish_reconstruction_paired_replicas(
-            replicas, output_dir=tmp_path / "overrun", reservation_bytes=1
+            replicas,
+            output_dir=tmp_path / "overrun",
+            reservation_bytes=publication["measured_state_bytes"] + 1,
         )
     assert not (tmp_path / "overrun").exists()
 

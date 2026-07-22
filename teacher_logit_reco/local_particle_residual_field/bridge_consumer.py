@@ -29,7 +29,9 @@ from .bridge import (
 )
 from .bridge_campaign import PAIRED_SEED_IDS, record_registry_measurements
 from .bridge_contracts import (
+    build_total_sized_publication,
     canonical_sha256,
+    immutable_json_bytes,
     sha256_file,
     with_content_hash,
     write_immutable_json,
@@ -1682,24 +1684,18 @@ def publish_paired_replicas(
     retained["run_id"] = median.run_id
     retained["seed_id"] = median_seed
     encoded_checkpoint = _state_bytes(retained)
-    if reservation_bytes is not None and len(encoded_checkpoint) > int(reservation_bytes):
-        raise PermissionError("consumer checkpoint exceeds its predeclared run reservation")
-    root.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = root / "median_weights.pt"
-    with checkpoint_path.open("xb") as handle:
-        handle.write(encoded_checkpoint)
-    measured_bytes = int(checkpoint_path.stat().st_size)
-    checkpoint_sha256 = sha256_file(checkpoint_path)
-    metrics_artifact = with_content_hash(
+    checkpoint_sha256 = hashlib.sha256(encoded_checkpoint).hexdigest()
+    aggregate_bytes = immutable_json_bytes(aggregate)
+    metrics_artifact, publication_bytes = build_total_sized_publication(
         {
             "contract": PREDICTION_ANCHORED_CONSUMER_PUBLICATION_CONTRACT,
             "run_id": median.run_id,
             "aggregate_sha256": aggregate["content_hash"],
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "median_seed_id": median_seed,
-            "retained_checkpoint": checkpoint_path.name,
+            "retained_checkpoint": "median_weights.pt",
             "retained_checkpoint_sha256": checkpoint_sha256,
-            "measured_state_bytes": measured_bytes,
+            "measured_state_bytes": len(encoded_checkpoint),
             "reserved_bytes": reservation_bytes,
             "reservation_enforced_before_publication": reservation_bytes is not None,
             "nonmedian_weights_persisted": False,
@@ -1707,10 +1703,22 @@ def publish_paired_replicas(
             "scheduler_state_persisted": False,
             "generated_fields_persisted": False,
             "persistent_artifact_allowlist": ["aggregate_metrics.json", "median_weights.pt", "publication.json"],
-        }
+        },
+        other_artifact_bytes=len(encoded_checkpoint) + len(aggregate_bytes),
     )
-    write_immutable_json(root / "aggregate_metrics.json", aggregate)
-    write_immutable_json(root / "publication.json", metrics_artifact)
+    total_bytes = int(metrics_artifact["measured_total_persistent_bytes"])
+    if reservation_bytes is not None and total_bytes > int(reservation_bytes):
+        raise PermissionError("consumer publication directory exceeds its predeclared run reservation")
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = root / "median_weights.pt"
+    for path, encoded in (
+        (checkpoint_path, encoded_checkpoint),
+        (root / "aggregate_metrics.json", aggregate_bytes),
+        (root / "publication.json", publication_bytes),
+    ):
+        with path.open("xb") as handle:
+            handle.write(encoded)
+    measured_bytes = len(encoded_checkpoint)
     names = sorted(path.name for path in root.iterdir())
     if names != ["aggregate_metrics.json", "median_weights.pt", "publication.json"]:
         raise RuntimeError(f"consumer publication wrote unexpected artifacts: {names}")
@@ -1726,6 +1734,7 @@ def publish_paired_replicas(
         "aggregate": str(root / "aggregate_metrics.json"),
         "publication": str(root / "publication.json"),
         "measured_state_bytes": measured_bytes,
+        "measured_total_persistent_bytes": total_bytes,
         "checkpoint_sha256": checkpoint_sha256,
         "persistent_artifacts": names,
     }
@@ -1774,22 +1783,12 @@ def publish_evaluated_teacher_replica(
     if sha256_file(source) != expected_sha:
         raise ValueError("selected teacher replica bytes disagree with evaluation evidence")
     measured_source_bytes = int(source.stat().st_size)
-    if reservation_bytes is not None and measured_source_bytes > int(reservation_bytes):
-        raise PermissionError("evaluated teacher checkpoint exceeds its predeclared run reservation")
 
     root = Path(output_dir)
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"consumer publication directory is not empty: {root}")
-    root.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = root / "median_weights.pt"
-    with source.open("rb") as reader, checkpoint_path.open("xb") as writer:
-        shutil.copyfileobj(reader, writer, length=8 * 1024 * 1024)
-    if sha256_file(checkpoint_path) != expected_sha:
-        raise RuntimeError("byte-exact teacher checkpoint publication changed its SHA-256")
-
     import torch
-
-    loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    loaded = torch.load(source, map_location="cpu", weights_only=False)
     if not isinstance(loaded, Mapping) or "model_state_dict" not in loaded:
         raise ValueError("published teacher checkpoint is not a weights payload")
     forbidden = {
@@ -1799,8 +1798,8 @@ def publish_evaluated_teacher_replica(
     if forbidden.intersection(loaded):
         raise ValueError("evaluated teacher checkpoint contains forbidden persistent state")
 
-    write_immutable_json(root / "aggregate_metrics.json", selection_aggregate)
-    publication = with_content_hash(
+    aggregate_bytes = immutable_json_bytes(selection_aggregate)
+    publication, publication_bytes = build_total_sized_publication(
         {
             "contract": PREDICTION_ANCHORED_CONSUMER_PUBLICATION_CONTRACT,
             "run_id": str(run_id),
@@ -1808,9 +1807,9 @@ def publish_evaluated_teacher_replica(
             "aggregate_contract": PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "median_seed_id": seed,
-            "retained_checkpoint": checkpoint_path.name,
+            "retained_checkpoint": "median_weights.pt",
             "retained_checkpoint_sha256": expected_sha,
-            "measured_state_bytes": int(checkpoint_path.stat().st_size),
+            "measured_state_bytes": measured_source_bytes,
             "reserved_bytes": reservation_bytes,
             "reservation_enforced_before_publication": reservation_bytes is not None,
             "byte_exact_evaluated_replica": True,
@@ -1821,9 +1820,24 @@ def publish_evaluated_teacher_replica(
             "persistent_artifact_allowlist": [
                 "aggregate_metrics.json", "median_weights.pt", "publication.json"
             ],
-        }
+        },
+        other_artifact_bytes=measured_source_bytes + len(aggregate_bytes),
     )
-    write_immutable_json(root / "publication.json", publication)
+    total_bytes = int(publication["measured_total_persistent_bytes"])
+    if reservation_bytes is not None and total_bytes > int(reservation_bytes):
+        raise PermissionError("evaluated teacher publication directory exceeds its predeclared run reservation")
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = root / "median_weights.pt"
+    with source.open("rb") as reader, checkpoint_path.open("xb") as writer:
+        shutil.copyfileobj(reader, writer, length=8 * 1024 * 1024)
+    for path, encoded in (
+        (root / "aggregate_metrics.json", aggregate_bytes),
+        (root / "publication.json", publication_bytes),
+    ):
+        with path.open("xb") as handle:
+            handle.write(encoded)
+    if sha256_file(checkpoint_path) != expected_sha:
+        raise RuntimeError("byte-exact teacher checkpoint publication changed its SHA-256")
     names = sorted(path.name for path in root.iterdir())
     if names != ["aggregate_metrics.json", "median_weights.pt", "publication.json"]:
         raise RuntimeError(f"teacher publication wrote unexpected artifacts: {names}")
@@ -1836,6 +1850,7 @@ def publish_evaluated_teacher_replica(
         "aggregate": str(root / "aggregate_metrics.json"),
         "publication": str(root / "publication.json"),
         "checkpoint_sha256": expected_sha,
+        "measured_total_persistent_bytes": total_bytes,
         "byte_exact_evaluated_replica": True,
         "persistent_artifacts": names,
     }

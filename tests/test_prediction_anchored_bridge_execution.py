@@ -412,6 +412,15 @@ def test_consumer_executor_trains_all_paired_rows_and_selection_evidence_in_ram(
     assert result["persistent_dense_fields_written"] is False
     assert len(list(replicas.glob("*.pt"))) == 24
     assert len(list(replicas.glob("*.metrics.json"))) == 24
+    selection_hashes = set()
+    for metrics_path in replicas.glob("*.metrics.json"):
+        metrics = json.loads(metrics_path.read_text())
+        assert "model_val_select" in metrics
+        selection_hashes.add(metrics["model_val_select"]["split_sha256"])
+    child_manifest = json.loads(Path(spec["child_manifest"]["path"]).read_text())
+    assert selection_hashes == {
+        child_manifest["children"]["model_val_select"]["content_hash"]
+    }
     for run_id in ("T10_clean", "T10_robust", "T10_all50_clean"):
         aggregate = json.loads(
             (evidence / run_id / "selection_aggregate.json").read_text()

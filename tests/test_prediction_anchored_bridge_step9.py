@@ -464,6 +464,9 @@ def test_single_hlt_only_bundle_export_and_clean_reload(tmp_path):
     )
     assert audit["passed"] is True
     assert audit["max_abs_logit_difference"] == 0.0
+    assert audit["privileged_source_denial_probe_count"] == 2
+    assert audit["privileged_access_attempt_count"] >= 2
+    assert audit["literal_host_paths_removed"] is False
     final = validate_final_test_request(locked, clean_reload_audit=audit, evaluation_flags={})
     assert final["hlt_only"] is True
     with pytest.raises(PermissionError, match="forbidden evaluation flags"):

@@ -809,17 +809,29 @@ def run_consumer_campaign_from_execution_spec(
         }
         replica_root.mkdir(parents=True, exist_ok=False)
         for seed in PAIRED_SEED_IDS:
-            # The matched-compute row is evaluated on f0 once per seed.
-            matched_model = make_model(TPRED_CONTINUE, config).to(torch_device)
-            matched_model.load_state_dict(candidate_by_run_seed[TPRED_CONTINUE][seed]["model_state_dict"], strict=True)
-            matched_metrics = _quick_evaluate(
-                matched_model,
-                model_val,
-                parent_indices=select_indices,
-                run_id=TPRED_CONTINUE,
-                device=torch_device,
-                batch_size=evaluation_batch_size,
-            )
+            # Every frozen upstream control is evaluated exactly once on the
+            # sealed selection view. Reports must never substitute stop-split
+            # metrics when comparing these rows.
+            select_metrics_by_run: dict[str, dict[str, float]] = {}
+            for fixed_run_id in STEP3_RUN_IDS:
+                fixed_model = make_model(fixed_run_id, config).to(torch_device)
+                fixed_model.load_state_dict(
+                    candidate_by_run_seed[fixed_run_id][seed]["model_state_dict"], strict=True
+                )
+                fixed_metrics = _quick_evaluate(
+                    fixed_model,
+                    model_val,
+                    parent_indices=select_indices,
+                    run_id=fixed_run_id,
+                    device=torch_device,
+                    batch_size=evaluation_batch_size,
+                )
+                select_metrics_by_run[fixed_run_id] = fixed_metrics
+                metrics_by_run_seed[fixed_run_id][seed]["model_val_select"] = {
+                    **fixed_metrics,
+                    "split_sha256": child["children"]["model_val_select"]["content_hash"],
+                }
+            matched_metrics = select_metrics_by_run[TPRED_CONTINUE]
             for run_id in (T10_CLEAN, T10_ROBUST, T10_ALL50_CLEAN):
                 candidate = candidate_by_run_seed[run_id][seed]
                 checkpoint_path = replica_root / f"{run_id}__seed{seed}.pt"
@@ -853,12 +865,12 @@ def run_consumer_campaign_from_execution_spec(
                     bootstrap_resamples=int(bootstrap_resamples),
                 )
                 evaluation_objects[run_id].append(evaluation)
-                metrics_by_run_seed[run_id][seed]["model_val_select"] = {
+                metrics_by_run_seed[run_id][seed]["model_val_select"].update({
                     "bridge_accuracy": evaluation.artifact["bridge_0p10"]["accuracy"],
                     "bridge_cross_entropy": evaluation.artifact["bridge_0p10"]["cross_entropy"],
                     "f0_accuracy": evaluation.artifact["f0"]["accuracy"],
                     "same_consumer_bridge_gain": evaluation.artifact["delta_same"],
-                }
+                })
 
         # Persist all RAM-local replica pairs only after all scientific checks.
         for run_id in STEP3_RUN_IDS:

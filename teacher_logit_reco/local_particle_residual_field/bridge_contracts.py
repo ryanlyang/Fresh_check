@@ -153,6 +153,40 @@ def write_immutable_json(path: str | Path, payload: Mapping[str, Any]) -> dict[s
     }
 
 
+def immutable_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Return the exact bytes used by a new immutable JSON publication."""
+
+    validate_content_hash(payload)
+    return (
+        json.dumps(
+            dict(payload), allow_nan=False, ensure_ascii=False, indent=2, sort_keys=True
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def build_total_sized_publication(
+    payload: Mapping[str, Any], *, other_artifact_bytes: int
+) -> tuple[dict[str, Any], bytes]:
+    """Hash a publication whose recorded total includes its own JSON bytes."""
+
+    if "content_hash" in payload or "measured_total_persistent_bytes" in payload:
+        raise ValueError("publication sizing input must not contain derived fields")
+    if not isinstance(other_artifact_bytes, int) or isinstance(other_artifact_bytes, bool) or other_artifact_bytes <= 0:
+        raise ValueError("other_artifact_bytes must be a positive integer")
+    total = other_artifact_bytes
+    for _ in range(16):
+        artifact = with_content_hash(
+            {**dict(payload), "measured_total_persistent_bytes": int(total)}
+        )
+        encoded = immutable_json_bytes(artifact)
+        updated = other_artifact_bytes + len(encoded)
+        if updated == total:
+            return artifact, encoded
+        total = updated
+    raise RuntimeError("publication byte-total fixed point did not converge")
+
+
 __all__ = [
     "PREDICTION_ANCHORED_CANONICAL_JSON_CONTRACT",
     "canonical_json_bytes",

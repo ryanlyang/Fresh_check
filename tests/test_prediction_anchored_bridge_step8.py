@@ -32,6 +32,7 @@ from teacher_logit_reco.local_particle_residual_field import (
     build_adversarial_channel_report,
     build_bridge_quantile_reference,
     build_campaign_registry,
+    build_clean_start_step8_fixed_storage,
     build_live_teacher_config,
     build_matched_wrong_event_map,
     build_teacher_binding,
@@ -61,6 +62,24 @@ from teacher_logit_reco.local_particle_residual_field.bridge_contracts import sh
 
 
 CLASS_ORDER = tuple(f"class_{index}" for index in range(10))
+
+
+def test_clean_start_fixed_storage_requires_no_future_campaign_artifacts():
+    child = with_content_hash(
+        {
+            "contract": "prediction_anchored_child_splits_v1",
+            "children": {"stack_train_distill": {"count": 250_000}},
+        }
+    )
+    registry = build_campaign_registry(alternate_teacher_valid=False)
+    storage, evidence = build_clean_start_step8_fixed_storage(child, registry)
+    artifact = storage.to_artifact()
+    assert artifact["measurement_basis"] == "clean_start_conservative_upper_bound"
+    assert artifact["production_safe_upper_bounds"] is True
+    assert artifact["all_categories_measured"] is False
+    assert evidence["future_campaign_artifacts_required"] is False
+    assert len(artifact["target_logit_namespace_bytes"]) == 3
+    assert min(artifact["target_logit_namespace_bytes"].values()) > 250_000 * 48
 
 
 def _all50_fixture(n=3, p=5):

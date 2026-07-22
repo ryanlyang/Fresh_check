@@ -47,6 +47,8 @@ pab_bootstrap_allocation() {
   local launch_args=(
     "${PYTHON_BIN}" -u scripts/run_prediction_anchored_bridge_allocation.py
     --graph "${PREDICTION_ANCHORED_GRAPH}"
+    --execution-spec "${PAB_EXECUTION_SPEC:?missing PAB_EXECUTION_SPEC}"
+    --reservations "${PAB_RESERVATIONS:?missing PAB_RESERVATIONS}"
     --node-id "${PREDICTION_ANCHORED_NODE_ID}"
     --ram-root "${PAB_RAM_ROOT}"
     --output "${PAB_ALLOCATION_LEDGER_DIR}/launch_manifest.json"

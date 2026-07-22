@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
+    build_clean_start_step8_fixed_storage,
     measure_step8_fixed_storage,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (  # noqa: E402
@@ -23,8 +24,10 @@ from teacher_logit_reco.local_particle_residual_field.bridge_contracts import ( 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("filesystem", "clean-start"), default="filesystem")
     parser.add_argument("--child-split-manifest", required=True)
-    parser.add_argument("--r0-weights", required=True)
+    parser.add_argument("--registry", default="", help="required in clean-start mode")
+    parser.add_argument("--r0-weights", default="")
     parser.add_argument(
         "--target-namespace", action="append", default=[], metavar="NAME=PATH",
         help="repeat for primary, all50, N3, and conditional alternate",
@@ -33,7 +36,7 @@ def _parser() -> argparse.ArgumentParser:
         "--metadata-path", action="append", default=[],
         help="repeat for bounded recipe/binding/report files or directories",
     )
-    parser.add_argument("--final-deployable-bundle", required=True)
+    parser.add_argument("--final-deployable-bundle", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -53,13 +56,23 @@ def _namespaces(values: list[str]) -> dict[str, str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    storage, measurement = measure_step8_fixed_storage(
-        child_split_manifest_path=args.child_split_manifest,
-        r0_weights_path=args.r0_weights,
-        target_logit_namespace_paths=_namespaces(args.target_namespace),
-        recipes_bindings_reports_paths=args.metadata_path,
-        final_deployable_bundle_path=args.final_deployable_bundle,
-    )
+    if args.mode == "clean-start":
+        if not args.registry:
+            raise ValueError("clean-start mode requires --registry")
+        from teacher_logit_reco.local_particle_residual_field.bridge_contracts import load_hashed_json
+        storage, measurement = build_clean_start_step8_fixed_storage(
+            load_hashed_json(args.child_split_manifest), load_hashed_json(args.registry)
+        )
+    else:
+        if not args.r0_weights or not args.final_deployable_bundle:
+            raise ValueError("filesystem mode requires --r0-weights and --final-deployable-bundle")
+        storage, measurement = measure_step8_fixed_storage(
+            child_split_manifest_path=args.child_split_manifest,
+            r0_weights_path=args.r0_weights,
+            target_logit_namespace_paths=_namespaces(args.target_namespace),
+            recipes_bindings_reports_paths=args.metadata_path,
+            final_deployable_bundle_path=args.final_deployable_bundle,
+        )
     output: dict[str, object] = {
         "dry_run": bool(args.dry_run),
         "fixed_storage": storage.to_artifact(),

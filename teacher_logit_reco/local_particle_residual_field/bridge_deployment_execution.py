@@ -341,6 +341,21 @@ def assemble_deployable_replica_evidence(
             raise ValueError("reconstruction publication used a different selected T10")
         if parent_hashes.get("r0_checkpoint_sha256") != sha256_file(r0_path):
             raise ValueError("reconstruction publication used a different R0")
+        publication_total_bytes = publication.get("measured_total_persistent_bytes")
+        if publication_total_bytes is None:
+            # Compatibility audit for pre-hardening fixtures: measure the full
+            # allowlisted directory rather than falling back to checkpoint bytes.
+            allowlist = publication.get(
+                "persistent_artifact_allowlist",
+                ["aggregate_metrics.json", "median_weights.pt", "publication.json"],
+            )
+            publication_total_bytes = sum(
+                int((publication_root / name).stat().st_size)
+                for name in allowlist
+            )
+        publication_total_bytes = int(publication_total_bytes)
+        if publication_total_bytes > int(registry_row["measured_retained_bytes"]):
+            raise PermissionError(f"{run_id} publication exceeds its run reservation")
 
         run_replicas = []
         run_exclusion: str | None = None
@@ -424,7 +439,7 @@ def assemble_deployable_replica_evidence(
                 teacher_sha256=teacher_sha,
                 recipe_sha256=binding["bridge_recipe_sha256"],
                 deployed_parameter_count=deployed_parameters,
-                persistent_bytes=int(publication["measured_state_bytes"]),
+                persistent_bytes=publication_total_bytes,
                 reserved_bytes=int(registry_row["measured_retained_bytes"]),
                 recovery_fraction=select.get("recovery_fraction"),
                 saturation_fraction=select["trust_saturation_fraction"],

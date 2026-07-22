@@ -38,6 +38,8 @@ from .bridge_campaign import (
     campaign_run_definitions,
 )
 from .bridge_contracts import (
+    build_total_sized_publication,
+    immutable_json_bytes,
     load_hashed_json,
     sha256_file,
     validate_content_hash,
@@ -2075,29 +2077,18 @@ def publish_reconstruction_paired_replicas(
     encoded = BytesIO()
     torch.save(_publication_weights(median.weights_payload), encoded)
     checkpoint_bytes = encoded.getvalue()
-    if reservation_bytes is not None and len(checkpoint_bytes) > int(reservation_bytes):
-        raise PermissionError("reconstruction checkpoint exceeds its predeclared run reservation")
-    root.mkdir(parents=True, exist_ok=True)
-    checkpoint = root / "median_weights.pt"
-    with checkpoint.open("xb") as handle:
-        handle.write(checkpoint_bytes)
-    reloaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if reloaded.get("checkpoint_contract") != PREDICTION_ANCHORED_RECONSTRUCTION_REPLICA_CONTRACT:
-        raise ValueError("published reconstruction checkpoint failed its contract reload audit")
-    if set(reloaded.get("model_state_dict", {})) != set(
-        median.weights_payload.get("model_state_dict", {})
-    ):
-        raise ValueError("published reconstruction checkpoint changed its state keys")
-    publication = with_content_hash(
+    checkpoint_sha = hashlib.sha256(checkpoint_bytes).hexdigest()
+    aggregate_bytes = immutable_json_bytes(aggregate)
+    publication, publication_bytes = build_total_sized_publication(
         {
             "contract": PREDICTION_ANCHORED_RECONSTRUCTION_PUBLICATION_CONTRACT,
             "run_id": median.run_id,
             "aggregate_sha256": aggregate["content_hash"],
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "median_seed_id": int(median.seed_id),
-            "retained_checkpoint": checkpoint.name,
-            "retained_checkpoint_sha256": sha256_file(checkpoint),
-            "measured_state_bytes": int(checkpoint.stat().st_size),
+            "retained_checkpoint": "median_weights.pt",
+            "retained_checkpoint_sha256": checkpoint_sha,
+            "measured_state_bytes": len(checkpoint_bytes),
             "reserved_bytes": reservation_bytes,
             "reservation_enforced_before_publication": reservation_bytes is not None,
             "persistent_artifact_allowlist": [
@@ -2110,10 +2101,28 @@ def publish_reconstruction_paired_replicas(
             "deployable_checkpoint_requires_teacher_at_inference": False,
             "weights_payload_reload_verified": True,
             "l0_postteacher_common_evaluation": bool(l0_postteacher),
-        }
+        },
+        other_artifact_bytes=len(checkpoint_bytes) + len(aggregate_bytes),
     )
-    write_immutable_json(root / "aggregate_metrics.json", aggregate)
-    write_immutable_json(root / "publication.json", publication)
+    total_bytes = int(publication["measured_total_persistent_bytes"])
+    if reservation_bytes is not None and total_bytes > int(reservation_bytes):
+        raise PermissionError("reconstruction publication directory exceeds its predeclared run reservation")
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint = root / "median_weights.pt"
+    for path, encoded_bytes in (
+        (checkpoint, checkpoint_bytes),
+        (root / "aggregate_metrics.json", aggregate_bytes),
+        (root / "publication.json", publication_bytes),
+    ):
+        with path.open("xb") as handle:
+            handle.write(encoded_bytes)
+    reloaded = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if reloaded.get("checkpoint_contract") != PREDICTION_ANCHORED_RECONSTRUCTION_REPLICA_CONTRACT:
+        raise ValueError("published reconstruction checkpoint failed its contract reload audit")
+    if set(reloaded.get("model_state_dict", {})) != set(
+        median.weights_payload.get("model_state_dict", {})
+    ):
+        raise ValueError("published reconstruction checkpoint changed its state keys")
     names = sorted(path.name for path in root.iterdir())
     expected = ["aggregate_metrics.json", "median_weights.pt", "publication.json"]
     if names != expected:
@@ -2125,6 +2134,8 @@ def publish_reconstruction_paired_replicas(
         "checkpoint": str(checkpoint),
         "aggregate": str(root / "aggregate_metrics.json"),
         "publication": str(root / "publication.json"),
+        "measured_state_bytes": len(checkpoint_bytes),
+        "measured_total_persistent_bytes": total_bytes,
         "persistent_artifacts": names,
     }
 

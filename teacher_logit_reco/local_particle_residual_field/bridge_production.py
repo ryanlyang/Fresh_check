@@ -20,6 +20,7 @@ from .bridge_campaign_policy import (
     PREDICTION_ANCHORED_CAMPAIGN_RESERVATION_CONTRACT,
 )
 from .bridge_contracts import validate_content_hash, with_content_hash
+from .bridge_execution import validate_prediction_anchored_execution_spec
 
 
 PREDICTION_ANCHORED_TIGRIS_RESOURCES_CONTRACT = (
@@ -764,11 +765,32 @@ def build_allocation_launch_manifest(
     environment: Mapping[str, Any],
     ram_root: str,
     selected_consumer: Mapping[str, Any] | None = None,
+    execution_spec: Mapping[str, Any] | None = None,
+    reservations: Mapping[str, Any] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Validate one allocated node before any accelerator/model construction."""
 
     validate_prediction_anchored_tigris_graph(graph)
+    if execution_spec is None or reservations is None:
+        if not dry_run:
+            raise PermissionError("allocation launch requires execution-spec and reservation artifacts")
+    else:
+        validate_prediction_anchored_execution_spec(execution_spec, verify_file_hashes=True)
+        validate_content_hash(
+            reservations, expected_contract=PREDICTION_ANCHORED_CAMPAIGN_RESERVATION_CONTRACT
+        )
+        expected = {
+            "execution_spec_sha256": execution_spec["content_hash"],
+            "reservations_sha256": reservations["content_hash"],
+            "child_manifest_sha256": execution_spec["child_manifest"]["content_hash"],
+            "parent_manifest_file_sha256": execution_spec["parent_manifest"]["sha256"],
+        }
+        for field, value in expected.items():
+            if graph.get(field) != value:
+                raise ValueError(f"allocation {field} disagrees with immutable graph")
+        if reservations.get("execution_spec_sha256") != execution_spec["content_hash"]:
+            raise ValueError("allocation reservations belong to another execution spec")
     by_id = {row["node_id"]: row for row in graph["nodes"]}
     if node_id not in by_id:
         raise KeyError(f"production graph has no node {node_id!r}")
@@ -841,6 +863,9 @@ def build_allocation_launch_manifest(
         {
             "contract": PREDICTION_ANCHORED_ALLOCATION_LAUNCH_CONTRACT,
             "graph_sha256": graph["content_hash"],
+            "execution_spec_sha256": None if execution_spec is None else execution_spec["content_hash"],
+            "reservations_sha256": None if reservations is None else reservations["content_hash"],
+            "allocation_contracts_revalidated": execution_spec is not None and reservations is not None,
             "node_sha256": node["content_hash"],
             "node_id": node_id,
             "stage": node["stage"],

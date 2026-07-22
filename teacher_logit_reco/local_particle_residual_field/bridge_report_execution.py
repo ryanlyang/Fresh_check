@@ -211,14 +211,14 @@ def _paired_publication_row(
         }
         for row in seeds:
             metrics = row.get("metrics", row)
-            select = metrics.get(
-                "model_val_select", metrics.get("model_val_stop", metrics)
-            )
+            select = metrics.get("model_val_select")
+            if not isinstance(select, Mapping):
+                raise ValueError(f"{run_id} seed row lacks model_val_select metrics")
             baseline_row = baseline_by_seed[int(row["seed_id"])]
             baseline_metrics = baseline_row.get("metrics", baseline_row)
-            baseline_select = baseline_metrics.get(
-                "model_val_select", baseline_metrics.get("model_val_stop", baseline_metrics)
-            )
+            baseline_select = baseline_metrics.get("model_val_select")
+            if not isinstance(baseline_select, Mapping):
+                raise ValueError("A0_S500 baseline seed row lacks model_val_select metrics")
             gain = float(select["accuracy"] - baseline_select["accuracy"])
             select["baseline_accuracy"] = float(baseline_select["accuracy"])
             select["deployable_gain"] = gain

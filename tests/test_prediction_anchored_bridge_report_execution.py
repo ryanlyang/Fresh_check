@@ -100,6 +100,7 @@ def _generic_aggregate(run_id: str, *, reconstruction: bool) -> dict:
         metrics = {
             "optimizer_steps_completed": 25,
             "model_val_stop": _classification(0.69 + offset),
+            "model_val_select": _classification(0.69 + offset),
         }
         replicas.append({"seed_id": seed, "metrics": metrics})
     return with_content_hash(

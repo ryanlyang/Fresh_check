@@ -43,7 +43,13 @@ from .bridge_campaign import (
     validate_campaign_registry,
 )
 from .bridge_consumer import STEP3_RUN_IDS
-from .bridge_contracts import canonical_sha256, sha256_file, validate_content_hash, with_content_hash
+from .bridge_contracts import (
+    canonical_json_bytes,
+    canonical_sha256,
+    sha256_file,
+    validate_content_hash,
+    with_content_hash,
+)
 from .bridge_evaluation import (
     ALL50_TEACHER_NAMESPACE,
     ALTERNATE_TEACHER_NAMESPACE,
@@ -1629,6 +1635,7 @@ class Step8FixedStorage:
     target_logit_namespace_bytes: Mapping[str, int]
     recipes_bindings_reports_bytes: int
     final_deployable_bundle_bytes: int
+    measurement_basis: str = "filesystem_measured"
 
     def __post_init__(self) -> None:
         scalar_names = (
@@ -1650,6 +1657,11 @@ class Step8FixedStorage:
             for value in self.target_logit_namespace_bytes.values()
         ):
             raise ValueError("target-logit namespace byte counts must be measured positive integers")
+        if self.measurement_basis not in {
+            "filesystem_measured",
+            "clean_start_conservative_upper_bound",
+        }:
+            raise ValueError("unknown Step 8 fixed-storage measurement basis")
 
     @property
     def total_bytes(self) -> int:
@@ -1669,9 +1681,73 @@ class Step8FixedStorage:
                 "target_logit_namespace_bytes": dict(self.target_logit_namespace_bytes),
                 "total_bytes": self.total_bytes,
                 "dense_field_cache_bytes": 0,
-                "all_categories_measured": True,
+                "all_categories_measured": self.measurement_basis == "filesystem_measured",
+                "production_safe_upper_bounds": self.measurement_basis
+                == "clean_start_conservative_upper_bound",
             }
         )
+
+
+def build_clean_start_step8_fixed_storage(
+    child_split_manifest: Mapping[str, Any],
+    registry: Mapping[str, Any],
+) -> tuple[Step8FixedStorage, dict[str, Any]]:
+    """Conservatively reserve fixed bytes before campaign outputs exist."""
+
+    validate_content_hash(
+        child_split_manifest, expected_contract="prediction_anchored_child_splits_v1"
+    )
+    validate_campaign_registry(registry)
+    event_count = int(child_split_manifest["children"]["stack_train_distill"]["count"])
+    if event_count <= 0:
+        raise ValueError("clean-start fixed storage requires stack_train_distill events")
+    namespaces = [PRIMARY_TEACHER_NAMESPACE, ALL50_TEACHER_NAMESPACE, N3_F0_TEACHER_NAMESPACE]
+    if bool(registry.get("alternate_teacher_valid")):
+        namespaces.append(ALTERNATE_TEACHER_NAMESPACE)
+    # Complete uncompressed NPZ row: float32[10], int64 label, and NumPy <U64 identity.
+    per_event_cache_bytes = 10 * 4 + 8 + 64 * 4
+    per_namespace_overhead = 2 * 1024**2
+    namespace_bytes = {
+        name: event_count * per_event_cache_bytes + per_namespace_overhead
+        for name in namespaces
+    }
+
+    def weights_with_headroom(parameter_count: int) -> int:
+        raw = int(parameter_count) * 4
+        return raw + int(math.ceil(raw * 0.15))
+
+    storage = Step8FixedStorage(
+        child_split_manifest_bytes=len(canonical_json_bytes(child_split_manifest)) + 1,
+        r0_weights_bytes=weights_with_headroom(16_000_000),
+        target_logit_namespace_bytes=namespace_bytes,
+        recipes_bindings_reports_bytes=32 * 1024**2,
+        final_deployable_bundle_bytes=weights_with_headroom(52_000_000),
+        measurement_basis="clean_start_conservative_upper_bound",
+    )
+    report = with_content_hash(
+        {
+            "contract": PREDICTION_ANCHORED_STEP8_FIXED_STORAGE_MEASUREMENT_CONTRACT,
+            "fixed_storage": storage.to_artifact(),
+            "child_split_manifest_sha256": child_split_manifest["content_hash"],
+            "registry_sha256": registry["content_hash"],
+            "stack_train_distill_event_count": event_count,
+            "target_cache_formula": {
+                "logit_classes": 10,
+                "logit_dtype_bytes": 4,
+                "label_dtype_bytes": 8,
+                "identity_unicode_characters": 64,
+                "unicode_character_bytes": 4,
+                "per_namespace_overhead_bytes": per_namespace_overhead,
+            },
+            "weight_dtype_bytes": 4,
+            "serialization_headroom_fraction": 0.15,
+            "filesystem_bytes_measured": False,
+            "clean_start_production_safe_upper_bounds": True,
+            "future_campaign_artifacts_required": False,
+            "dense_field_artifacts_present": False,
+        }
+    )
+    return storage, report
 
 
 def _measured_path(path: str | Path, *, label: str) -> tuple[int, list[dict[str, Any]]]:
@@ -2098,6 +2174,7 @@ __all__ = [
     "compute_gain_and_recovery",
     "build_adversarial_channel_report",
     "Step8FixedStorage",
+    "build_clean_start_step8_fixed_storage",
     "measure_step8_fixed_storage",
     "measure_step8_registry_states",
     "require_post_teacher_release",

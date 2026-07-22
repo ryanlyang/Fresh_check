@@ -25,7 +25,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="ROLE=PATH",
-        help="measured immutable parent; repeat for R0, consumer, metadata, and other parents",
+        help="representative immutable parent; required exactly for roles r0, consumer, metadata",
     )
     parser.add_argument("--output", default="")
     parser.add_argument("--dry-run", action="store_true")
@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_prediction_anchored_execution_spec,
     )
     from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (
+        canonical_sha256,
         load_hashed_json,
         validate_content_hash,
         write_immutable_json,
@@ -106,8 +107,29 @@ def main(argv: list[str] | None = None) -> int:
         if not role.strip() or not path.strip() or role in parents:
             raise ValueError("fixed-parent roles must be nonempty and unique")
         parents[role] = _measure(path)
-    if not parents:
-        raise ValueError("at least one --fixed-parent ROLE=PATH is required")
+    if not parents and fixed.get("measurement_basis") == "clean_start_conservative_upper_bound":
+        formula_sizes = {
+            "r0": int(fixed["r0_weights_bytes"]),
+            "consumer": int(fixed["final_deployable_bundle_bytes"]),
+            "metadata": int(fixed["recipes_bindings_reports_bytes"]),
+        }
+        parents = {
+            role: {
+                "path": f"formula://{role}",
+                "size_bytes": size,
+                "sha256": canonical_sha256(
+                    {
+                        "role": role,
+                        "size_bytes": size,
+                        "fixed_storage_sha256": fixed["content_hash"],
+                    }
+                ),
+                "basis": "clean_start_formula",
+            }
+            for role, size in formula_sizes.items()
+        }
+    if set(parents) != {"r0", "consumer", "metadata"}:
+        raise ValueError("--fixed-parent roles must be exactly r0, consumer, and metadata")
     artifact = build_campaign_reservations(
         registry,
         execution_spec=execution_spec,

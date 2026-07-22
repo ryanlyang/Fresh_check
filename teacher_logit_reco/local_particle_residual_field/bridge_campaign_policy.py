@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from io import BytesIO
 import math
 import io
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -199,14 +200,33 @@ def build_campaign_reservations(
         size = raw.get("size_bytes")
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             raise ValueError(f"{role} size_bytes must be a positive measured integer")
-        path = Path(str(raw.get("path", ""))).resolve(strict=False)
+        basis = str(raw.get("basis", "filesystem_measured"))
+        if basis not in {"filesystem_measured", "clean_start_formula"}:
+            raise ValueError(f"{role} has an unknown fixed-parent basis")
+        raw_path = str(raw.get("path", ""))
+        if basis == "clean_start_formula":
+            if raw_path != f"formula://{role}":
+                raise ValueError(f"{role} clean-start formula path is not canonical")
+            path = Path(f"__formula_parent__/{role}").resolve(strict=False)
+        else:
+            path = Path(raw_path).resolve(strict=False)
         if digest in hashes:
             raise ValueError("fixed parent hash is duplicated across publication roles")
         if any(path == prior or path in prior.parents or prior in path.parents for prior in resolved_paths):
             raise ValueError("fixed parent paths overlap and would be duplicated")
         hashes.add(digest)
         resolved_paths.append(path)
-        parents[str(role)] = {"sha256": digest, "size_bytes": size, "path": str(path)}
+        parents[str(role)] = {
+            "sha256": digest,
+            "size_bytes": size,
+            "path": raw_path if basis == "clean_start_formula" else str(path),
+            "basis": basis,
+        }
+    required_parent_roles = {"r0", "consumer", "metadata"}
+    if set(fixed_parent_artifacts) != required_parent_roles:
+        raise ValueError(
+            "fixed parent inventory must be exactly r0, consumer, and metadata"
+        )
 
     run_reservations = {}
     for row in registry["runs"]:
@@ -1483,16 +1503,26 @@ def clean_hlt_only_reload_audit(
 
     original_builtin_open = builtins.open
     original_io_open = io.open
+    original_os_open = os.open
+    denied_accesses: list[str] = []
 
     def guarded_builtin_open(path_value: Any, *args: Any, **kwargs: Any):
         if forbidden(path_value):
+            denied_accesses.append(str(path_value))
             raise PermissionError(f"privileged source is isolated from reload: {path_value}")
         return original_builtin_open(path_value, *args, **kwargs)
 
     def guarded_io_open(path_value: Any, *args: Any, **kwargs: Any):
         if forbidden(path_value):
+            denied_accesses.append(str(path_value))
             raise PermissionError(f"privileged source is isolated from reload: {path_value}")
         return original_io_open(path_value, *args, **kwargs)
+
+    def guarded_os_open(path_value: Any, *args: Any, **kwargs: Any):
+        if forbidden(path_value):
+            denied_accesses.append(str(path_value))
+            raise PermissionError(f"privileged source is isolated from reload: {path_value}")
+        return original_os_open(path_value, *args, **kwargs)
     source_bundle.eval()
     with torch.no_grad():
         source_logits = source_bundle(fixed_hlt_batch).detach().cpu()
@@ -1501,11 +1531,22 @@ def clean_hlt_only_reload_audit(
         shutil.copy2(checkpoint_path, copied)
         builtins.open = guarded_builtin_open
         io.open = guarded_io_open
+        os.open = guarded_os_open
         try:
+            # Positive control: prove every real privileged root is denied by
+            # the exact guard active during model construction and inference.
+            for root in privileged:
+                try:
+                    guarded_builtin_open(root, "rb")
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError(f"privileged isolation probe unexpectedly opened {root}")
             loaded, manifest = load_deployable_bundle(copied, bundle_factory=bundle_factory)
             with torch.no_grad():
                 loaded_logits = loaded(fixed_hlt_batch).detach().cpu()
         finally:
+            os.open = original_os_open
             io.open = original_io_open
             builtins.open = original_builtin_open
     if source_logits.shape != loaded_logits.shape:
@@ -1513,6 +1554,9 @@ def clean_hlt_only_reload_audit(
     difference = torch.abs(source_logits - loaded_logits)
     max_abs = float(difference.max().item()) if difference.numel() else 0.0
     passed = bool(torch.allclose(source_logits, loaded_logits, atol=float(atol), rtol=float(rtol)))
+    probe_denials = sum(str(root) in denied_accesses for root in privileged)
+    isolation_proven = probe_denials == len(privileged)
+    passed = passed and isolation_proven
     if manifest.get("locked_deployable_sha256") != locked_deployable["content_hash"]:
         raise ValueError("clean bundle manifest is bound to another locked deployment")
     return with_content_hash(
@@ -1522,10 +1566,13 @@ def clean_hlt_only_reload_audit(
             "bundle_checkpoint_sha256": sha256_file(checkpoint_path),
             "bundle_manifest_sha256": manifest["content_hash"],
             "privileged_source_path_count": len(privileged),
-            "privileged_sources_absent": True,
+            "privileged_sources_absent": isolation_proven,
             "privileged_sources_existed_before_isolation": True,
-            "privileged_source_access_denied_during_reload": True,
-            "isolation_method": "deny_canonical_privileged_roots_during_clean_copy_reload",
+            "privileged_source_access_denied_during_reload": isolation_proven,
+            "privileged_source_denial_probe_count": probe_denials,
+            "privileged_access_attempt_count": len(denied_accesses),
+            "literal_host_paths_removed": False,
+            "isolation_method": "clean_copy_reload_with_positive_denial_probes_for_canonical_privileged_roots",
             "fixed_hlt_batch_keys": sorted(fixed_hlt_batch),
             "atol": float(atol),
             "rtol": float(rtol),

@@ -85,6 +85,7 @@ def _fixed(value: dict[str, object]) -> Step8FixedStorage:
         target_logit_namespace_bytes={str(k): int(v) for k, v in value["target_logit_namespace_bytes"].items()},
         recipes_bindings_reports_bytes=int(value["recipes_bindings_reports_bytes"]),
         final_deployable_bundle_bytes=int(value["final_deployable_bundle_bytes"]),
+        measurement_basis=str(value.get("measurement_basis", "filesystem_measured")),
     )
 
 
