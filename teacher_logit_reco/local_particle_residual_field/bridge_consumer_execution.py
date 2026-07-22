@@ -352,6 +352,13 @@ class _BoundConditionForward:
             fields = virtual_bridge(
                 anchor, truth, mask, rho="1.000", channel_policy=BRIDGE_CHANNEL_ALL50
             )
+        elif condition == "reliability5_only":
+            full = virtual_bridge(
+                anchor, truth, mask, rho="0.100", channel_policy=BRIDGE_CHANNEL_ALL50
+            )
+            fields = np.array(anchor, copy=True)
+            fields[..., 45:] = full[..., 45:]
+            fields[~mask] = 0.0
         elif condition == "zero_field_consumer_diagnostic":
             fields = np.zeros_like(anchor)
         else:

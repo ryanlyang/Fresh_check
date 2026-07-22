@@ -90,6 +90,7 @@ def _node(
     runner: str,
     arguments: Sequence[str],
     dependencies: Sequence[str],
+    afterany_dependencies: Sequence[str] = (),
     configuration_run_ids: Sequence[str] = (),
     resources: TigrisResources,
     shared_source_group: str,
@@ -103,6 +104,9 @@ def _node(
         raise ValueError(f"production node {node_id} repeats a configuration")
     if persistent_reservation_bytes < 0:
         raise ValueError("node persistent reservation cannot be negative")
+    afterany = [str(value) for value in afterany_dependencies]
+    if not set(afterany).issubset(str(value) for value in dependencies):
+        raise ValueError("afterany dependencies must be ordinary graph dependencies")
     return with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_PRODUCTION_NODE_CONTRACT,
@@ -111,6 +115,7 @@ def _node(
             "runner": str(runner),
             "arguments": [str(value) for value in arguments],
             "dependencies": [str(value) for value in dependencies],
+            "afterany_dependencies": afterany,
             "configuration_run_ids": configs,
             "paired_seed_ids": list(PAIRED_SEED_IDS) if configs else [],
             "resources": resources.to_artifact(),
@@ -459,6 +464,7 @@ def build_prediction_anchored_tigris_graph(
             runner="run_prepare_prediction_anchored_bridge_ram.sh",
             arguments=("B6_SELECT",),
             dependencies=selection_dependencies,
+            afterany_dependencies=selection_dependencies,
             resources=cpu,
             shared_source_group="paired3_model_val_select_metrics",
             requires_selected_consumer=True,
@@ -619,6 +625,8 @@ def validate_prediction_anchored_tigris_graph(graph: Mapping[str, Any]) -> dict[
             "metrics_all_seeds__weights_ordered_median_only"
         ):
             raise ValueError("a production node changed median-only publication")
+        if not set(row.get("afterany_dependencies", [])).issubset(row["dependencies"]):
+            raise ValueError("production node has an invalid afterany dependency")
     order = _topological_node_ids(nodes)
     if order != graph.get("topological_node_ids"):
         raise ValueError("production graph topological order changed")
@@ -710,8 +718,14 @@ def render_tigris_sbatch_commands(
         if int(resources["gpus_per_node"]) > 0:
             argv.append(f"--gres=gpu:{resources['gpus_per_node']}")
         if row["dependencies"]:
-            dependency = ":".join(f"${{JOB_{value}}}" for value in row["dependencies"])
-            argv.append(f"--dependency=afterok:{dependency}")
+            afterany = set(row.get("afterany_dependencies", []))
+            afterok_ids = [value for value in row["dependencies"] if value not in afterany]
+            clauses = []
+            if afterok_ids:
+                clauses.append("afterok:" + ":".join(f"${{JOB_{value}}}" for value in afterok_ids))
+            if afterany:
+                clauses.append("afterany:" + ":".join(f"${{JOB_{value}}}" for value in row["dependencies"] if value in afterany))
+            argv.append("--dependency=" + ",".join(clauses))
         argv.extend(
             [
                 f"sbatch/{row['runner']}",
@@ -885,6 +899,7 @@ def build_prediction_anchored_job_ledger(
                 "job_id": value,
                 "dependency_node_ids": list(node["dependencies"]),
                 "dependency_job_ids": [str(job_ids[value]) for value in node["dependencies"]],
+                "afterany_dependency_node_ids": list(node.get("afterany_dependencies", [])),
                 "runner": node["runner"],
                 "arguments": list(node["arguments"]),
             }
@@ -927,7 +942,11 @@ def simulate_prediction_anchored_scheduler(
         node = by_id[node_id]
         if node["protected_final_test"] and not include_final_test:
             status = "NOT_SUBMITTED_PROTECTED"
-        elif any(statuses[parent] != "COMPLETED" for parent in node["dependencies"]):
+        elif any(
+            statuses[parent] != "COMPLETED"
+            for parent in node["dependencies"]
+            if parent not in set(node.get("afterany_dependencies", []))
+        ):
             status = "DEPENDENCY_NEVER_SATISFIED"
         else:
             outcome = requested.get(node_id, "COMPLETED")
@@ -967,6 +986,7 @@ def simulate_prediction_anchored_scheduler(
             "rows": rows,
             "statuses": statuses,
             "consumer_selection_afterok_enforced": True,
+            "exploratory_b6_completion_uses_afterany": True,
             "cache_started": cache_started,
             "b6_training_started": b6_started,
             "cross_allocation_resume": False,

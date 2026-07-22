@@ -201,8 +201,27 @@ def _paired_publication_row(
     metadata: Mapping[str, Any],
     section: str = "baselines_and_deployable",
     deployable: bool = True,
+    comparison_baseline_seed_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     seeds = _seed_rows(aggregate)
+    measured_gains: list[float] = []
+    if comparison_baseline_seed_rows is not None:
+        baseline_by_seed = {
+            int(row["seed_id"]): row for row in comparison_baseline_seed_rows
+        }
+        for row in seeds:
+            metrics = row.get("metrics", row)
+            select = metrics.get("model_val_select", metrics)
+            baseline_row = baseline_by_seed[int(row["seed_id"])]
+            baseline_metrics = baseline_row.get("metrics", baseline_row)
+            baseline_select = baseline_metrics.get(
+                "model_val_select", baseline_metrics.get("model_val_stop", baseline_metrics)
+            )
+            gain = float(select["accuracy"] - baseline_select["accuracy"])
+            select["baseline_accuracy"] = float(baseline_select["accuracy"])
+            select["deployable_gain"] = gain
+            select["deployable_gain_reference"] = "A0_S500_same_seed_model_val"
+            measured_gains.append(gain)
     median_seed = int(aggregate["median_seed_id"])
     return build_step9_report_row(
         row_id=row_id,
@@ -220,6 +239,24 @@ def _paired_publication_row(
             "source_aggregate_sha256": aggregate["content_hash"],
             "source_publication_sha256": publication["content_hash"],
             "checkpoint_reload_verified": True,
+            "measured_gain_over_A0_S500_mean": (
+                None if not measured_gains else _mean(measured_gains)
+            ),
+        },
+    )
+
+
+def _missing_baseline_row(row_id: str, run_id: str) -> dict[str, Any]:
+    return build_step9_report_row(
+        row_id=row_id,
+        section="baselines_and_deployable",
+        status="FAILED",
+        deployable=False,
+        hlt_only_reload_passed=None,
+        metadata={
+            "source_run_id": run_id,
+            "missing_metrics_visible": True,
+            "failure_did_not_block_unrelated_selection_or_reporting": True,
         },
     )
 
@@ -240,7 +277,10 @@ def _condition_row(
             metrics = row["f0"]
         elif condition == "bridge_0p10":
             metrics = row["bridge_0p10"]
-        elif condition in {"oracle_physical45", "oracle_all50", "zero_field_consumer_diagnostic"}:
+        elif condition in {
+            "oracle_physical45", "oracle_all50", "reliability5_only",
+            "zero_field_consumer_diagnostic",
+        }:
             metrics = row["diagnostics"][condition]
         elif condition.startswith("negative_control:"):
             metrics = row["negative_controls"][condition.split(":", 1)[1]]
@@ -518,6 +558,9 @@ def assemble_step9_report_evidence(
 
     baseline_rows = [_legacy_reference_row(execution_spec)]
     for run_id in (A0_C250, A0_C250_LONG, A0_S500):
+        if run_id not in publications:
+            baseline_rows.append(_missing_baseline_row(run_id, run_id))
+            continue
         aggregate, publication = publications[run_id]
         seeds = _seed_rows(aggregate)
         metadata = _training_metadata(
@@ -536,6 +579,9 @@ def assemble_step9_report_evidence(
             )
         )
     for run_id in _DIRECT_BASELINES:
+        if run_id not in publications or A0_S500 not in publications:
+            baseline_rows.append(_missing_baseline_row(run_id, run_id))
+            continue
         aggregate, publication = publications[run_id]
         seeds = _seed_rows(aggregate)
         median_metrics = _median_metrics(seeds, int(aggregate["median_seed_id"]))
@@ -551,9 +597,13 @@ def assemble_step9_report_evidence(
                     child_manifest=child,
                     median_metrics=median_metrics,
                 ),
+                comparison_baseline_seed_rows=_seed_rows(publications[A0_S500][0]),
             )
         )
     for run_id, row_id in ((TPRED, "Tpred(f0)"), (TPRED_CONTINUE, "Tpred_continue(f0)")):
+        if run_id not in publications:
+            baseline_rows.append(_missing_baseline_row(row_id, run_id))
+            continue
         aggregate, publication = publications[run_id]
         baseline_rows.append(
             _paired_publication_row(
@@ -631,6 +681,7 @@ def assemble_step9_report_evidence(
     all50_aggregate = publications[T10_ALL50_CLEAN][0]
     for condition, suffix in (
         ("bridge_0p10", "bridge_0.10"),
+        ("reliability5_only", "reliability5_only"),
         ("oracle_physical45", "physical45_oracle"),
         ("oracle_all50", "full50_oracle"),
         ("zero_field_consumer_diagnostic", "zero_field"),

@@ -944,7 +944,8 @@ def _evaluate_direct(
     metrics = classification_metrics(np.concatenate(logits), np.concatenate(labels), class_order=class_order)
     return {
         **metrics,
-        "deployable_gain": 0.0,
+        "deployable_gain": None,
+        "deployable_gain_reference": "computed_in_report_against_A0_S500_same_seed",
         "recovery_fraction": None,
         "teacher_path_present": False,
         "field_output_present": False,
@@ -1907,6 +1908,24 @@ def aggregate_reconstruction_replicas(
             "seed_id",
         ]
         aggregation_phase = "early_reachability_bridge_loss"
+    elif run_id in {DIRECT_HLT, DIRECT_R0REP}:
+        scored = [
+            (
+                _metric(item.metrics, "model_val_select.accuracy"),
+                -_metric(item.metrics, "model_val_select.cross_entropy"),
+                0.0,
+                int(item.seed_id),
+                item,
+            )
+            for item in replicas
+        ]
+        ordering = [
+            "model_val_select.accuracy",
+            "negative_model_val_select.cross_entropy",
+            "constant_zero",
+            "seed_id",
+        ]
+        aggregation_phase = "direct_control_model_val_select"
     else:
         scored = [
             (

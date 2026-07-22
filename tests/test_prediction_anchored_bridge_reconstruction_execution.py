@@ -178,6 +178,11 @@ def test_general_paired_publication_retains_only_ordered_median_weights(tmp_path
     assert payload["weights_only"] is True
     assert payload["optimizer_state_persisted"] is False
     assert payload["generated_fields_persisted"] is False
+    with pytest.raises(PermissionError, match="reservation"):
+        publish_reconstruction_paired_replicas(
+            replicas, output_dir=tmp_path / "overrun", reservation_bytes=1
+        )
+    assert not (tmp_path / "overrun").exists()
 
 
 def _l0_replica(

@@ -1007,11 +1007,17 @@ def build_step9_reports(
         raise ValueError("privileged report omits distinct oracle ceilings: " + ", ".join(sorted(missing_privileged)))
     for row in baseline_deployable_rows:
         validate_content_hash(row, expected_contract=PREDICTION_ANCHORED_REPORT_ROW_CONTRACT)
-        if row.get("section") != "baselines_and_deployable" or not bool(row.get("deployable")):
+        missing_visible = (
+            row.get("status") in {"FAILED", "SKIPPED_INVALID_PARENT", "SKIPPED_FAILED_PARENT"}
+            and row.get("metadata", {}).get("missing_metrics_visible") is True
+        )
+        if row.get("section") != "baselines_and_deployable" or (
+            not bool(row.get("deployable")) and not missing_visible
+        ):
             raise ValueError("baseline/deployable section contains a misplaced row")
         if row.get("row_id") in PRIVILEGED_REQUIRED_IDS:
             raise ValueError("oracle ceiling rows are forbidden from the deployable section")
-        if row["row_id"].startswith("A0"):
+        if row["row_id"].startswith("A0") and not missing_visible:
             metadata = row.get("metadata", {})
             required = {"training_manifest_sha256", "unique_jet_count", "optimizer_step_budget"}
             legacy_reference = (

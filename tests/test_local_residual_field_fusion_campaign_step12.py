@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_step12_submitters_cover_all_stages_and_dependency_gates() -> None:
     generic = (ROOT / "sbatch" / "submit_lprf_p7b_fusion_campaign.sh").read_text(encoding="utf-8")
     tigris = (ROOT / "sbatch" / "submit_lprf_p7b_fusion_campaign_tigris.sh").read_text(encoding="utf-8")
+    common = (ROOT / "sbatch" / "common.sh").read_text(encoding="utf-8")
     for stage in ("preflight", "train_seed_control", "cache_stack", "fit_candidates", "select", "evaluate_final", "report", "full_campaign"):
         assert stage in generic
     assert "--dependency=afterok:" in generic
@@ -25,6 +26,9 @@ def test_step12_submitters_cover_all_stages_and_dependency_gates() -> None:
     assert "action=cancel_and_resubmit" in generic and 'scancel "${job_id}"' in generic
     assert "reu-aisocial" in generic and "reu-aisocial" in tigris
     assert "PYTHONNOUSERSITE=1" in tigris
+    assert 'CONDA_BASE:=/home/ryreu/miniconda3' in tigris
+    assert "export PROJECT_DIR OUTPUT_ROOT DIAGNOSTICS_ROOT LOG_DIR CONDA_BASE CONDA_ENV" in tigris
+    assert common.index('local conda_sh="${HOME}/miniconda3/etc/profile.d/conda.sh"') < common.index("if command -v conda")
 
 
 def test_step12_every_new_tigris_job_uses_common_setup_and_full_account() -> None:

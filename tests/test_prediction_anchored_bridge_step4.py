@@ -52,6 +52,7 @@ def _conditions(labels: np.ndarray, endpoint_correct: int) -> dict[str, np.ndarr
         "rho_0.100": _predictions(labels, endpoint_correct),
         "oracle_physical45": _predictions(labels, min(n, endpoint_correct + 15)),
         "oracle_all50": _predictions(labels, min(n, endpoint_correct + 20)),
+        "reliability5_only": _predictions(labels, min(n, endpoint_correct + 3)),
         "zero_field_consumer_diagnostic": _predictions(labels, 100),
     }
     conditions.update({name: _predictions(labels, 140) for name in BRIDGE_CONTROLS})

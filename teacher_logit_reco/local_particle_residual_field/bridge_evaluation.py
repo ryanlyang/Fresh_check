@@ -63,6 +63,7 @@ REQUIRED_RESPONSE_KEYS = tuple(f"rho_{rho}" for rho in RESPONSE_RHOS)
 REQUIRED_DIAGNOSTIC_KEYS = (
     "oracle_physical45",
     "oracle_all50",
+    "reliability5_only",
     "zero_field_consumer_diagnostic",
 )
 DEFAULT_BACKGROUND_REJECTION_EFFICIENCIES = (0.30, 0.50)

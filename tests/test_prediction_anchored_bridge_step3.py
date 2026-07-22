@@ -365,6 +365,16 @@ def test_exact_step_engine_and_weights_only_ordered_median_publication(tmp_path)
     assert "optimizer_state_dict" not in checkpoint
     assert "generated_fields" not in checkpoint
     assert checkpoint["seed_id"] == 303
+    with pytest.raises(PermissionError, match="reservation"):
+        publish_paired_replicas(
+            replicas,
+            output_dir=tmp_path / "overrun",
+            primary_metric="model_val_select.bridge_accuracy",
+            cross_entropy_metric="model_val_select.bridge_cross_entropy",
+            gain_metric="model_val_select.same_consumer_bridge_gain",
+            reservation_bytes=1,
+        )
+    assert not (tmp_path / "overrun").exists()
 
 
 def test_tensor_batch_and_measured_registry_do_not_persist_dense_fields():

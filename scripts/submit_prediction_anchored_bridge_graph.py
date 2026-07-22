@@ -92,10 +92,16 @@ def _argv(
     if int(resources["gpus_per_node"]) > 0:
         argv.append(f"--gres=gpu:{resources['gpus_per_node']}")
     if node["dependencies"]:
-        argv.append(
-            "--dependency=afterok:"
-            + ":".join(str(job_ids[value]) for value in node["dependencies"])
-        )
+        afterany = set(node.get("afterany_dependencies", []))
+        afterok_ids = [value for value in node["dependencies"] if value not in afterany]
+        clauses = []
+        if afterok_ids:
+            clauses.append("afterok:" + ":".join(str(job_ids[value]) for value in afterok_ids))
+        if afterany:
+            clauses.append("afterany:" + ":".join(
+                str(job_ids[value]) for value in node["dependencies"] if value in afterany
+            ))
+        argv.append("--dependency=" + ",".join(clauses))
     argv.extend([f"sbatch/{node['runner']}", *node["arguments"]])
     return argv
 
