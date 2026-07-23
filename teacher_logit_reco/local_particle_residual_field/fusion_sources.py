@@ -132,6 +132,10 @@ def _attested_binary_projection_metrics(block: Any) -> tuple[dict[str, Any], str
             "binary_projection_signal_efficiencies",
             computed["signal_efficiencies"],
         ),
+        # Prediction caches contain within-split metrics only.  Preserve the
+        # corresponding field from the complete metric contract when
+        # reconstructing the stored payload for attestation.
+        "frozen_threshold_source": None,
         "projections": dict(stored),
     }
     if stable_fusion_json_hash(stored_payload) != stable_fusion_json_hash(computed):

@@ -47,6 +47,10 @@ def test_full_bootstrap_submitter_queues_afterok_and_reuses_complete_hlt():
     assert "stack_train_offline.npz" in missing
     assert "--splits stack_train" in missing
     assert "PYTHONNOUSERSITE=1" in submitter + finalizer + missing
+    assert "SKIP_CONDA=1" in finalizer
+    assert "SKIP_CONDA=1" in missing
+    assert '/envs/${CONDA_ENV}/bin/python' in finalizer
+    assert '/envs/${CONDA_ENV}/bin/python' in missing
 
 
 def test_finalizer_binds_all_four_immutable_submission_controls():

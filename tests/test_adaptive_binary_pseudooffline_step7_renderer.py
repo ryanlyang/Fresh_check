@@ -27,6 +27,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.particle_renderer import (
     ConstrainedParticleRenderer,
     ParticleRendererConfig,
     ParticleSlotLayout,
+    _allocate_local_particle_masses,
     _invariant_mass_float64,
     _type_conditioned_minimum_mass,
     allocate_particle_charges,
@@ -192,9 +193,14 @@ def _identity_target_map(rendered, hierarchy) -> RendererTargetMap:
 
 def test_n_body_phase_space_is_differentiable_and_closes_massive_parent():
     parent = torch.tensor((20.0, 3.0, -2.0, 4.0), dtype=torch.float64)
-    raw = torch.randn(5, 3, dtype=torch.float64, requires_grad=True)
+    generator = torch.Generator().manual_seed(1701)
+    raw = torch.randn(
+        5, 3, generator=generator, dtype=torch.float64, requires_grad=True
+    )
     masses = torch.tensor((0.14, 0.0, 0.0, 0.01, 0.1), dtype=torch.float64)
-    fractions = torch.randn(5, dtype=torch.float64, requires_grad=True)
+    fractions = torch.randn(
+        5, generator=generator, dtype=torch.float64, requires_grad=True
+    )
     particles, diagnostics = project_n_body_phase_space(parent, raw, masses, fractions)
     torch.testing.assert_close(particles.sum(dim=0), parent, atol=2.0e-7, rtol=2.0e-7)
     on_shell = torch.sqrt(
@@ -325,6 +331,23 @@ def test_pid_mass_floor_is_exact_fp32_under_bfloat16_autocast():
     masses.sum().backward()
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()
+
+
+def test_near_massless_parent_disables_optional_learned_particle_mass():
+    logits = torch.tensor((1.2, -0.4, 0.7), dtype=torch.float32, requires_grad=True)
+    masses = _allocate_local_particle_masses(
+        torch.tensor(8.0e-7, dtype=torch.float64),
+        torch.zeros(3, dtype=torch.float64),
+        logits,
+        torch.tensor(0.9, dtype=torch.float64),
+        phase_space_mass_epsilon=1.0e-5,
+        near_massless_threshold=1.0e-6,
+    )
+
+    torch.testing.assert_close(masses, torch.zeros_like(masses), atol=0.0, rtol=0.0)
+    masses.sum().backward()
+    assert logits.grad is not None
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits.grad), atol=0.0, rtol=0.0)
 
 
 def test_massless_phase_space_branch_closes_without_a_fake_mass_floor():

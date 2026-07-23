@@ -73,6 +73,43 @@ def test_step4_prediction_block_persists_binary_metrics_inside_metrics_metadata(
     assert metadata["metrics"]["binary_projection_metrics"]["QCD_vs_Hgg"]["available"] is True
 
 
+def test_step4_preflight_attests_current_binary_metric_metadata(tmp_path: Path) -> None:
+    labels = np.asarray([0, 3, 0, 3], dtype=np.int64)
+    logits = np.zeros((4, len(LABEL_NAMES)), dtype=np.float32)
+    logits[np.arange(4), labels] = 2.0
+    metrics = fusion_module._metrics_from_logits(logits, labels, label_names=LABEL_NAMES)
+    save_prediction_block(
+        PredictionBlock(
+            model_name="A0_seed1",
+            split="stack_train",
+            logits=logits,
+            probs=np.zeros_like(logits),
+            labels=labels,
+            jet_ids=[
+                JetIdentity(file="stack_train.root", entry=index, label=int(label))
+                for index, label in enumerate(labels)
+            ],
+            metadata={
+                "binary_projection_metrics_contract": metrics[
+                    "binary_projection_metrics_contract"
+                ],
+                "binary_projection_signal_efficiencies": metrics[
+                    "binary_projection_signal_efficiencies"
+                ],
+                "binary_projection_metrics": metrics["binary_projection_metrics"],
+            },
+        ),
+        tmp_path,
+    )
+
+    block = load_prediction_block(tmp_path, "A0_seed1", "stack_train")
+    attested, source = source_module._attested_binary_projection_metrics(block)
+
+    assert source == "prediction_metadata_verified_against_logits"
+    assert attested["projections"] == metrics["binary_projection_metrics"]
+    assert attested["frozen_threshold_source"] is None
+
+
 def test_step4_preflight_backfills_legacy_binary_metrics_without_mutating_sources(tmp_path: Path) -> None:
     audit_config, payload = build_source_fixture(tmp_path)
     source_metadata = Path(audit_config.a0_prediction_dir) / "A0" / "stack_train_predictions_metadata.json"

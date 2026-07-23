@@ -16,6 +16,16 @@ IFS=$'\n\t'
 : "${PAB_PREFLIGHT_ROOT:?missing PAB_PREFLIGHT_ROOT}"
 : "${PREDICTION_ANCHORED_ARTIFACT_ROOT:?missing campaign artifact root}"
 export PYTHONNOUSERSITE=1
+: "${CONDA_ENV:=weaver}"
+: "${CONDA_BASE:=/home/ryreu/miniconda3}"
+direct_python="${CONDA_BASE}/envs/${CONDA_ENV}/bin/python"
+[[ -x "${direct_python}" ]] || {
+  echo "Missing direct conda-environment Python: ${direct_python}" >&2
+  exit 2
+}
+export SKIP_CONDA=1 PYTHON_BIN="${direct_python}"
+export CONDA_PREFIX="${CONDA_BASE}/envs/${CONDA_ENV}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_setup
@@ -49,4 +59,3 @@ export PREDICTION_ANCHORED_EXECUTE=1
 
 # The finalizer submits B0--B6 only after every immutable binding validates.
 fresh_run bash sbatch/submit_prediction_anchored_bridge_pilot.sh
-

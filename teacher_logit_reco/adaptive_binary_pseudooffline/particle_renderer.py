@@ -395,6 +395,41 @@ def _type_conditioned_minimum_mass(type_allocation: TypeAllocation, mass_table: 
         return hard_mass + (relaxed_mass - relaxed_mass.detach())
 
 
+def _allocate_local_particle_masses(
+    parent_mass: Any,
+    local_minimum: Any,
+    mass_logits: Any,
+    group_fraction: Any,
+    *,
+    phase_space_mass_epsilon: float,
+    near_massless_threshold: float,
+) -> Any:
+    """Allocate optional rest mass without violating the massless limit."""
+
+    torch = require_torch()
+    parent = torch.as_tensor(parent_mass).to(torch.float64)
+    minimum = torch.as_tensor(local_minimum, device=parent.device).to(torch.float64)
+    logits = torch.as_tensor(mass_logits, device=parent.device).float()
+    fraction = torch.as_tensor(group_fraction, device=parent.device).to(torch.float64)
+    available = (
+        (1.0 - float(phase_space_mass_epsilon)) * parent - minimum.sum()
+    ).clamp_min(0.0)
+    optional_mass = (
+        available
+        * fraction
+        * logits.softmax(dim=0).to(torch.float64)
+    )
+    # A lightlike parent has no rest-frame energy available for learned child
+    # masses. Keep only immutable PID floors; a nonzero floor then fails the
+    # projector's physical feasibility guard with useful diagnostics.
+    optional_mass = torch.where(
+        parent > float(near_massless_threshold),
+        optional_mass,
+        torch.zeros_like(optional_mass),
+    )
+    return minimum + optional_mass
+
+
 def _allowed_charge_mask(hard_pid_indices: Any) -> Any:
     torch = require_torch()
     pid = torch.as_tensor(hard_pid_indices).long()
@@ -636,7 +671,14 @@ def project_n_body_phase_space(
         }
     if float(parent_mass.detach().cpu()) <= float(near_massless_threshold):
         if bool((masses > 1.0e-9).any()):
-            raise ValueError("near-massless parent cannot carry massive rendered particles")
+            raise ValueError(
+                "near-massless parent cannot carry massive rendered particles: "
+                f"parent_mass={float(parent_mass.detach().cpu()):.8e}, "
+                f"maximum_particle_mass={float(masses.max().detach().cpu()):.8e}, "
+                f"particle_mass_sum={float(masses.sum().detach().cpu()):.8e}, "
+                f"threshold={float(near_massless_threshold):.8e}, "
+                f"particle_count={count}"
+            )
         fractions = fractions_raw.softmax(dim=0)
         result = fractions[:, None] * parent[None, :]
         residual = (result.sum(dim=0) - parent).abs().max()
@@ -1061,20 +1103,16 @@ class ConstrainedParticleRenderer(_ModuleBase):
                 if int(member.numel()) == 1:
                     local_mass = parent_mass[None]
                 else:
-                    available = (
-                        (1.0 - self.config.phase_space_mass_epsilon) * parent_mass
-                        - local_minimum.sum()
-                    ).clamp_min(0.0)
                     group_fraction = torch.sigmoid(
                         self.group_mass_fraction_head(final.hidden[batch_index, group_index])
                     ).squeeze(-1).to(torch.float64)
-                    local_mass = local_minimum + (
-                        available
-                        * group_fraction
-                        * mass_logits[batch_index, member]
-                        .float()
-                        .softmax(dim=0)
-                        .to(torch.float64)
+                    local_mass = _allocate_local_particle_masses(
+                        parent_mass,
+                        local_minimum,
+                        mass_logits[batch_index, member],
+                        group_fraction,
+                        phase_space_mass_epsilon=self.config.phase_space_mass_epsilon,
+                        near_massless_threshold=self.config.near_massless_threshold,
                     )
                 if self.config.exact_nbody_projection:
                     local_p4, phase = project_n_body_phase_space(
