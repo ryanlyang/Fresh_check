@@ -49,36 +49,48 @@ def test_bootstrap_derives_and_requires_the_baseline_model_size(tmp_path):
         _baseline_model_size(tmp_path / "unknown.pt")
 
 
-def test_full_bootstrap_submitter_queues_afterok_and_reuses_complete_hlt():
+def test_full_bootstrap_submitter_builds_locked_500k_source_before_finalizer():
     submitter = (ROOT / "sbatch/submit_prediction_anchored_bridge_full_bootstrap.sh").read_text()
     finalizer = (ROOT / "sbatch/run_finalize_prediction_anchored_bridge_submission.sh").read_text()
-    missing = (ROOT / "sbatch/run_prediction_anchored_missing_offline_split.sh").read_text()
-    assert "afterok:${offline_job}" in submitter
-    assert 'offline_job="${offline_job%%;*}"' in submitter
-    assert 'finalizer_job="${finalizer_job%%;*}"' in submitter
-    assert submitter.count("=~ ^[0-9]+$") == 2
-    assert "run_prediction_anchored_missing_offline_split.sh" in submitter
-    assert "for split in model_train model_val stack_train stack_val final_test" in submitter
-    assert "refusing a guessed rebuild" in submitter
-    assert "--account=reu-aisocial" in submitter
+    assert "rebuild_and_pilot_20260720_185817" not in submitter
+    assert 'PAB_REBUILD_SOURCE:=1' in submitter
+    assert 'PAB_SOURCE_BASE="${PAB_NEW_SOURCE_BASE:-' in submitter
+    assert "source_500k_${stamp}" in submitter
+    for setting in (
+        "MODEL_TRAIN_SIZE=500000",
+        "MODEL_VAL_SIZE=150000",
+        "STACK_TRAIN_SIZE=500000",
+        "STACK_VAL_SIZE=150000",
+        "FINAL_TEST_SIZE=150000",
+    ):
+        assert f"export {setting}" in submitter
+    assert (
+        'ARCHITECTURE_VIEW_10CLASS_OFFLINE_SPLITS='
+        '"model_train model_val stack_train stack_val"'
+    ) in submitter
+    assert "run_build_fresh_splits.sh" in submitter
+    assert "run_build_fresh_hlt_cache.sh" in submitter
+    assert "run_cache_architecture_view_offline_inputs.sh" in submitter
+    assert "run_train_local_residual_field_tagger.sh A0" in submitter
+    assert '--dependency="afterok:${split_job}"' in submitter
+    assert '--dependency="afterok:${hlt_job}:${offline_job}"' in submitter
+    assert 'source_dependency="${a0_job}"' in submitter
+    assert 'dependency=(--dependency="afterok:${source_dependency}")' in submitter
+    assert 'job_id="${output%%;*}"' in submitter
+    assert '--account="${PAB_SBATCH_ACCOUNT}"' in submitter
+    assert "PAB_SBATCH_ACCOUNT:=reu-aisocial" in submitter
+    assert "PAB_SBATCH_PARTITION:=tigris" in submitter
     assert "PREDICTION_ANCHORED_EXECUTE=1" in finalizer
     assert "submit_prediction_anchored_bridge_pilot.sh" in finalizer
-    assert "stack_train_offline.npz" in missing
-    assert "--splits stack_train" in missing
-    assert "PYTHONNOUSERSITE=1" in submitter + finalizer + missing
+    assert "PYTHONNOUSERSITE=1" in submitter + finalizer
     assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
     assert "PAB_CONDA_ENV:=atlas_kd_tigris" in submitter
     assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in finalizer
     assert "PAB_CONDA_ENV:=atlas_kd_tigris" in finalizer
-    assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in missing
-    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in missing
     assert 'export CONDA_ENV="${PAB_CONDA_ENV}"' in finalizer
     assert 'export CONDA_BASE="${PAB_CONDA_BASE}"' in finalizer
-    assert 'export CONDA_ENV="${PAB_CONDA_ENV}"' in missing
-    assert 'export CONDA_BASE="${PAB_CONDA_BASE}"' in missing
-    assert "SKIP_CONDA=1" not in finalizer + missing
+    assert "SKIP_CONDA=1" not in finalizer
     assert "#SBATCH --nodes=1" in finalizer
-    assert "#SBATCH --nodes=1" in missing
 
 
 def test_finalizer_binds_all_four_immutable_submission_controls():

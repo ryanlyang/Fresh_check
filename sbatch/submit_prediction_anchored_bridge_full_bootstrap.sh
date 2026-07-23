@@ -25,20 +25,52 @@ if [[ "${PAB_REBUILD_SOURCE}" == "1" ]]; then
   # residual-field campaign.  Reuse must be explicitly requested.
   PAB_SOURCE_BASE="${PAB_NEW_SOURCE_BASE:-${PROJECT_DIR}/checkpoints/prediction_anchored_bridge/source_500k_${stamp}}"
   PREDICTION_ANCHORED_ARTIFACT_ROOT="${PAB_NEW_ARTIFACT_ROOT:-${PROJECT_DIR}/checkpoints/prediction_anchored_bridge/full_pilot_${stamp}}"
+  PAB_PREFLIGHT_ROOT="${PAB_NEW_PREFLIGHT_ROOT:-${PREDICTION_ANCHORED_ARTIFACT_ROOT}/preflight}"
 elif [[ "${PAB_REBUILD_SOURCE}" == "0" ]]; then
   : "${PAB_SOURCE_BASE:?PAB_REBUILD_SOURCE=0 requires an explicit compatible PAB_SOURCE_BASE}"
   : "${PREDICTION_ANCHORED_ARTIFACT_ROOT:=${PROJECT_DIR}/checkpoints/prediction_anchored_bridge/full_pilot_${stamp}}"
+  : "${PAB_PREFLIGHT_ROOT:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/preflight}"
 else
   echo "PAB_REBUILD_SOURCE must be 0 or 1, got ${PAB_REBUILD_SOURCE}" >&2
   exit 2
 fi
-: "${PAB_PREFLIGHT_ROOT:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/preflight}"
 export PAB_SOURCE_BASE PREDICTION_ANCHORED_ARTIFACT_ROOT PAB_PREFLIGHT_ROOT
 
 parent="${PAB_SOURCE_BASE}/inputs/split_manifest/split_manifest.json.gz"
 hlt_cache="${PAB_SOURCE_BASE}/inputs/hlt_cache"
 offline_cache="${PAB_SOURCE_BASE}/inputs/offline_cache"
 baseline="${PAB_SOURCE_BASE}/taggers/A0/best_model_val.pt"
+
+if [[ "${PAB_REBUILD_SOURCE}" == "1" ]]; then
+  [[ ! -e "${PAB_SOURCE_BASE}" ]] || {
+    echo "Fresh 500k source root already exists; refusing replacement: ${PAB_SOURCE_BASE}" >&2
+    exit 2
+  }
+else
+  for path in "${parent}" "${baseline}"; do
+    [[ -f "${path}" && ! -L "${path}" ]] || {
+      echo "Missing reusable source input: ${path}" >&2
+      exit 2
+    }
+  done
+  for split in model_train model_val stack_train stack_val final_test; do
+    [[ -f "${hlt_cache}/${split}_fixed_hlt.npz" ]] || {
+      echo "Reusable HLT cache is incomplete at split ${split}" >&2
+      exit 2
+    }
+  done
+  for split in model_train model_val stack_train stack_val; do
+    [[ -f "${offline_cache}/${split}_offline.npz" ]] || {
+      echo "Reusable offline cache is incomplete at development split ${split}" >&2
+      exit 2
+    }
+  done
+fi
+[[ ! -e "${PREDICTION_ANCHORED_ARTIFACT_ROOT}" ]] || {
+  echo "Fresh pilot artifact root already exists; refusing replacement: ${PREDICTION_ANCHORED_ARTIFACT_ROOT}" >&2
+  exit 2
+}
+mkdir -p "${PREDICTION_ANCHORED_ARTIFACT_ROOT}"
 
 submit_job() {
   local label="$1"
@@ -60,10 +92,7 @@ hlt_job=""
 offline_job=""
 a0_job=""
 if [[ "${PAB_REBUILD_SOURCE}" == "1" ]]; then
-  [[ ! -e "${PAB_SOURCE_BASE}" ]] || {
-    echo "Fresh 500k source root already exists; refusing replacement: ${PAB_SOURCE_BASE}" >&2
-    exit 2
-  }
+  mkdir -p "${PAB_SOURCE_BASE}"
 
   export DATA_DIR="${PAB_DATA_DIR}"
   export DATA_DIRS="${PAB_DATA_DIR}"
@@ -118,25 +147,6 @@ if [[ "${PAB_REBUILD_SOURCE}" == "1" ]]; then
     --dependency="afterok:${hlt_job}:${offline_job}" --export=ALL \
     sbatch/run_train_local_residual_field_tagger.sh A0)"
   source_dependency="${a0_job}"
-else
-  for path in "${parent}" "${baseline}"; do
-    [[ -f "${path}" && ! -L "${path}" ]] || {
-      echo "Missing reusable source input: ${path}" >&2
-      exit 2
-    }
-  done
-  for split in model_train model_val stack_train stack_val final_test; do
-    [[ -f "${hlt_cache}/${split}_fixed_hlt.npz" ]] || {
-      echo "Reusable HLT cache is incomplete at split ${split}" >&2
-      exit 2
-    }
-  done
-  for split in model_train model_val stack_train stack_val; do
-    [[ -f "${offline_cache}/${split}_offline.npz" ]] || {
-      echo "Reusable offline cache is incomplete at development split ${split}" >&2
-      exit 2
-    }
-  done
 fi
 
 dependency=()
@@ -149,7 +159,11 @@ finalizer_job="$(submit_job finalizer "${dependency[@]}" \
   --export=ALL,PYTHONNOUSERSITE=1,PROJECT_DIR="${PROJECT_DIR}",PAB_SOURCE_BASE="${PAB_SOURCE_BASE}",PAB_PREFLIGHT_ROOT="${PAB_PREFLIGHT_ROOT}",PREDICTION_ANCHORED_ARTIFACT_ROOT="${PREDICTION_ANCHORED_ARTIFACT_ROOT}" \
   sbatch/run_finalize_prediction_anchored_bridge_submission.sh)"
 
-printf 'source_mode=%s\n' "$([[ "${PAB_REBUILD_SOURCE}" == "1" ]] && printf REBUILT_500K || printf REUSED_EXPLICIT)"
+source_mode=REUSED_EXPLICIT
+if [[ "${PAB_REBUILD_SOURCE}" == "1" ]]; then
+  source_mode=REBUILT_500K
+fi
+printf 'source_mode=%s\n' "${source_mode}"
 printf 'source_root=%s\n' "${PAB_SOURCE_BASE}"
 printf 'split_job=%s\n' "${split_job:-REUSED_EXISTING}"
 printf 'hlt_job=%s\n' "${hlt_job:-REUSED_EXISTING}"
