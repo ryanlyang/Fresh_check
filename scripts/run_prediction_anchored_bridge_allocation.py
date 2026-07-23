@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph", required=True)
     parser.add_argument("--execution-spec", required=True)
     parser.add_argument("--reservations", required=True)
+    parser.add_argument("--representative-reference", required=True)
     parser.add_argument("--node-id", required=True)
     parser.add_argument("--ram-root", required=True)
     parser.add_argument("--selected-consumer", default="")
@@ -41,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     graph = load_hashed_json(args.graph)
     execution_spec = load_hashed_json(args.execution_spec)
     reservations = load_hashed_json(args.reservations)
+    representative_reference = load_hashed_json(args.representative_reference)
     selected = (
         None
         if not args.selected_consumer
@@ -54,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_consumer=selected,
         execution_spec=execution_spec,
         reservations=reservations,
+        representative_reference=representative_reference,
         dry_run=bool(args.dry_run),
     )
     result = {"dry_run": bool(args.dry_run), "launch_manifest": artifact}

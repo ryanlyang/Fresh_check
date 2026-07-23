@@ -37,7 +37,14 @@ from .fusion_campaign import (
     default_fusion_candidate_specs,
     stable_fusion_json_hash,
 )
-from .fusion_features import PreClassifierEmbeddingCapture, _campaign_forward, require_development_prediction_sources
+from .fusion_features import (
+    FUSION_FEATURE_AMP_LOGITS_ATOL,
+    FUSION_FEATURE_FP32_LOGITS_ATOL,
+    FUSION_FEATURE_LOGITS_RTOL,
+    PreClassifierEmbeddingCapture,
+    _campaign_forward,
+    require_development_prediction_sources,
+)
 from .fusion_late import apply_late_fusion_candidate
 from .fusion_metrics import (
     freeze_binary_projection_thresholds,
@@ -262,8 +269,30 @@ def _extract_final_embedding(
     embeddings = np.concatenate(embedding_rows).astype(np.float32)
     logits = np.concatenate(logit_rows).astype(np.float32)
     labels = np.concatenate(label_rows).astype(np.int64)
-    if not np.array_equal(labels, block.labels) or not np.allclose(logits, block.logits, atol=2.0e-3, rtol=2.0e-3):
-        raise ValueError(f"final representation forward does not reproduce selected predictions for {member}")
+    logits_atol = float(
+        feature_config.get(
+            "logits_atol",
+            FUSION_FEATURE_AMP_LOGITS_ATOL if amp_enabled else FUSION_FEATURE_FP32_LOGITS_ATOL,
+        )
+    )
+    logits_rtol = float(feature_config.get("logits_rtol", FUSION_FEATURE_LOGITS_RTOL))
+    labels_agree = np.array_equal(labels, block.labels)
+    logits_agree = logits.shape == block.logits.shape and np.allclose(
+        logits,
+        block.logits,
+        atol=logits_atol,
+        rtol=logits_rtol,
+    )
+    if not labels_agree or not logits_agree:
+        max_abs = (
+            float(np.max(np.abs(logits - block.logits)))
+            if logits.shape == block.logits.shape
+            else None
+        )
+        raise ValueError(
+            f"final representation forward does not reproduce selected predictions for {member}; "
+            f"max_abs={max_abs}, atol={logits_atol}, rtol={logits_rtol}"
+        )
     path = output_root / "representations" / member / "final_test_representations.npz"
     _atomic_npz(path, jet_embedding=embeddings.astype(np.float16), labels=labels)
     return embeddings

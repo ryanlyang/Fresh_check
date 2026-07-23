@@ -39,12 +39,22 @@ if [[ ! -f "${offline_cache}/stack_train_offline.npz" ]]; then
     --account=reu-aisocial --partition=tigris \
     --export=ALL,PYTHONNOUSERSITE=1,PROJECT_DIR="${PROJECT_DIR}",PAB_SOURCE_BASE="${PAB_SOURCE_BASE}" \
     sbatch/run_prediction_anchored_missing_offline_split.sh)"
+  offline_job="${offline_job%%;*}"
+  [[ "${offline_job}" =~ ^[0-9]+$ ]] || {
+    echo "Could not parse numeric offline job ID from sbatch output: ${offline_job}" >&2
+    exit 2
+  }
   dependency=(--dependency="afterok:${offline_job}")
 fi
 
 finalizer_job="$(sbatch --parsable "${dependency[@]}" \
   --export=ALL,PYTHONNOUSERSITE=1,PROJECT_DIR="${PROJECT_DIR}",PAB_SOURCE_BASE="${PAB_SOURCE_BASE}",PAB_PREFLIGHT_ROOT="${PAB_PREFLIGHT_ROOT}",PREDICTION_ANCHORED_ARTIFACT_ROOT="${PREDICTION_ANCHORED_ARTIFACT_ROOT}" \
   sbatch/run_finalize_prediction_anchored_bridge_submission.sh)"
+finalizer_job="${finalizer_job%%;*}"
+[[ "${finalizer_job}" =~ ^[0-9]+$ ]] || {
+  echo "Could not parse numeric finalizer job ID from sbatch output: ${finalizer_job}" >&2
+  exit 2
+}
 
 printf 'offline_job=%s\n' "${offline_job:-REUSED_EXISTING}"
 printf 'finalizer_job=%s\n' "${finalizer_job}"

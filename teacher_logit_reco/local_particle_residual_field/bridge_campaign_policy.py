@@ -157,6 +157,7 @@ def build_campaign_reservations(
     production_readiness: Mapping[str, Any],
     fixed_parent_artifacts: Mapping[str, Mapping[str, Any]],
     final_deployable_bundle_bytes: int,
+    representative_reference_sha256: str,
 ) -> dict[str, Any]:
     """Reserve measured bytes exactly once for each run and frozen parent.
 
@@ -180,6 +181,10 @@ def build_campaign_reservations(
         raise ValueError("execution spec has no immutable parent-manifest binding")
     parent_sha256 = _sha256(
         parent_manifest.get("sha256"), name="execution-spec parent manifest file"
+    )
+    representative_sha256 = _sha256(
+        representative_reference_sha256,
+        name="representative architecture resource reference",
     )
     if not bool(production_readiness.get("ok")) or not bool(
         production_readiness.get("production_submission_allowed")
@@ -259,6 +264,7 @@ def build_campaign_reservations(
             "execution_spec_sha256": execution_spec["content_hash"],
             "child_manifest_sha256": child_sha256,
             "parent_manifest_file_sha256": parent_sha256,
+            "representative_reference_sha256": representative_sha256,
             "selected_budget_bytes": int(production_readiness["selected_budget_bytes"]),
             "projected_persistent_bytes": int(
                 production_readiness["projected_persistent_bytes"]

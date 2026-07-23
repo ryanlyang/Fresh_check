@@ -22,8 +22,8 @@ from teacher_logit_reco.local_particle_residual_field import (
     BRIDGE_CHANNEL_PHYSICAL45,
     STEP3_RUN_IDS,
     ConsumerCampaignConfig,
-    DeployedBundleResourceReference,
     StreamedR0TrainConfig,
+    build_representative_architecture_resource_reference,
     build_campaign_registry,
     build_child_split_manifest,
     build_clean_start_step8_fixed_storage,
@@ -34,7 +34,6 @@ from teacher_logit_reco.local_particle_residual_field import (
     fit_absolute_output_scaler,
     fit_bridge_scalers,
     initialize_step3_root_from_reference,
-    measure_step7_resources,
     measure_step8_registry_states,
     record_step3_registry_measurements,
 )
@@ -68,10 +67,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", required=True)
     parser.add_argument("--budget-gib", type=int, choices=(5, 6), default=5)
     return parser
-
-
-def _parameters(model: torch.nn.Module) -> int:
-    return sum(int(value.numel()) for value in model.parameters())
 
 
 def _baseline_model_size(path: str | Path) -> str:
@@ -130,7 +125,13 @@ def main(argv: list[str] | None = None) -> int:
         offline_cache_dir=args.offline_cache_dir,
         baseline_checkpoint_path=args.baseline_checkpoint,
         r0_config=StreamedR0TrainConfig(output_dir="__RUNTIME_OUTPUT_DIR__"),
-        consumer_config=ConsumerCampaignConfig(model_size=model_size),
+        consumer_config=ConsumerCampaignConfig(
+            baseline_steps=10_000,
+            bridge_finetune_steps=2_000,
+            batch_size=128,
+            evaluation_interval_steps=200,
+            model_size=model_size,
+        ),
     )
     execution_path = output / "prediction_anchored_execution_spec.json"
     write_prediction_anchored_execution_spec(execution_path, execution)
@@ -156,7 +157,6 @@ def main(argv: list[str] | None = None) -> int:
     a3 = build_step7_hlg_correction_model(
         ARCH_A3_HLG_PRIMARY, scaler_artifact=physical, dropout=0.05
     )
-    a3_profile = measure_step7_resources(a3, particle_width=int(parent.max_constits))
     names, groups, _ = local_particle_residual_field_layout()
     r0 = build_local_residual_field_reconstructor(
         LocalResidualFieldReconstructorConfig(
@@ -168,25 +168,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     t10 = build_step3_consumer_model("T10_clean", model_size=model_size)
-    r0_parameters = _parameters(r0)
-    t10_parameters = _parameters(t10)
-    reference = DeployedBundleResourceReference(
+    reference = build_representative_architecture_resource_reference(
+        r0_model=r0,
+        t10_model=t10,
+        a3_model=a3,
         particle_width=int(parent.max_constits), valid_particles=int(parent.max_constits),
-        r0_parameters=r0_parameters,
-        r0_forward_flops=max(r0_parameters * int(parent.max_constits), 1),
-        a3_parameters=a3_profile.total_parameters,
-        a3_forward_flops=a3_profile.forward_flops,
-        t10_parameters=t10_parameters,
-        t10_forward_flops=max(t10_parameters * int(parent.max_constits), 1),
-        r0_checkpoint_sha256=canonical_sha256({"representative": "r0", "config": execution["r0_config"]}),
-        a3_config_sha256=a3.config_artifact()["content_hash"],
-        t10_checkpoint_sha256=sha256_file(args.baseline_checkpoint),
         source_manifest_sha256=source_sha,
     )
     reference_artifact = reference.to_artifact()
-    write_immutable_json(output / "canonical_a3_bundle_resources.json", reference_artifact)
-    runtime_reference = Path(args.artifact_root).resolve() / "measurements" / "deployed_resource_reference.json"
-    write_immutable_json(runtime_reference, reference_artifact)
+    representative_reference_path = (
+        output / "representative_architecture_resource_reference.json"
+    )
+    write_immutable_json(representative_reference_path, reference_artifact)
 
     fixed, fixed_evidence = build_clean_start_step8_fixed_storage(child, registry3)
     write_immutable_json(output / "measured_fixed_storage.json", fixed.to_artifact())
@@ -230,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         production_readiness=measurement["production_readiness"],
         fixed_parent_artifacts=formula_parents,
         final_deployable_bundle_bytes=fixed.final_deployable_bundle_bytes,
+        representative_reference_sha256=reference_artifact["content_hash"],
     )
     reservations_path = output / "campaign_reservations.json"
     write_immutable_json(reservations_path, reservations)

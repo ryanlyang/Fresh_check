@@ -21,11 +21,12 @@ from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     NORMAL_PILOT_BUDGET_BYTES,
     PAIRED3_HARD_CEILING_BYTES,
     STEP8_SPECIAL_CANONICAL_RUN_IDS,
-    DeployedBundleResourceReference,
+    BundleResourceReference,
     PredictionAnchoredAll50HLG,
     Step8FixedStorage,
     measure_step8_registry_states,
     resolve_step8_run_recipe,
+    resource_reference_from_artifact,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (  # noqa: E402
     validate_campaign_registry,
@@ -66,15 +67,8 @@ def _read(path: str, label: str) -> dict[str, object]:
     return value
 
 
-def _reference(value: dict[str, object]) -> DeployedBundleResourceReference:
-    validate_content_hash(value, expected_contract="prediction_anchored_deployed_resource_reference_v1")
-    names = (
-        "particle_width", "valid_particles", "r0_parameters", "r0_forward_flops",
-        "a3_parameters", "a3_forward_flops", "t10_parameters", "t10_forward_flops",
-        "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
-        "source_manifest_sha256",
-    )
-    return DeployedBundleResourceReference(**{name: value[name] for name in names})
+def _reference(value: dict[str, object]) -> BundleResourceReference:
+    return resource_reference_from_artifact(value)
 
 
 def _fixed(value: dict[str, object]) -> Step8FixedStorage:

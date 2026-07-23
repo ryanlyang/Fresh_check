@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from teacher_logit_reco.local_particle_residual_field.bridge_reconstruction_exec
     PREDICTION_ANCHORED_RECONSTRUCTION_REPLICA_CONTRACT,
     RECONSTRUCTION_RUN_IDS,
     ReconstructionReplicaResult,
+    _validate_b6_deployed_reference_lineage,
     aggregate_reconstruction_replicas,
     build_reconstruction_model,
     publish_reconstruction_paired_replicas,
@@ -29,6 +31,7 @@ from teacher_logit_reco.local_particle_residual_field.hierarchical_global_recons
     ARCH_A3_HLG_PRIMARY,
     ARCH_A5_HLG_ABSOLUTE,
     DIRECT_HLT,
+    DeployedBundleResourceReference,
 )
 from teacher_logit_reco.local_particle_residual_field.hierarchical_reconstructor import (
     ARCH_A1_MULTISCALE_LOCAL,
@@ -76,6 +79,85 @@ def _absolute() -> dict[str, object]:
             "derived_dense_fields_persisted": False,
         }
     )
+
+
+def _b6_deployed_reference_lineage_fixture():
+    spec = with_content_hash(
+        {
+            "contract": "test_execution_spec_v1",
+            "parent_manifest": {"sha256": "1" * 64},
+        }
+    )
+    child = with_content_hash({"contract": "test_child_manifest_v1"})
+    registration = with_content_hash({"contract": "test_r0_registration_v1"})
+    selected = with_content_hash(
+        {
+            "contract": "test_selected_consumer_v1",
+            "checkpoint_sha256": "2" * 64,
+            "bridge_recipe_sha256": "3" * 64,
+        }
+    )
+    physical45_scaler = with_content_hash({"contract": "test_scaler_v1"})
+    graph = with_content_hash(
+        {
+            "contract": "test_graph_v1",
+            "representative_reference_sha256": "4" * 64,
+        }
+    )
+    r0_checkpoint_sha256 = "5" * 64
+    reference = DeployedBundleResourceReference(
+        particle_width=128,
+        valid_particles=64,
+        r0_parameters=1,
+        r0_forward_flops=1,
+        a3_parameters=1,
+        a3_forward_flops=1,
+        t10_parameters=1,
+        t10_forward_flops=1,
+        r0_checkpoint_sha256=r0_checkpoint_sha256,
+        a3_config_sha256="6" * 64,
+        t10_checkpoint_sha256=selected["checkpoint_sha256"],
+        physical45_scaler_sha256=physical45_scaler["content_hash"],
+        r0_registration_sha256=registration["content_hash"],
+        execution_spec_sha256=spec["content_hash"],
+        child_manifest_sha256=child["content_hash"],
+        selected_consumer_sha256=selected["content_hash"],
+        physical45_recipe_sha256=selected["bridge_recipe_sha256"],
+        source_manifest_sha256=spec["parent_manifest"]["sha256"],
+        representative_reference_sha256=graph[
+            "representative_reference_sha256"
+        ],
+    )
+    parents = {
+        "spec": spec,
+        "child": child,
+        "registration": registration,
+        "selected": selected,
+        "physical45_scaler": physical45_scaler,
+        "graph": graph,
+        "r0_checkpoint_sha256": r0_checkpoint_sha256,
+    }
+    return reference, parents
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "execution_spec_sha256",
+        "child_manifest_sha256",
+        "r0_registration_sha256",
+        "selected_consumer_sha256",
+        "physical45_recipe_sha256",
+        "representative_reference_sha256",
+    ),
+)
+def test_b6_rejects_each_stale_deployed_reference_parent(field_name: str):
+    reference, parents = _b6_deployed_reference_lineage_fixture()
+    _validate_b6_deployed_reference_lineage(reference, **parents)
+
+    stale = replace(reference, **{field_name: "0" * 64})
+    with pytest.raises(ValueError, match=field_name):
+        _validate_b6_deployed_reference_lineage(stale, **parents)
 
 
 def test_all_46_reconstruction_rows_have_one_repository_executor_mapping():

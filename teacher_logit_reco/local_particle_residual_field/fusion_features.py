@@ -45,6 +45,9 @@ LOCAL_RESIDUAL_FIELD_FUSION_FEATURE_MANIFEST_CONTRACT = "local_residual_field_fu
 LOCAL_RESIDUAL_FIELD_FUSION_REPRESENTATION_NAME = "pre_classifier_cls_embedding"
 LOCAL_RESIDUAL_FIELD_FUSION_REPRESENTATION_SOURCE = "final_linear_forward_pre_hook"
 FUSION_FEATURE_MEMBERS = (FUSION_MEMBER_A0, FUSION_MEMBER_A0_SEED1, FUSION_MEMBER_P7B)
+FUSION_FEATURE_FP32_LOGITS_ATOL = 2.0e-3
+FUSION_FEATURE_AMP_LOGITS_ATOL = 1.0e-2
+FUSION_FEATURE_LOGITS_RTOL = 2.0e-3
 
 
 def _read_json(path: str | Path) -> dict[str, Any]:
@@ -259,8 +262,8 @@ class FusionFeatureCacheConfig:
     device: str = "auto"
     amp: bool = True
     storage_dtype: str = "float16"
-    logits_atol: float = 2.0e-3
-    logits_rtol: float = 2.0e-3
+    logits_atol: float | None = None
+    logits_rtol: float = FUSION_FEATURE_LOGITS_RTOL
     overwrite: bool = False
 
     def __post_init__(self) -> None:
@@ -283,8 +286,17 @@ class FusionFeatureCacheConfig:
         self.num_workers = int(self.num_workers)
         if self.batch_size <= 0 or self.num_workers < 0:
             raise ValueError("batch_size must be positive and num_workers non-negative")
-        self.logits_atol = float(self.logits_atol)
+        self.amp = bool(self.amp)
+        self.logits_atol = float(
+            FUSION_FEATURE_AMP_LOGITS_ATOL
+            if self.logits_atol is None and self.amp
+            else FUSION_FEATURE_FP32_LOGITS_ATOL
+            if self.logits_atol is None
+            else self.logits_atol
+        )
         self.logits_rtol = float(self.logits_rtol)
+        if self.logits_atol < 0.0 or self.logits_rtol < 0.0:
+            raise ValueError("logit reproduction tolerances must be non-negative")
         self.overwrite = bool(self.overwrite)
 
 

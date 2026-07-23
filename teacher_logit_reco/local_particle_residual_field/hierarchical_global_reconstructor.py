@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from io import BytesIO
 import hashlib
 import math
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -83,6 +83,9 @@ PREDICTION_ANCHORED_DIRECT_CONFIG_CONTRACT = "prediction_anchored_hlg_direct_con
 PREDICTION_ANCHORED_DIRECT_MODEL_CONTRACT = "prediction_anchored_hlg_direct_classifier_v1"
 PREDICTION_ANCHORED_DIRECT_TRAIN_CONTRACT = "prediction_anchored_hlg_direct_training_v1"
 PREDICTION_ANCHORED_DEPLOYED_RESOURCE_CONTRACT = "prediction_anchored_deployed_resource_reference_v1"
+PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT = (
+    "prediction_anchored_representative_architecture_resource_reference_v1"
+)
 PREDICTION_ANCHORED_STEP7_RESOURCE_CONTRACT = "prediction_anchored_step7_resource_profile_v1"
 PREDICTION_ANCHORED_STEP7_MEASUREMENT_CONTRACT = "prediction_anchored_step7_registry_measurement_v1"
 PREDICTION_ANCHORED_STEP7_RELOAD_CONTRACT = "prediction_anchored_step7_tiny_train_reload_v1"
@@ -1357,7 +1360,7 @@ def step7_gate_regularization(output: HLGCorrectionOutput, *, phase: str) -> tup
 
 
 @dataclass(frozen=True)
-class DeployedBundleResourceReference:
+class RepresentativeArchitectureResourceReference:
     particle_width: int
     valid_particles: int
     r0_parameters: int
@@ -1366,9 +1369,9 @@ class DeployedBundleResourceReference:
     a3_forward_flops: int
     t10_parameters: int
     t10_forward_flops: int
-    r0_checkpoint_sha256: str
+    r0_config_sha256: str
     a3_config_sha256: str
-    t10_checkpoint_sha256: str
+    t10_config_sha256: str
     source_manifest_sha256: str
 
     def __post_init__(self) -> None:
@@ -1381,11 +1384,82 @@ class DeployedBundleResourceReference:
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         for name in (
-            "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
+            "r0_config_sha256", "a3_config_sha256", "t10_config_sha256",
             "source_manifest_sha256",
         ):
             if not _valid_sha256(getattr(self, name)):
                 raise ValueError(f"{name} must be a SHA-256")
+
+    @property
+    def total_parameters(self) -> int:
+        return int(self.r0_parameters + self.a3_parameters + self.t10_parameters)
+
+    @property
+    def total_forward_flops(self) -> int:
+        return int(self.r0_forward_flops + self.a3_forward_flops + self.t10_forward_flops)
+
+    def to_artifact(self) -> dict[str, Any]:
+        return with_content_hash(
+            {
+                "contract": PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT,
+                **asdict(self),
+                "total_parameters": self.total_parameters,
+                "total_forward_flops": self.total_forward_flops,
+                "measurement_batch_size": 1,
+                "same_valid_mask_required": True,
+                "reference_kind": "representative_architecture",
+                "reference_locked_to_canonical_a3_not_eventual_selection": True,
+                "checkpoint_hashes_present": False,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class DeployedBundleResourceReference:
+    particle_width: int
+    valid_particles: int
+    r0_parameters: int
+    r0_forward_flops: int
+    a3_parameters: int
+    a3_forward_flops: int
+    t10_parameters: int
+    t10_forward_flops: int
+    r0_checkpoint_sha256: str
+    a3_config_sha256: str
+    t10_checkpoint_sha256: str
+    physical45_scaler_sha256: str
+    r0_registration_sha256: str
+    execution_spec_sha256: str
+    child_manifest_sha256: str
+    selected_consumer_sha256: str
+    physical45_recipe_sha256: str
+    source_manifest_sha256: str
+    representative_reference_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 0 < int(self.valid_particles) <= int(self.particle_width):
+            raise ValueError("deployed resource reference has invalid particle widths")
+        for name in (
+            "r0_parameters", "r0_forward_flops", "a3_parameters", "a3_forward_flops",
+            "t10_parameters", "t10_forward_flops",
+        ):
+            if int(getattr(self, name)) <= 0:
+                raise ValueError(f"{name} must be positive")
+        for name in (
+            "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
+            "physical45_scaler_sha256",
+            "r0_registration_sha256", "execution_spec_sha256",
+            "child_manifest_sha256", "selected_consumer_sha256",
+            "physical45_recipe_sha256",
+            "source_manifest_sha256",
+        ):
+            if not _valid_sha256(getattr(self, name)):
+                raise ValueError(f"{name} must be a SHA-256")
+        if (
+            self.representative_reference_sha256 is not None
+            and not _valid_sha256(self.representative_reference_sha256)
+        ):
+            raise ValueError("representative_reference_sha256 must be a SHA-256")
 
     @property
     def total_parameters(self) -> int:
@@ -1404,9 +1478,58 @@ class DeployedBundleResourceReference:
                 "total_forward_flops": self.total_forward_flops,
                 "measurement_batch_size": 1,
                 "same_valid_mask_required": True,
+                "reference_kind": "confirmed_runtime_checkpoints",
                 "reference_locked_to_canonical_a3_not_eventual_selection": True,
+                "checkpoint_hashes_present": True,
+                "resource_values_identical_to_representative": bool(
+                    self.representative_reference_sha256
+                ),
             }
         )
+
+
+BundleResourceReference = (
+    RepresentativeArchitectureResourceReference | DeployedBundleResourceReference
+)
+
+
+def resource_reference_from_artifact(
+    value: Mapping[str, Any], *, require_runtime: bool = False
+) -> BundleResourceReference:
+    contract = str(value.get("contract", ""))
+    if contract == PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT:
+        if require_runtime:
+            raise ValueError("runtime checkpoint reference is required")
+        validate_content_hash(
+            value, expected_contract=PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT
+        )
+        names = (
+            "particle_width", "valid_particles", "r0_parameters", "r0_forward_flops",
+            "a3_parameters", "a3_forward_flops", "t10_parameters", "t10_forward_flops",
+            "r0_config_sha256", "a3_config_sha256", "t10_config_sha256",
+            "source_manifest_sha256",
+        )
+        return RepresentativeArchitectureResourceReference(
+            **{name: value[name] for name in names}
+        )
+    validate_content_hash(
+        value, expected_contract=PREDICTION_ANCHORED_DEPLOYED_RESOURCE_CONTRACT
+    )
+    names = (
+        "particle_width", "valid_particles", "r0_parameters", "r0_forward_flops",
+        "a3_parameters", "a3_forward_flops", "t10_parameters", "t10_forward_flops",
+        "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
+        "physical45_scaler_sha256",
+        "r0_registration_sha256", "execution_spec_sha256",
+        "child_manifest_sha256", "selected_consumer_sha256",
+        "physical45_recipe_sha256",
+        "source_manifest_sha256",
+    )
+    kwargs = {name: value[name] for name in names}
+    kwargs["representative_reference_sha256"] = value.get(
+        "representative_reference_sha256"
+    )
+    return DeployedBundleResourceReference(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -1767,23 +1890,20 @@ def _profile_inputs(
     return tokens, mask, torch.zeros((1, particle_width, 50)), torch.zeros((1, particle_width, 160))
 
 
-def measure_step7_resources(
-    model: PredictionAnchoredHLGCorrection | DirectHLGClassifier,
-    *,
-    particle_width: int,
-    valid_particles: int | None = None,
-) -> HLGResourceProfile:
-    valid_count = int(particle_width if valid_particles is None else valid_particles)
-    if not 0 < valid_count <= int(particle_width):
-        raise ValueError("resource measurement requires valid_particles within particle_width")
-    device = next(model.parameters()).device
-    tokens, mask, f0, h0 = tuple(value.to(device) for value in _profile_inputs(int(particle_width), valid_count))
+def _profile_executed_forward(
+    model: torch.nn.Module,
+    forward_call: Callable[[], Any],
+) -> tuple[Any, int]:
+    """Profile one real forward with the hook convention shared by all bundle parts."""
+
     flops = 0
 
     def linear_hook(module: torch.nn.Linear, args: tuple[Any, ...], output: Any) -> None:
         nonlocal flops
         tensor = output if isinstance(output, torch.Tensor) else output[0]
-        flops += int(tensor.numel()) * (2 * int(module.in_features) + (1 if module.bias is not None else 0))
+        flops += int(tensor.numel()) * (
+            2 * int(module.in_features) + (1 if module.bias is not None else 0)
+        )
 
     def norm_hook(module: torch.nn.LayerNorm, args: tuple[Any, ...], output: Any) -> None:
         nonlocal flops
@@ -1795,13 +1915,34 @@ def measure_step7_resources(
 
     def mha_hook(module: torch.nn.MultiheadAttention, args: tuple[Any, ...], output: Any) -> None:
         nonlocal flops
-        query, key, value = args[:3]
+        query, key, _value = args[:3]
         batch, queries, dim = query.shape
         keys = key.shape[1]
         flops += batch * queries * (2 * dim * dim + dim)
         flops += batch * keys * 2 * (2 * dim * dim + dim)
         flops += batch * queries * (2 * dim * dim + dim)
         flops += 4 * batch * queries * keys * dim
+
+    def conv_hook(
+        module: torch.nn.Conv1d | torch.nn.Conv2d,
+        args: tuple[Any, ...],
+        output: Any,
+    ) -> None:
+        nonlocal flops
+        kernel_ops = int(np.prod(module.kernel_size)) * int(module.in_channels) // int(
+            module.groups
+        )
+        flops += int(output.numel()) * (
+            2 * kernel_ops + (1 if module.bias is not None else 0)
+        )
+
+    def batch_norm_hook(
+        module: torch.nn.BatchNorm1d | torch.nn.BatchNorm2d,
+        args: tuple[Any, ...],
+        output: Any,
+    ) -> None:
+        nonlocal flops
+        flops += 5 * int(output.numel())
 
     hooks = []
     for module in model.modules():
@@ -1813,28 +1954,85 @@ def measure_step7_resources(
             hooks.append(module.register_forward_hook(norm_hook))
         elif isinstance(module, torch.nn.GELU):
             hooks.append(module.register_forward_hook(gelu_hook))
+        elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d)):
+            hooks.append(module.register_forward_hook(conv_hook))
+        elif isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
+            hooks.append(module.register_forward_hook(batch_norm_hook))
     was_training = model.training
     model.eval()
     try:
         with torch.no_grad():
-            if isinstance(model, DirectHLGClassifier):
-                output = model(tokens, mask, f0, h0) if model.config.uses_r0_representation else model(tokens, mask)
-                architecture_id = model.config.run_id
-                regions = int(output.region_tokens.shape[1])
-                scope = "direct_hlg_classifier"
-            else:
-                output = (
-                    model(tokens, mask, f0[..., 45:], None)
-                    if model.config.architecture_id == ARCH_A5S_HLG_SCRATCH
-                    else model(tokens, mask, f0, h0)
-                )
-                architecture_id = model.config.architecture_id
-                regions = int(output.reasoning_state.region_tokens.shape[1])
-                scope = "hlg_correction"
+            output = forward_call()
     finally:
         for hook in hooks:
             hook.remove()
         model.train(was_training)
+    return output, int(flops)
+
+
+def measure_module_forward_resources(
+    model: torch.nn.Module,
+    *,
+    forward_call: Callable[[], Any],
+    architecture_id: str,
+    scope: str,
+    particle_width: int,
+    valid_particles: int,
+    explicit_unhooked_flops: int = 0,
+) -> HLGResourceProfile:
+    """Measure a non-HLG bundle component with the same executed-forward profiler."""
+
+    if not 0 < int(valid_particles) <= int(particle_width):
+        raise ValueError("resource measurement requires valid_particles within particle_width")
+    _output, hooked_flops = _profile_executed_forward(model, forward_call)
+    trainable = sum(int(value.numel()) for value in model.parameters() if value.requires_grad)
+    total = sum(int(value.numel()) for value in model.parameters())
+    return HLGResourceProfile(
+        str(architecture_id),
+        trainable,
+        total,
+        int(hooked_flops + int(explicit_unhooked_flops)),
+        1,
+        int(particle_width),
+        int(valid_particles),
+        str(scope),
+        "executed_bundle_forward_resource_hooks_v2",
+    )
+
+
+def measure_step7_resources(
+    model: PredictionAnchoredHLGCorrection | DirectHLGClassifier,
+    *,
+    particle_width: int,
+    valid_particles: int | None = None,
+) -> HLGResourceProfile:
+    valid_count = int(particle_width if valid_particles is None else valid_particles)
+    if not 0 < valid_count <= int(particle_width):
+        raise ValueError("resource measurement requires valid_particles within particle_width")
+    device = next(model.parameters()).device
+    tokens, mask, f0, h0 = tuple(value.to(device) for value in _profile_inputs(int(particle_width), valid_count))
+    def run_forward() -> Any:
+        if isinstance(model, DirectHLGClassifier):
+            return (
+                model(tokens, mask, f0, h0)
+                if model.config.uses_r0_representation
+                else model(tokens, mask)
+            )
+        return (
+            model(tokens, mask, f0[..., 45:], None)
+            if model.config.architecture_id == ARCH_A5S_HLG_SCRATCH
+            else model(tokens, mask, f0, h0)
+        )
+
+    output, flops = _profile_executed_forward(model, run_forward)
+    if isinstance(model, DirectHLGClassifier):
+        architecture_id = model.config.run_id
+        regions = int(output.region_tokens.shape[1])
+        scope = "direct_hlg_classifier"
+    else:
+        architecture_id = model.config.architecture_id
+        regions = int(output.reasoning_state.region_tokens.shape[1])
+        scope = "hlg_correction"
     edge_count = int(output.diagnostics["directed_edge_count"])
     # Operations outside hooked modules: graph kernels/weighted aggregation,
     # assignment similarity/geometry, weighted pooling, pair construction,
@@ -1861,7 +2059,7 @@ def measure_step7_resources(
         int(particle_width),
         valid_count,
         scope,
-        "executed_step7_forward_resource_hooks_v1",
+        "executed_bundle_forward_resource_hooks_v2",
     )
 
 
@@ -1878,7 +2076,7 @@ def fit_direct_hlg_config(
     run_id: str,
     *,
     scaler_artifact: Mapping[str, Any] | None,
-    reference: DeployedBundleResourceReference,
+    reference: BundleResourceReference,
     dropout: float = 0.05,
 ) -> tuple[DirectHLGConfig, HLGResourceProfile, dict[str, Any]]:
     """Size a direct HLG control to the immutable canonical bundle reference."""
@@ -1957,7 +2155,7 @@ def build_capacity_matched_direct_hlg(
     run_id: str,
     *,
     scaler_artifact: Mapping[str, Any] | None,
-    reference: DeployedBundleResourceReference,
+    reference: BundleResourceReference,
     dropout: float = 0.05,
 ) -> tuple[DirectHLGClassifier, HLGResourceProfile, dict[str, Any]]:
     expected_scaler = scaler_artifact if run_id == DIRECT_R0REP else None
@@ -1980,7 +2178,7 @@ def build_capacity_matched_direct_hlg(
 
 
 def direct_capacity_match(
-    profile: HLGResourceProfile, reference: DeployedBundleResourceReference
+    profile: HLGResourceProfile, reference: BundleResourceReference
 ) -> dict[str, Any]:
     parameter_error = abs(profile.total_parameters / reference.total_parameters - 1.0)
     flop_error = abs(profile.forward_flops / reference.total_forward_flops - 1.0)
@@ -2014,7 +2212,7 @@ def measure_step7_registry_states(
     scaler_artifact: Mapping[str, Any],
     absolute_scaler_artifact: Mapping[str, Any],
     source_manifest_sha256: str,
-    deployed_reference: DeployedBundleResourceReference,
+    deployed_reference: BundleResourceReference,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Measure every Step 1-7 architecture row and leave only Step 8 rows open."""
 
@@ -2025,6 +2223,16 @@ def measure_step7_registry_states(
         raise ValueError("Step 7 measurement requires the source-manifest SHA-256")
     if source_manifest_sha256 != deployed_reference.source_manifest_sha256:
         raise ValueError("deployed resource reference belongs to a different source manifest")
+    expected_scaler_sha256 = getattr(
+        deployed_reference, "physical45_scaler_sha256", None
+    )
+    if (
+        expected_scaler_sha256 is not None
+        and scaler_artifact.get("content_hash") != expected_scaler_sha256
+    ):
+        raise ValueError(
+            "physical45 scaler differs from the confirmed runtime resource reference"
+        )
     step6_registry, step6_artifact = measure_step6_registry_states(
         registry,
         scaler_artifact=scaler_artifact,
@@ -2072,7 +2280,9 @@ def measure_step7_registry_states(
             particle_width=deployed_reference.particle_width,
             valid_particles=deployed_reference.valid_particles,
         ).to_artifact()
-    canonical_config_hash = config_hashes[ARCH_A3_HLG_PRIMARY]
+    canonical_config_hash = HLGCorrectionConfig.for_architecture(
+        ARCH_A3_HLG_PRIMARY, dropout=0.05
+    ).to_artifact()["content_hash"]
     canonical_profile = profiles[ARCH_A3_HLG_PRIMARY]
     if deployed_reference.a3_config_sha256 != canonical_config_hash:
         raise ValueError(
@@ -2269,7 +2479,7 @@ def tiny_train_reload_step7_direct(
     run_id: str,
     *,
     scaler_artifact: Mapping[str, Any],
-    deployed_reference: DeployedBundleResourceReference,
+    deployed_reference: BundleResourceReference,
     batch: Mapping[str, Any],
     learning_rate: float = 1.0e-3,
 ) -> dict[str, Any]:
@@ -2427,6 +2637,7 @@ __all__ = [
     "PREDICTION_ANCHORED_DIRECT_MODEL_CONTRACT",
     "PREDICTION_ANCHORED_DIRECT_TRAIN_CONTRACT",
     "PREDICTION_ANCHORED_DEPLOYED_RESOURCE_CONTRACT",
+    "PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT",
     "PREDICTION_ANCHORED_STEP7_RESOURCE_CONTRACT",
     "PREDICTION_ANCHORED_STEP7_MEASUREMENT_CONTRACT",
     "PREDICTION_ANCHORED_STEP7_RELOAD_CONTRACT",
@@ -2476,7 +2687,9 @@ __all__ = [
     "HLGRadiusCorrectionHead",
     "HLGCorrectionOutput",
     "PredictionAnchoredHLGCorrection",
+    "RepresentativeArchitectureResourceReference",
     "DeployedBundleResourceReference",
+    "BundleResourceReference",
     "DirectHLGConfig",
     "DirectHLGTrainConfig",
     "DirectHLGOutput",
@@ -2486,6 +2699,8 @@ __all__ = [
     "build_step7_hlg_correction_model",
     "step7_gate_regularization",
     "measure_step7_resources",
+    "measure_module_forward_resources",
+    "resource_reference_from_artifact",
     "fit_direct_hlg_config",
     "build_capacity_matched_direct_hlg",
     "direct_capacity_match",

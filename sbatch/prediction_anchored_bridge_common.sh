@@ -44,11 +44,13 @@ pab_bootstrap_allocation() {
   esac
   mkdir -p "${PAB_RAM_ROOT}"
   PAB_ALLOCATION_LEDGER_DIR="${PREDICTION_ANCHORED_ARTIFACT_ROOT}/allocation_ledgers/${PREDICTION_ANCHORED_NODE_ID}/${SLURM_JOB_ID}"
+  : "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE:=${PAB_PREFLIGHT_ROOT:?missing PAB_PREFLIGHT_ROOT}/representative_architecture_resource_reference.json}"
   local launch_args=(
     "${PYTHON_BIN}" -u scripts/run_prediction_anchored_bridge_allocation.py
     --graph "${PREDICTION_ANCHORED_GRAPH}"
     --execution-spec "${PAB_EXECUTION_SPEC:?missing PAB_EXECUTION_SPEC}"
     --reservations "${PAB_RESERVATIONS:?missing PAB_RESERVATIONS}"
+    --representative-reference "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE}"
     --node-id "${PREDICTION_ANCHORED_NODE_ID}"
     --ram-root "${PAB_RAM_ROOT}"
     --output "${PAB_ALLOCATION_LEDGER_DIR}/launch_manifest.json"
@@ -62,7 +64,7 @@ pab_bootstrap_allocation() {
     mkdir -p "${PAB_ALLOCATION_LEDGER_DIR}"
   fi
   fresh_run "${launch_args[@]}"
-  export PAB_RAM_ROOT PAB_ALLOCATION_LEDGER_DIR
+  export PAB_RAM_ROOT PAB_ALLOCATION_LEDGER_DIR PAB_REPRESENTATIVE_RESOURCE_REFERENCE
 }
 
 pab_node_run_ids() {

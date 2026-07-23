@@ -100,6 +100,7 @@ from .hierarchical_global_reconstructor import (
     DeployedBundleResourceReference,
     build_capacity_matched_direct_hlg,
     build_step7_hlg_correction_model,
+    resource_reference_from_artifact,
     step7_gate_regularization,
 )
 from .hierarchical_reconstructor import (
@@ -254,16 +255,48 @@ def resolve_reconstruction_run(run_id: str) -> ReconstructionRunSpec:
 
 
 def _reference_from_artifact(value: Mapping[str, Any]) -> DeployedBundleResourceReference:
-    validate_content_hash(
-        value, expected_contract="prediction_anchored_deployed_resource_reference_v1"
-    )
-    names = (
-        "particle_width", "valid_particles", "r0_parameters", "r0_forward_flops",
-        "a3_parameters", "a3_forward_flops", "t10_parameters", "t10_forward_flops",
-        "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
-        "source_manifest_sha256",
-    )
-    return DeployedBundleResourceReference(**{name: value[name] for name in names})
+    reference = resource_reference_from_artifact(value, require_runtime=True)
+    assert isinstance(reference, DeployedBundleResourceReference)
+    return reference
+
+
+def _validate_b6_deployed_reference_lineage(
+    reference: DeployedBundleResourceReference,
+    *,
+    spec: Mapping[str, Any],
+    child: Mapping[str, Any],
+    registration: Mapping[str, Any],
+    selected: Mapping[str, Any],
+    physical45_scaler: Mapping[str, Any],
+    graph: Mapping[str, Any],
+    r0_checkpoint_sha256: str,
+) -> None:
+    """Require the B4 runtime reference to match every B6 loaded parent."""
+
+    expected = {
+        "source_manifest_sha256": spec["parent_manifest"]["sha256"],
+        "r0_checkpoint_sha256": str(r0_checkpoint_sha256),
+        "physical45_scaler_sha256": physical45_scaler["content_hash"],
+        "t10_checkpoint_sha256": selected["checkpoint_sha256"],
+        "execution_spec_sha256": spec["content_hash"],
+        "child_manifest_sha256": child["content_hash"],
+        "r0_registration_sha256": registration["content_hash"],
+        "selected_consumer_sha256": selected["content_hash"],
+        "physical45_recipe_sha256": selected["bridge_recipe_sha256"],
+        "representative_reference_sha256": graph[
+            "representative_reference_sha256"
+        ],
+    }
+    changed = [
+        name
+        for name, expected_value in expected.items()
+        if getattr(reference, name) != expected_value
+    ]
+    if changed:
+        raise ValueError(
+            "B6 deployed resource reference lineage mismatch: "
+            + ", ".join(changed)
+        )
 
 
 def build_reconstruction_model(
@@ -1458,6 +1491,8 @@ def run_reconstruction_pack_from_execution_spec(
         )
         if selected.get("status") != "CONFIRMED_LOCKED":
             raise PermissionError("B6 refuses an unconfirmed or guessed primary consumer")
+        if selected.get("f0_checkpoint_sha256") != r0_sha:
+            raise ValueError("selected consumer was confirmed against another R0 checkpoint")
     if node.get("stage") == "B6":
         release = load_hashed_json(
             Path(artifact_root) / "selection" / "post_teacher_release.json",
@@ -1469,6 +1504,17 @@ def run_reconstruction_pack_from_execution_spec(
         )
         if release.get("selected_consumer_sha256") != release_selected["content_hash"]:
             raise ValueError("B6 post-teacher release belongs to another selected consumer")
+        if reference is not None:
+            _validate_b6_deployed_reference_lineage(
+                reference,
+                spec=spec,
+                child=child,
+                registration=registration,
+                selected=release_selected,
+                physical45_scaler=physical,
+                graph=graph,
+                r0_checkpoint_sha256=r0_sha,
+            )
         released = set(release.get("released_post_teacher_run_ids", []))
         missing_release = [
             value for value in run_ids if value != L0_RUN_ID and value not in released

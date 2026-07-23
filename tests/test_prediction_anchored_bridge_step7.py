@@ -89,6 +89,12 @@ def _synthetic_direct_reference(width=4):
         r0_checkpoint_sha256="a" * 64,
         a3_config_sha256="c" * 64,
         t10_checkpoint_sha256="e" * 64,
+        physical45_scaler_sha256="f" * 64,
+        r0_registration_sha256="1" * 64,
+        execution_spec_sha256="2" * 64,
+        child_manifest_sha256="3" * 64,
+        selected_consumer_sha256="4" * 64,
+        physical45_recipe_sha256="5" * 64,
         source_manifest_sha256="d" * 64,
     )
 
@@ -110,8 +116,14 @@ def _verified_reference(scaler, width=4):
         t10_parameters=remaining_parameters - remaining_parameters // 2,
         t10_forward_flops=1_750_000,
         r0_checkpoint_sha256="a" * 64,
-        a3_config_sha256=model.config_artifact()["content_hash"],
+        a3_config_sha256=model.config.to_artifact()["content_hash"],
         t10_checkpoint_sha256="e" * 64,
+        physical45_scaler_sha256=scaler["content_hash"],
+        r0_registration_sha256="1" * 64,
+        execution_spec_sha256="2" * 64,
+        child_manifest_sha256="3" * 64,
+        selected_consumer_sha256="4" * 64,
+        physical45_recipe_sha256="5" * 64,
         source_manifest_sha256="d" * 64,
     )
 

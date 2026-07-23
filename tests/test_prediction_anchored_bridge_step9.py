@@ -68,6 +68,7 @@ def _reservations(registry, tmp_path: Path):
     return build_campaign_reservations(
         registry, execution_spec=_execution_spec(), production_readiness=readiness,
         fixed_parent_artifacts=parents, final_deployable_bundle_bytes=512,
+        representative_reference_sha256="9" * 64,
     )
 
 
@@ -182,6 +183,7 @@ def test_reservations_reconcile_quota_and_reject_duplicate_parents(tmp_path):
         build_campaign_reservations(
             registry, execution_spec=_execution_spec(), production_readiness=readiness,
             fixed_parent_artifacts=duplicate, final_deployable_bundle_bytes=512,
+            representative_reference_sha256="9" * 64,
         )
     over_quota = dict(readiness)
     over_quota["projected_persistent_bytes"] = over_quota["selected_budget_bytes"] + 1
@@ -194,6 +196,7 @@ def test_reservations_reconcile_quota_and_reject_duplicate_parents(tmp_path):
                 "r0": {"sha256": "1" * 64, "size_bytes": 10, "path": tmp_path / "only"}
             },
             final_deployable_bundle_bytes=512,
+            representative_reference_sha256="9" * 64,
         )
 
 

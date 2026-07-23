@@ -9,6 +9,9 @@ import sys
 
 import pytest
 
+from tests.test_prediction_anchored_bridge_execution import (
+    _fixture as _execution_fixture,
+)
 from teacher_logit_reco.local_particle_residual_field import (
     PAIRED_SEED_IDS,
     TIGRIS_ACCOUNT,
@@ -57,7 +60,14 @@ def _execution_spec():
     })
 
 
-def _reservations(registry, tmp_path: Path, *, budget_gib: int = 5):
+def _reservations(
+    registry,
+    tmp_path: Path,
+    *,
+    budget_gib: int = 5,
+    representative_sha256: str = "9" * 64,
+    execution_spec=None,
+):
     readiness = require_production_ready(
         registry,
         fixed_persistent_bytes=4096,
@@ -65,7 +75,7 @@ def _reservations(registry, tmp_path: Path, *, budget_gib: int = 5):
     )
     return build_campaign_reservations(
         registry,
-        execution_spec=_execution_spec(),
+        execution_spec=execution_spec or _execution_spec(),
         production_readiness=readiness,
         fixed_parent_artifacts={
             "r0": {"sha256": "1" * 64, "size_bytes": 512, "path": tmp_path / "r0.pt"},
@@ -73,14 +83,26 @@ def _reservations(registry, tmp_path: Path, *, budget_gib: int = 5):
             "metadata": {"sha256": "3" * 64, "size_bytes": 512, "path": tmp_path / "metadata"},
         },
         final_deployable_bundle_bytes=512,
+        representative_reference_sha256=representative_sha256,
     )
 
 
-def _graph(tmp_path: Path, *, alternate: bool = False, budget_gib: int = 5):
+def _graph(
+    tmp_path: Path,
+    *,
+    alternate: bool = False,
+    budget_gib: int = 5,
+    representative_sha256: str = "9" * 64,
+):
     registry = _registry(alternate=alternate)
     return build_prediction_anchored_tigris_graph(
         registry,
-        reservations=_reservations(registry, tmp_path, budget_gib=budget_gib),
+        reservations=_reservations(
+            registry,
+            tmp_path,
+            budget_gib=budget_gib,
+            representative_sha256=representative_sha256,
+        ),
         execution_spec=_execution_spec(),
         artifact_root=str(tmp_path / "campaign"),
     )
@@ -96,6 +118,7 @@ def test_registry_rendered_graph_covers_54_46_45_and_conditional_skip(tmp_path):
     assert validation["configuration_count"] == 54
     assert validation["reconstruction_breadth_count"] == 46
     assert validation["post_teacher_configuration_count"] == 45
+    assert graph["representative_reference_sha256"] == "9" * 64
     assert graph["runnable_configuration_count"] == 53
     assert graph["covered_runnable_configuration_count"] == 53
     assert graph["conditional_skips"] == [
@@ -130,6 +153,7 @@ def test_graph_refuses_unmeasured_and_accepts_measured_five_and_six_gib_modes(tm
             "execution_spec_sha256": execution_spec["content_hash"],
             "child_manifest_sha256": execution_spec["child_manifest"]["content_hash"],
             "parent_manifest_file_sha256": execution_spec["parent_manifest"]["sha256"],
+            "representative_reference_sha256": "9" * 64,
             "projected_persistent_bytes": 1,
             "selected_budget_bytes": 5 * 1024**3,
             "run_reservations_bytes": {
@@ -174,7 +198,13 @@ def test_selected_consumer_and_sealed_confirmations_are_ordered_fail_closed(tmp_
     graph = _graph(tmp_path)
     nodes = _by_id(graph)
     assert nodes["b4_confirm_consumer"]["requires_selected_consumer"] is False
-    assert nodes["b5_bind_teachers"]["dependencies"] == ["b4_confirm_consumer"]
+    assert nodes["b4_publish_runtime_resources"]["dependencies"] == [
+        "b4_confirm_consumer"
+    ]
+    assert nodes["b4_publish_runtime_resources"]["requires_selected_consumer"] is True
+    assert nodes["b5_bind_teachers"]["dependencies"] == [
+        "b4_publish_runtime_resources"
+    ]
     assert nodes["b5_bind_teachers"]["requires_selected_consumer"] is True
     l0_eval = nodes["b6_l0_postteacher_eval_paired3"]
     assert l0_eval["configuration_run_ids"] == []
@@ -198,7 +228,30 @@ def test_selected_consumer_and_sealed_confirmations_are_ordered_fail_closed(tmp_
 
 
 def test_allocation_preflight_enforces_leader_memory_usersite_and_selection(tmp_path):
-    graph = _graph(tmp_path)
+    execution_root = tmp_path / "execution"
+    execution_root.mkdir()
+    execution_spec, _execution_spec_path = _execution_fixture(execution_root)
+    representative = with_content_hash(
+        {
+            "contract": (
+                "prediction_anchored_representative_architecture_resource_reference_v1"
+            ),
+            "source_manifest_sha256": execution_spec["parent_manifest"]["sha256"],
+        }
+    )
+    registry = _registry()
+    reservations = _reservations(
+        registry,
+        tmp_path,
+        representative_sha256=representative["content_hash"],
+        execution_spec=execution_spec,
+    )
+    graph = build_prediction_anchored_tigris_graph(
+        registry,
+        reservations=reservations,
+        execution_spec=execution_spec,
+        artifact_root=str(tmp_path / "campaign"),
+    )
     base = {
         "SLURM_NNODES": "1",
         "SLURM_PROCID": "0",
@@ -215,6 +268,9 @@ def test_allocation_preflight_enforces_leader_memory_usersite_and_selection(tmp_
         environment=base,
         ram_root=str(tmp_path / "dry-ram"),
         selected_consumer=selected,
+        execution_spec=execution_spec,
+        reservations=reservations,
+        representative_reference=representative,
         dry_run=True,
     )
     assert launch["allocation_leader_rank"] == 0
@@ -222,6 +278,26 @@ def test_allocation_preflight_enforces_leader_memory_usersite_and_selection(tmp_
     assert launch["all_workers_join_same_ram_ledger"] is True
     assert launch["persistent_dense_field_output_paths"] == []
     assert "scripts/cache_prediction_anchored_bridge_logits.py" in launch["connected_command_surfaces"]
+    assert launch["allocation_contracts_revalidated"] is True
+    stale_reference = with_content_hash(
+        {
+            "contract": (
+                "prediction_anchored_representative_architecture_resource_reference_v1"
+            ),
+            "source_manifest_sha256": "f" * 64,
+        }
+    )
+    with pytest.raises(ValueError, match="representative.reference"):
+        build_allocation_launch_manifest(
+            graph,
+            node_id="b0_validate_preflight",
+            environment=base,
+            ram_root=str(tmp_path),
+            execution_spec=execution_spec,
+            reservations=reservations,
+            representative_reference=stale_reference,
+            dry_run=True,
+        )
     with pytest.raises(PermissionError, match="guessing is forbidden"):
         build_allocation_launch_manifest(
             graph, node_id="b5_bind_teachers", environment=base,
@@ -390,6 +466,7 @@ def test_required_clis_help_and_tigris_shell_contracts():
     assert "Only allocation leader rank 0" in common
     assert "restart" in common.lower() and "whole" in common.lower()
     assert "/dev/shm/prediction_anchored_bridge/" in common
+    assert "--representative-reference" in common
     prepare = (REPO_ROOT / "sbatch" / "run_prepare_prediction_anchored_bridge_ram.sh").read_text(encoding="utf-8")
     assert "fresh_run env" in prepare and "-u PAB_OFFLINE_NPZ" in prepare
     submit = (REPO_ROOT / "sbatch" / "submit_prediction_anchored_bridge_pilot.sh").read_text(

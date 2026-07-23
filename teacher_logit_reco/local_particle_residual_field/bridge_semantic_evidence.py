@@ -76,7 +76,7 @@ from .hierarchical_global_reconstructor import (
     ARCH_A3_HLG_PRIMARY,
     DIRECT_HLT,
     DIRECT_R0REP,
-    DeployedBundleResourceReference,
+    BundleResourceReference,
     DirectHLGClassifier,
     DirectHLGConfig,
     HLGCorrectionOutput,
@@ -1859,7 +1859,7 @@ def measure_step8_registry_states(
     all50_scaler_artifact: Mapping[str, Any],
     absolute_scaler_artifact: Mapping[str, Any],
     source_manifest_sha256: str,
-    deployed_reference: DeployedBundleResourceReference,
+    deployed_reference: BundleResourceReference,
     fixed_storage: Step8FixedStorage,
     selected_budget_bytes: int = NORMAL_PILOT_BUDGET_BYTES,
 ) -> tuple[dict[str, Any], dict[str, Any]]:

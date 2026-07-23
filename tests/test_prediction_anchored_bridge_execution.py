@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -518,6 +519,79 @@ def test_consumer_executor_trains_all_paired_rows_and_selection_evidence_in_ram(
         model.load_state_dict(payload["model_state_dict"], strict=True)
         return model, payload
 
+    stale_recipe = with_content_hash(
+        {
+            **{
+                key: value
+                for key, value in physical_recipe.items()
+                if key != "content_hash"
+            },
+            "parent_hashes": {
+                **physical_recipe["parent_hashes"],
+                "preprocessing_sha256": "f" * 64,
+            },
+        }
+    )
+    stale_recipe_path = tmp_path / "stale_recipe.json"
+    write_immutable_json(stale_recipe_path, stale_recipe)
+    stale_recipe_preconfirmation = with_content_hash(
+        {
+            **{
+                key: value
+                for key, value in preconfirmation.items()
+                if key != "content_hash"
+            },
+            "bridge_recipe_sha256": stale_recipe["content_hash"],
+        }
+    )
+    stale_recipe_preconfirmation_path = tmp_path / "stale_recipe_preconfirmation.json"
+    write_immutable_json(
+        stale_recipe_preconfirmation_path, stale_recipe_preconfirmation
+    )
+    with pytest.raises(
+        ValueError, match="different execution.*preprocessing_sha256"
+    ):
+        confirm_selected_consumer_from_execution_spec(
+            spec_path,
+            preconfirmation_path=stale_recipe_preconfirmation_path,
+            r0_checkpoint_path=r0_result["checkpoint"],
+            r0_registration_path=r0_result["registration"],
+            physical45_recipe_path=stale_recipe_path,
+            output_dir=tmp_path / "stale_recipe_selection",
+            ram_root=tmp_path / "stale_recipe_ram_confirmation",
+            allocation_id="stale_recipe_confirmation",
+            device="cpu",
+            allow_unverified_test_root=True,
+            model_loader=toy_loader,
+        )
+
+    stale_preconfirmation = with_content_hash(
+        {
+            **{
+                key: value
+                for key, value in preconfirmation.items()
+                if key != "content_hash"
+            },
+            "f0_checkpoint_sha256": "f" * 64,
+        }
+    )
+    stale_preconfirmation_path = tmp_path / "stale_preconfirmation.json"
+    write_immutable_json(stale_preconfirmation_path, stale_preconfirmation)
+    with pytest.raises(ValueError, match="selected against a different R0 checkpoint"):
+        confirm_selected_consumer_from_execution_spec(
+            spec_path,
+            preconfirmation_path=stale_preconfirmation_path,
+            r0_checkpoint_path=r0_result["checkpoint"],
+            r0_registration_path=r0_result["registration"],
+            physical45_recipe_path=recipe_paths["physical45"],
+            output_dir=tmp_path / "stale_selection",
+            ram_root=tmp_path / "stale_ram_confirmation",
+            allocation_id="stale_confirmation",
+            device="cpu",
+            allow_unverified_test_root=True,
+            model_loader=toy_loader,
+        )
+
     confirmation = confirm_selected_consumer_from_execution_spec(
         spec_path,
         preconfirmation_path=preconfirmation_path,
@@ -655,6 +729,7 @@ def test_consumer_executor_trains_all_paired_rows_and_selection_evidence_in_ram(
             "metadata": {"sha256": "3" * 64, "size_bytes": 512, "path": tmp_path / "metadata"},
         },
         final_deployable_bundle_bytes=512,
+        representative_reference_sha256="9" * 64,
     )
     graph = build_prediction_anchored_tigris_graph(
         registry, reservations=reservations, execution_spec=spec,
@@ -870,6 +945,7 @@ def test_b3_l0_repository_executor_trains_three_real_replicas_from_one_ram_stage
             "metadata": {"sha256": "3" * 64, "size_bytes": 512, "path": tmp_path / "metadata"},
         },
         final_deployable_bundle_bytes=512,
+        representative_reference_sha256="9" * 64,
     )
     artifact_root = tmp_path / "campaign_l0"
     graph = build_prediction_anchored_tigris_graph(

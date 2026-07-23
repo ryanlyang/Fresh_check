@@ -24,6 +24,7 @@ from .bridge_contracts import (
     with_content_hash,
     write_immutable_json,
 )
+from .bridge import validate_bridge_recipe
 from .bridge_consumer import ConsumerCampaignConfig
 from .bridge_r0 import StreamedR0TrainConfig
 from .bridge_splits import (
@@ -295,6 +296,53 @@ def validate_prediction_anchored_execution_spec(
     }
 
 
+def validate_bridge_recipe_execution_binding(
+    recipe: Mapping[str, Any],
+    *,
+    execution_spec: Mapping[str, Any],
+    child_manifest: Mapping[str, Any],
+    r0_checkpoint_sha256: str,
+) -> dict[str, str]:
+    """Bind a physical bridge recipe to one exact execution and distill child."""
+
+    validate_bridge_recipe(recipe)
+    validate_prediction_anchored_execution_spec(
+        execution_spec, verify_file_hashes=False
+    )
+    validate_content_hash(
+        child_manifest, expected_contract=PREDICTION_ANCHORED_SPLIT_CONTRACT
+    )
+    if (
+        child_manifest.get("content_hash")
+        != execution_spec.get("child_manifest", {}).get("content_hash")
+    ):
+        raise ValueError("execution spec and child manifest differ")
+    expected = {
+        "r0_checkpoint_sha256": str(r0_checkpoint_sha256),
+        "hlt_source_sha256": str(
+            execution_spec["sources"]["stack_train"]["hlt_npz"]["sha256"]
+        ),
+        "offline_source_sha256": str(
+            execution_spec["sources"]["stack_train"]["offline_npz"]["sha256"]
+        ),
+        "split_manifest_sha256": str(
+            child_manifest["children"]["stack_train_distill"]["content_hash"]
+        ),
+        "target_schema_sha256": str(execution_spec["target_schema_sha256"]),
+        "preprocessing_sha256": str(execution_spec["preprocessing_sha256"]),
+    }
+    parents = recipe.get("parent_hashes", {})
+    changed = [
+        name for name, expected_value in expected.items()
+        if parents.get(name) != expected_value
+    ]
+    if changed:
+        raise ValueError(
+            "bridge recipe belongs to a different execution: " + ", ".join(changed)
+        )
+    return expected
+
+
 def write_prediction_anchored_execution_spec(
     path: str | Path, payload: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -308,5 +356,6 @@ __all__ = [
     "default_bridge_schema_hashes",
     "build_prediction_anchored_execution_spec",
     "validate_prediction_anchored_execution_spec",
+    "validate_bridge_recipe_execution_binding",
     "write_prediction_anchored_execution_spec",
 ]

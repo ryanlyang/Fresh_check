@@ -337,6 +337,7 @@ from .bridge_execution import (
     build_prediction_anchored_execution_spec,
     default_bridge_schema_hashes,
     validate_prediction_anchored_execution_spec,
+    validate_bridge_recipe_execution_binding,
     write_prediction_anchored_execution_spec,
 )
 from .bridge_numerical import (
@@ -496,6 +497,7 @@ from .hierarchical_global_reconstructor import (
     PREDICTION_ANCHORED_DIRECT_MODEL_CONTRACT,
     PREDICTION_ANCHORED_DIRECT_TRAIN_CONTRACT,
     PREDICTION_ANCHORED_DEPLOYED_RESOURCE_CONTRACT,
+    PREDICTION_ANCHORED_REPRESENTATIVE_RESOURCE_CONTRACT,
     PREDICTION_ANCHORED_STEP7_RESOURCE_CONTRACT,
     PREDICTION_ANCHORED_STEP7_MEASUREMENT_CONTRACT,
     PREDICTION_ANCHORED_STEP7_RELOAD_CONTRACT,
@@ -545,7 +547,9 @@ from .hierarchical_global_reconstructor import (
     HLGRadiusCorrectionHead,
     HLGCorrectionOutput,
     PredictionAnchoredHLGCorrection,
+    RepresentativeArchitectureResourceReference,
     DeployedBundleResourceReference,
+    BundleResourceReference,
     DirectHLGConfig,
     DirectHLGTrainConfig,
     DirectHLGOutput,
@@ -555,6 +559,8 @@ from .hierarchical_global_reconstructor import (
     build_step7_hlg_correction_model,
     step7_gate_regularization,
     measure_step7_resources,
+    measure_module_forward_resources,
+    resource_reference_from_artifact,
     fit_direct_hlg_config,
     build_capacity_matched_direct_hlg,
     direct_capacity_match,
@@ -565,6 +571,8 @@ from .hierarchical_global_reconstructor import (
     run_step7_paired_seed_miniature,
 )
 from .hierarchical_global_reconstructor import __all__ as _STEP7_HLG_EXPORTS
+from .bridge_resource_reference import *  # noqa: F401,F403
+from .bridge_resource_reference import __all__ as _RESOURCE_REFERENCE_EXPORTS
 from .bridge_semantic_evidence import *  # noqa: F401,F403
 from .bridge_semantic_evidence import __all__ as _STEP8_SEMANTIC_EXPORTS
 from .bridge_campaign_policy import *  # noqa: F401,F403
@@ -902,6 +910,7 @@ __all__ = list(dict.fromkeys([
     "build_prediction_anchored_execution_spec",
     "default_bridge_schema_hashes",
     "validate_prediction_anchored_execution_spec",
+    "validate_bridge_recipe_execution_binding",
     "write_prediction_anchored_execution_spec",
     "run_streamed_r0_from_execution_spec",
     "prepare_bridge_inputs_from_execution_spec",
@@ -1086,4 +1095,4 @@ __all__ = list(dict.fromkeys([
     "particle_capacity_match",
     "measure_step6_registry_states",
     "tiny_train_reload_step6_model",
-] + list(_STEP7_HLG_EXPORTS) + list(_STEP8_SEMANTIC_EXPORTS) + list(_STEP9_POLICY_EXPORTS) + list(_STEP10_PRODUCTION_EXPORTS) + list(_RECONSTRUCTION_EXECUTION_EXPORTS) + list(_DEPLOYMENT_EXECUTION_EXPORTS) + list(_REPORT_EXECUTION_EXPORTS) + list(_P7B_FUSION_CAMPAIGN_EXPORTS) + list(_P7B_FUSION_SEED_EXPORTS) + list(_P7B_FUSION_SOURCE_EXPORTS) + list(_P7B_FUSION_FEATURE_EXPORTS) + list(_P7B_FUSION_METRIC_EXPORTS) + list(_P7B_FUSION_METRIC_AUDIT_EXPORTS) + list(_P7B_FUSION_LATE_EXPORTS) + list(_P7B_FUSION_MODEL_EXPORTS) + list(_P7B_FUSION_TRAIN_EXPORTS) + list(_P7B_FUSION_SELECTION_EXPORTS) + list(_P7B_FUSION_FINAL_EXPORTS) + list(_P7B_FUSION_REPLAY_EXPORTS) + list(_P7B_FUSION_RUNTIME_EXPORTS) + list(_P7B_FUSION_REPORT_EXPORTS) + list(_P7B_FUSION_STABILITY_EXPORTS) + list(_P7B_FUSION_BOOTSTRAP_EXPORTS)))
+] + list(_STEP7_HLG_EXPORTS) + list(_RESOURCE_REFERENCE_EXPORTS) + list(_STEP8_SEMANTIC_EXPORTS) + list(_STEP9_POLICY_EXPORTS) + list(_STEP10_PRODUCTION_EXPORTS) + list(_RECONSTRUCTION_EXECUTION_EXPORTS) + list(_DEPLOYMENT_EXECUTION_EXPORTS) + list(_REPORT_EXECUTION_EXPORTS) + list(_P7B_FUSION_CAMPAIGN_EXPORTS) + list(_P7B_FUSION_SEED_EXPORTS) + list(_P7B_FUSION_SOURCE_EXPORTS) + list(_P7B_FUSION_FEATURE_EXPORTS) + list(_P7B_FUSION_METRIC_EXPORTS) + list(_P7B_FUSION_METRIC_AUDIT_EXPORTS) + list(_P7B_FUSION_LATE_EXPORTS) + list(_P7B_FUSION_MODEL_EXPORTS) + list(_P7B_FUSION_TRAIN_EXPORTS) + list(_P7B_FUSION_SELECTION_EXPORTS) + list(_P7B_FUSION_FINAL_EXPORTS) + list(_P7B_FUSION_REPLAY_EXPORTS) + list(_P7B_FUSION_RUNTIME_EXPORTS) + list(_P7B_FUSION_REPORT_EXPORTS) + list(_P7B_FUSION_STABILITY_EXPORTS) + list(_P7B_FUSION_BOOTSTRAP_EXPORTS)))

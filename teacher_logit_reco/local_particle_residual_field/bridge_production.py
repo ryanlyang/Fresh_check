@@ -207,10 +207,21 @@ def build_prediction_anchored_tigris_graph(
         raise ValueError("Step 10 reservations are bound to another registry")
     child_manifest = execution_spec.get("child_manifest", {})
     parent_manifest = execution_spec.get("parent_manifest", {})
+    representative_sha256 = str(
+        reservations.get("representative_reference_sha256", "")
+    )
+    if (
+        len(representative_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in representative_sha256)
+    ):
+        raise ValueError(
+            "Step 10 reservations have no valid representative-reference binding"
+        )
     expected_bindings = {
         "execution_spec_sha256": execution_spec["content_hash"],
         "child_manifest_sha256": child_manifest.get("content_hash"),
         "parent_manifest_file_sha256": parent_manifest.get("sha256"),
+        "representative_reference_sha256": representative_sha256,
     }
     for name, expected in expected_bindings.items():
         if reservations.get(name) != expected:
@@ -335,11 +346,23 @@ def build_prediction_anchored_tigris_graph(
     )
     nodes.append(
         _node(
+            node_id="b4_publish_runtime_resources",
+            stage="B4",
+            runner="run_prepare_prediction_anchored_bridge_ram.sh",
+            arguments=("B4_RUNTIME_RESOURCES",),
+            dependencies=("b4_confirm_consumer",),
+            resources=cpu,
+            shared_source_group="confirmed_runtime_resource_profile",
+            requires_selected_consumer=True,
+        )
+    )
+    nodes.append(
+        _node(
             node_id="b5_bind_teachers",
             stage="B5",
             runner="run_prepare_prediction_anchored_bridge_ram.sh",
             arguments=("B5_BIND",),
-            dependencies=("b4_confirm_consumer",),
+            dependencies=("b4_publish_runtime_resources",),
             resources=cpu,
             shared_source_group="immutable_teacher_bindings",
             requires_selected_consumer=True,
@@ -578,6 +601,7 @@ def validate_prediction_anchored_tigris_graph(graph: Mapping[str, Any]) -> dict[
         "execution_spec_sha256",
         "child_manifest_sha256",
         "parent_manifest_file_sha256",
+        "representative_reference_sha256",
     ):
         value = str(graph.get(name, ""))
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
@@ -767,30 +791,61 @@ def build_allocation_launch_manifest(
     selected_consumer: Mapping[str, Any] | None = None,
     execution_spec: Mapping[str, Any] | None = None,
     reservations: Mapping[str, Any] | None = None,
+    representative_reference: Mapping[str, Any] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Validate one allocated node before any accelerator/model construction."""
 
     validate_prediction_anchored_tigris_graph(graph)
-    if execution_spec is None or reservations is None:
+    if (
+        execution_spec is None
+        or reservations is None
+        or representative_reference is None
+    ):
         if not dry_run:
-            raise PermissionError("allocation launch requires execution-spec and reservation artifacts")
+            raise PermissionError(
+                "allocation launch requires execution-spec, reservation, and "
+                "representative-reference artifacts"
+            )
     else:
         validate_prediction_anchored_execution_spec(execution_spec, verify_file_hashes=True)
         validate_content_hash(
             reservations, expected_contract=PREDICTION_ANCHORED_CAMPAIGN_RESERVATION_CONTRACT
+        )
+        validate_content_hash(
+            representative_reference,
+            expected_contract=(
+                "prediction_anchored_representative_architecture_resource_reference_v1"
+            ),
         )
         expected = {
             "execution_spec_sha256": execution_spec["content_hash"],
             "reservations_sha256": reservations["content_hash"],
             "child_manifest_sha256": execution_spec["child_manifest"]["content_hash"],
             "parent_manifest_file_sha256": execution_spec["parent_manifest"]["sha256"],
+            "representative_reference_sha256": representative_reference[
+                "content_hash"
+            ],
         }
         for field, value in expected.items():
             if graph.get(field) != value:
                 raise ValueError(f"allocation {field} disagrees with immutable graph")
         if reservations.get("execution_spec_sha256") != execution_spec["content_hash"]:
             raise ValueError("allocation reservations belong to another execution spec")
+        if (
+            reservations.get("representative_reference_sha256")
+            != representative_reference["content_hash"]
+        ):
+            raise ValueError(
+                "allocation reservations bind another representative reference"
+            )
+        if (
+            representative_reference.get("source_manifest_sha256")
+            != execution_spec["parent_manifest"]["sha256"]
+        ):
+            raise ValueError(
+                "representative reference belongs to another execution source"
+            )
     by_id = {row["node_id"]: row for row in graph["nodes"]}
     if node_id not in by_id:
         raise KeyError(f"production graph has no node {node_id!r}")
@@ -851,7 +906,9 @@ def build_allocation_launch_manifest(
         surface = commands["B3_reconstructor"] if node["stage"] == "B3" else commands["B6"]
     elif node["runner"] == "run_cache_prediction_anchored_bridge_logits.sh":
         surface = commands["B5_cache"]
-    elif node["arguments"] and node["arguments"][0] in {"B4_SELECT", "B4_CONFIRM", "B5_BIND"}:
+    elif node["arguments"] and node["arguments"][0] in {
+        "B4_SELECT", "B4_CONFIRM", "B4_RUNTIME_RESOURCES", "B5_BIND"
+    }:
         surface = commands["B4"]
     elif node["arguments"] and node["arguments"][0] in {"B6_SELECT", "DEPLOY_CONFIRM", "FINAL_TEST"}:
         surface = commands["REPORT"]
@@ -865,7 +922,11 @@ def build_allocation_launch_manifest(
             "graph_sha256": graph["content_hash"],
             "execution_spec_sha256": None if execution_spec is None else execution_spec["content_hash"],
             "reservations_sha256": None if reservations is None else reservations["content_hash"],
-            "allocation_contracts_revalidated": execution_spec is not None and reservations is not None,
+            "allocation_contracts_revalidated": (
+                execution_spec is not None
+                and reservations is not None
+                and representative_reference is not None
+            ),
             "node_sha256": node["content_hash"],
             "node_id": node_id,
             "stage": node["stage"],

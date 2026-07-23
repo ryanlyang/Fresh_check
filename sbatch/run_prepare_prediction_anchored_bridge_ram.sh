@@ -14,7 +14,7 @@ set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/prediction_anchored_bridge_common.sh"
-ACTION="${1:?Usage: run_prepare_prediction_anchored_bridge_ram.sh <B0|B1|B2|B4_SELECT|B4_CONFIRM|B5_BIND|B5_RELEASE|B6_SELECT|DEPLOY_CONFIRM|REPORT_EXPORT|FINAL_TEST>}"
+ACTION="${1:?Usage: run_prepare_prediction_anchored_bridge_ram.sh <B0|B1|B2|B4_SELECT|B4_CONFIRM|B4_RUNTIME_RESOURCES|B5_BIND|B5_RELEASE|B6_SELECT|DEPLOY_CONFIRM|REPORT_EXPORT|FINAL_TEST>}"
 pab_bootstrap_allocation
 
 dry_flag=()
@@ -83,6 +83,25 @@ case "${ACTION}" in
       --physical45-recipe "${PAB_PHYSICAL45_RECIPE}" \
       --ram-root "${PAB_RAM_ROOT}" --allocation-id "${SLURM_JOB_ID}" \
       --output-dir "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/selection" --device "${DEVICE}"
+    ;;
+  B4_RUNTIME_RESOURCES)
+    [[ -f "${selected}" ]] || { echo "Runtime resources require the confirmed consumer" >&2; exit 2; }
+    pab_require_env PAB_PREFLIGHT_ROOT
+    : "${PAB_R0_CHECKPOINT:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/r0/r0_weights.pt}"
+    : "${PAB_R0_REGISTRATION:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/r0/r0_registration.json}"
+    : "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE:=${PAB_PREFLIGHT_ROOT}/representative_architecture_resource_reference.json}"
+    : "${PAB_PHYSICAL45_RECIPE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_recipe_physical45.json}"
+    fresh_require_file "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE}"
+    fresh_run "${PYTHON_BIN}" -u scripts/publish_prediction_anchored_runtime_resources.py \
+      --representative-reference "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE}" \
+      --execution-spec "${PAB_EXECUTION_SPEC}" \
+      --r0-checkpoint "${PAB_R0_CHECKPOINT}" \
+      --r0-registration "${PAB_R0_REGISTRATION}" \
+      --selected-consumer "${selected}" \
+      --physical45-recipe "${PAB_PHYSICAL45_RECIPE}" \
+      --physical45-scaler "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_scalers_physical45.json" \
+      --output "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/measurements/deployed_resource_reference.json" \
+      --device cpu
     ;;
   B5_BIND)
     [[ -f "${selected}" ]] || { echo "Stage B5 refuses a guessed consumer" >&2; exit 2; }

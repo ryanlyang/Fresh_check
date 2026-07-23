@@ -137,6 +137,36 @@ def test_step5_capture_fails_closed_for_ambiguous_or_missing_head() -> None:
         PreClassifierEmbeddingCapture(missing)
 
 
+def test_step5_amp_reproduction_tolerance_accepts_one_cross_gpu_quantization_step() -> None:
+    common = {
+        "checkpoint": "member.pt",
+        "member_id": "P7b",
+        "output_dir": "features",
+        "prediction_sources": "sources.json",
+        "source_artifact_audit": "audit.json",
+        "hlt_cache_dir": "hlt",
+        "manifest_path": "manifest.json.gz",
+    }
+    amp_config = FusionFeatureCacheConfig(**common, amp=True)
+    fp32_config = FusionFeatureCacheConfig(**common, amp=False)
+    cached = np.zeros((1, 10), dtype=np.float32)
+    cross_gpu_amp = cached.copy()
+    cross_gpu_amp[0, 0] = np.float32(0.0078125)
+
+    assert np.allclose(
+        cross_gpu_amp,
+        cached,
+        atol=amp_config.logits_atol,
+        rtol=amp_config.logits_rtol,
+    )
+    assert not np.allclose(
+        cross_gpu_amp,
+        cached,
+        atol=fp32_config.logits_atol,
+        rtol=fp32_config.logits_rtol,
+    )
+
+
 def test_step5_cache_binds_representation_to_prediction_and_source_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

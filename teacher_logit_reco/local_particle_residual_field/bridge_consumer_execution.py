@@ -67,10 +67,12 @@ from .bridge_evaluation import (
 )
 from .bridge_execution import (
     PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT,
+    validate_bridge_recipe_execution_binding,
     validate_prediction_anchored_execution_spec,
 )
 from .bridge_numerical import _paths_from_source, _verify_staged_source_binding
 from .bridge_ram import (
+    PREDICTION_ANCHORED_R0_REGISTRATION_CONTRACT,
     AllocationNpzStager,
     AllocationRamLedger,
     FrozenR0Runner,
@@ -956,15 +958,47 @@ def confirm_selected_consumer_from_execution_spec(
     preconfirmation = load_hashed_json(preconfirmation_path)
     if preconfirmation.get("status") != "LOCKED_AWAITING_STACK_VAL_CONSUMER":
         raise PermissionError("consumer preconfirmation is not locked for one-shot confirmation")
+    try:
+        selected_rho_endpoint = float(
+            preconfirmation.get("selected_rho_endpoint")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "consumer preconfirmation has no valid rho endpoint"
+        ) from exc
+    if (
+        selected_rho_endpoint != 0.10
+        or preconfirmation.get("bridge_channel_policy")
+        != BRIDGE_CHANNEL_PHYSICAL45
+    ):
+        raise ValueError(
+            "consumer preconfirmation changed the locked endpoint/channel policy"
+        )
     recipe = load_hashed_json(physical45_recipe_path)
     validate_bridge_recipe(recipe)
     if recipe["content_hash"] != preconfirmation.get("bridge_recipe_sha256"):
         raise ValueError("preconfirmation and physical45 recipe differ")
     r0_path = Path(r0_checkpoint_path)
     r0_sha = sha256_file(r0_path)
-    registration = load_hashed_json(r0_registration_path)
-    if registration.get("checkpoint_sha256") != r0_sha:
-        raise ValueError("R0 registration/checkpoint binding changed")
+    registration = load_hashed_json(
+        r0_registration_path,
+        expected_contract=PREDICTION_ANCHORED_R0_REGISTRATION_CONTRACT,
+    )
+    if (
+        registration.get("checkpoint_sha256") != r0_sha
+        or registration.get("split_manifest") != child["content_hash"]
+        or registration.get("preprocessing") != spec["preprocessing_sha256"]
+        or registration.get("target_schema") != spec["target_schema_sha256"]
+    ):
+        raise ValueError("R0 registration/checkpoint/execution binding changed")
+    if preconfirmation.get("f0_checkpoint_sha256") != r0_sha:
+        raise ValueError("consumer preconfirmation was selected against a different R0 checkpoint")
+    validate_bridge_recipe_execution_binding(
+        recipe,
+        execution_spec=spec,
+        child_manifest=child,
+        r0_checkpoint_sha256=r0_sha,
+    )
     checkpoint = Path(str(preconfirmation.get("checkpoint_path", "")))
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise FileNotFoundError("selected median consumer checkpoint is absent or unsafe")

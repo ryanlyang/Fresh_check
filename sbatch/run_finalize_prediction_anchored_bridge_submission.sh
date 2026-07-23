@@ -4,6 +4,7 @@
 #SBATCH --error=fresh_check_logs/%x_%j.err
 #SBATCH --account=reu-aisocial
 #SBATCH --partition=tigris
+#SBATCH --nodes=1
 #SBATCH --time=04:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=12
@@ -49,6 +50,7 @@ export PREDICTION_ANCHORED_GRAPH="${PAB_PREFLIGHT_ROOT}/prediction_anchored_tigr
 export PAB_REGISTRY="${PAB_PREFLIGHT_ROOT}/campaign_registry_step8.json"
 export PAB_RESERVATIONS="${PAB_PREFLIGHT_ROOT}/campaign_reservations.json"
 export PAB_EXECUTION_SPEC="${PAB_PREFLIGHT_ROOT}/prediction_anchored_execution_spec.json"
+export PAB_REPRESENTATIVE_RESOURCE_REFERENCE="${PAB_PREFLIGHT_ROOT}/representative_architecture_resource_reference.json"
 export PREDICTION_ANCHORED_EXECUTE=1
 
 # The finalizer submits B0--B6 only after every immutable binding validates.

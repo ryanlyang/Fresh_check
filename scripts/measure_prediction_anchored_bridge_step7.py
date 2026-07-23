@@ -20,12 +20,14 @@ from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     ARCH_A5S_HLG_SCRATCH,
     DIRECT_HLT,
     DIRECT_R0REP,
+    HLGCorrectionConfig,
     STEP7_HIERARCHY_ARCHITECTURE_IDS,
-    DeployedBundleResourceReference,
+    BundleResourceReference,
     build_capacity_matched_direct_hlg,
     build_step7_hlg_correction_model,
     measure_step7_registry_states,
     measure_step7_resources,
+    resource_reference_from_artifact,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign import (  # noqa: E402
     validate_campaign_registry,
@@ -64,21 +66,14 @@ def _read_json(path: str, *, label: str) -> dict[str, object]:
     return value
 
 
-def _reference(value: dict[str, object]) -> DeployedBundleResourceReference:
-    validate_content_hash(value, expected_contract="prediction_anchored_deployed_resource_reference_v1")
-    names = (
-        "particle_width", "valid_particles", "r0_parameters", "r0_forward_flops",
-        "a3_parameters", "a3_forward_flops", "t10_parameters", "t10_forward_flops",
-        "r0_checkpoint_sha256", "a3_config_sha256", "t10_checkpoint_sha256",
-        "source_manifest_sha256",
-    )
-    return DeployedBundleResourceReference(**{name: value[name] for name in names})
+def _reference(value: dict[str, object]) -> BundleResourceReference:
+    return resource_reference_from_artifact(value)
 
 
 def _plan(
     scaler: dict[str, object],
     absolute: dict[str, object],
-    reference: DeployedBundleResourceReference,
+    reference: BundleResourceReference,
 ) -> dict[str, object]:
     profiles = {}
     configs = {}
@@ -96,7 +91,9 @@ def _plan(
             particle_width=reference.particle_width,
             valid_particles=reference.valid_particles,
         ).to_artifact()
-    canonical_config_hash = configs[ARCH_A3_HLG_PRIMARY]["content_hash"]
+    canonical_config_hash = HLGCorrectionConfig.for_architecture(
+        ARCH_A3_HLG_PRIMARY
+    ).to_artifact()["content_hash"]
     canonical_profile = profiles[ARCH_A3_HLG_PRIMARY]
     if reference.a3_config_sha256 != canonical_config_hash:
         raise ValueError("deployed reference is bound to a different canonical A3 config")

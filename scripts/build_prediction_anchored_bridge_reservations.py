@@ -20,6 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", required=True)
     parser.add_argument("--step8-measurement", required=True)
     parser.add_argument("--execution-spec", required=True)
+    parser.add_argument("--representative-reference", required=True)
     parser.add_argument(
         "--fixed-parent",
         action="append",
@@ -92,11 +93,22 @@ def main(argv: list[str] | None = None) -> int:
     execution_spec = load_hashed_json(
         args.execution_spec, expected_contract=PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT
     )
+    representative_reference = load_hashed_json(
+        args.representative_reference,
+        expected_contract=(
+            "prediction_anchored_representative_architecture_resource_reference_v1"
+        ),
+    )
     validate_prediction_anchored_execution_spec(execution_spec, verify_file_hashes=True)
     if measurement.get("updated_registry_sha256") != registry["content_hash"]:
         raise ValueError("Step 8 measurement belongs to another measured registry")
     if measurement.get("source_manifest_sha256") != execution_spec["parent_manifest"]["sha256"]:
         raise ValueError("Step 8 measurement belongs to another execution-spec source manifest")
+    if (
+        representative_reference.get("source_manifest_sha256")
+        != execution_spec["parent_manifest"]["sha256"]
+    ):
+        raise ValueError("representative reference belongs to another execution spec")
     fixed = measurement.get("fixed_storage", {})
     validate_content_hash(fixed, expected_contract="prediction_anchored_step8_fixed_storage_v1")
     parents = {}
@@ -136,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         production_readiness=measurement["production_readiness"],
         fixed_parent_artifacts=parents,
         final_deployable_bundle_bytes=int(fixed["final_deployable_bundle_bytes"]),
+        representative_reference_sha256=representative_reference["content_hash"],
     )
     publication = None
     if not args.dry_run:
