@@ -15,6 +15,7 @@ from tests.test_prediction_anchored_bridge_execution import (
 from teacher_logit_reco.local_particle_residual_field import (
     PAIRED_SEED_IDS,
     TIGRIS_ACCOUNT,
+    TigrisResources,
     build_allocation_launch_manifest,
     build_campaign_registry,
     build_campaign_reservations,
@@ -179,6 +180,7 @@ def test_packing_is_single_node_shared_source_paired3_and_median_only(tmp_path):
     graph = _graph(tmp_path)
     for node in graph["nodes"]:
         assert node["resources"]["nodes"] == 1
+        assert node["resources"]["gpus_per_node"] in {0, 1}
         assert node["resources"]["host_memory_gib"] >= 64
         assert node["allocation_packing"]["allocation_leader_rank"] == 0
         assert node["allocation_packing"]["one_persistent_source_open_by_leader"] is True
@@ -192,6 +194,13 @@ def test_packing_is_single_node_shared_source_paired3_and_median_only(tmp_path):
     b6_packs = [node for node in graph["nodes"] if node["node_id"].startswith("b6_") and "pack" in node["node_id"]]
     assert all(1 <= len(node["configuration_run_ids"]) <= 4 for node in b6_packs)
     assert all(len({node["teacher_namespace"]}) == 1 for node in b6_packs)
+
+
+def test_tigris_resource_contract_rejects_unavailable_multi_gpu_nodes(tmp_path):
+    del tmp_path
+    assert TigrisResources().gpus_per_node == 1
+    with pytest.raises(ValueError, match="accelerator/CPU resource"):
+        TigrisResources(gpus_per_node=4)
 
 
 def test_selected_consumer_and_sealed_confirmations_are_ordered_fail_closed(tmp_path):
@@ -455,6 +464,12 @@ def test_required_clis_help_and_tigris_shell_contracts():
         if name != "submit_prediction_anchored_bridge_pilot.sh":
             assert "#SBATCH --nodes=1" in text
             assert "#SBATCH --mem=" in text
+        if name in {
+            "run_train_prediction_anchored_bridge_consumer.sh",
+            "run_train_prediction_anchored_bridge_reconstructor.sh",
+        }:
+            assert "#SBATCH --gres=gpu:1" in text
+            assert "#SBATCH --gres=gpu:4" not in text
         assert "reu-aisoc\n" not in text
     cache_shell = (
         REPO_ROOT / "sbatch" / "run_cache_prediction_anchored_bridge_logits.sh"

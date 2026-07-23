@@ -54,7 +54,11 @@ class TigrisResources:
     account: str = TIGRIS_ACCOUNT
     partition: str = TIGRIS_PARTITION
     nodes: int = 1
-    gpus_per_node: int = 4
+    # Tigris GH200 nodes expose one accelerator per node.  Paired3 denotes
+    # three scientific seeds, not three/four simultaneously allocated GPUs;
+    # the executors retain all seeds and run them sequentially when one device
+    # is visible.
+    gpus_per_node: int = 1
     cpus_per_task: int = 12
     host_memory_gib: int = 512
     walltime: str = "3-00:00:00"
@@ -66,7 +70,7 @@ class TigrisResources:
             raise ValueError("prediction-anchored production is locked to the tigris partition")
         if int(self.nodes) != 1:
             raise ValueError("packed prediction-anchored allocations must request exactly one node")
-        if int(self.gpus_per_node) < 0 or int(self.cpus_per_task) <= 0:
+        if int(self.gpus_per_node) not in {0, 1} or int(self.cpus_per_task) <= 0:
             raise ValueError("invalid Tigris accelerator/CPU resource request")
         if int(self.host_memory_gib) < 64:
             raise ValueError("prediction-anchored jobs must request explicit host memory")
@@ -304,8 +308,9 @@ def build_prediction_anchored_tigris_graph(
             persistent_reservation_bytes=sum(run_bytes[value] for value in l0),
         )
     )
-    # All eight upstream rows share the Tpred/A0 RAM branch lineage and must
-    # remain in one allocation even though GPU tasks are internally packed.
+    # All eight upstream rows share the Tpred/A0 RAM branch lineage and remain
+    # in one allocation.  Their paired seeds execute sequentially on the
+    # single Tigris accelerator without changing the scientific inventory.
     nodes.append(
         _node(
             node_id="b3_consumers_paired3",
