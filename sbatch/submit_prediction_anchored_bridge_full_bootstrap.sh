@@ -6,6 +6,9 @@ IFS=$'\n\t'
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 : "${PAB_SOURCE_BASE:=${PROJECT_DIR}/checkpoints/local_particle_residual_field_curriculum/rebuild_and_pilot_20260720_185817}"
+: "${PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
+: "${PAB_CONDA_ENV:=atlas_kd_tigris}"
+export PAB_CONDA_BASE PAB_CONDA_ENV
 export PYTHONNOUSERSITE=1
 cd "${PROJECT_DIR}"
 mkdir -p fresh_check_logs

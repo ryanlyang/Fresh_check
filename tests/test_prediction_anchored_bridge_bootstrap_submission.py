@@ -47,10 +47,17 @@ def test_full_bootstrap_submitter_queues_afterok_and_reuses_complete_hlt():
     assert "stack_train_offline.npz" in missing
     assert "--splits stack_train" in missing
     assert "PYTHONNOUSERSITE=1" in submitter + finalizer + missing
-    assert "SKIP_CONDA=1" in finalizer
-    assert "SKIP_CONDA=1" in missing
-    assert '/envs/${CONDA_ENV}/bin/python' in finalizer
-    assert '/envs/${CONDA_ENV}/bin/python' in missing
+    assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
+    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in submitter
+    assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in finalizer
+    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in finalizer
+    assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in missing
+    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in missing
+    assert 'export CONDA_ENV="${PAB_CONDA_ENV}"' in finalizer
+    assert 'export CONDA_BASE="${PAB_CONDA_BASE}"' in finalizer
+    assert 'export CONDA_ENV="${PAB_CONDA_ENV}"' in missing
+    assert 'export CONDA_BASE="${PAB_CONDA_BASE}"' in missing
+    assert "SKIP_CONDA=1" not in finalizer + missing
 
 
 def test_finalizer_binds_all_four_immutable_submission_controls():
