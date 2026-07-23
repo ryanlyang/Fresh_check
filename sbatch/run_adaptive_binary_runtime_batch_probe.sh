@@ -18,6 +18,7 @@ set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/common.sh"
+source "${PROJECT_DIR}/sbatch/adaptive_binary_ddp_launch.sh"
 VARIANT="${1:?Usage: worker <variant> <stage-family> <local-batch-size>}"
 STAGE_FAMILY="${2:?Missing stage family}"
 LOCAL_BATCH_SIZE="${3:?Missing local batch size}"
@@ -47,9 +48,7 @@ fi
 if ((world_size > 1)); then
   mapfile -t hosts < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
   export MASTER_ADDR="${hosts[0]:?Unable to resolve DDP master host}"
-  numeric_job_id="${SLURM_JOB_ID%%_*}"
-  export MASTER_PORT="$((20000 + numeric_job_id % 20000))"
-  fresh_run srun --nodes="${nodes}" --ntasks="${world_size}" \
+  abph_fresh_run_srun_with_port_retry --nodes="${nodes}" --ntasks="${world_size}" \
     --ntasks-per-node="${tasks_per_node}" --kill-on-bad-exit=1 \
     --cpu-bind=cores --export=ALL "${probe_command[@]}"
 else

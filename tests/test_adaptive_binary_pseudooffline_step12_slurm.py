@@ -641,12 +641,32 @@ def test_variant_worker_has_fail_closed_srun_contract() -> None:
         '[[ "${SLURM_NTASKS:-0}" == "${ABPH_DISTRIBUTED_NTASKS}" ]]',
         'scontrol show hostnames "${SLURM_JOB_NODELIST}"',
         'export MASTER_ADDR="${master_addr}"',
-        'export MASTER_PORT=',
-        'fresh_run srun',
+        'adaptive_binary_ddp_launch.sh',
+        'abph_fresh_run_srun_with_port_retry',
         '--kill-on-bad-exit=1',
         '--export=ALL',
     ):
         assert required in source
+
+
+def test_adaptive_binary_ddp_launcher_retries_only_quick_startup_failures() -> None:
+    source = (
+        REPO_ROOT / "sbatch" / "adaptive_binary_ddp_launch.sh"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "ABPH_DDP_PORT_RETRY_ATTEMPTS:-4",
+        "ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-180",
+        "abph_ddp_master_port",
+        'MASTER_PORT="$(abph_ddp_master_port',
+        'if fresh_run srun "$@"; then',
+        "elapsed > quick_failure_seconds",
+        "retrying with a different rendezvous port",
+        "no further port retry",
+    ):
+        assert required in source
+    assert source.index("elapsed > quick_failure_seconds") < source.index(
+        "retrying with a different rendezvous port"
+    )
 
 
 def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path: Path) -> None:
@@ -868,6 +888,8 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "run_compile_adaptive_binary_single_path_acceptance.sh" in submitter
     assert "ABPH_RUNTIME_BATCH_DEPENDENCY" in submitter
     assert "--kill-on-bad-exit=1" in worker
+    assert "adaptive_binary_ddp_launch.sh" in worker
+    assert "abph_fresh_run_srun_with_port_retry" in worker
     assert "run_adaptive_binary_ddp_acceptance_smoke.py" in worker
     assert "--runtime-reference-benchmark" in worker
     assert "cleanup_benchmark_checkpoints" in worker
@@ -941,7 +963,8 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
     assert "torch.cuda.manual_seed_all(24731)" in probe
     assert "np.random.seed(24731)" in probe
     assert "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}" in worker
-    assert "fresh_run srun" in worker and "--kill-on-bad-exit=1" in worker
+    assert "abph_fresh_run_srun_with_port_retry" in worker
+    assert "--kill-on-bad-exit=1" in worker
     assert "compile_adaptive_binary_runtime_batch_contract.py" in compiler
     assert "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT}" in compiler
     assert "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}" in compiler

@@ -22,6 +22,7 @@ CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
 DATA_DIR="${ABPH_DATA_DIR:-/home/ryreu/atlas/PracticeTagging/data/jetclass_part1}"
 export CONDA_BASE CONDA_ENV DATA_DIR
 source "${PROJECT_DIR}/sbatch/common.sh"
+source "${PROJECT_DIR}/sbatch/adaptive_binary_ddp_launch.sh"
 MODE="${1:?Usage: run_adaptive_binary_runtime_acceptance.sh <smoke|benchmark|benchmark_uninstrumented> [variant]}"
 VARIANT="${2:-}"
 : "${ABPH_ROOT:?Set ABPH_ROOT to the prepared pilot campaign root}"
@@ -127,10 +128,7 @@ if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
   }
   mapfile -t allocated_hosts < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
   export MASTER_ADDR="${allocated_hosts[0]:?No DDP master host found}"
-  numeric_job_id="${SLURM_JOB_ID%%_*}"
-  [[ "${numeric_job_id}" =~ ^[0-9]+$ ]] || { echo "Invalid Slurm job id" >&2; exit 2; }
-  export MASTER_PORT="$((20000 + numeric_job_id % 20000))"
-  fresh_run srun --nodes=4 --ntasks=4 --ntasks-per-node=1 \
+  abph_fresh_run_srun_with_port_retry --nodes=4 --ntasks=4 --ntasks-per-node=1 \
     --kill-on-bad-exit=1 --cpu-bind=cores --export=ALL "${cmd[@]}"
 else
   fresh_run "${cmd[@]}"

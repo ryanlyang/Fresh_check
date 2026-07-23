@@ -14,6 +14,7 @@ set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/common.sh"
+source "${PROJECT_DIR}/sbatch/adaptive_binary_ddp_launch.sh"
 VARIANT="${1:?Usage: run_adaptive_binary_variant.sh <registry-variant>}"
 SEED_INDEX="${2:-1}"
 OUTPUT_DIR_OVERRIDE="${3:-}"
@@ -126,8 +127,7 @@ if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
   numeric_job_id="${SLURM_JOB_ID%%_*}"
   [[ "${numeric_job_id}" =~ ^[0-9]+$ ]] || { echo "invalid Slurm job id ${SLURM_JOB_ID}" >&2; exit 2; }
   export MASTER_ADDR="${master_addr}"
-  export MASTER_PORT="$((20000 + numeric_job_id % 20000))"
-  fresh_run srun \
+  abph_fresh_run_srun_with_port_retry \
     --nodes="${ABPH_DISTRIBUTED_NODES}" \
     --ntasks="${ABPH_DISTRIBUTED_NTASKS}" \
     --ntasks-per-node="${ABPH_DISTRIBUTED_NTASKS_PER_NODE}" \
