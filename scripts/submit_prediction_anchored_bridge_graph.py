@@ -14,6 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+PAB_TIGRIS_CONDA_BASE = "/home/ryreu/miniforge3-aarch64"
+PAB_TIGRIS_CONDA_ENV = "atlas_kd_tigris"
+
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     TIGRIS_ACCOUNT,
     TIGRIS_PARTITION,
@@ -103,6 +106,10 @@ def _argv(
         f"--error={log_dir.as_posix()}/%x_%j.err",
         (
             "--export=ALL,PYTHONNOUSERSITE=1,"
+            f"PAB_CONDA_BASE={PAB_TIGRIS_CONDA_BASE},"
+            f"PAB_CONDA_ENV={PAB_TIGRIS_CONDA_ENV},"
+            f"CONDA_BASE={PAB_TIGRIS_CONDA_BASE},"
+            f"CONDA_ENV={PAB_TIGRIS_CONDA_ENV},"
             f"PREDICTION_ANCHORED_GRAPH={graph_path.as_posix()},"
             f"PREDICTION_ANCHORED_NODE_ID={node['node_id']},"
             f"PREDICTION_ANCHORED_ARTIFACT_ROOT={artifact_root},"

@@ -6,6 +6,11 @@ IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 : "${PREDICTION_ANCHORED_GRAPH:?Set PREDICTION_ANCHORED_GRAPH to the reviewed immutable graph}"
 : "${PREDICTION_ANCHORED_ARTIFACT_ROOT:=${PROJECT_DIR}/fresh_check_outputs/prediction_anchored_bridge}"
+: "${PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
+: "${PAB_CONDA_ENV:=atlas_kd_tigris}"
+CONDA_BASE="${PAB_CONDA_BASE}"
+CONDA_ENV="${PAB_CONDA_ENV}"
+export CONDA_BASE CONDA_ENV PAB_CONDA_BASE PAB_CONDA_ENV
 export PYTHONNOUSERSITE=1
 source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_prepare_submitter

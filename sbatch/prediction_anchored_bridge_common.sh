@@ -9,6 +9,11 @@ IFS=$'\n\t'
 : "${PREDICTION_ANCHORED_GRAPH:?Set PREDICTION_ANCHORED_GRAPH to the immutable Step-10 graph}"
 : "${PREDICTION_ANCHORED_NODE_ID:?The submitter must export PREDICTION_ANCHORED_NODE_ID}"
 : "${PAB_DRY_RUN:=0}"
+: "${PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
+: "${PAB_CONDA_ENV:=atlas_kd_tigris}"
+CONDA_BASE="${PAB_CONDA_BASE}"
+CONDA_ENV="${PAB_CONDA_ENV}"
+export CONDA_BASE CONDA_ENV PAB_CONDA_BASE PAB_CONDA_ENV
 export PYTHONNOUSERSITE=1
 
 # shellcheck source=common.sh

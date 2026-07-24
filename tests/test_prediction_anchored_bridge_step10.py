@@ -443,6 +443,11 @@ def test_recovery_submission_omits_completed_dependency_from_sbatch(tmp_path):
         completed_node_ids={completed_node},
     )
     assert not any(value.startswith("--dependency=") for value in argv)
+    exported = next(value for value in argv if value.startswith("--export="))
+    assert "PAB_CONDA_BASE=/home/ryreu/miniforge3-aarch64" in exported
+    assert "PAB_CONDA_ENV=atlas_kd_tigris" in exported
+    assert "CONDA_BASE=/home/ryreu/miniforge3-aarch64" in exported
+    assert "CONDA_ENV=atlas_kd_tigris" in exported
 
 
 def test_submit_cli_is_non_submitting_without_explicit_execute(tmp_path):
@@ -569,6 +574,9 @@ def test_required_clis_help_and_tigris_shell_contracts():
     assert "restart" in common.lower() and "whole" in common.lower()
     assert "/dev/shm/prediction_anchored_bridge/" in common
     assert "--representative-reference" in common
+    assert "PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in common
+    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in common
+    assert "export CONDA_BASE CONDA_ENV PAB_CONDA_BASE PAB_CONDA_ENV" in common
     prepare = (REPO_ROOT / "sbatch" / "run_prepare_prediction_anchored_bridge_ram.sh").read_text(encoding="utf-8")
     assert "fresh_run env" in prepare and "-u PAB_OFFLINE_NPZ" in prepare
     submit = (REPO_ROOT / "sbatch" / "submit_prediction_anchored_bridge_pilot.sh").read_text(
