@@ -91,6 +91,10 @@ def _argv(
     completed_node_ids: set[str] | None = None,
 ):
     resources = node["resources"]
+    preflight_root = graph_path.parent
+    representative_reference = (
+        preflight_root / "representative_architecture_resource_reference.json"
+    )
     argv = [
         sbatch_bin,
         "--parsable",
@@ -113,6 +117,9 @@ def _argv(
             f"PREDICTION_ANCHORED_GRAPH={graph_path.as_posix()},"
             f"PREDICTION_ANCHORED_NODE_ID={node['node_id']},"
             f"PREDICTION_ANCHORED_ARTIFACT_ROOT={artifact_root},"
+            f"PAB_PREFLIGHT_ROOT={preflight_root.as_posix()},"
+            "PAB_REPRESENTATIVE_RESOURCE_REFERENCE="
+            f"{representative_reference.as_posix()},"
             f"PAB_REGISTRY={registry_path.as_posix()},"
             f"PAB_RESERVATIONS={reservations_path.as_posix()},"
             f"PAB_EXECUTION_SPEC={execution_spec_path.as_posix()}"

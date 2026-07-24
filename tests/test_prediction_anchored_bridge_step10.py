@@ -448,6 +448,26 @@ def test_recovery_submission_omits_completed_dependency_from_sbatch(tmp_path):
     assert "PAB_CONDA_ENV=atlas_kd_tigris" in exported
     assert "CONDA_BASE=/home/ryreu/miniforge3-aarch64" in exported
     assert "CONDA_ENV=atlas_kd_tigris" in exported
+    assert f"PAB_PREFLIGHT_ROOT={tmp_path.as_posix()}" in exported
+    assert (
+        "PAB_REPRESENTATIVE_RESOURCE_REFERENCE="
+        f"{(tmp_path / 'representative_architecture_resource_reference.json').as_posix()}"
+    ) in exported
+
+
+def test_allocation_common_derives_preflight_bindings_from_immutable_graph():
+    common = (
+        REPO_ROOT / "sbatch/prediction_anchored_bridge_common.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        ': "${PAB_PREFLIGHT_ROOT:=$(dirname -- '
+        '"${PREDICTION_ANCHORED_GRAPH}")}"'
+    ) in common
+    assert (
+        ': "${PAB_REPRESENTATIVE_RESOURCE_REFERENCE:=${PAB_PREFLIGHT_ROOT}'
+        '/representative_architecture_resource_reference.json}"'
+    ) in common
+    assert "export PAB_PREFLIGHT_ROOT PAB_REPRESENTATIVE_RESOURCE_REFERENCE" in common
 
 
 def test_submit_cli_is_non_submitting_without_explicit_execute(tmp_path):
