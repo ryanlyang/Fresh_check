@@ -17,6 +17,7 @@ from teacher_logit_reco.local_particle_residual_field import (
     RobustBridgeSampler,
     aggregate_paired_replicas,
     branch_lineage_artifact,
+    build_step3_consumer_model,
     build_consumer_replica_manifest,
     build_consumer_tensor_batch,
     build_continuation_batch_plan,
@@ -54,6 +55,48 @@ class _Widened(torch.nn.Module):
 
     def forward(self, value, fields):
         return self.part_model.output(torch.tanh(self.part_model.input(torch.cat([value, fields], dim=1))))
+
+
+class _ParticleEmbed(torch.nn.Module):
+    """Minimal Weaver-shaped embedder with the same input LayerNorm hazard."""
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.input_bn = torch.nn.BatchNorm1d(input_dim)
+        self.embed = torch.nn.Sequential(
+            torch.nn.LayerNorm(input_dim),
+            torch.nn.Linear(input_dim, 8),
+            torch.nn.GELU(),
+            torch.nn.LayerNorm(8),
+            torch.nn.Linear(8, 8),
+            torch.nn.GELU(),
+        )
+
+    def forward(self, features):
+        return self.embed(self.input_bn(features).transpose(1, 2).contiguous())
+
+
+class _ParticleCore(torch.nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.embed = _ParticleEmbed(input_dim)
+        self.head = torch.nn.Linear(8, 3)
+
+    def forward(self, features, *, mask):
+        hidden = self.embed(features)
+        valid = mask.transpose(1, 2).to(dtype=hidden.dtype)
+        pooled = (hidden * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
+        return self.head(pooled)
+
+
+class _ParticleWrapper(torch.nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.mod = _ParticleCore(input_dim)
+
+    def forward(self, points, features, lorentz_vectors, mask):
+        del points, lorentz_vectors
+        return self.mod(features, mask=mask)
 
 
 def _fields(n=100, p=3):
@@ -109,6 +152,104 @@ def test_reference_copy_zeroes_only_new_columns_and_preserves_initial_logits():
     bad["input.weight"] = torch.randn(7, 5)
     with pytest.raises(ValueError, match="outside the declared"):
         copy_reference_hlt_weights(bad, _Widened(), added_field_dim=50)
+
+
+def test_production_shaped_part_warm_start_preserves_logits_and_field_gradient():
+    """Regression for B3 job 15131: widened LayerNorm must not alter HLT logits."""
+
+    torch.manual_seed(17)
+    reference = build_step3_consumer_model(
+        A0_C250,
+        model_size="tiny",
+        num_classes=3,
+        part_model=_ParticleWrapper(17),
+    )
+    widened = build_step3_consumer_model(
+        "Tpred",
+        model_size="tiny",
+        num_classes=3,
+        part_model=_ParticleWrapper(67),
+    )
+    report = copy_reference_hlt_weights(
+        reference.state_dict(), widened, added_field_dim=50
+    )
+    assert widened.config.hlt_anchored_field_normalization is True
+    assert report["new_normalization_entries_keep_trainable_defaults"] is True
+    input_norm = widened.part_model.mod.embed.embed[0]
+    assert input_norm.__class__.__name__ == "HLTAnchoredSplitLayerNorm"
+    assert torch.equal(input_norm.weight[:17], reference.part_model.mod.embed.embed[0].weight)
+    assert torch.equal(input_norm.weight[17:], torch.ones(50))
+
+    features = torch.randn(6, 17, 9)
+    fields = torch.randn(6, 9, 50)
+    mask = torch.ones(6, 1, 9, dtype=torch.bool)
+    mask[::2, :, -2:] = False
+    reference.eval()
+    widened.eval()
+    with torch.no_grad():
+        reference_logits = reference(None, features, None, mask)
+        widened_logits = widened(
+            None,
+            features,
+            None,
+            mask,
+            oracle_fields=fields,
+            raw_mask=mask.squeeze(1),
+        )
+    identity = verify_initial_logit_identity(reference_logits, widened_logits)
+    assert identity["identity_verified"] is True
+
+    widened.train()
+    widened.zero_grad(set_to_none=True)
+    logits = widened(
+        None,
+        features,
+        None,
+        mask,
+        oracle_fields=fields,
+        raw_mask=mask.squeeze(1),
+    )
+    logits.square().mean().backward()
+    projection = widened.part_model.mod.embed.embed[1]
+    assert torch.count_nonzero(projection.weight[:, 17:]).item() == 0
+    assert projection.weight.grad is not None
+    assert torch.count_nonzero(projection.weight.grad[:, 17:]).item() > 0
+
+
+def test_actual_weaver_tiny_warm_start_identity_when_training_stack_is_available():
+    """Run the exact production module on Tigris; local CI may lack Weaver."""
+
+    pytest.importorskip("weaver.nn.model.ParticleTransformer")
+    torch.manual_seed(23)
+    reference = build_step3_consumer_model(
+        A0_C250, model_size="tiny", num_classes=3
+    )
+    widened = build_step3_consumer_model(
+        "Tpred", model_size="tiny", num_classes=3
+    )
+    copy_reference_hlt_weights(reference.state_dict(), widened, added_field_dim=50)
+
+    features = torch.randn(3, 17, 8)
+    fields = torch.randn(3, 8, 50)
+    mask = torch.ones(3, 1, 8, dtype=torch.bool)
+    momentum = torch.randn(3, 3, 8)
+    energy = (momentum.square().sum(dim=1, keepdim=True) + 1.0).sqrt()
+    vectors = torch.cat((momentum, energy), dim=1)
+    points = torch.zeros(3, 2, 8)
+    reference.eval()
+    widened.eval()
+    with torch.no_grad():
+        reference_logits = reference(points, features, vectors, mask)
+        widened_logits = widened(
+            points,
+            features,
+            vectors,
+            mask,
+            oracle_fields=fields,
+            raw_mask=mask.squeeze(1),
+        )
+    identity = verify_initial_logit_identity(reference_logits, widened_logits)
+    assert identity["identity_verified"] is True
 
 
 def test_lineage_restores_model_optimizer_scheduler_and_shared_plan_exactly():

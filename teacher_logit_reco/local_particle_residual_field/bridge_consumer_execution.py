@@ -578,6 +578,56 @@ def run_consumer_campaign_from_execution_spec(
         }
         for seed in PAIRED_SEED_IDS:
             set_training_seed(int(seed))
+            # Fail the allocation before spending the root-training budget if
+            # the paired HLT/Tpred warm start is not a true no-op.  Job 15131
+            # exposed why this invariant must precede, rather than follow,
+            # more than an hour of optimization.
+            a0_probe = make_model(A0_C250, config).to(torch_device)
+            a0_init = initialize_step3_root_from_reference(
+                a0_probe,
+                spec["baseline_checkpoint"]["path"],
+                run_id=A0_C250,
+                map_location=torch_device,
+            )
+            tpred_probe = make_model(TPRED, config).to(torch_device)
+            tpred_init = initialize_step3_root_from_reference(
+                tpred_probe,
+                spec["baseline_checkpoint"]["path"],
+                run_id=TPRED,
+                map_location=torch_device,
+            )
+            probe_raw = stack.batch(
+                consumer_indices[: min(config.batch_size, len(consumer_indices))]
+            )
+            a0_batch = build_consumer_tensor_batch(
+                tokens=probe_raw["tokens"],
+                mask=probe_raw["mask"],
+                labels=probe_raw["labels"],
+                f0=probe_raw["f0"],
+                f_true=probe_raw["f_true"],
+                run_id=A0_C250,
+                device=torch_device,
+            )
+            tpred_batch = build_consumer_tensor_batch(
+                tokens=probe_raw["tokens"],
+                mask=probe_raw["mask"],
+                labels=probe_raw["labels"],
+                f0=probe_raw["f0"],
+                f_true=probe_raw["f_true"],
+                run_id=TPRED,
+                device=torch_device,
+            )
+            a0_probe.eval()
+            tpred_probe.eval()
+            with torch.no_grad():
+                verify_paired_a0_tpred_initialization(
+                    a0_initialization=a0_init,
+                    tpred_initialization=tpred_init,
+                    reference_logits=_model_logits(a0_probe, a0_batch),
+                    tpred_logits=_model_logits(tpred_probe, tpred_batch),
+                )
+            del a0_probe, tpred_probe, a0_batch, tpred_batch, probe_raw
+
             baseline_plan_consumer = build_continuation_batch_plan(
                 seed_id=seed,
                 n_examples=len(consumer_indices),
@@ -667,35 +717,6 @@ def run_consumer_campaign_from_execution_spec(
                     "batch_plan_sha256": report["batch_plan_sha256"],
                 }
                 roots[run_id] = (model, optimizer, resolver, report, initialization)
-
-            # Same-reference/zero-column identity is checked before any result
-            # is allowed to leave RAM.  Rebuild roots because the trained roots
-            # are no longer at initialization.
-            a0_probe = make_model(A0_C250, config).to(torch_device)
-            a0_init = initialize_step3_root_from_reference(
-                a0_probe, spec["baseline_checkpoint"]["path"], run_id=A0_C250, map_location=torch_device
-            )
-            tpred_probe = make_model(TPRED, config).to(torch_device)
-            tpred_init = initialize_step3_root_from_reference(
-                tpred_probe, spec["baseline_checkpoint"]["path"], run_id=TPRED, map_location=torch_device
-            )
-            probe_raw = stack.batch(consumer_indices[: min(config.batch_size, len(consumer_indices))])
-            a0_batch = build_consumer_tensor_batch(
-                tokens=probe_raw["tokens"], mask=probe_raw["mask"], labels=probe_raw["labels"],
-                f0=probe_raw["f0"], f_true=probe_raw["f_true"], run_id=A0_C250, device=torch_device,
-            )
-            tpred_batch = build_consumer_tensor_batch(
-                tokens=probe_raw["tokens"], mask=probe_raw["mask"], labels=probe_raw["labels"],
-                f0=probe_raw["f0"], f_true=probe_raw["f_true"], run_id=TPRED, device=torch_device,
-            )
-            a0_probe.eval(); tpred_probe.eval()
-            with torch.no_grad():
-                verify_paired_a0_tpred_initialization(
-                    a0_initialization=a0_init,
-                    tpred_initialization=tpred_init,
-                    reference_logits=_model_logits(a0_probe, a0_batch),
-                    tpred_logits=_model_logits(tpred_probe, tpred_batch),
-                )
 
             # A0 long branches from the exact terminal A0 state.
             a0_model, a0_optimizer, _, _, _ = roots[A0_C250]

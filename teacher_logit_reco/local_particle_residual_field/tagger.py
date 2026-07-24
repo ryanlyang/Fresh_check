@@ -122,6 +122,7 @@ class LocalResidualFieldTaggerConfig:
     num_classes: int = 10
     field_dim: int = 50
     base_feature_dim: int = len(PF_FEATURE_NAMES)
+    hlt_anchored_field_normalization: bool = False
     field_source: str = RESIDUAL_FIELD_SOURCE_FROZEN_RECONSTRUCTOR
     model_size: str = "base"
     residual_field_scale: float = 1.0
@@ -149,6 +150,16 @@ class LocalResidualFieldTaggerConfig:
         if field_dim < 0 or (field_dim == 0 and source != RESIDUAL_FIELD_SOURCE_HLT_ONLY):
             raise ValueError("field_dim must be positive except for hlt_only baselines")
         object.__setattr__(self, "field_dim", field_dim)
+        anchored_normalization = bool(self.hlt_anchored_field_normalization)
+        if anchored_normalization and (
+            source == RESIDUAL_FIELD_SOURCE_HLT_ONLY or field_dim <= 0
+        ):
+            raise ValueError(
+                "hlt_anchored_field_normalization requires a positive residual-field input"
+            )
+        object.__setattr__(
+            self, "hlt_anchored_field_normalization", anchored_normalization
+        )
         scale = float(self.residual_field_scale)
         if scale < 0.0:
             raise ValueError("residual_field_scale must be non-negative")
@@ -256,6 +267,136 @@ class LocalResidualFieldTaggerOutput:
     control_diagnostics: Mapping[str, Any] | None = None
 
 
+class HLTAnchoredSplitLayerNorm(_ModuleBase):
+    """Normalize HLT and residual-field channels without perturbing the HLT path.
+
+    Weaver's particle embedder applies LayerNorm over its complete input vector
+    before the widened input projection.  A conventional ``LayerNorm(67)``
+    therefore changes the original 17 HLT activations merely because 50 field
+    channels were appended, even when the new projection columns are zero.
+    This module retains one state-dict-compatible affine vector while
+    normalizing the two channel blocks independently.
+    """
+
+    def __init__(
+        self,
+        base_feature_dim: int,
+        field_dim: int,
+        *,
+        eps: float = 1.0e-5,
+        elementwise_affine: bool = True,
+        device: Any | None = None,
+        dtype: Any | None = None,
+    ) -> None:
+        torch = require_torch()
+        super().__init__()
+        self.base_feature_dim = int(base_feature_dim)
+        self.field_dim = int(field_dim)
+        self.normalized_shape = (self.base_feature_dim + self.field_dim,)
+        self.eps = float(eps)
+        self.elementwise_affine = bool(elementwise_affine)
+        if self.base_feature_dim <= 0 or self.field_dim <= 0:
+            raise ValueError("split LayerNorm channel dimensions must be positive")
+        if self.elementwise_affine:
+            factory_kwargs = {"device": device, "dtype": dtype}
+            self.weight = torch.nn.Parameter(
+                torch.ones(self.normalized_shape, **factory_kwargs)
+            )
+            self.bias = torch.nn.Parameter(
+                torch.zeros(self.normalized_shape, **factory_kwargs)
+            )
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, value: Any) -> Any:
+        torch = require_torch()
+        if int(value.shape[-1]) != int(self.normalized_shape[0]):
+            raise ValueError(
+                f"anchored LayerNorm expected {self.normalized_shape[0]} channels, "
+                f"got {value.shape[-1]}"
+            )
+        base = value[..., : self.base_feature_dim]
+        fields = value[..., self.base_feature_dim :]
+        base_weight = (
+            None if self.weight is None else self.weight[: self.base_feature_dim]
+        )
+        base_bias = None if self.bias is None else self.bias[: self.base_feature_dim]
+        field_weight = (
+            None if self.weight is None else self.weight[self.base_feature_dim :]
+        )
+        field_bias = (
+            None if self.bias is None else self.bias[self.base_feature_dim :]
+        )
+        base = torch.nn.functional.layer_norm(
+            base,
+            (self.base_feature_dim,),
+            base_weight,
+            base_bias,
+            self.eps,
+        )
+        fields = torch.nn.functional.layer_norm(
+            fields,
+            (self.field_dim,),
+            field_weight,
+            field_bias,
+            self.eps,
+        )
+        return torch.cat((base, fields), dim=-1)
+
+
+def install_hlt_anchored_field_normalization(
+    part_model: Any,
+    *,
+    base_feature_dim: int,
+    field_dim: int,
+) -> dict[str, Any]:
+    """Replace only Weaver's widened input LayerNorm with a split normalizer."""
+
+    torch = require_torch()
+    core = getattr(part_model, "mod", part_model)
+    embedder = getattr(core, "embed", None)
+    embed_stack = getattr(embedder, "embed", None)
+    if not isinstance(embed_stack, torch.nn.Sequential) or len(embed_stack) < 2:
+        raise TypeError(
+            "HLT-anchored field normalization requires Weaver's sequential "
+            "particle input embedder"
+        )
+    original = embed_stack[0]
+    if not isinstance(original, torch.nn.LayerNorm):
+        raise TypeError(
+            "HLT-anchored field normalization expected LayerNorm as the first "
+            "particle embedding operation"
+        )
+    total = int(base_feature_dim) + int(field_dim)
+    if tuple(int(value) for value in original.normalized_shape) != (total,):
+        raise ValueError(
+            "particle input LayerNorm shape does not match base plus field dimensions"
+        )
+    parameter = next(original.parameters(), None)
+    replacement = HLTAnchoredSplitLayerNorm(
+        int(base_feature_dim),
+        int(field_dim),
+        eps=float(original.eps),
+        elementwise_affine=bool(original.elementwise_affine),
+        device=None if parameter is None else parameter.device,
+        dtype=None if parameter is None else parameter.dtype,
+    )
+    with torch.no_grad():
+        if original.elementwise_affine:
+            replacement.weight.copy_(original.weight)
+            replacement.bias.copy_(original.bias)
+    embed_stack[0] = replacement
+    return {
+        "installed": True,
+        "base_feature_dim": int(base_feature_dim),
+        "field_dim": int(field_dim),
+        "normalized_shape": [total],
+        "input_projection_index": 1,
+        "hlt_and_field_blocks_normalized_independently": True,
+    }
+
+
 def _coerce_reconstructor_config(
     config: LocalResidualFieldTaggerConfig,
 ) -> LocalResidualFieldReconstructorConfig:
@@ -305,6 +446,15 @@ class LocalResidualFieldAugmentedParT(_ModuleBase):
             model_size=str(self.config.model_size),
             overrides={"input_dim": int(self.config.augmented_feature_dim)},
         )
+        self.hlt_anchored_normalization_report = None
+        if self.config.hlt_anchored_field_normalization:
+            self.hlt_anchored_normalization_report = (
+                install_hlt_anchored_field_normalization(
+                    self.part_model,
+                    base_feature_dim=int(self.config.base_feature_dim),
+                    field_dim=int(self.config.field_dim),
+                )
+            )
         self.field_dropout = torch.nn.Dropout(float(self.config.field_dropout))
         if reconstructor is not None:
             self.reconstructor = reconstructor
@@ -858,6 +1008,8 @@ __all__ = [
     "RESIDUAL_FIELD_SOURCES",
     "LocalResidualFieldTaggerConfig",
     "LocalResidualFieldTaggerOutput",
+    "HLTAnchoredSplitLayerNorm",
+    "install_hlt_anchored_field_normalization",
     "LocalResidualFieldAugmentedParT",
     "normalize_residual_field_source",
     "warm_start_local_residual_field_tagger_part",

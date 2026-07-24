@@ -50,6 +50,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--approve-final-test", action="store_true")
     parser.add_argument("--sbatch-bin", default="sbatch")
     parser.add_argument("--log-dir", default="fresh_check_logs")
+    parser.add_argument(
+        "--existing-job",
+        action="append",
+        default=[],
+        metavar="NODE_ID=SLURM_JOB_ID",
+        help=(
+            "Reuse an already submitted node when recovering the same immutable "
+            "graph. Downstream jobs retain their Slurm dependency on this job ID."
+        ),
+    )
     return parser
 
 
@@ -112,6 +122,33 @@ def _validate_required_executors(graph, *, include_final_test: bool) -> dict[str
         "repository_owned_deployable_export": "scripts/deploy_prediction_anchored_bridge.py",
         "repository_owned_final_test": "scripts/deploy_prediction_anchored_bridge.py",
     }
+
+
+def _existing_jobs(
+    values: list[str],
+    graph,
+    *,
+    include_final_test: bool,
+) -> dict[str, str]:
+    by_id = {row["node_id"]: row for row in graph["nodes"]}
+    parsed: dict[str, str] = {}
+    for raw in values:
+        node_id, separator, job_id = str(raw).partition("=")
+        if not separator or not node_id or not job_id.isdigit():
+            raise ValueError(
+                "--existing-job must have the form NODE_ID=SLURM_JOB_ID"
+            )
+        if node_id not in by_id:
+            raise KeyError(f"--existing-job names unknown graph node {node_id!r}")
+        if by_id[node_id]["protected_final_test"] and not include_final_test:
+            raise PermissionError(
+                "the protected final-test node cannot be reused without "
+                "--include-final-test and --approve-final-test"
+            )
+        if node_id in parsed:
+            raise ValueError(f"duplicate --existing-job node {node_id!r}")
+        parsed[node_id] = job_id
+    return parsed
 
 
 def _submission_bindings(args, graph) -> tuple[Path, Path, Path]:
@@ -178,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         raise PermissionError("final-test submission requires --approve-final-test")
     if args.approve_final_test and not args.include_final_test:
         raise ValueError("--approve-final-test has no effect without --include-final-test")
+    if args.existing_job and not args.execute:
+        raise ValueError("--existing-job is only valid with --execute")
     graph_path = Path(args.graph).resolve()
     graph = load_hashed_json(graph_path)
     validation = validate_prediction_anchored_tigris_graph(graph)
@@ -213,11 +252,18 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     by_id = {row["node_id"]: row for row in graph["nodes"]}
-    job_ids = {}
+    reused_job_ids = _existing_jobs(
+        args.existing_job,
+        graph,
+        include_final_test=bool(args.include_final_test),
+    )
+    job_ids = dict(reused_job_ids)
     commands = []
     for node_id in graph["topological_node_ids"]:
         node = by_id[node_id]
         if node["protected_final_test"] and not args.include_final_test:
+            continue
+        if node_id in reused_job_ids:
             continue
         command = _argv(
             node,
@@ -245,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         graph,
         job_ids=job_ids,
         include_final_test=bool(args.include_final_test),
+        reused_job_node_ids=tuple(reused_job_ids),
     )
     publication = write_immutable_json(args.ledger_output, ledger)
     print(
@@ -253,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dry_run": False,
                 "submission_executed": True,
                 "executor_preflight": executor_preflight,
+                "reused_jobs": reused_job_ids,
                 "submitted_jobs": commands,
                 "ledger": ledger,
                 "publication": publication,

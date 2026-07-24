@@ -381,6 +381,37 @@ def test_dry_job_ledger_records_every_afterok_dependency(tmp_path):
         assert row["dependency_job_ids"] == [ids[value] for value in row["dependency_node_ids"]]
 
 
+def test_recovery_job_ledger_marks_existing_nodes_and_keeps_full_dependencies(tmp_path):
+    graph = _graph(tmp_path)
+    submitted = [node for node in graph["nodes"] if not node["protected_final_test"]]
+    ids = {node["node_id"]: str(15_000 + index) for index, node in enumerate(submitted)}
+    reused = (
+        "b0_validate_preflight",
+        "b1_train_register_r0",
+        "b2_stage_recipes_scalers",
+        "b3_l0_paired3",
+    )
+    ledger = build_prediction_anchored_job_ledger(
+        graph,
+        job_ids=ids,
+        include_final_test=False,
+        reused_job_node_ids=reused,
+    )
+    assert ledger["reused_job_node_ids"] == sorted(reused)
+    assert ledger["reused_job_count"] == 4
+    rows = {row["node_id"]: row for row in ledger["jobs"]}
+    assert all(
+        rows[node_id]["submission_origin"] == "existing_slurm_job"
+        for node_id in reused
+    )
+    assert rows["b3_consumers_paired3"]["dependency_job_ids"] == [
+        ids["b2_stage_recipes_scalers"]
+    ]
+    assert rows["b6_l0_postteacher_eval_paired3"]["dependency_job_ids"][0] == ids[
+        "b3_l0_paired3"
+    ]
+
+
 def test_submit_cli_is_non_submitting_without_explicit_execute(tmp_path):
     graph_path = tmp_path / "graph.json"
     write_immutable_json(graph_path, _graph(tmp_path))
@@ -392,6 +423,26 @@ def test_submit_cli_is_non_submitting_without_explicit_execute(tmp_path):
     assert payload["submission_executed"] is False
     assert payload["rendered"]["submission_executed"] is False
     assert "submitted_jobs" not in payload
+
+
+def test_submit_cli_rejects_existing_jobs_without_execute(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    write_immutable_json(graph_path, _graph(tmp_path))
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/submit_prediction_anchored_bridge_graph.py",
+            "--graph",
+            str(graph_path),
+            "--existing-job",
+            "b2_stage_recipes_scalers=15130",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert "--existing-job is only valid with --execute" in completed.stderr
 
 
 def test_execute_requires_explicit_scientific_bindings_before_sbatch(tmp_path):

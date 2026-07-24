@@ -967,6 +967,7 @@ def build_prediction_anchored_job_ledger(
     *,
     job_ids: Mapping[str, str | int],
     include_final_test: bool,
+    reused_job_node_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     validate_prediction_anchored_tigris_graph(graph)
     expected = {
@@ -976,6 +977,9 @@ def build_prediction_anchored_job_ledger(
     }
     if set(job_ids) != expected:
         raise ValueError("job ledger IDs do not exactly match the submitted graph nodes")
+    reused = {str(value) for value in reused_job_node_ids}
+    if not reused.issubset(expected):
+        raise ValueError("job ledger reuses an unknown or unsubmitted graph node")
     rows = []
     for node_id in graph["topological_node_ids"]:
         if node_id not in expected:
@@ -993,6 +997,9 @@ def build_prediction_anchored_job_ledger(
                 "afterany_dependency_node_ids": list(node.get("afterany_dependencies", [])),
                 "runner": node["runner"],
                 "arguments": list(node["arguments"]),
+                "submission_origin": (
+                    "existing_slurm_job" if node_id in reused else "submitted_now"
+                ),
             }
         )
     return with_content_hash(
@@ -1004,6 +1011,8 @@ def build_prediction_anchored_job_ledger(
             "include_final_test": bool(include_final_test),
             "jobs": rows,
             "job_count": len(rows),
+            "reused_job_node_ids": sorted(reused),
+            "reused_job_count": len(reused),
             "dependencies_recorded": True,
             "immutable_after_submission": True,
         }

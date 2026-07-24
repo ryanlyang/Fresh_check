@@ -548,6 +548,7 @@ def copy_reference_hlt_weights(
     updated = dict(target)
     exact: list[str] = []
     widened: list[dict[str, Any]] = []
+    widened_default_entries: dict[str, Any] = {}
     missing: list[str] = []
     for target_key, target_value in target.items():
         if not target_key.startswith(target_prefix):
@@ -575,10 +576,24 @@ def copy_reference_hlt_weights(
                 f"{source_shape} -> {target_shape}"
             )
         axis = differing[0]
-        expanded = torch.zeros_like(target_value)
+        # Preserve the target module's semantically correct defaults for
+        # widened one-dimensional normalization state (gain/running variance
+        # are ones; bias/running mean are zeros).  Only tensors with a genuine
+        # input-column axis are zeroed so the field projection starts as an
+        # exact no-op while retaining a usable gradient into those columns.
+        expanded = target_value.detach().clone()
         slices = [slice(None)] * len(target_shape)
         slices[axis] = slice(0, source_shape[axis])
         expanded[tuple(slices)] = value.detach().to(device=target_value.device, dtype=target_value.dtype)
+        new_slices = [slice(None)] * len(target_shape)
+        new_slices[axis] = slice(source_shape[axis], None)
+        zero_initialized_input_columns = bool(expanded.ndim >= 2)
+        if zero_initialized_input_columns:
+            expanded[tuple(new_slices)] = 0
+        else:
+            widened_default_entries[target_key] = (
+                expanded[tuple(new_slices)].detach().cpu().clone()
+            )
         updated[target_key] = expanded
         widened.append(
             {
@@ -586,7 +601,10 @@ def copy_reference_hlt_weights(
                 "input_axis": axis,
                 "source_shape": list(source_shape),
                 "target_shape": list(target_shape),
-                "new_entries_exact_zero": True,
+                "new_entries_exact_zero": zero_initialized_input_columns,
+                "new_entries_use_target_module_defaults": bool(
+                    not zero_initialized_input_columns
+                ),
             }
         )
     if missing:
@@ -602,14 +620,28 @@ def copy_reference_hlt_weights(
         source_key = key[len(target_prefix) :]
         if not torch.equal(loaded[key].detach().cpu(), source[source_key].detach().cpu().to(dtype=loaded[key].dtype)):
             raise AssertionError(f"copied HLT tensor {key} is not bitwise identical")
+    zero_column_keys = []
     for item in widened:
         key = item["target_key"]
         axis = int(item["input_axis"])
         old = int(item["source_shape"][axis])
         slices = [slice(None)] * loaded[key].ndim
         slices[axis] = slice(old, None)
-        if not torch.count_nonzero(loaded[key][tuple(slices)]).item() == 0:
-            raise AssertionError(f"new field-input entries for {key} are not exactly zero")
+        if bool(item["new_entries_exact_zero"]):
+            if not torch.count_nonzero(loaded[key][tuple(slices)]).item() == 0:
+                raise AssertionError(
+                    f"new field-input columns for {key} are not exactly zero"
+                )
+            zero_column_keys.append(key)
+        elif not torch.equal(
+            loaded[key][tuple(slices)].detach().cpu(),
+            widened_default_entries[key],
+        ):
+            raise AssertionError(
+                f"new normalization state for {key} did not retain target defaults"
+            )
+    if added == 50 and not zero_column_keys:
+        raise AssertionError("Tpred warm start found no zero-initialized field columns")
     return with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_CONSUMER_RUN_CONTRACT,
@@ -617,7 +649,13 @@ def copy_reference_hlt_weights(
             "exact_copied_keys": exact,
             "widened_input_keys": widened,
             "all_other_part_parameters_bitwise_copied": True,
-            "new_field_input_entries_exact_zero": bool(added == 50),
+            "new_field_input_column_keys": zero_column_keys,
+            "new_field_input_entries_exact_zero": bool(
+                added == 50 and zero_column_keys
+            ),
+            "new_normalization_entries_keep_trainable_defaults": bool(
+                added == 50
+            ),
         }
     )
 
@@ -681,6 +719,7 @@ def build_step3_consumer_model(
     config = LocalResidualFieldTaggerConfig(
         num_classes=int(num_classes),
         field_dim=0 if is_a0 else 50,
+        hlt_anchored_field_normalization=not is_a0,
         field_source=(
             RESIDUAL_FIELD_SOURCE_HLT_ONLY if is_a0 else RESIDUAL_FIELD_SOURCE_ORACLE
         ),
