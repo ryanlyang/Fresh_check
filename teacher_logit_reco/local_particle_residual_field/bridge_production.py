@@ -968,6 +968,7 @@ def build_prediction_anchored_job_ledger(
     job_ids: Mapping[str, str | int],
     include_final_test: bool,
     reused_job_node_ids: Sequence[str] = (),
+    completed_job_node_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     validate_prediction_anchored_tigris_graph(graph)
     expected = {
@@ -978,8 +979,13 @@ def build_prediction_anchored_job_ledger(
     if set(job_ids) != expected:
         raise ValueError("job ledger IDs do not exactly match the submitted graph nodes")
     reused = {str(value) for value in reused_job_node_ids}
+    completed = {str(value) for value in completed_job_node_ids}
     if not reused.issubset(expected):
         raise ValueError("job ledger reuses an unknown or unsubmitted graph node")
+    if not completed.issubset(expected):
+        raise ValueError("job ledger completes an unknown or unsubmitted graph node")
+    if reused & completed:
+        raise ValueError("job ledger node cannot be both live-reused and completed")
     rows = []
     for node_id in graph["topological_node_ids"]:
         if node_id not in expected:
@@ -998,8 +1004,17 @@ def build_prediction_anchored_job_ledger(
                 "runner": node["runner"],
                 "arguments": list(node["arguments"]),
                 "submission_origin": (
-                    "existing_slurm_job" if node_id in reused else "submitted_now"
+                    "completed_slurm_job"
+                    if node_id in completed
+                    else "existing_slurm_job"
+                    if node_id in reused
+                    else "submitted_now"
                 ),
+                "active_dependency_node_ids": [
+                    value
+                    for value in node["dependencies"]
+                    if value not in completed
+                ],
             }
         )
     return with_content_hash(
@@ -1013,6 +1028,8 @@ def build_prediction_anchored_job_ledger(
             "job_count": len(rows),
             "reused_job_node_ids": sorted(reused),
             "reused_job_count": len(reused),
+            "completed_job_node_ids": sorted(completed),
+            "completed_job_count": len(completed),
             "dependencies_recorded": True,
             "immutable_after_submission": True,
         }

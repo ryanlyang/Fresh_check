@@ -60,6 +60,17 @@ def _parser() -> argparse.ArgumentParser:
             "graph. Downstream jobs retain their Slurm dependency on this job ID."
         ),
     )
+    parser.add_argument(
+        "--completed-job",
+        action="append",
+        default=[],
+        metavar="NODE_ID=SLURM_JOB_ID",
+        help=(
+            "Reuse a successfully completed node whose job has aged out of "
+            "Slurm's live dependency table. Its job ID remains in provenance, "
+            "but no new afterok clause is emitted for it."
+        ),
+    )
     return parser
 
 
@@ -74,6 +85,7 @@ def _argv(
     execution_spec_path: Path,
     log_dir: Path,
     sbatch_bin: str,
+    completed_node_ids: set[str] | None = None,
 ):
     resources = node["resources"]
     argv = [
@@ -101,15 +113,20 @@ def _argv(
     ]
     if int(resources["gpus_per_node"]) > 0:
         argv.append(f"--gres=gpu:{resources['gpus_per_node']}")
-    if node["dependencies"]:
+    completed_nodes = completed_node_ids or set()
+    active_dependencies = [
+        value for value in node["dependencies"] if value not in completed_nodes
+    ]
+    if active_dependencies:
         afterany = set(node.get("afterany_dependencies", []))
-        afterok_ids = [value for value in node["dependencies"] if value not in afterany]
+        afterok_ids = [value for value in active_dependencies if value not in afterany]
         clauses = []
         if afterok_ids:
             clauses.append("afterok:" + ":".join(str(job_ids[value]) for value in afterok_ids))
-        if afterany:
+        active_afterany = [value for value in active_dependencies if value in afterany]
+        if active_afterany:
             clauses.append("afterany:" + ":".join(
-                str(job_ids[value]) for value in node["dependencies"] if value in afterany
+                str(job_ids[value]) for value in active_afterany
             ))
         argv.append("--dependency=" + ",".join(clauses))
     argv.extend([f"sbatch/{node['runner']}", *node["arguments"]])
@@ -215,8 +232,10 @@ def main(argv: list[str] | None = None) -> int:
         raise PermissionError("final-test submission requires --approve-final-test")
     if args.approve_final_test and not args.include_final_test:
         raise ValueError("--approve-final-test has no effect without --include-final-test")
-    if args.existing_job and not args.execute:
-        raise ValueError("--existing-job is only valid with --execute")
+    if (args.existing_job or args.completed_job) and not args.execute:
+        raise ValueError(
+            "--existing-job and --completed-job are only valid with --execute"
+        )
     graph_path = Path(args.graph).resolve()
     graph = load_hashed_json(graph_path)
     validation = validate_prediction_anchored_tigris_graph(graph)
@@ -257,13 +276,24 @@ def main(argv: list[str] | None = None) -> int:
         graph,
         include_final_test=bool(args.include_final_test),
     )
-    job_ids = dict(reused_job_ids)
+    completed_job_ids = _existing_jobs(
+        args.completed_job,
+        graph,
+        include_final_test=bool(args.include_final_test),
+    )
+    overlap = set(reused_job_ids) & set(completed_job_ids)
+    if overlap:
+        raise ValueError(
+            "nodes cannot be both --existing-job and --completed-job: "
+            + ", ".join(sorted(overlap))
+        )
+    job_ids = {**reused_job_ids, **completed_job_ids}
     commands = []
     for node_id in graph["topological_node_ids"]:
         node = by_id[node_id]
         if node["protected_final_test"] and not args.include_final_test:
             continue
-        if node_id in reused_job_ids:
+        if node_id in reused_job_ids or node_id in completed_job_ids:
             continue
         command = _argv(
             node,
@@ -275,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             execution_spec_path=execution_spec_path,
             log_dir=log_dir,
             sbatch_bin=str(args.sbatch_bin),
+            completed_node_ids=set(completed_job_ids),
         )
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
@@ -292,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         job_ids=job_ids,
         include_final_test=bool(args.include_final_test),
         reused_job_node_ids=tuple(reused_job_ids),
+        completed_job_node_ids=tuple(completed_job_ids),
     )
     publication = write_immutable_json(args.ledger_output, ledger)
     print(
@@ -301,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 "submission_executed": True,
                 "executor_preflight": executor_preflight,
                 "reused_jobs": reused_job_ids,
+                "completed_jobs": completed_job_ids,
                 "submitted_jobs": commands,
                 "ledger": ledger,
                 "publication": publication,
