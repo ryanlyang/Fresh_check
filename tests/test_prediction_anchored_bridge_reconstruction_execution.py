@@ -14,6 +14,9 @@ from teacher_logit_reco.local_particle_residual_field.bridge import (
     BridgeScalers,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import with_content_hash
+from teacher_logit_reco.local_particle_residual_field.bridge_reconstructor import (
+    PredictionAnchoredC0Correction,
+)
 from teacher_logit_reco.local_particle_residual_field.bridge_reconstruction_execution import (
     PREDICTION_ANCHORED_L0_POSTTEACHER_LINEAGE_CONTRACT,
     PREDICTION_ANCHORED_RECONSTRUCTION_METRICS_CONTRACT,
@@ -160,9 +163,9 @@ def test_b6_rejects_each_stale_deployed_reference_parent(field_name: str):
         _validate_b6_deployed_reference_lineage(stale, **parents)
 
 
-def test_all_46_reconstruction_rows_have_one_repository_executor_mapping():
-    assert len(RECONSTRUCTION_RUN_IDS) == 46
-    assert len(set(RECONSTRUCTION_RUN_IDS)) == 46
+def test_all_47_reconstruction_rows_have_one_repository_executor_mapping():
+    assert len(RECONSTRUCTION_RUN_IDS) == 47
+    assert len(set(RECONSTRUCTION_RUN_IDS)) == 47
     resolved = {run_id: resolve_reconstruction_run(run_id) for run_id in RECONSTRUCTION_RUN_IDS}
     assert set(resolved) == set(RECONSTRUCTION_RUN_IDS)
     assert resolved["D10_L0_bridge_only"].binding_kind is None
@@ -171,6 +174,10 @@ def test_all_46_reconstruction_rows_have_one_repository_executor_mapping():
     assert resolved["D10_N3_nonprivileged_teacher_kd"].cache_namespace.endswith("f0_control")
     assert resolved[DIRECT_HLT].direct is True
     assert resolved["D10_B1_all50_fullhead"].channel_policy == "all50"
+    assert resolved["D10_TALT_A0"].binding_kind == "alternate"
+    assert resolved["D10_TALT_A0"].architecture_id == "D10_A0_c0_delta"
+    assert resolved["D10_TALT_A3"].binding_kind == "alternate"
+    assert resolved["D10_TALT_A3"].architecture_id == ARCH_A3_HLG_PRIMARY
 
 
 def test_representative_c0_local_hlg_absolute_and_all50_models_build_from_locked_artifacts():
@@ -197,11 +204,19 @@ def test_representative_c0_local_hlg_absolute_and_all50_models_build_from_locked
         all50_scaler=all50,
         dropout=0.0,
     )
+    clean_c0, _ = build_reconstruction_model(
+        "D10_TALT_A0", physical45_scaler=physical, dropout=0.0
+    )
+    clean_hlg, _ = build_reconstruction_model(
+        "D10_TALT_A3", physical45_scaler=physical, dropout=0.0
+    )
     assert c0.config.trust_bound_enabled is False
     assert local.config.architecture_id == ARCH_A1_MULTISCALE_LOCAL
     assert hlg.config.architecture_id == ARCH_A3_HLG_PRIMARY
     assert absolute.config.architecture_id == ARCH_A5_HLG_ABSOLUTE
     assert all50_model.full50_reachable is True
+    assert isinstance(clean_c0, PredictionAnchoredC0Correction)
+    assert clean_hlg.config.architecture_id == ARCH_A3_HLG_PRIMARY
     try:
         build_reconstruction_model(DIRECT_HLT, physical45_scaler=physical)
     except FileNotFoundError as error:

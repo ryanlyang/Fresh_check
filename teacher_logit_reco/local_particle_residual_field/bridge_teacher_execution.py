@@ -36,6 +36,7 @@ from .bridge_evaluation import (
     PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
     PREDICTION_ANCHORED_SELECTED_CONSUMER_CONTRACT,
     PRIMARY_TEACHER_NAMESPACE,
+    WARN_AND_CONTINUE_QUALITY_GATE_POLICY,
     build_teacher_binding,
     validate_teacher_binding,
 )
@@ -122,7 +123,7 @@ def bind_teacher_set_from_execution_spec(
     output_dir: str | Path,
     include_eligible_alternate: bool = True,
 ) -> dict[str, Any]:
-    """Create primary/all50 and, when valid, alternate bindings from B3/B4 outputs."""
+    """Create primary/all50 and requested alternate bindings from B3/B4 outputs."""
 
     _, child = _load_execution_inputs(execution_spec_path)
     selected = load_hashed_json(
@@ -151,6 +152,11 @@ def bind_teacher_set_from_execution_spec(
     if selected_run not in {T10_CLEAN, T10_ROBUST}:
         raise ValueError("primary selection is not a physical45 T10 recipe")
     primary_aggregate = selected["recipe_aggregate_metrics"]
+    quality_override_authorized = bool(
+        selected.get("quality_gate_policy") == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+        and selected.get("quality_warnings_acknowledged")
+        and selected.get("downstream_submission_allowed")
+    )
     primary_checkpoint = Path(str(selected.get("checkpoint_path", "")))
     if primary_checkpoint.is_symlink() or not primary_checkpoint.is_file():
         raise FileNotFoundError("selected primary checkpoint is absent or unsafe")
@@ -185,6 +191,7 @@ def bind_teacher_set_from_execution_spec(
             target_cache_namespace=PRIMARY_TEACHER_NAMESPACE,
             bridge_recipe_sha256=physical_recipe["content_hash"],
             primary_selection=selected,
+            allow_failed_quality_gates=quality_override_authorized,
         ),
         "all50": build_teacher_binding(
             binding_kind="all50",
@@ -207,7 +214,7 @@ def bind_teacher_set_from_execution_spec(
             evidence_root / alternate_run / "selection_aggregate.json",
             expected_contract=PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
         )
-        if bool(alternate_aggregate.get("eligible")):
+        if bool(alternate_aggregate.get("eligible")) or quality_override_authorized:
             alternate_checkpoint = _teacher_checkpoint(
                 run_id=alternate_run,
                 aggregate=alternate_aggregate,
@@ -223,8 +230,13 @@ def bind_teacher_set_from_execution_spec(
                 validation_manifest_hashes=validation_hashes,
                 target_cache_namespace=ALTERNATE_TEACHER_NAMESPACE,
                 bridge_recipe_sha256=physical_recipe["content_hash"],
+                allow_failed_quality_gates=quality_override_authorized,
             )
-            alternate_status = "BOUND_ELIGIBLE"
+            alternate_status = (
+                "BOUND_ELIGIBLE"
+                if bool(alternate_aggregate.get("eligible"))
+                else "BOUND_WITH_QUALITY_WARNINGS"
+            )
         else:
             alternate_status = "SKIPPED_INVALID_PARENT"
 

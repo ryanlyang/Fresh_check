@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from jetclass_fresh.jetclass_data import load_split_manifest  # noqa: E402
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     A3_INTERACTION_RUN_IDS,
+    ALTERNATE_RUN_IDS,
     ALL50_RUN_IDS,
     NEGATIVE_CONTROL_RUN_IDS,
     NORMAL_PILOT_BUDGET_BYTES,
@@ -124,7 +125,12 @@ def main(argv: list[str] | None = None) -> int:
             "negative_control_run_ids": list(NEGATIVE_CONTROL_RUN_IDS),
             "recipes": {
                 run_id: resolve_step8_run_recipe(run_id).to_artifact()
-                for run_id in (*A3_INTERACTION_RUN_IDS, *ALL50_RUN_IDS, "D10_TALT_A3", *NEGATIVE_CONTROL_RUN_IDS)
+                for run_id in (
+                    *A3_INTERACTION_RUN_IDS,
+                    *ALL50_RUN_IDS,
+                    *ALTERNATE_RUN_IDS,
+                    *NEGATIVE_CONTROL_RUN_IDS,
+                )
             },
             "b1_model_config": b1.config_artifact(),
             "source_manifest_sha256": source_hash,

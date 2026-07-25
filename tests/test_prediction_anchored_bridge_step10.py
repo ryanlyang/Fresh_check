@@ -114,16 +114,21 @@ def _by_id(graph):
     return {row["node_id"]: row for row in graph["nodes"]}
 
 
-def test_registry_rendered_graph_covers_54_46_45_and_conditional_skip(tmp_path):
+def test_registry_rendered_graph_covers_55_47_46_and_conditional_skips(tmp_path):
     graph = _graph(tmp_path)
     validation = validate_prediction_anchored_tigris_graph(graph)
-    assert validation["configuration_count"] == 54
-    assert validation["reconstruction_breadth_count"] == 46
-    assert validation["post_teacher_configuration_count"] == 45
+    assert validation["configuration_count"] == 55
+    assert validation["reconstruction_breadth_count"] == 47
+    assert validation["post_teacher_configuration_count"] == 46
     assert graph["representative_reference_sha256"] == "9" * 64
     assert graph["runnable_configuration_count"] == 53
     assert graph["covered_runnable_configuration_count"] == 53
     assert graph["conditional_skips"] == [
+        {
+            "run_id": "D10_TALT_A0",
+            "status": "SKIPPED_INVALID_PARENT",
+            "reason": "conditional parent is invalid",
+        },
         {
             "run_id": "D10_TALT_A3",
             "status": "SKIPPED_INVALID_PARENT",
@@ -134,9 +139,9 @@ def test_registry_rendered_graph_covers_54_46_45_and_conditional_skip(tmp_path):
     assert len(covered) == len(set(covered)) == 53
 
 
-def test_alternate_teacher_adds_binding_cache_and_exactly_54_runnable_rows(tmp_path):
+def test_alternate_teacher_adds_binding_cache_and_exactly_55_runnable_rows(tmp_path):
     graph = _graph(tmp_path, alternate=True)
-    assert graph["runnable_configuration_count"] == 54
+    assert graph["runnable_configuration_count"] == 55
     assert graph["conditional_skips"] == []
     nodes = _by_id(graph)
     assert "b5_cache_alternate" in nodes

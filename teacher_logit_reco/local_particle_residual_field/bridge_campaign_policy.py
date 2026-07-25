@@ -404,7 +404,7 @@ def record_campaign_run_outcomes(
     registry: Mapping[str, Any],
     outcomes: Mapping[str, str],
 ) -> dict[str, Any]:
-    """Record failures/skips without removing any of the 54 registry rows."""
+    """Record failures/skips without removing any of the 55 registry rows."""
 
     validate_content_hash(state, expected_contract=PREDICTION_ANCHORED_CAMPAIGN_STATE_CONTRACT)
     validate_campaign_registry(registry)
@@ -1062,7 +1062,7 @@ def build_step9_reports(
 
     canonical_ids = [row["canonical_run_id"] for row in registry["runs"]]
     if set(run_outcomes) != set(canonical_ids):
-        raise ValueError("report run outcomes must keep every one of the 54 registry rows visible")
+        raise ValueError("report run outcomes must keep every one of the 55 registry rows visible")
     rendered_ablation = []
     for run_id in canonical_ids:
         outcome = str(run_outcomes[run_id])
@@ -1107,7 +1107,7 @@ def build_step9_reports(
             "baseline_deployable_row_count": len(baseline_deployable_rows),
             "privileged_row_count": len(privileged_rows),
             "ablation_row_count": len(rendered_ablation),
-            "all_registry_rows_visible": len(rendered_ablation) == 54,
+            "all_registry_rows_visible": len(rendered_ablation) == 55,
             "physical45_and_full50_ceilings_separate": True,
             "persistent_telemetry": deepcopy(dict(persistent_telemetry)),
             "ram_telemetry": deepcopy(dict(ram_telemetry)),

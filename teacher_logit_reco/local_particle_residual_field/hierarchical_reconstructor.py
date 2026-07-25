@@ -1060,6 +1060,7 @@ STEP7_DEFERRED_ARCHITECTURE_IDS = (
     "D10_XA3_full_no_smooth",
     "D10_B1_all50_fullhead",
     "D10_B2_all50_physical45_only",
+    "D10_TALT_A0",
     "D10_TALT_A3",
     "D10_N0_shuffled_logit_kd",
     "D10_N1_shuffled_bridge_field",

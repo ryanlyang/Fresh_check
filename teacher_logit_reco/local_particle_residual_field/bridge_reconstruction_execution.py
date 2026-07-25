@@ -78,6 +78,8 @@ from .bridge_reconstructor_train import (
 )
 from .bridge_semantic_evidence import (
     ALL50_RUN_IDS,
+    ALTERNATE_A0_RUN_ID,
+    ALTERNATE_RUN_IDS,
     NEGATIVE_CONTROL_RUN_IDS,
     PERTURBATION_AUDIT_SEEDS,
     PredictionAnchoredAll50HLG,
@@ -140,7 +142,7 @@ RECONSTRUCTION_RUN_IDS = tuple(
     if row.reconstruction_breadth
 )
 _SPECIAL_STEP8_IDS = frozenset(
-    (*ALL50_RUN_IDS, *NEGATIVE_CONTROL_RUN_IDS, "D10_TALT_A3")
+    (*ALL50_RUN_IDS, *ALTERNATE_RUN_IDS, *NEGATIVE_CONTROL_RUN_IDS)
     + tuple(
         run_id
         for run_id in RECONSTRUCTION_RUN_IDS
@@ -241,8 +243,14 @@ def resolve_reconstruction_run(run_id: str) -> ReconstructionRunSpec:
         recipe = resolve_step8_run_recipe(value)
         return ReconstructionRunSpec(
             value,
-            "all50" if value in ALL50_RUN_IDS else "a3_semantic",
-            ARCH_A3_HLG_PRIMARY,
+            (
+                "all50"
+                if value in ALL50_RUN_IDS
+                else "alternate_semantic"
+                if value in ALTERNATE_RUN_IDS
+                else "a3_semantic"
+            ),
+            recipe.architecture_id,
             "step8",
             value,
             recipe.channel_policy,
@@ -309,7 +317,7 @@ def build_reconstruction_model(
     c0_model_width: int = 160,
     dropout: float = 0.05,
 ) -> tuple[torch.nn.Module, dict[str, Any]]:
-    """Map every one of the 46 reconstruction rows to its implemented graph."""
+    """Map every reconstruction row to its implemented graph."""
 
     spec = resolve_reconstruction_run(run_id)
     if spec.family == "c0":
@@ -355,6 +363,20 @@ def build_reconstruction_model(
                 dropout=float(dropout),
             ),
             {"family": "all50", "capacity_match": None},
+        )
+    if spec.architecture_id == "D10_A0_c0_delta":
+        if run_id != ALTERNATE_A0_RUN_ID:
+            raise ValueError("only TALT_A0 may request the alternate C0 graph")
+        return (
+            PredictionAnchoredC0Correction(
+                physical45_scaler,
+                C0CorrectionConfig(
+                    d_model=int(c0_model_width),
+                    dropout=float(dropout),
+                    trust_bound_enabled=True,
+                ),
+            ),
+            {"family": "c0_alternate", "capacity_match": None},
         )
     architecture = spec.architecture_id or ARCH_A3_HLG_PRIMARY
     required_absolute = architecture in {ARCH_A5_HLG_ABSOLUTE, ARCH_A5S_HLG_SCRATCH}

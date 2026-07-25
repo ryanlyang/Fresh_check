@@ -32,9 +32,9 @@ PREDICTION_ANCHORED_STORAGE_FORMULA_CONTRACT = (
 
 PAIRED_SEED_IDS = (101, 202, 303)
 RETAINED_STATE_RULE = "metrics_all_seeds__weights_ordered_median_only"
-REGISTRY_CONFIGURATION_COUNT = 54
-RECONSTRUCTION_BREADTH_COUNT = 46
-POST_TEACHER_CONFIGURATION_COUNT = 45
+REGISTRY_CONFIGURATION_COUNT = 55
+RECONSTRUCTION_BREADTH_COUNT = 47
+POST_TEACHER_CONFIGURATION_COUNT = 46
 NORMAL_PILOT_BUDGET_BYTES = 5 * 1024**3
 PAIRED3_HARD_CEILING_BYTES = 6 * 1024**3
 MEASUREMENT_UNMEASURED = "UNMEASURED"
@@ -105,7 +105,7 @@ def _definition(
 
 
 def campaign_run_definitions() -> tuple[CampaignRunDefinition, ...]:
-    """Return the locked canonical 54-row inventory.
+    """Return the locked canonical 55-row inventory.
 
     Aliases are identifiers, not additional configurations.  Every definition
     states its scientific role and selectability explicitly.
@@ -315,20 +315,24 @@ def campaign_run_definitions() -> tuple[CampaignRunDefinition, ...]:
             )
         )
 
-    rows.append(
-        _definition(
-            "D10_TALT_A3",
-            family="alternate_teacher",
-            stage="B6",
-            scientific_role="alternate_teacher_diagnostic",
-            selectable=False,
-            storage_class="hlg",
-            reconstruction=True,
-            post_teacher=True,
-            requires_selected_teacher=True,
-            conditional_parent="alternate_teacher_valid",
+    for run_id, storage_class in (
+        ("D10_TALT_A0", "c0"),
+        ("D10_TALT_A3", "hlg"),
+    ):
+        rows.append(
+            _definition(
+                run_id,
+                family="alternate_teacher",
+                stage="B6",
+                scientific_role="alternate_teacher_diagnostic",
+                selectable=False,
+                storage_class=storage_class,
+                reconstruction=True,
+                post_teacher=True,
+                requires_selected_teacher=True,
+                conditional_parent="alternate_teacher_valid",
+            )
         )
-    )
 
     for run_id in (
         "D10_N0_shuffled_logit_kd",
@@ -487,7 +491,7 @@ def validate_campaign_registry(payload: Mapping[str, Any]) -> dict[str, Any]:
     if len(runs) != REGISTRY_CONFIGURATION_COUNT or set(
         run.get("canonical_run_id") for run in runs if isinstance(run, Mapping)
     ) != set(definitions):
-        raise ValueError("campaign registry does not contain the locked 54 canonical rows")
+        raise ValueError("campaign registry does not contain the locked 55 canonical rows")
 
     observed_aliases: dict[str, str] = {}
     reconstruction_count = 0

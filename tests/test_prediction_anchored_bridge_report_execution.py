@@ -268,7 +268,7 @@ def test_automatic_report_evidence_uses_publications_and_clean_reload(tmp_path, 
     )
     assert evidence["contract"] == PREDICTION_ANCHORED_REPORT_EVIDENCE_CONTRACT
     assert evidence["manual_report_evidence_used"] is False
-    assert len(evidence["run_outcomes"]) == 54
+    assert len(evidence["run_outcomes"]) == 55
     assert set(evidence["run_outcomes"].values()) == {"COMPLETED", "SKIPPED_INVALID_PARENT"}
     baseline = {row["row_id"]: row for row in evidence["baseline_deployable_rows"]}
     assert baseline["A0_legacy"]["status"] == "REFERENCE_ONLY_UNPAIRED"

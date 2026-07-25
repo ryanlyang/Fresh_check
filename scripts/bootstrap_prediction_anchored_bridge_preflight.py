@@ -111,7 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     parent = load_split_manifest(parent_path)
     source_sha = sha256_file(parent_path)
     child = build_child_split_manifest(parent)
-    registry0 = build_campaign_registry(alternate_teacher_valid=False)
+    # Both physical-45 consumers are always trained and provenance-audited.
+    # Performance gates are warnings in the production pilot, so reserve and
+    # schedule the alternate-teacher A3 diagnostic from the clean start.
+    registry0 = build_campaign_registry(alternate_teacher_valid=True)
     child_path = output / "prediction_anchored_child_splits.json"
     registry0_path = output / "campaign_registry_step1.json"
     write_immutable_json(child_path, child)

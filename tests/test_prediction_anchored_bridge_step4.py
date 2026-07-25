@@ -5,12 +5,17 @@ import json
 import numpy as np
 import pytest
 
+from scripts.select_prediction_anchored_bridge_consumer import (
+    main as consumer_selection_main,
+)
 from teacher_logit_reco.local_particle_residual_field import (
     ALL50_TEACHER_NAMESPACE,
     BRIDGE_CONTROLS,
     N3_F0_TEACHER_NAMESPACE,
     PRIMARY_TEACHER_NAMESPACE,
     aggregate_consumer_evaluations,
+    build_no_eligible_consumer_stop,
+    build_campaign_registry,
     build_consumer_replica_evaluation,
     build_live_teacher_config,
     build_teacher_binding,
@@ -19,6 +24,7 @@ from teacher_logit_reco.local_particle_residual_field import (
     evaluate_bound_consumer_conditions,
     finalize_consumer_confirmation,
     load_teacher_logit_cache,
+    require_post_teacher_release,
     select_bridge_consumer_preconfirmation,
     validate_teacher_binding,
     verify_cached_direct_agreement,
@@ -28,6 +34,9 @@ from teacher_logit_reco.local_particle_residual_field import (
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import with_content_hash
 from teacher_logit_reco.local_particle_residual_field.bridge_contracts import sha256_file
+from teacher_logit_reco.local_particle_residual_field.bridge_contracts import (
+    write_immutable_json,
+)
 
 
 CLASS_ORDER = tuple(f"class_{index}" for index in range(10))
@@ -265,6 +274,205 @@ def test_gate_rejects_two_of_three_and_response_control_failures():
             f0_checkpoint_sha256="d" * 64,
             bridge_recipe_sha256="a" * 64,
         )
+    stopped = build_no_eligible_consumer_stop([mixed, mixed_robust])
+    assert stopped["status"] == "STOPPED_NO_ELIGIBLE_BRIDGE_CONSUMER"
+    assert stopped["selected_consumer_id"] is None
+    assert stopped["guessed_consumer_used"] is False
+    assert stopped["stack_val_consumer_opened"] is False
+    assert stopped["downstream_submission_allowed"] is False
+    for recipe in ("T10_clean", "T10_robust"):
+        summary = stopped["recipe_summaries"][recipe]
+        assert summary["eligible"] is False
+        assert summary["failed_rules"]
+        assert len(summary["replica_effects"]) == 3
+
+
+def test_selection_cli_publishes_diagnostic_stop_when_no_recipe_is_eligible(
+    tmp_path, capsys
+):
+    clean = aggregate_consumer_evaluations(
+        _evaluations("T10_clean", (138, 141, 139)), bootstrap_resamples=100
+    )
+    robust = aggregate_consumer_evaluations(
+        _evaluations("T10_robust", (138, 141, 139)), bootstrap_resamples=100
+    )
+    clean_path = tmp_path / "clean.json"
+    robust_path = tmp_path / "robust.json"
+    write_immutable_json(clean_path, clean)
+    write_immutable_json(robust_path, robust)
+    selection_path = tmp_path / "selection" / "consumer_preconfirmation.json"
+
+    status = consumer_selection_main(
+        [
+            "select",
+            "--clean-aggregate",
+            str(clean_path),
+            "--robust-aggregate",
+            str(robust_path),
+            "--clean-checkpoint",
+            str(tmp_path / "clean.pt"),
+            "--robust-checkpoint",
+            str(tmp_path / "robust.pt"),
+            "--f0-checkpoint-sha256",
+            "d" * 64,
+            "--bridge-recipe-sha256",
+            "a" * 64,
+            "--output",
+            str(selection_path),
+        ]
+    )
+
+    assert status == 2
+    assert not selection_path.exists()
+    stopped_path = selection_path.parent / "stopped_campaign.json"
+    stopped = json.loads(stopped_path.read_text(encoding="utf-8"))
+    assert stopped["status"] == "STOPPED_NO_ELIGIBLE_BRIDGE_CONSUMER"
+    assert stopped["downstream_submission_allowed"] is False
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["selection"] is None
+    assert printed["stopped_campaign"]["recipe_summaries"]["T10_clean"][
+        "failed_rules"
+    ]
+
+
+def test_warn_and_continue_prefers_robust_and_records_every_failed_rule(
+    tmp_path, capsys
+):
+    clean = aggregate_consumer_evaluations(
+        _evaluations("T10_clean", (138, 141, 139)), bootstrap_resamples=100
+    )
+    robust = aggregate_consumer_evaluations(
+        _evaluations("T10_robust", (138, 141, 139)), bootstrap_resamples=100
+    )
+    clean_path = tmp_path / "clean.json"
+    robust_path = tmp_path / "robust.json"
+    write_immutable_json(clean_path, clean)
+    write_immutable_json(robust_path, robust)
+    selection_path = tmp_path / "selection" / "consumer_preconfirmation.json"
+
+    status = consumer_selection_main(
+        [
+            "select",
+            "--clean-aggregate",
+            str(clean_path),
+            "--robust-aggregate",
+            str(robust_path),
+            "--clean-checkpoint",
+            str(tmp_path / "clean.pt"),
+            "--robust-checkpoint",
+            str(tmp_path / "robust.pt"),
+            "--f0-checkpoint-sha256",
+            "d" * 64,
+            "--bridge-recipe-sha256",
+            "a" * 64,
+            "--quality-gate-policy",
+            "warn_and_continue",
+            "--preferred-consumer",
+            "T10_robust",
+            "--output",
+            str(selection_path),
+        ]
+    )
+
+    assert status == 0
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    assert selection["selected_consumer_recipe"] == "T10_robust"
+    assert selection["aggregate_quality_eligible"] is False
+    assert selection["quality_gate_override_applied"] is True
+    assert selection["failed_quality_rules"]
+    assert selection["downstream_submission_allowed"] is True
+    assert not (selection_path.parent / "stopped_campaign.json").exists()
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["selection"]["quality_gate_policy"] == "warn_and_continue"
+
+
+def test_warn_and_continue_confirmation_keeps_quality_failure_as_warning(tmp_path):
+    checkpoint = tmp_path / "robust.pt"
+    checkpoint.write_bytes(b"quality-warning median")
+    checkpoint_sha256 = sha256_file(checkpoint)
+    clean = aggregate_consumer_evaluations(
+        _evaluations("T10_clean", (138, 141, 139)), bootstrap_resamples=100
+    )
+    robust = aggregate_consumer_evaluations(
+        _evaluations(
+            "T10_robust",
+            (138, 139, 141),
+            median_checkpoint_sha256=checkpoint_sha256,
+        ),
+        bootstrap_resamples=100,
+    )
+    pre = select_bridge_consumer_preconfirmation(
+        [clean, robust],
+        f0_checkpoint_sha256="d" * 64,
+        bridge_recipe_sha256="a" * 64,
+        selected_checkpoint_paths={
+            "T10_clean": "clean.pt",
+            "T10_robust": str(checkpoint),
+        },
+        quality_gate_policy="warn_and_continue",
+        preferred_consumer_recipe="T10_robust",
+    )
+    receipt = with_content_hash(
+        {
+            "contract": "prediction_anchored_split_access_receipt_v1",
+            "status": "AUTHORIZED",
+            "split_name": "stack_val_consumer",
+            "purpose": "consumer_confirmation",
+            "seal_kind": "consumer_preconfirmation",
+            "one_shot": True,
+            "selection_sha256": pre["content_hash"],
+        }
+    )
+    selected = finalize_consumer_confirmation(
+        pre,
+        {
+            "checkpoint_sha256": pre["checkpoint_sha256"],
+            "bridge_recipe_sha256": pre["bridge_recipe_sha256"],
+            "f0_accuracy": 0.75,
+            "bridge_0p10_accuracy": 0.74,
+            "provenance_valid": True,
+        },
+        access_receipt=receipt,
+        output_dir=tmp_path,
+    )
+    assert selected["status"] == "CONFIRMED_LOCKED"
+    confirmation = selected["stack_val_consumer_confirmation"]
+    assert confirmation["quality_passed"] is False
+    assert confirmation["integrity_passed"] is True
+    assert confirmation["quality_gate_override_applied"] is True
+    assert confirmation["execution_authorized"] is True
+    assert selected["downstream_submission_allowed"] is True
+    assert (tmp_path / "selected_bridge_consumer.json").is_file()
+    assert not (tmp_path / "stopped_campaign.json").exists()
+    binding = build_teacher_binding(
+        binding_kind="primary",
+        run_id="T10_robust",
+        aggregate=robust,
+        checkpoint_path=str(checkpoint),
+        checkpoint_sha256=checkpoint_sha256,
+        channel_policy="physical45",
+        validation_manifest_hashes={
+            "model_val_select": "e" * 64,
+            "stack_val_consumer": "f" * 64,
+        },
+        target_cache_namespace=PRIMARY_TEACHER_NAMESPACE,
+        bridge_recipe_sha256=selected["bridge_recipe_sha256"],
+        primary_selection=selected,
+    )
+    assert binding["aggregate_quality_eligible"] is False
+    assert binding["quality_gate_override_applied"] is True
+    validate_teacher_binding(
+        binding, expected_kind="primary", primary_selection=selected
+    )
+    release = require_post_teacher_release(
+        build_campaign_registry(alternate_teacher_valid=True),
+        selected_consumer=selected,
+        primary_binding=binding,
+    )
+    assert release["teacher_gate_passed"] is True
+    assert release["teacher_integrity_gate_passed"] is True
+    assert release["teacher_quality_passed"] is False
+    assert release["teacher_quality_warning_override_applied"] is True
 
 
 def test_confirmation_is_one_shot_fail_closed_and_never_chooses_runner_up(tmp_path):

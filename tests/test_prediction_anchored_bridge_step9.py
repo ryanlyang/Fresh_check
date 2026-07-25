@@ -171,7 +171,7 @@ def test_reservations_reconcile_quota_and_reject_duplicate_parents(tmp_path):
     registry = _measured_registry()
     artifact = _reservations(registry, tmp_path)
     assert artifact["quota_preflight_passed"] is True
-    assert len(artifact["run_reservations_bytes"]) == 54
+    assert len(artifact["run_reservations_bytes"]) == 55
     readiness = require_production_ready(
         registry, fixed_persistent_bytes=4096, selected_budget_bytes=5 * 1024**3
     )
@@ -203,7 +203,8 @@ def test_reservations_reconcile_quota_and_reject_duplicate_parents(tmp_path):
 def test_b0_b6_success_state_machine_and_visible_conditional_skip(tmp_path):
     registry = _measured_registry()
     state = initialize_step9_campaign(registry, reservations=_reservations(registry, tmp_path))
-    assert len(state["run_outcomes"]) == 54
+    assert len(state["run_outcomes"]) == 55
+    assert state["run_outcomes"]["D10_TALT_A0"] == "SKIPPED_INVALID_PARENT"
     assert state["run_outcomes"]["D10_TALT_A3"] == "SKIPPED_INVALID_PARENT"
     for stage in B_STAGES:
         state = advance_step9_campaign(state, registry=registry, evidence=_stage(stage))
@@ -323,7 +324,7 @@ def _report_row(row_id, section, *, deployable, teacher_gain=0.02, recovery=0.25
     )
 
 
-def test_reports_are_disjoint_complete_and_keep_all_54_rows_visible():
+def test_reports_are_disjoint_complete_and_keep_all_55_rows_visible():
     registry = _measured_registry()
     baseline_ids = list(BASELINE_DEPLOYABLE_REQUIRED_IDS) + ["selected_T10(fhat:D10_L8_full_c0)"]
     baseline = [_report_row(value, "baselines_and_deployable", deployable=True) for value in baseline_ids]
@@ -336,7 +337,9 @@ def test_reports_are_disjoint_complete_and_keep_all_54_rows_visible():
     privileged = [_report_row(value, "privileged_oracle", deployable=False) for value in privileged_ids]
     outcomes = {
         row["canonical_run_id"]: (
-            "SKIPPED_INVALID_PARENT" if row["canonical_run_id"] == "D10_TALT_A3" else "PENDING"
+            "SKIPPED_INVALID_PARENT"
+            if row["canonical_run_id"] in {"D10_TALT_A0", "D10_TALT_A3"}
+            else "PENDING"
         )
         for row in registry["runs"]
     }
@@ -350,11 +353,16 @@ def test_reports_are_disjoint_complete_and_keep_all_54_rows_visible():
         persistent_telemetry={"published_bytes": 1234},
         ram_telemetry={"peak_resident_bytes": 5678},
     )
-    assert report["ablation_row_count"] == 54
+    assert report["ablation_row_count"] == 55
     assert report["physical45_and_full50_ceilings_separate"] is True
     assert all(row["deployable"] for row in report["sections"]["baselines_and_deployable"])
     assert all(not row["deployable"] for row in report["sections"]["privileged_oracle"])
-    assert next(row for row in report["sections"]["ablation_evidence"] if row["row_id"] == "D10_TALT_A3")["status"] == "SKIPPED_INVALID_PARENT"
+    for run_id in ("D10_TALT_A0", "D10_TALT_A3"):
+        assert next(
+            row
+            for row in report["sections"]["ablation_evidence"]
+            if row["row_id"] == run_id
+        )["status"] == "SKIPPED_INVALID_PARENT"
     assert next(row for row in report["sections"]["ablation_evidence"] if row["row_id"] == "D10_L0_bridge_only")["status"] == "FAILED"
 
 

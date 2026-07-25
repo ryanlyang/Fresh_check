@@ -9,6 +9,7 @@ import pytest
 import torch
 
 import scripts.bootstrap_prediction_anchored_bridge_preflight as bootstrap
+import scripts.refresh_prediction_anchored_bridge_preflight as refresh
 from scripts.bootstrap_prediction_anchored_bridge_preflight import _baseline_model_size
 from tests.test_prediction_anchored_bridge_execution import (
     _ToyConsumer,
@@ -93,6 +94,25 @@ def test_full_bootstrap_submitter_builds_locked_500k_source_before_finalizer():
     assert "#SBATCH --nodes=1" in finalizer
 
 
+def test_recovery_wrapper_refreshes_graph_and_reuses_exact_b0_b3_nodes():
+    wrapper = (
+        ROOT / "sbatch/run_refresh_prediction_anchored_bridge_recovery.sh"
+    ).read_text()
+    assert "#SBATCH --account=reu-aisocial" in wrapper
+    assert "PYTHONNOUSERSITE=1" in wrapper
+    assert "PAB_CONDA_ENV:=atlas_kd_tigris" in wrapper
+    assert "refresh_prediction_anchored_bridge_preflight.py" in wrapper
+    assert '--completed-job "b0_validate_preflight=${PAB_B0_JOB_ID}"' in wrapper
+    assert '--completed-job "b1_train_register_r0=${PAB_B1_JOB_ID}"' in wrapper
+    assert '--completed-job "b2_stage_recipes_scalers=${PAB_B2_JOB_ID}"' in wrapper
+    assert (
+        '--completed-job "b3_consumers_paired3=${PAB_B3_CONSUMER_JOB_ID}"'
+        in wrapper
+    )
+    assert '--existing-job "b3_l0_paired3=${PAB_B3_L0_JOB_ID}"' in wrapper
+    assert "--execute" in wrapper
+
+
 def test_finalizer_binds_all_four_immutable_submission_controls():
     finalizer = (ROOT / "sbatch/run_finalize_prediction_anchored_bridge_submission.sh").read_text()
     for name in (
@@ -119,6 +139,9 @@ def test_b4_confirmation_publishes_checkpoint_bound_runtime_resource_reference()
     b4_runtime_branch = runner.split(
         "  B4_RUNTIME_RESOURCES)", maxsplit=1
     )[1].split("    ;;", maxsplit=1)[0]
+    b4_select_branch = runner.split(
+        "  B4_SELECT)", maxsplit=1
+    )[1].split("    ;;", maxsplit=1)[0]
     assert "representative_architecture_resource_reference.json" in bootstrap
     assert "canonical_a3_bundle_resources.json" not in bootstrap
     assert "measurements/deployed_resource_reference.json" not in bootstrap
@@ -134,6 +157,10 @@ def test_b4_confirmation_publishes_checkpoint_bound_runtime_resource_reference()
     assert b4_runtime_branch.index(registration_initializer) < b4_runtime_branch.index(
         '--r0-registration "${PAB_R0_REGISTRATION}"'
     )
+    assert "PAB_CONSUMER_QUALITY_GATE_POLICY:=warn_and_continue" in b4_select_branch
+    assert "PAB_PREFERRED_CONSUMER:=T10_robust" in b4_select_branch
+    assert '--quality-gate-policy "${PAB_CONSUMER_QUALITY_GATE_POLICY}"' in b4_select_branch
+    assert '--preferred-consumer "${PAB_PREFERRED_CONSUMER}"' in b4_select_branch
 
 
 def test_miniature_clean_start_reaches_registry_reservations_graph_and_rendering(
@@ -144,13 +171,7 @@ def test_miniature_clean_start_reaches_registry_reservations_graph_and_rendering
     spec, _spec_path = execution_fixture(source_root)
     parent_path = Path(spec["parent_manifest"]["path"])
     baseline_path = Path(spec["baseline_checkpoint"]["path"])
-    torch.save(
-        {
-            "model_state_dict": _ToyConsumer("A0_C250").state_dict(),
-            "model_config": {"model_size": "tiny"},
-        },
-        baseline_path,
-    )
+    monkeypatch.setattr(bootstrap, "_baseline_model_size", lambda _path: "tiny")
     monkeypatch.setattr(
         bootstrap,
         "build_child_split_manifest",
@@ -227,15 +248,65 @@ def test_miniature_clean_start_reaches_registry_reservations_graph_and_rendering
         ).read_text()
     )
     rendered = render_tigris_sbatch_commands(graph)
-    assert registry["configuration_count"] == 54
+    assert registry["configuration_count"] == 55
     assert reservations["projected_persistent_bytes"] <= 5 * 1024**3
     assert reservations["representative_reference_sha256"] == representative[
         "content_hash"
     ]
     assert graph["representative_reference_sha256"] == representative["content_hash"]
-    assert graph["covered_runnable_configuration_count"] == 53
+    assert graph["covered_runnable_configuration_count"] == 55
+    assert graph["conditional_skips"] == []
+    assert any(
+        node["teacher_namespace"] == "physical45_alternate_bridge_teacher"
+        for node in graph["nodes"]
+    )
     assert len(rendered["commands"]) == len(graph["nodes"]) - 1
     assert representative["checkpoint_hashes_present"] is False
     assert not (
         artifact_root / "measurements" / "deployed_resource_reference.json"
     ).exists()
+
+    monkeypatch.setattr(
+        refresh,
+        "build_step3_consumer_model",
+        lambda run_id, model_size: _ToyConsumer(run_id),
+    )
+    monkeypatch.setattr(refresh, "_baseline_model_size", lambda _path: "tiny")
+    monkeypatch.setattr(
+        refresh,
+        "initialize_step3_root_from_reference",
+        lambda *args, **kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        refresh, "measure_step8_registry_states", miniature_measure
+    )
+    refreshed = tmp_path / "preflight_clean_pair_v2"
+    artifact_root.mkdir()
+    assert (
+        refresh.main(
+            [
+                "--source-preflight",
+                str(output),
+                "--output-dir",
+                str(refreshed),
+                "--artifact-root",
+                str(artifact_root),
+                "--budget-gib",
+                "5",
+            ]
+        )
+        == 0
+    )
+    original_spec = json.loads(
+        (output / "prediction_anchored_execution_spec.json").read_text()
+    )
+    refreshed_spec = json.loads(
+        (refreshed / "prediction_anchored_execution_spec.json").read_text()
+    )
+    refreshed_graph = json.loads(
+        (refreshed / "prediction_anchored_tigris_graph.json").read_text()
+    )
+    assert refreshed_spec["content_hash"] == original_spec["content_hash"]
+    assert refreshed_graph["execution_spec_sha256"] == original_spec["content_hash"]
+    assert refreshed_graph["configuration_count"] == 55
+    assert refreshed_graph["covered_runnable_configuration_count"] == 55

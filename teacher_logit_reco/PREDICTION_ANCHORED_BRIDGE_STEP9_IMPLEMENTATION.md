@@ -13,7 +13,7 @@ byte reservation; a conditional skip receives zero. Frozen parent hashes must
 be unique and their paths must not overlap, preventing double charging or a
 second published parent copy. An over-quota projection fails before B0.
 
-The versioned campaign state contains all 54 canonical rows throughout its
+The versioned campaign state contains all 55 canonical rows throughout its
 lifetime. `build_stage_evidence` requires the declared boolean gates and
 explicit immutable parent hashes for each stage:
 
@@ -21,15 +21,18 @@ explicit immutable parent hashes for each stage:
 - B1: registered R0 plus valid live `f0/h0`;
 - B2: physical-45/all-50 recipes and the live batch audit;
 - B3: independent L0 launch and completed paired upstream/consumer block;
-- B4: aggregate-only consumer selection and one-shot consumer confirmation;
+- B4: aggregate quality reporting, explicit robust preference, and one-shot
+  consumer confirmation;
 - B5: the selected consumer, bindings, and separate primary/all-50/N3 caches;
 - B6: the valid-teacher release and completed paired reconstruction breadth.
 
-Stages advance strictly in order. A failed stage stops the campaign, marks its
-descendants `SKIPPED_FAILED_PARENT`, and cannot be resumed or replaced by a
-fallback. `D10_TALT_A3` stays visibly `SKIPPED_INVALID_PARENT` when its parent
-is invalid and cannot be promoted by an outcome update. B6 release remains
-based on the Step 8 teacher gate, not C0 success.
+Stages advance strictly in order. A hard integrity failure stops the campaign,
+marks its descendants `SKIPPED_FAILED_PARENT`, and cannot be replaced by a
+fallback. Consumer performance-rule failures are recorded warnings and do not
+stop B5/B6. `D10_TALT_A0` and `D10_TALT_A3` are runnable in production under
+the alternate clean-consumer quality-warning binding but remain permanently
+non-selectable. B6 release
+remains based on confirmed teacher integrity, not C0 success.
 
 ## Aggregate deployment selection and sealed confirmation
 
@@ -66,7 +69,7 @@ flag is rejected.
    and selected `T10(f_hat)`;
 2. watermarked non-deployable diagnostics, with separate physical-45 and
    full-50 oracle ceiling rows;
-3. all 54 ablation rows, including missing, failed, and conditional-skipped
+3. all 55 ablation rows, including missing, failed, and conditional-skipped
    states.
 
 Completed rows require all three seed metrics, aggregate statistics, and the

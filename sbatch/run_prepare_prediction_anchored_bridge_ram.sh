@@ -55,6 +55,8 @@ case "${ACTION}" in
       --device "${DEVICE}" "${dry_flag[@]}"
     ;;
   B4_SELECT)
+    : "${PAB_CONSUMER_QUALITY_GATE_POLICY:=warn_and_continue}"
+    : "${PAB_PREFERRED_CONSUMER:=T10_robust}"
     : "${PAB_T10_CLEAN_AGGREGATE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/consumer_evaluations/T10_clean/selection_aggregate.json}"
     : "${PAB_T10_ROBUST_AGGREGATE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/consumer_evaluations/T10_robust/selection_aggregate.json}"
     : "${PAB_T10_CLEAN_CHECKPOINT:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/consumers/T10_clean/median_weights.pt}"
@@ -65,6 +67,8 @@ case "${ACTION}" in
       --clean-aggregate "${PAB_T10_CLEAN_AGGREGATE}" --robust-aggregate "${PAB_T10_ROBUST_AGGREGATE}" \
       --clean-checkpoint "${PAB_T10_CLEAN_CHECKPOINT}" --robust-checkpoint "${PAB_T10_ROBUST_CHECKPOINT}" \
       --f0-checkpoint "${PAB_R0_CHECKPOINT}" --bridge-recipe "${PAB_PHYSICAL45_RECIPE}" \
+      --quality-gate-policy "${PAB_CONSUMER_QUALITY_GATE_POLICY}" \
+      --preferred-consumer "${PAB_PREFERRED_CONSUMER}" \
       --output "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/selection/consumer_preconfirmation.json" "${dry_flag[@]}"
     ;;
   B4_CONFIRM)
@@ -105,12 +109,13 @@ case "${ACTION}" in
     ;;
   B5_BIND)
     [[ -f "${selected}" ]] || { echo "Stage B5 refuses a guessed consumer" >&2; exit 2; }
-    pab_require_env PAB_EXECUTION_SPEC
+    pab_require_env PAB_EXECUTION_SPEC PAB_REGISTRY
     : "${PAB_PHYSICAL45_RECIPE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_recipe_physical45.json}"
     : "${PAB_ALL50_RECIPE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_recipe_all50.json}"
     : "${PAB_ALL50_SCALER:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_scalers_all50.json}"
     fresh_run "${PYTHON_BIN}" -u scripts/bind_prediction_anchored_bridge_teachers.py \
-      --execution-spec "${PAB_EXECUTION_SPEC}" --selected-consumer "${selected}" \
+      --execution-spec "${PAB_EXECUTION_SPEC}" --registry "${PAB_REGISTRY}" \
+      --selected-consumer "${selected}" \
       --physical45-recipe "${PAB_PHYSICAL45_RECIPE}" --all50-recipe "${PAB_ALL50_RECIPE}" \
       --all50-scaler "${PAB_ALL50_SCALER}" \
       --consumer-evaluation-root "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/consumer_evaluations" \

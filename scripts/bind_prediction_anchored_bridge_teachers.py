@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the confirmed primary, all50, and eligible alternate B5 teachers."""
+"""Bind the confirmed primary, all50, and declared alternate B5 teachers."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from teacher_logit_reco.local_particle_residual_field.bridge_teacher_execution i
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execution-spec", required=True)
+    parser.add_argument("--registry", required=True)
     parser.add_argument("--selected-consumer", required=True)
     parser.add_argument("--physical45-recipe", required=True)
     parser.add_argument("--all50-recipe", required=True)
@@ -38,6 +39,27 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    registry = load_hashed_json(args.registry)
+    alternate_rows = [
+        row
+        for row in registry.get("runs", [])
+        if row.get("canonical_run_id") in {"D10_TALT_A0", "D10_TALT_A3"}
+    ]
+    if {row.get("canonical_run_id") for row in alternate_rows} != {
+        "D10_TALT_A0",
+        "D10_TALT_A3",
+    }:
+        raise ValueError("campaign registry omits a clean-consumer comparison")
+    alternate_statuses = {
+        str(row.get("execution_status")) for row in alternate_rows
+    }
+    if len(alternate_statuses) != 1:
+        raise ValueError("clean-consumer comparison rows have inconsistent status")
+    alternate_status = next(iter(alternate_statuses))
+    alternate_runnable = bool(
+        not args.no_alternate
+        and alternate_status == "RUNNABLE"
+    )
     if args.dry_run:
         selected = load_hashed_json(args.selected_consumer)
         if selected.get("status") != "CONFIRMED_LOCKED":
@@ -47,7 +69,13 @@ def main(argv: list[str] | None = None) -> int:
             "dry_run": True,
             "selected_consumer_sha256": selected["content_hash"],
             "selected_consumer_status": selected.get("status"),
-            "binding_kinds": ["primary", "all50", "eligible_alternate"],
+            "binding_kinds": [
+                "primary",
+                "all50",
+                *(["declared_alternate"] if alternate_runnable else []),
+            ],
+            "alternate_registry_status": alternate_status,
+            "alternate_run_ids": ["D10_TALT_A0", "D10_TALT_A3"],
             "bindings_created_before_cache": True,
             "guessed_consumer_allowed": False,
         }
@@ -61,9 +89,11 @@ def main(argv: list[str] | None = None) -> int:
             consumer_evaluation_root=args.consumer_evaluation_root,
             consumer_publication_root=args.consumer_publication_root,
             output_dir=args.output_dir,
-            include_eligible_alternate=not bool(args.no_alternate),
+            include_eligible_alternate=alternate_runnable,
         )
         result["dry_run"] = False
+        result["alternate_registry_status"] = alternate_status
+        result["alternate_run_ids"] = ["D10_TALT_A0", "D10_TALT_A3"]
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

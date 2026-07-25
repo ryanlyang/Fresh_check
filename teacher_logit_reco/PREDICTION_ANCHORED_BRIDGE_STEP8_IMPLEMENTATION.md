@@ -46,8 +46,11 @@ different scaling.
 binding -> cache -> live-run chain. Primary, all-50, alternate, and N3 cache
 namespaces are not interchangeable. N3 must have `field_condition=f0` and
 `rho_endpoint=0`; all privileged KD runs must have
-`field_condition=bridge_0.100`. The conditional TALT recipe remains
-non-selectable and follows the registry's `SKIPPED_INVALID_PARENT` state.
+`field_condition=bridge_0.100`. The matched TALT A0/A3 pair remains
+non-selectable, but the production pilot now schedules both rows with the
+alternate clean consumer's explicit quality-warning binding rather than
+suppressing them for a failed performance rule. Hard
+provenance or checkpoint-integrity failure still prevents the binding.
 
 ## Trained negative controls
 
@@ -89,10 +92,10 @@ pass-through gates. Gain/recovery uses sign-correct loss improvement and writes
 `measure_step8_registry_states` requires the eight actual upstream Step 3
 measurements. It can inherit a fully measured Step 7 registry or instantiate
 and measure the remaining Step 4–7 rows from a Step 3 registry. It then
-serializes representative weights in RAM for all 14 Step 8 canonical rows,
-including the conditional TALT state, and verifies:
+serializes representative weights in RAM for all 15 Step 8 canonical rows,
+including the two conditional TALT states, and verifies:
 
-- generated registry counts remain 54 / 46 / 45;
+- generated registry counts remain 55 / 47 / 46;
 - the canonical A3 alias resolves to the same registry row;
 - every runnable row is `MEASURED`;
 - target-cache fixed bytes match the conditional alternate state;

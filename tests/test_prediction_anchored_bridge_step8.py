@@ -16,6 +16,7 @@ from tests.test_prediction_anchored_bridge_step4 import _confirmed_selection
 from teacher_logit_reco.local_particle_residual_field import (
     A3_INTERACTION_RUN_IDS,
     A3_PRIMARY_ALIAS,
+    ALTERNATE_RUN_IDS,
     ALL50_RUN_IDS,
     ARCH_A3_HLG_PRIMARY,
     NEGATIVE_CONTROL_RUN_IDS,
@@ -101,7 +102,7 @@ def _all50_fixture(n=3, p=5):
 def test_step8_recipe_matrix_coefficients_warmups_namespaces_and_alias_are_exact():
     recipes = step8_run_recipes()
     assert len(A3_INTERACTION_RUN_IDS) == 8
-    assert len(STEP8_SPECIAL_CANONICAL_RUN_IDS) == 14
+    assert len(STEP8_SPECIAL_CANONICAL_RUN_IDS) == 15
     assert recipes[A3_PRIMARY_ALIAS].canonical_run_id == ARCH_A3_HLG_PRIMARY
     assert recipes[A3_PRIMARY_ALIAS].to_artifact()["distillation_coefficients"] == {
         "kd": 1.0, "ce": 0.5, "bridge": 0.2, "true": 0.0,
@@ -115,17 +116,24 @@ def test_step8_recipe_matrix_coefficients_warmups_namespaces_and_alias_are_exact
     assert recipes["D10_XA3_full_no_smooth"].smooth == 0
     assert recipes[ALL50_RUN_IDS[0]].binding_kind == "all50"
     assert recipes[ALL50_RUN_IDS[0]].channel_policy == "all50"
+    assert recipes["D10_TALT_A0"].binding_kind == "alternate"
+    assert recipes["D10_TALT_A0"].architecture_id == "D10_A0_c0_delta"
     assert recipes["D10_TALT_A3"].binding_kind == "alternate"
+    assert recipes["D10_TALT_A3"].architecture_id == ARCH_A3_HLG_PRIMARY
     assert recipes[NEGATIVE_CONTROL_RUN_IDS[3]].cache_namespace == "physical45_selected_teacher_on_f0_control"
-    assert all(not recipes[value].selectable_for_primary_deployment for value in (*ALL50_RUN_IDS, "D10_TALT_A3", *NEGATIVE_CONTROL_RUN_IDS))
+    assert all(
+        not recipes[value].selectable_for_primary_deployment
+        for value in (*ALL50_RUN_IDS, *ALTERNATE_RUN_IDS, *NEGATIVE_CONTROL_RUN_IDS)
+    )
     with pytest.raises(ValueError, match="no field warm-up"):
         recipes["D10_XA3_kd_only"].phase_coefficients("field_warmup")
     semantics = validate_step8_registry_semantics(build_campaign_registry())
     assert semantics["registry_counts"] == {
-        "configuration_count": 54,
-        "reconstruction_breadth_count": 46,
-        "post_teacher_configuration_count": 45,
+        "configuration_count": 55,
+        "reconstruction_breadth_count": 47,
+        "post_teacher_configuration_count": 46,
     }
+    assert semantics["canonical_semantic_rows"]["D10_TALT_A0"]["execution_status"] == "SKIPPED_INVALID_PARENT"
     assert semantics["canonical_semantic_rows"]["D10_TALT_A3"]["execution_status"] == "SKIPPED_INVALID_PARENT"
 
 
@@ -332,7 +340,7 @@ def test_primary_n3_and_all50_lineage_are_immutable_namespace_isolated_and_relea
     )
     assert release["teacher_gate_passed"] is True
     assert release["c0_success_consulted"] is False
-    assert release["registered_post_teacher_configuration_count"] == 45
+    assert release["registered_post_teacher_configuration_count"] == 46
 
     batch, _, all50_scaler = _all50_fixture(n=2, p=4)
     all50_checkpoint = tmp_path / "all50.pt"
@@ -551,12 +559,20 @@ def test_step8_measures_all_special_rows_deduplicates_alias_and_passes_then_refu
         source_manifest_sha256="d" * 64, deployed_reference=reference,
         fixed_storage=fixed,
     )
-    assert artifact["newly_measured_configuration_count"] == 14
+    assert artifact["newly_measured_configuration_count"] == 15
     assert artifact["unmeasured_runnable_run_ids"] == []
     assert artifact["production_readiness"]["production_submission_allowed"] is True
-    assert artifact["registry_configuration_count"] == 54
-    assert artifact["reconstruction_breadth_count"] == 46
-    assert artifact["post_teacher_configuration_count"] == 45
+    assert artifact["registry_configuration_count"] == 55
+    assert artifact["reconstruction_breadth_count"] == 47
+    assert artifact["post_teacher_configuration_count"] == 46
+    assert (
+        artifact["model_config_sha256"]["D10_TALT_A0"]
+        != artifact["canonical_a3_config_sha256"]
+    )
+    assert (
+        artifact["model_config_sha256"]["D10_TALT_A3"]
+        == artifact["canonical_a3_config_sha256"]
+    )
     assert resolve_registry_run(updated, A3_PRIMARY_ALIAS)["content_hash"] == resolve_registry_run(updated, ARCH_A3_HLG_PRIMARY)["content_hash"]
     assert all(row["measurement_status"] == "MEASURED" for row in updated["runs"] if row["execution_status"] == "RUNNABLE")
     with pytest.raises(PermissionError, match="exceeds budget"):
@@ -603,7 +619,7 @@ def test_step8_operator_plan_cli_validates_all_semantic_rows_without_writing(tmp
     payload = json.loads(completed.stdout)
     assert payload["dry_run"] is True
     assert len(payload["plan"]["a3_interaction_run_ids"]) == 8
-    assert len(payload["plan"]["canonical_special_run_ids"]) == 14
+    assert len(payload["plan"]["canonical_special_run_ids"]) == 15
     assert payload["plan"]["dense_field_cache_persisted"] is False
 
 

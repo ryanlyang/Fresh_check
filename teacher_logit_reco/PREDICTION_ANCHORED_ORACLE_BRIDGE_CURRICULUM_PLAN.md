@@ -193,7 +193,7 @@ B6  launch three paired seeds of every remaining valid loss, interaction, contro
 aggregate model_val_select -> lock one config/median checkpoint -> one stack_val_deploy confirmation -> reload audit -> final-test HLT-only
 ```
 
-Every primary Stage `B5` and later job must read `selected_bridge_consumer.json`. Non-primary jobs must additionally read their exact all-50 or alternate `teacher_binding_v1` and must reject the primary artifact as a substitute. All jobs fail closed if a binding is missing, invalid, points at an incomplete checkpoint, or disagrees with recipe/logit provenance. There is no implicit “best-looking checkpoint” fallback. B6 is gated only by a scientifically valid privileged consumer, not by whether a smaller C0 reconstructor succeeds: available GPUs should be used to test the full HLG hypothesis even when a simple model fails.
+Every primary Stage `B5` and later job must read `selected_bridge_consumer.json`. Non-primary jobs must additionally read their exact all-50 or alternate `teacher_binding_v1` and must reject the primary artifact as a substitute. All jobs fail closed if a binding is missing, invalid, points at an incomplete checkpoint, or disagrees with recipe/logit provenance. There is no implicit “best-looking checkpoint” fallback. B6 requires a provenance-valid privileged consumer but does not stop on a scientific quality warning or because a smaller C0 reconstructor fails: available GPUs should be used to test the full HLG hypothesis even when a simple model or a predeclared performance rule fails.
 
 ## 8. Artifact and provenance contract
 
@@ -262,7 +262,7 @@ Batch construction must reject non-finite fields, mismatched masks, duplicate ev
 
 This file selects a privileged teacher/consumer. It is not itself deployable. The selection portion is written and hashed before `stack_val_consumer` is opened; confirmation may append only the predeclared pass/fail record. A failed confirmation cannot change the recipe or seed ID.
 
-Non-primary teachers never reuse or overwrite this artifact. `T10_all50_clean` and a valid alternate recipe each receive an immutable `teacher_binding_v1` artifact containing their recipe, aggregate seed results, selected median replica, exact checkpoint hash, channel policy, validation-manifest hashes, and declared target-cache namespace/schema. A binding must not contain the hash of a cache artifact that does not yet exist.
+Non-primary teachers never reuse or overwrite this artifact. `T10_all50_clean` and the provenance-valid alternate recipe each receive an immutable `teacher_binding_v1` artifact containing their recipe, aggregate seed results, selected median replica, exact checkpoint hash, channel policy, validation-manifest hashes, declared target-cache namespace/schema, eligibility boolean, failed quality rules, and any explicit warning override. A binding must not contain the hash of a cache artifact that does not yet exist.
 
 ### Target-logit cache
 
@@ -418,7 +418,7 @@ The primary bridge-gain comparison is always within the same consumer. Comparing
 
 ### Bridge-consumer selection
 
-The selector chooses between the three-seed `T10_clean` and `T10_robust` recipe aggregates. Each seed's epoch is selected only on `model_val_stop`; the resulting checkpoint is evaluated once on `model_val_select`. A recipe must satisfy the aggregate validity rules and have at least two of three replicas with positive same-consumer bridge gain. Selection preferences, in order, are:
+The selector evaluates the three-seed `T10_clean` and `T10_robust` recipe aggregates. Each seed's epoch is selected only on `model_val_stop`; the resulting checkpoint is evaluated once on `model_val_select`. Every aggregate rule below is still computed and reported:
 
 1. positive same-consumer `b_0.10` versus `f0` gain;
 2. positive `T10(b_0.10)` versus `Tpred_continue(f0)` matched-compute gain;
@@ -427,7 +427,17 @@ The selector chooses between the three-seed `T10_clean` and `T10_robust` recipe 
 5. limited `f0` degradation relative to `Tpred_continue`, so the frozen consumer is not unusably brittle;
 6. lower across-seed variance, then lower mean ECE, then lower mean Brier score as tie-breakers.
 
-After choosing a recipe by aggregate results, sort its three eligible replicas in ascending order by `(model_val_select bridge accuracy, same-consumer bridge gain, negative bridge cross-entropy, seed ID)` and retain the middle replica. That exact median-performing checkpoint becomes the permanently frozen teacher; the lucky best seed is never chosen. The pre-confirmation artifact is then locked before one evaluation on `stack_val_consumer`. If it fails confirmation, selection fails and writes a stopped-campaign report. It must not guess a consumer, choose the runner-up, or refit the selected recipe.
+The production pilot explicitly prefers `T10_robust`; `T10_clean` is retained
+as the matched alternate diagnostic. Sort each recipe's three replicas in
+ascending order by `(model_val_select bridge accuracy, same-consumer bridge
+gain, negative bridge cross-entropy, seed ID)` and retain the middle replica.
+The exact robust median checkpoint becomes the permanently frozen primary
+teacher, while the clean median checkpoint is separately bound for the
+alternate comparison; the lucky best seed is never chosen. The pre-confirmation
+artifact is locked before one evaluation on `stack_val_consumer`. Performance
+failure there is recorded and continuation remains authorized; hard integrity
+failure writes a stopped-campaign report. The pipeline must not guess a
+consumer, choose a runner-up, or refit either recipe.
 
 ## 12. `R10` reconstructor architecture
 
@@ -817,13 +827,26 @@ Report both gains separately as shortcut-risk diagnostics. Neither can replace t
 
 ### 16.5 Alternate selected-teacher check
 
-After the primary consumer is selected, train one canonical-A3 run against the non-selected valid bridge consumer:
+After the primary robust consumer is selected, train a matched simple/strong
+architecture pair against the non-selected clean bridge consumer:
 
 ```text
+D10_TALT_A0
 D10_TALT_A3
 ```
 
-This tests whether robust bridge-consumer training changes distillability. The alternate recipe must independently satisfy its aggregate `model_val_select` validity rules, and its predeclared median checkpoint is bound in `teacher_binding_alt.json`; otherwise the run remains in the registry as `SKIPPED_INVALID_PARENT`. It has its own cache namespace and may not retroactively alter the primary selection rule.
+`D10_TALT_A0` uses the same simple particle-only C0 graph and primary objective
+as the robust-path A0 run; `D10_TALT_A3` uses the same canonical HLG graph and
+primary objective as the robust-path A3 run. Together they test whether robust
+bridge-consumer training changes distillability at both ends of the architecture
+range. The
+alternate recipe's complete `model_val_select` validity report and failed rules
+remain attached to its predeclared median checkpoint, but performance-rule
+failure does not suppress the run. The checkpoint is bound in
+`teacher_binding_alt.json` with an explicit quality-warning override and has its
+own cache namespace. Invalid provenance, a missing or changed checkpoint, or
+non-finite confirmation metrics still fail the run. The alternate may not
+retroactively alter the primary selection rule.
 
 ### 16.6 Trained negative controls
 
@@ -852,10 +875,10 @@ The campaign registry is the sole source of truth for run IDs, deduplication, co
 | `D10_XA3_bridge_only`, `D10_XA3_ce_only`, `D10_XA3_kd_only`, `D10_XA3_kd_bridge`, `D10_XA3_kd_ce`, `D10_XA3_full_primary`, `D10_XA3_full_no_warmup`, `D10_XA3_full_no_smooth` | Confirmatory bounded A3 loss/schedule candidates | yes |
 | `A0_CAP500_direct_hlt`, `A0_CAP500_r0rep_direct`, `A0_C250`, `A0_C250_LONG`, `A0_S500`, `Tpred`, `Tpred_continue`, `T10_clean`, `T10_robust`, `T10_all50_clean` | Baseline or teacher controls | no |
 | `D10_B1_all50_fullhead`, `D10_B2_all50_physical45_only` | All-50 semantic diagnostics | no |
-| `D10_TALT_A3` | Alternate-teacher diagnostic | no |
+| `D10_TALT_A0`, `D10_TALT_A3` | Matched simple/strong alternate-teacher diagnostics | no |
 | `D10_N0_shuffled_logit_kd`, `D10_N1_shuffled_bridge_field`, `D10_N2_shuffled_primary`, `D10_N3_nonprivileged_teacher_kd` | Negative controls | no |
 
-These are complete IDs, not prefix rules. A new configuration must amend this table before any result exists. `D10_TALT_A3` may never replace the primary teacher or enter the primary bundle in this pilot. The no-trust run records saturation as `not_applicable` and is excluded instead of receiving an invented alternate safety gate. Documentation/tests render counts from the registry; no submission script contains an independently maintained numeric total.
+These are complete IDs, not prefix rules. A new configuration must amend this table before any result exists. Neither `D10_TALT_A0` nor `D10_TALT_A3` may replace the primary teacher or enter the primary bundle in this pilot. The no-trust run records saturation as `not_applicable` and is excluded instead of receiving an invented alternate safety gate. Documentation/tests render counts from the registry; no submission script contains an independently maintained numeric total.
 
 The current maximum configuration inventory is:
 
@@ -865,13 +888,17 @@ The current maximum configuration inventory is:
 - 21 additional architecture configurations after `D10_A0_c0_delta`/L8 deduplication;
 - 7 additional A3 loss-interaction configurations after canonical-A3 deduplication;
 - 2 all-50 diagnostic reconstructors;
-- 1 conditional alternate-teacher run;
+- 2 conditional alternate-teacher runs;
 - 4 trained negative controls;
-- 46 reconstruction-breadth configurations including early `D10_L0_bridge_only`;
-- 45 post-teacher B6 configurations because L0 launches alongside B3;
-- 54 maximum model-training configurations including the 8 upstream A0/consumer configurations, excluding `R0`, RAM/source audits, and logit jobs.
+- 47 reconstruction-breadth configurations including early `D10_L0_bridge_only`;
+- 46 post-teacher B6 configurations because L0 launches alongside B3;
+- 55 maximum model-training configurations including the 8 upstream A0/consumer configurations, excluding `R0`, RAM/source audits, and logit jobs.
 
-If the campaign trains rather than registers `R0`, record that additional prerequisite training job separately. `D10_TALT_A3` remains a registered `SKIPPED_INVALID_PARENT` row when no alternate teacher is valid, so the maximum executed configuration count becomes 53 while registry cardinality remains 54.
+If the campaign trains rather than registers `R0`, record that additional
+prerequisite training job separately. Both physical-45 consumers are trained
+and provenance-audited before B4, so both TALT rows are reserved and runnable in
+the production pilot. Registry cardinality and maximum executed configuration
+count are both 55.
 
 The required scientific profile is `paired3`: all valid configurations use seed IDs `{101,202,303}`, comparisons use paired seed IDs, selectors rank aggregate configuration results, and only median-replica weights are published. A one-seed `breadth_debug` profile may validate scheduling and tensor paths but is permanently non-selectable and cannot support scientific conclusions. GPU availability is not used as a reason to omit an informative ablation; persistent storage is controlled by metrics-only non-median replicas rather than by removing experiments.
 
@@ -938,9 +965,10 @@ Confidence intervals must be paired by event. Use deterministic paired bootstrap
 
 This is a ten-class pilot. The locked primary selection metric is `model_val_select` accuracy, higher is better, matching the existing local residual-field tagger protocol. `macro_per_class_accuracy` and cross-entropy are secondary guard/tie metrics. Binary FPR at 50% signal efficiency may be reported for explicitly defined binary slices but does not select this ten-class campaign. Every metric below is first computed per paired seed and then aggregated as an arithmetic mean with sample standard deviation; a selector never ranks the best individual seed.
 
-### 18.1 Bridge-teacher validity gate
+### 18.1 Bridge-teacher quality diagnostics and continuation
 
-Before distillation jobs are submitted, a `T10` recipe aggregate must satisfy all of:
+Before distillation jobs are submitted, compute and publish all of the following
+quality rules for each `T10` recipe:
 
 1. mean `Delta_same = accuracy(T10(b_0.10)) - accuracy(T10(f0)) > 0` on `model_val_select`;
 2. either the paired-bootstrap 90% lower bound for aggregate `Delta_same` is positive or mean `Delta_same >= 0.001` (0.1 percentage points);
@@ -951,9 +979,23 @@ Before distillation jobs are submitted, a `T10` recipe aggregate must satisfy al
 7. each of the five Section 10 control gains is at most `max(0.00025, 0.25 * Delta_same)` on `model_val_select`;
 8. checkpoint, physical-45 recipe, split, RAM audit, and response artifacts are valid.
 
-For eligible recipes, define `best_score=max(mean model_val_select bridge accuracy)` once, then define the order-independent `tie_pool={recipe: best_score-score <= 0.0005}`. Only members of that fixed pool receive secondary ordering: higher mean `f0` accuracy, lower mean bridge cross-entropy, lower standard deviation of `Delta_same`, lower mean ECE, lower mean Brier score, and finally lexicographically smaller recipe ID. The median replica is then chosen by the fixed rule in Section 11. Recipe, seed, and checkpoint are written to the pre-confirmation artifact before `stack_val_consumer` is opened.
+Rules 1-7 are scientific quality diagnostics, not execution gates. Their
+failure is recorded verbatim in the selection, binding, cache, and reports and
+does not suppress downstream training. Rule 8 remains a hard integrity gate.
+The production continuation policy explicitly selects `T10_robust` as the
+primary consumer and retains `T10_clean` as the alternate comparison; this is a
+declared preference, not a guessed fallback. The fixed median-replica rule in
+Section 11 still chooses each recipe's checkpoint. Recipe, seed, checkpoint,
+quality-policy name, eligibility boolean, and every failed rule are written to
+the pre-confirmation artifact before `stack_val_consumer` is opened.
 
-The locked median checkpoint passes confirmation only if its `Delta_same >= 0` on `stack_val_consumer`, all metrics are finite, and provenance remains valid. Failure stops the campaign; `stack_val_consumer` never ranks recipes, breaks ties, changes the selected seed, or selects a runner-up. These thresholds are predeclared pilot defaults. Full uncertainty and effect sizes remain mandatory.
+On `stack_val_consumer`, negative `Delta_same` is likewise a recorded quality
+warning rather than a stop. Confirmation authorizes continuation whenever all
+metrics are finite and provenance remains valid. Non-finite metrics, invalid
+provenance, stale hashes, or a missing/changed checkpoint remain hard failures.
+`stack_val_consumer` never ranks recipes, breaks ties, changes the selected
+seed, or selects a runner-up. Full uncertainty and effect sizes remain
+mandatory.
 
 ### 18.2 Reconstructor validity gate
 
@@ -1077,7 +1119,7 @@ Reuse existing modules where possible. Suggested new files are organizational, n
 - `teacher_logit_reco/local_particle_residual_field/bridge_train.py`
   - phase scheduling, in-allocation RAM-local resume state, weights-only publication, and deployable export.
 - `teacher_logit_reco/local_particle_residual_field/bridge_campaign.py`
-  - generated 54-configuration maximum registry, 45-configuration post-teacher matrix, explicit selectability, conditional skips, paired seeds, deduplication, provisional/measured storage accounting, selector artifacts, and reports.
+  - generated 55-configuration maximum registry, 46-configuration post-teacher matrix, explicit selectability, conditional skips, paired seeds, deduplication, provisional/measured storage accounting, selector artifacts, and reports.
 
 ### Command-line entry points
 
@@ -1112,7 +1154,7 @@ and use the full account string:
 reu-aisocial
 ```
 
-The submission script records every job ID and dependency. Packed training allocations request exactly one node; rank 0 is the sole staging/ledger leader, and every GPU rank joins the same allocation-wide RAM ledger. Consumer selection must be an `afterok` dependency for logit caching and reconstruction. A failed gate must prevent downstream submission or cause downstream jobs to fail closed with an explicit stopped-campaign status. Every job requests and preflights host memory, creates a verified allocation/rank workspace, reserves persistent output bytes before training, and publishes no dense field tensor. Manifests record `cross_allocation_resume=false`; a failed/preempted allocation restarts the entire three-seed configuration.
+The submission script records every job ID and dependency. Packed training allocations request exactly one node; rank 0 is the sole staging/ledger leader, and every GPU rank joins the same allocation-wide RAM ledger. Consumer selection must be an `afterok` dependency for logit caching and reconstruction. Performance-rule failures publish warnings and continue; only hard integrity failures prevent downstream submission or cause downstream jobs to fail closed with an explicit stopped-campaign status. Every job requests and preflights host memory, creates a verified allocation/rank workspace, reserves persistent output bytes before training, and publishes no dense field tensor. Manifests record `cross_allocation_resume=false`; a failed/preempted allocation restarts the entire three-seed configuration.
 
 ## 23. Required tests
 
@@ -1144,7 +1186,9 @@ Tests should be small, deterministic, and CPU-capable unless explicitly marked a
 - `A0_C250` uses exactly the consumer child manifest, `A0_C250_LONG` uses no new jets and exactly the bridge fine-tuning continuation budget, and `A0_S500` uses the exact child-manifest union;
 - both direct controls match the declared parameter/FLOP tolerance, use the 500k union, and contain no bridge/KD/`T10` path;
 - same-consumer response evaluation uses one checkpoint for all fields;
-- selector ranks recipe aggregates, chooses the predeclared median replica, writes all required fields, and refuses invalid/no-gain candidates;
+- selector records aggregate quality rules, deterministically prefers robust,
+  chooses each predeclared median replica, continues across performance
+  warnings, and refuses hard provenance/non-finite/stale-lineage failures;
 - consumer and final tie pools are defined against one maximum score and are invariant to registry iteration order;
 - consumer calibration ties use lower mean ECE and then lower mean Brier score; final ties use exact deployed parameter count and never measured latency;
 - selector enforces same-consumer and matched-compute gains plus every numerical tolerance in Section 18;
@@ -1206,7 +1250,7 @@ Tests should be small, deterministic, and CPU-capable unless explicitly marked a
 - paired bootstrap is deterministic;
 - `model_val_stop/select` and `stack_val_consumer/deploy` child manifests have exact 75k counts, full parent coverage, and zero overlap;
 - stack confirmation failures cannot select a runner-up, and `stack_val_deploy` is inaccessible before a locked deployable selection;
-- the registry renders 54 maximum configurations, 46 reconstruction-breadth configurations, and 45 post-teacher configurations; conditional TALT remains visible as `SKIPPED_INVALID_PARENT`;
+- the registry renders 55 runnable configurations, 47 reconstruction-breadth configurations, and 46 post-teacher configurations, including the quality-warning-bound TALT pair;
 - every registry row has an explicit scientific role/selectability value; direct, all-50, negative, absolute, exploratory, TALT, and no-trust rows cannot enter primary selection;
 - storage preflight rejects projections over 5 GiB or the explicitly selected 6 GiB paired3 ceiling;
 - production storage projection refuses any runnable `UNMEASURED` row and otherwise uses measured serialized state bytes, actual manifest particle width, and metrics-only non-median replicas;
@@ -1269,7 +1313,7 @@ Before every step, inspect the dirty working tree and preserve unrelated or part
 
 Implement versioned configurations, canonical hashes, and the safety layer used by every later step. Create/bind the exact 250k/250k `stack_train` children, 75k/75k `model_val` children, and 75k/75k `stack_val` children; prove counts, class stratification, parent coverage, and zero overlap. Implement the declarative campaign registry, exact scientific-role/selectability fields, aliases, conditional skips, paired seed IDs, and formula-based provisional storage bounds. Not-yet-implemented architectures remain explicitly `UNMEASURED`; Step 1 must not instantiate placeholder A3 models or claim a final measured budget.
 
-Completion requires split overlap/reordering/stale-parent tests, validation-access locks, generated 54/46/45 registry counts, complete selectability coverage, conditional TALT state, provisional-formula tests, particle-width-sensitive dense-cache projections, and refusal to submit production while any runnable row is `UNMEASURED`. The dry-run report contains every child hash, seed replica, retained-state rule, provisional byte category, and measurement status.
+Completion requires split overlap/reordering/stale-parent tests, validation-access locks, generated 55/47/46 registry counts, complete selectability coverage, conditional TALT state, provisional-formula tests, particle-width-sensitive dense-cache projections, and refusal to submit production while any runnable row is `UNMEASURED`. The dry-run report contains every child hash, seed replica, retained-state rule, provisional byte category, and measurement status.
 
 ### Step 2 of 10: streamed truth, frozen `R0`, and virtual bridge provider
 
@@ -1285,9 +1329,9 @@ Completion requires bitwise copied-weight/zero-column and initial-logit tests, e
 
 ### Step 4 of 10: response metrics, numerical selector, and exact-teacher logits
 
-Implement per-seed and aggregate same-checkpoint response/control evaluation, matched-compute comparison, paired bootstrap, calibration/slice metrics, and every Section 18 rule. Select a recipe on `model_val_select`, retain its ordered-median replica, lock `selected_bridge_consumer.json`, and only then perform the one-shot `stack_val_consumer` confirmation. Create immutable primary/all-50/alternate bindings before any cache, then generate namespace-separated bridge targets plus the dedicated selected-teacher-on-`f0` N3 cache on `stack_train_distill`; every cache manifest points to its binding hash and refitting is forbidden.
+Implement per-seed and aggregate same-checkpoint response/control evaluation, matched-compute comparison, paired bootstrap, calibration/slice metrics, and every Section 18 rule. Publish all quality failures, deterministically prefer robust for the primary path, retain the ordered-median robust and clean replicas, lock `selected_bridge_consumer.json`, and only then perform the one-shot `stack_val_consumer` confirmation. Continue on performance warnings but stop on invalid provenance, non-finite metrics, stale hashes, or missing checkpoints. Create immutable primary/all-50/alternate bindings before any cache, then generate namespace-separated bridge targets plus the dedicated selected-teacher-on-`f0` N3 cache on `stack_train_distill`; every cache manifest points to its binding hash and refitting is forbidden.
 
-Completion requires synthetic aggregate/median/tie cases, best-seed rejection, two-of-three validity, sealed-confirmation failure with no runner-up, fail-closed missing/stale/cross-lineage artifacts, identical hashes across selection/logits/live/bundle configurations, cached-versus-direct agreement, and exact zero KD at equal fields for every semantically reachable teacher path.
+Completion requires synthetic aggregate/median/tie cases, best-seed rejection, two-of-three quality-warning cases, warning-mode continuation through negative confirmation gain, hard failure for non-finite/provenance/stale/cross-lineage artifacts, no runner-up, identical hashes across selection/logits/live/bundle configurations, cached-versus-direct agreement, and exact zero KD at equal fields for every semantically reachable teacher path.
 
 ### Step 5 of 10: C0 correction path, losses, and reachability suite
 
@@ -1309,7 +1353,7 @@ Completion requires exact assignment/pooling/token/transformer/readback equation
 
 ### Step 8 of 10: semantic, adversarial-channel, and paired-seed evidence
 
-Implement the eight-run A3 loss-interaction block with canonical-A3 deduplication; canonical-A3 all-50 semantics and reliability response; conditional `D10_TALT_A3`; all four separately defined trained controls including the N3 cache namespace; exact four-seed perturbation, bridge-distribution/alignment, and adversarial-channel diagnostics. Measure any remaining special-run states, require every runnable row to be `MEASURED`, and execute the final measured 5/6 GiB preflight over the generated 54/46/45 registry without making HLG depend on C0 success.
+Implement the eight-run A3 loss-interaction block with canonical-A3 deduplication; canonical-A3 all-50 semantics and reliability response; conditional matched `D10_TALT_A0`/`D10_TALT_A3` clean-consumer diagnostics; all four separately defined trained controls including the N3 cache namespace; exact four-seed perturbation, bridge-distribution/alignment, and adversarial-channel diagnostics. Measure any remaining special-run states, require every runnable row to be `MEASURED`, and execute the final measured 5/6 GiB preflight over the generated 55/47/46 registry without making HLG depend on C0 success.
 
 Completion requires all-50 full-head versus physical-only invariants, immutable binding→cache provenance, N3 cache isolation, four-control matching, complete selectability/non-selectability, exact perturbation threshold tests, alignment diagnostics without hidden cutoffs, generated count/deduplication tests, zero `UNMEASURED` runnable rows, final measured budget refusal, post-teacher release after only a valid teacher gate, and a miniature three-seed comparison of HLG, particle-only, raw-HLT-direct, and `R0`-representation-direct controls.
 
@@ -1323,7 +1367,7 @@ Completion requires synthetic success/failure/control/quota/confirmation campaig
 
 Connect every audit, staging, recipe/scaler, consumer, selector/binding, logit, reconstructor, report, and export command. Implement dependency-aware Slurm submission for B0-B6/paired3, multi-GPU allocation packing by shared source/teacher, one-time source staging, job-ID ledgers, host-memory requests, measured storage reservations, sealed-validation permissions, and fail-closed selection. Enforce `PYTHONNOUSERSITE=1` and account `reu-aisocial`.
 
-Completion requires command/dry-run/shell tests, simulated dependency/confirmation/preemption success and failure, registry-rendered 54/46/45 inspection, single-node/one-leader/allocation-ledger and one-open assertions, restart-whole-configuration behavior, paired seed/median publication, zero runnable `UNMEASURED` rows, measured 5/6 GiB budget modes, absence of dense-field output paths, and a local CPU rehearsal whose generated Tigris command performs no submission until explicitly executed.
+Completion requires command/dry-run/shell tests, simulated dependency/confirmation/preemption success and failure, registry-rendered 55/47/46 inspection, single-node/one-leader/allocation-ledger and one-open assertions, restart-whole-configuration behavior, paired seed/median publication, zero runnable `UNMEASURED` rows, measured 5/6 GiB budget modes, absence of dense-field output paths, and a local CPU rehearsal whose generated Tigris command performs no submission until explicitly executed.
 
 ### Operational sequence after implementation
 
@@ -1331,7 +1375,7 @@ The ten steps above implement and locally rehearse the system. Actual expensive 
 
 1. require zero runnable `UNMEASURED` registry rows and pass the final measured 5 or 6 GiB preflight before submitting any production allocation;
 2. submit B0-B4, including early L0 and three paired consumer replicas, then lock/confirm the physical-45 `rho = 0.10` teacher;
-3. if valid, allow B5 and release the registry-derived 45-configuration post-teacher matrix; the full maximum registry contains 54 model configurations including the early/upstream runs;
+3. if valid, allow B5 and release the registry-derived 46-configuration post-teacher matrix; the full maximum registry contains 55 model configurations including the early/upstream runs;
 4. inspect reachability, deployable recovery, all-50 shortcut, direct-HLT, adversarial, and negative-control evidence;
 5. aggregate the already paired-three-seed matrix, retain each median checkpoint under the 5 or 6 GiB budget, and lock one configuration before opening `stack_val_deploy`;
 6. pass one-shot deployment confirmation and the clean reload audit, and only then evaluate final-test HLT-only;

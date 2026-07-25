@@ -59,6 +59,12 @@ N3_F0_TEACHER_NAMESPACE = "physical45_selected_teacher_on_f0_control"
 TEACHER_LOGIT_CACHE_SCHEMA = "prediction_anchored_teacher_logit_cache_v1"
 
 SELECTION_RECIPE_IDS = (T10_CLEAN, T10_ROBUST)
+STRICT_QUALITY_GATE_POLICY = "strict"
+WARN_AND_CONTINUE_QUALITY_GATE_POLICY = "warn_and_continue"
+QUALITY_GATE_POLICIES = (
+    STRICT_QUALITY_GATE_POLICY,
+    WARN_AND_CONTINUE_QUALITY_GATE_POLICY,
+)
 REQUIRED_RESPONSE_KEYS = tuple(f"rho_{rho}" for rho in RESPONSE_RHOS)
 REQUIRED_DIAGNOSTIC_KEYS = (
     "oracle_physical45",
@@ -801,11 +807,22 @@ def select_bridge_consumer_preconfirmation(
     bridge_recipe_sha256: str,
     bridge_channel_policy: str = BRIDGE_CHANNEL_PHYSICAL45,
     selected_checkpoint_paths: Mapping[str, str] | None = None,
+    quality_gate_policy: str = STRICT_QUALITY_GATE_POLICY,
+    preferred_consumer_recipe: str = T10_ROBUST,
 ) -> dict[str, Any]:
-    """Select once from fixed aggregates; never inspect an individual best seed."""
+    """Select once from fixed aggregates; never inspect an individual best seed.
+
+    ``warn_and_continue`` turns scientific performance gates into recorded
+    warnings.  It never bypasses provenance validity, malformed aggregates,
+    checkpoint identity, or later non-finite-metric checks.
+    """
 
     if bridge_channel_policy != BRIDGE_CHANNEL_PHYSICAL45:
         raise ValueError("primary consumer selection is physical45")
+    if quality_gate_policy not in QUALITY_GATE_POLICIES:
+        raise ValueError(f"unknown consumer quality-gate policy: {quality_gate_policy!r}")
+    if preferred_consumer_recipe not in SELECTION_RECIPE_IDS:
+        raise ValueError("preferred consumer must be T10_clean or T10_robust")
     by_recipe: dict[str, Mapping[str, Any]] = {}
     for raw in aggregates:
         validate_content_hash(raw, expected_contract=PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT)
@@ -816,22 +833,52 @@ def select_bridge_consumer_preconfirmation(
     if set(by_recipe) != set(SELECTION_RECIPE_IDS):
         raise ValueError("selector requires both predeclared consumer recipes")
     eligible = [raw for raw in by_recipe.values() if bool(raw["eligible"])]
-    if not eligible:
-        raise RuntimeError("no bridge-consumer recipe satisfies Section 18.1")
-    best_score = max(float(raw["mean_bridge_accuracy"]) for raw in eligible)
-    tie_pool = [raw for raw in eligible if best_score - float(raw["mean_bridge_accuracy"]) <= 0.0005]
-    ranked = sorted(
-        tie_pool,
-        key=lambda raw: (
-            -float(raw["mean_f0_accuracy"]),
-            float(raw["mean_bridge_cross_entropy"]),
-            float(raw["sample_std_delta_same"]),
-            float(raw["mean_expected_calibration_error"]),
-            float(raw["mean_brier_score"]),
-            str(raw["run_id"]),
-        ),
-    )
-    selected = ranked[0]
+    provenance_valid = [
+        raw
+        for raw in by_recipe.values()
+        if bool(dict(raw.get("validity_rules", {})).get("rule_8_provenance_valid"))
+    ]
+    if quality_gate_policy == STRICT_QUALITY_GATE_POLICY:
+        if not eligible:
+            raise RuntimeError("no bridge-consumer recipe satisfies Section 18.1")
+        candidate_pool = eligible
+        best_score = max(float(raw["mean_bridge_accuracy"]) for raw in candidate_pool)
+        tie_pool = [
+            raw
+            for raw in candidate_pool
+            if best_score - float(raw["mean_bridge_accuracy"]) <= 0.0005
+        ]
+        ranked = sorted(
+            tie_pool,
+            key=lambda raw: (
+                -float(raw["mean_f0_accuracy"]),
+                float(raw["mean_bridge_cross_entropy"]),
+                float(raw["sample_std_delta_same"]),
+                float(raw["mean_expected_calibration_error"]),
+                float(raw["mean_brier_score"]),
+                str(raw["run_id"]),
+            ),
+        )
+        selected = ranked[0]
+        selection_mode = "eligible_bridge_accuracy_then_locked_ties"
+    else:
+        if not provenance_valid:
+            raise RuntimeError(
+                "no bridge-consumer recipe has valid provenance; quality override is forbidden"
+            )
+        candidate_pool = provenance_valid
+        best_score = max(float(raw["mean_bridge_accuracy"]) for raw in candidate_pool)
+        tie_pool = [by_recipe[preferred_consumer_recipe]]
+        if not bool(
+            dict(tie_pool[0].get("validity_rules", {})).get(
+                "rule_8_provenance_valid"
+            )
+        ):
+            raise RuntimeError(
+                "preferred bridge consumer has invalid provenance; quality override is forbidden"
+            )
+        selected = tie_pool[0]
+        selection_mode = "explicit_preferred_consumer_with_quality_warnings"
     recipe = str(selected["run_id"])
     median_seed = int(selected["median_seed_id"])
     checkpoint_hash = _sha256(selected["median_checkpoint_sha256"], name="checkpoint_sha256")
@@ -853,7 +900,30 @@ def select_bridge_consumer_preconfirmation(
             "lexicographic_recipe_id",
         ],
         "winner": recipe,
+        "selection_mode": selection_mode,
+        "preferred_consumer_recipe": (
+            preferred_consumer_recipe
+            if quality_gate_policy == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+            else None
+        ),
     }
+    all_quality_results = {
+        name: {
+            "eligible": bool(raw["eligible"]),
+            "failed_rules": sorted(
+                str(rule)
+                for rule, passed in dict(raw["validity_rules"]).items()
+                if not bool(passed)
+            ),
+            "validity_rules": deepcopy(dict(raw["validity_rules"])),
+        }
+        for name, raw in sorted(by_recipe.items())
+    }
+    selected_failed_rules = list(all_quality_results[recipe]["failed_rules"])
+    override_applied = bool(
+        quality_gate_policy == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+        and selected_failed_rules
+    )
     return with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_CONSUMER_PRECONFIRMATION_CONTRACT,
@@ -864,8 +934,21 @@ def select_bridge_consumer_preconfirmation(
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "selected_median_seed_id": median_seed,
             "selected_rho_endpoint": 0.10,
-            "selection_source": "model_val_stop_then_model_val_select__stack_val_consumer_confirmation_only",
+            "selection_source": (
+                "model_val_stop_then_model_val_select__stack_val_consumer_confirmation_only"
+                if quality_gate_policy == STRICT_QUALITY_GATE_POLICY
+                else "explicit_consumer_preference__model_val_select_quality_diagnostics__stack_val_consumer_confirmation_only"
+            ),
             "selection_reason": reason,
+            "quality_gate_policy": quality_gate_policy,
+            "aggregate_quality_eligible": bool(selected["eligible"]),
+            "failed_quality_rules": selected_failed_rules,
+            "all_recipe_quality_gate_results": all_quality_results,
+            "quality_gate_override_applied": override_applied,
+            "quality_warnings_acknowledged": bool(
+                quality_gate_policy == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+            ),
+            "downstream_submission_allowed": True,
             "recipe_aggregate_metrics": deepcopy(dict(selected)),
             "all_recipe_aggregate_hashes": {
                 name: str(value["content_hash"]) for name, value in sorted(by_recipe.items())
@@ -881,6 +964,103 @@ def select_bridge_consumer_preconfirmation(
             "best_individual_seed_selectable": False,
             "stack_val_consumer_opened": False,
             "deployable": False,
+        }
+    )
+
+
+def build_no_eligible_consumer_stop(
+    aggregates: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Describe a Section-18.1 stop without guessing or opening confirmation data."""
+
+    by_recipe: dict[str, Mapping[str, Any]] = {}
+    for raw in aggregates:
+        validate_content_hash(
+            raw,
+            expected_contract=PREDICTION_ANCHORED_CONSUMER_AGGREGATE_CONTRACT,
+        )
+        recipe = str(raw["run_id"])
+        if recipe not in SELECTION_RECIPE_IDS or recipe in by_recipe:
+            raise ValueError(
+                "no-eligible report requires unique T10_clean and T10_robust aggregates"
+            )
+        by_recipe[recipe] = raw
+    if set(by_recipe) != set(SELECTION_RECIPE_IDS):
+        raise ValueError(
+            "no-eligible report requires both predeclared consumer recipes"
+        )
+    if any(bool(raw["eligible"]) for raw in by_recipe.values()):
+        raise ValueError("cannot write a no-eligible report when a recipe is eligible")
+
+    recipe_summaries: dict[str, Any] = {}
+    for recipe in sorted(by_recipe):
+        raw = by_recipe[recipe]
+        rules = {
+            str(name): bool(value)
+            for name, value in dict(raw["validity_rules"]).items()
+        }
+        recipe_summaries[recipe] = {
+            "aggregate_sha256": str(raw["content_hash"]),
+            "eligible": False,
+            "failed_rules": sorted(name for name, passed in rules.items() if not passed),
+            "validity_rules": rules,
+            "mean_bridge_accuracy": float(raw["mean_bridge_accuracy"]),
+            "mean_f0_accuracy": float(raw["mean_f0_accuracy"]),
+            "mean_matched_compute_f0_accuracy": float(
+                raw["mean_matched_compute_f0_accuracy"]
+            ),
+            "mean_matched_compute_gain": float(raw["mean_matched_compute_gain"]),
+            "mean_delta_same": float(raw["mean_delta_same"]),
+            "sample_std_delta_same": float(raw["sample_std_delta_same"]),
+            "aggregate_paired_bootstrap_90": deepcopy(
+                raw["aggregate_paired_bootstrap_90"]
+            ),
+            "mean_response_curve": deepcopy(raw["mean_response_curve"]),
+            "adjacent_decreases_over_0p0005": int(
+                raw["adjacent_decreases_over_0p0005"]
+            ),
+            "rho_0p10_within_0p0005_of_max": bool(
+                raw["rho_0p10_within_0p0005_of_max"]
+            ),
+            "mean_negative_control_gains": deepcopy(
+                raw["mean_negative_control_gains"]
+            ),
+            "negative_control_gain_limit": float(
+                raw["negative_control_gain_limit"]
+            ),
+            "median_seed_id": int(raw["median_seed_id"]),
+            "replica_effects": [
+                {
+                    "seed_id": int(replica["seed_id"]),
+                    "f0_accuracy": float(replica["f0"]["accuracy"]),
+                    "bridge_0p10_accuracy": float(
+                        replica["bridge_0p10"]["accuracy"]
+                    ),
+                    "delta_same": float(replica["delta_same"]),
+                    "matched_compute_gain": float(
+                        replica["matched_compute_gain"]
+                    ),
+                }
+                for replica in raw["replica_metrics"]
+            ],
+        }
+    return with_content_hash(
+        {
+            "contract": PREDICTION_ANCHORED_STOPPED_CAMPAIGN_CONTRACT,
+            "status": "STOPPED_NO_ELIGIBLE_BRIDGE_CONSUMER",
+            "stopped_stage": "B4_SELECT",
+            "selection_split": "model_val_select",
+            "candidate_recipe_ids": list(SELECTION_RECIPE_IDS),
+            "recipe_summaries": recipe_summaries,
+            "selected_consumer_id": None,
+            "selected_consumer_recipe": None,
+            "guessed_consumer_used": False,
+            "runner_up_considered": False,
+            "refit_performed": False,
+            "stack_val_consumer_opened": False,
+            "final_test_opened": False,
+            "downstream_submission_allowed": False,
+            "stop_reason": "no bridge-consumer recipe satisfies Section 18.1",
         }
     )
 
@@ -932,10 +1112,18 @@ def finalize_consumer_confirmation(
         if all_metrics_finite
         else None
     )
-    passed = (
+    integrity_passed = (
         delta is not None
-        and delta >= 0
         and bool(confirmation.get("provenance_valid"))
+    )
+    quality_passed = bool(integrity_passed and delta is not None and delta >= 0)
+    quality_override_authorized = (
+        preconfirmation.get("quality_gate_policy")
+        == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+        and bool(preconfirmation.get("quality_warnings_acknowledged"))
+    )
+    execution_authorized = bool(
+        integrity_passed and (quality_passed or quality_override_authorized)
     )
     record = {
         "split": "stack_val_consumer",
@@ -947,10 +1135,19 @@ def finalize_consumer_confirmation(
         "delta_same": None if delta is None else float(delta),
         "all_metrics_finite": bool(all_metrics_finite),
         "provenance_valid": bool(confirmation.get("provenance_valid")),
-        "passed": bool(passed),
+        "passed": bool(quality_passed),
+        "quality_passed": bool(quality_passed),
+        "integrity_passed": bool(integrity_passed),
+        "quality_gate_policy": preconfirmation.get(
+            "quality_gate_policy", STRICT_QUALITY_GATE_POLICY
+        ),
+        "quality_gate_override_applied": bool(
+            execution_authorized and not quality_passed
+        ),
+        "execution_authorized": bool(execution_authorized),
     }
     root = None if output_dir is None else Path(output_dir)
-    if not passed:
+    if not execution_authorized:
         stopped = with_content_hash(
             {
                 "contract": PREDICTION_ANCHORED_STOPPED_CAMPAIGN_CONTRACT,
@@ -961,6 +1158,11 @@ def finalize_consumer_confirmation(
                 "runner_up_considered": False,
                 "refit_performed": False,
                 "downstream_submission_allowed": False,
+                "stop_reason": (
+                    "consumer confirmation failed a hard integrity requirement"
+                    if not integrity_passed
+                    else "consumer confirmation failed under strict quality-gate policy"
+                ),
             }
         )
         if root is not None:
@@ -981,6 +1183,11 @@ def finalize_consumer_confirmation(
             "stack_val_consumer_opened": True,
             "runner_up_considered": False,
             "refit_performed": False,
+            "confirmation_quality_passed": bool(quality_passed),
+            "confirmation_quality_gate_override_applied": bool(
+                execution_authorized and not quality_passed
+            ),
+            "downstream_submission_allowed": True,
             "deployable": False,
         }
     )
@@ -1003,6 +1210,7 @@ def build_teacher_binding(
     bridge_recipe_sha256: str,
     primary_selection: Mapping[str, Any] | None = None,
     all50_scaler_artifact: Mapping[str, Any] | None = None,
+    allow_failed_quality_gates: bool = False,
 ) -> dict[str, Any]:
     """Bind an exact median teacher before any target-logit cache exists."""
 
@@ -1075,8 +1283,26 @@ def build_teacher_binding(
         raise ValueError("teacher binding checkpoint is not the aggregate median")
     if binding_kind == "all50" and str(run_id) != T10_ALL50_CLEAN:
         raise ValueError("all50 binding must use T10_all50_clean")
-    if binding_kind in {"primary", "alternate"} and not bool(aggregate.get("eligible")):
-        raise ValueError("physical45 binding recipe did not pass aggregate validity")
+    aggregate_quality_eligible = bool(aggregate.get("eligible"))
+    primary_quality_override = bool(
+        binding_kind == "primary"
+        and primary_selection is not None
+        and primary_selection.get("quality_gate_policy")
+        == WARN_AND_CONTINUE_QUALITY_GATE_POLICY
+        and primary_selection.get("quality_warnings_acknowledged")
+        and primary_selection.get("downstream_submission_allowed")
+    )
+    quality_override_authorized = bool(
+        allow_failed_quality_gates or primary_quality_override
+    )
+    if (
+        binding_kind in {"primary", "alternate"}
+        and not aggregate_quality_eligible
+        and not quality_override_authorized
+    ):
+        raise ValueError(
+            "physical45 binding recipe failed quality gates without an explicit override"
+        )
     checkpoint_file = Path(checkpoint_path)
     if checkpoint_file.is_symlink() or not checkpoint_file.is_file():
         raise FileNotFoundError(f"bound teacher checkpoint is absent or unsafe: {checkpoint_file}")
@@ -1095,6 +1321,19 @@ def build_teacher_binding(
             "run_id": str(run_id),
             "recipe_aggregate_sha256": aggregate["content_hash"],
             "recipe_aggregate_metrics": deepcopy(dict(aggregate)),
+            "aggregate_quality_eligible": aggregate_quality_eligible,
+            "failed_quality_rules": sorted(
+                str(rule)
+                for rule, passed in dict(
+                    aggregate.get("validity_rules", {})
+                ).items()
+                if not bool(passed)
+            ),
+            "quality_gate_override_applied": bool(
+                binding_kind in {"primary", "alternate"}
+                and not aggregate_quality_eligible
+                and quality_override_authorized
+            ),
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "selected_median_seed_id": int(aggregate["median_seed_id"]),
             "checkpoint_path": str(checkpoint_path),
@@ -1151,6 +1390,32 @@ def validate_teacher_binding(
         raise ValueError("teacher binding circularly references a cache artifact")
     if not bool(binding.get("checkpoint_refit_forbidden")):
         raise ValueError("teacher binding permits a post-cache refit")
+    aggregate = binding.get("recipe_aggregate_metrics")
+    if not isinstance(aggregate, Mapping):
+        raise ValueError("teacher binding omits its recipe aggregate")
+    validate_content_hash(aggregate)
+    if binding.get("recipe_aggregate_sha256") != aggregate["content_hash"]:
+        raise ValueError("teacher binding recipe aggregate hash changed")
+    aggregate_quality_eligible = bool(aggregate.get("eligible"))
+    if bool(binding.get("aggregate_quality_eligible")) != aggregate_quality_eligible:
+        raise ValueError("teacher binding quality eligibility changed")
+    expected_failed_rules = sorted(
+        str(rule)
+        for rule, passed in dict(aggregate.get("validity_rules", {})).items()
+        if not bool(passed)
+    )
+    if list(binding.get("failed_quality_rules", [])) != expected_failed_rules:
+        raise ValueError("teacher binding failed-quality-rule inventory changed")
+    if (
+        kind in {"primary", "alternate"}
+        and not aggregate_quality_eligible
+        and not bool(binding.get("quality_gate_override_applied"))
+    ):
+        raise ValueError(
+            "ineligible physical45 binding lacks its recorded quality override"
+        )
+    if aggregate_quality_eligible and bool(binding.get("quality_gate_override_applied")):
+        raise ValueError("eligible teacher binding claims an unnecessary quality override")
     all50_scaler_hash = binding.get("all50_correction_scaler_sha256")
     all50_statistics = binding.get("all50_extra_correction_statistics")
     if kind == "all50" and all50_scaler_hash is not None:
@@ -1213,6 +1478,9 @@ __all__ = [
     "ALTERNATE_TEACHER_NAMESPACE",
     "N3_F0_TEACHER_NAMESPACE",
     "TEACHER_LOGIT_CACHE_SCHEMA",
+    "STRICT_QUALITY_GATE_POLICY",
+    "WARN_AND_CONTINUE_QUALITY_GATE_POLICY",
+    "QUALITY_GATE_POLICIES",
     "ConsumerReplicaEvaluation",
     "classification_metrics",
     "slice_classification_metrics",
@@ -1221,6 +1489,7 @@ __all__ = [
     "evaluate_bound_consumer_conditions",
     "aggregate_consumer_evaluations",
     "select_bridge_consumer_preconfirmation",
+    "build_no_eligible_consumer_stop",
     "finalize_consumer_confirmation",
     "build_teacher_binding",
     "validate_teacher_binding",

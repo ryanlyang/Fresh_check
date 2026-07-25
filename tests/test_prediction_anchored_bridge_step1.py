@@ -315,9 +315,9 @@ def test_validation_access_is_purpose_locked_and_confirmation_is_one_shot(
 def test_registry_has_exact_counts_aliases_roles_seeds_and_conditional_state() -> None:
     registry = build_campaign_registry(alternate_teacher_valid=False)
     audit = validate_campaign_registry(registry)
-    assert audit["configuration_count"] == REGISTRY_CONFIGURATION_COUNT == 54
-    assert audit["reconstruction_breadth_count"] == RECONSTRUCTION_BREADTH_COUNT == 46
-    assert audit["post_teacher_configuration_count"] == POST_TEACHER_CONFIGURATION_COUNT == 45
+    assert audit["configuration_count"] == REGISTRY_CONFIGURATION_COUNT == 55
+    assert audit["reconstruction_breadth_count"] == RECONSTRUCTION_BREADTH_COUNT == 47
+    assert audit["post_teacher_configuration_count"] == POST_TEACHER_CONFIGURATION_COUNT == 46
     assert audit["runnable_configuration_count"] == 53
     assert registry["alias_to_canonical"] == {
         "D10_A0_c0_delta": "D10_L8_full_c0",
@@ -386,21 +386,24 @@ def test_registry_has_exact_counts_aliases_roles_seeds_and_conditional_state() -
         "D10_A5_hlg_absolute_conditioned",
         "A0_CAP500_direct_hlt",
         "D10_B1_all50_fullhead",
+        "D10_TALT_A0",
         "D10_TALT_A3",
         "D10_N0_shuffled_logit_kd",
     ):
         assert resolve_registry_run(registry, run_id)[
             "selectable_for_primary_deployment"
         ] is False
-    assert resolve_registry_run(registry, "D10_TALT_A3")[
-        "execution_status"
-    ] == "SKIPPED_INVALID_PARENT"
+    for run_id in ("D10_TALT_A0", "D10_TALT_A3"):
+        assert resolve_registry_run(registry, run_id)[
+            "execution_status"
+        ] == "SKIPPED_INVALID_PARENT"
 
     with_alternate = build_campaign_registry(alternate_teacher_valid=True)
-    assert validate_campaign_registry(with_alternate)["runnable_configuration_count"] == 54
-    assert resolve_registry_run(with_alternate, "D10_TALT_A3")[
-        "execution_status"
-    ] == "RUNNABLE"
+    assert validate_campaign_registry(with_alternate)["runnable_configuration_count"] == 55
+    for run_id in ("D10_TALT_A0", "D10_TALT_A3"):
+        assert resolve_registry_run(with_alternate, run_id)[
+            "execution_status"
+        ] == "RUNNABLE"
 
 
 def test_provisional_storage_formula_and_dense_cache_projection_are_exact() -> None:
@@ -451,7 +454,7 @@ def test_step1_report_is_complete_and_production_remains_blocked() -> None:
         "stack_val_consumer",
         "stack_val_deploy",
     }
-    assert len(report["runs"]) == 54
+    assert len(report["runs"]) == 55
     for row in report["runs"]:
         assert len(row["seed_replicas"]) == 3
         assert row["retained_state_rule"] == RETAINED_STATE_RULE
@@ -559,7 +562,7 @@ def test_step1_cli_dry_run_writes_nothing_and_renders_complete_report(
     payload = json.loads(completed.stdout)
     assert payload["dry_run"] is True
     assert payload["debug_miniature_splits"] is True
-    assert payload["report"]["counts"]["configuration_count"] == 54
-    assert len(payload["report"]["runs"]) == 54
+    assert payload["report"]["counts"]["configuration_count"] == 55
+    assert len(payload["report"]["runs"]) == 55
     assert payload["report"]["production_submission_allowed"] is False
     assert not output_dir.exists()

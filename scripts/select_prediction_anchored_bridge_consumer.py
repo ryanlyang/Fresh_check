@@ -22,6 +22,9 @@ from teacher_logit_reco.local_particle_residual_field.bridge_evaluation import (
     ALL50_TEACHER_NAMESPACE,
     ALTERNATE_TEACHER_NAMESPACE,
     PRIMARY_TEACHER_NAMESPACE,
+    QUALITY_GATE_POLICIES,
+    STRICT_QUALITY_GATE_POLICY,
+    build_no_eligible_consumer_stop,
     build_teacher_binding,
     finalize_consumer_confirmation,
     select_bridge_consumer_preconfirmation,
@@ -42,6 +45,17 @@ def _parser() -> argparse.ArgumentParser:
     select.add_argument("--bridge-recipe-sha256", default="")
     select.add_argument("--bridge-recipe", default="")
     select.add_argument("--output", required=True)
+    select.add_argument(
+        "--quality-gate-policy",
+        choices=QUALITY_GATE_POLICIES,
+        default=STRICT_QUALITY_GATE_POLICY,
+        help="strict stops on failed scientific gates; warn_and_continue records them and proceeds",
+    )
+    select.add_argument(
+        "--preferred-consumer",
+        choices=("T10_clean", "T10_robust"),
+        default="T10_robust",
+    )
     select.add_argument("--dry-run", action="store_true")
 
     confirm = subparsers.add_parser("confirm", help="apply the sealed one-shot confirmation")
@@ -96,6 +110,30 @@ def main(argv: list[str] | None = None) -> int:
             if args.bridge_recipe_sha256
             else load_hashed_json(args.bridge_recipe)["content_hash"]
         )
+        if (
+            args.quality_gate_policy == STRICT_QUALITY_GATE_POLICY
+            and not any(bool(aggregate["eligible"]) for aggregate in (clean, robust))
+        ):
+            artifact = build_no_eligible_consumer_stop([clean, robust])
+            stopped_path = Path(args.output).parent / "stopped_campaign.json"
+            publication = (
+                None
+                if args.dry_run
+                else write_immutable_json(stopped_path, artifact)
+            )
+            print(
+                json.dumps(
+                    {
+                        "dry_run": bool(args.dry_run),
+                        "selection": None,
+                        "stopped_campaign": artifact,
+                        "publication": publication,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
         artifact = select_bridge_consumer_preconfirmation(
             [clean, robust],
             f0_checkpoint_sha256=f0_sha256,
@@ -104,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                 "T10_clean": args.clean_checkpoint,
                 "T10_robust": args.robust_checkpoint,
             },
+            quality_gate_policy=args.quality_gate_policy,
+            preferred_consumer_recipe=args.preferred_consumer,
         )
         publication = None if args.dry_run else write_immutable_json(args.output, artifact)
         print(json.dumps({"dry_run": bool(args.dry_run), "selection": artifact, "publication": publication}, indent=2, sort_keys=True))

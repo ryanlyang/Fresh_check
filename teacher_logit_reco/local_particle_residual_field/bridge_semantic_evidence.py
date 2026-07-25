@@ -1,9 +1,10 @@
 """Step 8 semantic controls and adversarial-channel evidence.
 
-The module completes the scientific boundary around the Step 7 HLG graph.  It
-does not introduce another primary architecture: every run in this module uses
-the exact canonical A3 graph, with the sole declared B1 addition of a
-zero-initialized 160 -> 64 -> 5 reliability head.
+The module completes the scientific boundary around the Step 7 HLG graph. It
+does not introduce another primary architecture. Most runs use the exact
+canonical A3 graph, with the declared B1 reliability-head addition; the
+non-selectable TALT_A0 comparison deliberately reuses the simple C0 graph
+against the same alternate clean consumer as TALT_A3.
 
 Dense bridge fields and shuffled controls are allocation-local inputs.  The
 only persistent distribution reference produced here is the locked 1,001 by
@@ -71,7 +72,13 @@ from .bridge_losses import (
     local_smoothness_loss,
     masked_group_balanced_huber,
 )
-from .bridge_reconstructor import PHYSICAL_CHANNELS, TorchBridgeScalers
+from .bridge_reconstructor import (
+    C0CorrectionConfig,
+    C0CorrectionOutput,
+    PHYSICAL_CHANNELS,
+    PredictionAnchoredC0Correction,
+    TorchBridgeScalers,
+)
 from .hierarchical_global_reconstructor import (
     ARCH_A3_HLG_PRIMARY,
     DIRECT_HLT,
@@ -125,7 +132,10 @@ A3_ADDITIONAL_CANONICAL_RUN_IDS = tuple(
     value for value in A3_INTERACTION_RUN_IDS if value != A3_PRIMARY_ALIAS
 )
 ALL50_RUN_IDS = ("D10_B1_all50_fullhead", "D10_B2_all50_physical45_only")
-ALTERNATE_RUN_ID = "D10_TALT_A3"
+ALTERNATE_A0_RUN_ID = "D10_TALT_A0"
+ALTERNATE_A3_RUN_ID = "D10_TALT_A3"
+ALTERNATE_RUN_ID = ALTERNATE_A3_RUN_ID
+ALTERNATE_RUN_IDS = (ALTERNATE_A0_RUN_ID, ALTERNATE_A3_RUN_ID)
 NEGATIVE_CONTROL_RUN_IDS = (
     "D10_N0_shuffled_logit_kd",
     "D10_N1_shuffled_bridge_field",
@@ -135,7 +145,7 @@ NEGATIVE_CONTROL_RUN_IDS = (
 STEP8_SPECIAL_CANONICAL_RUN_IDS = (
     A3_ADDITIONAL_CANONICAL_RUN_IDS
     + ALL50_RUN_IDS
-    + (ALTERNATE_RUN_ID,)
+    + ALTERNATE_RUN_IDS
     + NEGATIVE_CONTROL_RUN_IDS
 )
 PERTURBATION_AUDIT_SEEDS = (9101, 9102, 9103, 9104)
@@ -169,6 +179,7 @@ class Step8RunRecipe:
     binding_kind: str | None
     channel_policy: str
     selectable_for_primary_deployment: bool
+    architecture_id: str = ARCH_A3_HLG_PRIMARY
     control_kind: str | None = None
     all50_head: str | None = None
     conditional_parent: str | None = None
@@ -178,7 +189,7 @@ class Step8RunRecipe:
             set(A3_INTERACTION_RUN_IDS)
             | {ARCH_A3_HLG_PRIMARY}
             | set(ALL50_RUN_IDS)
-            | {ALTERNATE_RUN_ID}
+            | set(ALTERNATE_RUN_IDS)
             | set(NEGATIVE_CONTROL_RUN_IDS)
         )
         if self.run_id not in allowed:
@@ -199,6 +210,16 @@ class Step8RunRecipe:
             raise ValueError("invalid all50 head semantics")
         if self.all50_head is not None and self.run_id not in ALL50_RUN_IDS:
             raise ValueError("only B1/B2 may declare all50 head semantics")
+        if self.architecture_id not in {
+            ARCH_A3_HLG_PRIMARY,
+            "D10_A0_c0_delta",
+        }:
+            raise ValueError("invalid Step 8 architecture identity")
+        if (
+            self.architecture_id == "D10_A0_c0_delta"
+            and self.run_id != ALTERNATE_A0_RUN_ID
+        ):
+            raise ValueError("only TALT_A0 may use the C0 architecture in Step 8")
 
     @property
     def canonical_run_id(self) -> str:
@@ -239,7 +260,7 @@ class Step8RunRecipe:
                 "contract": PREDICTION_ANCHORED_STEP8_RECIPE_CONTRACT,
                 **asdict(self),
                 "canonical_run_id": self.canonical_run_id,
-                "architecture_id": ARCH_A3_HLG_PRIMARY,
+                "architecture_id": self.architecture_id,
                 "distillation_coefficients": self.phase_coefficients("distillation"),
                 "warmup_coefficients": (
                     self.phase_coefficients("field_warmup") if self.field_warmup else None
@@ -269,11 +290,12 @@ def _recipe(
     control: str | None = None,
     all50_head: str | None = None,
     conditional_parent: str | None = None,
+    architecture_id: str = ARCH_A3_HLG_PRIMARY,
 ) -> Step8RunRecipe:
     return Step8RunRecipe(
         run_id, kd, ce, bridge, 0.0, anchor, smooth, warmup,
         namespace if kd > 0 else None, kind, policy, selectable,
-        control, all50_head, conditional_parent,
+        architecture_id, control, all50_head, conditional_parent,
     )
 
 
@@ -302,7 +324,14 @@ def step8_run_recipes() -> dict[str, Step8RunRecipe]:
             all50_head="physical45_only",
         ),
         _recipe(
-            ALTERNATE_RUN_ID, **{**primary, "namespace": ALTERNATE_TEACHER_NAMESPACE},
+            ALTERNATE_A0_RUN_ID,
+            **{**primary, "namespace": ALTERNATE_TEACHER_NAMESPACE},
+            kind="alternate", selectable=False,
+            conditional_parent="alternate_teacher_valid",
+            architecture_id="D10_A0_c0_delta",
+        ),
+        _recipe(
+            ALTERNATE_A3_RUN_ID, **{**primary, "namespace": ALTERNATE_TEACHER_NAMESPACE},
             kind="alternate", selectable=False, conditional_parent="alternate_teacher_valid",
         ),
         _recipe(
@@ -344,10 +373,10 @@ def validate_step8_registry_semantics(registry: Mapping[str, Any]) -> dict[str, 
         (ARCH_A3_HLG_PRIMARY,)
         + A3_ADDITIONAL_CANONICAL_RUN_IDS
         + ALL50_RUN_IDS
-        + (ALTERNATE_RUN_ID,)
+        + ALTERNATE_RUN_IDS
         + NEGATIVE_CONTROL_RUN_IDS
     )
-    if len(canonical_ids) != 15 or len(set(canonical_ids)) != len(canonical_ids):
+    if len(canonical_ids) != 16 or len(set(canonical_ids)) != len(canonical_ids):
         raise AssertionError("Step 8 canonical semantic inventory changed")
     rows = {}
     for run_id in canonical_ids:
@@ -592,7 +621,7 @@ def all50_anchor_regularization(
 
 
 def compute_step8_objective(
-    output: HLGCorrectionOutput | All50CorrectionOutput,
+    output: HLGCorrectionOutput | All50CorrectionOutput | C0CorrectionOutput,
     batch: Mapping[str, Any],
     recipe: Step8RunRecipe,
     *,
@@ -1936,6 +1965,12 @@ def measure_step8_registry_states(
                 dropout=0.05,
             )
             model_config = model.config_artifact()
+        elif run_id == ALTERNATE_A0_RUN_ID:
+            model = PredictionAnchoredC0Correction(
+                physical45_scaler_artifact,
+                C0CorrectionConfig(d_model=160, dropout=0.05),
+            )
+            model_config = model.config_artifact()
         else:
             model = physical_a3
             model_config = canonical_config
@@ -2005,7 +2040,7 @@ def require_post_teacher_release(
     selected_consumer: Mapping[str, Any],
     primary_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Release B6 solely from a confirmed valid teacher, never from C0 success."""
+    """Release B6 from a confirmed, integrity-valid teacher, never from C0 success."""
 
     validate_campaign_registry(registry)
     validate_content_hash(
@@ -2015,8 +2050,13 @@ def require_post_teacher_release(
     if selected_consumer.get("status") != "CONFIRMED_LOCKED":
         raise PermissionError("post-teacher matrix requires a confirmed locked consumer")
     confirmation = selected_consumer.get("stack_val_consumer_confirmation", {})
-    if not bool(confirmation.get("passed")) or not bool(confirmation.get("provenance_valid")):
-        raise PermissionError("post-teacher matrix requires a scientifically valid teacher gate")
+    execution_authorized = bool(
+        confirmation.get("execution_authorized", confirmation.get("passed"))
+    )
+    if not execution_authorized or not bool(confirmation.get("provenance_valid")):
+        raise PermissionError(
+            "post-teacher matrix requires an integrity-valid confirmed teacher"
+        )
     validate_teacher_binding(
         primary_binding,
         expected_kind="primary",
@@ -2035,6 +2075,13 @@ def require_post_teacher_release(
             "registered_post_teacher_configuration_count": registry["post_teacher_configuration_count"],
             "released_runnable_count": len(runnable),
             "teacher_gate_passed": True,
+            "teacher_integrity_gate_passed": True,
+            "teacher_quality_passed": bool(
+                confirmation.get("quality_passed", confirmation.get("passed"))
+            ),
+            "teacher_quality_warning_override_applied": bool(
+                confirmation.get("quality_gate_override_applied")
+            ),
             "c0_success_consulted": False,
             "hlg_release_independent_of_c0": True,
         }
@@ -2140,7 +2187,10 @@ __all__ = [
     "A3_INTERACTION_RUN_IDS",
     "A3_ADDITIONAL_CANONICAL_RUN_IDS",
     "ALL50_RUN_IDS",
+    "ALTERNATE_A0_RUN_ID",
+    "ALTERNATE_A3_RUN_ID",
     "ALTERNATE_RUN_ID",
+    "ALTERNATE_RUN_IDS",
     "NEGATIVE_CONTROL_RUN_IDS",
     "STEP8_SPECIAL_CANONICAL_RUN_IDS",
     "PERTURBATION_AUDIT_SEEDS",

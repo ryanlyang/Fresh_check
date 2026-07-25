@@ -439,7 +439,10 @@ def build_prediction_anchored_tigris_graph(
 
     post_rows = [row for row in registry["runs"] if bool(row["post_teacher_configuration"])]
     if len(post_rows) != POST_TEACHER_CONFIGURATION_COUNT:
-        raise ValueError("registry post-teacher inventory no longer contains 45 rows")
+        raise ValueError(
+            "registry post-teacher inventory no longer contains "
+            f"{POST_TEACHER_CONFIGURATION_COUNT} rows"
+        )
     grouped: dict[str, list[str]] = {}
     skipped = []
     for row in post_rows:
