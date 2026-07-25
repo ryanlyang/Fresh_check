@@ -16,6 +16,9 @@ IFS=$'\n\t'
 : "${PAB_SOURCE_BASE:?missing PAB_SOURCE_BASE}"
 : "${PAB_PREFLIGHT_ROOT:?missing PAB_PREFLIGHT_ROOT}"
 : "${PREDICTION_ANCHORED_ARTIFACT_ROOT:?missing campaign artifact root}"
+: "${PAB_SPLIT_PROFILE:=pilot_250k}"
+: "${PAB_BUDGET_GIB:=5}"
+: "${PAB_RECON_PHASE2_EPOCHS:=40}"
 export PYTHONNOUSERSITE=1
 : "${PAB_CONDA_ENV:=atlas_kd_tigris}"
 : "${PAB_CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
@@ -44,7 +47,8 @@ fresh_run "${PYTHON_BIN}" -u scripts/bootstrap_prediction_anchored_bridge_prefli
   --baseline-checkpoint "${baseline}" \
   --output-dir "${PAB_PREFLIGHT_ROOT}" \
   --artifact-root "${PREDICTION_ANCHORED_ARTIFACT_ROOT}" \
-  --budget-gib 5
+  --budget-gib "${PAB_BUDGET_GIB}" \
+  --split-profile "${PAB_SPLIT_PROFILE}"
 
 export PREDICTION_ANCHORED_GRAPH="${PAB_PREFLIGHT_ROOT}/prediction_anchored_tigris_graph.json"
 export PAB_REGISTRY="${PAB_PREFLIGHT_ROOT}/campaign_registry_step8.json"
@@ -52,6 +56,7 @@ export PAB_RESERVATIONS="${PAB_PREFLIGHT_ROOT}/campaign_reservations.json"
 export PAB_EXECUTION_SPEC="${PAB_PREFLIGHT_ROOT}/prediction_anchored_execution_spec.json"
 export PAB_REPRESENTATIVE_RESOURCE_REFERENCE="${PAB_PREFLIGHT_ROOT}/representative_architecture_resource_reference.json"
 export PREDICTION_ANCHORED_EXECUTE=1
+export PAB_SPLIT_PROFILE PAB_RECON_PHASE2_EPOCHS
 
 # The finalizer submits B0--B6 only after every immutable binding validates.
 fresh_run bash sbatch/submit_prediction_anchored_bridge_pilot.sh

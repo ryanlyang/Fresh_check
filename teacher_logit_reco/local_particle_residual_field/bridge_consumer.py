@@ -54,6 +54,13 @@ PREDICTION_ANCHORED_BRANCH_EXECUTION_CONTRACT = (
     "prediction_anchored_tpred_branch_execution_v1"
 )
 
+CONSUMER_DATA_PROFILE_PILOT_250K = "pilot_250k"
+CONSUMER_DATA_PROFILE_HIGH_DATA_3M = "high_data_3m"
+CONSUMER_DATA_PROFILES = {
+    CONSUMER_DATA_PROFILE_PILOT_250K: (250_000, 500_000),
+    CONSUMER_DATA_PROFILE_HIGH_DATA_3M: (3_000_000, 6_000_000),
+}
+
 A0_C250 = "A0_C250"
 A0_C250_LONG = "A0_C250_LONG"
 A0_S500 = "A0_S500"
@@ -115,8 +122,12 @@ class ConsumerRunSpec:
             raise ValueError("scientific consumer runs require paired seeds 101/202/303")
         if self.channel_policy not in {None, BRIDGE_CHANNEL_PHYSICAL45, BRIDGE_CHANNEL_ALL50}:
             raise ValueError("invalid consumer channel policy")
-        if int(self.unique_jet_count) not in {250_000, 500_000}:
-            raise ValueError("consumer fairness rows must use exactly 250k or 500k unique jets")
+        if int(self.unique_jet_count) not in {
+            count for counts in CONSUMER_DATA_PROFILES.values() for count in counts
+        }:
+            raise ValueError(
+                "consumer fairness rows must use a count from a locked data profile"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,16 +137,25 @@ class ConsumerRunSpec:
         }
 
 
-def consumer_run_specs() -> dict[str, ConsumerRunSpec]:
+def consumer_run_specs(
+    data_profile: str = CONSUMER_DATA_PROFILE_PILOT_250K,
+) -> dict[str, ConsumerRunSpec]:
+    try:
+        consumer_count, union_count = CONSUMER_DATA_PROFILES[str(data_profile)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown consumer data profile {data_profile!r}; "
+            f"expected one of {sorted(CONSUMER_DATA_PROFILES)}"
+        ) from exc
     specs = (
-        ConsumerRunSpec(A0_C250, "stack_train_consumer", "reference_hlt_part", FIELD_CONDITION_A0, None, "baseline", 250_000),
-        ConsumerRunSpec(A0_C250_LONG, "stack_train_consumer", A0_C250, FIELD_CONDITION_A0, None, "bridge_continuation", 250_000),
-        ConsumerRunSpec(A0_S500, "stack_train_union", "reference_hlt_part", FIELD_CONDITION_A0, None, "baseline", 500_000),
-        ConsumerRunSpec(TPRED, "stack_train_consumer", "reference_hlt_part", FIELD_CONDITION_F0, BRIDGE_CHANNEL_PHYSICAL45, "baseline", 250_000),
-        ConsumerRunSpec(TPRED_CONTINUE, "stack_train_consumer", TPRED, FIELD_CONDITION_F0, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", 250_000),
-        ConsumerRunSpec(T10_CLEAN, "stack_train_consumer", TPRED, FIELD_CONDITION_BRIDGE, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", 250_000),
-        ConsumerRunSpec(T10_ROBUST, "stack_train_consumer", TPRED, FIELD_CONDITION_ROBUST, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", 250_000),
-        ConsumerRunSpec(T10_ALL50_CLEAN, "stack_train_consumer", TPRED, FIELD_CONDITION_BRIDGE, BRIDGE_CHANNEL_ALL50, "bridge_continuation", 250_000),
+        ConsumerRunSpec(A0_C250, "stack_train_consumer", "reference_hlt_part", FIELD_CONDITION_A0, None, "baseline", consumer_count),
+        ConsumerRunSpec(A0_C250_LONG, "stack_train_consumer", A0_C250, FIELD_CONDITION_A0, None, "bridge_continuation", consumer_count),
+        ConsumerRunSpec(A0_S500, "stack_train_union", "reference_hlt_part", FIELD_CONDITION_A0, None, "baseline", union_count),
+        ConsumerRunSpec(TPRED, "stack_train_consumer", "reference_hlt_part", FIELD_CONDITION_F0, BRIDGE_CHANNEL_PHYSICAL45, "baseline", consumer_count),
+        ConsumerRunSpec(TPRED_CONTINUE, "stack_train_consumer", TPRED, FIELD_CONDITION_F0, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", consumer_count),
+        ConsumerRunSpec(T10_CLEAN, "stack_train_consumer", TPRED, FIELD_CONDITION_BRIDGE, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", consumer_count),
+        ConsumerRunSpec(T10_ROBUST, "stack_train_consumer", TPRED, FIELD_CONDITION_ROBUST, BRIDGE_CHANNEL_PHYSICAL45, "bridge_continuation", consumer_count),
+        ConsumerRunSpec(T10_ALL50_CLEAN, "stack_train_consumer", TPRED, FIELD_CONDITION_BRIDGE, BRIDGE_CHANNEL_ALL50, "bridge_continuation", consumer_count),
     )
     return {spec.run_id: spec for spec in specs}
 
@@ -145,7 +165,7 @@ def build_consumer_replica_manifest(config: "ConsumerCampaignConfig") -> dict[st
 
     rows: list[dict[str, Any]] = []
     for run_id in STEP3_RUN_IDS:
-        spec = consumer_run_specs()[run_id]
+        spec = consumer_run_specs(config.data_profile)[run_id]
         steps = (
             config.bridge_finetune_steps
             if spec.budget_kind == "bridge_continuation"
@@ -196,6 +216,7 @@ class ConsumerCampaignConfig:
     input_field_dim: int = 50
     reference_input_dim: int = 17
     paired_seed_ids: tuple[int, ...] = PAIRED_SEED_IDS
+    data_profile: str = CONSUMER_DATA_PROFILE_PILOT_250K
 
     def __post_init__(self) -> None:
         for name in ("baseline_steps", "bridge_finetune_steps", "batch_size", "evaluation_interval_steps"):
@@ -205,6 +226,10 @@ class ConsumerCampaignConfig:
             raise ValueError("the bridge consumer must widen by exactly 50 residual fields")
         if tuple(self.paired_seed_ids) != tuple(PAIRED_SEED_IDS):
             raise ValueError("scientific consumer runs require paired seeds 101/202/303")
+        if str(self.data_profile) not in CONSUMER_DATA_PROFILES:
+            raise ValueError(
+                f"unknown consumer data profile {self.data_profile!r}"
+            )
         if float(self.learning_rate) <= 0 or float(self.weight_decay) < 0 or float(self.grad_clip_norm) < 0:
             raise ValueError("invalid optimizer configuration")
 
@@ -222,7 +247,10 @@ class ConsumerCampaignConfig:
                 **asdict(self),
                 "paired_seed_ids": list(self.paired_seed_ids),
                 "continuation_evaluation_steps": list(self.continuation_evaluation_steps),
-                "run_specs": {key: value.to_dict() for key, value in consumer_run_specs().items()},
+                "run_specs": {
+                    key: value.to_dict()
+                    for key, value in consumer_run_specs(self.data_profile).items()
+                },
             }
         )
 

@@ -35,6 +35,7 @@ from teacher_logit_reco.local_particle_residual_field import (
     fit_bridge_scalers,
     initialize_step3_root_from_reference,
     measure_step8_registry_states,
+    prediction_anchored_split_config,
     record_step3_registry_measurements,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign_policy import (
@@ -66,6 +67,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--artifact-root", required=True)
     parser.add_argument("--budget-gib", type=int, choices=(5, 6), default=5)
+    parser.add_argument(
+        "--split-profile",
+        choices=("pilot_250k", "high_data_3m"),
+        default="pilot_250k",
+    )
     return parser
 
 
@@ -110,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     parent_path = Path(args.parent_manifest).resolve()
     parent = load_split_manifest(parent_path)
     source_sha = sha256_file(parent_path)
-    child = build_child_split_manifest(parent)
+    split_config = prediction_anchored_split_config(args.split_profile)
+    child = build_child_split_manifest(parent, config=split_config)
     # Both physical-45 consumers are always trained and provenance-audited.
     # Performance gates are warnings in the production pilot, so reserve and
     # schedule the alternate-teacher A3 diagnostic from the clean start.
@@ -121,6 +128,12 @@ def main(argv: list[str] | None = None) -> int:
     write_immutable_json(registry0_path, registry0)
 
     model_size = _baseline_model_size(args.baseline_checkpoint)
+    if args.split_profile == "high_data_3m":
+        baseline_steps = 120_000
+        bridge_finetune_steps = 24_000
+    else:
+        baseline_steps = 10_000
+        bridge_finetune_steps = 2_000
     execution = build_prediction_anchored_execution_spec(
         parent_manifest_path=parent_path,
         child_manifest_path=child_path,
@@ -129,11 +142,12 @@ def main(argv: list[str] | None = None) -> int:
         baseline_checkpoint_path=args.baseline_checkpoint,
         r0_config=StreamedR0TrainConfig(output_dir="__RUNTIME_OUTPUT_DIR__"),
         consumer_config=ConsumerCampaignConfig(
-            baseline_steps=10_000,
-            bridge_finetune_steps=2_000,
+            baseline_steps=baseline_steps,
+            bridge_finetune_steps=bridge_finetune_steps,
             batch_size=128,
             evaluation_interval_steps=200,
             model_size=model_size,
+            data_profile=args.split_profile,
         ),
     )
     execution_path = output / "prediction_anchored_execution_spec.json"
@@ -243,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
         "registry": str(registry_path), "reservations": str(reservations_path),
         "execution_spec": str(execution_path), "graph": str(graph_path),
         "artifact_root": str(Path(args.artifact_root).resolve()),
+        "split_profile": args.split_profile,
+        "consumer_baseline_steps": baseline_steps,
+        "consumer_bridge_finetune_steps": bridge_finetune_steps,
         "production_submission_allowed": True,
         "representative_measurements_only": True,
     }

@@ -101,6 +101,5 @@ printf 'stack_train_distill=3000000\n'
 printf 'validation_total=1000000\n'
 printf 'final_test_sealed=1000000\n'
 printf 'r0_disjoint_model_train=500000\n'
-printf 'dense_npz_materialization=DISABLED\n'
-printf 'scientific_training_submission=DEFERRED_UNTIL_STREAMING_RUNTIME\n'
-
+printf 'dense_npz_materialization=DEFERRED_TO_MEASURED_FULL_SUBMITTER\n'
+printf 'scientific_training_submission=DEFERRED_UNTIL_SOURCE_CACHE_BUILD\n'

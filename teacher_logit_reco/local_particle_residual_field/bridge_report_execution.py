@@ -158,8 +158,10 @@ def _training_metadata(
     median_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
     if run_id in {A0_C250, A0_C250_LONG, A0_S500}:
-        run_spec = consumer_run_specs()[run_id]
         config = execution_spec["consumer_training"]
+        run_spec = consumer_run_specs(
+            str(config.get("data_profile", "pilot_250k"))
+        )[run_id]
         base_steps = int(config["baseline_steps"])
         continuation = int(config["bridge_finetune_steps"])
         steps = base_steps + continuation if run_id == A0_C250_LONG else base_steps
@@ -185,7 +187,10 @@ def _training_metadata(
         return {
             "training_manifest_sha256": child_manifest["content_hash"],
             "training_split_names": ["stack_train_consumer", "stack_train_distill"],
-            "unique_jet_count": 500_000,
+            "unique_jet_count": int(
+                child_manifest["children"]["stack_train_consumer"]["count"]
+            )
+            + int(child_manifest["children"]["stack_train_distill"]["count"]),
             "optimizer_step_budget": int(steps),
             "training_metadata_source": "paired_reconstruction_metrics_and_child_manifest",
         }

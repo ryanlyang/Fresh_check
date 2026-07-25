@@ -27,9 +27,11 @@ pab_require_env PAB_EXECUTION_SPEC PAB_RESERVATIONS
 : "${PAB_ALL50_SCALER:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_scalers_all50.json}"
 : "${PAB_ABSOLUTE_SCALER:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/bridge_inputs/bridge_absolute_scaler_physical45.json}"
 : "${PAB_DEPLOYED_RESOURCE_REFERENCE:=${PREDICTION_ANCHORED_ARTIFACT_ROOT}/measurements/deployed_resource_reference.json}"
+: "${PAB_RECON_PHASE2_EPOCHS:=40}"
 
 plan_args=("${PYTHON_BIN}" -u scripts/train_prediction_anchored_bridge_reconstructor.py
-  --mode plan --scaler "${PAB_PHYSICAL45_SCALER}")
+  --mode plan --scaler "${PAB_PHYSICAL45_SCALER}"
+  --phase2-epochs "${PAB_RECON_PHASE2_EPOCHS}")
 if pab_is_dry_run; then
   plan_args+=(--dry-run)
 else
@@ -50,6 +52,7 @@ fresh_run "${PYTHON_BIN}" -u scripts/train_prediction_anchored_bridge_reconstruc
   --deployed-resource-reference "${PAB_DEPLOYED_RESOURCE_REFERENCE}" \
   --ram-root "${PAB_RAM_ROOT}" --allocation-id "${SLURM_JOB_ID}" \
   --replica-dir "${PAB_RAM_ROOT}/replicas" --device "${DEVICE}" \
+  --phase2-epochs "${PAB_RECON_PHASE2_EPOCHS}" \
   --execution-report "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/telemetry/${PREDICTION_ANCHORED_NODE_ID}.json"
 if [[ "${PACK_ID}" == "b6_l0_postteacher_eval_paired3" ]]; then
   run_ids=(D10_L0_bridge_only)

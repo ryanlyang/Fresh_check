@@ -105,11 +105,28 @@ class _ResidentBridgeParent:
         r0: FrozenR0Runner,
         ledger: AllocationRamLedger,
         generation_batch_size: int,
+        derived_parent_indices: np.ndarray | None = None,
     ) -> None:
         self.name = str(name)
         self.hlt = hlt
         self.offline = offline
-        n_events = hlt.n_events
+        requested = (
+            np.arange(hlt.n_events, dtype=np.int64)
+            if derived_parent_indices is None
+            else np.asarray(derived_parent_indices, dtype=np.int64)
+        )
+        if (
+            requested.ndim != 1
+            or requested.size == 0
+            or np.any(requested < 0)
+            or np.any(requested >= hlt.n_events)
+            or np.unique(requested).size != requested.size
+        ):
+            raise ValueError("resident bridge parent derived indices are invalid")
+        self.derived_parent_indices = requested
+        self._derived_positions = np.full(hlt.n_events, -1, dtype=np.int32)
+        self._derived_positions[requested] = np.arange(requested.size, dtype=np.int32)
+        n_events = int(requested.size)
         particle_width = int(hlt.manifest["arrays"]["tokens"]["shape"][1])
         expected = n_events * particle_width * 50 * np.dtype(np.float32).itemsize * 2
         expected += n_events * particle_width * np.dtype(bool).itemsize
@@ -127,8 +144,9 @@ class _ResidentBridgeParent:
             raise ValueError("generation_batch_size must be positive")
         for start in range(0, n_events, step):
             stop = min(start + step, n_events)
-            hlt_batch = hlt.read_range(start, stop, names=("tokens", "mask"))
-            offline_batch = offline.read_range(start, stop, names=("tokens", "mask"))
+            selected = requested[start:stop]
+            hlt_batch = hlt.read_indices(selected, names=("tokens", "mask"))
+            offline_batch = offline.read_indices(selected, names=("tokens", "mask"))
             truth, target_mask, _, _, _ = compute_local_particle_residual_fields(
                 hlt_batch["tokens"],
                 hlt_batch["mask"],
@@ -146,15 +164,36 @@ class _ResidentBridgeParent:
             raise ValueError(f"resident bridge parent {name} changed padding semantics")
         ledger.commit(self.reservation_id, measured_bytes=expected)
 
-    def batch(self, indices: Sequence[int]) -> dict[str, np.ndarray]:
+    def fields(
+        self, indices: Sequence[int]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        selected = np.asarray(indices, dtype=np.int64)
+        positions = self._derived_positions[selected]
+        if np.any(positions < 0):
+            raise ValueError(
+                f"resident bridge parent {self.name} was asked for fields "
+                "outside its declared derived child"
+            )
+        return self.f0[positions], self.f_true[positions], self.mask[positions]
+
+    def batch(
+        self, indices: Sequence[int], *, require_fields: bool = True
+    ) -> dict[str, np.ndarray]:
         selected = np.asarray(indices, dtype=np.int64)
         hlt = self.hlt.read_indices(selected, names=("tokens", "mask", "labels"))
-        if not np.array_equal(hlt["mask"], self.mask[selected]):
+        if require_fields:
+            f0, f_true, field_mask = self.fields(selected)
+        else:
+            shape = (*hlt["mask"].shape, 50)
+            f0 = np.zeros(shape, dtype=np.float32)
+            f_true = np.zeros(shape, dtype=np.float32)
+            field_mask = hlt["mask"]
+        if not np.array_equal(hlt["mask"], field_mask):
             raise ValueError(f"resident bridge parent {self.name} mask changed")
         return {
             **hlt,
-            "f0": self.f0[selected],
-            "f_true": self.f_true[selected],
+            "f0": f0,
+            "f_true": f_true,
             "indices": selected,
         }
 
@@ -196,7 +235,10 @@ def _resolver(
     def resolve(local_indices: tuple[int, ...]) -> dict[str, Any]:
         local = np.asarray(local_indices, dtype=np.int64)
         selected = parent_indices[local]
-        raw = parent.batch(selected)
+        raw = parent.batch(
+            selected,
+            require_fields=run_id not in {A0_C250, A0_C250_LONG, A0_S500},
+        )
         batch = build_consumer_tensor_batch(
             tokens=raw["tokens"],
             mask=raw["mask"],
@@ -234,7 +276,10 @@ def _quick_evaluate(
     with torch.no_grad():
         for start in range(0, len(parent_indices), int(batch_size)):
             selected = parent_indices[start : start + int(batch_size)]
-            raw = parent.batch(selected)
+            raw = parent.batch(
+                selected,
+                require_fields=eval_run not in {A0_C250, A0_C250_LONG, A0_S500},
+            )
             batch = build_consumer_tensor_batch(
                 tokens=raw["tokens"],
                 mask=raw["mask"],
@@ -390,8 +435,7 @@ def _evaluation_batches(
         parent_indices,
         names=("tokens", "mask", "labels", "jet_file_indices", "jet_entries"),
     )
-    f0 = parent.f0[parent_indices]
-    truth = parent.f_true[parent_indices]
+    f0, truth, _ = parent.fields(parent_indices)
     event_ids = _event_ids(parent.hlt, parent_indices)
     wrong_map = build_matched_wrong_event_map(
         tokens=raw["tokens"],
@@ -529,6 +573,17 @@ def run_consumer_campaign_from_execution_spec(
                 source=spec["sources"][split],
                 report=staged[split][2],
             )
+        consumer_indices = np.asarray(
+            child["children"]["stack_train_consumer"]["parent_row_indices"],
+            dtype=np.int64,
+        )
+        stop_indices = np.asarray(
+            child["children"]["model_val_stop"]["parent_row_indices"], dtype=np.int64
+        )
+        select_indices = np.asarray(
+            child["children"]["model_val_select"]["parent_row_indices"], dtype=np.int64
+        )
+        model_val_derived_indices = np.concatenate((stop_indices, select_indices))
         r0 = FrozenR0Runner(r0_path, device=torch_device)
         stack = _ResidentBridgeParent(
             name="stack_train",
@@ -537,6 +592,7 @@ def run_consumer_campaign_from_execution_spec(
             r0=r0,
             ledger=ledger,
             generation_batch_size=int(generation_batch_size),
+            derived_parent_indices=consumer_indices,
         )
         model_val = _ResidentBridgeParent(
             name="model_val",
@@ -545,20 +601,13 @@ def run_consumer_campaign_from_execution_spec(
             r0=r0,
             ledger=ledger,
             generation_batch_size=int(generation_batch_size),
+            derived_parent_indices=model_val_derived_indices,
         )
         resident.extend((stack, model_val))
-        consumer_indices = np.asarray(
-            child["children"]["stack_train_consumer"]["parent_row_indices"], dtype=np.int64
-        )
         union_indices = np.arange(stack.hlt.n_events, dtype=np.int64)
-        stop_indices = np.asarray(
-            child["children"]["model_val_stop"]["parent_row_indices"], dtype=np.int64
-        )
-        select_indices = np.asarray(
-            child["children"]["model_val_select"]["parent_row_indices"], dtype=np.int64
-        )
+        consumer_f0, consumer_truth, consumer_mask = stack.fields(consumer_indices)
         corruption = fit_bridge_corruption_scale(
-            [(stack.f0[consumer_indices], stack.f_true[consumer_indices], stack.mask[consumer_indices])],
+            [(consumer_f0, consumer_truth, consumer_mask)],
             parent_hashes={
                 "execution_spec_sha256": spec["content_hash"],
                 "r0_checkpoint_sha256": r0_sha,

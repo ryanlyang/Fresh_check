@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare the immutable, storage-safe 3M/3M bridge source manifest.
+"""Prepare the immutable 3M/3M bridge source and child manifests.
 
-This command intentionally writes only provenance, child membership, and
-streaming-shard metadata.  It must not materialize dense HLT/offline NPZ
-copies for the 8.5M-event parent inventory.
+This command writes provenance and restart partitions only. Dense compressed
+source caches are materialized later by the full submitter after a measured
+free-space check; the partitions do not duplicate particle tensors.
 """
 
 from __future__ import annotations
@@ -125,7 +125,9 @@ def build_streaming_plan(
             "shard_events": int(shard_events),
             "children": children,
             "direct_parent_splits": parents,
-            "dense_source_cache_policy": "forbidden_in_home_use_streaming_or_job_local_ram",
+            "dense_source_cache_policy": (
+                "allowed_after_measured_projection_and_minimum_free_space_check"
+            ),
             "final_test_offline_inputs_allowed": False,
         }
     )
@@ -198,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             "final_test_policy": "sealed_hlt_only_after_locked_deployable",
             "dense_npz_materialized": False,
             "persistent_storage_policy": (
-                "manifest_only_until_streaming_high_data_runtime_is_bound"
+                "manifest_only_until_dense_cache_projection_is_approved"
             ),
             "scientific_jobs_submitted": False,
         }
