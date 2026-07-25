@@ -120,6 +120,68 @@ def _default_partitions() -> tuple[ParentPartitionSpec, ...]:
     )
 
 
+def _high_data_3m_parent_counts() -> tuple[tuple[str, int], ...]:
+    """Locked parent inventory for the storage-safe high-data campaign.
+
+    The requested 6M labeled training pool remains the 3M/3M ``stack_train``
+    partition.  ``model_train`` is a separate 500k parent because R0 must not
+    learn from either the consumer or distillation examples.
+    """
+
+    return (
+        ("model_train", 500_000),
+        ("model_val", 500_000),
+        ("stack_train", 6_000_000),
+        ("stack_val", 500_000),
+        ("final_test", 1_000_000),
+    )
+
+
+def _high_data_3m_partitions() -> tuple[ParentPartitionSpec, ...]:
+    return (
+        ParentPartitionSpec(
+            parent_split="stack_train",
+            seed=8_100_101,
+            children=(
+                ChildSplitSpec(
+                    "stack_train_consumer", 3_000_000, "consumer_training"
+                ),
+                ChildSplitSpec(
+                    "stack_train_distill", 3_000_000, "reconstructor_training"
+                ),
+            ),
+        ),
+        ParentPartitionSpec(
+            parent_split="model_val",
+            seed=8_100_202,
+            children=(
+                ChildSplitSpec("model_val_stop", 250_000, "checkpoint_selection"),
+                ChildSplitSpec(
+                    "model_val_select", 250_000, "configuration_selection"
+                ),
+            ),
+        ),
+        ParentPartitionSpec(
+            parent_split="stack_val",
+            seed=8_100_303,
+            children=(
+                ChildSplitSpec(
+                    "stack_val_consumer",
+                    250_000,
+                    "consumer_confirmation",
+                    "consumer_preconfirmation",
+                ),
+                ChildSplitSpec(
+                    "stack_val_deploy",
+                    250_000,
+                    "deployable_confirmation",
+                    "deployable_preconfirmation",
+                ),
+            ),
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class PredictionAnchoredSplitConfig:
     """Versioned, hashable split configuration.
@@ -154,6 +216,25 @@ class PredictionAnchoredSplitConfig:
 
 
 LOCKED_PILOT_SPLIT_CONFIG = PredictionAnchoredSplitConfig()
+LOCKED_HIGH_DATA_3M_SPLIT_CONFIG = PredictionAnchoredSplitConfig(
+    contract="prediction_anchored_high_data_3m_split_config_v1",
+    parent_split_counts=_high_data_3m_parent_counts(),
+    partitions=_high_data_3m_partitions(),
+)
+
+
+def prediction_anchored_split_config(profile: str) -> PredictionAnchoredSplitConfig:
+    profiles = {
+        "pilot_250k": LOCKED_PILOT_SPLIT_CONFIG,
+        "high_data_3m": LOCKED_HIGH_DATA_3M_SPLIT_CONFIG,
+    }
+    try:
+        return profiles[str(profile)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown prediction-anchored split profile {profile!r}; "
+            f"expected one of {sorted(profiles)}"
+        ) from exc
 
 
 def prediction_anchored_split_config_from_payload(
@@ -706,6 +787,7 @@ def claim_split_access(
 
 __all__ = [
     "ChildSplitSpec",
+    "LOCKED_HIGH_DATA_3M_SPLIT_CONFIG",
     "LOCKED_PILOT_SPLIT_CONFIG",
     "PREDICTION_ANCHORED_ACCESS_RECEIPT_CONTRACT",
     "PREDICTION_ANCHORED_CHILD_SPLIT_CONTRACT",
@@ -723,5 +805,6 @@ __all__ = [
     "build_validation_unlock",
     "child_split_summary",
     "claim_split_access",
+    "prediction_anchored_split_config",
     "split_binding",
 ]

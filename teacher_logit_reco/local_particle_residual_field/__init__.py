@@ -244,6 +244,7 @@ from .bridge_contracts import (
     write_immutable_json,
 )
 from .bridge_splits import (
+    LOCKED_HIGH_DATA_3M_SPLIT_CONFIG,
     LOCKED_PILOT_SPLIT_CONFIG,
     PREDICTION_ANCHORED_ACCESS_RECEIPT_CONTRACT,
     PREDICTION_ANCHORED_CHILD_SPLIT_CONTRACT,
@@ -260,6 +261,7 @@ from .bridge_splits import (
     build_validation_unlock,
     child_split_summary,
     claim_split_access,
+    prediction_anchored_split_config,
     prediction_anchored_split_config_from_payload,
     split_binding,
 )
@@ -833,6 +835,7 @@ __all__ = list(dict.fromkeys([
     "validate_content_hash",
     "with_content_hash",
     "write_immutable_json",
+    "LOCKED_HIGH_DATA_3M_SPLIT_CONFIG",
     "LOCKED_PILOT_SPLIT_CONFIG",
     "PREDICTION_ANCHORED_ACCESS_RECEIPT_CONTRACT",
     "PREDICTION_ANCHORED_CHILD_SPLIT_CONTRACT",
@@ -849,6 +852,7 @@ __all__ = list(dict.fromkeys([
     "build_validation_unlock",
     "child_split_summary",
     "claim_split_access",
+    "prediction_anchored_split_config",
     "prediction_anchored_split_config_from_payload",
     "split_binding",
     "MEASUREMENT_MEASURED",
