@@ -41,6 +41,25 @@ def test_clean_start_bootstrap_cli_imports_without_campaign_outputs():
     assert "--artifact-root" in completed.stdout
 
 
+def test_refresh_cli_imports_when_launched_outside_repository(tmp_path):
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(
+                ROOT
+                / "scripts/refresh_prediction_anchored_bridge_preflight.py"
+            ),
+            "--help",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--source-preflight" in completed.stdout
+    assert "--artifact-root" in completed.stdout
+
+
 def test_bootstrap_derives_and_requires_the_baseline_model_size(tmp_path):
     checkpoint = tmp_path / "baseline.pt"
     torch.save({"model_state_dict": {}, "model_config": {"model_size": "tiny"}}, checkpoint)

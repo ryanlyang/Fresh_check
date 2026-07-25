@@ -10,12 +10,11 @@ import sys
 
 import torch
 
-from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM  # noqa: E402
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM  # noqa: E402
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
     ARCH_A3_HLG_PRIMARY,
     STEP3_RUN_IDS,
