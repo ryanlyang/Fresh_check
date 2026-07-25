@@ -170,7 +170,9 @@ def main(argv: list[str] | None = None) -> int:
             field_groups={key: tuple(value) for key, value in groups.items()},
         )
     )
-    t10 = build_step3_consumer_model("T10_clean", model_size=model_size)
+    # Production explicitly prefers T10_robust. The representative resource
+    # fingerprint must describe the consumer B4 will actually load.
+    t10 = build_step3_consumer_model("T10_robust", model_size=model_size)
     reference = build_representative_architecture_resource_reference(
         r0_model=r0,
         t10_model=t10,

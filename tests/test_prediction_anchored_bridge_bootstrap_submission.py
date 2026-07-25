@@ -98,18 +98,21 @@ def test_recovery_wrapper_refreshes_graph_and_reuses_exact_b0_b3_nodes():
     wrapper = (
         ROOT / "sbatch/run_refresh_prediction_anchored_bridge_recovery.sh"
     ).read_text()
+    refresher = (
+        ROOT / "scripts/refresh_prediction_anchored_bridge_preflight.py"
+    ).read_text()
     assert "#SBATCH --account=reu-aisocial" in wrapper
     assert "PYTHONNOUSERSITE=1" in wrapper
     assert "PAB_CONDA_ENV:=atlas_kd_tigris" in wrapper
     assert "refresh_prediction_anchored_bridge_preflight.py" in wrapper
-    assert '--completed-job "b0_validate_preflight=${PAB_B0_JOB_ID}"' in wrapper
-    assert '--completed-job "b1_train_register_r0=${PAB_B1_JOB_ID}"' in wrapper
-    assert '--completed-job "b2_stage_recipes_scalers=${PAB_B2_JOB_ID}"' in wrapper
-    assert (
-        '--completed-job "b3_consumers_paired3=${PAB_B3_CONSUMER_JOB_ID}"'
-        in wrapper
-    )
-    assert '--existing-job "b3_l0_paired3=${PAB_B3_L0_JOB_ID}"' in wrapper
+    assert '"b0_validate_preflight=${PAB_B0_JOB_ID}"' in wrapper
+    assert '"b1_train_register_r0=${PAB_B1_JOB_ID}"' in wrapper
+    assert '"b2_stage_recipes_scalers=${PAB_B2_JOB_ID}"' in wrapper
+    assert '"b3_consumers_paired3=${PAB_B3_CONSUMER_JOB_ID}"' in wrapper
+    assert '"b3_l0_paired3=${PAB_B3_L0_JOB_ID}"' in wrapper
+    assert '"b4_select_consumer=${PAB_B4_SELECT_JOB_ID}"' in wrapper
+    assert '"b4_confirm_consumer=${PAB_B4_CONFIRM_JOB_ID}"' in wrapper
+    assert 'build_step3_consumer_model("T10_robust"' in refresher
     assert "--execute" in wrapper
 
 
@@ -143,6 +146,8 @@ def test_b4_confirmation_publishes_checkpoint_bound_runtime_resource_reference()
         "  B4_SELECT)", maxsplit=1
     )[1].split("    ;;", maxsplit=1)[0]
     assert "representative_architecture_resource_reference.json" in bootstrap
+    assert 'build_step3_consumer_model("T10_robust"' in bootstrap
+    assert 'build_step3_consumer_model("T10_clean"' not in bootstrap
     assert "canonical_a3_bundle_resources.json" not in bootstrap
     assert "measurements/deployed_resource_reference.json" not in bootstrap
     assert "publish_prediction_anchored_runtime_resources.py" in runner

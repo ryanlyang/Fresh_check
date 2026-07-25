@@ -10,21 +10,26 @@ import sys
 
 import torch
 
+from jetclass_fresh.jetclass_data import RAW_TOKEN_DIM  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.local_particle_residual_field import (  # noqa: E402
+    ARCH_A3_HLG_PRIMARY,
     STEP3_RUN_IDS,
+    LocalResidualFieldReconstructorConfig,
+    build_local_residual_field_reconstructor,
+    build_representative_architecture_resource_reference,
     build_campaign_registry,
     build_clean_start_step8_fixed_storage,
     build_prediction_anchored_tigris_graph,
     build_step3_consumer_model,
+    build_step7_hlg_correction_model,
     initialize_step3_root_from_reference,
     measure_step8_registry_states,
     record_step3_registry_measurements,
-    resource_reference_from_artifact,
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_campaign_policy import (  # noqa: E402
     build_campaign_reservations,
@@ -36,6 +41,9 @@ from teacher_logit_reco.local_particle_residual_field.bridge_contracts import ( 
 )
 from teacher_logit_reco.local_particle_residual_field.bridge_execution import (  # noqa: E402
     validate_prediction_anchored_execution_spec,
+)
+from teacher_logit_reco.local_particle_residual_field.targets import (  # noqa: E402
+    local_particle_residual_field_layout,
 )
 
 
@@ -101,12 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     physical = _read(source, "representative_scaler_physical45.json")
     all50 = _read(source, "representative_scaler_all50.json")
     absolute = _read(source, "representative_absolute_scaler.json")
-    reference_artifact = _read(
+    source_reference_artifact = _read(
         source, "representative_architecture_resource_reference.json"
     )
-    reference = resource_reference_from_artifact(reference_artifact)
     source_sha256 = str(execution["parent_manifest"]["sha256"])
-    if reference.source_manifest_sha256 != source_sha256:
+    if source_reference_artifact.get("source_manifest_sha256") != source_sha256:
         raise ValueError("representative reference belongs to another execution")
 
     registry0 = build_campaign_registry(alternate_teacher_valid=True)
@@ -126,6 +133,36 @@ def main(argv: list[str] | None = None) -> int:
         registry0, representative
     )
     del representative
+
+    a3 = build_step7_hlg_correction_model(
+        ARCH_A3_HLG_PRIMARY, scaler_artifact=physical, dropout=0.05
+    )
+    names, groups, _ = local_particle_residual_field_layout()
+    r0 = build_local_residual_field_reconstructor(
+        LocalResidualFieldReconstructorConfig(
+            variant="C0",
+            particle_dim=RAW_TOKEN_DIM,
+            field_dim=50,
+            d_model=160,
+            num_heads=5,
+            num_layers=4,
+            context_layers=1,
+            dropout=0.05,
+            attention_dropout=0.05,
+            field_names=tuple(names),
+            field_groups={key: tuple(value) for key, value in groups.items()},
+        )
+    )
+    t10 = build_step3_consumer_model("T10_robust", model_size=model_size)
+    reference = build_representative_architecture_resource_reference(
+        r0_model=r0,
+        t10_model=t10,
+        a3_model=a3,
+        particle_width=int(execution["max_constits"]),
+        valid_particles=int(execution["max_constits"]),
+        source_manifest_sha256=source_sha256,
+    )
+    reference_artifact = reference.to_artifact()
 
     fixed, fixed_evidence = build_clean_start_step8_fixed_storage(child, registry3)
     registry8, measurement = measure_step8_registry_states(
