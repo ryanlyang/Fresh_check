@@ -49,6 +49,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--consumer-weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--consumer-grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--consumer-model-size", choices=("tiny", "base", "large"), default="base")
+    parser.add_argument(
+        "--consumer-data-profile",
+        choices=("pilot_250k", "high_data_3m"),
+        default="pilot_250k",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -73,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         weight_decay=float(args.consumer_weight_decay),
         grad_clip_norm=float(args.consumer_grad_clip_norm),
         model_size=str(args.consumer_model_size),
+        data_profile=str(args.consumer_data_profile),
     )
     spec = build_prediction_anchored_execution_spec(
         parent_manifest_path=args.parent_manifest,

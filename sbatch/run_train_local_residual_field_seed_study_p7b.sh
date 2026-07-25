@@ -41,7 +41,6 @@ c0_checkpoint="$(manifest_value paths.c0_checkpoint)"
 consumer_checkpoint="$(manifest_value paths.consumer_checkpoint)"
 consumer_teacher_config="$(manifest_value paths.consumer_teacher_config)"
 consumer_run_report="$(manifest_value paths.consumer_run_report)"
-oracle_logits_dir="$(manifest_value paths.oracle_teacher_logits_dir)"
 
 fresh_require_file "${manifest_path}"
 fresh_require_dir "${hlt_cache_dir}"
@@ -51,7 +50,6 @@ fresh_require_file "${c0_checkpoint}"
 fresh_require_file "${consumer_checkpoint}"
 fresh_require_file "${consumer_teacher_config}"
 fresh_require_file "${consumer_run_report}"
-fresh_require_dir "${oracle_logits_dir}"
 if ! fresh_is_dry_run && [[ -d "${OUTPUT_DIR}" ]]; then
   partial_dir="${OUTPUT_DIR}.partial_$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID:-manual}"
   echo "Quarantining incomplete P7b seed directory: ${OUTPUT_DIR} -> ${partial_dir}"
@@ -72,7 +70,6 @@ train_cmd=(
   --oracle-teacher-checkpoint "${consumer_checkpoint}"
   --oracle-teacher-config-path "${consumer_teacher_config}"
   --oracle-run-report-path "${consumer_run_report}"
-  --oracle-teacher-logits-dir "${oracle_logits_dir}"
   --seed "${SEED}"
   --epochs 12
   --batch-size 24

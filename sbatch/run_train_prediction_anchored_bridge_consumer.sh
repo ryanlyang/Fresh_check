@@ -17,8 +17,17 @@ IFS=$'\n\t'
 source "${PROJECT_DIR}/sbatch/prediction_anchored_bridge_common.sh"
 PACK_ID="${1:?Usage: run_train_prediction_anchored_bridge_consumer.sh <pack-id>}"
 pab_bootstrap_allocation
+: "${PAB_SPLIT_PROFILE:=pilot_250k}"
+: "${PAB_CONSUMER_BASELINE_STEPS:=10000}"
+: "${PAB_CONSUMER_FINETUNE_STEPS:=2000}"
 
-plan_args=("${PYTHON_BIN}" -u scripts/train_prediction_anchored_bridge_consumer.py --mode plan)
+consumer_config_args=(
+  --data-profile "${PAB_SPLIT_PROFILE}"
+  --baseline-steps "${PAB_CONSUMER_BASELINE_STEPS}"
+  --bridge-finetune-steps "${PAB_CONSUMER_FINETUNE_STEPS}"
+)
+plan_args=("${PYTHON_BIN}" -u scripts/train_prediction_anchored_bridge_consumer.py
+  --mode plan "${consumer_config_args[@]}")
 if pab_is_dry_run; then
   plan_args+=(--dry-run)
 else
@@ -51,7 +60,7 @@ for run_id in "${run_ids[@]}"; do
   publish_args=("${PYTHON_BIN}" -u scripts/train_prediction_anchored_bridge_consumer.py \
     --mode publish --run-id "${run_id}" --replica-dir "${PAB_RAM_ROOT}/replicas" \
     --output-dir "${PREDICTION_ANCHORED_ARTIFACT_ROOT}/consumers/${run_id}" \
-    --reservations "${PAB_RESERVATIONS}")
+    --reservations "${PAB_RESERVATIONS}" "${consumer_config_args[@]}")
   case "${run_id}" in
     T10_clean|T10_robust|T10_all50_clean)
       publish_args+=(--selection-aggregate \

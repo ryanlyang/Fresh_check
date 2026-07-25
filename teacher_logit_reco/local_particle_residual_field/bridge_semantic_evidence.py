@@ -1030,8 +1030,10 @@ class Step8TrainConfig:
             raise ValueError("field_warmup_steps must be positive exactly for warm-up recipes")
         if int(self.field_warmup_steps) < 0:
             raise ValueError("field_warmup_steps cannot be negative")
-        if int(self.unique_training_jets) != 250_000:
-            raise ValueError("Step 8 reconstruction runs are locked to stack_train_distill 250k")
+        if int(self.unique_training_jets) not in {250_000, 3_000_000}:
+            raise ValueError(
+                "Step 8 reconstruction runs require a locked distillation-child count"
+            )
         if float(self.learning_rate) <= 0 or float(self.weight_decay) < 0:
             raise ValueError("Step 8 optimizer hyperparameters are invalid")
         if float(self.gradient_clip_norm) <= 0:

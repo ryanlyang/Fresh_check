@@ -25,7 +25,11 @@ from .bridge_contracts import (
     write_immutable_json,
 )
 from .bridge import validate_bridge_recipe
-from .bridge_consumer import ConsumerCampaignConfig
+from .bridge_consumer import (
+    CONSUMER_DATA_PROFILE_HIGH_DATA_3M,
+    CONSUMER_DATA_PROFILE_PILOT_250K,
+    ConsumerCampaignConfig,
+)
 from .bridge_r0 import StreamedR0TrainConfig
 from .bridge_splits import (
     PREDICTION_ANCHORED_SPLIT_CONTRACT,
@@ -187,9 +191,20 @@ def build_prediction_anchored_execution_spec(
         batch_size=128,
         evaluation_interval_steps=200,
     )
+    data_profile = (
+        CONSUMER_DATA_PROFILE_HIGH_DATA_3M
+        if split_config.contract
+        == "prediction_anchored_high_data_3m_split_config_v1"
+        else CONSUMER_DATA_PROFILE_PILOT_250K
+    )
+    if consumers.data_profile != data_profile:
+        raise ValueError(
+            "consumer data profile does not match the immutable child split profile"
+        )
     payload = with_content_hash(
         {
             "contract": PREDICTION_ANCHORED_EXECUTION_SPEC_CONTRACT,
+            "data_profile": data_profile,
             "parent_manifest": {
                 **_source_file_record(parent_path),
                 "manifest_sha256": parent_sha256,
@@ -271,7 +286,12 @@ def validate_prediction_anchored_execution_spec(
     normalized_consumer = dict(consumer_payload)
     if "paired_seed_ids" in normalized_consumer:
         normalized_consumer["paired_seed_ids"] = tuple(normalized_consumer["paired_seed_ids"])
-    ConsumerCampaignConfig(**normalized_consumer)
+    consumers = ConsumerCampaignConfig(**normalized_consumer)
+    declared_profile = payload.get("data_profile", consumers.data_profile)
+    if declared_profile != consumers.data_profile:
+        raise ValueError(
+            "execution-spec data profile differs from consumer training"
+        )
     parent_record = payload.get("parent_manifest", {})
     child_record = payload.get("child_manifest", {})
     if verify_file_hashes:

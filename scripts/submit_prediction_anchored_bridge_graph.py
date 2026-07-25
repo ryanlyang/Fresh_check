@@ -88,6 +88,7 @@ def _argv(
     execution_spec_path: Path,
     log_dir: Path,
     sbatch_bin: str,
+    data_profile: str = "pilot_250k",
     completed_node_ids: set[str] | None = None,
 ):
     resources = node["resources"]
@@ -95,6 +96,16 @@ def _argv(
     representative_reference = (
         preflight_root / "representative_architecture_resource_reference.json"
     )
+    if data_profile == "high_data_3m":
+        consumer_baseline_steps = 120_000
+        consumer_finetune_steps = 24_000
+        recon_phase2_epochs = 4
+    elif data_profile == "pilot_250k":
+        consumer_baseline_steps = 10_000
+        consumer_finetune_steps = 2_000
+        recon_phase2_epochs = 40
+    else:
+        raise ValueError(f"unknown graph data profile {data_profile!r}")
     argv = [
         sbatch_bin,
         "--parsable",
@@ -122,7 +133,11 @@ def _argv(
             f"{representative_reference.as_posix()},"
             f"PAB_REGISTRY={registry_path.as_posix()},"
             f"PAB_RESERVATIONS={reservations_path.as_posix()},"
-            f"PAB_EXECUTION_SPEC={execution_spec_path.as_posix()}"
+            f"PAB_EXECUTION_SPEC={execution_spec_path.as_posix()},"
+            f"PAB_SPLIT_PROFILE={data_profile},"
+            f"PAB_CONSUMER_BASELINE_STEPS={consumer_baseline_steps},"
+            f"PAB_CONSUMER_FINETUNE_STEPS={consumer_finetune_steps},"
+            f"PAB_RECON_PHASE2_EPOCHS={recon_phase2_epochs}"
         ),
     ]
     if int(resources["gpus_per_node"]) > 0:
@@ -319,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             execution_spec_path=execution_spec_path,
             log_dir=log_dir,
             sbatch_bin=str(args.sbatch_bin),
+            data_profile=str(graph.get("data_profile", "pilot_250k")),
             completed_node_ids=set(completed_job_ids),
         )
         completed = subprocess.run(command, capture_output=True, text=True, check=False)

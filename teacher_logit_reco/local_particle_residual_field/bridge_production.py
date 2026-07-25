@@ -561,6 +561,7 @@ def build_prediction_anchored_tigris_graph(
         {
             "contract": PREDICTION_ANCHORED_PRODUCTION_GRAPH_CONTRACT,
             "profile": PAIRED_PROFILE,
+            "data_profile": execution_spec.get("data_profile", "pilot_250k"),
             "registry_sha256": registry["content_hash"],
             "reservations_sha256": reservations["content_hash"],
             **expected_bindings,
@@ -603,6 +604,11 @@ def build_prediction_anchored_tigris_graph(
 
 def validate_prediction_anchored_tigris_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
     validate_content_hash(graph, expected_contract=PREDICTION_ANCHORED_PRODUCTION_GRAPH_CONTRACT)
+    if graph.get("data_profile", "pilot_250k") not in {
+        "pilot_250k",
+        "high_data_3m",
+    }:
+        raise ValueError("production graph has an unknown data profile")
     for name in (
         "registry_sha256",
         "reservations_sha256",
@@ -726,6 +732,19 @@ def render_tigris_sbatch_commands(
     include_final_test: bool = False,
 ) -> dict[str, Any]:
     validate_prediction_anchored_tigris_graph(graph)
+    data_profile = str(graph.get("data_profile", "pilot_250k"))
+    if data_profile == "high_data_3m":
+        consumer_baseline_steps, consumer_finetune_steps, recon_epochs = (
+            120_000,
+            24_000,
+            4,
+        )
+    else:
+        consumer_baseline_steps, consumer_finetune_steps, recon_epochs = (
+            10_000,
+            2_000,
+            40,
+        )
     commands = []
     for row in graph["nodes"]:
         if row["protected_final_test"] and not include_final_test:
@@ -745,7 +764,11 @@ def render_tigris_sbatch_commands(
                 "--export=ALL,PYTHONNOUSERSITE=1,"
                 "PREDICTION_ANCHORED_GRAPH=<IMMUTABLE_GRAPH_PATH>,"
                 f"PREDICTION_ANCHORED_NODE_ID={row['node_id']},"
-                f"PREDICTION_ANCHORED_ARTIFACT_ROOT={graph['artifact_root']}"
+                f"PREDICTION_ANCHORED_ARTIFACT_ROOT={graph['artifact_root']},"
+                f"PAB_SPLIT_PROFILE={data_profile},"
+                f"PAB_CONSUMER_BASELINE_STEPS={consumer_baseline_steps},"
+                f"PAB_CONSUMER_FINETUNE_STEPS={consumer_finetune_steps},"
+                f"PAB_RECON_PHASE2_EPOCHS={recon_epochs}"
             ),
         ]
         if int(resources["gpus_per_node"]) > 0:

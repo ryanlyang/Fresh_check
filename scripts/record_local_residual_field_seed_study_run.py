@@ -64,11 +64,16 @@ def main(argv: list[str] | None = None) -> int:
         for key in set(reference_config) | set(config)
         if reference_config.get(key) != config.get(key)
     )
-    if recipe_differences != ["output_dir", "seed"]:
+    expected_recipe_differences = ["oracle_teacher_logits_dir", "output_dir", "seed"]
+    if recipe_differences != expected_recipe_differences:
         raise ValueError(
-            "P7b seed-study replicate differs from the frozen P7b recipe outside "
-            f"output_dir/seed: {recipe_differences}"
+            "P7b seed-study replicate does not match the frozen active recipe; "
+            f"expected differences {expected_recipe_differences}, observed {recipe_differences}"
         )
+    if bool(config.get("oracle_logit_only_fallback")):
+        raise ValueError("P7b seed study must use the online frozen-oracle forward")
+    if dict(report.get("oracle_teacher_logits_paths") or {}):
+        raise ValueError("P7b seed study unexpectedly resolved cached oracle logits")
     if report.get("selected_consumer_id") != manifest.get("selected_consumer_id"):
         raise ValueError("P7b selected consumer differs from the frozen study manifest")
     completion = {
@@ -80,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         "runtime_inputs": "HLT_only",
         "deployable": True,
         "final_test_evaluated": False,
+        "oracle_execution_mode": "frozen_checkpoint_online",
         "recipe_difference_paths": recipe_differences,
         "manifest_path": str(manifest_path.resolve()),
         "checkpoint_path": str(checkpoint_path.resolve()),

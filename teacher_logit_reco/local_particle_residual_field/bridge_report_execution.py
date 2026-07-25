@@ -184,13 +184,17 @@ def _training_metadata(
         steps = median_metrics.get("optimizer_steps_completed")
         if not isinstance(steps, int) or isinstance(steps, bool) or steps <= 0:
             raise ValueError(f"direct baseline {run_id} lacks its executed step count")
+        data_profile = str(
+            execution_spec.get("consumer_training", {}).get(
+                "data_profile", "pilot_250k"
+            )
+        )
         return {
             "training_manifest_sha256": child_manifest["content_hash"],
             "training_split_names": ["stack_train_consumer", "stack_train_distill"],
             "unique_jet_count": int(
-                child_manifest["children"]["stack_train_consumer"]["count"]
-            )
-            + int(child_manifest["children"]["stack_train_distill"]["count"]),
+                consumer_run_specs(data_profile)[A0_S500].unique_jet_count
+            ),
             "optimizer_step_budget": int(steps),
             "training_metadata_source": "paired_reconstruction_metrics_and_child_manifest",
         }

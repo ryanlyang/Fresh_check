@@ -123,7 +123,6 @@ def build_seed_study_manifest(
     }
     for label, path in required_files.items():
         _require_file(path, label)
-    _require_dir(oracle_logits_dir, "oracle teacher-logit cache")
 
     a0_seed = int(extract_a0_train_config(load_json_object(required_files["a0_source_metadata"]))["seed"])
     a0_seed1 = int(
@@ -139,6 +138,11 @@ def build_seed_study_manifest(
         raise ValueError("P7b reference source metadata is missing its config")
     if int(p7b_reference_config.get("seed", -1)) != P7B_REFERENCE_SEED:
         raise ValueError(f"P7b reference seed must be {P7B_REFERENCE_SEED}")
+    if bool(p7b_reference_config.get("oracle_logit_only_fallback")):
+        raise ValueError("P7b reference unexpectedly used oracle-logit-only fallback")
+    p7b_reference_report = load_json_object(required_files["p7b_reference_run_report"])
+    if dict(p7b_reference_report.get("oracle_teacher_logits_paths") or {}):
+        raise ValueError("P7b reference unexpectedly resolved cached oracle teacher logits")
 
     run_dirs: dict[str, dict[str, str]] = {}
     for seed in MATCHED_SEEDS:
@@ -168,6 +172,9 @@ def build_seed_study_manifest(
         "p7b_reference_seed": P7B_REFERENCE_SEED,
         "p7b_reference_dir": str(p7b_reference_dir.resolve()),
         "final_test_policy": "forbidden",
+        "oracle_execution_mode": "frozen_checkpoint_online",
+        "oracle_logit_cache_required": False,
+        "oracle_logit_cache_present": oracle_logits_dir.is_dir(),
         "selection_split": "model_val",
         "comparison_split": "stack_val",
         "selected_consumer_id": consumer_id,
@@ -180,7 +187,9 @@ def build_seed_study_manifest(
             "consumer_checkpoint": str(required_files["consumer_checkpoint"].resolve()),
             "consumer_teacher_config": str(required_files["consumer_teacher_config"].resolve()),
             "consumer_run_report": str(required_files["consumer_run_report"].resolve()),
-            "oracle_teacher_logits_dir": str(oracle_logits_dir.resolve()),
+            "oracle_teacher_logits_dir": (
+                str(oracle_logits_dir.resolve()) if oracle_logits_dir.is_dir() else None
+            ),
             "a0_source_metadata": str(required_files["a0_source_metadata"].resolve()),
             "p7b_reference_source_metadata": str(
                 required_files["p7b_reference_source_metadata"].resolve()

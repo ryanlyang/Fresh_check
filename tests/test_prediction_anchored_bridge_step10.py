@@ -459,6 +459,27 @@ def test_recovery_submission_omits_completed_dependency_from_sbatch(tmp_path):
         f"{(tmp_path / 'representative_architecture_resource_reference.json').as_posix()}"
     ) in exported
 
+    high_data_argv = _argv(
+        node,
+        {completed_node: "15130"},
+        graph_path=tmp_path / "graph.json",
+        artifact_root=str(tmp_path / "artifacts"),
+        registry_path=tmp_path / "registry.json",
+        reservations_path=tmp_path / "reservations.json",
+        execution_spec_path=tmp_path / "execution.json",
+        log_dir=tmp_path / "logs",
+        sbatch_bin="sbatch",
+        data_profile="high_data_3m",
+        completed_node_ids={completed_node},
+    )
+    high_data_export = next(
+        value for value in high_data_argv if value.startswith("--export=")
+    )
+    assert "PAB_SPLIT_PROFILE=high_data_3m" in high_data_export
+    assert "PAB_CONSUMER_BASELINE_STEPS=120000" in high_data_export
+    assert "PAB_CONSUMER_FINETUNE_STEPS=24000" in high_data_export
+    assert "PAB_RECON_PHASE2_EPOCHS=4" in high_data_export
+
 
 def test_allocation_common_derives_preflight_bindings_from_immutable_graph():
     common = (

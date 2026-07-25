@@ -42,6 +42,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--model-size", choices=("tiny", "base", "large"), default="base")
+    parser.add_argument(
+        "--data-profile",
+        choices=("pilot_250k", "high_data_3m"),
+        default="pilot_250k",
+    )
     parser.add_argument("--output", default="", help="immutable plan JSON for plan mode")
     parser.add_argument("--output-dir", default="", help="empty publication directory for publish mode")
     parser.add_argument("--replica-dir", default="", help="directory containing seed checkpoint/metric pairs")
@@ -66,6 +71,7 @@ def _config(args: argparse.Namespace) -> ConsumerCampaignConfig:
         weight_decay=args.weight_decay,
         grad_clip_norm=args.grad_clip_norm,
         model_size=args.model_size,
+        data_profile=args.data_profile,
     )
 
 

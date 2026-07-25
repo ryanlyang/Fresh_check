@@ -44,6 +44,7 @@ from .bridge_consumer import (
     build_step3_consumer_model,
     capture_training_lineage,
     consumer_cross_entropy_loss,
+    consumer_run_specs,
     fit_bridge_corruption_scale,
     initialize_step3_root_from_reference,
     run_a0_long_from_ram_lineage,
@@ -130,6 +131,7 @@ class _ResidentBridgeParent:
         particle_width = int(hlt.manifest["arrays"]["tokens"]["shape"][1])
         expected = n_events * particle_width * 50 * np.dtype(np.float32).itemsize * 2
         expected += n_events * particle_width * np.dtype(bool).itemsize
+        expected += int(self._derived_positions.nbytes)
         self.reservation_id = ledger.reserve(
             owner="rank0",
             role=f"resident_f0_ftrue:{self.name}",
@@ -584,6 +586,22 @@ def run_consumer_campaign_from_execution_spec(
             child["children"]["model_val_select"]["parent_row_indices"], dtype=np.int64
         )
         model_val_derived_indices = np.concatenate((stop_indices, select_indices))
+        run_specs = consumer_run_specs(config.data_profile)
+        if (
+            not allow_unverified_test_root
+            and consumer_indices.size != run_specs[TPRED].unique_jet_count
+        ):
+            raise ValueError(
+                "consumer child count differs from the execution-bound data profile"
+            )
+        if (
+            not allow_unverified_test_root
+            and staged["stack_train"][0].n_events
+            != run_specs[A0_S500].unique_jet_count
+        ):
+            raise ValueError(
+                "stack_train union count differs from the execution-bound data profile"
+            )
         r0 = FrozenR0Runner(r0_path, device=torch_device)
         stack = _ResidentBridgeParent(
             name="stack_train",
@@ -979,6 +997,12 @@ def run_consumer_campaign_from_execution_spec(
             "contract": PREDICTION_ANCHORED_CONSUMER_EXECUTION_CONTRACT,
             "execution_spec_sha256": spec["content_hash"],
             "r0_checkpoint_sha256": r0_sha,
+            "data_profile": config.data_profile,
+            "consumer_unique_jet_count": int(consumer_indices.size),
+            "union_unique_jet_count": int(union_indices.size),
+            "resident_stack_field_event_count": int(
+                stack.derived_parent_indices.size
+            ),
             "paired_seed_ids": list(PAIRED_SEED_IDS),
             "run_ids": list(STEP3_RUN_IDS),
             "replica_count": len(STEP3_RUN_IDS) * len(PAIRED_SEED_IDS),

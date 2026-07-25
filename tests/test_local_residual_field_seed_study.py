@@ -15,6 +15,7 @@ from teacher_logit_reco.local_particle_residual_field.seed_study import (
     TRAINED_A0_SEEDS,
     SEED_STUDY_MANIFEST_CONTRACT,
     build_a0_seed_study_config,
+    build_seed_study_manifest,
     build_seed_study_report,
 )
 from teacher_logit_reco.local_particle_residual_field.tagger_train import (
@@ -63,6 +64,79 @@ def test_seed_matrix_and_a0_clone_are_locked(tmp_path: Path) -> None:
     assert config.baseline_checkpoint is None
     assert config.reconstructor_checkpoint is None
     assert config.kd_loss_weight == 0.0
+
+
+def test_preflight_allows_deleted_semantically_inactive_oracle_logit_cache(
+    tmp_path: Path,
+) -> None:
+    curriculum_root = tmp_path / "curriculum"
+    fusion_root = tmp_path / "fusion"
+    campaign_root = tmp_path / "study"
+    (curriculum_root / "inputs" / "hlt_cache").mkdir(parents=True)
+    (curriculum_root / "targets").mkdir()
+    (curriculum_root / "inputs" / "split_manifest").mkdir()
+    (curriculum_root / "inputs" / "split_manifest" / "split_manifest.json.gz").write_bytes(
+        b"manifest"
+    )
+    _write_json(
+        curriculum_root / "selected_consumer.json",
+        {"selected_consumer_id": "Orobust_light"},
+    )
+    (curriculum_root / "reconstructors" / "C0").mkdir(parents=True)
+    (curriculum_root / "reconstructors" / "C0" / "best_model_val.pt").write_bytes(b"c0")
+
+    a0_config = _a0_source_config(tmp_path)["config"]
+    a0_dir = curriculum_root / "taggers" / "A0"
+    a0_dir.mkdir(parents=True)
+    (a0_dir / "best_model_val.pt").write_bytes(b"a0")
+    _write_json(a0_dir / "source_metadata.json", {"config": a0_config})
+    _write_json(a0_dir / "run_report.json", {"ok": True})
+
+    a0_seed1_dir = fusion_root / "taggers" / "A0_seed1"
+    a0_seed1_dir.mkdir(parents=True)
+    (a0_seed1_dir / "best_model_val.pt").write_bytes(b"a0-seed1")
+    a0_seed1_config = dict(a0_config)
+    a0_seed1_config["seed"] = 20522
+    _write_json(a0_seed1_dir / "source_metadata.json", {"config": a0_seed1_config})
+    _write_json(a0_seed1_dir / "run_report.json", {"ok": True})
+
+    consumer_dir = curriculum_root / "taggers" / "Orobust_light"
+    consumer_dir.mkdir(parents=True)
+    for filename in ("best_model_val.pt",):
+        (consumer_dir / filename).write_bytes(b"consumer")
+    _write_json(consumer_dir / "teacher_config.json", {"ok": True})
+    _write_json(consumer_dir / "run_report.json", {"ok": True})
+
+    p7b_dir = curriculum_root / "curriculum" / "P7b"
+    p7b_dir.mkdir(parents=True)
+    _write_json(
+        p7b_dir / "source_metadata.json",
+        {
+            "config": {
+                "seed": 30421,
+                "oracle_logit_only_fallback": False,
+                "oracle_teacher_logits_dir": str(
+                    curriculum_root / "oracle_teacher_logits" / "Orobust_light"
+                ),
+            }
+        },
+    )
+    _write_json(
+        p7b_dir / "run_report.json",
+        {"ok": True, "oracle_teacher_logits_paths": {}},
+    )
+
+    manifest = build_seed_study_manifest(
+        campaign_id="no_cache",
+        campaign_root=campaign_root,
+        curriculum_root=curriculum_root,
+        fusion_root=fusion_root,
+    )
+    assert manifest["ok"] is True
+    assert manifest["oracle_execution_mode"] == "frozen_checkpoint_online"
+    assert manifest["oracle_logit_cache_required"] is False
+    assert manifest["oracle_logit_cache_present"] is False
+    assert manifest["paths"]["oracle_teacher_logits_dir"] is None
 
 
 def _metric(accuracy: float, cross_entropy: float) -> dict[str, object]:
@@ -152,5 +226,6 @@ def test_tigris_submitter_queues_only_missing_a0_and_all_matched_p7b() -> None:
     assert "--run-id P7b" in p7b_job
     assert "--evaluate-final-test" not in p7b_job
     assert "--confirm-final-test" not in p7b_job
+    assert "--oracle-teacher-logits-dir" not in p7b_job
     assert "--student-warm-start-checkpoint \"${consumer_checkpoint}\"" in p7b_job
     assert "--predictor-warm-start-checkpoint \"${c0_checkpoint}\"" in p7b_job

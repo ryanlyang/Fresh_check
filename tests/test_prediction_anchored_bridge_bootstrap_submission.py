@@ -145,7 +145,8 @@ def test_finalizer_binds_all_four_immutable_submission_controls():
         "PAB_REPRESENTATIVE_RESOURCE_REFERENCE",
     ):
         assert f"export {name}=" in finalizer
-    assert "--budget-gib 5" in finalizer
+    assert '--budget-gib "${PAB_BUDGET_GIB}"' in finalizer
+    assert '--split-profile "${PAB_SPLIT_PROFILE}"' in finalizer
 
 
 def test_b4_confirmation_publishes_checkpoint_bound_runtime_resource_reference():
@@ -199,7 +200,7 @@ def test_miniature_clean_start_reaches_registry_reservations_graph_and_rendering
     monkeypatch.setattr(
         bootstrap,
         "build_child_split_manifest",
-        lambda parent: build_child_split_manifest(
+        lambda parent, config=None: build_child_split_manifest(
             parent, config=miniature_split_config()
         ),
     )
