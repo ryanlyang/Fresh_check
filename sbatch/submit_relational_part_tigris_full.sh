@@ -54,6 +54,8 @@ conda activate "${CONDA_ENV}"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+python -c \
+  'from torch.utils.cpp_extension import verify_ninja_availability; verify_ninja_availability(); print("PyTorch C++ extension toolchain: ninja OK")'
 if [[ ! -d "${DATA_DIR}" ]]; then
   echo "JetClass data root does not exist: ${DATA_DIR}" >&2
   exit 2

@@ -407,6 +407,7 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     assert "RPT_STORAGE_MEASUREMENTS" in top
     assert "PYTHONDONTWRITEBYTECODE=1" in top
     assert 'LD_LIBRARY_PATH="${CONDA_PREFIX}/lib' in top
+    assert "verify_ninja_availability" in top
     semantic_runner = (
         ROOT / "scripts" / "run_relational_part_semantic_perturbation.py"
     ).read_text(encoding="utf-8")
