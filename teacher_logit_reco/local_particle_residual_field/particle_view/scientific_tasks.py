@@ -333,6 +333,34 @@ def _operation_callable(operation: str) -> Callable[..., Any] | None:
         from .stack_runtime import run_stack_fusion
 
         return run_stack_fusion
+    if operation == "bundle_export":
+        from .report_runtime import run_report_bundle_export
+
+        return run_report_bundle_export
+    if operation == "bundle_reload":
+        from .report_runtime import run_report_bundle_reload
+
+        return run_report_bundle_reload
+    if operation == "reporting":
+        # Both the aggregate report and family permit are locked PV09
+        # operations.  The factory supplies the exact callable-shaped kwargs;
+        # dispatch on their authenticated field inventory rather than allowing
+        # an arbitrary factory action.
+        from .report_runtime import (
+            run_report_aggregate,
+            run_report_final_permit,
+        )
+
+        def run_locked_reporting(**kwargs):
+            if "permit_family" in kwargs:
+                return run_report_final_permit(**kwargs)
+            return run_report_aggregate(**kwargs)
+
+        return run_locked_reporting
+    if operation == "final_test":
+        from .final_runtime import run_final_test_campaign
+
+        return run_final_test_campaign
     return None
 
 

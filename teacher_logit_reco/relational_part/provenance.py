@@ -176,7 +176,7 @@ def initialize_artifact_layout(
 
 
 def source_snapshot(repo_root: str | Path) -> dict[str, Any]:
-    """Return commit and dirty-state hashes without mutating the repository."""
+    """Hash the exact tracked diff and untracked bytes without mutating Git."""
 
     root = Path(repo_root).resolve()
 
@@ -190,10 +190,40 @@ def source_snapshot(repo_root: str | Path) -> dict[str, Any]:
         )
         return completed.stdout.strip()
 
+    def run_bytes(*args: str) -> bytes:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        return completed.stdout
+
     commit = run("rev-parse", "HEAD")
     require_git_object_id(commit, name="source_commit")
     status = run("status", "--porcelain=v1", "--untracked-files=all")
-    status_hash = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(b"relational_part_source_snapshot_v2\0")
+    digest.update(run_bytes("diff", "--binary", "--no-ext-diff", "HEAD", "--"))
+    untracked = [
+        value
+        for value in run_bytes(
+            "ls-files", "--others", "--exclude-standard", "-z"
+        ).split(b"\0")
+        if value
+    ]
+    for encoded in sorted(untracked):
+        relative = encoded.decode("utf-8", errors="surrogateescape")
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("untracked source path escapes repository") from exc
+        digest.update(b"\0untracked\0")
+        digest.update(encoded)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    status_hash = digest.hexdigest()
     return {
         "source_commit": commit,
         "source_status_sha256": status_hash,

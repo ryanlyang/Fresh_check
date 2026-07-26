@@ -919,6 +919,7 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert 'CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"' in worker_prefix
     assert 'CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"' in worker_prefix
     assert "jetclass_part1" in worker_prefix
+    assert "export ABPH_RUNTIME_PROFILE_WARMUP_UPDATES=0" in worker
     assert "write_adaptive_binary_runtime_acceptance.py" in compiler
     assert "--single-path-acceptance" in compiler
 

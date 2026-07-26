@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import hashlib
+import sys
+import json
 
 import numpy as np
 import pytest
@@ -32,6 +34,10 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_fairness_task_specs,
     build_stack_factory_config,
     build_stack_task_specs,
+    build_report_factory_config,
+    build_report_task_specs,
+    build_final_factory_config,
+    build_final_task_specs,
     canonical_sha256,
     build_direct_control_factory,
     build_direct_control_factory_config,
@@ -41,8 +47,14 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_post_target_task_specs,
     build_particle_view_registry,
     build_runtime_data_config,
+    build_runtime_command_catalog,
+    build_runtime_execution_manifest,
+    build_runtime_handler_catalog,
     build_runtime_task_result,
     build_scientific_task_catalog,
+    build_particle_view_production_graph,
+    reconcile_particle_view_production_graph,
+    submit_particle_view_graph,
     build_stage_a_teacher_task_specs,
     build_stage_a_direct_resource_plan,
     build_stage_a_direct_task_specs,
@@ -51,6 +63,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_unified_split_manifest,
     execute_scientific_task,
     load_aligned_logical_jet_view,
+    load_final_hlt_view,
     load_hashed_json,
     make_logical_data_loader,
     miniature_parent_manifest,
@@ -68,10 +81,14 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     validate_focused_control_factory_config,
     validate_fairness_factory_config,
     validate_stack_factory_config,
+    validate_report_factory_config,
+    validate_final_factory_config,
+    validate_full_pilot_scientific_bootstrap,
     validate_post_target_factory_config,
     validate_stage_a_direct_resource_plan,
     validate_target_discovery_factory_config,
     train_direct_hlt_control,
+    publish_full_pilot_scientific_bootstrap,
     write_immutable_json,
 )
 from teacher_logit_reco.local_particle_residual_field.particle_view.fairness_runtime import (
@@ -540,6 +557,281 @@ def test_stack_factory_covers_integration_eight(tmp_path):
     assert sum(
         row["operation"] == "fusion" for row in specs.values()
     ) == 8
+
+
+def test_report_factory_covers_integration_nine_and_orders_dependencies(
+    tmp_path,
+):
+    _, unified, runtime = _runtime_sources(tmp_path)
+    fairness = build_fairness_factory_config(
+        runtime_data_config=runtime,
+        device="cpu",
+        max_train_batches=1,
+        max_val_batches=1,
+    )
+    stack = build_stack_factory_config(
+        fairness_factory_config=fairness,
+        device="cpu",
+        max_stack_batches=1,
+        bootstrap_replicates=25,
+        linear_fusion_steps=10,
+    )
+    config = build_report_factory_config(
+        stack_factory_config=stack,
+        source_commit="a" * 40,
+        python_executable=sys.executable,
+        reload_fixture_batch_size=2,
+    )
+    assert validate_report_factory_config(
+        config, verify_executable=True
+    )["ok"]
+    assert not config["final_test_loaded"]
+    assert not config["oracle_dependencies_in_export"]
+    assert not config["performance_gates"]
+    path = tmp_path / "report_factory.json"
+    write_immutable_json(path, config)
+    specs = build_report_task_specs(factory_config_path=path)
+    assert len(specs) == 7
+    assert sum(row["operation"] == "bundle_export" for row in specs.values()) == 2
+    assert sum(row["operation"] == "bundle_reload" for row in specs.values()) == 2
+    assert sum(row["operation"] == "reporting" for row in specs.values()) == 3
+
+    registry = build_low_data_campaign_registry(
+        unified_split_manifest=unified
+    )
+    rows = {row["run_id"]: row for row in registry["runs"]}
+    stack_ids = {
+        row["run_id"] for row in registry["runs"] if row["stage"] == "stack"
+    }
+    assert set(
+        rows["REPORT_EXPORT_PRIVILEGED_WINNER"]["parent_run_ids"]
+    ) == stack_ids
+    assert rows["REPORT_RELOAD_PRIVILEGED_WINNER"]["parent_run_ids"] == [
+        "REPORT_EXPORT_PRIVILEGED_WINNER"
+    ]
+    assert rows["REPORT_AGGREGATE_REPORT"]["parent_run_ids"] == [
+        "REPORT_RELOAD_PRIVILEGED_WINNER",
+        "REPORT_RELOAD_DEPLOYABLE_WINNER",
+    ]
+    assert rows["REPORT_FINAL_PERMIT_PRIVILEGED"]["parent_run_ids"] == [
+        "REPORT_AGGREGATE_REPORT"
+    ]
+
+
+def test_final_factory_covers_integration_ten_and_is_hlt_only(tmp_path):
+    _, unified, runtime = _runtime_sources(tmp_path)
+    fairness = build_fairness_factory_config(
+        runtime_data_config=runtime,
+        device="cpu",
+        max_train_batches=1,
+        max_val_batches=1,
+    )
+    stack = build_stack_factory_config(
+        fairness_factory_config=fairness,
+        device="cpu",
+        max_stack_batches=1,
+        bootstrap_replicates=25,
+        linear_fusion_steps=10,
+    )
+    report = build_report_factory_config(
+        stack_factory_config=stack,
+        source_commit="a" * 40,
+        python_executable=sys.executable,
+        reload_fixture_batch_size=2,
+    )
+    config = build_final_factory_config(
+        report_factory_config=report,
+        device="cpu",
+        batch_size=2,
+        num_workers=0,
+        bootstrap_replicates=25,
+    )
+    assert validate_final_factory_config(config)["ok"]
+    assert config["offline_cache_forbidden"]
+    assert config["oracle_models_forbidden"]
+    assert config["evaluate_each_distinct_source_once"]
+    assert not config["performance_gates"]
+    path = tmp_path / "final_factory.json"
+    write_immutable_json(path, config)
+    specs = build_final_task_specs(factory_config_path=path)
+    assert set(specs) == {
+        "FINAL_PRIVILEGED_SCIENTIFIC",
+        "FINAL_PRE_STAGE_G_DEPLOYABLE",
+    }
+    assert all(row["operation"] == "final_test" for row in specs.values())
+
+    registry = build_low_data_campaign_registry(
+        unified_split_manifest=unified
+    )
+    rows = {row["run_id"]: row for row in registry["runs"]}
+    expected = {
+        "REPORT_FINAL_PERMIT_PRIVILEGED",
+        "REPORT_FINAL_PERMIT_DEPLOYABLE",
+    }
+    assert set(
+        rows["FINAL_PRIVILEGED_SCIENTIFIC"]["parent_run_ids"]
+    ) == expected
+    assert set(
+        rows["FINAL_PRE_STAGE_G_DEPLOYABLE"]["parent_run_ids"]
+    ) == {"FINAL_PRIVILEGED_SCIENTIFIC"}
+
+
+def test_final_loader_opens_only_hlt_cache_and_complete_final_split(tmp_path):
+    _, unified, runtime = _runtime_sources(tmp_path)
+    view, audit = load_final_hlt_view(runtime)
+    expected = unified["logical_splits"]["final_test"]
+    assert len(view) == expected["count"]
+    assert view.logical_split_sha256 == expected["content_hash"]
+    assert view.ordered_identity_sha256 == expected[
+        "ordered_identity_sha256"
+    ]
+    assert audit["opened_cache_kinds"] == ["hlt_array", "hlt_metadata"]
+    assert not audit["offline_cache_opened"]
+    assert not audit["oracle_model_loaded"]
+
+
+def test_full_scientific_bootstrap_has_exact_coverage_and_builds_graph(
+    tmp_path,
+):
+    _, unified, runtime = _runtime_sources(tmp_path / "sources")
+    registry = build_low_data_campaign_registry(
+        unified_split_manifest=unified
+    )
+    registry_path = tmp_path / "registry.json"
+    write_immutable_json(registry_path, registry)
+    bootstrap = publish_full_pilot_scientific_bootstrap(
+        output_dir=tmp_path / "bootstrap",
+        registry=registry,
+        runtime_data_config=runtime,
+        source_commit="a" * 40,
+        device="cpu",
+        num_workers=0,
+        batch_size=2,
+        bootstrap_replicates=25,
+        linear_fusion_steps=10,
+        python_executable=sys.executable,
+        handler_python_executable=sys.executable,
+        max_train_batches=1,
+        max_val_batches=1,
+        max_stack_batches=1,
+        production=False,
+    )
+    audit = validate_full_pilot_scientific_bootstrap(
+        bootstrap, registry=registry
+    )
+    assert audit["run_count"] == len(registry["runs"])
+    assert bootstrap["exact_registry_coverage"]
+    assert bootstrap["source_preflight_included"]
+    assert bootstrap["report_and_final_included"]
+    handlers = json.loads(
+        Path(
+            bootstrap["scientific_handler_commands"]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    handler_catalog = build_runtime_handler_catalog(handlers)
+    handler_catalog_path = tmp_path / "runtime_handler_catalog.json"
+    write_immutable_json(handler_catalog_path, handler_catalog)
+    manifest = build_runtime_execution_manifest(
+        registry=registry,
+        registry_path=str(registry_path),
+        handler_catalog=handler_catalog,
+        handler_catalog_path=str(handler_catalog_path),
+        artifact_root=str(tmp_path / "campaign"),
+    )
+    manifest_path = tmp_path / "runtime_execution_manifest.json"
+    write_immutable_json(manifest_path, manifest)
+    commands = build_runtime_command_catalog(
+        execution_manifest_path=str(manifest_path),
+        python_executable=sys.executable,
+    )
+    graph = build_particle_view_production_graph(
+        registry=registry,
+        artifact_root=str(tmp_path / "campaign"),
+        source_commit="a" * 40,
+        command_catalog=commands,
+    )
+    reconciliation = reconcile_particle_view_production_graph(
+        graph=graph, registry=registry
+    )
+    assert reconciliation["reconciled"]
+    ledger = submit_particle_view_graph(
+        graph=graph,
+        graph_path=str(tmp_path / "production_graph.json"),
+        mode="dry_run",
+    )
+    assert ledger["planned_submit_count"] == 11
+
+
+def test_production_full_bootstrap_rejects_partial_batch_limits(tmp_path):
+    _, unified, runtime = _runtime_sources(tmp_path / "sources")
+    registry = build_low_data_campaign_registry(
+        unified_split_manifest=unified
+    )
+    with pytest.raises(ValueError, match="forbids partial-batch"):
+        publish_full_pilot_scientific_bootstrap(
+            output_dir=tmp_path / "bootstrap",
+            registry=registry,
+            runtime_data_config=runtime,
+            source_commit="a" * 40,
+            max_train_batches=1,
+            production=True,
+        )
+
+
+def test_one_command_full_pilot_bootstrap_dry_run(tmp_path):
+    _, unified, runtime = _runtime_sources(tmp_path / "sources")
+    registry = build_low_data_campaign_registry(
+        unified_split_manifest=unified
+    )
+    registry_path = tmp_path / "registry.json"
+    runtime_path = tmp_path / "runtime_data.json"
+    write_immutable_json(registry_path, registry)
+    write_immutable_json(runtime_path, runtime)
+    artifact_root = tmp_path / "campaign"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/submit_particle_view_full_pilot.py",
+            "--registry",
+            str(registry_path),
+            "--runtime-data-config",
+            str(runtime_path),
+            "--artifact-root",
+            str(artifact_root),
+            "--source-commit",
+            "a" * 40,
+            "--bootstrap-scientific",
+            "--device",
+            "cpu",
+            "--batch-size",
+            "2",
+            "--bootstrap-replicates",
+            "25",
+            "--linear-fusion-steps",
+            "10",
+            "--runtime-python-executable",
+            sys.executable,
+            "--dry-run",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "mode=dry_run planned=11 submitted=0" in completed.stdout
+    assert (
+        artifact_root
+        / "preflight"
+        / "scientific_bootstrap"
+        / "scientific_task_catalog.json"
+    ).is_file()
+    assert (
+        artifact_root / "preflight" / "runtime_execution_manifest.json"
+    ).is_file()
+    assert (
+        artifact_root / "preflight" / "production_graph.json"
+    ).is_file()
 
 
 def test_confirmation_factory_covers_structural_confirmation_and_selection(

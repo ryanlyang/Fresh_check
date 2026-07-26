@@ -222,6 +222,34 @@ def build_final_test_permit(
         or final_section.get("stage_g_controls_forbidden") is not True
     ):
         raise ValueError("final-test sealed-split policy changed")
+    baselines = []
+    for row in final_section.get("authorized_hlt_baselines", []):
+        source_sha = require_sha256(
+            "authorized_hlt_baseline.bundle_sha256",
+            row.get("bundle_sha256"),
+        )
+        if (
+            int(row.get("seed")) not in {101, 202, 303}
+            or row.get("role") != "matched_a0_final_baseline"
+            or not isinstance(row.get("winner_families"), list)
+        ):
+            raise ValueError("final-test HLT baseline authorization changed")
+        baselines.append(
+            {
+                "bundle_sha256": source_sha,
+                "seed": int(row["seed"]),
+                "role": "matched_a0_final_baseline",
+                "winner_families": sorted(row["winner_families"]),
+                "requires_oracle": False,
+                "required_inputs": list(PARTICLE_VIEW_BUNDLE_INPUT_NAMES),
+            }
+        )
+    fusion_recipes = sorted(
+        {
+            require_sha256("authorized_fusion_recipe_sha256", value)
+            for value in final_section.get("authorized_fusion_recipes", [])
+        }
+    )
     authorized_source = {
         row["bundle_sha256"]: row
         for row in final_section["authorized_bundles"]
@@ -298,6 +326,8 @@ def build_final_test_permit(
             "final_test_split_sha256": final_section["split_sha256"],
             "authorized_exports": entries,
             "authorized_export_count": len(entries),
+            "authorized_hlt_baselines": baselines,
+            "authorized_fusion_recipe_sha256": fusion_recipes,
             "only_preselected_median_representatives": True,
             "stage_g_controls_authorized": False,
             "oracle_diagnostics_authorized": False,
@@ -325,6 +355,18 @@ def _validate_final_test_permit(payload: Mapping[str, Any]) -> None:
         or payload.get("hlt_only_required") is not True
     ):
         raise ValueError("final-test permit policy changed")
+    for row in payload.get("authorized_hlt_baselines", []):
+        require_sha256(
+            "authorized_hlt_baseline.bundle_sha256", row["bundle_sha256"]
+        )
+        if (
+            row["requires_oracle"] is not False
+            or row["required_inputs"]
+            != list(PARTICLE_VIEW_BUNDLE_INPUT_NAMES)
+        ):
+            raise ValueError("final-test baseline permit is not HLT-only")
+    for value in payload.get("authorized_fusion_recipe_sha256", []):
+        require_sha256("authorized_fusion_recipe_sha256", value)
 
 
 def evaluate_authorized_final_test(

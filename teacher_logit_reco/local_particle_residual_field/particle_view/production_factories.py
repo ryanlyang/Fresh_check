@@ -918,4 +918,30 @@ def build_source_preflight_factory(
     }
 
 
-__all__ = ["build_source_preflight_factory"]
+def build_source_preflight_task_specs(
+    *, runtime_data_config_path: str | Path
+) -> dict[str, dict[str, str]]:
+    """Bind the registry's source node to the authenticated runtime sources."""
+
+    path = Path(runtime_data_config_path).resolve()
+    validate_runtime_data_config(
+        load_hashed_json(path), verify_cache_files=False
+    )
+    return {
+        "PV_SOURCE_PREFLIGHT": {
+            "operation": "source_preflight",
+            "factory": (
+                "teacher_logit_reco.local_particle_residual_field."
+                "particle_view.production_factories:"
+                "build_source_preflight_factory"
+            ),
+            "factory_config_path": str(path),
+            "factory_config_sha256": sha256_file(path),
+        }
+    }
+
+
+__all__ = [
+    "build_source_preflight_factory",
+    "build_source_preflight_task_specs",
+]

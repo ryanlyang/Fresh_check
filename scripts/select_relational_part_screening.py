@@ -21,6 +21,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     validate_campaign_source,
 )
 from teacher_logit_reco.relational_part.workflow import (  # noqa: E402
+    expected_training_lineage,
     load_record_sequence,
     parse_named_hashes,
     reject_final_test_paths,
@@ -63,6 +64,9 @@ def main() -> int:
         split_manifest_sha256=args.split_manifest_sha256,
         hlt_cache_hashes=hlt_hashes,
         results_envelope_sha256=envelope["content_hash"],
+        expected_common_lineage_hashes=expected_training_lineage(
+            args.campaign_spec.parent, families=()
+        ),
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     if not args.dry_run:

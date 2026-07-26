@@ -20,6 +20,7 @@ for ((index=0; index<count; index++)); do
   evaluation_args+=(--final-evaluation "${output_dir}/metrics.json")
 done
 python scripts/write_relational_part_report.py \
+  --campaign-spec "${CAMPAIGN_ROOT}/campaign_spec.json" \
   --locked-finalists "${CAMPAIGN_ROOT}/selection/locked_finalists.json" \
   --confirmation-summary "${CAMPAIGN_ROOT}/selection/confirmation_summary.json" \
   "${evaluation_args[@]}" \

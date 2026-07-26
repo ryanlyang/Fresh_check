@@ -52,6 +52,7 @@ from teacher_logit_reco.relational_part.semantic_controls import (
     evaluate_semantic_perturbations,
     select_unary_widths,
     zero_relation_family,
+    zero_region_resolution,
     unary_adapter_parameter_count,
     within_jet_shuffled_relations,
     wrong_event_relations,
@@ -134,6 +135,7 @@ def _screening():
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
         results_envelope_sha256="7" * 64,
+        expected_common_lineage_hashes=results[0]["lineage_hashes"],
     )
     architecture = build_confirmation_architecture_registry(
         relation_registry_sha256=relation["content_hash"],
@@ -206,6 +208,7 @@ def test_screening_rejects_stale_cross_campaign_checkpoint_lineage() -> None:
             split_manifest_sha256="6" * 64,
             hlt_cache_hashes=hashes,
             results_envelope_sha256="7" * 64,
+            expected_common_lineage_hashes=results[0]["lineage_hashes"],
         )
 
 
@@ -264,6 +267,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
             split_manifest_sha256="6" * 64,
             hlt_cache_hashes=hashes,
             results_envelope_sha256="9" * 64,
+            expected_common_lineage_hashes=results[0]["lineage_hashes"],
         )
     preliminary, preliminary_lock = aggregate_confirmation(
         confirmation_registry=confirmation,
@@ -272,6 +276,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
         results_envelope_sha256="9" * 64,
+        expected_common_lineage_hashes=results[0]["lineage_hashes"],
         seal_finalists=False,
     )
     assert preliminary_lock is None
@@ -282,6 +287,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
         results_envelope_sha256="9" * 64,
+        expected_common_lineage_hashes=results[0]["lineage_hashes"],
         semantic_unary_results=unary,
         unary_results_envelope_sha256="a" * 64,
         semantic_perturbation_sha256="7" * 64,
@@ -443,6 +449,61 @@ def test_combination_family_dropout_zeros_only_selected_channels() -> None:
     assert detail["zeroed_family"] == "PT"
 
 
+def test_region_resolution_ablation_reencodes_only_region_slice() -> None:
+    class RegionEncoder:
+        def __init__(self):
+            self.disabled = None
+
+        def __call__(
+            self,
+            raw_tokens,
+            mask,
+            region_trees,
+            *,
+            disabled_resolutions,
+        ):
+            del region_trees
+            self.disabled = tuple(disabled_resolutions)
+            batch, particles = raw_tokens.shape[:2]
+            output = raw_tokens.new_full(
+                (batch, 12, particles, particles),
+                float(disabled_resolutions[0]),
+            )
+            return output.masked_fill(
+                ~(mask.unsqueeze(-1) & mask.unsqueeze(-2)), 0.0
+            )
+
+    encoder = RegionEncoder()
+    model = SimpleNamespace(
+        families=("REGION",),
+        pair_builder=SimpleNamespace(encoders={"REGION": encoder}),
+    )
+    pairs = torch.randn(2, 16, 3, 3)
+    mask = torch.tensor(
+        [[[True, True, False]], [[True, True, True]]]
+    )
+    pairs = pairs.masked_fill(
+        ~(mask.unsqueeze(-1) & mask.unsqueeze(-2)), 0.0
+    )
+    output, detail = zero_region_resolution(
+        pairs,
+        mask,
+        model=model,
+        raw_tokens=torch.zeros(2, 3, 14),
+        region_trees=({}, {}),
+        resolution=4,
+    )
+    assert encoder.disabled == (4,)
+    assert torch.equal(output[:, :4], pairs[:, :4])
+    assert output[:, 4:].masked_select(
+        (mask.unsqueeze(-1) & mask.unsqueeze(-2)).expand(-1, 12, -1, -1)
+    ).eq(4).all()
+    assert detail["zeroed_resolution"] == 4
+    assert detail["raw_zeroed_channel_indices"] == [
+        1, 14, 15, 16, 17, 18, 19, 28, 29, 34, 35, 39
+    ]
+
+
 def test_unary_parameter_search_and_registry_are_exact() -> None:
     target = unary_adapter_parameter_count(3, 20, 10)
     selected = select_unary_widths(
@@ -578,8 +639,8 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
     }
     registration = with_content_hash(
         {
-            "contract": "relational_part_checkpoint_registration_v1",
-            "schema_version": 1,
+                "contract": "relational_part_checkpoint_registration_v2",
+                "schema_version": 2,
             "run_id": "RPT_BASE",
             "seed": 101,
             "checkpoint_sha256": checkpoint,
@@ -626,6 +687,9 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
             "confirmation_summary_sha256": "8" * 64,
             "semantic_perturbation_sha256": "9" * 64,
             "unary_control_registry_sha256": "0" * 64,
+            "confirmation_results_envelope_sha256": "1" * 64,
+            "unary_results_envelope_sha256": "2" * 64,
+            "all_selection_lineage_authenticated": True,
             "baseline_id": "RPT_BASE",
             "evaluation_rows": [
                 {
@@ -788,6 +852,9 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
             "confirmation_summary_sha256": confirmation["content_hash"],
             "semantic_perturbation_sha256": "5" * 64,
             "unary_control_registry_sha256": "6" * 64,
+            "confirmation_results_envelope_sha256": "7" * 64,
+            "unary_results_envelope_sha256": "8" * 64,
+            "all_selection_lineage_authenticated": True,
             "baseline_id": "RPT_BASE",
             "evaluation_rows": [
                 {

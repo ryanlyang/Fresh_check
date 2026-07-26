@@ -414,16 +414,29 @@ class TrackEncoder(_ModuleBase):
             details["validity_index"].masked_select(pair_mask),
             minlength=4,
         )
+        state_count_list = [int(value) for value in state_counts.cpu()]
+        state_total = int(state_counts.sum().cpu())
         both = details["both_tracks_valid"][:, 0]
         return {
             "validity_state_order": list(TRACK_VALIDITY_STATE_NAMES),
-            "validity_state_counts": [int(value) for value in state_counts.cpu()],
+            "validity_state_counts": state_count_list,
             "validity_state_fractions": [
                 float(value)
                 for value in (
                     state_counts.float() / state_counts.sum().clamp_min(1)
                 ).cpu()
             ],
+            "_population_statistics": {
+                "validity_state_counts": {
+                    "kind": "sum",
+                    "value": state_count_list,
+                },
+                "validity_state_fractions": {
+                    "kind": "ratio",
+                    "numerator": state_count_list,
+                    "denominator": [state_total] * len(state_count_list),
+                },
+            },
             "track_valid_count": int(details["track_valid"].sum().cpu()),
             "d0_uncertainty_floor": self.d0_uncertainty_floor,
             "dz_uncertainty_floor": self.dz_uncertainty_floor,

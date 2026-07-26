@@ -53,6 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "perturb",
         "--confirmation-summary",
         str(root / "selection" / "confirmation_summary.json"),
+        "--campaign-spec",
+        str(root / "campaign_spec.json"),
         "--screening-registry",
         str(root / "registry" / "screening_registry.json"),
         "--normalization",

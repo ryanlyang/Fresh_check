@@ -29,6 +29,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     evaluate_semantic_perturbations,
     load_hashed_json,
     sha256_file,
+    validate_campaign_source,
     write_immutable_json,
 )
 from teacher_logit_reco.relational_part.workflow import (  # noqa: E402
@@ -103,12 +104,36 @@ def _perturb(args) -> int:
         args.confirmation_summary,
         expected_contract=CONFIRMATION_SUMMARY_CONTRACT,
     )
+    campaign = load_hashed_json(args.campaign_spec)
+    validate_campaign_source(campaign, repo_root=REPO_ROOT)
     registration = load_hashed_json(args.checkpoint_registration)
     model_contract = load_hashed_json(args.model_contract)
     screening = load_hashed_json(
         args.screening_registry, expected_contract=SCREENING_REGISTRY_CONTRACT
     )
     normalization, region = _common_normalizers(args)
+    if args.seed != 101:
+        raise ValueError("semantic perturbations are bound to confirmed seed 101")
+    if summary["nominal_relational_winner_id"] != args.run_id:
+        raise ValueError("semantic perturbations must use the nominal winner")
+    winner_rows = [
+        row for row in summary["rows"] if row["run_id"] == args.run_id
+    ]
+    if len(winner_rows) != 1:
+        raise ValueError("confirmation summary has no unique nominal winner row")
+    winner = winner_rows[0]
+    if (
+        registration["content_hash"]
+        != winner["checkpoint_registration_hashes"]["101"]
+        or registration["checkpoint_sha256"]
+        != winner["checkpoint_hashes"]["101"]
+        or model_contract["content_hash"]
+        != winner["model_contract_sha256"]
+    ):
+        raise ValueError(
+            "semantic checkpoint, registration, or model contract is not "
+            "the exact confirmed seed-101 winner"
+        )
     resolved = {
         "run_id": args.run_id,
         "seed": args.seed,
@@ -122,8 +147,6 @@ def _perturb(args) -> int:
     print(json.dumps(resolved, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
-    if summary["nominal_relational_winner_id"] != args.run_id:
-        raise ValueError("semantic perturbations must use the nominal winner")
     if sha256_file(args.checkpoint) != registration["checkpoint_sha256"]:
         raise ValueError("semantic checkpoint file hash mismatch")
     random.seed(args.seed)
@@ -160,6 +183,7 @@ def _perturb(args) -> int:
     artifact = build_semantic_perturbation_artifact(
         nominal_winner_run_id=args.run_id,
         nominal_checkpoint_sha256=registration["checkpoint_sha256"],
+        nominal_checkpoint_registration_sha256=registration["content_hash"],
         confirmation_summary_sha256=summary["content_hash"],
         metrics=metrics,
         diagnostics=diagnostics,
@@ -190,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
 
     perturb = subparsers.add_parser("perturb")
     perturb.add_argument("--confirmation-summary", type=Path, required=True)
+    perturb.add_argument("--campaign-spec", type=Path, required=True)
     perturb.add_argument("--screening-registry", type=Path, required=True)
     perturb.add_argument("--normalization", type=Path, required=True)
     perturb.add_argument("--region-normalization", type=Path)

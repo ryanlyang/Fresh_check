@@ -16,6 +16,9 @@ CAMPAIGN_SPEC_CONTRACT = "relational_part_campaign_spec_v3"
 STEP1_REPORT_CONTRACT = "relational_part_step1_report_v3"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SOURCE_STATUS_HASH_POLICY = (
+    "git_diff_binary_HEAD_plus_sorted_untracked_file_bytes_v2"
+)
 
 
 def canonical_json_bytes(payload: Any) -> bytes:
@@ -80,6 +83,7 @@ def bind_source_provenance(
             name="source_snapshot.source_status_sha256",
         ),
         "dirty": bool(source_snapshot.get("source_dirty")),
+        "status_hash_policy": SOURCE_STATUS_HASH_POLICY,
     }
     existing_source = payload.get("source")
     if existing_source is not None:
@@ -271,6 +275,9 @@ def build_campaign_spec(
                 "commit": source_commit,
                 "status_sha256": source_status,
                 "dirty": bool(source_snapshot.get("source_dirty")),
+                "status_hash_policy": (
+                    SOURCE_STATUS_HASH_POLICY
+                ),
             },
             "split_manifest_hash": require_sha256(
                 split_manifest_hash, name="split_manifest_hash"

@@ -101,6 +101,9 @@ case "${MODE}" in
       export ABPH_RUNTIME_PROFILE_ENABLED=1
       output_dir="${profile_root}/benchmarks/${VARIANT}"
     fi
+    # Every production stage must contribute a timing sample. One-update
+    # warm-start handoffs are real work, so they intentionally have no warmup.
+    export ABPH_RUNTIME_PROFILE_WARMUP_UPDATES=0
     if [[ "${VARIANT}" == "D1_kt32_mh4_particles" ]]; then
       export ABPH_RENDERER_UPDATES=1
     fi

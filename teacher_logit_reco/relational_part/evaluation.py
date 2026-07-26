@@ -482,7 +482,7 @@ def evaluate_locked_finalist(
     expected_checkpoint = rows[run_id]["checkpoint_hashes"].get(str(int(seed)))
     registration_sha = validate_content_hash(
         checkpoint_registration,
-        expected_contract="relational_part_checkpoint_registration_v1",
+        expected_contract="relational_part_checkpoint_registration_v2",
     )
     if registration_sha != rows[run_id][
         "checkpoint_registration_hashes"

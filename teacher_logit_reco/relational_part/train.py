@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 TRAINING_CONTRACT = "relational_part_training_v1"
 TRAINING_CURVES_CONTRACT = "relational_part_training_curves_v1"
 CHECKPOINT_CONTRACT = "relational_part_checkpoint_v1"
-CHECKPOINT_REGISTRATION_CONTRACT = "relational_part_checkpoint_registration_v1"
+CHECKPOINT_REGISTRATION_CONTRACT = "relational_part_checkpoint_registration_v2"
 
 
 @dataclass(frozen=True)
@@ -346,26 +346,185 @@ def _capture_diagnostics(
         if not results:
             raise ValueError("val_select diagnostics received an empty loader")
 
+        sum_scalar_fields = {
+            "valid_directed_pair_count",
+            "valid_particle_count",
+            "track_valid_count",
+            "masked_query_count",
+        }
+        sum_sequence_fields = {
+            "category_counts",
+            "charge_state_counts",
+            "directed_pair_counts",
+            "validity_state_counts",
+            "bin_counts",
+            "event_counts",
+            "correct_counts",
+        }
+        event_distribution_fields = {
+            "node_counts",
+            "maximum_leaf_depths",
+        }
+        immutable_fields = {
+            "requested_cluster_counts",
+            "pair_embedding_norms",
+            "uncertainty_floor_audit",
+        }
+
+        def add_values(left: Any, right: Any) -> Any:
+            if not isinstance(left, (list, tuple)) and isinstance(
+                right, (list, tuple)
+            ):
+                if float(left) != 0.0:
+                    raise ValueError(
+                        "cannot add a scalar diagnostic statistic to a sequence"
+                    )
+                return [add_values(0.0, value) for value in right]
+            if isinstance(left, (list, tuple)) and isinstance(
+                right, (list, tuple)
+            ):
+                if len(left) != len(right):
+                    raise ValueError(
+                        "population-statistic numerator shape drifted by batch"
+                    )
+                return [
+                    add_values(left[index], right[index])
+                    for index in range(len(left))
+                ]
+            return left + right
+
+        def divide_values(numerator: Any, denominator: Any) -> Any:
+            if isinstance(numerator, (list, tuple)):
+                if isinstance(denominator, (list, tuple)):
+                    if len(numerator) != len(denominator):
+                        raise ValueError(
+                            "population-statistic denominator shape drifted"
+                        )
+                    return [
+                        divide_values(numerator[index], denominator[index])
+                        for index in range(len(numerator))
+                    ]
+                return [
+                    divide_values(value, denominator) for value in numerator
+                ]
+            value = float(denominator)
+            return None if value == 0.0 else float(numerator) / value
+
+        def aggregate_population_stat(
+            specifications: Sequence[Mapping[str, Any]],
+        ) -> Any:
+            kinds = {str(specification.get("kind")) for specification in specifications}
+            if len(kinds) != 1:
+                raise ValueError("diagnostic aggregation kind drifted by batch")
+            kind = kinds.pop()
+            if kind == "sum":
+                total: Any = 0
+                for specification in specifications:
+                    total = add_values(total, specification["value"])
+                return total
+            if kind == "ratio":
+                numerator = specifications[0]["numerator"]
+                denominator = specifications[0]["denominator"]
+                for specification in specifications[1:]:
+                    numerator = add_values(
+                        numerator, specification["numerator"]
+                    )
+                    denominator = add_values(
+                        denominator, specification["denominator"]
+                    )
+                return divide_values(numerator, denominator)
+            if kind == "concatenate":
+                return [
+                    item
+                    for specification in specifications
+                    for item in specification["values"]
+                ]
+            if kind == "immutable":
+                value = specifications[0]["value"]
+                if any(
+                    specification["value"] != value
+                    for specification in specifications[1:]
+                ):
+                    raise ValueError("immutable diagnostic value drifted by batch")
+                return value
+            raise ValueError(f"unknown diagnostic aggregation kind {kind!r}")
+
         def aggregate(values: Sequence[Any], key: str = "") -> Any:
             present = [value for value in values if value is not None]
             if not present:
                 return None
             if all(isinstance(value, Mapping) for value in present):
-                keys = set(present[0])
-                if any(set(value) != keys for value in present[1:]):
+                statistic_maps = [
+                    value.get("_population_statistics", {}) for value in present
+                ]
+                keys = set(present[0]) - {"_population_statistics"}
+                if any(
+                    set(value) - {"_population_statistics"} != keys
+                    for value in present[1:]
+                ):
                     raise ValueError("diagnostic mapping structure drifted by batch")
-                return {
-                    name: aggregate(
-                        [value[name] for value in present], str(name)
+                statistic_keys = set(statistic_maps[0])
+                if any(set(value) != statistic_keys for value in statistic_maps[1:]):
+                    raise ValueError(
+                        "population-statistic schema drifted by batch"
                     )
-                    for name in sorted(keys)
-                }
+                if not statistic_keys.issubset(keys):
+                    missing = sorted(statistic_keys - keys)
+                    raise ValueError(
+                        "population statistics target absent fields: "
+                        f"{missing}"
+                    )
+                output = {}
+                for name in sorted(keys):
+                    if name in statistic_keys:
+                        output[name] = aggregate_population_stat(
+                            [value[name] for value in statistic_maps]
+                        )
+                    else:
+                        output[name] = aggregate(
+                            [value[name] for value in present], str(name)
+                        )
+                for name in statistic_keys:
+                    if name not in output:
+                        raise ValueError(
+                            f"population statistic targets absent field {name!r}"
+                        )
+                return output
             if all(
                 isinstance(value, (list, tuple)) for value in present
             ):
+                if key == "pair_bias_shape":
+                    tail = tuple(present[0][1:])
+                    if any(tuple(value[1:]) != tail for value in present[1:]):
+                        raise ValueError(
+                            "pair-bias non-batch shape drifted by batch"
+                        )
+                    return [
+                        sum(int(value[0]) for value in present),
+                        *tail,
+                    ]
+                if key in event_distribution_fields:
+                    return [
+                        item for value in present for item in value
+                    ]
+                if key in immutable_fields:
+                    if any(value != present[0] for value in present[1:]):
+                        raise ValueError(
+                            f"immutable diagnostic {key} drifted by batch"
+                        )
+                    return list(present[0])
                 length = len(present[0])
                 if any(len(value) != length for value in present[1:]):
-                    raise ValueError("diagnostic sequence length drifted by batch")
+                    raise ValueError(
+                        f"fixed diagnostic sequence {key!r} drifted by batch"
+                    )
+                if key in sum_sequence_fields:
+                    return [
+                        add_values(
+                            0.0, sum(value[index] for value in present)
+                        )
+                        for index in range(length)
+                    ]
                 return [
                     aggregate([value[index] for value in present], key)
                     for index in range(length)
@@ -376,7 +535,7 @@ def _capture_diagnostics(
                 isinstance(value, (int, float, np.integer, np.floating))
                 for value in present
             ):
-                if "count" in key:
+                if key in sum_scalar_fields:
                     return int(sum(int(value) for value in present))
                 denominator = float(sum(weights))
                 return float(
@@ -394,7 +553,9 @@ def _capture_diagnostics(
         return {
             "scope": "complete_val_select_population",
             "aggregation": (
-                "event_count_weighted_numeric_means; explicit count fields summed"
+                "schema_aware_v2: declared ratios use exact sufficient "
+                "statistics; declared counts/histograms sum; event "
+                "distributions concatenate; immutable values must agree"
             ),
             "batch_count": len(results),
             "event_count": sum(weights),
@@ -761,7 +922,7 @@ def train_relational_model(
     registration = with_content_hash(
         {
             "contract": CHECKPOINT_REGISTRATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "configuration_role": (
                 "reference_baseline"

@@ -745,24 +745,31 @@ def build_low_data_campaign_registry(
             uses_labels=False,
         )
 
-    for family_id, family, permit_parent in (
+    final_permit_parents = (
+        "REPORT_FINAL_PERMIT_PRIVILEGED",
+        "REPORT_FINAL_PERMIT_DEPLOYABLE",
+    )
+    for family_id, family in (
         (
             "PRIVILEGED_SCIENTIFIC",
             "privileged_scientific",
-            "REPORT_FINAL_PERMIT_PRIVILEGED",
         ),
         (
             "PRE_STAGE_G_DEPLOYABLE",
             "pre_stage_g_deployable",
-            "REPORT_FINAL_PERMIT_DEPLOYABLE",
         ),
     ):
+        parents = (
+            final_permit_parents
+            if family_id == "PRIVILEGED_SCIENTIFIC"
+            else ("FINAL_PRIVILEGED_SCIENTIFIC",)
+        )
         add(
             f"FINAL_{family_id}",
             stage="final_test",
             category="final_test",
             detail=family_id,
-            parents=(permit_parent,),
+            parents=parents,
             uses_labels=False,
             selectable=True,
             family=family,

@@ -89,15 +89,40 @@ def _benchmark(
     buckets["gradient_synchronization"]["cpu_total_seconds"] = (
         update_seconds * 0.20 if world_size > 1 else 0.0
     )
+    seconds_per_update = float(update_seconds) / 20.0
+    if variant == DEEP_VARIANT:
+        stage_samples = {
+            "phase1_root": 1,
+            **{
+                f"phase2_hierarchy_{capacity}": 1
+                for capacity in (2, 4, 8, 16, 32)
+            },
+            "phase3_renderer": 1,
+            "phase4_distribution": 13,
+        }
+    else:
+        stage_samples = {"phase1_root": 20}
     profile = {
         "contract": ABPH_RUNTIME_PROFILE_CONTRACT,
         "ok": True,
         "buckets": buckets,
         "stages": {
-            "benchmark": {
-                "sampled_jets": sampled_jets,
-                "sampled_updates": 20,
+            name: {
+                "phase": (
+                    1
+                    if name == "phase1_root"
+                    else 2
+                    if name.startswith("phase2_")
+                    else 3
+                    if name == "phase3_renderer"
+                    else 4
+                ),
+                "phase_name": name,
+                "sampled_jets": sampled_jets * samples // 20,
+                "sampled_updates": samples,
+                "median_optimizer_update_seconds": seconds_per_update,
             }
+            for name, samples in stage_samples.items()
         },
         "summary": {
             "communication_fraction": 0.20 if world_size > 1 else 0.0,
@@ -348,6 +373,22 @@ def test_acceptance_separates_runtime_pilot_and_highdata_gates(tmp_path: Path):
     )
     assert runtime_only["promotion"]["ddp4_runtime_approved"] is True
     assert runtime_only["promotion"]["optimized_pilot_submission_allowed"] is False
+    projection = runtime_only["runtime_gate"]["deep_stage_aware_projection"]
+    assert projection["nominal_updates"] == 25_006
+    assert projection["projected_validation_events"] == 19
+    assert set(projection["stages"]) == {
+        "phase1_root",
+        "phase2_hierarchy_2",
+        "phase2_hierarchy_4",
+        "phase2_hierarchy_8",
+        "phase2_hierarchy_16",
+        "phase2_hierarchy_32",
+        "phase3_renderer",
+        "phase4_distribution",
+    }
+    assert "particle_render_projection" in runtime_only["runtime_gate"][
+        "deep_bottleneck_buckets"
+    ]
 
     extensions = {
         variant: _extension(tmp_path / f"{variant}-extension.json", variant)

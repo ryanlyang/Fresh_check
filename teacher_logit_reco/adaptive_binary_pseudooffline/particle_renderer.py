@@ -176,29 +176,32 @@ def exact_particle_slot_layout(final_frontier: Any, root_state: AccountingState)
         raise ValueError("particle rendering requires an all-terminal final frontier")
     if bool((counts[mask] <= 0).any()):
         raise ValueError("active microgroups must have positive constituent counts")
-    batch, groups = mask.shape
-    slot_mask = torch.zeros((batch, ABPH_MAX_PARTICLES), dtype=torch.bool, device=mask.device)
-    group_indices = torch.full(
-        (batch, ABPH_MAX_PARTICLES), -1, dtype=torch.long, device=mask.device
+    batch, _ = mask.shape
+    active_counts = torch.where(mask, counts, torch.zeros_like(counts))
+    cumulative = active_counts.cumsum(dim=1)
+    root_count = root_state.constituent_count.round().long()
+    if bool((root_count < 0).any()) or bool(
+        (root_count > ABPH_MAX_PARTICLES).any()
+    ):
+        raise RuntimeError("compiled root count exceeds the 128-slot contract")
+    if not bool((active_counts.sum(dim=1) == root_count).all()):
+        raise RuntimeError("final microgroup counts do not close to the root count")
+    slot = torch.arange(ABPH_MAX_PARTICLES, device=mask.device).expand(batch, -1)
+    slot_mask = slot < root_count[:, None]
+    # right=True skips repeated cumulative boundaries from inactive groups.
+    resolved_group = torch.searchsorted(
+        cumulative.contiguous(), slot.contiguous(), right=True
+    ).clamp_max(mask.shape[1] - 1)
+    group_indices = torch.where(
+        slot_mask, resolved_group, torch.full_like(resolved_group, -1)
     )
-    local_indices = torch.full_like(group_indices, -1)
-    for batch_index in range(batch):
-        cursor = 0
-        for group_index in torch.nonzero(mask[batch_index], as_tuple=False).flatten().tolist():
-            count = int(counts[batch_index, group_index].detach().cpu())
-            if cursor + count > ABPH_MAX_PARTICLES:
-                raise RuntimeError("compiled microgroup counts exceed the 128-slot contract")
-            slot_mask[batch_index, cursor : cursor + count] = True
-            group_indices[batch_index, cursor : cursor + count] = int(group_index)
-            local_indices[batch_index, cursor : cursor + count] = torch.arange(
-                count, device=mask.device
-            )
-            cursor += count
-        root_count = int(root_state.constituent_count[batch_index].detach().cpu())
-        if cursor != root_count:
-            raise RuntimeError(
-                f"final microgroup counts {cursor} do not close to root count {root_count}"
-            )
+    preceding = torch.cat(
+        (torch.zeros_like(cumulative[:, :1]), cumulative[:, :-1]), dim=1
+    )
+    group_start = preceding.gather(1, resolved_group)
+    local_indices = torch.where(
+        slot_mask, slot - group_start, torch.full_like(slot, -1)
+    )
     return ParticleSlotLayout(
         mask=slot_mask,
         group_indices=group_indices,
@@ -215,19 +218,16 @@ def exact_particle_slot_layout(final_frontier: Any, root_state: AccountingState)
     )
 
 
-def _minimum_cost_square_assignment(cost: Any) -> Any:
-    """Exact O(N^3) Hungarian assignment without an optional SciPy dependency."""
+def _minimum_cost_square_assignment_rows(detached: list[list[float]]) -> list[int]:
+    """Exact O(N^3) Hungarian assignment over already-host-resident rows."""
 
-    torch = require_torch()
-    values = torch.as_tensor(cost)
-    if values.ndim != 2 or values.shape[0] != values.shape[1]:
+    n = len(detached)
+    if any(len(row) != n for row in detached):
         raise ValueError("minimum-cost assignment requires a square cost matrix")
-    if not bool(torch.isfinite(values).all()):
+    if any(not math.isfinite(float(value)) for row in detached for value in row):
         raise ValueError("minimum-cost assignment received nonfinite costs")
-    n = int(values.shape[0])
     if n == 0:
-        return torch.empty(0, dtype=torch.long, device=values.device)
-    detached = values.detach().to(torch.float64).cpu().tolist()
+        return []
     u = [0.0] * (n + 1)
     v = [0.0] * (n + 1)
     p = [0] * (n + 1)
@@ -275,6 +275,18 @@ def _minimum_cost_square_assignment(cost: Any) -> Any:
             assignment[p[column] - 1] = column - 1
     if any(value < 0 for value in assignment):
         raise RuntimeError("minimum-cost assignment did not cover every row")
+    return assignment
+
+
+def _minimum_cost_square_assignment(cost: Any) -> Any:
+    """Exact O(N^3) Hungarian assignment without an optional SciPy dependency."""
+
+    torch = require_torch()
+    values = torch.as_tensor(cost)
+    if values.ndim != 2 or values.shape[0] != values.shape[1]:
+        raise ValueError("minimum-cost assignment requires a square cost matrix")
+    detached = values.detach().to(torch.float64).cpu().tolist()
+    assignment = _minimum_cost_square_assignment_rows(detached)
     return torch.tensor(assignment, dtype=torch.long, device=values.device)
 
 
@@ -303,6 +315,83 @@ def _quota_sinkhorn(logits: Any, quotas: Any, *, temperature: float, iterations:
     return result
 
 
+def _active_group_rows(layout: ParticleSlotLayout, group_count: int) -> tuple[Any, Any, Any]:
+    """Return active (batch, group) pairs and their fixed-width slot masks."""
+
+    torch = require_torch()
+    group_axis = torch.arange(
+        int(group_count), device=layout.mask.device
+    ).view(1, -1, 1)
+    membership = (
+        layout.mask[:, None, :]
+        & (layout.group_indices[:, None, :] == group_axis)
+    )
+    pairs = torch.nonzero(membership.any(dim=-1), as_tuple=False)
+    return pairs[:, 0], pairs[:, 1], membership[pairs[:, 0], pairs[:, 1]]
+
+
+def _batched_quota_sinkhorn(
+    logits: Any,
+    slot_mask: Any,
+    quotas: Any,
+    *,
+    temperature: float,
+    iterations: int,
+) -> Any:
+    """Solve all group quota transports in one fixed-width GPU batch."""
+
+    torch = require_torch()
+    scores = torch.as_tensor(logits).float()
+    valid = torch.as_tensor(slot_mask, device=scores.device).bool()
+    counts = torch.as_tensor(quotas, device=scores.device).long()
+    if scores.ndim != 3 or valid.shape != scores.shape[:2]:
+        raise ValueError("batched quota transport shapes are inconsistent")
+    if counts.shape != (scores.shape[0], scores.shape[2]):
+        raise ValueError("batched quota counts have the wrong shape")
+    if not bool((counts.sum(dim=-1) == valid.sum(dim=-1)).all()):
+        raise ValueError("batched type quotas do not close to slot counts")
+    active_columns = counts > 0
+    support = valid[:, :, None] & active_columns[:, None, :]
+    log_transport = (scores / float(temperature)).masked_fill(
+        ~support, float("-inf")
+    )
+    log_column_mass = counts.clamp_min(1).to(scores.dtype).log()
+    for _ in range(int(iterations)):
+        row_normalizer = torch.logsumexp(log_transport, dim=-1, keepdim=True)
+        row_normalizer = torch.where(
+            valid[:, :, None],
+            row_normalizer,
+            torch.zeros_like(row_normalizer),
+        )
+        log_transport = torch.where(
+            support,
+            log_transport - row_normalizer,
+            torch.full_like(log_transport, float("-inf")),
+        )
+        column_normalizer = torch.logsumexp(log_transport, dim=1, keepdim=True)
+        column_normalizer = torch.where(
+            active_columns[:, None, :],
+            column_normalizer,
+            torch.zeros_like(column_normalizer),
+        )
+        log_transport = torch.where(
+            support,
+            log_transport
+            - column_normalizer
+            + log_column_mass[:, None, :],
+            torch.full_like(log_transport, float("-inf")),
+        )
+    row_normalizer = torch.logsumexp(log_transport, dim=-1, keepdim=True)
+    row_normalizer = torch.where(
+        valid[:, :, None], row_normalizer, torch.zeros_like(row_normalizer)
+    )
+    return torch.where(
+        support,
+        (log_transport - row_normalizer).exp(),
+        torch.zeros_like(log_transport),
+    )
+
+
 def allocate_particle_types(
     logits: Any,
     layout: ParticleSlotLayout,
@@ -318,32 +407,54 @@ def allocate_particle_types(
     counts = torch.as_tensor(group_type_counts, device=scores.device).long()
     if scores.shape != (*layout.mask.shape, len(ABPH_PID_CATEGORIES)):
         raise ValueError("particle type logits have the wrong shape")
+    batch_rows, group_rows, slot_rows = _active_group_rows(
+        layout, counts.shape[1]
+    )
+    grouped_scores = scores[batch_rows]
+    grouped_quotas = counts[batch_rows, group_rows]
+    grouped_soft = _batched_quota_sinkhorn(
+        grouped_scores,
+        slot_rows,
+        grouped_quotas,
+        temperature=temperature,
+        iterations=sinkhorn_iterations,
+    )
     soft = torch.zeros(scores.shape, dtype=torch.float32, device=scores.device)
-    hard_indices = torch.full(layout.mask.shape, -1, dtype=torch.long, device=scores.device)
-    for batch_index in range(scores.shape[0]):
-        groups = torch.unique(layout.group_indices[batch_index, layout.mask[batch_index]])
-        for group_index_tensor in groups:
-            group_index = int(group_index_tensor)
-            slots = torch.nonzero(
-                layout.mask[batch_index]
-                & (layout.group_indices[batch_index] == group_index),
-                as_tuple=False,
-            ).flatten()
-            quotas = counts[batch_index, group_index]
-            probabilities = _quota_sinkhorn(
-                scores[batch_index, slots],
-                quotas,
-                temperature=temperature,
-                iterations=sinkhorn_iterations,
-            )
-            soft[batch_index, slots] = probabilities
-            expanded_types = torch.repeat_interleave(
-                torch.arange(len(ABPH_PID_CATEGORIES), device=scores.device), quotas
-            )
-            assignment = _minimum_cost_square_assignment(
-                -scores[batch_index, slots][:, expanded_types]
-            )
-            hard_indices[batch_index, slots] = expanded_types[assignment]
+    batch_grid = batch_rows[:, None].expand_as(slot_rows)
+    slot_grid = torch.arange(
+        scores.shape[1], device=scores.device
+    )[None, :].expand_as(slot_rows)
+    soft[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_soft[slot_rows]
+
+    # Hard quota assignment is nondifferentiable. Transfer every active group
+    # once, solve the small exact Hungarian problems on the host, then publish
+    # all selected types with one device transfer.
+    host_scores = grouped_scores.detach().to(torch.float64).cpu()
+    host_slots = slot_rows.cpu()
+    host_quotas = grouped_quotas.cpu()
+    grouped_hard = torch.full(
+        slot_rows.shape, -1, dtype=torch.long, device="cpu"
+    )
+    for row_index in range(slot_rows.shape[0]):
+        active_slots = torch.nonzero(host_slots[row_index], as_tuple=False).flatten()
+        quotas = host_quotas[row_index]
+        expanded_types = torch.repeat_interleave(
+            torch.arange(len(ABPH_PID_CATEGORIES)), quotas
+        )
+        local_cost = (
+            -host_scores[row_index, active_slots][:, expanded_types]
+        ).tolist()
+        assignment = _minimum_cost_square_assignment_rows(local_cost)
+        grouped_hard[row_index, active_slots] = expanded_types[
+            torch.tensor(assignment, dtype=torch.long)
+        ]
+    grouped_hard = grouped_hard.to(scores.device)
+    hard_indices = torch.full(
+        layout.mask.shape, -1, dtype=torch.long, device=scores.device
+    )
+    hard_indices[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_hard[
+        slot_rows
+    ]
     hard = torch.nn.functional.one_hot(
         hard_indices.clamp_min(0), num_classes=len(ABPH_PID_CATEGORIES)
     ).to(soft.dtype) * layout.mask.unsqueeze(-1)
@@ -351,14 +462,15 @@ def allocate_particle_types(
     # exactly the hard quota assignment rather than a rounded (hard + soft)
     # subtraction under mixed precision.
     straight_through = hard + (soft - soft.detach())
+    grouped_hard_one_hot = torch.nn.functional.one_hot(
+        grouped_hard.clamp_min(0), num_classes=len(ABPH_PID_CATEGORIES)
+    ).to(soft.dtype) * slot_rows.unsqueeze(-1)
+    grouped_hard_counts = grouped_hard_one_hot.sum(dim=1).long()
+    grouped_expected_counts = grouped_soft.sum(dim=1)
     hard_counts = torch.zeros_like(counts)
-    for group_index in range(counts.shape[1]):
-        member = layout.mask & (layout.group_indices == group_index)
-        hard_counts[:, group_index] = (hard * member.unsqueeze(-1)).sum(dim=1).long()
     expected_counts = torch.zeros_like(counts, dtype=soft.dtype)
-    for group_index in range(counts.shape[1]):
-        member = layout.mask & (layout.group_indices == group_index)
-        expected_counts[:, group_index] = (soft * member.unsqueeze(-1)).sum(dim=1)
+    hard_counts[batch_rows, group_rows] = grouped_hard_counts
+    expected_counts[batch_rows, group_rows] = grouped_expected_counts
     if not bool((hard_counts == counts).all()):
         raise RuntimeError("hard PID assignment failed exact type-count closure")
     return TypeAllocation(
@@ -443,14 +555,13 @@ def _allowed_charge_mask(hard_pid_indices: Any) -> Any:
     return allowed
 
 
-def _minimum_cost_charge_sequence(logits: Any, allowed: Any, target_charge: int) -> Any:
-    torch = require_torch()
-    scores = torch.as_tensor(logits)
-    permitted = torch.as_tensor(allowed, device=scores.device).bool()
-    n_slots = int(scores.shape[0])
+def _minimum_cost_charge_sequence_rows(
+    detached: Any, permitted_cpu: Any, target_charge: int
+) -> tuple[int, ...]:
+    """Exact charge DP over host-resident rows."""
+
+    n_slots = int(detached.shape[0])
     states: dict[int, tuple[float, tuple[int, ...]]] = {0: (0.0, ())}
-    detached = scores.detach().to(torch.float64).cpu()
-    permitted_cpu = permitted.cpu()
     for slot in range(n_slots):
         updated: dict[int, tuple[float, tuple[int, ...]]] = {}
         for running, (cost, path) in states.items():
@@ -466,7 +577,19 @@ def _minimum_cost_charge_sequence(logits: Any, allowed: Any, target_charge: int)
         states = updated
     if int(target_charge) not in states:
         raise RuntimeError("compiled charge budget is infeasible for allocated particle types")
-    return torch.tensor(states[int(target_charge)][1], dtype=torch.long, device=scores.device)
+    return states[int(target_charge)][1]
+
+
+def _minimum_cost_charge_sequence(logits: Any, allowed: Any, target_charge: int) -> Any:
+    torch = require_torch()
+    scores = torch.as_tensor(logits)
+    permitted = torch.as_tensor(allowed, device=scores.device).bool()
+    sequence = _minimum_cost_charge_sequence_rows(
+        scores.detach().to(torch.float64).cpu(),
+        permitted.cpu(),
+        target_charge,
+    )
+    return torch.tensor(sequence, dtype=torch.long, device=scores.device)
 
 
 def _charge_soft_probabilities(
@@ -497,6 +620,54 @@ def _charge_soft_probabilities(
     ).softmax(dim=-1)
 
 
+def _batched_charge_soft_probabilities(
+    logits: Any,
+    allowed: Any,
+    slot_mask: Any,
+    target_charge: Any,
+    *,
+    temperature: float,
+) -> Any:
+    """Project all local expected charges with one batched multiplier solve."""
+
+    torch = require_torch()
+    scores = torch.as_tensor(logits).float()
+    permitted = torch.as_tensor(allowed, device=scores.device).bool()
+    valid = torch.as_tensor(slot_mask, device=scores.device).bool()
+    targets = torch.as_tensor(target_charge, device=scores.device).float()
+    support = scores.new_tensor(_CHARGE_SUPPORT)
+    lower = scores.new_full((scores.shape[0],), -40.0)
+    upper = scores.new_full((scores.shape[0],), 40.0)
+    active = permitted & valid[:, :, None]
+    for _ in range(64):
+        middle = 0.5 * (lower + upper)
+        tilted = (
+            scores + middle[:, None, None] * support
+        ) / float(temperature)
+        tilted = tilted.masked_fill(~permitted, float("-inf"))
+        tilted = torch.where(
+            valid[:, :, None], tilted, torch.zeros_like(tilted)
+        )
+        probabilities = tilted.softmax(dim=-1)
+        probabilities = torch.where(
+            valid[:, :, None], probabilities, torch.zeros_like(probabilities)
+        )
+        expectation = (probabilities * support).sum(dim=(1, 2))
+        below = expectation < targets
+        lower = torch.where(below, middle, lower)
+        upper = torch.where(below, upper, middle)
+    multiplier = 0.5 * (lower + upper)
+    final_logits = (
+        scores + multiplier[:, None, None] * support
+    ) / float(temperature)
+    final_logits = final_logits.masked_fill(~permitted, float("-inf"))
+    final_logits = torch.where(
+        valid[:, :, None], final_logits, torch.zeros_like(final_logits)
+    )
+    result = final_logits.softmax(dim=-1)
+    return torch.where(valid[:, :, None], result, torch.zeros_like(result))
+
+
 def allocate_particle_charges(
     logits: Any,
     layout: ParticleSlotLayout,
@@ -513,34 +684,50 @@ def allocate_particle_charges(
     if scores.shape != (*layout.mask.shape, 3):
         raise ValueError("charge logits must have shape [B, 128, 3]")
     allowed_all = _allowed_charge_mask(hard_pid_indices)
+    batch_rows, group_rows, slot_rows = _active_group_rows(
+        layout, targets.shape[1]
+    )
+    grouped_scores = scores[batch_rows]
+    grouped_allowed = allowed_all[batch_rows]
+    grouped_targets = targets[batch_rows, group_rows]
+    grouped_soft = _batched_charge_soft_probabilities(
+        grouped_scores,
+        grouped_allowed,
+        slot_rows,
+        grouped_targets,
+        temperature=temperature,
+    )
+    batch_grid = batch_rows[:, None].expand_as(slot_rows)
+    slot_grid = torch.arange(
+        scores.shape[1], device=scores.device
+    )[None, :].expand_as(slot_rows)
     soft = torch.zeros(scores.shape, dtype=torch.float32, device=scores.device)
+    soft[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_soft[slot_rows]
+
+    host_scores = grouped_scores.detach().to(torch.float64).cpu()
+    host_allowed = grouped_allowed.cpu()
+    host_slots = slot_rows.cpu()
+    host_targets = grouped_targets.cpu()
+    grouped_hard = torch.zeros(slot_rows.shape, dtype=torch.long, device="cpu")
+    for row_index in range(slot_rows.shape[0]):
+        active_slots = torch.nonzero(host_slots[row_index], as_tuple=False).flatten()
+        sequence = _minimum_cost_charge_sequence_rows(
+            host_scores[row_index, active_slots],
+            host_allowed[row_index, active_slots],
+            int(host_targets[row_index]),
+        )
+        grouped_hard[row_index, active_slots] = torch.tensor(
+            sequence, dtype=torch.long
+        )
+    grouped_hard = grouped_hard.to(scores.device)
     hard = torch.zeros(layout.mask.shape, dtype=torch.long, device=scores.device)
-    for batch_index in range(scores.shape[0]):
-        groups = torch.unique(layout.group_indices[batch_index, layout.mask[batch_index]])
-        for group_index_tensor in groups:
-            group_index = int(group_index_tensor)
-            slots = torch.nonzero(
-                layout.mask[batch_index]
-                & (layout.group_indices[batch_index] == group_index),
-                as_tuple=False,
-            ).flatten()
-            target = int(targets[batch_index, group_index].detach().cpu())
-            local_allowed = allowed_all[batch_index, slots]
-            soft[batch_index, slots] = _charge_soft_probabilities(
-                scores[batch_index, slots],
-                local_allowed,
-                target,
-                temperature=temperature,
-            )
-            hard[batch_index, slots] = _minimum_cost_charge_sequence(
-                scores[batch_index, slots], local_allowed, target
-            )
+    hard[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_hard[slot_rows]
     expected = (soft * scores.new_tensor(_CHARGE_SUPPORT)).sum(dim=-1)
     straight_through = hard.to(soft.dtype) + expected - expected.detach()
     hard_group_charge = torch.zeros_like(targets)
-    for group_index in range(targets.shape[1]):
-        member = layout.mask & (layout.group_indices == group_index)
-        hard_group_charge[:, group_index] = (hard * member).sum(dim=1)
+    hard_group_charge[batch_rows, group_rows] = (
+        grouped_hard * slot_rows
+    ).sum(dim=1)
     if not bool((hard_group_charge == targets).all()):
         raise RuntimeError("hard particle charges failed exact group closure")
     selected_allowed = allowed_all.gather(
@@ -556,13 +743,16 @@ def allocate_particle_charges(
             "hard_group_charge_closes_exactly": True,
             "hard_charges_respect_pid_support": True,
             "soft_expected_charge_max_residual": float(
-                max(
-                    (
-                        (expected * (layout.group_indices == group_index) * layout.mask).sum(dim=1)
-                        - targets[:, group_index]
-                    ).abs().max().detach().cpu()
-                    for group_index in range(targets.shape[1])
+                (
+                    (grouped_soft * scores.new_tensor(_CHARGE_SUPPORT)).sum(
+                        dim=(1, 2)
+                    )
+                    - grouped_targets
                 )
+                .abs()
+                .max()
+                .detach()
+                .cpu()
             ),
         },
     )
@@ -754,6 +944,248 @@ def project_n_body_phase_space(
         "raw_closure_max_residual": float(raw_residual.detach().cpu()),
         "mass_shell_max_residual": float(mass_shell_residual.detach().cpu()),
         "closure_anchor_index": int(anchor.detach().cpu()),
+    }
+
+
+def _boost_rest_to_lab_batched(
+    rest_four_vector: Any, parent_four_vector: Any, parent_mass: Any
+) -> Any:
+    torch = require_torch()
+    rest = torch.as_tensor(rest_four_vector)
+    parent = torch.as_tensor(
+        parent_four_vector, device=rest.device, dtype=rest.dtype
+    )
+    mass = torch.as_tensor(parent_mass, device=rest.device, dtype=rest.dtype)
+    beta = parent[:, 1:] / parent[:, :1].clamp_min(1.0e-12)
+    beta2 = beta.square().sum(dim=-1).clamp_max(1.0 - 1.0e-12)
+    gamma = parent[:, 0] / mass.clamp_min(1.0e-12)
+    beta_dot = (rest[..., 1:] * beta[:, None, :]).sum(dim=-1)
+    coefficient = torch.where(
+        beta2[:, None] > 1.0e-16,
+        ((gamma - 1.0)[:, None] * beta_dot / beta2[:, None])
+        + gamma[:, None] * rest[..., 0],
+        rest[..., 0],
+    )
+    boosted_spatial = rest[..., 1:] + coefficient[..., None] * beta[:, None, :]
+    boosted_energy = gamma[:, None] * (rest[..., 0] + beta_dot)
+    return torch.cat((boosted_energy[..., None], boosted_spatial), dim=-1)
+
+
+def _allocate_local_particle_masses_batched(
+    parent_mass: Any,
+    local_minimum: Any,
+    mass_logits: Any,
+    group_fraction: Any,
+    slot_mask: Any,
+    *,
+    phase_space_mass_epsilon: float,
+    near_massless_threshold: float,
+) -> Any:
+    torch = require_torch()
+    parent = torch.as_tensor(parent_mass).to(torch.float64)
+    minimum = torch.as_tensor(
+        local_minimum, device=parent.device
+    ).to(torch.float64)
+    logits = torch.as_tensor(
+        mass_logits, device=parent.device
+    ).to(torch.float64)
+    fraction = torch.as_tensor(
+        group_fraction, device=parent.device
+    ).to(torch.float64)
+    valid = torch.as_tensor(slot_mask, device=parent.device).bool()
+    minimum = minimum * valid
+    available = (
+        (1.0 - float(phase_space_mass_epsilon)) * parent
+        - minimum.sum(dim=-1)
+    ).clamp_min(0.0)
+    masked_logits = logits.masked_fill(~valid, float("-inf"))
+    weights = masked_logits.softmax(dim=-1)
+    optional = available[:, None] * fraction[:, None] * weights
+    optional = torch.where(
+        (parent > float(near_massless_threshold))[:, None] & valid,
+        optional,
+        torch.zeros_like(optional),
+    )
+    result = minimum + optional
+    single = valid.sum(dim=-1) == 1
+    result = torch.where(
+        single[:, None] & valid, parent[:, None], result
+    )
+    return result * valid
+
+
+def project_batched_n_body_phase_space(
+    parent_four_vector: Any,
+    raw_rest_spatial: Any,
+    particle_masses: Any,
+    energy_fraction_logits: Any,
+    slot_mask: Any,
+    local_slot_indices: Any,
+    *,
+    iterations: int = 64,
+    near_massless_threshold: float = 1.0e-6,
+) -> tuple[Any, Mapping[str, Any]]:
+    """Vectorized exact projection for every active terminal group in a batch."""
+
+    torch = require_torch()
+    parent_input = torch.as_tensor(parent_four_vector)
+    output_dtype = parent_input.dtype
+    parent = parent_input.to(torch.float64)
+    raw = torch.as_tensor(
+        raw_rest_spatial, device=parent.device
+    ).to(torch.float64)
+    masses = torch.as_tensor(
+        particle_masses, device=parent.device
+    ).to(torch.float64)
+    fractions_raw = torch.as_tensor(
+        energy_fraction_logits, device=parent.device
+    ).to(torch.float64)
+    valid = torch.as_tensor(slot_mask, device=parent.device).bool()
+    local_index = torch.as_tensor(
+        local_slot_indices, device=parent.device
+    ).to(torch.float64)
+    if (
+        parent.ndim != 2
+        or parent.shape[-1] != 4
+        or raw.shape != (*valid.shape, 3)
+        or masses.shape != valid.shape
+        or fractions_raw.shape != valid.shape
+    ):
+        raise ValueError("batched N-body particle dimensions are inconsistent")
+    counts = valid.sum(dim=-1)
+    if bool((counts <= 0).any()):
+        raise ValueError("batched N-body projection received an empty group")
+    parent_mass = _invariant_mass_float64(parent)
+    tolerance = 2.0e-5 * parent_mass.abs().clamp_min(1.0)
+    minimum = masses.masked_fill(~valid, float("inf")).min(dim=-1).values
+    mass_sum = (masses * valid).sum(dim=-1)
+    if bool((minimum < 0.0).any()) or bool(
+        (mass_sum > parent_mass + tolerance).any()
+    ):
+        raise ValueError("batched particle masses are infeasible for a parent")
+
+    result = torch.zeros(
+        (*valid.shape, 4), dtype=torch.float64, device=parent.device
+    )
+    single = counts == 1
+    massless = (
+        (parent_mass <= float(near_massless_threshold)) & ~single
+    )
+    massive = ~(single | massless)
+    if bool((massless[:, None] & valid & (masses > 1.0e-9)).any()):
+        raise ValueError("near-massless parent cannot carry massive rendered particles")
+
+    if bool(single.any()):
+        rows = torch.nonzero(single, as_tuple=False).flatten()
+        columns = valid[rows].to(torch.long).argmax(dim=-1)
+        result[rows, columns] = parent[rows]
+
+    if bool(massless.any()):
+        rows = torch.nonzero(massless, as_tuple=False).flatten()
+        local_valid = valid[rows]
+        logits = fractions_raw[rows].masked_fill(~local_valid, float("-inf"))
+        fractions = logits.softmax(dim=-1)
+        result[rows] = fractions[..., None] * parent[rows, None, :]
+
+    scale_all = parent_mass.new_zeros(parent_mass.shape)
+    if bool(massive.any()):
+        rows = torch.nonzero(massive, as_tuple=False).flatten()
+        local_valid = valid[rows]
+        local_raw = raw[rows]
+        local_masses = masses[rows]
+        local_counts = counts[rows].to(torch.float64)
+        mean = (local_raw * local_valid[..., None]).sum(dim=1) / local_counts[:, None]
+        centered = (local_raw - mean[:, None, :]) * local_valid[..., None]
+        degenerate = centered.square().sum(dim=(1, 2)) < 1.0e-18
+        if bool(degenerate.any()):
+            local_position = local_index[rows].clamp_min(0.0)
+            z = 1.0 - 2.0 * (
+                local_position + 0.5
+            ) / local_counts[:, None]
+            angle = local_position * (math.pi * (3.0 - math.sqrt(5.0)))
+            radius = torch.sqrt((1.0 - z.square()).clamp_min(0.0))
+            deterministic = torch.stack(
+                (radius * torch.cos(angle), radius * torch.sin(angle), z),
+                dim=-1,
+            ) * local_valid[..., None]
+            deterministic = deterministic - (
+                deterministic.sum(dim=1) / local_counts[:, None]
+            )[:, None, :]
+            centered = torch.where(
+                degenerate[:, None, None], deterministic, centered
+            )
+        local_parent_mass = parent_mass[rows]
+        lower = torch.zeros_like(local_parent_mass)
+        mean_norm = (
+            centered.norm(dim=-1).sum(dim=-1) / local_counts
+        ).clamp_min(1.0e-8)
+        upper = local_parent_mass / mean_norm
+        for _ in range(16):
+            upper_energy = (
+                _stable_nonnegative_sqrt(
+                    (upper[:, None, None] * centered).square().sum(dim=-1)
+                    + local_masses.square()
+                )
+                * local_valid
+            ).sum(dim=-1)
+            upper = torch.where(
+                upper_energy < local_parent_mass, 2.0 * upper, upper
+            )
+        for _ in range(int(iterations)):
+            middle = 0.5 * (lower + upper)
+            energy = (
+                _stable_nonnegative_sqrt(
+                    (middle[:, None, None] * centered).square().sum(dim=-1)
+                    + local_masses.square()
+                )
+                * local_valid
+            ).sum(dim=-1)
+            below = energy < local_parent_mass
+            lower = torch.where(below, middle, lower)
+            upper = torch.where(below, upper, middle)
+        scale = 0.5 * (lower + upper)
+        spatial = scale[:, None, None] * centered
+        rest_energy = _stable_nonnegative_sqrt(
+            spatial.square().sum(dim=-1) + local_masses.square()
+        ) * local_valid
+        rest = torch.cat((rest_energy[..., None], spatial), dim=-1)
+        lab = _boost_rest_to_lab_batched(
+            rest, parent[rows], local_parent_mass
+        ) * local_valid[..., None]
+        residual_vector = parent[rows] - lab.sum(dim=1)
+        anchor = lab[..., 0].abs().masked_fill(~local_valid, -1.0).argmax(dim=-1)
+        anchor_weight = torch.nn.functional.one_hot(
+            anchor, num_classes=valid.shape[1]
+        ).to(lab.dtype)
+        lab = lab + anchor_weight[..., None] * residual_vector[:, None, :]
+        result[rows] = lab
+        scale_all[rows] = scale
+
+    residual = (result.sum(dim=1) - parent).abs().max(dim=-1).values
+    rendered_mass = _invariant_mass_float64(result)
+    shell_residual = (
+        (rendered_mass - masses).abs().masked_fill(~valid, 0.0).max(dim=-1).values
+    )
+    energy_scale = parent[:, 0].abs().clamp_min(1.0)
+    if bool(
+        (
+            (residual > 5.0e-6 * energy_scale)
+            | (shell_residual > 2.0e-5 * energy_scale)
+        ).any()
+    ):
+        raise RuntimeError("batched N-body phase-space projection failed guarded closure")
+    branch_counts = {
+        "single_particle_exact_parent": int(single.sum().detach().cpu()),
+        "massless_collinear": int(massless.sum().detach().cpu()),
+        "massive_rest_frame": int(massive.sum().detach().cpu()),
+    }
+    return result.to(output_dtype), {
+        "branch_counts": {
+            key: value for key, value in branch_counts.items() if value
+        },
+        "maximum_scale": float(scale_all.max().detach().cpu()),
+        "closure_max_residual": float(residual.max().detach().cpu()),
+        "mass_shell_max_residual": float(shell_residual.max().detach().cpu()),
     }
 
 
@@ -1070,91 +1502,92 @@ class ConstrainedParticleRenderer(_ModuleBase):
             _PID_MASSES, dtype=torch.float32, device=slots.device
         )
         minimum_mass = _type_conditioned_minimum_mass(type_allocation, mass_table)
-        # Exact phase-space projection runs in FP32/FP64. Preserve its output
-        # in FP32 rather than assigning it into BF16 buffers under autocast.
-        mass = torch.zeros(layout.mask.shape, dtype=torch.float32, device=slots.device)
-        four_vector = torch.zeros(
-            (*layout.mask.shape, 4), dtype=torch.float32, device=slots.device
-        )
         raw_spatial = self.rest_spatial_head(slots)
         energy_fraction_logits = self.energy_fraction_head(slots).squeeze(-1)
         mass_logits = self.mass_weight_head(slots).squeeze(-1)
-        phase_branches: dict[str, int] = {}
-        maximum_local_residual = 0.0
-        for batch_index in range(slots.shape[0]):
-            groups = torch.unique(layout.group_indices[batch_index, layout.mask[batch_index]])
-            for group_index_tensor in groups:
-                group_index = int(group_index_tensor)
-                member = torch.nonzero(
-                    layout.mask[batch_index]
-                    & (layout.group_indices[batch_index] == group_index),
-                    as_tuple=False,
-                ).flatten()
-                parent = final.ledger[batch_index, group_index]
-                parent_p4 = torch.stack(
-                    tuple(parent[ROOT_FEATURE_INDEX[name]] for name in ("energy", "px", "py", "pz"))
+        batch_rows, group_rows, slot_rows = _active_group_rows(
+            layout, final.mask.shape[1]
+        )
+        grouped_parent = final.ledger[batch_rows, group_rows]
+        grouped_parent_p4 = torch.stack(
+            tuple(
+                grouped_parent[:, ROOT_FEATURE_INDEX[name]]
+                for name in ("energy", "px", "py", "pz")
+            ),
+            dim=-1,
+        )
+        grouped_parent_mass = _invariant_mass_float64(grouped_parent_p4)
+        grouped_fraction = torch.sigmoid(
+            self.group_mass_fraction_head(final.hidden[batch_rows, group_rows])
+        ).squeeze(-1)
+        grouped_mass = _allocate_local_particle_masses_batched(
+            grouped_parent_mass,
+            minimum_mass[batch_rows],
+            mass_logits[batch_rows],
+            grouped_fraction,
+            slot_rows,
+            phase_space_mass_epsilon=self.config.phase_space_mass_epsilon,
+            near_massless_threshold=self.config.near_massless_threshold,
+        )
+        if self.config.exact_nbody_projection:
+            grouped_p4, phase = project_batched_n_body_phase_space(
+                grouped_parent_p4,
+                raw_spatial[batch_rows],
+                grouped_mass,
+                energy_fraction_logits[batch_rows],
+                slot_rows,
+                layout.local_slot_indices[batch_rows],
+                iterations=self.config.phase_space_iterations,
+                near_massless_threshold=self.config.near_massless_threshold,
+            )
+            phase_branches = dict(phase["branch_counts"])
+            maximum_local_residual = float(phase["closure_max_residual"])
+        else:
+            direction = torch.nn.functional.normalize(
+                raw_spatial[batch_rows], dim=-1, eps=1.0e-8
+            )
+            energy = (
+                torch.nn.functional.softplus(
+                    energy_fraction_logits[batch_rows]
                 )
-                # Compute the available mass in the exact same float64 domain
-                # used by ``project_n_body_phase_space``.  A float32 invariant
-                # mass here can be materially different for boosted cells and
-                # make a valid allocation appear infeasible after projection.
-                parent_mass = _invariant_mass_float64(parent_p4)
-                local_minimum = minimum_mass[batch_index, member].to(torch.float64)
-                if int(member.numel()) == 1:
-                    local_mass = parent_mass[None]
-                else:
-                    group_fraction = torch.sigmoid(
-                        self.group_mass_fraction_head(final.hidden[batch_index, group_index])
-                    ).squeeze(-1).to(torch.float64)
-                    local_mass = _allocate_local_particle_masses(
-                        parent_mass,
-                        local_minimum,
-                        mass_logits[batch_index, member],
-                        group_fraction,
-                        phase_space_mass_epsilon=self.config.phase_space_mass_epsilon,
-                        near_massless_threshold=self.config.near_massless_threshold,
-                    )
-                if self.config.exact_nbody_projection:
-                    local_p4, phase = project_n_body_phase_space(
-                        parent_p4,
-                        raw_spatial[batch_index, member],
-                        local_mass,
-                        energy_fraction_logits[batch_index, member],
-                        iterations=self.config.phase_space_iterations,
-                        near_massless_threshold=self.config.near_massless_threshold,
-                    )
-                else:
-                    direction = torch.nn.functional.normalize(
-                        raw_spatial[batch_index, member], dim=-1, eps=1.0e-8
-                    )
-                    energy = (
-                        torch.nn.functional.softplus(
-                            energy_fraction_logits[batch_index, member]
-                        )
-                        + local_mass
-                    )
-                    momentum = _stable_nonnegative_sqrt(
-                        energy.square() - local_mass.square()
-                    )
-                    local_p4 = torch.cat(
-                        (energy[:, None], direction * momentum[:, None]), dim=-1
-                    )
-                    phase = {
-                        "branch": "unconstrained_no_nbody_projection",
-                        "closure_max_residual": float(
-                            (local_p4.sum(dim=0) - parent_p4)
-                            .abs()
-                            .max()
-                            .detach()
-                            .cpu()
-                        ),
-                    }
-                four_vector[batch_index, member] = local_p4.to(four_vector.dtype)
-                mass[batch_index, member] = local_mass.to(mass.dtype)
-                phase_branches[phase["branch"]] = phase_branches.get(phase["branch"], 0) + 1
-                maximum_local_residual = max(
-                    maximum_local_residual, float(phase["closure_max_residual"])
+                + grouped_mass
+            ) * slot_rows
+            momentum = _stable_nonnegative_sqrt(
+                energy.square() - grouped_mass.square()
+            ) * slot_rows
+            grouped_p4 = torch.cat(
+                (energy[..., None], direction * momentum[..., None]), dim=-1
+            ) * slot_rows[..., None]
+            phase_branches = {
+                "unconstrained_no_nbody_projection": int(
+                    slot_rows.shape[0]
                 )
+            }
+            maximum_local_residual = float(
+                (grouped_p4.sum(dim=1) - grouped_parent_p4)
+                .abs()
+                .max()
+                .detach()
+                .cpu()
+            )
+        # Publish every group in one indexed operation. Group slot masks are
+        # disjoint by construction, so each particle slot is written exactly once.
+        batch_grid = batch_rows[:, None].expand_as(slot_rows)
+        slot_grid = torch.arange(
+            layout.mask.shape[1], device=slots.device
+        )[None, :].expand_as(slot_rows)
+        four_vector = torch.zeros(
+            (*layout.mask.shape, 4), dtype=torch.float32, device=slots.device
+        )
+        mass = torch.zeros(
+            layout.mask.shape, dtype=torch.float32, device=slots.device
+        )
+        four_vector[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_p4[
+            slot_rows
+        ].to(four_vector.dtype)
+        mass[batch_grid[slot_rows], slot_grid[slot_rows]] = grouped_mass[
+            slot_rows
+        ].to(mass.dtype)
         track_raw = self.track_head(slots)
         track = torch.stack(
             (
@@ -1276,5 +1709,6 @@ __all__ = [
     "allocate_particle_charges",
     "allocate_particle_types",
     "exact_particle_slot_layout",
+    "project_batched_n_body_phase_space",
     "project_n_body_phase_space",
 ]

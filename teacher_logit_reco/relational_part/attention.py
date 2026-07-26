@@ -183,45 +183,84 @@ def attention_allocation_diagnostics(
         per_head = []
         for head in range(int(weights.shape[1])):
             values = weights[:, head]
+            query_count = int(query_valid.sum().detach().cpu())
 
-            def context_fraction(context_mask: Any) -> float:
+            def context_fraction(context_mask: Any) -> tuple[float, float]:
                 fraction = (
                     values * context_mask.unsqueeze(1).to(values)
                 ).sum(-1)
                 selected = fraction.masked_select(query_valid)
-                return float(selected.mean().detach().cpu())
+                return (
+                    float(selected.mean().detach().cpu()),
+                    float(selected.sum().detach().cpu()),
+                )
 
             angular = {}
+            angular_statistics = {}
             for label, selected_band in zip(labels, band_masks):
                 fraction = (
                     values * selected_band.to(values)
                 ).sum(-1)
-                angular[label] = float(
-                    fraction.masked_select(query_valid).mean().detach().cpu()
-                )
+                selected = fraction.masked_select(query_valid)
+                angular[label] = float(selected.mean().detach().cpu())
+                angular_statistics[label] = {
+                    "kind": "ratio",
+                    "numerator": float(selected.sum().detach().cpu()),
+                    "denominator": query_count,
+                }
             probability = values.clamp_min(1.0e-30)
+            entropy_values = (-(probability * probability.log()).sum(-1))
+            entropy_selected = entropy_values.masked_select(query_valid)
+            maximum_selected = values.amax(-1).masked_select(query_valid)
+            leading_value, leading_sum = context_fraction(leading)
+            subleading_value, subleading_sum = context_fraction(subleading)
+            soft_value, soft_sum = context_fraction(soft)
             per_head.append(
                 {
-                    "leading_context_fraction": context_fraction(leading),
-                    "subleading_context_fraction": context_fraction(
-                        subleading
-                    ),
-                    "soft_context_fraction": context_fraction(soft),
-                    "angular_band_fractions": angular,
+                    "leading_context_fraction": leading_value,
+                    "subleading_context_fraction": subleading_value,
+                    "soft_context_fraction": soft_value,
+                    "angular_band_fractions": {
+                        **angular,
+                        "_population_statistics": angular_statistics,
+                    },
                     "attention_entropy": float(
-                        (-(probability * probability.log()).sum(-1))
-                        .masked_select(query_valid)
-                        .mean()
-                        .detach()
-                        .cpu()
+                        entropy_selected.mean().detach().cpu()
                     ),
                     "maximum_attention_weight": float(
-                        values.amax(-1)
-                        .masked_select(query_valid)
-                        .mean()
-                        .detach()
-                        .cpu()
+                        maximum_selected.mean().detach().cpu()
                     ),
+                    "_population_statistics": {
+                        "leading_context_fraction": {
+                            "kind": "ratio",
+                            "numerator": leading_sum,
+                            "denominator": query_count,
+                        },
+                        "subleading_context_fraction": {
+                            "kind": "ratio",
+                            "numerator": subleading_sum,
+                            "denominator": query_count,
+                        },
+                        "soft_context_fraction": {
+                            "kind": "ratio",
+                            "numerator": soft_sum,
+                            "denominator": query_count,
+                        },
+                        "attention_entropy": {
+                            "kind": "ratio",
+                            "numerator": float(
+                                entropy_selected.sum().detach().cpu()
+                            ),
+                            "denominator": query_count,
+                        },
+                        "maximum_attention_weight": {
+                            "kind": "ratio",
+                            "numerator": float(
+                                maximum_selected.sum().detach().cpu()
+                            ),
+                            "denominator": query_count,
+                        },
+                    },
                 }
             )
         layers.append({"layer": layer, "per_head": per_head})

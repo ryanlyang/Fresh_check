@@ -230,6 +230,7 @@ from .particle_renderer import (
     allocate_particle_charges,
     allocate_particle_types,
     exact_particle_slot_layout,
+    project_batched_n_body_phase_space,
     project_n_body_phase_space,
 )
 from .particle_matching import (
@@ -815,6 +816,7 @@ __all__ = [name for name in globals() if name.startswith("ABPH_")] + [
     "minimum_mass_budget",
     "model_val_oracle_best_hypothesis",
     "pairwise_particle_cost",
+    "project_batched_n_body_phase_space",
     "project_n_body_phase_space",
     "neutral_binary_prediction",
     "normalize_variant_name",

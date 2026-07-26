@@ -129,6 +129,8 @@ from .semantic_controls import (
     unary_adapter_parameter_count,
     within_jet_shuffled_relations,
     wrong_event_relations,
+    zero_region_resolution,
+    zero_relation_family,
 )
 from .normalization import (
     CHARGE_RAW_FEATURE_NAMES,
@@ -588,6 +590,8 @@ __all__ = [
     "unary_adapter_parameter_count",
     "within_jet_shuffled_relations",
     "wrong_event_relations",
+    "zero_region_resolution",
+    "zero_relation_family",
     "build_runtime_model",
     "RUN_RESULT_ENVELOPE_CONTRACT",
     "build_run_result_envelope",

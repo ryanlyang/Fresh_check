@@ -23,6 +23,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     load_hashed_json,
     paired_prediction_statistics_many,
     render_relational_part_markdown,
+    validate_campaign_source,
     write_immutable_json,
 )
 
@@ -49,6 +50,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--locked-finalists", type=Path, required=True)
     parser.add_argument("--confirmation-summary", type=Path, required=True)
+    parser.add_argument("--campaign-spec", type=Path, required=True)
     parser.add_argument(
         "--final-evaluation", type=Path, action="append", default=[]
     )
@@ -65,6 +67,13 @@ def main() -> int:
         args.confirmation_summary,
         expected_contract=CONFIRMATION_SUMMARY_CONTRACT,
     )
+    campaign = load_hashed_json(args.campaign_spec)
+    validate_campaign_source(campaign, repo_root=REPO_ROOT)
+    if (
+        lock.get("campaign_spec_sha256") != campaign["content_hash"]
+        or confirmation.get("campaign_spec_sha256") != campaign["content_hash"]
+    ):
+        raise ValueError("report inputs belong to another campaign source lock")
     evaluations = [
         load_hashed_json(path, expected_contract=FINAL_EVALUATION_CONTRACT)
         for path in args.final_evaluation

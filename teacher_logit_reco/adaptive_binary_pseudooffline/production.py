@@ -2201,6 +2201,7 @@ def reconstructor_step(
                             targets.particle_mask, device=tokens.device
                         ).bool(),
                         rollout_alignment.levels[-1].renderer_target_map,
+                        return_assignments=False,
                     )
                 else:
                     particle_loss = compute_global_particle_matching_loss(

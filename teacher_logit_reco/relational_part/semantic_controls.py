@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-SEMANTIC_PERTURBATION_CONTRACT = "relational_part_semantic_perturbations_v2"
+SEMANTIC_PERTURBATION_CONTRACT = "relational_part_semantic_perturbations_v3"
 UNARY_CONTROL_REGISTRY_CONTRACT = "relational_part_unary_control_registry_v1"
 UNARY_MODEL_CONTRACT = "relational_part_unary_model_v1"
 UNARY_FAMILY_WIDTHS = {
@@ -211,6 +211,74 @@ def zero_relation_family(
     }
 
 
+def zero_region_resolution(
+    pair_features: Any,
+    mask: Any,
+    *,
+    model: Any,
+    raw_tokens: Any,
+    region_trees: Sequence[Mapping[str, Any]],
+    resolution: int,
+) -> tuple[Any, dict[str, Any]]:
+    """Re-encode REGION with exactly one K-specific raw channel group zeroed."""
+
+    module = require_torch()
+    families = canonical_supported_families(getattr(model, "families", ()))
+    if "REGION" not in families:
+        raise ValueError("REGION resolution ablation requires active REGION")
+    if int(resolution) not in EXCLUSIVE_RESOLUTIONS:
+        raise ValueError("REGION resolution ablation must use K=2, K=4, or K=8")
+    offset = STANDARD_FOUR_CHANNELS + sum(
+        SUPPORTED_FAMILY_DIMENSIONS[family]
+        for family in families[:families.index("REGION")]
+    )
+    width = SUPPORTED_FAMILY_DIMENSIONS["REGION"]
+    selected_slice = slice(offset, offset + width)
+    encoder = model.pair_builder.encoders["REGION"]
+    replacement = encoder(
+        raw_tokens,
+        mask,
+        region_trees,
+        disabled_resolutions=(int(resolution),),
+    )
+    output = pair_features.clone()
+    output[:, selected_slice] = replacement
+    pair_mask = mask.bool().unsqueeze(-1) & mask.bool().unsqueeze(-2)
+    output = output.masked_fill(~pair_mask, 0.0)
+    return output, {
+        "kind": "inference_only_region_resolution_ablation",
+        "zeroed_resolution": int(resolution),
+        "retained_resolutions": [
+            value for value in EXCLUSIVE_RESOLUTIONS
+            if value != int(resolution)
+        ],
+        "raw_zeroed_channel_indices": [
+            EXCLUSIVE_RESOLUTIONS.index(int(resolution)),
+            *range(
+                8 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 6,
+                14 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 6,
+            ),
+            *range(
+                26 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 2,
+                28 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 2,
+            ),
+            *range(
+                32 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 2,
+                34 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 2,
+            ),
+            38 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)),
+        ],
+        "shared_lca_merge_channels_retained": [3, 4, 5, 6, 7],
+        "base4_unchanged": bool(
+            module.equal(
+                output[:, :STANDARD_FOUR_CHANNELS],
+                pair_features[:, :STANDARD_FOUR_CHANNELS],
+            )
+        ),
+        "mask_agreement": True,
+    }
+
+
 def _physics_order(
     pt: np.ndarray,
     vectors: np.ndarray,
@@ -317,6 +385,7 @@ def build_semantic_perturbation_artifact(
     *,
     nominal_winner_run_id: str,
     nominal_checkpoint_sha256: str,
+    nominal_checkpoint_registration_sha256: str,
     confirmation_summary_sha256: str,
     metrics: Mapping[str, Mapping[str, Any]],
     diagnostics: Mapping[str, Mapping[str, Any]],
@@ -331,21 +400,32 @@ def build_semantic_perturbation_artifact(
         not required.issubset(metrics)
         or set(metrics) != set(diagnostics)
         or any(
-            not name.startswith("family_dropout_")
+            not (
+                name.startswith("family_dropout_")
+                or name in {
+                    "region_resolution_dropout_K2",
+                    "region_resolution_dropout_K4",
+                    "region_resolution_dropout_K8",
+                }
+            )
             for name in set(metrics) - required
         )
     ):
         raise ValueError(
             "semantic artifact requires the full model, three controls, "
-            "and only declared family dropouts"
+            "declared family dropouts, and declared REGION K ablations"
         )
     return with_content_hash(
         {
             "contract": SEMANTIC_PERTURBATION_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "nominal_winner_run_id": nominal_winner_run_id,
             "nominal_checkpoint_sha256": require_sha256(
                 nominal_checkpoint_sha256, name="nominal_checkpoint_sha256"
+            ),
+            "nominal_checkpoint_registration_sha256": require_sha256(
+                nominal_checkpoint_registration_sha256,
+                name="nominal_checkpoint_registration_sha256",
             ),
             "confirmation_summary_sha256": require_sha256(
                 confirmation_summary_sha256,
@@ -428,6 +508,11 @@ def evaluate_semantic_perturbations(
     if len(families) >= 2:
         for family in families:
             specifications[f"family_dropout_{family}"] = all_groups
+    if "REGION" in families:
+        for resolution in EXCLUSIVE_RESOLUTIONS:
+            specifications[
+                f"region_resolution_dropout_K{resolution}"
+            ] = all_groups
     resolved_device = module.device(device)
     was_training = bool(model.training)
     model.eval()
@@ -438,6 +523,7 @@ def evaluate_semantic_perturbations(
             for name, groups in specifications.items():
                 logits: list[np.ndarray] = []
                 labels: list[np.ndarray] = []
+                pid_strata: list[np.ndarray] = []
                 batch_diagnostics: list[Mapping[str, Any]] = []
                 for indices in groups:
                     raw = collate_relational_batch(
@@ -476,7 +562,7 @@ def evaluate_semantic_perturbations(
                             output, detail = directional_swap_relations(
                                 pairs, mask
                             )
-                        else:
+                        elif name.startswith("family_dropout_"):
                             output, detail = zero_relation_family(
                                 pairs,
                                 mask,
@@ -484,6 +570,20 @@ def evaluate_semantic_perturbations(
                                 family=name.removeprefix(
                                     "family_dropout_"
                                 ),
+                            )
+                        else:
+                            resolution = int(
+                                name.removeprefix(
+                                    "region_resolution_dropout_K"
+                                )
+                            )
+                            output, detail = zero_region_resolution(
+                                pairs,
+                                mask,
+                                model=model,
+                                raw_tokens=raw_tokens,
+                                region_trees=raw["region_trees"],
+                                resolution=resolution,
                             )
                         batch_diagnostics.append(detail)
                         return output
@@ -493,6 +593,25 @@ def evaluate_semantic_perturbations(
                     output = model_forward(model, batch)
                     logits.append(output.detach().float().cpu().numpy())
                     labels.append(raw["labels"].detach().long().cpu().numpy())
+                    if "CHARGE" in families:
+                        categories = pid_categories(
+                            raw["features"][:, 6:11],
+                            raw["mask"],
+                            fail_on_multi_hot=False,
+                        )
+                        valid_particles = raw["mask"][:, 0].bool()
+                        populations = torch.stack(
+                            [
+                                categories.eq(index)
+                                .logical_and(valid_particles)
+                                .sum(1)
+                                for index in range(6)
+                            ],
+                            dim=1,
+                        )
+                        pid_strata.append(
+                            populations.argmax(1).cpu().numpy()
+                        )
                 if not logits:
                     raise ValueError(f"{name} has no eligible val_select events")
                 metrics[name] = evaluate_logits(
@@ -500,6 +619,35 @@ def evaluate_semantic_perturbations(
                     np.concatenate(labels),
                     split="val_select",
                 )
+                if pid_strata:
+                    joined_logits = np.concatenate(logits)
+                    joined_labels = np.concatenate(labels)
+                    joined_strata = np.concatenate(pid_strata)
+                    predicted = joined_logits.argmax(axis=1)
+                    conditioned = {}
+                    for index, category in enumerate(
+                        (
+                            "charged_hadron",
+                            "neutral_hadron",
+                            "photon",
+                            "electron",
+                            "muon",
+                            "unknown",
+                        )
+                    ):
+                        selected = joined_strata == index
+                        total = int(selected.sum())
+                        correct = int(
+                            (predicted[selected] == joined_labels[selected]).sum()
+                        )
+                        conditioned[category] = {
+                            "event_count": total,
+                            "correct_count": correct,
+                            "accuracy": (
+                                None if total == 0 else correct / total
+                            ),
+                        }
+                    metrics[name]["pid_conditioned_accuracy"] = conditioned
                 diagnostics[name] = {
                     "batch_count": len(batch_diagnostics),
                     "evaluated_event_count": int(sum(len(group) for group in groups)),
@@ -536,6 +684,28 @@ def evaluate_semantic_perturbations(
                     ),
                     "batch_diagnostics": batch_diagnostics,
                 }
+        if (
+            "CHARGE" in families
+            and "family_dropout_CHARGE" in metrics
+        ):
+            full = metrics["full_model"]["pid_conditioned_accuracy"]
+            dropped = metrics["family_dropout_CHARGE"][
+                "pid_conditioned_accuracy"
+            ]
+            metrics["full_model"][
+                "charge_gain_conditioned_on_pid_vs_charge_dropout"
+            ] = {
+                category: (
+                    None
+                    if full[category]["accuracy"] is None
+                    or dropped[category]["accuracy"] is None
+                    else (
+                        full[category]["accuracy"]
+                        - dropped[category]["accuracy"]
+                    )
+                )
+                for category in full
+            }
     finally:
         if was_training:
             model.train()
@@ -1002,6 +1172,7 @@ __all__ = [
     "build_unary_model_contract",
     "directional_swap_relations",
     "zero_relation_family",
+    "zero_region_resolution",
     "evaluate_semantic_perturbations",
     "select_unary_widths",
     "unary_adapter_flops",

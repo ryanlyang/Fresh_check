@@ -38,7 +38,7 @@ from .registry import (
     resolve_registered_run,
     validate_screening_registry,
 )
-from .relation_pid_charge import PID_CHARGE_RELATION_CONTRACT
+from .relation_pid_charge import PID_CHARGE_RELATION_CONTRACT, pid_categories
 from .relation_pt import PT_RELATION_CONTRACT
 from .relation_pt import average_tied_descending_rank, valid_pair_mask
 from .relation_track import TRACK_RELATION_CONTRACT
@@ -639,6 +639,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         mask: Any,
         raw_tokens: Any | None = None,
         region_trees: Any | None = None,
+        labels: Any | None = None,
     ) -> dict[str, Any]:
         """Return the prespecified family and head-wise pair-bias diagnostics."""
 
@@ -671,15 +672,23 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 attention_allocation_diagnostics,
                 capture_multihead_attention_weights,
             )
-            captured_attention = capture_multihead_attention_weights(
-                self.mod,
-                lambda: self.mod(
+            diagnostic_logits: list[Any] = []
+
+            def diagnostic_forward() -> Any:
+                value = self.mod(
                     clean_features,
                     v=clean_vectors,
                     mask=valid,
                     uu=details["combined"],
-                ),
+                )
+                diagnostic_logits.append(value)
+                return value
+
+            captured_attention = capture_multihead_attention_weights(
+                self.mod,
+                diagnostic_forward,
             )
+            logits = diagnostic_logits[0]
         pair_mask = valid_pair_mask(valid)
 
         def head_means(group: Any) -> list[float | None]:
@@ -693,6 +702,207 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     else float(values.mean().detach().cpu())
                 )
             return output
+
+        def histogram(
+            values: Any,
+            selected: Any,
+            edges: tuple[float, ...],
+        ) -> dict[str, Any]:
+            finite = values.masked_select(selected & torch.isfinite(values))
+            counts = []
+            for index in range(len(edges) - 1):
+                left, right = edges[index], edges[index + 1]
+                inside = (
+                    finite.ge(left) & finite.le(right)
+                    if index == 0
+                    else finite.gt(left) & finite.le(right)
+                )
+                counts.append(int(inside.sum().cpu()))
+            serialized_edges = [
+                (
+                    "-inf"
+                    if value == -float("inf")
+                    else "+inf"
+                    if value == float("inf")
+                    else value
+                )
+                for value in edges
+            ]
+            return {
+                "bin_edges": serialized_edges,
+                "endpoint_policy": (
+                    "first bin [left,right], later bins (left,right]"
+                ),
+                "bin_counts": counts,
+                "finite_entry_count": int(finite.numel()),
+                "_population_statistics": {
+                    "bin_counts": {"kind": "sum", "value": counts},
+                    "finite_entry_count": {
+                        "kind": "sum",
+                        "value": int(finite.numel()),
+                    },
+                },
+            }
+
+        def binned_pair_bias(
+            measure: Any,
+            edges: tuple[float, ...],
+            *,
+            applicable: Any | None = None,
+        ) -> dict[str, Any]:
+            selected_domain = pair_mask[:, 0]
+            if applicable is not None:
+                selected_domain = selected_domain & applicable.bool()
+            counts: list[int] = []
+            sums: list[list[float]] = []
+            means: list[list[float | None]] = []
+            denominators: list[list[int]] = []
+            for index in range(len(edges) - 1):
+                left, right = edges[index], edges[index + 1]
+                selected = selected_domain & (
+                    measure.ge(left) & measure.le(right)
+                    if index == 0
+                    else measure.gt(left) & measure.le(right)
+                )
+                count = int(selected.sum().cpu())
+                counts.append(count)
+                head_sums = [
+                    float(
+                        bias[:, head].masked_select(selected).sum().cpu()
+                    )
+                    for head in range(int(bias.shape[1]))
+                ]
+                sums.append(head_sums)
+                denominators.append([count] * int(bias.shape[1]))
+                means.append(
+                    [
+                        None if count == 0 else value / count
+                        for value in head_sums
+                    ]
+                )
+            serialized_edges = [
+                (
+                    "-inf"
+                    if value == -float("inf")
+                    else "+inf"
+                    if value == float("inf")
+                    else value
+                )
+                for value in edges
+            ]
+            return {
+                "bin_edges": serialized_edges,
+                "endpoint_policy": (
+                    "first bin [left,right], later bins (left,right]"
+                ),
+                "pair_counts": counts,
+                "bias_sums_by_head": sums,
+                "mean_bias_by_head": means,
+                "_population_statistics": {
+                    "pair_counts": {"kind": "sum", "value": counts},
+                    "bias_sums_by_head": {"kind": "sum", "value": sums},
+                    "mean_bias_by_head": {
+                        "kind": "ratio",
+                        "numerator": sums,
+                        "denominator": denominators,
+                    },
+                },
+            }
+
+        predictions = logits.argmax(dim=1)
+
+        def binned_performance(
+            measure: Any,
+            edges: tuple[float, ...],
+        ) -> dict[str, Any] | None:
+            if labels is None:
+                return None
+            truth = labels.long()
+            counts: list[int] = []
+            correct: list[int] = []
+            accuracy: list[float | None] = []
+            for index in range(len(edges) - 1):
+                left, right = edges[index], edges[index + 1]
+                selected = (
+                    measure.ge(left) & measure.le(right)
+                    if index == 0
+                    else measure.gt(left) & measure.le(right)
+                )
+                count = int(selected.sum().cpu())
+                matched = int(
+                    (predictions.eq(truth) & selected).sum().cpu()
+                )
+                counts.append(count)
+                correct.append(matched)
+                accuracy.append(None if count == 0 else matched / count)
+            serialized_edges = [
+                (
+                    "-inf"
+                    if value == -float("inf")
+                    else "+inf"
+                    if value == float("inf")
+                    else value
+                )
+                for value in edges
+            ]
+            return {
+                "bin_edges": serialized_edges,
+                "endpoint_policy": (
+                    "first bin [left,right], later bins (left,right]"
+                ),
+                "event_counts": counts,
+                "correct_counts": correct,
+                "accuracy": accuracy,
+                "_population_statistics": {
+                    "event_counts": {"kind": "sum", "value": counts},
+                    "correct_counts": {"kind": "sum", "value": correct},
+                    "accuracy": {
+                        "kind": "ratio",
+                        "numerator": correct,
+                        "denominator": counts,
+                    },
+                },
+            }
+
+        def categorical_performance(
+            categories: Any,
+            names: tuple[str, ...],
+        ) -> dict[str, Any] | None:
+            if labels is None:
+                return None
+            truth = labels.long()
+            counts = [
+                int(categories.eq(index).sum().cpu())
+                for index in range(len(names))
+            ]
+            correct = [
+                int(
+                    (
+                        categories.eq(index)
+                        & predictions.eq(truth)
+                    ).sum().cpu()
+                )
+                for index in range(len(names))
+            ]
+            accuracy = [
+                None if count == 0 else matched / count
+                for count, matched in zip(counts, correct)
+            ]
+            return {
+                "category_order": list(names),
+                "event_counts": counts,
+                "correct_counts": correct,
+                "accuracy": accuracy,
+                "_population_statistics": {
+                    "event_counts": {"kind": "sum", "value": counts},
+                    "correct_counts": {"kind": "sum", "value": correct},
+                    "accuracy": {
+                        "kind": "ratio",
+                        "numerator": correct,
+                        "denominator": counts,
+                    },
+                },
+            }
 
         output: dict[str, Any] = {
             "families": list(self.families),
@@ -800,6 +1010,19 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 clean_features[:, 5], valid, return_details=True
             )
             raw = charge_details["raw"]
+            diagnostic_pid = pid_categories(
+                clean_features[:, 6:11],
+                valid,
+                fail_on_multi_hot=False,
+            )
+            pid_population = torch.stack(
+                [
+                    diagnostic_pid.eq(index).logical_and(valid[:, 0]).sum(1)
+                    for index in range(6)
+                ],
+                dim=1,
+            )
+            dominant_pid = pid_population.argmax(dim=1)
             output["CHARGE"] = {
                 **charge_encoder.diagnostics(clean_features[:, 5], valid),
                 "headwise_bias": {
@@ -808,6 +1031,21 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     "charged_neutral": head_means(raw[:, 5:6].bool()),
                     "neutral_neutral": head_means(raw[:, 4:5].bool()),
                 },
+                "pid_conditioned_performance": categorical_performance(
+                    dominant_pid,
+                    (
+                        "dominant_charged_hadron",
+                        "dominant_neutral_hadron",
+                        "dominant_photon",
+                        "dominant_electron",
+                        "dominant_muon",
+                        "dominant_unknown",
+                    ),
+                ),
+                "pid_conditioning_definition": (
+                    "jet stratum is the most frequent canonical HLT PID "
+                    "category; ties resolve by canonical category order"
+                ),
             }
         if "TRACK" in self.families:
             if clean_raw is None:
@@ -830,6 +1068,48 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             both_tracks_valid = (
                 track_valid.unsqueeze(-1) & track_valid.unsqueeze(-2)
             )
+            track_class_performance = None
+            if labels is not None:
+                required_indices = (1, 2, 8, 9)
+                required_names = ("Hbb", "Hcc", "Tbqq", "Tbl")
+                class_counts = [
+                    int(labels.eq(index).sum().cpu())
+                    for index in required_indices
+                ]
+                class_correct = [
+                    int(
+                        (
+                            labels.eq(index) & predictions.eq(labels)
+                        ).sum().cpu()
+                    )
+                    for index in required_indices
+                ]
+                track_class_performance = {
+                    "class_order": list(required_names),
+                    "event_counts": class_counts,
+                    "correct_counts": class_correct,
+                    "accuracy": [
+                        None if count == 0 else correct / count
+                        for count, correct in zip(
+                            class_counts, class_correct
+                        )
+                    ],
+                    "_population_statistics": {
+                        "event_counts": {
+                            "kind": "sum",
+                            "value": class_counts,
+                        },
+                        "correct_counts": {
+                            "kind": "sum",
+                            "value": class_correct,
+                        },
+                        "accuracy": {
+                            "kind": "ratio",
+                            "numerator": class_correct,
+                            "denominator": class_counts,
+                        },
+                    },
+                }
             output["TRACK"] = {
                 **track_encoder.diagnostics(clean_raw, valid),
                 "displaced_threshold_raw_absolute_significance": 2.0,
@@ -862,6 +1142,43 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     if bool(both_tracks_valid.any())
                     else None
                 ),
+                "raw_displacement_distributions": {
+                    "d0": histogram(
+                        track_details["d0"],
+                        track_valid,
+                        (-float("inf"), -1.0, -0.1, 0.0, 0.1, 1.0, float("inf")),
+                    ),
+                    "dz": histogram(
+                        track_details["dz"],
+                        track_valid,
+                        (-float("inf"), -1.0, -0.1, 0.0, 0.1, 1.0, float("inf")),
+                    ),
+                },
+                "absolute_significance_distributions": {
+                    "d0": histogram(
+                        track_details["raw_d0_significance"].abs(),
+                        track_valid,
+                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                    ),
+                    "dz": histogram(
+                        track_details["raw_dz_significance"].abs(),
+                        track_valid,
+                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                    ),
+                },
+                "compatibility_chi2_distribution": histogram(
+                    track_details["chi2"],
+                    both_tracks_valid[:, 0],
+                    (0.0, 1.0, 4.0, 9.0, 16.0, 25.0, float("inf")),
+                ),
+                "bias_by_minimum_absolute_displacement_significance": (
+                    binned_pair_bias(
+                        endpoint_min,
+                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                        applicable=both_tracks_valid[:, 0],
+                    )
+                ),
+                "required_class_performance": track_class_performance,
             }
         if "DENSITY" in self.families:
             if clean_raw is None:
@@ -871,6 +1188,17 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 clean_raw, valid, return_details=True
             )
             local_activity = density_details["descriptor"][:, 20]
+            particle_valid = valid[:, 0]
+            multiplicity = particle_valid.sum(1).to(clean_vectors.dtype)
+            particle_pt = torch.hypot(
+                clean_vectors[:, 0], clean_vectors[:, 1]
+            ).masked_fill(~particle_valid, 0.0)
+            leading_fraction = particle_pt.amax(1) / particle_pt.sum(
+                1
+            ).clamp_min(1.0e-30)
+            context_activity = local_activity.unsqueeze(-2).expand(
+                -1, int(local_activity.shape[1]), -1
+            )
             output["DENSITY"] = {
                 **density_encoder.diagnostics(clean_raw, valid),
                 "local_activity_definition": (
@@ -878,6 +1206,20 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 ),
                 "mean_local_activity": float(
                     local_activity.masked_select(valid[:, 0]).mean().cpu()
+                ),
+                "bias_by_context_local_activity_fraction": binned_pair_bias(
+                    context_activity,
+                    (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+                ),
+                "performance_by_jet_multiplicity": binned_performance(
+                    multiplicity,
+                    (0.0, 20.0, 40.0, 60.0, 80.0, 100.0, float("inf")),
+                ),
+                "performance_by_leading_particle_pt_fraction": (
+                    binned_performance(
+                        leading_fraction,
+                        (0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0),
+                    )
                 ),
             }
         if "REGION" in self.families:
@@ -888,15 +1230,44 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 clean_raw, valid, region_trees, return_details=True
             )
             region_raw = region_details["raw"]
+            depth_per_event = torch.as_tensor(
+                [
+                    (
+                        int(max(tree["depth"][:tree["n_valid"]]))
+                        if int(tree["n_valid"]) else 0
+                    )
+                    for tree in region_trees
+                ],
+                device=clean_vectors.device,
+                dtype=clean_vectors.dtype,
+            )
+            hard_prongs = torch.as_tensor(
+                [
+                    int(tree["actual_cluster_counts"]["8"])
+                    for tree in region_trees
+                ],
+                device=clean_vectors.device,
+                dtype=clean_vectors.dtype,
+            )
+            actual_counts = {
+                str(k): [
+                    int(tree["actual_cluster_counts"][str(k)])
+                    for tree in region_trees
+                ]
+                for k in (2, 4, 8)
+            }
             output["REGION"] = {
                 "normalization_sha256": region_encoder.normalization_sha256,
                 "requested_cluster_counts": [2, 4, 8],
                 "actual_cluster_counts": {
-                    str(k): [
-                        int(tree["actual_cluster_counts"][str(k)])
-                        for tree in region_trees
-                    ]
-                    for k in (2, 4, 8)
+                    **actual_counts,
+                    "_population_statistics": {
+                        str(k): {
+                            "kind": "concatenate",
+                            "values": actual_counts[str(k)],
+                        }
+                        for k in (2, 4, 8)
+                    },
                 },
                 "node_counts": [int(tree["n_nodes"]) for tree in region_trees],
                 "maximum_leaf_depths": [
@@ -925,6 +1296,99 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     str(k): head_means(region_raw[:, index:index + 1].bool())
                     for index, k in enumerate((2, 4, 8))
                 },
+                "lca_distributions": {
+                    "normalized_depth": histogram(
+                        region_raw[:, 3],
+                        pair_mask[:, 0],
+                        (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                    ),
+                    "log_merge_delta_r": histogram(
+                        region_raw[:, 4],
+                        pair_mask[:, 0],
+                        (
+                            -float("inf"),
+                            -4.0,
+                            -3.0,
+                            -2.0,
+                            -1.0,
+                            0.0,
+                            float("inf"),
+                        ),
+                    ),
+                    "log_merge_kt": histogram(
+                        region_raw[:, 5],
+                        pair_mask[:, 0],
+                        (
+                            -float("inf"),
+                            -4.0,
+                            -2.0,
+                            0.0,
+                            2.0,
+                            4.0,
+                            float("inf"),
+                        ),
+                    ),
+                    "merge_z": histogram(
+                        region_raw[:, 6],
+                        pair_mask[:, 0],
+                        (0.0, 0.05, 0.1, 0.2, 0.35, 0.5),
+                    ),
+                    "log_merge_mass_fraction": histogram(
+                        region_raw[:, 7],
+                        pair_mask[:, 0],
+                        (
+                            -float("inf"),
+                            -6.0,
+                            -4.0,
+                            -2.0,
+                            -1.0,
+                            0.0,
+                            float("inf"),
+                        ),
+                    ),
+                },
+                "cluster_property_distributions": {
+                    str(k): {
+                        "log_pt_fraction": histogram(
+                            region_raw[:, 8 + index * 6],
+                            pair_mask[:, 0],
+                            (
+                                -float("inf"),
+                                -4.0,
+                                -2.0,
+                                -1.0,
+                                -0.5,
+                                0.0,
+                            ),
+                        ),
+                        "log_mass_fraction": histogram(
+                            region_raw[:, 9 + index * 6],
+                            pair_mask[:, 0],
+                            (
+                                -float("inf"),
+                                -6.0,
+                                -4.0,
+                                -2.0,
+                                -1.0,
+                                0.0,
+                            ),
+                        ),
+                        "multiplicity_fraction": histogram(
+                            region_raw[:, 10 + index * 6],
+                            pair_mask[:, 0],
+                            (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+                        ),
+                    }
+                    for index, k in enumerate((2, 4, 8))
+                },
+                "performance_by_tree_depth": binned_performance(
+                    depth_per_event,
+                    (0.0, 4.0, 8.0, 12.0, 16.0, float("inf")),
+                ),
+                "performance_by_hard_prong_count": binned_performance(
+                    hard_prongs,
+                    (0.0, 2.0, 4.0, 6.0, 8.0, float("inf")),
+                ),
             }
         return output
 

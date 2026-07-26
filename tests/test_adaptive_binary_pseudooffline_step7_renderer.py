@@ -33,6 +33,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.particle_renderer import (
     allocate_particle_charges,
     allocate_particle_types,
     exact_particle_slot_layout,
+    project_batched_n_body_phase_space,
     project_n_body_phase_space,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.root_transforms import ROOT_FEATURE_INDEX
@@ -462,6 +463,62 @@ def test_topology_matched_local_targets_use_hungarian_without_crossing_groups():
         ]
         assert bool((predicted_groups == assignment.group_index).all())
         assert bool((target_groups == assignment.group_index).all())
+    compact = compute_local_particle_matching_loss(
+        rendered,
+        target_features,
+        rendered.mask,
+        target_map,
+        return_assignments=False,
+    )
+    torch.testing.assert_close(compact.total, loss.total)
+    assert compact.assignments == ()
+    assert compact.diagnostics["assignment_records_materialized"] is False
+
+
+def test_batched_phase_space_matches_individual_exact_projection():
+    parent = torch.tensor(
+        [[10.0, 0.0, 0.0, 0.0], [8.0, 1.0, 0.25, -0.5]],
+        dtype=torch.float64,
+    )
+    raw = torch.tensor(
+        [
+            [[0.4, -0.2, 0.1], [-0.3, 0.5, -0.2], [0.1, -0.3, 0.4], [0.0, 0.0, 0.0]],
+            [[0.25, 0.1, -0.2], [-0.15, -0.05, 0.3], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ],
+        dtype=torch.float64,
+    )
+    masses = torch.tensor(
+        [[0.14, 0.0, 0.11, 0.0], [0.14, 0.0, 0.0, 0.0]],
+        dtype=torch.float64,
+    )
+    fractions = torch.tensor(
+        [[0.2, -0.4, 0.7, 0.0], [0.3, -0.1, 0.0, 0.0]],
+        dtype=torch.float64,
+    )
+    mask = torch.tensor(
+        [[True, True, True, False], [True, True, False, False]]
+    )
+    local = torch.tensor([[0, 1, 2, -1], [0, 1, -1, -1]])
+    batched, diagnostics = project_batched_n_body_phase_space(
+        parent,
+        raw,
+        masses,
+        fractions,
+        mask,
+        local,
+    )
+    for row in range(parent.shape[0]):
+        individual, _ = project_n_body_phase_space(
+            parent[row],
+            raw[row, mask[row]],
+            masses[row, mask[row]],
+            fractions[row, mask[row]],
+        )
+        torch.testing.assert_close(
+            batched[row, mask[row]], individual, atol=1.0e-10, rtol=1.0e-10
+        )
+        assert not bool(batched[row, ~mask[row]].any())
+    assert diagnostics["branch_counts"]["massive_rest_frame"] == 2
 
 
 def test_rollout_weighted_targets_use_ot_and_false_split_capacity_hits_null_sink():

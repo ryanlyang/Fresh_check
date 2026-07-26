@@ -236,6 +236,14 @@ def build_screening_summary(
             "results_envelope_sha256": require_sha256(
                 results_envelope_sha256, name="results_envelope_sha256"
             ),
+            "expected_common_lineage_hashes": {
+                str(name): require_sha256(
+                    value, name=f"expected_common_lineage_hashes.{name}"
+                )
+                for name, value in sorted(
+                    expected_common_lineage_hashes.items()
+                )
+            },
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
             ),
@@ -736,6 +744,14 @@ def aggregate_confirmation(
                 results_envelope_sha256, name="results_envelope_sha256"
             ),
             "all_result_lineage_authenticated": True,
+            "expected_common_lineage_hashes": {
+                str(name): require_sha256(
+                    value, name=f"expected_common_lineage_hashes.{name}"
+                )
+                for name, value in sorted(
+                    expected_common_lineage_hashes.items()
+                )
+            },
             "confirmation_registry_sha256": registry_sha,
             "rows": aggregates,
             "scientific_finalist_ordering": [
@@ -804,6 +820,9 @@ def aggregate_confirmation(
             ),
             "unary_results_envelope_sha256": unary_envelope_sha,
             "all_selection_lineage_authenticated": True,
+            "expected_common_lineage_hashes": summary[
+                "expected_common_lineage_hashes"
+            ],
             "semantic_perturbation_sha256": require_sha256(
                 semantic_perturbation_sha256,
                 name="semantic_perturbation_sha256",
@@ -895,6 +914,16 @@ def validate_locked_finalists(
         raise ValueError("finalist lock HLT-cache inventory mismatch")
     if lock.get("final_test_used_for_selection") is not False:
         raise ValueError("finalist lock is contaminated by final-test selection")
+    if lock.get("all_selection_lineage_authenticated") is not True:
+        raise ValueError("finalist lock selection lineage is not authenticated")
+    require_sha256(
+        lock.get("confirmation_results_envelope_sha256"),
+        name="confirmation_results_envelope_sha256",
+    )
+    require_sha256(
+        lock.get("unary_results_envelope_sha256"),
+        name="unary_results_envelope_sha256",
+    )
     require_sha256(
         lock.get("semantic_perturbation_sha256"),
         name="semantic_perturbation_sha256",

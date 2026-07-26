@@ -111,6 +111,12 @@ Every optimized run must preserve all of the following.
 - Multi-hypothesis models retain the same hypothesis count, latent dimension, and fixed
   evaluation seeds.
 - Renderer phase-space and type-assignment iterations are not reduced.
+- Exact per-terminal-group PID quota transport, charge projection, N-body projection,
+  Hungarian matching, and unbalanced OT may be batched by compatible cardinality. This
+  is an execution transformation only: iteration counts, hard assignments, null
+  accounting, closure tolerances, and differentiable losses remain unchanged.
+- Production training need not materialize per-group diagnostic assignment objects when
+  the same aggregate losses, method counts, and scientific report fields are retained.
 - BF16 autocast, AdamW group policies, EMA decay, gradient clipping, and the effective
   global batch contracts remain unchanged.
 
@@ -900,6 +906,13 @@ labeling, truncation warnings, report fields, and checkpoint state.
 
 Skip inactive rollout work in teacher-forced phase 2 and reuse the exact hypothesis-zero
 rollout/render in phase 4. Add call-count, loss-parity, and gradient-parity tests.
+
+Replace sequential per-jet/per-terminal-group numerical solves with batched exact solves.
+The acceptance benchmark must time every actual D1 curriculum stage with zero profiler
+warmup for one-update handoffs. Its wall-time projection is the sum of the real D1 stage
+graph (`1` root handoff, five `1`-update hierarchy handoffs, renderer nominal updates,
+and distribution nominal updates), plus scaled complete-model-validation events.
+Applying one deepest-stage average to a generic stage-budget sum is forbidden.
 
 ### Step 4: Implement phase-specific batch preflight
 

@@ -19,9 +19,11 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (  # 
     build_low_data_campaign_inventory,
     build_low_data_campaign_registry,
     build_runtime_command_catalog,
+    build_runtime_data_config,
     build_runtime_execution_manifest,
     build_runtime_handler_catalog,
     load_hashed_json,
+    publish_full_pilot_scientific_bootstrap,
     reconcile_particle_view_production_graph,
     submit_particle_view_graph,
     with_content_hash,
@@ -44,6 +46,36 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--runtime-python-executable", default="python")
+    parser.add_argument(
+        "--bootstrap-scientific",
+        action="store_true",
+        help=(
+            "Build every production factory, task spec, scientific catalog, "
+            "and handler command before constructing/submitting the graph."
+        ),
+    )
+    parser.add_argument("--runtime-data-config")
+    parser.add_argument("--parent-manifest")
+    parser.add_argument("--hlt-cache-dir")
+    parser.add_argument("--offline-cache-dir")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--bootstrap-replicates", type=int, default=10_000)
+    parser.add_argument("--linear-fusion-steps", type=int, default=300)
+    parser.add_argument("--optional-p7b-resource")
+    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--existing-checkpoint")
+    parser.add_argument("--existing-observed-train-identity-sha256")
+    parser.add_argument("--existing-serialized-recipe")
+    parser.add_argument(
+        "--existing-recipe-reproduced-exactly", action="store_true"
+    )
+    parser.add_argument("--existing-provenance-metadata-sha256")
+    parser.add_argument(
+        "--existing-description",
+        default="pre-existing offline particle teacher",
+    )
     parser.add_argument("--artifact-root")
     parser.add_argument("--source-commit")
     parser.add_argument("--graph-id", default="particle_view_full_pilot_v1")
@@ -83,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     mode = "execute" if args.execute else "print_only" if args.print_only else "dry_run"
     if args.graph:
+        if args.bootstrap_scientific:
+            raise ValueError("--bootstrap-scientific cannot modify an existing graph")
         graph_path = Path(args.graph).resolve()
         graph = load_hashed_json(graph_path)
         artifact_root = Path(graph["artifact_root"])
@@ -99,10 +133,19 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "registry bootstrap also requires " + ", ".join(missing)
             )
-        if bool(args.command_catalog) == bool(args.handler_commands):
+        supplied_catalogs = sum(
+            bool(value)
+            for value in (
+                args.command_catalog,
+                args.handler_commands,
+                args.bootstrap_scientific,
+            )
+        )
+        if supplied_catalogs != 1:
             raise ValueError(
                 "registry bootstrap requires exactly one of "
-                "--command-catalog or --handler-commands"
+                "--command-catalog, --handler-commands, or "
+                "--bootstrap-scientific"
             )
         if args.registry:
             registry = load_hashed_json(args.registry)
@@ -117,6 +160,95 @@ def main(argv: list[str] | None = None) -> int:
             inventory = build_low_data_campaign_inventory(registry)
         artifact_root = Path(args.artifact_root).resolve()
         runtime_artifacts = None
+        bootstrap_index = None
+        if args.bootstrap_scientific:
+            if args.runtime_data_config:
+                if any(
+                    value
+                    for value in (
+                        args.parent_manifest,
+                        args.hlt_cache_dir,
+                        args.offline_cache_dir,
+                    )
+                ):
+                    raise ValueError(
+                        "--runtime-data-config cannot be combined with raw "
+                        "runtime source arguments"
+                    )
+                runtime_data = load_hashed_json(args.runtime_data_config)
+            else:
+                missing_runtime = [
+                    name
+                    for name, value in (
+                        ("--parent-manifest", args.parent_manifest),
+                        ("--hlt-cache-dir", args.hlt_cache_dir),
+                        ("--offline-cache-dir", args.offline_cache_dir),
+                    )
+                    if not value
+                ]
+                if missing_runtime or not args.unified_manifest:
+                    raise ValueError(
+                        "scientific bootstrap from raw sources requires "
+                        "--unified-manifest and "
+                        + ", ".join(missing_runtime or ["runtime sources"])
+                    )
+                runtime_data = build_runtime_data_config(
+                    parent_manifest_path=args.parent_manifest,
+                    unified_manifest_path=args.unified_manifest,
+                    hlt_cache_dir=args.hlt_cache_dir,
+                    offline_cache_dir=args.offline_cache_dir,
+                )
+            optional_p7b = None
+            if args.optional_p7b_resource:
+                optional_p7b = json.loads(
+                    Path(args.optional_p7b_resource).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if not isinstance(optional_p7b, dict):
+                    raise ValueError(
+                        "optional P7b resource must be a JSON object"
+                    )
+            bootstrap_root = (
+                artifact_root / "preflight" / "scientific_bootstrap"
+            )
+            bootstrap_index = publish_full_pilot_scientific_bootstrap(
+                output_dir=bootstrap_root,
+                registry=registry,
+                runtime_data_config=runtime_data,
+                source_commit=args.source_commit,
+                device=args.device,
+                num_workers=args.num_workers,
+                amp=not args.no_amp,
+                batch_size=args.batch_size,
+                bootstrap_replicates=args.bootstrap_replicates,
+                linear_fusion_steps=args.linear_fusion_steps,
+                optional_p7b_resource=optional_p7b,
+                existing_checkpoint_path=args.existing_checkpoint,
+                existing_observed_train_identity_sha256=(
+                    args.existing_observed_train_identity_sha256
+                ),
+                existing_serialized_recipe_path=(
+                    args.existing_serialized_recipe
+                ),
+                existing_recipe_reproduced_exactly=(
+                    args.existing_recipe_reproduced_exactly
+                ),
+                existing_provenance_metadata_sha256=(
+                    args.existing_provenance_metadata_sha256
+                ),
+                existing_description=args.existing_description,
+                existing_teacher_compatible=args.existing_teacher_compatible,
+                teacher_mix_compatible=args.teacher_mix_compatible,
+                python_executable=sys.executable,
+                handler_python_executable=(
+                    args.runtime_python_executable
+                ),
+                production=True,
+            )
+            args.handler_commands = bootstrap_index[
+                "scientific_handler_commands"
+            ]["path"]
         if args.command_catalog:
             catalog = json.loads(
                 Path(args.command_catalog).read_text(encoding="utf-8")
@@ -181,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
                     / "preflight"
                     / "low_data_campaign_inventory.json",
                     inventory,
+                )
+            if bootstrap_index is not None:
+                write_immutable_json(
+                    artifact_root
+                    / "preflight"
+                    / "full_scientific_bootstrap.json",
+                    bootstrap_index,
                 )
             if runtime_artifacts is not None:
                 (

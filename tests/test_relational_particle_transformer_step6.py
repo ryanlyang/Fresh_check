@@ -29,6 +29,7 @@ from teacher_logit_reco.relational_part import (
     train_relational_model,
     update_patience,
 )
+from teacher_logit_reco.relational_part.train import _capture_diagnostics
 
 
 def test_global_checkpoint_window_and_exact_patience() -> None:
@@ -236,6 +237,80 @@ def test_miniature_cpu_training_resume_is_exact_and_val_select_is_not_selector(
         (tmp_path / "resumed" / "training_curves.json").read_text()
     )
     assert full_curves["rows"] == resumed_curves["rows"]
+
+
+def test_population_diagnostics_accept_partial_region_batch_and_use_denominators() -> None:
+    class DiagnosticModel(torch.nn.Module):
+        def diagnostics(self, labels, mask):
+            batch = int(labels.shape[0])
+            query_count = int(mask.sum())
+            fraction = 0.2 if batch == 64 else 0.8
+            actual = [2] * batch
+            return {
+                "REGION": {
+                    "actual_cluster_counts": {
+                        "2": actual,
+                        "_population_statistics": {
+                            "2": {
+                                "kind": "concatenate",
+                                "values": actual,
+                            }
+                        },
+                    },
+                    "node_counts": [5] * batch,
+                },
+                "TRACK": {
+                    "uncertainty_floor_audit": {
+                        "d0": {"applicable_count": 123}
+                    }
+                },
+                "attention_allocation": {
+                    "layers": [
+                        {
+                            "layer": 0,
+                            "per_head": [
+                                {
+                                    "leading_context_fraction": fraction,
+                                    "_population_statistics": {
+                                        "leading_context_fraction": {
+                                            "kind": "ratio",
+                                            "numerator": fraction * query_count,
+                                            "denominator": query_count,
+                                        }
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+
+    full_mask = torch.ones(64, 1, 3, dtype=torch.bool)
+    partial_mask = torch.ones(1, 1, 1, dtype=torch.bool)
+    loader = [
+        {"labels": torch.zeros(64, dtype=torch.long), "mask": full_mask},
+        {"labels": torch.zeros(1, dtype=torch.long), "mask": partial_mask},
+    ]
+    captured = _capture_diagnostics(
+        DiagnosticModel(), loader, torch.device("cpu")
+    )
+    assert captured["batch_count"] == 2
+    assert captured["event_count"] == 65
+    assert len(
+        captured["values"]["REGION"]["actual_cluster_counts"]["2"]
+    ) == 65
+    assert len(captured["values"]["REGION"]["node_counts"]) == 65
+    assert (
+        captured["values"]["TRACK"]["uncertainty_floor_audit"]["d0"][
+            "applicable_count"
+        ]
+        == 123
+    )
+    expected = (0.2 * 64 * 3 + 0.8) / (64 * 3 + 1)
+    observed = captured["values"]["attention_allocation"]["layers"][0][
+        "per_head"
+    ][0]["leading_context_fraction"]
+    assert observed == pytest.approx(expected)
 
 
 def test_step6_contracts_bind_global_policy_and_base_controls() -> None:

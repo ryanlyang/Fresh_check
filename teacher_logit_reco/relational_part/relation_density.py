@@ -288,28 +288,54 @@ class DensityEncoder(_ModuleBase):
         )
         valid = mask[:, 0].bool()
         descriptor = details["descriptor"]
+        valid_count = int(valid.sum().cpu())
+        annulus_counts = [
+            int(
+                (
+                    details["annulus_masks"][:, index].sum(dim=-1) > 0
+                )[valid].sum().cpu()
+            )
+            for index in range(4)
+        ]
+        neighbor_sum = float(
+            descriptor[:, 20].masked_select(valid).sum().cpu()
+        )
+        self_share_sum = float(
+            descriptor[:, 21].masked_select(valid).sum().cpu()
+        )
         return {
-            "valid_particle_count": int(valid.sum().cpu()),
+            "valid_particle_count": valid_count,
             "annulus_nonempty_fractions": [
-                float(
-                    (
-                        details["annulus_masks"][:, index].sum(dim=-1) > 0
-                    )[valid].float().mean().cpu()
-                )
-                if bool(valid.any())
-                else 0.0
-                for index in range(4)
+                0.0 if valid_count == 0 else count / valid_count
+                for count in annulus_counts
             ],
             "mean_neighbor_fraction_R0p40": (
-                float(descriptor[:, 20].masked_select(valid).mean().cpu())
-                if bool(valid.any())
-                else 0.0
+                0.0 if valid_count == 0 else neighbor_sum / valid_count
             ),
             "mean_self_share_R0p20": (
-                float(descriptor[:, 21].masked_select(valid).mean().cpu())
-                if bool(valid.any())
-                else 0.0
+                0.0 if valid_count == 0 else self_share_sum / valid_count
             ),
+            "_population_statistics": {
+                "valid_particle_count": {
+                    "kind": "sum",
+                    "value": valid_count,
+                },
+                "annulus_nonempty_fractions": {
+                    "kind": "ratio",
+                    "numerator": annulus_counts,
+                    "denominator": [valid_count] * 4,
+                },
+                "mean_neighbor_fraction_R0p40": {
+                    "kind": "ratio",
+                    "numerator": neighbor_sum,
+                    "denominator": valid_count,
+                },
+                "mean_self_share_R0p20": {
+                    "kind": "ratio",
+                    "numerator": self_share_sum,
+                    "denominator": valid_count,
+                },
+            },
         }
 
 

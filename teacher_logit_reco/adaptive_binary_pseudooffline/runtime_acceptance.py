@@ -15,11 +15,12 @@ from .convergence_schedule import (
 )
 from .runtime_batch import RuntimeBatchContract
 from .runtime_profile import ABPH_RUNTIME_PROFILE_CONTRACT
+from .targets import ABPH_LEVEL_CAPACITIES
 
 
 ABPH_DDP_SMOKE_CONTRACT = "adaptive_binary_ddp_acceptance_smoke_v1"
-ABPH_RUNTIME_ACCEPTANCE_CONTRACT = "adaptive_binary_runtime_acceptance_v1"
-ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_reference_v2"
+ABPH_RUNTIME_ACCEPTANCE_CONTRACT = "adaptive_binary_runtime_acceptance_v2"
+ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_reference_v3"
 ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY = (
     "one_fixed_model_val_subset_at_fixed_update_v1"
 )
@@ -37,6 +38,23 @@ ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS = {
     "memory_utilization_maximum": 0.90,
     "deep_projected_wall_seconds_maximum": 48.0 * 3600.0,
 }
+_PROJECTED_PROFILE_BUCKETS = (
+    "optimizer_update_total",
+    "target_source_wait",
+    "target_shard_decompression",
+    "cpu_batch_assembly",
+    "host_to_device",
+    "model_step_total",
+    "hlt_encode_root_compile",
+    "teacher_forced_hierarchy_decode",
+    "rollout_hierarchy_decode",
+    "particle_render_projection",
+    "matching_loss_construction",
+    "backward",
+    "gradient_synchronization",
+    "optimizer_ema_update",
+    "full_validation",
+)
 
 
 def _read_json(path: str | Path) -> dict[str, Any]:
@@ -198,6 +216,38 @@ def _benchmark_evidence(
         raise ValueError(f"runtime benchmark lacks measured throughput: {directory}")
     if total_memory <= 0 or peak < 0:
         raise ValueError(f"runtime benchmark lacks device-memory telemetry: {directory}")
+    stage_timings = {
+        str(name): {
+            "phase": int(row.get("phase", -1)),
+            "phase_name": str(row.get("phase_name", "")),
+            "sampled_updates": int(row.get("sampled_updates", 0)),
+            "sampled_jets": int(row.get("sampled_jets", 0)),
+            "median_optimizer_update_seconds": (
+                None
+                if row.get("median_optimizer_update_seconds") is None
+                else float(row["median_optimizer_update_seconds"])
+            ),
+        }
+        for name, row in stages.items()
+    }
+    bucket_timings = {
+        name: {
+            key: value
+            for key, value in dict(buckets[name]).items()
+            if key
+            in {
+                "status",
+                "samples",
+                "cpu_total_seconds",
+                "cpu_median_seconds",
+                "cuda_total_seconds",
+                "cuda_median_seconds",
+                "synchronized_wall_total_seconds",
+                "synchronized_wall_median_seconds",
+            }
+        }
+        for name in _PROJECTED_PROFILE_BUCKETS
+    }
     return {
         "variant": expected_variant,
         "world_size": int(expected_world_size),
@@ -210,6 +260,8 @@ def _benchmark_evidence(
         "sampled_update_seconds": update_seconds,
         "seconds_per_update": update_seconds / sampled_updates,
         "jets_per_second": sampled_jets / update_seconds,
+        "stage_timings": stage_timings,
+        "bucket_timings": bucket_timings,
         "communication_fraction": summary.get("communication_fraction"),
         "peak_reserved_bytes": peak,
         "total_device_memory_bytes": total_memory,
@@ -225,6 +277,83 @@ def _benchmark_evidence(
             "training_curves": _artifact_row(curves_path),
             "runtime_profile": _artifact_row(profile_path),
         },
+    }
+
+
+def _deep_stage_projection(
+    evidence: Mapping[str, Any],
+    *,
+    validation_jets: int,
+    complete_model_val_jets: int = 150_000,
+    evaluation_interval: int = 2_000,
+) -> dict[str, Any]:
+    """Project D1 from its real warm-started stage graph and measured stage medians."""
+
+    stages = evidence.get("stage_timings")
+    if not isinstance(stages, Mapping):
+        raise ValueError("deep runtime evidence lacks stage timing rows")
+    pilot = ABPH_ACCELERATED_STAGE_BUDGETS["pilot"]
+    update_counts = {
+        "phase1_root": 1,
+        **{
+            f"phase2_hierarchy_{capacity}": 1
+            for capacity in ABPH_LEVEL_CAPACITIES
+        },
+        "phase3_renderer": int(pilot["renderer"].nominal_updates),
+        "phase4_distribution": int(pilot["distribution"].nominal_updates),
+    }
+    rows: dict[str, Any] = {}
+    training_seconds = 0.0
+    validation_events = 0
+    for stage_key, nominal_updates in update_counts.items():
+        timing = stages.get(stage_key)
+        if not isinstance(timing, Mapping):
+            raise ValueError(
+                f"deep runtime benchmark lacks required stage timing {stage_key}"
+            )
+        sampled_updates = int(timing.get("sampled_updates", 0))
+        seconds_per_update = timing.get("median_optimizer_update_seconds")
+        if sampled_updates <= 0 or seconds_per_update is None:
+            raise ValueError(
+                f"deep runtime benchmark did not sample required stage {stage_key}"
+            )
+        seconds_per_update = float(seconds_per_update)
+        if not math.isfinite(seconds_per_update) or seconds_per_update <= 0.0:
+            raise ValueError(f"deep runtime benchmark has invalid timing for {stage_key}")
+        projected = seconds_per_update * int(nominal_updates)
+        training_seconds += projected
+        interval_events = int(nominal_updates) // int(evaluation_interval)
+        transition_adds_event = int(nominal_updates) % int(evaluation_interval) != 0
+        stage_validation_events = interval_events + int(transition_adds_event)
+        validation_events += stage_validation_events
+        rows[stage_key] = {
+            "nominal_updates": int(nominal_updates),
+            "sampled_updates": sampled_updates,
+            "seconds_per_update": seconds_per_update,
+            "projected_training_seconds": projected,
+            "projected_validation_events": stage_validation_events,
+        }
+    measured_validation_seconds = float(evidence["validation_seconds"])
+    if validation_jets <= 0 or complete_model_val_jets <= 0:
+        raise ValueError("validation projection sizes must be positive")
+    full_validation_seconds = (
+        measured_validation_seconds
+        * float(complete_model_val_jets)
+        / float(validation_jets)
+    )
+    validation_seconds = full_validation_seconds * validation_events
+    return {
+        "contract": "adaptive_binary_d1_stage_aware_wall_projection_v1",
+        "stages": rows,
+        "nominal_updates": sum(update_counts.values()),
+        "projected_training_seconds": training_seconds,
+        "measured_validation_jets": int(validation_jets),
+        "complete_model_val_jets": int(complete_model_val_jets),
+        "evaluation_interval": int(evaluation_interval),
+        "projected_validation_events": validation_events,
+        "projected_full_validation_seconds_each": full_validation_seconds,
+        "projected_validation_seconds": validation_seconds,
+        "projected_total_wall_seconds": training_seconds + validation_seconds,
     }
 
 
@@ -503,13 +632,13 @@ def build_runtime_acceptance_report(
         )
     deep = comparisons["D1_kt32_mh4_particles"]
     communication = deep["ddp4_communication_fraction"]
-    deep_nominal_updates = sum(
-        budget.nominal_updates
-        for budget in ABPH_ACCELERATED_STAGE_BUDGETS["pilot"].values()
+    deep_projection = _deep_stage_projection(
+        ddp4["D1_kt32_mh4_particles"],
+        validation_jets=expected_validation_jets,
     )
-    deep_projected_wall_seconds = (
-        ddp4["D1_kt32_mh4_particles"]["seconds_per_update"]
-        * deep_nominal_updates
+    deep_nominal_updates = int(deep_projection["nominal_updates"])
+    deep_projected_wall_seconds = float(
+        deep_projection["projected_total_wall_seconds"]
     )
     runtime_checks = {
         "single_vs_ddp4_transport_parity": bool(smoke["ok"]),
@@ -565,6 +694,10 @@ def build_runtime_acceptance_report(
             "comparisons": comparisons,
             "deep_projected_wall_seconds": deep_projected_wall_seconds,
             "deep_nominal_update_projection": deep_nominal_updates,
+            "deep_stage_aware_projection": deep_projection,
+            "deep_bottleneck_buckets": ddp4[
+                "D1_kt32_mh4_particles"
+            ]["bucket_timings"],
             "transport_smoke": smoke,
             "single_runs": single,
             "ddp4_runs": ddp4,
