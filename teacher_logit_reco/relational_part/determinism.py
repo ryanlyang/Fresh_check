@@ -10,7 +10,7 @@ from typing import Mapping
 from .contracts import validate_content_hash, with_content_hash
 
 
-GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v1"
+GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v2"
 
 
 def build_global_determinism_contract() -> dict[str, Any]:
@@ -24,9 +24,29 @@ def build_global_determinism_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": GLOBAL_DETERMINISM_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "fixed_before_scientific_results": True,
             "model_specific_override_allowed": False,
+            "attention_diagnostics": {
+                "population": "complete_val_select",
+                "aggregation": "event_count_weighted_across_batches",
+                "context_groups": {
+                    "leading": "all_valid_particles_at_maximum_pt",
+                    "subleading": (
+                        "all_valid_particles_at_next_distinct_pt"
+                    ),
+                    "soft": "all_remaining_valid_particles",
+                },
+                "angular_band_edges": [0.0, 0.05, 0.10, 0.20, 0.40],
+                "angular_band_endpoint_policy": (
+                    "[0,0.05],(0.05,0.10],(0.10,0.20],"
+                    "(0.20,0.40],(0.40,inf)"
+                ),
+                "combination_family_dropouts": (
+                    "zero_exactly_one_encoded_family_after_base4_"
+                    "concatenation_without_retraining"
+                ),
+            },
             "parity": {
                 "authoritative_weaver_explicit_uu": {
                     "device_path": "real_installed_weaver",
@@ -339,7 +359,7 @@ def validate_global_determinism_contract(payload: Mapping[str, Any]) -> str:
     expected.pop("content_hash", None)
     if actual != expected:
         raise ValueError(
-            "global deterministic conventions differ from the locked v1 policy"
+            "global deterministic conventions differ from the locked v2 policy"
         )
     return digest
 

@@ -61,7 +61,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     hlt_binding_sha = validate_content_hash(hlt_binding)
     report = hlt_binding.get("split_reports", {}).get("model_train")
-    if not isinstance(report, dict) or report.get("ok") is not True:
+    if (
+        hlt_binding.get("ok") is not True
+        or not isinstance(report, dict)
+        or int(report.get("n_jets", 0)) <= 0
+    ):
         raise ValueError("HLT binding does not authenticate model_train")
     view = load_cached_hlt_view(args.cache_dir, "model_train", verify_hash=True)
     hlt_content_hash = str(report.get("hlt_content_hash"))

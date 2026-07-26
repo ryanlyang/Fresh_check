@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .campaign import TARGET_SCREEN_IDS
+from .campaign import CONSUMER_SCREEN_IDS, TARGET_SCREEN_IDS
+from .consumer_interface_runtime import (
+    PARTICLE_VIEW_CONSUMER_SCREEN_METRICS_CONTRACT,
+    select_consumer_interface,
+)
 from .contracts import (
     load_hashed_json,
     sha256_file,
@@ -50,6 +54,10 @@ def build_target_selection_factory_config(
             ),
             "source_commit": source_commit,
             "candidate_run_ids": list(TARGET_SCREEN_IDS),
+            "consumer_run_ids": [
+                f"SCREEN_{consumer_id}"
+                for consumer_id in CONSUMER_SCREEN_IDS
+            ],
             "canonical_target_id": CANONICAL_TARGET_DISCOVERY_RUN_ID,
             "forward_count": TARGET_SCREEN_FORWARD_COUNT,
             "ranking_split": "model_val_select",
@@ -74,6 +82,7 @@ def validate_target_selection_factory_config(
         "contract",
         "source_commit",
         "candidate_run_ids",
+        "consumer_run_ids",
         "canonical_target_id",
         "forward_count",
         "ranking_split",
@@ -86,6 +95,8 @@ def validate_target_selection_factory_config(
         not isinstance(payload["source_commit"], str)
         or not payload["source_commit"]
         or payload["candidate_run_ids"] != list(TARGET_SCREEN_IDS)
+        or payload["consumer_run_ids"]
+        != [f"SCREEN_{value}" for value in CONSUMER_SCREEN_IDS]
         or payload["canonical_target_id"]
         != CANONICAL_TARGET_DISCOVERY_RUN_ID
         or payload["forward_count"] != TARGET_SCREEN_FORWARD_COUNT
@@ -104,9 +115,11 @@ def validate_target_selection_factory_config(
 def run_target_selection(
     *,
     candidates: Sequence[Mapping[str, Any]],
+    consumer_metrics: Sequence[Mapping[str, Any]],
     unavailable_targets: Sequence[Mapping[str, Any]],
     source_commit: str,
     output_path: str,
+    consumer_output_path: str,
     warnings_path: str,
     result_path: str,
 ) -> None:
@@ -141,6 +154,10 @@ def run_target_selection(
         forward_count=TARGET_SCREEN_FORWARD_COUNT,
     )
     write_immutable_json(output_path, selection)
+    consumer_selection = select_consumer_interface(
+        list(consumer_metrics)
+    )
+    write_immutable_json(consumer_output_path, consumer_selection)
     warnings = []
     for row in ordered:
         warnings.extend(
@@ -162,6 +179,9 @@ def run_target_selection(
         {
             "contract": PARTICLE_VIEW_TARGET_SELECTION_RESULT_CONTRACT,
             "selection_sha256": selection["content_hash"],
+            "consumer_interface_selection_sha256": consumer_selection[
+                "content_hash"
+            ],
             "candidate_metric_sha256_by_run": {
                 run_id: by_id[run_id]["content_hash"]
                 for run_id in TARGET_SCREEN_IDS
@@ -242,18 +262,44 @@ def build_target_selection_factory(
             if expected_contract == PARTICLE_VIEW_TARGET_METRICS_CONTRACT
             else unavailable_targets
         ).append(metric)
+    consumer_metrics = []
+    for consumer_id in CONSUMER_SCREEN_IDS:
+        run = f"SCREEN_{consumer_id}"
+        binding = parents[run]["artifacts"].get(
+            "consumer_interface_metrics.json"
+        )
+        if binding is None:
+            raise ValueError(
+                f"consumer parent {run} omitted interface metrics"
+            )
+        path = Path(binding["path"]).resolve()
+        if not path.is_file() or sha256_file(path) != binding["sha256"]:
+            raise ValueError(f"consumer metric changed for {run}")
+        metric = load_hashed_json(path)
+        validate_content_hash(
+            metric,
+            expected_contract=PARTICLE_VIEW_CONSUMER_SCREEN_METRICS_CONTRACT,
+        )
+        if metric["run_id"] != run:
+            raise ValueError("consumer metric/run identity mismatch")
+        consumer_metrics.append(metric)
     output = Path(output_dir).resolve()
     return {
         "kwargs": {
             "candidates": candidates,
+            "consumer_metrics": consumer_metrics,
             "unavailable_targets": unavailable_targets,
             "source_commit": config["source_commit"],
             "output_path": str(output / "selected_targets.json"),
+            "consumer_output_path": str(
+                output / "selected_consumer_interface.json"
+            ),
             "warnings_path": str(output / "scientific_warnings.jsonl"),
             "result_path": str(output / "target_selection_result.json"),
         },
         "artifact_paths": [
             str(output / "selected_targets.json"),
+            str(output / "selected_consumer_interface.json"),
             str(output / "scientific_warnings.jsonl"),
             str(output / "target_selection_result.json"),
         ],

@@ -32,6 +32,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     load_snapshot_dropout_prediction_bank,
     particle_view_representation_losses,
     publish_correlated_residual_sampler,
+    run_residual_sampler_fit,
     train_pview0,
     train_robust_consumer,
     uncertainty_calibration_metrics,
@@ -93,6 +94,44 @@ def _predictor_batch(
 
 def _pview_lineage():
     return {name: _sha(name) for name in PVIEW0_LINEAGE_FIELDS}
+
+
+def test_production_residual_sampler_wrapper_publishes_metadata_only(tmp_path):
+    true = np.zeros((3, 4, 2), dtype=np.float32)
+    predicted = np.zeros_like(true)
+    mask = np.ones((3, 4), dtype=bool)
+    true[:, :, 0] = 0.2
+    stop_true = true.copy()
+    stop_true[:, :, 0] = 0.3
+    run_residual_sampler_fit(
+        train_true_view=true,
+        train_prediction=predicted,
+        train_mask=mask,
+        model_val_stop_true_view=stop_true,
+        model_val_stop_prediction=predicted,
+        model_val_stop_mask=mask,
+        train_identity_sha256=_sha("train"),
+        model_val_stop_split_sha256=_sha("stop"),
+        coordinate_binding_sha256=_sha("coordinate"),
+        pview0_checkpoint_sha256=_sha("pview0"),
+        snapshot_sha256=[
+            _sha("snapshot-2"),
+            _sha("snapshot-3"),
+            _sha("snapshot-4"),
+        ],
+        output_dir=str(tmp_path),
+    )
+    registration = json.loads(
+        (tmp_path / "correlated_residual_sampler.json").read_text()
+    )
+    publication = json.loads(
+        (tmp_path / "residual_sampler_publication.json").read_text()
+    )
+    validate_content_hash(registration)
+    validate_content_hash(publication)
+    assert registration["residual_events_persisted_to_disk"] is False
+    assert publication["ram_resident_training_resource"] is True
+    assert not list(tmp_path.glob("*.npz"))
 
 
 def test_step6_representation_and_uncertainty_losses_match_contract():

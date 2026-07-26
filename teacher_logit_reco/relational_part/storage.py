@@ -9,7 +9,7 @@ from .contracts import with_content_hash
 
 
 RELATIONAL_STORAGE_MEASUREMENTS_CONTRACT = "relational_part_storage_measurements_v1"
-RELATIONAL_STORAGE_PROJECTION_CONTRACT = "relational_part_storage_projection_v1"
+RELATIONAL_STORAGE_PROJECTION_CONTRACT = "relational_part_storage_projection_v2"
 GIB = 1024**3
 
 
@@ -127,6 +127,8 @@ def build_storage_projection(
     retained_checkpoint_count: int = 63,
     retained_final_prediction_sets: int = 54,
     final_test_events: int = 500_000,
+    maximum_concurrent_resumable_runs: int = 4,
+    resumable_checkpoint_equivalent_states_per_run: int = 43,
 ) -> dict[str, Any]:
     """Project from measurements and fail before submission if space is unsafe."""
 
@@ -153,6 +155,12 @@ def build_storage_projection(
         "retained_checkpoint_count": retained_checkpoint_count,
         "retained_final_prediction_sets": retained_final_prediction_sets,
         "final_test_events": final_test_events,
+        "maximum_concurrent_resumable_runs": (
+            maximum_concurrent_resumable_runs
+        ),
+        "resumable_checkpoint_equivalent_states_per_run": (
+            resumable_checkpoint_equivalent_states_per_run
+        ),
     }
     if any(int(value) < 0 for value in integer_inputs.values()):
         raise ValueError(f"storage inputs must be nonnegative: {integer_inputs}")
@@ -171,6 +179,14 @@ def build_storage_projection(
         "retained_best_checkpoints": _ceil_scaled(
             measurements.checkpoint_sample_bytes,
             retained_checkpoint_count,
+            measurements.checkpoint_sample_count,
+        ),
+        "peak_concurrent_resumable_last_checkpoints": _ceil_scaled(
+            measurements.checkpoint_sample_bytes,
+            (
+                maximum_concurrent_resumable_runs
+                * resumable_checkpoint_equivalent_states_per_run
+            ),
             measurements.checkpoint_sample_count,
         ),
         "locked_final_test_predictions": _ceil_scaled(
@@ -202,7 +218,7 @@ def build_storage_projection(
     return with_content_hash(
         {
             "contract": RELATIONAL_STORAGE_PROJECTION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "measurement_source": "representative_files_and_locked_tree_probe",
             "measurement_artifact_sha256": measurement_artifact_sha256,
             "measurements": measurements.to_dict(),
@@ -216,6 +232,16 @@ def build_storage_projection(
                     retained_final_prediction_sets
                 ),
                 "events_per_final_prediction_set": int(final_test_events),
+                "maximum_concurrent_resumable_runs": int(
+                    maximum_concurrent_resumable_runs
+                ),
+                "resumable_checkpoint_equivalent_states_per_run": int(
+                    resumable_checkpoint_equivalent_states_per_run
+                ),
+                "resumable_state_upper_bound_basis": (
+                    "40_candidate_model_states+current_model_state+"
+                    "two_Adam_moment_state_equivalents"
+                ),
             },
             "component_bytes": components,
             "projected_bytes": projected,

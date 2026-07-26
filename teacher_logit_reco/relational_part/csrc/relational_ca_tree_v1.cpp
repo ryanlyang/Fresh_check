@@ -354,6 +354,36 @@ py::dict backend_manifest() {
 #else
       false;
 #endif
+  result["compiler_family"] =
+#if defined(__clang__)
+      "clang";
+  result["compiler_major_version"] = __clang_major__;
+#elif defined(__GNUC__)
+      "gcc";
+  result["compiler_major_version"] = __GNUC__;
+#elif defined(_MSC_VER)
+      "msvc";
+  result["compiler_major_version"] = _MSC_VER / 100;
+#else
+      "unknown";
+  result["compiler_major_version"] = 0;
+#endif
+  result["compiler_version"] =
+#if defined(__VERSION__)
+      __VERSION__;
+#else
+      "unknown";
+#endif
+  result["platform_architecture"] =
+#if defined(__aarch64__)
+      "aarch64";
+#elif defined(__x86_64__) || defined(_M_X64)
+      "x86_64";
+#elif defined(__arm__)
+      "arm";
+#else
+      "unknown";
+#endif
   return result;
 }
 

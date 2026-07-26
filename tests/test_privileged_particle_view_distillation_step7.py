@@ -109,6 +109,36 @@ class TinyConsumer(nn.Module):
         )
 
 
+class TinySharedStemPredictor(nn.Module):
+    def __init__(self, shared_stem: nn.Linear):
+        super().__init__()
+        self.shared_stem = shared_stem
+        self.trainable_delta = nn.Linear(3, 3)
+        self.variance_layer = nn.Linear(3, 3)
+
+    def forward(self, features, lorentz_vectors, mask):
+        del lorentz_vectors
+        valid = mask[:, 0] if mask.ndim == 3 else mask
+        hidden = features.transpose(1, 2)
+        mean = self.shared_stem(hidden) + self.trainable_delta(hidden)
+        mean = torch.where(valid[:, :, None], mean, torch.zeros_like(mean))
+        log_variance = self.variance_layer(hidden).clamp(-6, 3)
+        log_variance = torch.where(
+            valid[:, :, None],
+            log_variance,
+            torch.zeros_like(log_variance),
+        )
+        return ParticleViewPredictorOutput(
+            mean=mean,
+            log_variance=log_variance,
+            trust=torch.sigmoid(mean[..., :1]),
+            balance_loss=mean.new_zeros(()),
+            hierarchy=None,
+            local_embeddings=hidden,
+            decoded_embeddings=hidden,
+        )
+
+
 def _batch(
     *,
     ids=(31, 12, 44, 20),
@@ -562,6 +592,79 @@ def test_step7_miniature_frozen_consumer_training_registration_and_reload(
         for parameter in reloaded_predictor.parameters()
     )
     assert registration["deployment_audit"]["teacher_independent"]
+
+
+def test_step7_shared_consumer_stem_remains_exactly_frozen(tmp_path):
+    torch.manual_seed(71041)
+    consumer = TinyConsumer(view_dim=3)
+    predictor = TinySharedStemPredictor(consumer.feature_projection)
+    consumer_state = module_state_sha256(consumer)
+    caches = {}
+    for split, ids in (
+        ("train", (1, 2, 3, 4)),
+        ("model_val_stop", (11, 12, 13, 14)),
+        ("model_val_select", (21, 22, 23, 24)),
+    ):
+        root = tmp_path / "caches" / split
+        publish_target_logit_cache(
+            frozen_consumer=consumer,
+            loader=[_batch(ids=ids, view_dim=3)],
+            output_dir=root,
+            split=split,
+            lineage=_cache_lineage("shared-stem"),
+        )
+        caches[split] = (
+            FrozenTargetLogitCache(
+                root / f"{split}_frozen_consumer_logits.json"
+            ),
+            [_batch(ids=ids, view_dim=3)],
+        )
+    cache_lineage = _cache_lineage("shared-stem")
+    lineage = {
+        field: _hash(f"shared-distill:{field}")
+        for field in DISTILLATION_LINEAGE_FIELDS
+    }
+    for field in (
+        "hlt_preprocessing_sha256",
+        "class_order_sha256",
+        "coordinate_binding_sha256",
+        "consumer_checkpoint_sha256",
+    ):
+        lineage[field] = cache_lineage[field]
+    lineage["initial_predictor_state_sha256"] = module_state_sha256(
+        predictor
+    )
+    for split, field in (
+        ("train", "train_target_logit_cache_sha256"),
+        ("model_val_stop", "model_val_stop_target_logit_cache_sha256"),
+        ("model_val_select", "model_val_select_target_logit_cache_sha256"),
+    ):
+        lineage[field] = caches[split][0].content_hash
+    registration = train_frozen_consumer_distillation(
+        predictor=predictor,
+        frozen_consumer=consumer,
+        train_loader=caches["train"][1],
+        model_val_stop_loader=caches["model_val_stop"][1],
+        model_val_select_loader=caches["model_val_select"][1],
+        train_target_cache=caches["train"][0],
+        model_val_stop_target_cache=caches["model_val_stop"][0],
+        model_val_select_target_cache=caches["model_val_select"][0],
+        output_dir=tmp_path / "shared_distillation",
+        lineage=lineage,
+        objective=build_distillation_loss_screen()["L_PRIMARY"],
+        configuration_id="shared_stem",
+        run_id="run_shared_stem",
+        deployed_parameters=sum(
+            parameter.numel()
+            for parameter in {
+                *predictor.parameters(),
+                *consumer.parameters(),
+            }
+        ),
+    )
+    assert module_state_sha256(consumer) == consumer_state
+    assert registration["consumer_state_sha256_before"] == consumer_state
+    assert registration["consumer_state_sha256_after"] == consumer_state
 
 
 def test_step7_joint_branch_and_ce_control_match_updates_and_initialization(

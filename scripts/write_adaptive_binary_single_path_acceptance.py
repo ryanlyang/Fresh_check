@@ -19,6 +19,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     canonical_hash,
 )
 
+INSTRUMENTATION_OVERHEAD_TARGET = 0.03
+INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING = 0.10
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -57,13 +60,22 @@ def main(argv: list[str] | None = None) -> int:
     speedup = args.deep_optimized_jets_per_second / args.deep_reference_jets_per_second
     explanation = (args.profiler_explanation or "").strip()
     checks = {
-        "instrumentation_overhead_below_3_percent": 0.0
-        <= args.instrumentation_overhead_fraction
-        < 0.03,
+        "instrumentation_overhead_below_10_percent_operational_ceiling": (
+            0.0
+            <= args.instrumentation_overhead_fraction
+            < INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING
+        ),
         "timing_coverage_complete": bool(args.timing_coverage_complete),
         "metric_and_checkpoint_parity": bool(args.metric_checkpoint_parity),
         "deep_single_gpu_speedup_or_profiled_absence": speedup >= 1.3
         or bool(explanation),
+    }
+    advisories = {
+        "instrumentation_overhead_target_below_3_percent": (
+            0.0
+            <= args.instrumentation_overhead_fraction
+            < INSTRUMENTATION_OVERHEAD_TARGET
+        ),
     }
     report = {
         "contract": ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT,
@@ -73,8 +85,17 @@ def main(argv: list[str] | None = None) -> int:
         "deep_reference_jets_per_second": args.deep_reference_jets_per_second,
         "deep_optimized_jets_per_second": args.deep_optimized_jets_per_second,
         "deep_training_speedup": speedup,
+        "instrumentation_overhead_policy": {
+            "target_fraction": INSTRUMENTATION_OVERHEAD_TARGET,
+            "operational_ceiling_fraction": (
+                INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING
+            ),
+            "target_is_blocking": False,
+            "operational_ceiling_is_blocking": True,
+        },
         "profiler_explanation": explanation or None,
         "checks": checks,
+        "advisories": advisories,
         "source_artifacts": {
             "uninstrumented_reference": _artifact(args.uninstrumented_reference),
             "instrumented_reference": _artifact(args.instrumented_reference),

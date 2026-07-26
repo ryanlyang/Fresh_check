@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -23,6 +24,7 @@ def main() -> int:
     parser.add_argument("--hlt-content-sha256", required=True)
     parser.add_argument("--tree-resource-sha256", required=True)
     parser.add_argument("--backend-manifest-sha256", required=True)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     expected_shards = (
         int(args.expected_jet_count) + 9_999
@@ -33,6 +35,23 @@ def main() -> int:
     ]
     if not all(path.is_file() for path in paths):
         raise FileNotFoundError("one or more expected REGION shard metadata files are absent")
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "split": args.split,
+                    "expected_jet_count": int(args.expected_jet_count),
+                    "expected_shard_count": expected_shards,
+                    "manifest_output": str(
+                        (args.tree_dir / "manifest.json").resolve()
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     manifest = finalize_tree_split(
         args.tree_dir / "manifest.json",
         paths,

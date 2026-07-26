@@ -15,6 +15,7 @@ from .target_generator import masked_particle_mean_center
 
 PARTICLE_VIEW_CONSUMER_CONFIG_CONTRACT = "particle_view_consumer_config_v1"
 PARTICLE_VIEW_CONSUMER_PATHS = (
+    "raw_projected",
     "token_only",
     "pair_only",
     "token_and_pair",
@@ -41,8 +42,10 @@ class ParticleViewConsumerConfig:
             raise ValueError("consumer dimensions must be positive")
         if self.view_path not in PARTICLE_VIEW_CONSUMER_PATHS:
             raise ValueError(f"view_path must be one of {PARTICLE_VIEW_CONSUMER_PATHS}")
-        if self.injection_block < 0:
-            raise ValueError("injection_block must be nonnegative")
+        if self.injection_block < -1:
+            raise ValueError("injection_block must be -1 or nonnegative")
+        if self.view_path == "raw_projected" and self.injection_block != -1:
+            raise ValueError("raw-projected consumer uses injection_block=-1")
         if not isinstance(self.learned_trust, bool):
             raise ValueError("learned_trust must be boolean")
         for name, value, upper in (
@@ -58,6 +61,10 @@ class ParticleViewConsumerConfig:
     @property
     def token_enabled(self) -> bool:
         return self.view_path in {"token_only", "token_and_pair"}
+
+    @property
+    def raw_enabled(self) -> bool:
+        return self.view_path == "raw_projected"
 
     @property
     def pair_enabled(self) -> bool:
@@ -79,7 +86,13 @@ class ParticleViewConsumerConfig:
             "pair_scale": "tanh_bounded_zero_initialized",
             "gate_initial_value": 0.5 if self.learned_trust else 1.0,
             "trust_regularizer_weight": 0.01 if self.learned_trust else 0.0,
-            "token_injection_location": "post_complete_particle_block",
+            "token_injection_location": (
+                "projected_into_raw_hlt_features_pre_embedding"
+                if self.raw_enabled
+                else "post_embedding_pre_particle_blocks"
+                if self.injection_block == -1
+                else "post_complete_particle_block"
+            ),
             "pair_injection_location": "post_part_pair_embed_pre_attention",
         }
 
@@ -165,7 +178,10 @@ class ParticleViewConsumer(nn.Module):
             raise ValueError("A0 model must expose the repository ParT as .mod")
         if not hasattr(a0_model.mod, "blocks"):
             raise ValueError("A0 ParT does not expose particle blocks")
-        if config.injection_block >= len(a0_model.mod.blocks):
+        if (
+            config.injection_block >= 0
+            and config.injection_block >= len(a0_model.mod.blocks)
+        ):
             raise ValueError("consumer injection block is outside A0")
         if config.pair_enabled and not hasattr(a0_model.mod, "pair_embed"):
             raise ValueError("pair-bias consumer requires A0.mod.pair_embed")
@@ -177,6 +193,7 @@ class ParticleViewConsumer(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, hidden),
         )
+        self.raw_adapter = nn.Linear(view_dim, 17)
         self.gate = nn.Sequential(
             nn.Linear(hidden + view_dim, hidden),
             nn.GELU(),
@@ -191,6 +208,7 @@ class ParticleViewConsumer(nn.Module):
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     _xavier_linear(layer)
+        _xavier_linear(self.raw_adapter)
         for layer in self.gate:
             if isinstance(layer, nn.Linear):
                 _xavier_linear(layer)
@@ -278,6 +296,18 @@ class ParticleViewConsumer(nn.Module):
             valid[:, :, None], initial_gate, torch.zeros_like(initial_gate)
         )
         state: dict[str, torch.Tensor] = {"gate": initial_gate}
+        model_features = features
+        if self.config.raw_enabled:
+            raw_correction = self.raw_adapter(view) * initial_gate
+            raw_correction = torch.where(
+                valid[:, :, None],
+                raw_correction,
+                torch.zeros_like(raw_correction),
+            )
+            model_features = features + torch.tanh(
+                self.raw_token_scale
+            ) * raw_correction.transpose(1, 2)
+            state["token_correction"] = raw_correction
 
         def token_hook(_module, _inputs, output):
             values, layout = self._token_layout(
@@ -337,13 +367,18 @@ class ParticleViewConsumer(nn.Module):
         if self.config.pair_enabled:
             handles.append(self.a0_model.mod.pair_embed.register_forward_hook(pair_hook))
         if self.config.token_enabled:
+            token_module = (
+                self.a0_model.mod.embed
+                if self.config.injection_block == -1
+                else self.a0_model.mod.blocks[self.config.injection_block]
+            )
             handles.append(
-                self.a0_model.mod.blocks[
-                    self.config.injection_block
-                ].register_forward_hook(token_hook)
+                token_module.register_forward_hook(token_hook)
             )
         try:
-            logits = self.a0_model(points, features, lorentz_vectors, mask)
+            logits = self.a0_model(
+                points, model_features, lorentz_vectors, mask
+            )
         finally:
             for handle in handles:
                 handle.remove()

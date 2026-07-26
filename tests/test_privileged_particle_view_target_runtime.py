@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 
 from teacher_logit_reco.local_particle_residual_field.particle_view import (
     CANONICAL_TARGET_DISCOVERY_RUN_ID,
+    CONSUMER_SCREEN_IDS,
     CandidateViewSet,
     IndexedCandidateViewProvider,
     MatchingFreeParticleViewGenerator,
@@ -22,14 +24,17 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_target_metrics_artifact,
     build_tap_stage_reservation,
     build_target_screen_recipe,
+    canonical_sha256,
     fit_particle_view_normalizer,
     lorentz_vectors_to_particle_geometry,
     particle_view_generator_config_from_payload,
     predict_recovery_probe_views,
+    run_recoverability_codesign,
     run_target_discovery_operation,
     run_target_selection,
     load_hashed_json,
     stage_teacher_tap_float16,
+    with_content_hash,
 )
 
 
@@ -399,11 +404,56 @@ def test_full_target_selection_accepts_unavailable_diagnostic_and_never_gates(
     selection_path = tmp_path / "selection.json"
     warnings_path = tmp_path / "warnings.jsonl"
     result_path = tmp_path / "result.json"
+    consumer_metrics = []
+    for index, consumer_id in enumerate(CONSUMER_SCREEN_IDS):
+        recipe = {
+            "consumer_id": consumer_id,
+            "injection_block": 0,
+            "view_path": "token_and_pair",
+            "learned_trust": True,
+            "augment_clean_view": False,
+            "robust_probe_mixture": False,
+            "training_role": "Cview_probe",
+            "epochs": 12,
+            "selection_split": "model_val_select",
+            "quality_gate_used": False,
+        }
+        consumer_metrics.append(
+            with_content_hash(
+                {
+                    "contract": "particle_view_consumer_screen_metrics_v1",
+                    "consumer_id": consumer_id,
+                    "run_id": f"SCREEN_{consumer_id}",
+                    "recipe": recipe,
+                    "recipe_sha256": canonical_sha256(recipe),
+                    "consumer_registration_sha256": _sha(
+                        f"consumer-{index}"
+                    ),
+                    "checkpoint_sha256": _sha(
+                        f"consumer-checkpoint-{index}"
+                    ),
+                    "model_val_select": {
+                        "accuracy": 0.7,
+                        "cross_entropy": 0.8 + index * 1.0e-4,
+                        "examples": 100.0,
+                    },
+                    "ranking_rule": [
+                        "highest_accuracy",
+                        "lowest_cross_entropy",
+                        "lexicographic_consumer_id",
+                    ],
+                    "quality_gate_used": False,
+                    "stops_execution": False,
+                }
+            )
+        )
     run_target_selection(
         candidates=candidates,
+        consumer_metrics=consumer_metrics,
         unavailable_targets=[unavailable],
         source_commit="abc123",
         output_path=str(selection_path),
+        consumer_output_path=str(tmp_path / "consumer_selection.json"),
         warnings_path=str(warnings_path),
         result_path=str(result_path),
     )
@@ -423,3 +473,162 @@ def test_full_target_selection_accepts_unavailable_diagnostic_and_never_gates(
     assert set(result["unavailable_target_sha256_by_run"]) == {
         "VGEN_TEACHER_EXISTING"
     }
+
+
+class _TinyCodesignConfig:
+    def __init__(self, view_dim: int, seed: int) -> None:
+        self.view_dim = view_dim
+        self.rich_dim = 160
+        self.cycles = 12
+        self.probe_steps_per_cycle = 1
+        self.projection_steps_per_cycle = 1
+        self.probe_learning_rate = 3.0e-4
+        self.projection_learning_rate = 1.0e-4
+        self.consumer_learning_rate = 3.0e-5
+        self.probe_weight_decay = 1.0e-4
+        self.projection_weight_decay = 1.0e-5
+        self.consumer_weight_decay = 1.0e-4
+        self.batch_size = 128
+        self.gradient_clip = 1.0
+        self.seed = seed
+
+    def to_payload(self):
+        return {
+            "contract": "tiny_codesign_test_v1",
+            "view_dim": self.view_dim,
+            "rich_dim": self.rich_dim,
+            "cycles": self.cycles,
+            "probe_steps_per_cycle": self.probe_steps_per_cycle,
+            "projection_steps_per_cycle": self.projection_steps_per_cycle,
+            "seed": self.seed,
+            "performance_early_termination": False,
+        }
+
+
+class _TinyCodesignProvider:
+    def __init__(self, generator):
+        self.generator = generator
+        self.codesign_projection = None
+
+    def __call__(self, batch):
+        mask = batch["mask"][:, 0]
+        rich = torch.nn.functional.pad(
+            batch["features"].transpose(1, 2),
+            (0, 160 - batch["features"].shape[1]),
+        )
+        deterministic = self.codesign_projection(rich, mask)
+        view = (
+            self.generator._augment(
+                deterministic, mask, generator=None
+            )
+            if self.codesign_projection.training
+            else deterministic
+        )
+        batch["offline_logits"] = torch.zeros(
+            batch["features"].shape[0],
+            3,
+            device=batch["features"].device,
+        )
+        return {
+            "view": view,
+            "raw_centered_view": deterministic,
+        }
+
+
+class _TinyConsumerConfig:
+    def to_payload(self):
+        return {"contract": "tiny_consumer_test_v1"}
+
+
+class _TinyCodesignConsumer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = _TinyConsumerConfig()
+        self.classifier = torch.nn.Linear(21, 3)
+
+    def forward(
+        self,
+        points,
+        features,
+        lorentz_vectors,
+        mask,
+        view,
+        *,
+        augment_clean_view,
+    ):
+        del points, lorentz_vectors, augment_clean_view
+        valid = mask[:, 0, :, None].to(features.dtype)
+        joined = torch.cat((features.transpose(1, 2), view), dim=-1)
+        pooled = (joined * valid).sum(dim=1) / valid.sum(dim=1)
+        logits = self.classifier(pooled)
+        return SimpleNamespace(
+            logits=logits,
+            trust_loss=logits.square().mean() * 0.0,
+        )
+
+
+def test_codesign_runtime_runs_all_cycles_freezes_rview_and_selects_projection(
+    tmp_path,
+    monkeypatch,
+):
+    import teacher_logit_reco.local_particle_residual_field.particle_view.target_runtime as runtime
+
+    monkeypatch.setattr(
+        runtime,
+        "RecoverabilityCoDesignConfig",
+        _TinyCodesignConfig,
+    )
+    generator = MatchingFreeParticleViewGenerator(
+        ParticleViewGeneratorConfig(
+            query_dim=17,
+            memory_dim=17,
+            width=160,
+            num_heads=8,
+            num_cross_attention_blocks=1,
+            bottleneck_width=4,
+        )
+    )
+    train_provider = _TinyCodesignProvider(generator)
+    stop_provider = _TinyCodesignProvider(generator)
+    momentum = torch.randn(2, 3, 4)
+    energy = (
+        momentum.square().sum(dim=1, keepdim=True) + 1.0
+    ).sqrt()
+    batch = {
+        "points": torch.zeros(2, 2, 4),
+        "features": torch.randn(2, 17, 4),
+        "lorentz_vectors": torch.cat((momentum, energy), dim=1),
+        "mask": torch.ones(2, 1, 4, dtype=torch.bool),
+        "labels": torch.tensor([0, 1]),
+    }
+    result = run_recoverability_codesign(
+        generator=generator,
+        consumer=_TinyCodesignConsumer(),
+        train_provider=train_provider,
+        stop_provider=stop_provider,
+        train_loader=[batch],
+        stop_loader=[batch],
+        oracle_config=build_target_screen_recipe(
+            "VGEN_RECODESIGN"
+        ).oracle_objective,
+        provisional_generator_checkpoint_sha256=_sha("provisional-g"),
+        provisional_consumer_registration_sha256=_sha("provisional-c"),
+        output_dir=tmp_path,
+        seed=101,
+        device=torch.device("cpu"),
+    )
+    ledger = result["ledger"]
+    assert len(ledger["cycles"]) == 12
+    assert ledger["performance_early_termination"] is False
+    assert 1 <= result["selected_cycle"] <= 12
+    assert all(
+        not parameter.requires_grad
+        for parameter in generator.parameters()
+    )
+    assert train_provider.codesign_projection is result["projection"]
+    assert Path(
+        result["generator_checkpoint_path"]
+    ).is_file()
+    assert not (
+        tmp_path / "recoverability_codesign" / "cycle_checkpoints"
+    ).exists()

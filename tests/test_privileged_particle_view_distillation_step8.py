@@ -14,6 +14,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     assert_split_access,
     build_a0_a0_pair_recipes,
     build_fusion_recipe,
+    build_fairness_input_index,
     build_paired_statistics_report,
     build_sealed_split_authorization,
     build_selected_path_fairness_ledger,
@@ -25,9 +26,13 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     exact_two_sided_mcnemar_pvalue,
     expand_three_seed_confirmation_rows,
     fit_linear_logit_fusion,
+    resolve_confirmation_role,
     select_direct_resource_control,
     select_particle_view_winner_families,
+    sha256_file,
     with_content_hash,
+    validate_fairness_input_index,
+    write_immutable_json,
 )
 
 
@@ -217,6 +222,113 @@ def test_step8_seed_aggregation_and_winner_families_are_distinct():
     assert selection["minimum_quality_gate"] is None
 
 
+def _confirmation_candidate(
+    source_run_id: str,
+    *,
+    accuracy: float,
+    loss_id: str = "L_PRIMARY",
+    architecture_id: str = "P_HIER_DECODER_REFINE",
+    target_id: str = "TARGET_ALTERNATE_SELECTED",
+    mode: str = "frozen",
+    privileged: bool = True,
+):
+    return {
+        "configuration_id": f"config::{source_run_id}",
+        "source_run_id": source_run_id,
+        "campaign_row": {
+            "row_id": f"row::{source_run_id}",
+            "target_id": target_id,
+            "architecture_id": architecture_id,
+            "consumer_id": "C_ROBUST_MIX",
+            "loss_id": loss_id,
+            "mode": mode,
+            "selectable": True,
+            "privileged_claim_eligible": privileged,
+        },
+        "model_val_select": {
+            "split": "model_val_select",
+            "deployable_accuracy": accuracy,
+            "deployable_cross_entropy": 1.0 - accuracy,
+            "recovery_status": "finite" if privileged else "undefined",
+            "recovery_fraction": 0.2 if privileged else None,
+        },
+        "deployed_parameters": 1000,
+        "selectable": True,
+        "diagnostic": False,
+        "privileged_claim_eligible": privileged,
+        "pre_stage_g_deployable_eligible": True,
+        "checkpoint_sha256": _sha(source_run_id),
+        "checkpoint_path": f"/tmp/{source_run_id}.pt",
+        "registration_path": f"/tmp/{source_run_id}.json",
+        "registration_sha256": _sha(f"registration-{source_run_id}"),
+    }
+
+
+def test_step8_confirmation_role_resolution_is_numerical_and_non_gating():
+    canonical = _confirmation_candidate("DISTILL_CANONICAL", accuracy=0.80)
+    architecture_low = _confirmation_candidate(
+        "ARCH_P_C0_PART",
+        accuracy=0.81,
+        architecture_id="P_C0_PART",
+    )
+    architecture_high = _confirmation_candidate(
+        "ARCH_P_WIDTH256",
+        accuracy=0.83,
+        architecture_id="P_WIDTH256",
+    )
+    no_ce = _confirmation_candidate(
+        "DISTILL_NO_CE",
+        accuracy=0.79,
+        loss_id="L_PRIMARY_NO_CE",
+    )
+    ce_only = _confirmation_candidate(
+        "TRAINED_CONTROL_IDENTICAL_CE_ONLY",
+        accuracy=0.82,
+        loss_id="L_CE",
+        privileged=False,
+    )
+    joint = _confirmation_candidate(
+        "TRAINED_CONTROL_DVIEW_JOINT",
+        accuracy=0.84,
+        mode="joint",
+    )
+    joint_ce = _confirmation_candidate(
+        "TRAINED_CONTROL_DVIEW_JOINT_CE_ONLY",
+        accuracy=0.85,
+        mode="joint_ce_control",
+        privileged=False,
+    )
+    candidates = [
+        canonical,
+        architecture_low,
+        architecture_high,
+        no_ce,
+        ce_only,
+        joint,
+        joint_ce,
+    ]
+    assert resolve_confirmation_role(
+        "CANONICAL_PREDECLARED", candidates
+    )["source_run_id"] == "DISTILL_CANONICAL"
+    assert resolve_confirmation_role(
+        "BEST_ARCHITECTURE", candidates
+    )["source_run_id"] == "ARCH_P_WIDTH256"
+    assert resolve_confirmation_role(
+        "BEST_NO_CE", candidates
+    )["source_run_id"] == "DISTILL_NO_CE"
+    assert resolve_confirmation_role(
+        "CE_ONLY_UPPER_BOUND", candidates
+    )["source_run_id"] == "TRAINED_CONTROL_IDENTICAL_CE_ONLY"
+    assert resolve_confirmation_role(
+        "DVIEW_JOINT", candidates
+    )["source_run_id"] == "TRAINED_CONTROL_DVIEW_JOINT"
+    direct = resolve_confirmation_role(
+        "DIRECT_FLOP_CONTROL", candidates
+    )
+    assert direct["source_kind"] == "direct"
+    assert direct["diagnostic"]
+
+
 def _training_ledger(config: str, seed: int):
     return with_content_hash(
         {
@@ -292,6 +404,52 @@ def _fairness_and_authorization():
         stage_g_control_bundles=controls,
     )
     return selection, fairness, authorization
+
+
+def test_fairness_input_index_binds_only_winners_and_all_seeds(tmp_path):
+    selection = _selection()
+    bindings = {}
+    for configuration_id in ("priv", "ce_only"):
+        bindings[configuration_id] = {}
+        for seed in (101, 202, 303):
+            ledger_path = tmp_path / f"{configuration_id}_{seed}_ledger.json"
+            resource_path = (
+                tmp_path / f"{configuration_id}_{seed}_resource.json"
+            )
+            ledger = write_immutable_json(
+                ledger_path, _training_ledger(configuration_id, seed)
+            )
+            resource = write_immutable_json(
+                resource_path, _resource(configuration_id, seed)
+            )
+            bindings[configuration_id][seed] = {
+                "training_ledger": {
+                    "path": ledger["path"],
+                    "sha256": sha256_file(ledger["path"]),
+                },
+                "resource_profile": {
+                    "path": resource["path"],
+                    "sha256": sha256_file(resource["path"]),
+                },
+            }
+    index = build_fairness_input_index(
+        selection=selection,
+        configurations=bindings,
+        flop_fixture_sha256=_sha("fixture"),
+        flop_counter_sha256=_sha("counter"),
+    )
+    assert index["configuration_count"] == 2
+    assert index["replica_count"] == 6
+    assert validate_fairness_input_index(
+        index, selection=selection, verify_files=True
+    )["ok"]
+    stale = dict(index)
+    stale["selection_sha256"] = _sha("other")
+    stale["content_hash"] = _sha("invalid")
+    with pytest.raises(ValueError):
+        validate_fairness_input_index(
+            stale, selection=selection, verify_files=True
+        )
 
 
 def test_step8_fairness_closure_and_sealed_split_permissions_fail_closed():

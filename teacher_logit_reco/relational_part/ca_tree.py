@@ -7,6 +7,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
+import shlex
+import shutil
+import subprocess
+import sys
 import tempfile
 from typing import Any, Mapping, Sequence
 
@@ -27,12 +32,12 @@ from .region_tree import (
 )
 
 
-ANGULAR_TREE_RESOURCE_CONTRACT = "relational_part_angular_tree_resource_v1"
+ANGULAR_TREE_RESOURCE_CONTRACT = "relational_part_angular_tree_resource_v2"
 ANGULAR_TREE_BACKEND_CONTRACT = "relational_ca_tree_v1"
-ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT = "relational_ca_tree_backend_manifest_v1"
+ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT = "relational_ca_tree_backend_manifest_v2"
 ANGULAR_TREE_SHARD_CONTRACT = "relational_ca_tree_shard_v1"
 ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT = "relational_ca_tree_split_manifest_v1"
-ANGULAR_TREE_PROBE_CONTRACT = "relational_ca_tree_throughput_probe_v1"
+ANGULAR_TREE_PROBE_CONTRACT = "relational_ca_tree_throughput_probe_v2"
 TREE_SHARD_MAX_JETS = 10_000
 TREE_PROBE_STRATA = (
     (0, 8), (9, 16), (17, 24), (25, 32), (33, 40),
@@ -50,7 +55,7 @@ def build_angular_tree_resource_contract(
     return with_content_hash(
         {
             "contract": ANGULAR_TREE_RESOURCE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "split_binding_sha256": split_binding_sha256,
             "backend_contract": ANGULAR_TREE_BACKEND_CONTRACT,
             "algorithm": {
@@ -90,9 +95,12 @@ def build_angular_tree_resource_contract(
                 "maximum_constituents": 128,
             },
             "required_backend_identity": [
-                "contract_id", "schema_version", "source_sha256",
+                "contract_id", "schema_version", "backend_schema_version",
+                "source_sha256",
                 "binary_sha256", "compiler_identity",
-                "compiler_major_version", "compiler_flags",
+                "compiler_major_version", "compiler_version",
+                "compiler_executable", "compiler_driver_version_line",
+                "compiler_flags",
                 "platform_architecture", "python_major_minor",
                 "pytorch_version", "pytorch_cxx11_abi",
                 "openmp_available", "self_test_sha256",
@@ -129,13 +137,17 @@ def validate_backend_manifest(
     *,
     binary_path: Path | None = None,
     source_path: Path | None = None,
+    check_runtime_environment: bool = False,
+    runtime_module: Any | None = None,
 ) -> str:
     digest = validate_content_hash(
         manifest, expected_contract=ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT
     )
     required = {
-        "contract_id", "schema_version", "source_sha256", "binary_sha256",
-        "compiler_identity", "compiler_major_version", "compiler_flags",
+        "contract_id", "schema_version", "backend_schema_version",
+        "source_sha256", "binary_sha256",
+        "compiler_identity", "compiler_major_version", "compiler_version",
+        "compiler_executable", "compiler_driver_version_line", "compiler_flags",
         "platform_architecture", "python_major_minor", "pytorch_version",
         "pytorch_cxx11_abi", "openmp_available", "self_test_sha256",
     }
@@ -143,6 +155,14 @@ def validate_backend_manifest(
         raise ValueError("tree backend manifest lacks required ABI identity")
     if manifest["contract_id"] != ANGULAR_TREE_BACKEND_CONTRACT:
         raise ValueError("tree backend contract ID differs")
+    if int(manifest.get("schema_version", -1)) != 2:
+        raise ValueError("tree backend manifest schema differs")
+    if (
+        not str(manifest["compiler_identity"])
+        or int(manifest["compiler_major_version"]) <= 0
+        or not str(manifest["compiler_version"])
+    ):
+        raise ValueError("tree backend compiler identity is incomplete")
     flags = list(manifest["compiler_flags"])
     required_flags = {
         "-O3", "-fno-fast-math", "-fno-associative-math", "-ffp-contract=off"
@@ -159,6 +179,73 @@ def validate_backend_manifest(
         raise ValueError("tree backend binary hash differs")
     if source_path is not None and sha256_file(source_path) != manifest["source_sha256"]:
         raise ValueError("tree backend source hash differs")
+    if check_runtime_environment:
+        try:
+            import torch
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError("backend ABI validation requires PyTorch") from exc
+        current = {
+            "platform_architecture": platform.machine(),
+            "python_major_minor": (
+                f"{sys.version_info.major}.{sys.version_info.minor}"
+            ),
+            "pytorch_version": torch.__version__,
+            "pytorch_cxx11_abi": bool(torch._C._GLIBCXX_USE_CXX11_ABI),
+        }
+        architecture_aliases = {
+            "AMD64": "x86_64",
+            "arm64": "aarch64",
+        }
+        current["platform_architecture"] = architecture_aliases.get(
+            current["platform_architecture"],
+            current["platform_architecture"],
+        )
+        for field, value in current.items():
+            if manifest.get(field) != value:
+                raise RuntimeError(
+                    f"tree backend runtime environment differs at {field}"
+                )
+        compiler_command = shlex.split(os.environ.get("CXX", "c++"))
+        executable = (
+            shutil.which(compiler_command[0]) if compiler_command else None
+        )
+        if executable is None:
+            raise RuntimeError("selected CXX compiler is absent at load time")
+        driver_line = subprocess.run(
+            [*compiler_command, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()[0]
+        if driver_line != manifest["compiler_driver_version_line"]:
+            raise RuntimeError("tree backend compiler driver identity differs")
+        if runtime_module is not None:
+            runtime = dict(runtime_module.backend_manifest())
+            runtime_fields = {
+                "contract_id": runtime.get("contract_id"),
+                "backend_schema_version": runtime.get("schema_version"),
+                "compiler_flags": list(runtime.get("compiler_flags", ())),
+                "compiler_identity": runtime.get("compiler_family"),
+                "compiler_major_version": int(
+                    runtime.get("compiler_major_version", -1)
+                ),
+                "compiler_version": runtime.get("compiler_version"),
+                "platform_architecture": runtime.get(
+                    "platform_architecture"
+                ),
+                "pytorch_cxx11_abi": runtime.get("pytorch_cxx11_abi"),
+                "openmp_available": runtime.get("openmp_available"),
+            }
+            for field, value in runtime_fields.items():
+                expected = (
+                    list(manifest[field])
+                    if field == "compiler_flags"
+                    else manifest[field]
+                )
+                if value != expected:
+                    raise RuntimeError(
+                        f"loaded tree backend differs at {field}"
+                    )
     return digest
 
 
@@ -179,9 +266,16 @@ def load_tree_backend(
         raise RuntimeError("cannot construct tree backend import specification")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    validate_backend_manifest(
+        manifest,
+        binary_path=binary_path,
+        source_path=source_path,
+        check_runtime_environment=True,
+        runtime_module=module,
+    )
     runtime_manifest = module.backend_manifest()
     for field in (
-        "contract_id", "schema_version", "compiler_flags",
+        "contract_id", "compiler_flags",
         "pytorch_cxx11_abi", "openmp_available",
     ):
         runtime_value = runtime_manifest.get(field)
@@ -404,6 +498,71 @@ def write_tree_shard(
     return {"reused": False, "metadata": metadata}
 
 
+def validate_existing_tree_shard(
+    output_path: Path,
+    identities: Sequence[Any],
+    *,
+    hlt_content_sha256: str,
+    tree_resource_sha256: str,
+    backend_manifest_sha256: str,
+    recover_unregistered_partial: bool = False,
+) -> dict[str, Any] | None:
+    """Return authenticated metadata for a complete shard, else ``None``.
+
+    A one-sided or partially written shard is never reusable.  A present but
+    stale shard fails closed instead of being silently replaced.
+    """
+
+    output_path = output_path.resolve()
+    metadata_path = output_path.with_suffix(".metadata.json")
+    if not output_path.exists() and not metadata_path.exists():
+        return None
+    if output_path.exists() != metadata_path.exists():
+        present = output_path if output_path.exists() else metadata_path
+        if (
+            not recover_unregistered_partial
+            or present.is_symlink()
+            or not present.is_file()
+        ):
+            raise FileExistsError("tree shard is partial or unsafe")
+        # The metadata file is the completion marker and both files are
+        # required. A one-sided artifact is unregistered by contract and may
+        # be removed by an explicitly resumable worker before reconstruction.
+        present.unlink()
+        return None
+    if (
+        output_path.is_symlink()
+        or metadata_path.is_symlink()
+        or not output_path.is_file()
+        or not metadata_path.is_file()
+    ):
+        raise FileExistsError("tree shard is partial or unsafe")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    validate_content_hash(
+        metadata, expected_contract=ANGULAR_TREE_SHARD_CONTRACT
+    )
+    expected_parent = {
+        "hlt_content_sha256": require_sha256(
+            hlt_content_sha256, name="hlt_content_sha256"
+        ),
+        "tree_resource_sha256": require_sha256(
+            tree_resource_sha256, name="tree_resource_sha256"
+        ),
+        "backend_manifest_sha256": require_sha256(
+            backend_manifest_sha256, name="backend_manifest_sha256"
+        ),
+    }
+    identity_keys = [_identity_key(value) for value in identities]
+    if (
+        metadata.get("parents") != expected_parent
+        or metadata.get("identity_sha256") != _identity_hash(identity_keys)
+        or metadata.get("npz_sha256") != sha256_file(output_path)
+        or int(metadata.get("jet_count", -1)) != len(identity_keys)
+    ):
+        raise FileExistsError("existing tree shard is stale or incompatible")
+    return metadata
+
+
 def finalize_tree_split(
     output_path: Path,
     shard_metadata_paths: Sequence[Path],
@@ -496,7 +655,8 @@ def select_tree_probe(
             ).digest(),
             keys[index],
         ))
-    quotas = [min(2_000, len(values)) for values in strata]
+    initial_quotas = [min(2_000, len(values)) for values in strata]
+    quotas = list(initial_quotas)
     deficit = sample_count - sum(quotas)
     remaining = [len(values) - quotas[index] for index, values in enumerate(strata)]
     while deficit > 0:
@@ -536,7 +696,11 @@ def select_tree_probe(
         "selected_indices": np.asarray(selected, dtype=np.int64),
         "parity_indices": np.asarray(parity, dtype=np.int64),
         "stratum_populations": [len(values) for values in strata],
+        "initial_quotas": initial_quotas,
         "final_quotas": quotas,
+        "redistributed_additions": [
+            quotas[index] - initial_quotas[index] for index in range(10)
+        ],
         "selected_identity_sha256": _identity_hash([keys[i] for i in selected]),
         "selection_salt": "rpt_tree_probe_v1",
         "parity_salt": "rpt_tree_probe_parity_v1",
@@ -553,6 +717,13 @@ def build_tree_probe_artifact(
     parity_topology_exact: bool,
     parity_max_continuous_absolute_error: float,
     total_campaign_jets: int = 1_750_000,
+    hlt_content_sha256: str | None = None,
+    tree_resource_sha256: str | None = None,
+    backend_manifest_sha256: str | None = None,
+    storage_projection: Mapping[str, Any] | None = None,
+    storage_measurement_policy: str = (
+        "caller_supplied_persisted_bytes_per_jet"
+    ),
     operational_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected = np.asarray(selection["selected_indices"], dtype=np.int64)
@@ -599,17 +770,106 @@ def build_tree_probe_artifact(
         )
     projected_shard_hours = TREE_SHARD_MAX_JETS * weighted_ms / 3.6e6
     projected_cpu_node_hours = int(total_campaign_jets) * weighted_ms / 3.6e6
-    limits_ok = (
+    provenance_values = (
+        hlt_content_sha256,
+        tree_resource_sha256,
+        backend_manifest_sha256,
+    )
+    if any(value is not None for value in provenance_values) and not all(
+        value is not None for value in provenance_values
+    ):
+        raise ValueError("tree probe production parents must be supplied together")
+    parents = None
+    if all(value is not None for value in provenance_values):
+        parents = {
+            "hlt_content_sha256": require_sha256(
+                hlt_content_sha256, name="hlt_content_sha256"
+            ),
+            "tree_resource_sha256": require_sha256(
+                tree_resource_sha256, name="tree_resource_sha256"
+            ),
+            "backend_manifest_sha256": require_sha256(
+                backend_manifest_sha256, name="backend_manifest_sha256"
+            ),
+        }
+    projected_tree_bytes = weighted_bytes * int(total_campaign_jets)
+    storage_check = {
+        "authenticated_projection_supplied": storage_projection is not None,
+        "passed": True,
+        "projected_campaign_bytes_with_probe_tree_measurement": None,
+        "projected_free_bytes_after_campaign": None,
+    }
+    storage_parent_sha = None
+    if storage_projection is not None:
+        storage_parent_sha = validate_content_hash(storage_projection)
+        if storage_projection.get("ok") is not True:
+            raise ValueError("tree probe storage parent is not safe")
+        old_tree_bytes = float(
+            storage_projection["component_bytes"][
+                "compact_region_tree_sidecars"
+            ]
+        )
+        revised_total = (
+            float(storage_projection["projected_bytes"])
+            - old_tree_bytes
+            + projected_tree_bytes
+        )
+        revised_free = (
+            float(storage_projection["available_bytes"]) - revised_total
+        )
+        storage_passed = (
+            revised_total <= float(storage_projection["budget_bytes"])
+            and revised_free
+            >= float(storage_projection["minimum_free_reserve_bytes"])
+        )
+        storage_check = {
+            "authenticated_projection_supplied": True,
+            "passed": bool(storage_passed),
+            "projected_campaign_bytes_with_probe_tree_measurement": revised_total,
+            "projected_free_bytes_after_campaign": revised_free,
+        }
+    continuous_parity_tolerance = 2.0e-6
+    parity_ok = (
+        parity_topology_exact
+        and float(parity_max_continuous_absolute_error)
+        <= continuous_parity_tolerance
+    )
+    if not parity_ok:
+        raise RuntimeError(
+            "tree topology/feature parity is a non-overridable failure"
+        )
+    operational_limits_ok = (
         projected_shard_hours <= 2.0
         and projected_cpu_node_hours <= 48.0
-        and parity_topology_exact
+        and storage_check["passed"]
     )
-    if not limits_ok and operational_override is None:
-        raise RuntimeError("tree throughput/parity probe blocks bulk-cache submission")
+    normalized_override = None
+    if operational_override is not None:
+        normalized_override = {
+            "reason": str(operational_override.get("reason", "")).strip(),
+            "authorized_by": str(
+                operational_override.get("authorized_by", "")
+            ).strip(),
+            "recorded_at_utc": str(
+                operational_override.get("recorded_at_utc", "")
+            ).strip(),
+        }
+        if not all(normalized_override.values()):
+            raise ValueError("tree operational override is incomplete")
+    if not operational_limits_ok and normalized_override is None:
+        raise RuntimeError(
+            "tree throughput/storage probe blocks bulk-cache submission"
+        )
+    bulk_submission_authorized = (
+        operational_limits_ok or normalized_override is not None
+    )
     return with_content_hash(
         {
             "contract": ANGULAR_TREE_PROBE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
+            "parents": parents,
+            "storage_projection_sha256": storage_parent_sha,
+            "scientific_provenance_complete": parents is not None,
             "selection_salt": selection["selection_salt"],
             "parity_salt": selection["parity_salt"],
             "selected_identity_sha256": selection[
@@ -620,6 +880,11 @@ def build_tree_probe_artifact(
                 len(selection["parity_indices"])
             ),
             "strata": stratum_rows,
+            "initial_quotas": list(selection["initial_quotas"]),
+            "final_quotas": list(selection["final_quotas"]),
+            "redistributed_additions": list(
+                selection["redistributed_additions"]
+            ),
             "weighted_jets_per_second": 1000.0 / weighted_ms,
             "milliseconds": {
                 "p50": float(np.quantile(elapsed, .5, method="linear")),
@@ -628,9 +893,8 @@ def build_tree_probe_artifact(
             },
             "peak_resident_bytes": int(peak_resident_bytes),
             "weighted_persisted_bytes_per_jet": weighted_bytes,
-            "projected_campaign_storage_bytes": (
-                weighted_bytes * int(total_campaign_jets)
-            ),
+            "storage_measurement_policy": str(storage_measurement_policy),
+            "projected_campaign_storage_bytes": projected_tree_bytes,
             "projected_shard_hours": projected_shard_hours,
             "projected_cpu_node_hours": projected_cpu_node_hours,
             "parity": {
@@ -638,16 +902,20 @@ def build_tree_probe_artifact(
                 "max_continuous_absolute_error": float(
                     parity_max_continuous_absolute_error
                 ),
+                "continuous_absolute_tolerance": (
+                    continuous_parity_tolerance
+                ),
                 "storage_cast": "float64_to_float32_once",
             },
+            "storage_check": storage_check,
             "limits": {
                 "maximum_projected_shard_hours": 2.0,
                 "maximum_projected_cpu_node_hours": 48.0,
-                "passed": limits_ok,
+                "passed_without_override": operational_limits_ok,
+                "bulk_submission_authorized": bulk_submission_authorized,
+                "passed": bulk_submission_authorized,
             },
-            "operational_override": (
-                None if operational_override is None else dict(operational_override)
-            ),
+            "operational_override": normalized_override,
         }
     )
 
@@ -669,6 +937,7 @@ __all__ = [
     "pack_tree_shard",
     "select_tree_probe",
     "unpack_tree_shard",
+    "validate_existing_tree_shard",
     "validate_backend_manifest",
     "write_tree_shard",
 ]

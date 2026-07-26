@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
+import shutil
 from typing import Any, Mapping
 
 import numpy as np
@@ -50,12 +51,18 @@ from .offline_teacher import (
 )
 from .oracle_discovery import (
     OracleObjectiveConfig,
+    RecoverabilityCoDesignConfig,
+    RecoverabilityCoDesignProjection,
+    build_codesign_ledger,
     build_target_metrics_from_counterfactual,
     build_two_pass_candidate_artifact,
+    co_design_projection_loss,
+    select_codesign_cycle,
 )
 from .recovery_probe import (
     FixedCapacityRecoveryProbe,
     RecoveryProbeConfig,
+    recovery_probe_losses,
     train_recovery_probe,
 )
 from .registry import validate_particle_view_registry
@@ -609,6 +616,7 @@ class StagedDiscoveryViewProvider:
         memory_layer_width: int | None = None,
         secondary_staged_memory: StagedContextualMemory | None = None,
         teacher_mixture: TwoTeacherTokenMixture | None = None,
+        codesign_projection: RecoverabilityCoDesignProjection | None = None,
     ) -> None:
         if memory_source not in {"offline", "hlt"}:
             raise ValueError("memory_source must be offline or hlt")
@@ -630,6 +638,7 @@ class StagedDiscoveryViewProvider:
         self.memory_layer_width = memory_layer_width
         self.secondary_staged_memory = secondary_staged_memory
         self.teacher_mixture = teacher_mixture
+        self.codesign_projection = codesign_projection
 
     def __call__(self, batch: Mapping[str, Any]) -> dict[str, torch.Tensor]:
         required = {
@@ -732,9 +741,27 @@ class StagedDiscoveryViewProvider:
             query_mask=batch["mask"][:, 0],
             memory_mask=memory_mask,
         )
+        if self.codesign_projection is None:
+            return {
+                "view": output.view,
+                "raw_centered_view": output.deterministic_centered_view,
+            }
+        deterministic = self.codesign_projection(
+            output.rich_context,
+            batch["mask"][:, 0],
+        )
+        view = (
+            self.generator._augment(
+                deterministic,
+                batch["mask"][:, 0],
+                generator=None,
+            )
+            if self.codesign_projection.training
+            else deterministic
+        )
         return {
-            "view": output.view,
-            "raw_centered_view": output.deterministic_centered_view,
+            "view": view,
+            "raw_centered_view": deterministic,
         }
 
 
@@ -1140,6 +1167,429 @@ def _generator_checkpoint(
     return sha256_file(output_path)
 
 
+class _CyclingBatches:
+    def __init__(self, loader) -> None:
+        self.loader = loader
+        self.iterator = iter(loader)
+
+    def next(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.iterator = iter(self.loader)
+            try:
+                return next(self.iterator)
+            except StopIteration as exc:
+                raise ValueError("co-design loader is empty") from exc
+
+
+def _device_batch(
+    raw: Mapping[str, Any],
+    device: torch.device,
+) -> dict[str, Any]:
+    return {
+        name: (
+            value.to(device=device, non_blocking=True)
+            if isinstance(value, torch.Tensor)
+            else value
+        )
+        for name, value in raw.items()
+    }
+
+
+def _set_trainable(module: torch.nn.Module, trainable: bool) -> None:
+    for parameter in module.parameters():
+        parameter.requires_grad_(trainable)
+        if not trainable:
+            parameter.grad = None
+    module.train(trainable)
+
+
+def _evaluate_codesign_cycle(
+    *,
+    consumer: ParticleViewConsumer,
+    probe: FixedCapacityRecoveryProbe,
+    provider: StagedDiscoveryViewProvider,
+    loader,
+    device: torch.device,
+) -> dict[str, float]:
+    consumer.eval()
+    probe.eval()
+    provider.generator.eval()
+    provider.codesign_projection.eval()
+    totals = {
+        "zero_correct": 0,
+        "true_correct": 0,
+        "predicted_correct": 0,
+        "predicted_ce": 0.0,
+        "examples": 0,
+    }
+    with torch.no_grad():
+        for raw in loader:
+            batch = _device_batch(raw, device)
+            true_view = provider(batch)["raw_centered_view"]
+            predicted_view = probe(
+                batch["features"], batch["mask"][:, 0]
+            )
+            zero_view = torch.zeros_like(true_view)
+            forwards = {}
+            for name, view in (
+                ("zero", zero_view),
+                ("true", true_view),
+                ("predicted", predicted_view),
+            ):
+                forwards[name] = consumer(
+                    batch["points"],
+                    batch["features"],
+                    batch["lorentz_vectors"],
+                    batch["mask"],
+                    view,
+                    augment_clean_view=False,
+                ).logits
+            labels = batch["labels"]
+            totals["zero_correct"] += int(
+                forwards["zero"].argmax(dim=1).eq(labels).sum().item()
+            )
+            totals["true_correct"] += int(
+                forwards["true"].argmax(dim=1).eq(labels).sum().item()
+            )
+            totals["predicted_correct"] += int(
+                forwards["predicted"].argmax(dim=1).eq(labels).sum().item()
+            )
+            totals["predicted_ce"] += float(
+                torch.nn.functional.cross_entropy(
+                    forwards["predicted"].float(),
+                    labels,
+                    reduction="sum",
+                ).item()
+            )
+            totals["examples"] += int(labels.numel())
+    examples = int(totals["examples"])
+    if examples == 0:
+        raise ValueError("co-design validation loader is empty")
+    zero_accuracy = totals["zero_correct"] / examples
+    true_accuracy = totals["true_correct"] / examples
+    predicted_accuracy = totals["predicted_correct"] / examples
+    return {
+        "zero_view_accuracy": zero_accuracy,
+        "oracle_accuracy": true_accuracy,
+        "predicted_view_accuracy": predicted_accuracy,
+        "oracle_gain": true_accuracy - zero_accuracy,
+        "predicted_gain": predicted_accuracy - zero_accuracy,
+        "cross_entropy": totals["predicted_ce"] / examples,
+        "examples": examples,
+    }
+
+
+def run_recoverability_codesign(
+    *,
+    generator: MatchingFreeParticleViewGenerator,
+    consumer: ParticleViewConsumer,
+    train_provider: StagedDiscoveryViewProvider,
+    stop_provider: StagedDiscoveryViewProvider,
+    train_loader,
+    stop_loader,
+    oracle_config: OracleObjectiveConfig,
+    provisional_generator_checkpoint_sha256: str,
+    provisional_consumer_registration_sha256: str,
+    output_dir: str | Path,
+    seed: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Run the locked 12-cycle persistent-probe co-design procedure."""
+
+    config = RecoverabilityCoDesignConfig(
+        view_dim=generator.config.bottleneck_width,
+        seed=seed,
+    )
+    if generator.config.width != config.rich_dim:
+        raise ValueError("co-design rich-context width changed")
+    torch.manual_seed(seed)
+    projection = RecoverabilityCoDesignProjection(config).to(device)
+    probe_config = RecoveryProbeConfig(
+        view_dim=config.view_dim,
+        seed=seed,
+    )
+    probe = FixedCapacityRecoveryProbe(probe_config).to(device)
+    consumer = consumer.to(device)
+    generator = generator.to(device).eval()
+    _set_trainable(generator, False)
+    train_provider.codesign_projection = projection
+    stop_provider.codesign_projection = projection
+
+    root = Path(output_dir).resolve() / "recoverability_codesign"
+    cycle_root = root / "cycle_checkpoints"
+    cycle_root.mkdir(parents=True, exist_ok=True)
+    rich_registration = with_content_hash(
+        {
+            "contract": "particle_view_rview_registration_v1",
+            "generator_config_sha256": generator.config.content_hash,
+            "provisional_generator_checkpoint_sha256": (
+                provisional_generator_checkpoint_sha256
+            ),
+            "rich_width": config.rich_dim,
+            "rich_context_normalization": "LayerNorm",
+            "bottleneck_parameters_excluded_from_coordinate": True,
+            "frozen_for_all_codesign_cycles": True,
+        }
+    )
+    write_immutable_json(
+        root / "rich_context_registration.json",
+        rich_registration,
+    )
+    provisional_head = with_content_hash(
+        {
+            "contract": "particle_view_codesign_provisional_head_v1",
+            "provisional_generator_checkpoint_sha256": (
+                provisional_generator_checkpoint_sha256
+            ),
+            "provisional_consumer_registration_sha256": (
+                provisional_consumer_registration_sha256
+            ),
+            "head_role": "Bseed",
+            "discarded_before_cycle_1": True,
+        }
+    )
+    write_immutable_json(
+        root / "provisional_head_registration.json",
+        provisional_head,
+    )
+
+    probe_optimizer = torch.optim.AdamW(
+        probe.parameters(),
+        lr=config.probe_learning_rate,
+        weight_decay=config.probe_weight_decay,
+    )
+    projection_optimizer = torch.optim.AdamW(
+        projection.parameters(),
+        lr=config.projection_learning_rate,
+        weight_decay=config.projection_weight_decay,
+    )
+    consumer_optimizer = torch.optim.AdamW(
+        consumer.parameters(),
+        lr=config.consumer_learning_rate,
+        weight_decay=config.consumer_weight_decay,
+    )
+    cycling = _CyclingBatches(train_loader)
+    cycle_rows = []
+    checkpoint_paths: dict[int, dict[str, Path]] = {}
+    for cycle in range(1, config.cycles + 1):
+        _set_trainable(probe, True)
+        _set_trainable(projection, False)
+        _set_trainable(consumer, False)
+        for _ in range(config.probe_steps_per_cycle):
+            batch = _device_batch(cycling.next(), device)
+            with torch.no_grad():
+                target = train_provider(batch)["raw_centered_view"]
+            probe_optimizer.zero_grad(set_to_none=True)
+            prediction = probe(
+                batch["features"], batch["mask"][:, 0]
+            )
+            probe_loss = recovery_probe_losses(
+                prediction,
+                target,
+                batch["mask"][:, 0],
+            )["total"]
+            if not torch.isfinite(probe_loss):
+                raise FloatingPointError("co-design probe loss is non-finite")
+            probe_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                probe.parameters(), config.gradient_clip
+            )
+            probe_optimizer.step()
+
+        _set_trainable(probe, False)
+        _set_trainable(projection, True)
+        _set_trainable(consumer, True)
+        for _ in range(config.projection_steps_per_cycle):
+            batch = _device_batch(cycling.next(), device)
+            projection_optimizer.zero_grad(set_to_none=True)
+            consumer_optimizer.zero_grad(set_to_none=True)
+            generated = train_provider(batch)
+            deterministic = generated["raw_centered_view"]
+            with torch.no_grad():
+                probe_prediction = probe(
+                    batch["features"], batch["mask"][:, 0]
+                )
+            consumer_output = consumer(
+                batch["points"],
+                batch["features"],
+                batch["lorentz_vectors"],
+                batch["mask"],
+                generated["view"],
+                augment_clean_view=False,
+            )
+            losses = co_design_projection_loss(
+                consumer_logits=consumer_output.logits,
+                labels=batch["labels"],
+                offline_logits=batch["offline_logits"],
+                raw_centered_view=deterministic,
+                probe_prediction=probe_prediction,
+                mask=batch["mask"][:, 0],
+                trust_loss=consumer_output.trust_loss,
+                oracle_config=oracle_config,
+            )
+            if not torch.isfinite(losses["total"]):
+                raise FloatingPointError(
+                    "co-design projection loss is non-finite"
+                )
+            losses["total"].backward()
+            torch.nn.utils.clip_grad_norm_(
+                projection.parameters(), config.gradient_clip
+            )
+            torch.nn.utils.clip_grad_norm_(
+                consumer.parameters(), config.gradient_clip
+            )
+            projection_optimizer.step()
+            consumer_optimizer.step()
+
+        metrics = _evaluate_codesign_cycle(
+            consumer=consumer,
+            probe=probe,
+            provider=stop_provider,
+            loader=stop_loader,
+            device=device,
+        )
+        paths = {
+            "projection": cycle_root / f"cycle_{cycle:02d}_projection.pt",
+            "consumer": cycle_root / f"cycle_{cycle:02d}_consumer.pt",
+            "probe": cycle_root / f"cycle_{cycle:02d}_probe.pt",
+        }
+        torch.save(
+            {
+                "contract": "particle_view_codesign_projection_cycle_v1",
+                "cycle": cycle,
+                "config": config.to_payload(),
+                "model_state_dict": projection.state_dict(),
+            },
+            paths["projection"],
+        )
+        torch.save(
+            {
+                "contract": "particle_view_codesign_consumer_cycle_v1",
+                "cycle": cycle,
+                "consumer_config": consumer.config.to_payload(),
+                "model_state_dict": consumer.state_dict(),
+            },
+            paths["consumer"],
+        )
+        torch.save(
+            {
+                "contract": "particle_view_codesign_probe_cycle_v1",
+                "cycle": cycle,
+                "probe_config": probe_config.to_payload(),
+                "model_state_dict": probe.state_dict(),
+            },
+            paths["probe"],
+        )
+        checkpoint_paths[cycle] = paths
+        cycle_rows.append(
+            {
+                "cycle": cycle,
+                **metrics,
+                "probe_optimizer_steps": config.probe_steps_per_cycle,
+                "projection_consumer_optimizer_steps": (
+                    config.projection_steps_per_cycle
+                ),
+                "projection_checkpoint_sha256": sha256_file(
+                    paths["projection"]
+                ),
+                "consumer_checkpoint_sha256": sha256_file(
+                    paths["consumer"]
+                ),
+                "probe_checkpoint_sha256": sha256_file(paths["probe"]),
+            }
+        )
+
+    selected = select_codesign_cycle(cycle_rows)
+    selected_cycle = int(selected["cycle"])
+    selected_paths = checkpoint_paths[selected_cycle]
+    final_paths = {
+        "projection": root / "selected_projection.pt",
+        "consumer": root / "selected_consumer.pt",
+        "probe": root / "selected_persistent_probe.pt",
+    }
+    for name, source in selected_paths.items():
+        shutil.copyfile(source, final_paths[name])
+    projection_payload = torch.load(
+        final_paths["projection"],
+        map_location="cpu",
+        weights_only=False,
+    )
+    projection.load_state_dict(
+        projection_payload["model_state_dict"], strict=True
+    )
+    projection.to(device).eval()
+    train_provider.codesign_projection = projection
+    stop_provider.codesign_projection = projection
+    final_projection_sha256 = sha256_file(final_paths["projection"])
+    ledger = build_codesign_ledger(
+        config=config,
+        rich_context_registration_sha256=rich_registration["content_hash"],
+        provisional_head_registration_sha256=provisional_head[
+            "content_hash"
+        ],
+        cycles=cycle_rows,
+        selected_cycle=selected_cycle,
+        final_projection_checkpoint_sha256=final_projection_sha256,
+    )
+    write_immutable_json(root / "codesign_ledger.json", ledger)
+    write_immutable_json(
+        root / "cycle_metrics.json",
+        with_content_hash(
+            {
+                "contract": "particle_view_codesign_cycle_metrics_v1",
+                "config": config.to_payload(),
+                "cycles": cycle_rows,
+                "selected_cycle": selected_cycle,
+                "selected_metrics": selected,
+                "performance_early_termination": False,
+            }
+        ),
+    )
+    codesigned_generator_path = root / "codesigned_generator.pt"
+    torch.save(
+        {
+            "contract": "particle_view_codesigned_generator_v1",
+            "generator_config": generator.config.to_payload(),
+            "generator_state_dict": generator.state_dict(),
+            "projection_config": config.to_payload(),
+            "projection_state_dict": projection.state_dict(),
+            "rich_context_registration_sha256": rich_registration[
+                "content_hash"
+            ],
+            "codesign_ledger_sha256": ledger["content_hash"],
+            "selected_cycle": selected_cycle,
+        },
+        codesigned_generator_path,
+    )
+    for paths in checkpoint_paths.values():
+        for path in paths.values():
+            path.unlink()
+    cycle_root.rmdir()
+    return {
+        "projection": projection,
+        "consumer": consumer,
+        "persistent_probe": probe,
+        "generator_checkpoint_path": codesigned_generator_path,
+        "generator_checkpoint_sha256": sha256_file(
+            codesigned_generator_path
+        ),
+        "ledger": ledger,
+        "selected_cycle": selected_cycle,
+        "artifact_paths": [
+            root / "rich_context_registration.json",
+            root / "provisional_head_registration.json",
+            root / "selected_projection.pt",
+            root / "selected_consumer.pt",
+            root / "selected_persistent_probe.pt",
+            root / "codesign_ledger.json",
+            root / "cycle_metrics.json",
+            codesigned_generator_path,
+        ],
+    }
+
+
 def run_canonical_target_discovery(
     *,
     recipe: TargetScreenRecipe,
@@ -1148,6 +1598,7 @@ def run_canonical_target_discovery(
     secondary_memory_teacher: FrozenContextualParticleTeacher | None,
     consumer_model: ParticleViewConsumer,
     probe_consumer_model: ParticleViewConsumer,
+    codesign_consumer_model: ParticleViewConsumer | None,
     query_mixture: FrozenTokenLayerMixture | None,
     memory_mixture: FrozenTokenLayerMixture | None,
     teacher_mixture: TwoTeacherTokenMixture | None,
@@ -1398,6 +1849,31 @@ def run_canonical_target_discovery(
         recipe=recipe_payload,
         output_path=generator_path,
     )
+    codesign_result = None
+    if recipe.recoverability_codesign:
+        if codesign_consumer_model is None:
+            raise ValueError("co-design row omitted its fresh A0 consumer")
+        codesign_result = run_recoverability_codesign(
+            generator=generator,
+            consumer=codesign_consumer_model,
+            train_provider=train_provider,
+            stop_provider=stop_provider,
+            train_loader=train_loader,
+            stop_loader=stop_loader,
+            oracle_config=recipe.oracle_objective,
+            provisional_generator_checkpoint_sha256=generator_sha256,
+            provisional_consumer_registration_sha256=load_hashed_json(
+                output / "consumer_registration.json"
+            )["content_hash"],
+            output_dir=output,
+            seed=seed,
+            device=resolved_device,
+        )
+        generator_sha256 = codesign_result[
+            "generator_checkpoint_sha256"
+        ]
+    elif codesign_consumer_model is not None:
+        raise ValueError("ordinary target received a co-design consumer")
     target = build_target_candidate_registration(
         target_id=recipe.run_id,
         campaign_id=PARTICLE_VIEW_LOW_DATA_CAMPAIGN_ID,
@@ -1649,6 +2125,11 @@ def run_canonical_target_discovery(
         ),
         secondary_staged_memory=select_secondary_memory,
         teacher_mixture=teacher_mixture,
+        codesign_projection=(
+            None
+            if codesign_result is None
+            else codesign_result["projection"]
+        ),
     )
     raw_select = materialize_candidate_views_in_ram(
         aligned=select_aligned,
@@ -1773,12 +2254,20 @@ def run_canonical_target_discovery(
             "target_metrics_sha256": target_metrics["content_hash"],
             "two_pass_candidate_sha256": two_pass["content_hash"],
             "quantization_diagnostics_sha256": quantization["content_hash"],
+            "codesign_ledger_sha256": (
+                None
+                if codesign_result is None
+                else codesign_result["ledger"]["content_hash"]
+            ),
             "model_val_select_staged_tap_manifest_sha256": (
                 select_memory.staged_tap.manifest["content_hash"]
             ),
             "view_payloads_persisted": False,
             "model_val_select_used_for_fitting": False,
             "quality_gate_used": False,
+            "recoverability_codesign_completed": (
+                codesign_result is not None
+            ),
         }
     )
     write_immutable_json(
@@ -1960,6 +2449,17 @@ def build_target_discovery_factory_config(
             "baseline_factory_config_sha256": (
                 baseline_factory_config_sha256
             ),
+            "runtime_availability": {
+                run_id: (
+                    "unavailable_non_gating"
+                    if (
+                        run_id == "VGEN_TEACHER_EXISTING"
+                        and existing_teacher is None
+                    )
+                    else "complete_two_pass"
+                )
+                for run_id in TARGET_SCREEN_IDS
+            },
             "production_scope": "complete_target_screen_two_pass_v1",
             "two_pass_probe_required_before_target_ranking": True,
             "quality_warnings_non_gating": True,
@@ -1989,6 +2489,7 @@ def validate_target_discovery_factory_config(
         "compatibility",
         "existing_teacher",
         "baseline_factory_config_sha256",
+        "runtime_availability",
         "production_scope",
         "two_pass_probe_required_before_target_ranking",
         "quality_warnings_non_gating",
@@ -2053,6 +2554,16 @@ def validate_target_discovery_factory_config(
         raise ValueError("existing-teacher evidence lacks baseline binding")
     if compatibility["existing_teacher_compatible"] and existing is None:
         raise ValueError("selectable existing teacher has no evidence")
+    expected_availability = {
+        run_id: (
+            "unavailable_non_gating"
+            if (run_id == "VGEN_TEACHER_EXISTING" and existing is None)
+            else "complete_two_pass"
+        )
+        for run_id in TARGET_SCREEN_IDS
+    }
+    if payload["runtime_availability"] != expected_availability:
+        raise ValueError("target runtime availability policy changed")
     for run_id in TARGET_SCREEN_IDS:
         existing_memory_dim = (
             128
@@ -2210,10 +2721,21 @@ def build_target_discovery_factory(
     a0_probe_consumer_model = reload_registered_teacher(
         registration=a0_registration, checkpoint_path=a0_checkpoint_path
     )
+    a0_codesign_consumer_model = (
+        reload_registered_teacher(
+            registration=a0_registration,
+            checkpoint_path=a0_checkpoint_path,
+        )
+        if run_id == "VGEN_RECODESIGN"
+        else None
+    )
     for parameter in a0_consumer_model.parameters():
         parameter.requires_grad_(True)
     for parameter in a0_probe_consumer_model.parameters():
         parameter.requires_grad_(True)
+    if a0_codesign_consumer_model is not None:
+        for parameter in a0_codesign_consumer_model.parameters():
+            parameter.requires_grad_(True)
     compatibility = config["compatibility"]
     recipe = build_target_screen_recipe(
         run_id,
@@ -2428,6 +2950,21 @@ def build_target_discovery_factory(
             learned_trust=True,
         ),
     )
+    codesign_consumer = (
+        ParticleViewConsumer(
+            a0_codesign_consumer_model,
+            ParticleViewConsumerConfig(
+                view_dim=recipe.generator_config.bottleneck_width,
+                hidden_dim=hidden,
+                num_heads=heads,
+                injection_block=0,
+                view_path="token_and_pair",
+                learned_trust=True,
+            ),
+        )
+        if a0_codesign_consumer_model is not None
+        else None
+    )
     query_mixture = (
         FrozenTokenLayerMixture()
         if recipe.query_tap_choice == "mix_last3"
@@ -2467,6 +3004,7 @@ def build_target_discovery_factory(
             ),
             "consumer_model": consumer,
             "probe_consumer_model": probe_consumer,
+            "codesign_consumer_model": codesign_consumer,
             "query_mixture": query_mixture,
             "memory_mixture": memory_mixture,
             "teacher_mixture": teacher_mixture,
@@ -2517,6 +3055,52 @@ def build_target_discovery_factory(
             str(output / "target_candidate_metrics.json"),
             str(output / "two_pass_candidate.json"),
             str(output / "target_two_pass_result.json"),
+            *(
+                [
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "rich_context_registration.json"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "provisional_head_registration.json"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "selected_projection.pt"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "selected_consumer.pt"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "selected_persistent_probe.pt"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "codesign_ledger.json"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "cycle_metrics.json"
+                    ),
+                    str(
+                        output
+                        / "recoverability_codesign"
+                        / "codesigned_generator.pt"
+                    ),
+                ]
+                if run_id == "VGEN_RECODESIGN"
+                else []
+            ),
         ],
         "action": None,
     }
@@ -2580,6 +3164,7 @@ __all__ = [
     "materialize_candidate_views_in_ram",
     "predict_recovery_probe_views",
     "run_canonical_target_discovery",
+    "run_recoverability_codesign",
     "run_target_discovery_operation",
     "stage_contextual_memory",
     "validate_target_discovery_factory_config",

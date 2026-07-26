@@ -33,6 +33,7 @@ SCIENTIFIC_OPERATIONS = (
     "existing_teacher_registration",
     "direct_control_training",
     "target_discovery",
+    "consumer_interface_screen",
     "consumer_training",
     "recovery_probe_training",
     "selected_view_publication",
@@ -41,7 +42,10 @@ SCIENTIFIC_OPERATIONS = (
     "robust_consumer_training",
     "frozen_distillation",
     "joint_finetuning",
+    "focused_composite_training",
+    "trained_control_training",
     "structural_control_evaluation",
+    "confirmation_training",
     "configuration_selection",
     "fairness_closure",
     "stack_evaluation",
@@ -60,7 +64,7 @@ _CATEGORY_OPERATIONS = {
         "direct_control_training",
     },
     "target_generator": {"target_discovery"},
-    "consumer_interface": {"target_discovery", "consumer_training"},
+    "consumer_interface": {"consumer_interface_screen"},
     "target_selection": {"configuration_selection"},
     "view_publication": {
         "selected_view_publication",
@@ -73,14 +77,20 @@ _CATEGORY_OPERATIONS = {
     },
     "predictor_architecture": {"frozen_distillation"},
     "distillation": {"frozen_distillation", "joint_finetuning"},
-    "focused_interaction": {"frozen_distillation", "joint_finetuning"},
+    "focused_interaction": {
+        "frozen_distillation",
+        "joint_finetuning",
+        "focused_composite_training",
+    },
     "trained_control": {
         "teacher_training",
         "frozen_distillation",
         "joint_finetuning",
+        "trained_control_training",
     },
     "structural_control": {"structural_control_evaluation"},
     "confirmation_role": {
+        "confirmation_training",
         "frozen_distillation",
         "joint_finetuning",
         "teacher_training",
@@ -249,6 +259,12 @@ def _load_factory(path: str) -> Callable[..., Mapping[str, Any]]:
 
 
 def _operation_callable(operation: str) -> Callable[..., Any] | None:
+    if operation == "consumer_interface_screen":
+        from .consumer_interface_runtime import (
+            run_consumer_interface_screen,
+        )
+
+        return run_consumer_interface_screen
     if operation == "consumer_training":
         from .consumer_train import train_particle_view_consumer
 
@@ -274,9 +290,9 @@ def _operation_callable(operation: str) -> Callable[..., Any] | None:
 
         return train_pview0
     if operation == "residual_sampler_fit":
-        from .robust_consumer import fit_correlated_residual_sampler
+        from .post_target_runtime import run_residual_sampler_fit
 
-        return fit_correlated_residual_sampler
+        return run_residual_sampler_fit
     if operation == "robust_consumer_training":
         from .robust_consumer import train_robust_consumer
 
@@ -289,6 +305,34 @@ def _operation_callable(operation: str) -> Callable[..., Any] | None:
         from .distillation import train_joint_finetuning
 
         return train_joint_finetuning
+    if operation == "focused_composite_training":
+        from .focused_control_runtime import (
+            run_focused_composite_training,
+        )
+
+        return run_focused_composite_training
+    if operation == "trained_control_training":
+        from .focused_control_runtime import run_trained_control_training
+
+        return run_trained_control_training
+    if operation == "structural_control_evaluation":
+        from .confirmation_runtime import (
+            run_structural_control_evaluation,
+        )
+
+        return run_structural_control_evaluation
+    if operation == "confirmation_training":
+        from .confirmation_runtime import run_confirmation_training
+
+        return run_confirmation_training
+    if operation == "stack_evaluation":
+        from .stack_runtime import run_stack_evaluation
+
+        return run_stack_evaluation
+    if operation == "fusion":
+        from .stack_runtime import run_stack_fusion
+
+        return run_stack_fusion
     return None
 
 

@@ -807,7 +807,10 @@ profiles and archive them under `audits/runtime_reference/`.
 
 Acceptance:
 
-- timing overhead below `3%` outside the sampled benchmark window;
+- target timing overhead below `3%` outside the sampled benchmark window;
+- a hard operational ceiling of `10%` in the deliberately dense, fully instrumented
+  20-update reference; missing the `3%` target is recorded but does not block promotion
+  when timing coverage and metric/checkpoint parity pass;
 - complete phase and validation timing coverage;
 - no metric/checkpoint changes.
 

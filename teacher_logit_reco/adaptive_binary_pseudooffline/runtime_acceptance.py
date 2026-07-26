@@ -23,7 +23,7 @@ ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_referen
 ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY = (
     "one_fixed_model_val_subset_at_fixed_update_v1"
 )
-ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT = "adaptive_binary_single_path_acceptance_v1"
+ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT = "adaptive_binary_single_path_acceptance_v2"
 ABPH_RUNTIME_REPRESENTATIVE_VARIANTS = (
     "B1_semantic_query_root",
     "D1_kt32_mh4_particles",

@@ -7,7 +7,12 @@ from scripts.build_adaptive_binary_bootstrap_storage_projection import (
     main as build_projection,
 )
 from scripts.compile_adaptive_binary_bootstrap_single_path_acceptance import (
+    INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING,
     main as compile_single_path,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline import (
+    ABPH_RUNTIME_PROFILE_BUCKETS,
+    ABPH_RUNTIME_PROFILE_CONTRACT,
 )
 import scripts.prune_adaptive_binary_prepared_root as prepared_prune
 
@@ -66,7 +71,25 @@ def _runtime_run(path: Path, *, profiled: bool, seconds: float) -> None:
     )
     _json(
         path / "runtime_profile.json",
-        {"ok": profiled, "summary": {"sampled_updates": 20 if profiled else 0}},
+        {
+            "contract": ABPH_RUNTIME_PROFILE_CONTRACT,
+            "ok": profiled,
+            "summary": {
+                "sampled_training_updates": 20 if profiled else 0,
+                "validation_count": 1 if profiled else 0,
+            },
+            "buckets": {
+                name: {
+                    "samples": (
+                        1
+                        if profiled
+                        and name in {"optimizer_update_total", "full_validation"}
+                        else 0
+                    )
+                }
+                for name in ABPH_RUNTIME_PROFILE_BUCKETS
+            },
+        },
     )
 
 
@@ -95,6 +118,60 @@ def test_single_path_bootstrap_uses_measured_matched_runs(tmp_path: Path) -> Non
         "instrumented_reference",
         "instrumented_walltime",
     }
+
+
+def test_single_path_accepts_measured_dense_profile_above_sparse_target(
+    tmp_path: Path,
+) -> None:
+    plain = tmp_path / "plain"
+    profiled = tmp_path / "profiled"
+    _runtime_run(plain, profiled=False, seconds=100.0)
+    _runtime_run(profiled, profiled=True, seconds=105.4)
+    output = tmp_path / "single_path.json"
+    assert compile_single_path(
+        [
+            "--uninstrumented-run",
+            str(plain),
+            "--instrumented-run",
+            str(profiled),
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["ok"] is True
+    assert (
+        payload["advisories"]["instrumentation_overhead_target_below_3_percent"]
+        is False
+    )
+    assert payload["checks"][
+        "instrumentation_overhead_below_10_percent_operational_ceiling"
+    ] is True
+
+
+def test_single_path_rejects_overhead_above_operational_ceiling(
+    tmp_path: Path,
+) -> None:
+    plain = tmp_path / "plain"
+    profiled = tmp_path / "profiled"
+    _runtime_run(plain, profiled=False, seconds=100.0)
+    _runtime_run(
+        profiled,
+        profiled=True,
+        seconds=100.0 * (1.0 + INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING + 0.01),
+    )
+    output = tmp_path / "single_path.json"
+    assert compile_single_path(
+        [
+            "--uninstrumented-run",
+            str(plain),
+            "--instrumented-run",
+            str(profiled),
+            "--output",
+            str(output),
+        ]
+    ) == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["ok"] is False
 
 
 def test_prepared_prune_is_approved_exact_and_preserves_results(

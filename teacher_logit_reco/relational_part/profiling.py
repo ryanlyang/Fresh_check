@@ -122,9 +122,40 @@ def profile_model_resources(
     model.to(resolved).eval()
     counter = _FlopCounter()
     counter.install(model)
-    with torch.no_grad():
-        model_forward(model, moved)
-    counter.remove()
+    try:
+        with torch.no_grad():
+            model_forward(model, moved)
+    finally:
+        counter.remove()
+    from .attention import EdgeValueAttention
+
+    mask = moved.get("mask")
+    if isinstance(mask, torch.Tensor):
+        batch = int(mask.shape[0])
+        particles = int(mask.shape[-1])
+        for child in model.modules():
+            if isinstance(child, EdgeValueAttention):
+                relation_width = int(child.relation_width)
+                heads = int(child.num_heads)
+                head_dim = int(child.head_dim)
+                counter.add(
+                    "edge_value_relation_aggregation",
+                    2
+                    * batch
+                    * heads
+                    * particles
+                    * particles
+                    * relation_width,
+                )
+                counter.add(
+                    "edge_value_projection",
+                    2
+                    * batch
+                    * heads
+                    * particles
+                    * head_dim
+                    * relation_width,
+                )
 
     def synchronize() -> None:
         if resolved.type == "cuda":
@@ -172,6 +203,7 @@ def profile_model_resources(
                     "Linear",
                     "Conv1d",
                     "MultiheadAttention_qkv_output_and_attention_matmuls",
+                    "edge_value_relation_aggregation_and_projection",
                 ],
                 "excluded": [
                     "normalization",

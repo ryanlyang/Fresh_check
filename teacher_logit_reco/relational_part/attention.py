@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - contract imports without torch
 
 
 STEP6_ATTENTION_CONTRACT = "relational_part_step6_attention_v1"
+ATTENTION_ANGULAR_BAND_EDGES = (0.0, 0.05, 0.10, 0.20, 0.40)
 
 
 def _require_torch():
@@ -81,6 +82,163 @@ def explicit_edge_value_message(
     return (attention_weights.unsqueeze(-1) * pair_values).sum(dim=3)
 
 
+def capture_multihead_attention_weights(
+    model: Any,
+    forward_call: Any,
+) -> list[Any]:
+    """Run one diagnostic forward while transparently retaining MHA weights."""
+
+    module = _require_torch()
+    attentions = [
+        value
+        for value in model.modules()
+        if isinstance(value, module.nn.MultiheadAttention)
+    ]
+    originals = []
+    captured: list[Any] = []
+    try:
+        for attention in attentions:
+            original = attention.forward
+            originals.append((attention, original))
+
+            def wrapped(*args: Any, _original=original, **kwargs: Any):
+                requested = bool(kwargs.get("need_weights", True))
+                kwargs["need_weights"] = True
+                if "average_attn_weights" in inspect.signature(
+                    _original
+                ).parameters:
+                    kwargs["average_attn_weights"] = False
+                output, weights = _original(*args, **kwargs)
+                if weights is None:
+                    raise RuntimeError(
+                        "diagnostic MultiheadAttention returned no weights"
+                    )
+                if weights.ndim == 3:
+                    weights = weights.unsqueeze(1)
+                captured.append(weights.detach())
+                return output, weights if requested else None
+
+            attention.forward = wrapped
+        forward_call()
+    finally:
+        for attention, original in originals:
+            attention.forward = original
+    return captured
+
+
+def attention_allocation_diagnostics(
+    weights_by_layer: Sequence[Any],
+    lorentz_vectors: Any,
+    mask: Any,
+) -> dict[str, Any]:
+    """Aggregate actual attention fractions by pT group and angular band."""
+
+    module = _require_torch()
+    valid = mask[:, 0].bool()
+    pt = module.hypot(lorentz_vectors[:, 0], lorentz_vectors[:, 1])
+    masked_pt = pt.masked_fill(~valid, -module.inf)
+    leading_pt = masked_pt.amax(dim=1, keepdim=True)
+    leading = valid & pt.eq(leading_pt)
+    below_leading = masked_pt.masked_fill(leading, -module.inf)
+    subleading_pt = below_leading.amax(dim=1, keepdim=True)
+    has_subleading = module.isfinite(subleading_pt)
+    subleading = valid & has_subleading & pt.eq(subleading_pt)
+    soft = valid & ~(leading | subleading)
+    safe_pt = pt.clamp_min(1.0e-30)
+    eta = module.asinh(lorentz_vectors[:, 2] / safe_pt)
+    phi = module.atan2(lorentz_vectors[:, 1], lorentz_vectors[:, 0])
+    delta_eta = eta.unsqueeze(-1) - eta.unsqueeze(-2)
+    delta_phi = module.atan2(
+        module.sin(phi.unsqueeze(-1) - phi.unsqueeze(-2)),
+        module.cos(phi.unsqueeze(-1) - phi.unsqueeze(-2)),
+    )
+    delta_r = module.hypot(delta_eta, delta_phi)
+    pair_valid = valid.unsqueeze(-1) & valid.unsqueeze(-2)
+    band_masks = []
+    labels = []
+    edges = ATTENTION_ANGULAR_BAND_EDGES
+    for index, left in enumerate(edges):
+        if index + 1 < len(edges):
+            right = edges[index + 1]
+            selected = (
+                delta_r.le(right)
+                if index == 0
+                else delta_r.gt(left) & delta_r.le(right)
+            )
+            labels.append(
+                f"[{left:.2f},{right:.2f}]"
+                if index == 0
+                else f"({left:.2f},{right:.2f}]"
+            )
+        else:
+            selected = delta_r.gt(left)
+            labels.append(f"({left:.2f},inf)")
+        band_masks.append(selected & pair_valid)
+
+    layers = []
+    for layer, weights in enumerate(weights_by_layer):
+        if int(weights.shape[0]) != int(valid.shape[0]):
+            continue  # Ignore class-attention blocks with a different query.
+        query_valid = valid
+        per_head = []
+        for head in range(int(weights.shape[1])):
+            values = weights[:, head]
+
+            def context_fraction(context_mask: Any) -> float:
+                fraction = (
+                    values * context_mask.unsqueeze(1).to(values)
+                ).sum(-1)
+                selected = fraction.masked_select(query_valid)
+                return float(selected.mean().detach().cpu())
+
+            angular = {}
+            for label, selected_band in zip(labels, band_masks):
+                fraction = (
+                    values * selected_band.to(values)
+                ).sum(-1)
+                angular[label] = float(
+                    fraction.masked_select(query_valid).mean().detach().cpu()
+                )
+            probability = values.clamp_min(1.0e-30)
+            per_head.append(
+                {
+                    "leading_context_fraction": context_fraction(leading),
+                    "subleading_context_fraction": context_fraction(
+                        subleading
+                    ),
+                    "soft_context_fraction": context_fraction(soft),
+                    "angular_band_fractions": angular,
+                    "attention_entropy": float(
+                        (-(probability * probability.log()).sum(-1))
+                        .masked_select(query_valid)
+                        .mean()
+                        .detach()
+                        .cpu()
+                    ),
+                    "maximum_attention_weight": float(
+                        values.amax(-1)
+                        .masked_select(query_valid)
+                        .mean()
+                        .detach()
+                        .cpu()
+                    ),
+                }
+            )
+        layers.append({"layer": layer, "per_head": per_head})
+    return {
+        "angular_band_edges": list(ATTENTION_ANGULAR_BAND_EDGES),
+        "angular_band_endpoint_policy": (
+            "[0,0.05],(0.05,0.10],(0.10,0.20],(0.20,0.40],(0.40,inf)"
+        ),
+        "context_group_policy": (
+            "leading=max_tied_pt; subleading=next_distinct_tied_pt; "
+            "soft=remaining_valid"
+        ),
+        "layers": layers,
+        "captured_particle_attention_layer_count": len(layers),
+    }
+
+
 class DirectionalPairStem(torch.nn.Module if torch is not None else object):
     """Split Weaver ``PairEmbed.fts_embed`` before its final head projection."""
 
@@ -105,7 +263,12 @@ class DirectionalPairStem(torch.nn.Module if torch is not None else object):
                 "Weaver fts_embed final head projection is not Conv1d/Linear"
             )
         self.prefix = module.nn.Sequential(*children[:-1])
-        self.reference_projection = final
+        # Keep only an unregistered construction template.  The original
+        # shared final projection is deliberately absent from the active
+        # architecture; every registered projection is layer-specific.
+        object.__setattr__(
+            self, "_reference_projection_template", copy.deepcopy(final)
+        )
         self.input_dimension = int(input_dimension)
         self.stem_width = int(
             final.in_channels if isinstance(final, module.nn.Conv1d)
@@ -115,6 +278,10 @@ class DirectionalPairStem(torch.nn.Module if torch is not None else object):
             final.out_channels if isinstance(final, module.nn.Conv1d)
             else final.out_features
         )
+
+    @property
+    def reference_projection(self) -> Any:
+        return self._reference_projection_template
 
     def forward(self, pair_features: Any, mask: Any) -> Any:
         module = _require_torch()
@@ -188,8 +355,11 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
         if not isinstance(reference, module.nn.MultiheadAttention):
             raise TypeError("edge-value path requires nn.MultiheadAttention")
         self.reference = reference
+        self.embed_dim = int(reference.embed_dim)
         self.num_heads = int(reference.num_heads)
         self.head_dim = int(reference.embed_dim // reference.num_heads)
+        self.batch_first = bool(reference.batch_first)
+        self.dropout = float(reference.dropout)
         self.relation_width = int(relation_width)
         self.edge_projection = module.nn.Parameter(
             module.empty(self.num_heads, self.head_dim, self.relation_width)
@@ -197,6 +367,7 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
         module.nn.init.xavier_uniform_(self.edge_projection)
         self._relation_stem = None
         self._query_valid = None
+        self.collect_diagnostics = False
         self.last_diagnostics: dict[str, Any] | None = None
 
     def bind(self, relation_stem: Any, query_valid: Any) -> None:
@@ -214,6 +385,23 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
         if relation is None or query_valid is None:
             raise RuntimeError("edge-value attention was not bound for this batch")
         requested_weights = bool(kwargs.get("need_weights", True))
+        if (
+            int(self.edge_projection.detach().count_nonzero()) == 0
+            or int(relation.detach().count_nonzero()) == 0
+        ):
+            output, returned_weights = self.reference(
+                query, key, value, **kwargs
+            )
+            if self.collect_diagnostics:
+                self.last_diagnostics = {
+                    "per_head_mean_norm_ratio": [0.0] * self.num_heads,
+                    "masked_query_count": int(
+                        (~query_valid).sum().detach().cpu()
+                    ),
+                    "materialized_pair_value_tensor": False,
+                    "exact_zero_message_reference_path": True,
+                }
+            return output, returned_weights
         call = dict(kwargs)
         call["need_weights"] = True
         if "average_attn_weights" in inspect.signature(
@@ -245,6 +433,11 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
         projected = projected * query_mask.to(projected.dtype)
         output = ordinary_output + projected
 
+        if not self.collect_diagnostics:
+            self.last_diagnostics = None
+            returned_weights = weights if requested_weights else None
+            return output, returned_weights
+
         value_projected = _value_tokens(self.reference, value)
         if batch_first:
             value_heads = value_projected.reshape(
@@ -264,17 +457,55 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
         numerator = relation_message.norm(dim=-1)
         denominator = ordinary_heads.norm(dim=-1) + 1.0e-6
         ratios = numerator / denominator
+        ratio_distributions = []
+        for head in range(self.num_heads):
+            selected_ratios = ratios[:, head].masked_select(query_valid).float()
+            ratio_distributions.append(
+                {
+                    "count": int(selected_ratios.numel()),
+                    "mean": float(selected_ratios.mean().detach().cpu()),
+                    "standard_deviation": float(
+                        selected_ratios.std(unbiased=False).detach().cpu()
+                    ),
+                    "quantiles": {
+                        str(quantile): float(
+                            module.quantile(selected_ratios, quantile)
+                            .detach()
+                            .cpu()
+                        )
+                        for quantile in (0.0, 0.25, 0.5, 0.75, 1.0)
+                    },
+                }
+            )
         self.last_diagnostics = {
-            "per_head_mean_norm_ratio": [
-                float(
-                    ratios[:, head].masked_select(query_valid).mean().detach().cpu()
-                )
-                if bool(query_valid.any())
-                else None
-                for head in range(self.num_heads)
-            ],
+            "per_head_norm_ratio_distribution": ratio_distributions,
             "masked_query_count": int((~query_valid).sum().detach().cpu()),
             "materialized_pair_value_tensor": False,
+            "per_head_attention_entropy": [
+                float(
+                    (
+                        -weights[:, head].clamp_min(1.0e-30)
+                        * weights[:, head].clamp_min(1.0e-30).log()
+                    )
+                    .sum(-1)
+                    .masked_select(query_valid)
+                    .mean()
+                    .detach()
+                    .cpu()
+                )
+                for head in range(self.num_heads)
+            ],
+            "per_head_maximum_attention_weight": [
+                float(
+                    weights[:, head]
+                    .amax(-1)
+                    .masked_select(query_valid)
+                    .mean()
+                    .detach()
+                    .cpu()
+                )
+                for head in range(self.num_heads)
+            ],
         }
         returned_weights = weights if requested_weights else None
         return output, returned_weights
@@ -327,7 +558,7 @@ class ConfirmationArchitectureParticleTransformer(
                 region_normalization_artifact=region_normalization_artifact,
             )
         object.__setattr__(self, "_weaver_module", weaver_module)
-        self.edge_attention = module.nn.ModuleList()
+        object.__setattr__(self, "edge_attention", [])
         if self.edge_value:
             for block in blocks:
                 attention = getattr(block, "attn", None)
@@ -336,6 +567,8 @@ class ConfirmationArchitectureParticleTransformer(
                 )
                 block.attn = wrapped
                 self.edge_attention.append(wrapped)
+        self._last_pair_diagnostics: dict[str, Any] | None = None
+        self.collect_diagnostics = False
 
     def _pairs(
         self,
@@ -344,14 +577,39 @@ class ConfirmationArchitectureParticleTransformer(
         mask: Any,
         raw_tokens: Any,
         region_trees: Any,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, float | None]]:
         if self.pair_builder is None:
-            return build_standard_four_pair_features(
-                vectors, mask=mask, module=self._weaver_module
+            return (
+                build_standard_four_pair_features(
+                    vectors, mask=mask, module=self._weaver_module
+                ),
+                {},
             )
-        return self.pair_builder(
-            features, vectors, mask, raw_tokens, region_trees
+        if not self.collect_diagnostics:
+            return (
+                self.pair_builder(
+                    features, vectors, mask, raw_tokens, region_trees
+                ),
+                {},
+            )
+        details = self.pair_builder(
+            features,
+            vectors,
+            mask,
+            raw_tokens,
+            region_trees,
+            return_details=True,
         )
+        pair_mask = details["pair_mask"]
+        norms = {}
+        for family, encoded in details["encoded"].items():
+            selected = encoded.masked_select(pair_mask.expand_as(encoded))
+            norms[family] = (
+                float(selected.float().square().mean().sqrt().detach().cpu())
+                if int(selected.numel())
+                else None
+            )
+        return details["combined"], norms
 
     def forward(
         self,
@@ -361,6 +619,7 @@ class ConfirmationArchitectureParticleTransformer(
         mask: Any,
         raw_tokens: Any | None = None,
         region_trees: Any | None = None,
+        pair_transform: Any | None = None,
     ) -> Any:
         del points
         valid = mask.bool()
@@ -369,11 +628,59 @@ class ConfirmationArchitectureParticleTransformer(
         clean_raw = raw_tokens
         if raw_tokens is not None:
             clean_raw = raw_tokens.masked_fill(~valid[:, 0].unsqueeze(-1), 0)
-        pairs = self._pairs(
+        pairs, activation_norms = self._pairs(
             clean_features, clean_vectors, valid, clean_raw, region_trees
         )
+        if pair_transform is not None:
+            if self.training:
+                raise RuntimeError(
+                    "semantic pair perturbations are inference-only"
+                )
+            expected_shape = tuple(pairs.shape)
+            pairs = pair_transform(
+                pairs,
+                mask=valid,
+                features=clean_features,
+                lorentz_vectors=clean_vectors,
+                raw_tokens=clean_raw,
+                region_trees=region_trees,
+            )
+            if tuple(pairs.shape) != expected_shape:
+                raise ValueError("semantic pair transform changed tensor shape")
         stem = self.pair_stem(pairs, valid)
         biases = self.layer_bias(stem)
+        if self.collect_diagnostics:
+            pair_mask = valid_pair_mask(valid)[:, 0]
+            bias_summaries = []
+            for bias in biases:
+                per_head = []
+                for head in range(int(bias.shape[1])):
+                    values = bias[:, head].masked_select(pair_mask)
+                    per_head.append(
+                        {
+                            "mean": float(values.mean().detach().cpu()),
+                            "standard_deviation": float(
+                                values.std(unbiased=False).detach().cpu()
+                            ),
+                            "absolute_mean": float(
+                                values.abs().mean().detach().cpu()
+                            ),
+                            "maximum_absolute": float(
+                                values.abs().max().detach().cpu()
+                            ),
+                        }
+                    )
+                bias_summaries.append(per_head)
+            selected_stem = stem.masked_select(
+                pair_mask.unsqueeze(1).expand_as(stem)
+            )
+            self._last_pair_diagnostics = {
+                "family_encoded_activation_rms": activation_norms,
+                "pair_stem_activation_rms": float(
+                    selected_stem.float().square().mean().sqrt().detach().cpu()
+                ),
+                "pair_bias_per_layer_head": bias_summaries,
+            }
         x = self.mod.embed(clean_features)
         padding = ~valid[:, 0]
         try:
@@ -391,20 +698,58 @@ class ConfirmationArchitectureParticleTransformer(
             for attention in self.edge_attention:
                 attention.clear()
 
-    def diagnostics(self) -> dict[str, Any]:
-        return {
-            "families": list(self.families),
-            "architecture": (
-                "layerwise_bias_and_edge_value"
-                if self.edge_value
-                else "layerwise_bias"
-            ),
-            "pair_stem_evaluations_per_batch": 1,
-            "layer_count": len(self.layer_bias.projections),
-            "edge_value": [
-                attention.last_diagnostics for attention in self.edge_attention
-            ],
-        }
+    def diagnostics(
+        self,
+        points: Any,
+        features: Any,
+        lorentz_vectors: Any,
+        mask: Any,
+        raw_tokens: Any | None = None,
+        region_trees: Any | None = None,
+    ) -> dict[str, Any]:
+        was_training = bool(self.training)
+        self.eval()
+        self.collect_diagnostics = True
+        for attention in self.edge_attention:
+            attention.collect_diagnostics = True
+        try:
+            with _require_torch().no_grad():
+                captured = capture_multihead_attention_weights(
+                    self,
+                    lambda: self.forward(
+                        points,
+                        features,
+                        lorentz_vectors,
+                        mask,
+                        raw_tokens,
+                        region_trees,
+                        None,
+                    ),
+                )
+            return {
+                "families": list(self.families),
+                "architecture": (
+                    "layerwise_bias_and_edge_value"
+                    if self.edge_value
+                    else "layerwise_bias"
+                ),
+                "pair_stem_evaluations_per_batch": 1,
+                "layer_count": len(self.layer_bias.projections),
+                "edge_value": [
+                    attention.last_diagnostics
+                    for attention in self.edge_attention
+                ],
+                "pair": self._last_pair_diagnostics,
+                "attention_allocation": attention_allocation_diagnostics(
+                    captured, lorentz_vectors, mask
+                ),
+            }
+        finally:
+            self.collect_diagnostics = False
+            for attention in self.edge_attention:
+                attention.collect_diagnostics = False
+            if was_training:
+                self.train()
 
 
 def build_step6_attention_contract(
@@ -436,6 +781,10 @@ def build_step6_attention_contract(
             "layerwise_bias": {
                 "projection_count": 8,
                 "shared_final_projection": False,
+                "initialization": (
+                    "independent_parameters_initialized_as_deep_copies_of_one_"
+                    "Weaver_initialized_final_projection"
+                ),
             },
             "edge_value": {
                 "enabled": bool(edge_value),
@@ -445,6 +794,7 @@ def build_step6_attention_contract(
                 "materialize_B_H_N_N_dh": False,
                 "invalid_query_and_key_relations_zero": True,
                 "epsilon": 1.0e-6,
+                "projection_initialization": "torch_xavier_uniform",
             },
             "base4_architecture_control": expected_base,
             "initialization": "from_scratch",
@@ -455,6 +805,9 @@ def build_step6_attention_contract(
 __all__ = [
     "STEP6_ATTENTION_CONTRACT",
     "ConfirmationArchitectureParticleTransformer",
+    "ATTENTION_ANGULAR_BAND_EDGES",
+    "attention_allocation_diagnostics",
+    "capture_multihead_attention_weights",
     "DirectionalPairStem",
     "EdgeValueAttention",
     "LayerwiseBiasProjection",

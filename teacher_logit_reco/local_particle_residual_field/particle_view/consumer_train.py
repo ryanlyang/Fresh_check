@@ -226,6 +226,7 @@ def train_particle_view_consumer(
     validation_view_provider: Callable[[Mapping[str, Any]], Any] | None = None,
     oracle_config: OracleObjectiveConfig | None = None,
     joint_trainable_modules: Mapping[str, torch.nn.Module] | None = None,
+    augment_clean_view_override: bool | None = None,
     device: str | torch.device = "cpu",
 ) -> dict[str, Any]:
     """Train discovery/probe/clean consumers under their exact Step-4 budget."""
@@ -261,6 +262,16 @@ def train_particle_view_consumer(
     if config.role == "Cview_discovery" and oracle_config is None:
         raise ValueError("discovery consumer requires the oracle objective")
     joint_modules = dict(joint_trainable_modules or {})
+    if (
+        augment_clean_view_override is not None
+        and (
+            not isinstance(augment_clean_view_override, bool)
+            or config.role not in {"Cview_probe", "Cview_clean"}
+        )
+    ):
+        raise ValueError(
+            "clean-view augmentation override is screen/clean-only"
+        )
     if config.role == "Cview_discovery" and "Gview" not in joint_modules:
         raise ValueError(
             "discovery training requires a checkpointed joint Gview module"
@@ -308,7 +319,11 @@ def train_particle_view_consumer(
                 model,
                 batch,
                 view,
-                augment_clean_view=config.role == "Cview_clean",
+                augment_clean_view=(
+                    config.role == "Cview_clean"
+                    if augment_clean_view_override is None
+                    else augment_clean_view_override
+                ),
             )
             if config.role == "Cview_discovery":
                 if "offline_logits" not in batch:
@@ -410,6 +425,9 @@ def train_particle_view_consumer(
             ),
             "joint_checkpointed_module_names": sorted(joint_modules),
             "model_val_select_loaded": False,
+            "clean_view_augmentation_override": (
+                augment_clean_view_override
+            ),
             "stack_val_loaded": False,
             "final_test_loaded": False,
         }

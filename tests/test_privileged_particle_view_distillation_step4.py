@@ -145,6 +145,37 @@ def _consumer(path: str = "token_and_pair") -> ParticleViewConsumer:
     )
 
 
+@pytest.mark.parametrize(
+    ("view_path", "injection_block"),
+    [("raw_projected", -1), ("token_only", -1)],
+)
+def test_raw_and_post_embedding_consumer_interfaces_keep_exact_a0_endpoint(
+    view_path,
+    injection_block,
+):
+    batch = _consumer_batch()
+    model = ParticleViewConsumer(
+        _FakeA0(),
+        ParticleViewConsumerConfig(
+            view_dim=4,
+            hidden_dim=16,
+            num_heads=4,
+            view_path=view_path,
+            injection_block=injection_block,
+        ),
+    )
+    audit = audit_zero_scaled_a0_endpoint(
+        model,
+        points=batch["points"],
+        features=batch["features"],
+        lorentz_vectors=batch["lorentz_vectors"],
+        mask=batch["mask"],
+        view=batch["true_view"],
+    )
+    assert audit["ok"]
+    assert audit["maximum_absolute_logit_difference"] == 0.0
+
+
 def test_zero_scaled_warm_start_and_two_step_gradient_reachability():
     batch = _consumer_batch()
     model = _consumer()

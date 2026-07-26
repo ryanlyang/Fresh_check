@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import inspect
 import math
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from .contracts import require_sha256, with_content_hash
+from .contracts import (
+    canonical_sha256,
+    require_sha256,
+    sha256_file,
+    with_content_hash,
+)
 
 try:
     import torch
@@ -18,6 +25,9 @@ except ImportError:  # pragma: no cover
 
 
 EVALUATION_CONTRACT = "relational_part_evaluation_v1"
+FINAL_EVALUATION_CONTRACT = "relational_part_final_evaluation_v1"
+FINAL_PREDICTION_CONTRACT = "relational_part_final_predictions_v1"
+PAIRED_STATISTICS_CONTRACT = "relational_part_paired_statistics_v1"
 CLASS_NAMES = (
     "QCD",
     "Hbb",
@@ -307,6 +317,477 @@ def evaluate_model(
     )
 
 
+def collect_model_predictions(
+    model: Any,
+    loader: Iterable[Mapping[str, Any]],
+    *,
+    device: str | Any = "cpu",
+    required_split: str = "final_test",
+) -> dict[str, Any]:
+    """Collect HLT-only event-aligned outputs without opening other sources."""
+
+    if torch is None:
+        raise RuntimeError("PyTorch is required for final evaluation")
+    if required_split != "final_test":
+        raise ValueError("sealed prediction collection is final_test-only")
+    resolved_device = torch.device(device)
+    was_training = bool(model.training)
+    model.eval()
+    logits: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
+    identities: list[str] = []
+    forbidden = ("offline", "teacher", "target_logits", "reco_view")
+    with torch.no_grad():
+        for raw in loader:
+            if any(name in raw for name in forbidden):
+                raise ValueError("final evaluation batch exposes a forbidden source")
+            if "labels" not in raw or "event_identities" not in raw:
+                raise ValueError(
+                    "final evaluation requires labels and bound event identities"
+                )
+            batch = _move_batch(raw, resolved_device)
+            output = model_forward(model, batch)
+            logits.append(output.detach().float().cpu().numpy())
+            labels.append(batch["labels"].detach().long().cpu().numpy())
+            identities.extend(str(value) for value in raw["event_identities"])
+    if was_training:
+        model.train()
+    if not logits:
+        raise ValueError("final-test loader is empty")
+    values = np.concatenate(logits)
+    truth = np.concatenate(labels)
+    if len(identities) != len(truth) or len(set(identities)) != len(identities):
+        raise ValueError("final-test event identities are absent or duplicated")
+    return {
+        "logits": values,
+        "labels": truth,
+        "predictions": values.argmax(axis=1).astype(np.int16),
+        "event_identities": np.asarray(identities, dtype=np.str_),
+        "event_identity_sha256": canonical_sha256(identities),
+    }
+
+
+def write_final_predictions(
+    path: str | Path,
+    predictions: Mapping[str, Any],
+    *,
+    run_id: str,
+    seed: int,
+    checkpoint_sha256: str,
+    locked_finalists_sha256: str,
+) -> dict[str, Any]:
+    destination = Path(path)
+    if destination.exists():
+        raise FileExistsError("final prediction artifact already exists")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    logits = np.asarray(predictions["logits"], dtype=np.float32)
+    labels = np.asarray(predictions["labels"], dtype=np.int16)
+    predicted = np.asarray(predictions["predictions"], dtype=np.int16)
+    identities = np.asarray(predictions["event_identities"], dtype=np.str_)
+    if not (
+        logits.shape == (len(labels), len(CLASS_NAMES))
+        and predicted.shape == labels.shape
+        and identities.shape == labels.shape
+    ):
+        raise ValueError("prediction artifact arrays have incompatible shapes")
+    metadata = with_content_hash(
+        {
+            "contract": FINAL_PREDICTION_CONTRACT,
+            "schema_version": 1,
+            "run_id": str(run_id),
+            "seed": int(seed),
+            "checkpoint_sha256": require_sha256(
+                checkpoint_sha256, name="checkpoint_sha256"
+            ),
+            "locked_finalists_sha256": require_sha256(
+                locked_finalists_sha256, name="locked_finalists_sha256"
+            ),
+            "event_count": len(labels),
+            "event_identity_sha256": str(
+                predictions["event_identity_sha256"]
+            ),
+            "logits_dtype": "float32",
+            "labels_dtype": "int16",
+            "prediction_tie_rule": "lowest_canonical_class_index",
+            "hlt_only": True,
+        }
+    )
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            np.savez_compressed(
+                stream,
+                logits=logits,
+                labels=labels,
+                predictions=predicted,
+                event_identities=identities,
+                metadata=np.asarray(
+                    [
+                        __import__("json").dumps(
+                            metadata,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    ],
+                    dtype=np.str_,
+                ),
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    return {
+        "path": str(destination.resolve()),
+        "sha256": sha256_file(destination),
+        "metadata": metadata,
+    }
+
+
+def evaluate_locked_finalist(
+    model: Any,
+    loader: Iterable[Mapping[str, Any]],
+    *,
+    run_id: str,
+    seed: int,
+    checkpoint_registration: Mapping[str, Any],
+    locked_finalists: Mapping[str, Any],
+    campaign_spec_sha256: str,
+    split_manifest_sha256: str,
+    hlt_cache_hashes: Mapping[str, str],
+    output_dir: str | Path,
+    device: str | Any = "cpu",
+    expected_event_count: int = 500_000,
+) -> dict[str, Any]:
+    from .selection import validate_locked_finalists
+
+    lock_sha = validate_locked_finalists(
+        locked_finalists,
+        campaign_spec_sha256=campaign_spec_sha256,
+        split_manifest_sha256=split_manifest_sha256,
+        hlt_cache_hashes=hlt_cache_hashes,
+    )
+    rows = {
+        str(row["run_id"]): row for row in locked_finalists["evaluation_rows"]
+    }
+    if run_id not in rows:
+        raise ValueError("run is absent from the immutable finalist lock")
+    expected_checkpoint = rows[run_id]["checkpoint_hashes"].get(str(int(seed)))
+    registration_sha = validate_content_hash(
+        checkpoint_registration,
+        expected_contract="relational_part_checkpoint_registration_v1",
+    )
+    if registration_sha != rows[run_id][
+        "checkpoint_registration_hashes"
+    ].get(str(int(seed))):
+        raise ValueError("checkpoint registration differs from finalist lock")
+    observed_checkpoint = require_sha256(
+        checkpoint_registration.get("checkpoint_sha256"),
+        name="checkpoint_registration.checkpoint_sha256",
+    )
+    if observed_checkpoint != expected_checkpoint:
+        raise ValueError("checkpoint differs from the locked seed artifact")
+    if checkpoint_registration.get("run_id") != run_id or int(
+        checkpoint_registration.get("seed", -1)
+    ) != int(seed):
+        raise ValueError("checkpoint registration run/seed mismatch")
+    if checkpoint_registration.get("val_select_used_for_checkpoint_selection") is not False:
+        raise ValueError("checkpoint selection provenance is invalid")
+    if checkpoint_registration.get("hlt_only_inference") is not True:
+        raise ValueError("final checkpoint is not declared HLT-only")
+    if checkpoint_registration.get("offline_or_teacher_required") is not False:
+        raise ValueError("final checkpoint declares a forbidden dependency")
+    if checkpoint_registration.get("model_contract_sha256") != rows[run_id][
+        "model_contract_sha256"
+    ]:
+        raise ValueError("final checkpoint model contract differs from lock")
+    registration_lineage = checkpoint_registration.get("lineage_hashes")
+    if (
+        not isinstance(registration_lineage, Mapping)
+        or dict(registration_lineage) != dict(rows[run_id]["lineage_hashes"])
+    ):
+        raise ValueError("final checkpoint lineage differs from finalist lock")
+    profile = checkpoint_registration.get("parameter_and_flop_profile")
+    if not isinstance(profile, Mapping):
+        raise ValueError("locked checkpoint lacks its resource profile")
+    required_profile = {
+        "trainable_parameters",
+        "forward_flops_per_event",
+        "latency_ms",
+        "peak_incremental_device_memory_bytes",
+    }
+    if not required_profile.issubset(profile):
+        raise ValueError("locked checkpoint resource profile is incomplete")
+    prediction_arrays = collect_model_predictions(
+        model, loader, device=device, required_split="final_test"
+    )
+    if len(prediction_arrays["labels"]) != int(expected_event_count):
+        raise ValueError(
+            "sealed final-test count differs from the locked campaign: "
+            f"{len(prediction_arrays['labels'])} != {int(expected_event_count)}"
+        )
+    metrics = evaluate_logits(
+        prediction_arrays["logits"],
+        prediction_arrays["labels"],
+        split="final_test",
+    )
+    destination = Path(output_dir)
+    prediction_publication = write_final_predictions(
+        destination / "predictions.npz",
+        prediction_arrays,
+        run_id=run_id,
+        seed=seed,
+        checkpoint_sha256=observed_checkpoint,
+        locked_finalists_sha256=lock_sha,
+    )
+    return with_content_hash(
+        {
+            "contract": FINAL_EVALUATION_CONTRACT,
+            "schema_version": 1,
+            "run_id": run_id,
+            "seed": int(seed),
+            "configuration_role": rows[run_id]["configuration_role"],
+            "relational_selection_eligible": rows[run_id][
+                "relational_selection_eligible"
+            ],
+            "locked_finalists_sha256": lock_sha,
+            "checkpoint_sha256": observed_checkpoint,
+            "checkpoint_registration_sha256": registration_sha,
+            "model_contract_sha256": checkpoint_registration[
+                "model_contract_sha256"
+            ],
+            "checkpoint_lineage_hashes": dict(registration_lineage),
+            "lineage_authenticated": True,
+            "campaign_spec_sha256": require_sha256(
+                campaign_spec_sha256, name="campaign_spec_sha256"
+            ),
+            "split_manifest_sha256": require_sha256(
+                split_manifest_sha256, name="split_manifest_sha256"
+            ),
+            "final_test_hlt_cache_sha256": require_sha256(
+                hlt_cache_hashes["final_test"],
+                name="hlt_cache_hashes.final_test",
+            ),
+            "metrics": metrics,
+            "event_count": int(expected_event_count),
+            "prediction_file": "predictions.npz",
+            "prediction_file_sha256": prediction_publication["sha256"],
+            "prediction_metadata": prediction_publication["metadata"],
+            "parameter_and_flop_profile": checkpoint_registration.get(
+                "parameter_and_flop_profile"
+            ),
+            "hlt_only_inference": True,
+            "final_test_used_for_selection": False,
+        }
+    )
+
+
+def load_final_predictions(path: str | Path) -> dict[str, Any]:
+    artifact = Path(path)
+    if not artifact.is_file() or artifact.is_symlink():
+        raise FileNotFoundError(f"prediction artifact is absent or unsafe: {artifact}")
+    import json
+
+    with np.load(artifact, allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["metadata"][0]))
+        from .contracts import validate_content_hash
+
+        validate_content_hash(
+            metadata, expected_contract=FINAL_PREDICTION_CONTRACT
+        )
+        result = {
+            "logits": np.asarray(payload["logits"], dtype=np.float32),
+            "labels": np.asarray(payload["labels"], dtype=np.int16),
+            "predictions": np.asarray(payload["predictions"], dtype=np.int16),
+            "event_identities": np.asarray(payload["event_identities"], dtype=np.str_),
+            "metadata": metadata,
+            "file_sha256": sha256_file(artifact),
+        }
+    identities = [str(value) for value in result["event_identities"]]
+    if canonical_sha256(identities) != metadata["event_identity_sha256"]:
+        raise ValueError("prediction event-identity hash mismatch")
+    return result
+
+
+def paired_prediction_statistics(
+    candidate: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *,
+    bootstrap_replicates: int = 10_000,
+    bootstrap_seed: int = 917_301,
+) -> dict[str, Any]:
+    return paired_prediction_statistics_many(
+        {"candidate": candidate},
+        baseline,
+        bootstrap_replicates=bootstrap_replicates,
+        bootstrap_seed=bootstrap_seed,
+    )["candidate"]
+
+
+def paired_prediction_statistics_many(
+    candidates: Mapping[str, Mapping[str, Any]],
+    baseline: Mapping[str, Any],
+    *,
+    bootstrap_replicates: int = 10_000,
+    bootstrap_seed: int = 917_301,
+    replicate_chunk_size: int = 16,
+) -> dict[str, dict[str, Any]]:
+    """Reuse the contract-identical bootstrap draws across many candidates."""
+
+    if not candidates:
+        raise ValueError("paired statistics require at least one candidate")
+    baseline_metadata = baseline.get("metadata", {})
+    baseline_seed = baseline_metadata.get("seed")
+    baseline_ids = np.asarray(baseline["event_identities"], dtype=np.str_)
+    labels = np.asarray(baseline["labels"], dtype=np.int64)
+    baseline_prediction = np.asarray(baseline["predictions"], dtype=np.int64)
+    baseline_correct = baseline_prediction == labels
+    if bootstrap_replicates <= 0:
+        raise ValueError("bootstrap replicate count must be positive")
+    if replicate_chunk_size <= 0:
+        raise ValueError("bootstrap chunk size must be positive")
+    class_indices = [
+        np.flatnonzero(labels == index) for index in range(len(CLASS_NAMES))
+    ]
+    if any(len(indices) == 0 for indices in class_indices):
+        raise ValueError("paired bootstrap requires every balanced class")
+    class_count = len(class_indices[0])
+    if any(len(indices) != class_count for indices in class_indices):
+        raise ValueError(
+            "paired bootstrap requires the locked exactly balanced final test"
+        )
+    names = list(candidates)
+    candidate_correct_rows = []
+    differences = []
+    metadata_rows = []
+    for name in names:
+        candidate = candidates[name]
+        candidate_metadata = candidate.get("metadata", {})
+        candidate_seed = candidate_metadata.get("seed")
+        if candidate_seed is not None and baseline_seed is not None and int(
+            candidate_seed
+        ) != int(baseline_seed):
+            raise ValueError("paired predictions belong to different seeds")
+        candidate_ids = np.asarray(
+            candidate["event_identities"], dtype=np.str_
+        )
+        if not np.array_equal(candidate_ids, baseline_ids):
+            raise ValueError("paired predictions are not identity-aligned")
+        if not np.array_equal(
+            np.asarray(candidate["labels"], dtype=np.int64), labels
+        ):
+            raise ValueError("paired predictions have different true labels")
+        candidate_prediction = np.asarray(
+            candidate["predictions"], dtype=np.int64
+        )
+        candidate_correct = candidate_prediction == labels
+        candidate_correct_rows.append(candidate_correct)
+        differences.append(
+            candidate_correct.astype(np.int8)
+            - baseline_correct.astype(np.int8)
+        )
+        metadata_rows.append(candidate_metadata)
+    difference_matrix = np.stack(differences)
+    generator = np.random.Generator(np.random.PCG64(int(bootstrap_seed)))
+    bootstrap_sums = np.zeros(
+        (len(names), int(bootstrap_replicates)), dtype=np.int64
+    )
+    total = len(labels)
+    for start in range(0, int(bootstrap_replicates), replicate_chunk_size):
+        stop = min(start + replicate_chunk_size, int(bootstrap_replicates))
+        chunk = stop - start
+        draws = generator.integers(
+            0,
+            class_count,
+            size=(chunk, len(CLASS_NAMES), class_count),
+            endpoint=False,
+            dtype=np.int64,
+        )
+        for class_index, indices in enumerate(class_indices):
+            class_difference = difference_matrix[:, indices]
+            bootstrap_sums[:, start:stop] += class_difference[
+                :, draws[:, class_index]
+            ].sum(axis=-1, dtype=np.int64)
+    bootstrap = bootstrap_sums.astype(np.float64) / total
+    baseline_accuracy = float(baseline_correct.mean(dtype=np.float64))
+    baseline_error = 1.0 - baseline_accuracy
+    output = {}
+    identity_sha = canonical_sha256(
+        [str(value) for value in baseline_ids]
+    )
+    for row_index, name in enumerate(names):
+        candidate_correct = candidate_correct_rows[row_index]
+        difference = difference_matrix[row_index]
+        candidate_metadata = metadata_rows[row_index]
+        candidate_seed = candidate_metadata.get("seed")
+        candidate_accuracy = float(
+            candidate_correct.mean(dtype=np.float64)
+        )
+        interval = np.quantile(
+            bootstrap[row_index], [0.025, 0.975], method="linear"
+        )
+        per_class = {
+            class_name: float(
+                difference[labels == index].mean(dtype=np.float64)
+            )
+            for index, class_name in enumerate(CLASS_NAMES)
+        }
+        output[name] = with_content_hash({
+            "contract": PAIRED_STATISTICS_CONTRACT,
+            "schema_version": 1,
+            "event_count": len(labels),
+            "candidate_run_id": candidate_metadata.get("run_id"),
+            "baseline_run_id": baseline_metadata.get("run_id"),
+            "seed": (
+                None if candidate_seed is None else int(candidate_seed)
+            ),
+            "candidate_checkpoint_sha256": candidate_metadata.get(
+                "checkpoint_sha256"
+            ),
+            "baseline_checkpoint_sha256": baseline_metadata.get(
+                "checkpoint_sha256"
+            ),
+            "event_identity_sha256": identity_sha,
+            "candidate_accuracy": candidate_accuracy,
+            "baseline_accuracy": baseline_accuracy,
+            "paired_absolute_accuracy_difference": (
+                candidate_accuracy - baseline_accuracy
+            ),
+            "paired_bootstrap": {
+                "seed": int(bootstrap_seed),
+                "replicates": int(bootstrap_replicates),
+                "sampling_unit": "aligned_event_identity",
+                "class_stratified_balanced": True,
+                "execution_chunk_replicates": int(replicate_chunk_size),
+                "lower_2p5_percent": float(interval[0]),
+                "upper_97p5_percent": float(interval[1]),
+                "quantile_method": "Hyndman_Fan_type_7_linear",
+            },
+            "mcnemar": {
+                "candidate_correct_baseline_wrong": int(
+                    (candidate_correct & ~baseline_correct).sum()
+                ),
+                "candidate_wrong_baseline_correct": int(
+                    (~candidate_correct & baseline_correct).sum()
+                ),
+            },
+            "relative_error_reduction": (
+                None
+                if baseline_error == 0.0
+                else (candidate_accuracy - baseline_accuracy) / baseline_error
+            ),
+            "relative_error_reduction_undefined": baseline_error == 0.0,
+            "per_class_paired_accuracy_difference": per_class,
+        })
+    return output
+
+
 def build_evaluation_contract(*, global_determinism_sha256: str) -> dict[str, Any]:
     return with_content_hash(
         {
@@ -338,11 +819,20 @@ def build_evaluation_contract(*, global_determinism_sha256: str) -> dict[str, An
 __all__ = [
     "CLASS_NAMES",
     "EVALUATION_CONTRACT",
+    "FINAL_EVALUATION_CONTRACT",
+    "FINAL_PREDICTION_CONTRACT",
+    "PAIRED_STATISTICS_CONTRACT",
     "build_evaluation_contract",
     "evaluate_logits",
     "evaluate_model",
+    "evaluate_locked_finalist",
     "expected_calibration_error",
     "model_forward",
     "qcd_signal_rejection",
+    "collect_model_predictions",
+    "load_final_predictions",
+    "paired_prediction_statistics",
+    "paired_prediction_statistics_many",
     "stable_probabilities",
+    "write_final_predictions",
 ]

@@ -1626,8 +1626,20 @@ def train_frozen_consumer_distillation(
     for cache in caches:
         if cache is not None:
             cache.validate_consumer(frozen_consumer)
+    consumer_parameter_ids = {
+        id(parameter) for parameter in frozen_consumer.parameters()
+    }
+    trainable_predictor_parameters = []
     for parameter in predictor.parameters():
-        parameter.requires_grad_(True)
+        # P_SHARED_CONSUMER_STEM deliberately aliases the frozen HLT stem.
+        # It is part of the deployed predictor graph, but it must remain
+        # frozen and bit-identical to the target/live consumer.
+        shared_with_consumer = id(parameter) in consumer_parameter_ids
+        parameter.requires_grad_(not shared_with_consumer)
+        if not shared_with_consumer:
+            trainable_predictor_parameters.append(parameter)
+    if not trainable_predictor_parameters:
+        raise ValueError("distillation predictor has no trainable parameters")
     _set_seed(config.seed)
     device = torch.device(device)
     predictor.to(device)
@@ -1636,7 +1648,7 @@ def train_frozen_consumer_distillation(
     if loader_batch_size is not None and int(loader_batch_size) != config.batch_size:
         raise ValueError("distillation train-loader batch size changed")
     optimizer = torch.optim.AdamW(
-        predictor.parameters(),
+        trainable_predictor_parameters,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         betas=(config.adam_beta1, config.adam_beta2),
@@ -1653,6 +1665,10 @@ def train_frozen_consumer_distillation(
     labeled_examples_processed = 0
     for epoch in range(1, config.maximum_epochs + 1):
         predictor.train()
+        # ``predictor.train()`` reaches aliased modules recursively.  Restore
+        # the exact consumer (and therefore a shared diagnostic stem) to eval
+        # mode before either side of the paired forward is evaluated.
+        frozen_consumer.eval()
         sums = {
             name: 0.0
             for name in (
@@ -1714,7 +1730,7 @@ def train_frozen_consumer_distillation(
             scaler.scale(losses["total"]).backward()
             scaler.unscale_(optimizer)
             gradient_norm = torch.nn.utils.clip_grad_norm_(
-                predictor.parameters(), config.gradient_clip
+                trainable_predictor_parameters, config.gradient_clip
             )
             if not torch.isfinite(gradient_norm):
                 raise FloatingPointError("distillation gradient is non-finite")

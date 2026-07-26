@@ -8,7 +8,12 @@ from typing import Any, Mapping
 
 from jetclass_fresh.hlt_baseline import default_part_config
 
-from .contracts import require_sha256, validate_content_hash, with_content_hash
+from .contracts import (
+    canonical_sha256,
+    require_sha256,
+    validate_content_hash,
+    with_content_hash,
+)
 from .capacity import (
     WIDE_CAPACITY_CONTRACT,
     pair_encoder_parameter_count,
@@ -28,7 +33,11 @@ from .pair_base import (
     build_standard_four_pair_features,
     require_torch,
 )
-from .registry import resolve_registered_run, validate_screening_registry
+from .registry import (
+    CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT,
+    resolve_registered_run,
+    validate_screening_registry,
+)
 from .relation_pid_charge import PID_CHARGE_RELATION_CONTRACT
 from .relation_pt import PT_RELATION_CONTRACT
 from .relation_pt import average_tied_descending_rank, valid_pair_mask
@@ -358,6 +367,34 @@ class RelationalParticleTransformer(_ModuleBase):
         uu = self.explicit_standard_four(lorentz_vectors, mask)
         return self.mod(features, v=lorentz_vectors, mask=mask, uu=uu)
 
+    def diagnostics(
+        self,
+        features: Any,
+        lorentz_vectors: Any,
+        mask: Any,
+    ) -> dict[str, Any]:
+        from .attention import (
+            attention_allocation_diagnostics,
+            capture_multihead_attention_weights,
+        )
+
+        valid = mask.bool()
+        uu = self.explicit_standard_four(lorentz_vectors, valid)
+        with require_torch().no_grad():
+            captured = capture_multihead_attention_weights(
+                self.mod,
+                lambda: self.mod(
+                    features, v=lorentz_vectors, mask=valid, uu=uu
+                ),
+            )
+        return {
+            "families": [],
+            "architecture": "shared_directional_pair_bias",
+            "attention_allocation": attention_allocation_diagnostics(
+                captured, lorentz_vectors, valid
+            ),
+        }
+
 
 class WideBaseParticleTransformer(_ModuleBase):
     """Base4-only active pair-stem capacity control."""
@@ -421,6 +458,13 @@ class WideBaseParticleTransformer(_ModuleBase):
             lorentz_vectors, mask=mask, module=self._weaver_module
         )
         return self.mod(features, v=lorentz_vectors, mask=mask, uu=uu)
+
+    diagnostics = RelationalParticleTransformer.diagnostics
+
+    def explicit_standard_four(self, lorentz_vectors: Any, mask: Any) -> Any:
+        return build_standard_four_pair_features(
+            lorentz_vectors, mask=mask, module=self._weaver_module
+        )
 
 
 class RelationalFamilyParticleTransformer(_ModuleBase):
@@ -517,6 +561,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         mask: Any,
         raw_tokens: Any | None = None,
         region_trees: Any | None = None,
+        pair_transform: Any | None = None,
     ) -> Any:
         torch = require_torch()
         RelationalParticleTransformer._validate_batch(
@@ -541,6 +586,26 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         uu = self.pair_features(
             clean_features, clean_vectors, valid, clean_raw, region_trees
         )
+        if pair_transform is not None:
+            if self.training:
+                raise RuntimeError(
+                    "semantic pair perturbations are inference-only"
+                )
+            uu = pair_transform(
+                uu,
+                mask=valid,
+                features=clean_features,
+                lorentz_vectors=clean_vectors,
+                raw_tokens=clean_raw,
+                region_trees=region_trees,
+            )
+            if tuple(uu.shape) != (
+                int(features.shape[0]),
+                self.pair_builder.output_dimension,
+                int(features.shape[2]),
+                int(features.shape[2]),
+            ):
+                raise ValueError("semantic pair transform changed tensor shape")
         return self.mod(
             clean_features,
             v=clean_vectors,
@@ -602,6 +667,19 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 uu=details["combined"],
                 mask=valid,
             )
+            from .attention import (
+                attention_allocation_diagnostics,
+                capture_multihead_attention_weights,
+            )
+            captured_attention = capture_multihead_attention_weights(
+                self.mod,
+                lambda: self.mod(
+                    clean_features,
+                    v=clean_vectors,
+                    mask=valid,
+                    uu=details["combined"],
+                ),
+            )
         pair_mask = valid_pair_mask(valid)
 
         def head_means(group: Any) -> list[float | None]:
@@ -621,6 +699,9 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             "pair_bias_shape": list(bias.shape),
             "valid_directed_pair_count": int(pair_mask.sum().cpu()),
             "pair_bias_finite": bool(torch.isfinite(bias).all()),
+            "attention_allocation": attention_allocation_diagnostics(
+                captured_attention, clean_vectors, valid
+            ),
         }
         if "PT" in self.families:
             pt_encoder = self.pair_builder.encoders["PT"]
@@ -1018,6 +1099,94 @@ def build_confirmation_architecture_model(
     return model
 
 
+def build_step6_model_contract(
+    run_id: str,
+    *,
+    selected_families: tuple[str, ...] | list[str],
+    confirmation_architecture_registry: Mapping[str, Any],
+    relation_normalization_artifact: Mapping[str, Any],
+    selected_shared_bias_model_contract_sha256: str,
+    global_determinism_sha256: str,
+) -> dict[str, Any]:
+    """Bind one resolved confirmation architecture before it is trained."""
+
+    registry_sha = validate_content_hash(
+        confirmation_architecture_registry,
+        expected_contract=CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT,
+    )
+    normalizer_sha = validate_relation_normalization_artifact(
+        relation_normalization_artifact
+    )
+    allowed = {
+        "RPT_BASE_LAYERWISE": ("layerwise_bias", False, True),
+        "RPT_BASE_EDGEVALUE": (
+            "layerwise_bias_and_edge_value",
+            True,
+            True,
+        ),
+        "RPT_SELECTED_LAYERWISE": ("layerwise_bias", False, False),
+        "RPT_SELECTED_EDGEVALUE": (
+            "layerwise_bias_and_edge_value",
+            True,
+            False,
+        ),
+    }
+    if run_id not in allowed:
+        raise ValueError(f"{run_id!r} is not a Step-6 architecture run")
+    architecture, edge_value, base_control = allowed[run_id]
+    families = (
+        () if base_control else canonical_supported_families(selected_families)
+    )
+    if base_control and tuple(selected_families):
+        raise ValueError("base4 architecture controls cannot receive relations")
+    family_set_hash = canonical_sha256(list(families))
+    return with_content_hash(
+        {
+            "contract": STEP6_RELATIONAL_MODEL_CONTRACT,
+            "schema_version": 1,
+            "run_id": run_id,
+            "configuration_role": (
+                "architecture_control" if base_control else "scientific_finalist"
+            ),
+            "confirmation_architecture_registry_sha256": registry_sha,
+            "relation_normalization_sha256": normalizer_sha,
+            "selected_shared_bias_model_contract_sha256": require_sha256(
+                selected_shared_bias_model_contract_sha256,
+                name="selected_shared_bias_model_contract_sha256",
+            ),
+            "global_determinism_sha256": require_sha256(
+                global_determinism_sha256, name="global_determinism_sha256"
+            ),
+            "selected_relation_set": list(families),
+            "selected_relation_set_sha256": family_set_hash,
+            "enabled_relations": ["base4", *families],
+            "attention_architecture": architecture,
+            "pair_stem_evaluations_per_batch": 1,
+            "independent_bias_projection_per_layer": True,
+            "layerwise_bias_projection_initialization": (
+                "independent_parameters_initialized_as_deep_copies_of_one_"
+                "Weaver_initialized_final_projection"
+            ),
+            "particle_attention_layer_count": 8,
+            "edge_value": {
+                "enabled": edge_value,
+                "per_layer_per_head_linear_no_bias": edge_value,
+                "aggregate_before_projection": edge_value,
+                "materialize_B_H_N_N_dh": False,
+                "norm_ratio_epsilon": 1.0e-6,
+                "projection_initialization": (
+                    "torch_nn_init_xavier_uniform_under_run_seed"
+                ),
+            },
+            "base4_architecture_control": base_control,
+            "every_registered_parameter_active": True,
+            "initialization": "from_scratch",
+            "hlt_only_inference": True,
+            "offline_or_teacher_required": False,
+        }
+    )
+
+
 def build_step3_model_contract(
     run_id: str,
     *,
@@ -1385,5 +1554,6 @@ __all__ = [
     "build_step3_model_contract",
     "build_step4_model_contract",
     "build_step5_model_contract",
+    "build_step6_model_contract",
     "exact_rpt_base_config",
 ]

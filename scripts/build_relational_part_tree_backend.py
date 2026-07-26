@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract", required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -59,6 +62,23 @@ def main() -> int:
         / "csrc"
         / "relational_ca_tree_v1.cpp"
     )
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "contract": args.contract,
+                    "source": str(source.resolve()),
+                    "source_sha256": sha256_file(source),
+                    "build_dir": str(args.build_dir.resolve()),
+                    "output_dir": str(args.output_dir.resolve()),
+                    "compiler_flags": FLAGS,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     args.build_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     module = load(
@@ -80,8 +100,16 @@ def main() -> int:
         raise FileExistsError("existing tree backend binary differs")
     if not binary_target.exists():
         shutil.copy2(binary_source, binary_target)
+    compiler_command = shlex.split(os.environ.get("CXX", "c++"))
+    if not compiler_command:
+        raise ValueError("CXX resolves to an empty compiler command")
+    compiler_executable = shutil.which(compiler_command[0])
+    if compiler_executable is None:
+        raise FileNotFoundError(
+            f"selected CXX compiler is absent: {compiler_command[0]}"
+        )
     compiler_line = subprocess.run(
-        ["c++", "--version"],
+        [*compiler_command, "--version"],
         check=True,
         capture_output=True,
         text=True,
@@ -90,14 +118,22 @@ def main() -> int:
     manifest = with_content_hash(
         {
             "contract": ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "contract_id": ANGULAR_TREE_BACKEND_CONTRACT,
+            "backend_schema_version": int(runtime["schema_version"]),
             "source_sha256": sha256_file(source),
             "binary_sha256": sha256_file(binary_target),
-            "compiler_identity": compiler_line,
-            "compiler_major_version": compiler_line,
+            "compiler_identity": str(runtime["compiler_family"]),
+            "compiler_major_version": int(
+                runtime["compiler_major_version"]
+            ),
+            "compiler_version": str(runtime["compiler_version"]),
+            "compiler_executable": str(Path(compiler_executable).resolve()),
+            "compiler_driver_version_line": compiler_line,
             "compiler_flags": FLAGS,
-            "platform_architecture": platform.machine(),
+            "platform_architecture": str(
+                runtime["platform_architecture"]
+            ),
             "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
             "pytorch_version": torch.__version__,
             "pytorch_cxx11_abi": bool(torch._C._GLIBCXX_USE_CXX11_ABI),
@@ -109,7 +145,11 @@ def main() -> int:
         }
     )
     validate_backend_manifest(
-        manifest, binary_path=binary_target, source_path=source
+        manifest,
+        binary_path=binary_target,
+        source_path=source,
+        check_runtime_environment=True,
+        runtime_module=module,
     )
     manifest_path = args.output_dir / "backend_manifest.json"
     payload = canonical_json_bytes(manifest) + b"\n"

@@ -12,8 +12,8 @@ from typing import Any, Mapping
 
 
 CANONICAL_JSON_CONTRACT = "relational_part_canonical_json_v1"
-CAMPAIGN_SPEC_CONTRACT = "relational_part_campaign_spec_v2"
-STEP1_REPORT_CONTRACT = "relational_part_step1_report_v2"
+CAMPAIGN_SPEC_CONTRACT = "relational_part_campaign_spec_v3"
+STEP1_REPORT_CONTRACT = "relational_part_step1_report_v3"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -261,7 +261,7 @@ def build_campaign_spec(
     return with_content_hash(
         {
             "contract": CAMPAIGN_SPEC_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_id": campaign_id,
             "scientific_program": "relational_particle_transformer_attention_bias",
             "campaign_stage": "step1_contracts_only",
@@ -282,6 +282,7 @@ def build_campaign_spec(
             "hlt_only_inference": True,
             "offline_or_teacher_required": False,
             "final_test_scientific_access": "sealed_until_locked_confirmation",
+            "continuation_source_snapshot_must_match_exactly": True,
             "canonical_json_contract": CANONICAL_JSON_CONTRACT,
         }
     )

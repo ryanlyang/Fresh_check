@@ -456,7 +456,65 @@ def build_low_data_campaign_registry(
         )
         predictor_run_ids.append(run_id)
 
-    for index, row in enumerate(_distillation_rows()):
+    distillation_rows = _distillation_rows()
+    distillation_run_by_key = {
+        (
+            str(row["target_id"]),
+            str(row["architecture_id"]),
+            str(row["consumer_id"]),
+            str(row["mode"]),
+            str(row["loss_id"]),
+        ): f"DISTILL_{index:03d}"
+        for index, row in enumerate(distillation_rows)
+    }
+
+    def distillation_parent_ids(row: Mapping[str, Any]) -> tuple[str, ...]:
+        target = str(row["target_id"])
+        architecture = str(row["architecture_id"])
+        consumer = str(row["consumer_id"])
+        mode = str(row["mode"])
+        loss = str(row["loss_id"])
+        architecture_parent = f"ARCH_{architecture}"
+        primary_key = (
+            target,
+            architecture,
+            consumer,
+            "frozen",
+            "L_PRIMARY",
+        )
+        primary = distillation_run_by_key.get(primary_key)
+        if primary is None:
+            raise RuntimeError(
+                "distillation row has no matching frozen L_PRIMARY source"
+            )
+        if mode == "frozen":
+            # CE-only is the exact-update comparator for the otherwise
+            # identical privileged branch.  Other frozen rows begin from the
+            # architecture-specific registered initialization.
+            return (
+                (architecture_parent, primary)
+                if loss == "L_CE"
+                else (architecture_parent,)
+            )
+        joint_key = (
+            target,
+            architecture,
+            consumer,
+            "joint",
+            "L_PRIMARY",
+        )
+        if mode == "joint":
+            return (primary,)
+        if mode == "joint_ce_control":
+            joint = distillation_run_by_key.get(joint_key)
+            if joint is None:
+                raise RuntimeError(
+                    "joint CE row has no matching privileged joint source"
+                )
+            return (primary, joint)
+        raise RuntimeError("unknown distillation campaign mode")
+
+    for index, row in enumerate(distillation_rows):
         run_id = f"DISTILL_{index:03d}"
         privileged = bool(row["privileged_claim_eligible"])
         add(
@@ -464,7 +522,7 @@ def build_low_data_campaign_registry(
             stage="predictor",
             category="distillation",
             detail=str(row["row_id"]),
-            parents=("ARCH_P_HIER_DECODER_REFINE",),
+            parents=distillation_parent_ids(row),
             selectable=True,
             family=(
                 "privileged_scientific"
@@ -500,12 +558,40 @@ def build_low_data_campaign_registry(
         run_id = f"TRAINED_CONTROL_{control_id}"
         privileged = bool(row["privileged_claim_eligible"])
         selectable = bool(row["selectable"])
+        control_parents = ["ROBUST_CONSUMER"]
+        canonical_primary = distillation_run_by_key[
+            (
+                "TARGET_ALTERNATE_SELECTED",
+                "P_HIER_DECODER_REFINE",
+                "C_ROBUST_MIX",
+                "frozen",
+                "L_PRIMARY",
+            )
+        ]
+        if control_id in {
+            "IDENTICAL_CE_ONLY",
+            "DVIEW_JOINT",
+            "DVIEW_JOINT_CE_ONLY",
+        }:
+            control_parents.append(canonical_primary)
+        if control_id == "DVIEW_JOINT_CE_ONLY":
+            control_parents.append(
+                distillation_run_by_key[
+                    (
+                        "TARGET_ALTERNATE_SELECTED",
+                        "P_HIER_DECODER_REFINE",
+                        "C_ROBUST_MIX",
+                        "joint",
+                        "L_PRIMARY",
+                    )
+                ]
+            )
         add(
             run_id,
             stage="predictor",
             category="trained_control",
             detail=control_id,
-            parents=("ROBUST_CONSUMER",),
+            parents=tuple(control_parents),
             selectable=selectable,
             diagnostic=not selectable,
             family=(
