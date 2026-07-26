@@ -18,6 +18,7 @@ IFS=$'\n\t'
 : "${RPT_TREE_SHARD_SIZE:=10000}"
 : "${RPT_DEVICE:=auto}"
 export PYTHONNOUSERSITE
+export PYTHONDONTWRITEBYTECODE=1
 
 rpt_require_campaign_root() {
   if [[ -z "${CAMPAIGN_ROOT:-}" ]]; then
@@ -40,6 +41,7 @@ rpt_setup() {
   # shellcheck disable=SC1090
   source "${conda_hook}"
   conda activate "${CONDA_ENV}"
+  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   cd "${PROJECT_DIR}"
   python -c "import sys; print(sys.executable)"
 }

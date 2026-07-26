@@ -52,6 +52,8 @@ fi
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 if [[ ! -d "${DATA_DIR}" ]]; then
   echo "JetClass data root does not exist: ${DATA_DIR}" >&2
   exit 2

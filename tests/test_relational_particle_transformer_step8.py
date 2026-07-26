@@ -384,6 +384,8 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         "192G",
     ):
         assert value in common
+    assert "PYTHONDONTWRITEBYTECODE=1" in common
+    assert 'LD_LIBRARY_PATH="${CONDA_PREFIX}/lib' in common
     top = (sbatch / "submit_relational_part_tigris_full.sh").read_text(
         encoding="utf-8"
     )
@@ -393,6 +395,8 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     assert "preflight_relational_part_data.py" in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top
+    assert "PYTHONDONTWRITEBYTECODE=1" in top
+    assert 'LD_LIBRARY_PATH="${CONDA_PREFIX}/lib' in top
     semantic_runner = (
         ROOT / "scripts" / "run_relational_part_semantic_perturbation.py"
     ).read_text(encoding="utf-8")
