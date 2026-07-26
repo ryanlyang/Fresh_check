@@ -349,14 +349,17 @@ def test_resumable_tree_worker_recovers_only_unregistered_partial(
 def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     required = {
         "run_build_relational_part_splits.sh",
+        "run_build_relational_part_campaign.sh",
         "run_audit_relational_part_raw_inputs.sh",
         "run_build_relational_part_hlt_cache.sh",
         "run_audit_relational_part_inputs.sh",
         "run_fit_relational_part_normalization.sh",
+        "run_fit_relational_part_region_normalization.sh",
         "run_build_relational_part_tree_backend.sh",
         "run_probe_relational_part_tree_backend.sh",
         "run_build_relational_part_angular_tree_shard.sh",
         "run_finalize_relational_part_angular_tree_cache.sh",
+        "run_build_relational_part_model_contracts.sh",
         "run_train_relational_part.sh",
         "run_select_relational_part_screening.sh",
         "run_submit_relational_part_confirmation.sh",
@@ -369,6 +372,13 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     }
     sbatch = ROOT / "sbatch"
     assert required.issubset({path.name for path in sbatch.iterdir()})
+    workers = sorted(sbatch.glob("run_*relational_part*.sh"))
+    assert workers
+    for worker in workers:
+        source = worker.read_text(encoding="utf-8")
+        assert 'SCRIPT_DIR="${PROJECT_DIR}/sbatch"' in source
+        assert "BASH_SOURCE[0]" not in source
+        assert 'source "${SCRIPT_DIR}/relational_part_common.sh"' in source
     common = (sbatch / "relational_part_common.sh").read_text(
         encoding="utf-8"
     )
