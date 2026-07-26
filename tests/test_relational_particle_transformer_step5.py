@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from teacher_logit_reco.relational_part import (
     RelationalParticleTransformer,
     WideBaseParticleTransformer,
     build_angular_tree_resource_contract,
+    build_batched_region_raw_features,
     build_global_determinism_contract,
     build_tree_probe_artifact,
     build_normalization_contract,
@@ -178,6 +180,33 @@ def test_region_41_channels_diagonal_merge_and_permutation_equivariance() -> Non
     torch.testing.assert_close(raw, restored, atol=2e-6, rtol=2e-6)
 
 
+def test_region_production_builder_is_batched_and_never_roundtrips_tokens() -> None:
+    tokens, mask, vectors, _ = _sample(jets=2)
+    trees = [
+        build_reference_tree(vectors[row], tokens[row], mask[row])
+        for row in range(2)
+    ]
+    token_tensor = torch.from_numpy(tokens)
+    mask_tensor = torch.from_numpy(mask).unsqueeze(1)
+    batched = build_batched_region_raw_features(
+        trees, token_tensor, mask_tensor
+    )
+    singles = torch.stack(
+        [
+            build_region_raw_features(
+                trees[row], token_tensor[row], mask_tensor[row, 0]
+            )
+            for row in range(2)
+        ]
+    )
+    torch.testing.assert_close(batched, singles, atol=0, rtol=0)
+    source = inspect.getsource(build_batched_region_raw_features)
+    assert ".cpu(" not in source
+    assert ".numpy(" not in source
+    assert "for query" not in source
+    assert "for context" not in source
+
+
 def test_region_normalizer_encoder_and_masking() -> None:
     tokens, mask, _, _, trees, _, base, region = _artifacts()
     assert validate_region_normalization(
@@ -301,6 +330,7 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
             "pytorch_cxx11_abi": True,
             "openmp_available": True,
             "self_test_sha256": "3" * 64,
+            "compiled_reference_smoke_tree_sha256": "4" * 64,
         }
     )
     assert validate_backend_manifest(manifest) == manifest["content_hash"]

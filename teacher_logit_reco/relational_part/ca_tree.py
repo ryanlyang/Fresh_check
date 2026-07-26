@@ -104,6 +104,7 @@ def build_angular_tree_resource_contract(
                 "platform_architecture", "python_major_minor",
                 "pytorch_version", "pytorch_cxx11_abi",
                 "openmp_available", "self_test_sha256",
+                "compiled_reference_smoke_tree_sha256",
             ],
             "sharding": {
                 "maximum_jets_per_shard": 10_000,
@@ -150,6 +151,7 @@ def validate_backend_manifest(
         "compiler_executable", "compiler_driver_version_line", "compiler_flags",
         "platform_architecture", "python_major_minor", "pytorch_version",
         "pytorch_cxx11_abi", "openmp_available", "self_test_sha256",
+        "compiled_reference_smoke_tree_sha256",
     }
     if not required.issubset(manifest):
         raise ValueError("tree backend manifest lacks required ABI identity")
@@ -173,7 +175,12 @@ def validate_backend_manifest(
         raise ValueError("tree backend compiler flags differ")
     if manifest.get("openmp_available") is not True:
         raise ValueError("tree backend lacks required OpenMP")
-    for field in ("source_sha256", "binary_sha256", "self_test_sha256"):
+    for field in (
+        "source_sha256",
+        "binary_sha256",
+        "self_test_sha256",
+        "compiled_reference_smoke_tree_sha256",
+    ):
         require_sha256(manifest[field], name=field)
     if binary_path is not None and sha256_file(binary_path) != manifest["binary_sha256"]:
         raise ValueError("tree backend binary hash differs")

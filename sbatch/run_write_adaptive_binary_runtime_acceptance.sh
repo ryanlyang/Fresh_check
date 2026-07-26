@@ -13,6 +13,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"
+CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
+export CONDA_BASE CONDA_ENV
 source "${PROJECT_DIR}/sbatch/common.sh"
 : "${ABPH_ROOT:?Set ABPH_ROOT}"
 : "${ABPH_RUNTIME_ACCEPTANCE_ROOT:=${ABPH_ROOT}/audits/runtime_acceptance}"

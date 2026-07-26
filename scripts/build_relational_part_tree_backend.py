@@ -20,13 +20,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch  # noqa: E402
+import numpy as np  # noqa: E402
 from torch.utils.cpp_extension import load  # noqa: E402
 
 from teacher_logit_reco.relational_part import (  # noqa: E402
     ANGULAR_TREE_BACKEND_CONTRACT,
     ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT,
+    build_compiled_tree,
+    build_reference_tree,
     canonical_json_bytes,
     sha256_file,
+    tree_content_sha256,
     validate_backend_manifest,
     with_content_hash,
 )
@@ -115,6 +119,35 @@ def main() -> int:
         text=True,
     ).stdout.splitlines()[0]
     self_test = dict(module.self_test())
+    smoke_tokens = np.zeros((4, 14), dtype=np.float64)
+    smoke_tokens[:, 0] = np.asarray((12.0, 7.0, 3.0, 1.0))
+    smoke_tokens[:, 1] = np.asarray((-0.4, 0.2, 0.7, -1.1))
+    smoke_tokens[:, 2] = np.asarray((0.1, -0.8, 1.4, 2.2))
+    smoke_tokens[:, 3] = smoke_tokens[:, 0] * np.cosh(
+        smoke_tokens[:, 1]
+    )
+    smoke_vectors = np.stack(
+        (
+            smoke_tokens[:, 0] * np.cos(smoke_tokens[:, 2]),
+            smoke_tokens[:, 0] * np.sin(smoke_tokens[:, 2]),
+            smoke_tokens[:, 0] * np.sinh(smoke_tokens[:, 1]),
+            smoke_tokens[:, 3],
+        ),
+        axis=1,
+    )
+    smoke_mask = np.asarray((True, True, True, True))
+    compiled_smoke = build_compiled_tree(
+        module, smoke_vectors, smoke_tokens, smoke_mask
+    )
+    reference_smoke = build_reference_tree(
+        smoke_vectors, smoke_tokens, smoke_mask
+    )
+    compiled_smoke_sha = tree_content_sha256(compiled_smoke)
+    reference_smoke_sha = tree_content_sha256(reference_smoke)
+    if compiled_smoke_sha != reference_smoke_sha:
+        raise RuntimeError(
+            "compiled backend canonical smoke tree differs from Python reference"
+        )
     manifest = with_content_hash(
         {
             "contract": ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT,
@@ -141,6 +174,7 @@ def main() -> int:
             "self_test_sha256": hashlib.sha256(
                 canonical_json_bytes(self_test)
             ).hexdigest(),
+            "compiled_reference_smoke_tree_sha256": compiled_smoke_sha,
             "binary_filename": binary_target.name,
         }
     )

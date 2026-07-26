@@ -719,13 +719,29 @@ def build_low_data_campaign_registry(
     stack_parents = tuple(
         spec.run_id for spec in specs if spec.stage == "stack"
     )
+    report_parents = {
+        "EXPORT_PRIVILEGED_WINNER": stack_parents,
+        "EXPORT_DEPLOYABLE_WINNER": stack_parents,
+        "RELOAD_PRIVILEGED_WINNER": (
+            "REPORT_EXPORT_PRIVILEGED_WINNER",
+        ),
+        "RELOAD_DEPLOYABLE_WINNER": (
+            "REPORT_EXPORT_DEPLOYABLE_WINNER",
+        ),
+        "AGGREGATE_REPORT": (
+            "REPORT_RELOAD_PRIVILEGED_WINNER",
+            "REPORT_RELOAD_DEPLOYABLE_WINNER",
+        ),
+        "FINAL_PERMIT_PRIVILEGED": ("REPORT_AGGREGATE_REPORT",),
+        "FINAL_PERMIT_DEPLOYABLE": ("REPORT_AGGREGATE_REPORT",),
+    }
     for report_id in _REPORT_EXPORT_IDS:
         add(
             f"REPORT_{report_id}",
             stage="report_export",
             category="report_export",
             detail=report_id,
-            parents=stack_parents,
+            parents=report_parents[report_id],
             uses_labels=False,
         )
 

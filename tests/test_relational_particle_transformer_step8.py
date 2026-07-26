@@ -32,6 +32,7 @@ from teacher_logit_reco.relational_part import (
     select_raw_audit_identities,
     select_tree_probe,
     validate_existing_tree_shard,
+    validate_campaign_source,
     validate_content_hash,
     validate_production_graph,
 )
@@ -270,6 +271,12 @@ def test_tree_probe_v2_authenticates_parents_and_storage() -> None:
     assert artifact["scientific_provenance_complete"] is True
     assert artifact["storage_projection_sha256"] == storage["content_hash"]
     assert artifact["limits"]["passed"] is True
+    assert (
+        storage["component_bytes"][
+            "peak_concurrent_resumable_last_checkpoints"
+        ]
+        > 0
+    )
     assert sum(artifact["initial_quotas"]) + sum(
         artifact["redistributed_additions"]
     ) == 20
@@ -345,10 +352,67 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         encoding="utf-8"
     )
     assert "--dry-run" in top
+    assert "--smoke-submit" in top
     assert "0-20%${SCREENING_ARRAY_CONCURRENCY}" in top
     assert "preflight_relational_part_data.py" in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top
+
+
+def test_continuation_source_snapshot_and_dynamic_ledger_fail_closed(
+    tmp_path: Path,
+) -> None:
+    from teacher_logit_reco.relational_part import source_snapshot, with_content_hash
+
+    source = source_snapshot(ROOT)
+    campaign = with_content_hash(
+        {
+            "contract": "test_campaign",
+            "schema_version": 1,
+            "source": {
+                "commit": source["source_commit"],
+                "status_sha256": source["source_status_sha256"],
+                "dirty": source["source_dirty"],
+            },
+        }
+    )
+    validate_campaign_source(campaign, repo_root=ROOT)
+    stale = {
+        **campaign,
+        "source": {**campaign["source"], "status_sha256": "0" * 64},
+    }
+    with pytest.raises(ValueError, match="source snapshot"):
+        validate_campaign_source(stale, repo_root=ROOT)
+
+    campaign_path = tmp_path / "campaign_spec.json"
+    campaign_path.write_text(json.dumps(campaign), encoding="utf-8")
+    ledger = tmp_path / "dynamic_jobs.json"
+    script = ROOT / "scripts" / "register_relational_part_dynamic_job.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--ledger",
+        str(ledger),
+        "--campaign-spec",
+        str(campaign_path),
+        "--logical-name",
+        "confirmation_training",
+        "--job-id",
+        "12345",
+        "--dependency",
+        "afterok:100",
+    ]
+    subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
+    subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert payload["job_count"] == 1
+    conflict = list(command)
+    conflict[conflict.index("12345")] = "99999"
+    failed = subprocess.run(
+        conflict, cwd=ROOT, check=False, capture_output=True, text=True
+    )
+    assert failed.returncode != 0
+    assert "another binding" in failed.stderr
 
 
 def test_smoke_simulation_prints_complete_nonmutating_ledger(

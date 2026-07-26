@@ -12,6 +12,9 @@
 
 set -euo pipefail
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"
+CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
+export CONDA_BASE CONDA_ENV
 source "${PROJECT_DIR}/sbatch/common.sh"
 : "${ABPH_BOOTSTRAP_CAMPAIGN_ROOT:?Set the fresh campaign root}"
 : "${ABPH_BOOTSTRAP_STORAGE_PROJECTION:?Set the root-bound projection}"

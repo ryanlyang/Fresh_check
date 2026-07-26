@@ -15,6 +15,7 @@ from .contracts import (
     canonical_sha256,
     require_sha256,
     sha256_file,
+    validate_content_hash,
     with_content_hash,
 )
 
@@ -25,7 +26,7 @@ except ImportError:  # pragma: no cover
 
 
 EVALUATION_CONTRACT = "relational_part_evaluation_v1"
-FINAL_EVALUATION_CONTRACT = "relational_part_final_evaluation_v1"
+FINAL_EVALUATION_CONTRACT = "relational_part_final_evaluation_v2"
 FINAL_PREDICTION_CONTRACT = "relational_part_final_predictions_v1"
 PAIRED_STATISTICS_CONTRACT = "relational_part_paired_statistics_v1"
 CLASS_NAMES = (
@@ -549,7 +550,7 @@ def evaluate_locked_finalist(
     return with_content_hash(
         {
             "contract": FINAL_EVALUATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "seed": int(seed),
             "configuration_role": rows[run_id]["configuration_role"],

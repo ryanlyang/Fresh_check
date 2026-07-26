@@ -51,6 +51,7 @@ from teacher_logit_reco.relational_part.semantic_controls import (
     directional_swap_relations,
     evaluate_semantic_perturbations,
     select_unary_widths,
+    zero_relation_family,
     unary_adapter_parameter_count,
     within_jet_shuffled_relations,
     wrong_event_relations,
@@ -185,6 +186,27 @@ def test_screening_negative_campaign_and_confirmation_registry_are_complete() ->
     assert union["new_relation_families"] == confirmation[
         "selected_union"
     ]["families"]
+
+
+def test_screening_rejects_stale_cross_campaign_checkpoint_lineage() -> None:
+    _, registry, results, hashes, _, _ = _screening()
+    stale = [dict(row) for row in results]
+    stale[0] = {
+        **stale[0],
+        "lineage_hashes": {
+            **stale[0]["lineage_hashes"],
+            "campaign_spec": "0" * 64,
+        },
+    }
+    with pytest.raises(ValueError, match="campaign_spec"):
+        build_screening_summary(
+            screening_registry=registry,
+            results=stale,
+            campaign_spec_sha256="5" * 64,
+            split_manifest_sha256="6" * 64,
+            hlt_cache_hashes=hashes,
+            results_envelope_sha256="7" * 64,
+        )
 
 
 def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> None:
@@ -395,6 +417,30 @@ def test_semantic_evaluator_uses_exact_global_multiplicity_strata() -> None:
     ] == 1
     assert diagnostics["wrong_event_relations"]["excluded_event_count"] == 1
     assert diagnostics["wrong_event_relations"]["fixed_point_count"] == 0
+
+
+def test_combination_family_dropout_zeros_only_selected_channels() -> None:
+    pairs = torch.randn(2, 20, 4, 4)
+    mask = torch.tensor(
+        [[[True, True, True, False]], [[True, True, False, False]]]
+    )
+    pairs = pairs.masked_fill(
+        ~(mask.unsqueeze(-1) & mask.unsqueeze(-2)), 0.0
+    )
+    output, detail = zero_relation_family(
+        pairs,
+        mask,
+        families=("PT", "PID"),
+        family="PT",
+    )
+    assert torch.equal(output[:, :4], pairs[:, :4])
+    assert output[:, 4:12].eq(0).all()
+    valid_pairs = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+    torch.testing.assert_close(
+        output[:, 12:].masked_select(valid_pairs.expand(-1, 8, -1, -1)),
+        pairs[:, 12:].masked_select(valid_pairs.expand(-1, 8, -1, -1)),
+    )
+    assert detail["zeroed_family"] == "PT"
 
 
 def test_unary_parameter_search_and_registry_are_exact() -> None:

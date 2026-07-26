@@ -79,6 +79,7 @@ def _validate_result_lineage(
     campaign_spec_sha256: str,
     split_manifest_sha256: str,
     hlt_cache_hashes: Mapping[str, str],
+    expected_common_lineage_hashes: Mapping[str, str],
 ) -> None:
     if record.get("lineage_authenticated") is not True:
         raise ValueError("selection result lineage is not authenticated")
@@ -109,6 +110,12 @@ def _validate_result_lineage(
         )
     for field, value in expected.items():
         if lineage.get(field) != value:
+            raise ValueError(f"selection result lineage differs at {field}")
+    for field, value in expected_common_lineage_hashes.items():
+        expected_value = require_sha256(
+            value, name=f"expected_common_lineage_hashes.{field}"
+        )
+        if lineage.get(field) != expected_value:
             raise ValueError(f"selection result lineage differs at {field}")
     for field, value in lineage.items():
         require_sha256(value, name=f"lineage_hashes.{field}")
@@ -152,6 +159,7 @@ def build_screening_summary(
     split_manifest_sha256: str,
     hlt_cache_hashes: Mapping[str, str],
     results_envelope_sha256: str,
+    expected_common_lineage_hashes: Mapping[str, str],
 ) -> dict[str, Any]:
     registry_sha = validate_screening_registry(screening_registry)
     expected_rows = {str(row["run_id"]): row for row in screening_registry["rows"]}
@@ -179,6 +187,7 @@ def build_screening_summary(
             campaign_spec_sha256=campaign_spec_sha256,
             split_manifest_sha256=split_manifest_sha256,
             hlt_cache_hashes=hlt_cache_hashes,
+            expected_common_lineage_hashes=expected_common_lineage_hashes,
         )
         normalized.append(
             {
@@ -631,6 +640,7 @@ def aggregate_confirmation(
     split_manifest_sha256: str,
     hlt_cache_hashes: Mapping[str, str],
     results_envelope_sha256: str,
+    expected_common_lineage_hashes: Mapping[str, str],
     semantic_unary_results: Sequence[Mapping[str, Any]] = (),
     unary_results_envelope_sha256: str | None = None,
     semantic_perturbation_sha256: str | None = None,
@@ -646,6 +656,7 @@ def aggregate_confirmation(
             campaign_spec_sha256=campaign_spec_sha256,
             split_manifest_sha256=split_manifest_sha256,
             hlt_cache_hashes=hlt_cache_hashes,
+            expected_common_lineage_hashes=expected_common_lineage_hashes,
         )
         grouped.setdefault(str(result["run_id"]), []).append(result)
     if set(grouped) != set(expected):
@@ -765,6 +776,7 @@ def aggregate_confirmation(
             campaign_spec_sha256=campaign_spec_sha256,
             split_manifest_sha256=split_manifest_sha256,
             hlt_cache_hashes=hlt_cache_hashes,
+            expected_common_lineage_hashes=expected_common_lineage_hashes,
         )
     unary_envelope_sha = require_sha256(
         unary_results_envelope_sha256,

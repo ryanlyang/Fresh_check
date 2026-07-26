@@ -386,3 +386,17 @@ def test_full_layerwise_and_edgevalue_base4_topology_zero_message_parity() -> No
     expected = layerwise(**batch)
     actual = edge(**batch)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    diagnostics = edge.diagnostics(**batch)
+    allocation = diagnostics["attention_allocation"]
+    assert allocation["captured_particle_attention_layer_count"] == 8
+    assert allocation["angular_band_edges"] == [0.0, 0.05, 0.1, 0.2, 0.4]
+    first_head = allocation["layers"][0]["per_head"][0]
+    context_total = sum(
+        first_head[name]
+        for name in (
+            "leading_context_fraction",
+            "subleading_context_fraction",
+            "soft_context_fraction",
+        )
+    )
+    assert context_total == pytest.approx(1.0, abs=1e-6)

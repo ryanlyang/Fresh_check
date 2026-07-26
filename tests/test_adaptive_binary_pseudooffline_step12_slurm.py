@@ -886,6 +886,17 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "C5_kt_32/best_model_val.pt" not in submitter
     assert "benchmark_uninstrumented" in submitter
     assert "run_compile_adaptive_binary_single_path_acceptance.sh" in submitter
+    for worker_name in (
+        "run_compile_adaptive_binary_single_path_acceptance.sh",
+        "run_write_adaptive_binary_runtime_acceptance.sh",
+        "run_prune_adaptive_binary_prepared_root.sh",
+        "run_submit_adaptive_binary_streaming_campaign.sh",
+    ):
+        worker_text = (REPO_ROOT / "sbatch" / worker_name).read_text(
+            encoding="utf-8"
+        )
+        assert "ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64" in worker_text
+        assert "ABPH_CONDA_ENV:-atlas_kd_tigris" in worker_text
     assert "ABPH_RUNTIME_BATCH_DEPENDENCY" in submitter
     assert "--kill-on-bad-exit=1" in worker
     assert "adaptive_binary_ddp_launch.sh" in worker

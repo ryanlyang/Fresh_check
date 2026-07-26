@@ -246,6 +246,8 @@ from .relation_region import (
     REGION_WITHIN_CLUSTER_PT_NAMES,
     RegionEncoder,
     RegionNormalizer,
+    build_batched_region_leaf_ranks,
+    build_batched_region_raw_features,
     build_region_raw_features,
     build_region_relation_contract,
 )
@@ -678,6 +680,8 @@ __all__ = [
     "build_tree_probe_artifact",
     "build_reference_trees",
     "build_region_raw_features",
+    "build_batched_region_leaf_ranks",
+    "build_batched_region_raw_features",
     "build_region_relation_contract",
     "build_registered_screening_model",
     "build_registered_wide_model",
