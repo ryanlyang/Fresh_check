@@ -20,7 +20,7 @@ from torch.nn import functional as F
 from .contracts import canonical_sha256
 
 
-PARTICLE_VIEW_GENERATOR_CONFIG_CONTRACT = "particle_view_generator_config_v1"
+PARTICLE_VIEW_GENERATOR_CONFIG_CONTRACT = "particle_view_generator_config_v2"
 PARTICLE_VIEW_PAIR_FEATURE_CONTRACT = "particle_view_hlt_memory_pair_features_v1"
 PARTICLE_VIEW_QUERY_TAP_CONTRACT = "particle_view_contextual_query_tap_v1"
 PARTICLE_VIEW_RATE_LOSS_CONTRACT = "particle_view_rate_covariance_losses_v1"
@@ -205,6 +205,7 @@ class ParticleViewGeneratorConfig:
     coordinate_noise_sigma: float = 0.05
     memory_source: str = "offline"
     self_mask_same_particle: bool = False
+    hard_local_radius: float | None = None
     contract: str = PARTICLE_VIEW_GENERATOR_CONFIG_CONTRACT
 
     def __post_init__(self) -> None:
@@ -253,6 +254,18 @@ class ParticleViewGeneratorConfig:
             raise ValueError("self_mask_same_particle must be boolean")
         if self.self_mask_same_particle and self.memory_source != "hlt":
             raise ValueError("same-particle self masking is only valid for HLT memory")
+        if self.hard_local_radius is not None:
+            if (
+                not isinstance(self.hard_local_radius, (int, float))
+                or isinstance(self.hard_local_radius, bool)
+                or not math.isfinite(self.hard_local_radius)
+                or self.hard_local_radius <= 0.0
+            ):
+                raise ValueError("hard_local_radius must be positive and finite")
+            if float(self.hard_local_radius) not in {0.2, 0.4}:
+                raise ValueError(
+                    "hard_local_radius is reserved for the 0.2/0.4 diagnostics"
+                )
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -274,6 +287,7 @@ class ParticleViewGeneratorConfig:
             "coordinate_noise_sigma": self.coordinate_noise_sigma,
             "memory_source": self.memory_source,
             "self_mask_same_particle": self.self_mask_same_particle,
+            "hard_local_radius": self.hard_local_radius,
             "matching_policy": "none_matching_free_cross_attention_v1",
             "output_operation_order": [
                 "tanh",
@@ -316,6 +330,7 @@ def particle_view_generator_config_from_payload(
         "coordinate_noise_sigma",
         "memory_source",
         "self_mask_same_particle",
+        "hard_local_radius",
         "matching_policy",
         "output_operation_order",
     }
@@ -340,6 +355,7 @@ def particle_view_generator_config_from_payload(
         coordinate_noise_sigma=payload["coordinate_noise_sigma"],
         memory_source=str(payload["memory_source"]),
         self_mask_same_particle=payload["self_mask_same_particle"],
+        hard_local_radius=payload["hard_local_radius"],
     )
     if config.to_payload() != dict(payload):
         raise ValueError("generator config payload is not canonical")
@@ -487,6 +503,7 @@ class _GeometricCrossAttentionBlock(nn.Module):
         self.num_heads = config.num_heads
         self.head_dim = config.width // config.num_heads
         self.use_pair_bias = config.use_pair_bias
+        self.hard_local_radius = config.hard_local_radius
         self.query_norm = nn.LayerNorm(config.width)
         self.memory_norm = nn.LayerNorm(config.width)
         self.q_projection = nn.Linear(config.width, config.width)
@@ -553,6 +570,14 @@ class _GeometricCrossAttentionBlock(nn.Module):
         allowed = memory_mask[:, None, None, :].expand(
             batch, self.num_heads, query_particles, memory_particles
         ).clone()
+        if self.hard_local_radius is not None:
+            nonnull_memory = memory_particles - int(null_token_present)
+            delta_r = torch.sqrt(
+                pair_features[..., 0].square()
+                + pair_features[..., 1].square()
+            )
+            local = delta_r <= float(self.hard_local_radius)
+            allowed[..., :nonnull_memory] &= local[:, None]
         if self_mask_same_particle:
             nonnull_memory = memory_particles - int(null_token_present)
             if nonnull_memory != query_particles:

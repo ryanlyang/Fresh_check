@@ -22,7 +22,14 @@ from .contracts import (
     with_content_hash,
     write_immutable_json,
 )
-from .normalization import build_normalization_contract
+from .determinism import (
+    build_global_determinism_contract,
+    validate_global_determinism_contract,
+)
+from .normalization import (
+    build_normalization_contract,
+    validate_normalization_contract,
+)
 from .provenance import (
     build_artifact_layout_contract,
     build_raw_input_schema_contract,
@@ -34,6 +41,7 @@ from .registry import (
     build_relation_family_registry,
     build_screening_registry,
     build_semantic_control_registry,
+    validate_relation_family_registry,
 )
 from .splits import (
     RelationalSplitConfig,
@@ -164,6 +172,7 @@ def build_step1_bundle(
             confirmation_registry_sha256=confirmation_registry["content_hash"],
         )
     )
+    global_determinism = bind(build_global_determinism_contract())
     normalization = bind(
         build_normalization_contract(
             split_binding_sha256=split_binding["content_hash"]
@@ -199,6 +208,7 @@ def build_step1_bundle(
             "content_hash"
         ],
         "semantic_control_registry_sha256": semantic_registry["content_hash"],
+        "global_determinism_sha256": global_determinism["content_hash"],
         "normalization_contract_sha256": normalization["content_hash"],
         "angular_tree_resource_contract_sha256": tree_resource["content_hash"],
         "artifact_layout_sha256": layout["content_hash"],
@@ -218,6 +228,7 @@ def build_step1_bundle(
             for key, value in parents.items()
             if value is not None
         },
+        global_determinism=global_determinism,
         split_manifest_hash=split_binding["source_manifest_hash"],
         hlt_cache_status=(
             "authenticated" if hlt_binding is not None else "expected_not_built"
@@ -231,7 +242,7 @@ def build_step1_bundle(
     report = bind(with_content_hash(
         {
             "contract": STEP1_REPORT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_spec_sha256": campaign_spec["content_hash"],
             "campaign_id": campaign_id,
             "campaign_profile": (
@@ -251,6 +262,8 @@ def build_step1_bundle(
             ),
             "hlt_cache_required_for_step1": bool(require_hlt_cache),
             "final_test_sealed": True,
+            "global_determinism_fixed_before_results": True,
+            "global_determinism_sha256": global_determinism["content_hash"],
             "offline_or_teacher_required_for_inference": False,
             "ready_for_step2": True,
             "scientific_results_allowed": bool(production_profile),
@@ -263,6 +276,7 @@ def build_step1_bundle(
         "screening_registry": screening_registry,
         "confirmation_architecture_registry": confirmation_registry,
         "semantic_control_registry": semantic_registry,
+        "global_determinism": global_determinism,
         "normalization_contract": normalization,
         "angular_tree_resource_contract": tree_resource,
         "artifact_layout": layout,
@@ -292,6 +306,7 @@ _ARTIFACT_PATHS = {
         "registry/confirmation_architecture_registry.json"
     ),
     "semantic_control_registry": "registry/semantic_control_registry.json",
+    "global_determinism": "registry/global_determinism.json",
     "normalization_contract": "inputs/normalization_contract.json",
     "angular_tree_resource_contract": "inputs/angular_tree_resource_contract.json",
     "artifact_layout": "registry/artifact_layout.json",
@@ -315,6 +330,7 @@ def validate_step1_bundle(
         "screening_registry",
         "confirmation_architecture_registry",
         "semantic_control_registry",
+        "global_determinism",
         "normalization_contract",
         "angular_tree_resource_contract",
         "artifact_layout",
@@ -331,6 +347,9 @@ def validate_step1_bundle(
         name: validate_content_hash(artifact)
         for name, artifact in bundle.items()
     }
+    validate_global_determinism_contract(bundle["global_determinism"])
+    validate_relation_family_registry(bundle["relation_family_registry"])
+    validate_normalization_contract(bundle["normalization_contract"])
     spec = bundle["campaign_spec"]
     expected_parents = {
         "split_binding": hashes["split_binding"],
@@ -341,6 +360,7 @@ def validate_step1_bundle(
             "confirmation_architecture_registry"
         ],
         "semantic_control_registry": hashes["semantic_control_registry"],
+        "global_determinism": hashes["global_determinism"],
         "normalization_contract": hashes["normalization_contract"],
         "angular_tree_resource_contract": hashes[
             "angular_tree_resource_contract"
@@ -395,6 +415,13 @@ def validate_step1_bundle(
             "semantic relation parent",
         ),
         (
+            bundle["campaign_spec"]
+            .get("global_determinism", {})
+            .get("content_hash"),
+            hashes["global_determinism"],
+            "campaign global-determinism parent",
+        ),
+        (
             bundle["normalization_contract"].get("split_binding_sha256"),
             hashes["split_binding"],
             "normalization split parent",
@@ -413,6 +440,11 @@ def validate_step1_bundle(
             bundle["step1_report"].get("campaign_spec_sha256"),
             hashes["campaign_spec"],
             "report campaign parent",
+        ),
+        (
+            bundle["step1_report"].get("global_determinism_sha256"),
+            hashes["global_determinism"],
+            "report global-determinism parent",
         ),
     ]
     for actual, expected, label in parent_checks:

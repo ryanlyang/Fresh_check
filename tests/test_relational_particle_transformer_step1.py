@@ -25,26 +25,38 @@ from jetclass_fresh.jetclass_data import (
     save_split_manifest,
 )
 from teacher_logit_reco.relational_part import (
+    CAMPAIGN_SPEC_CONTRACT,
     CANONICAL_FAMILY_ORDER,
     GIB,
+    GLOBAL_DETERMINISM_CONTRACT,
     LOCKED_HLT_SEEDS,
     PRODUCTION_SPLIT_SIZES,
+    RELATION_FAMILY_REGISTRY_CONTRACT,
+    SCREENING_REGISTRY_CONTRACT,
+    RAW_INPUT_SCHEMA_CONTRACT,
     RelationalSplitConfig,
     StorageMeasurements,
     build_confirmation_architecture_registry,
+    build_global_determinism_contract,
     build_hlt_binding,
     build_hlt_expectation,
     build_relation_family_registry,
+    build_raw_input_schema_contract,
     build_screening_registry,
     build_semantic_control_registry,
     build_split_binding,
     build_step1_bundle,
     build_storage_measurements,
     build_storage_projection,
+    optimizer_update_counts,
     publish_step1_bundle,
     resolve_registered_run,
+    scheduled_learning_rate,
     validate_content_hash,
+    validate_global_determinism_contract,
     validate_relational_split_manifest,
+    validate_screening_registry,
+    with_content_hash,
 )
 
 
@@ -291,6 +303,33 @@ def test_registries_are_complete_hashed_and_training_independent() -> None:
         confirmation_registry_sha256=confirmation["content_hash"],
     )
     assert relations["canonical_family_order"] == list(CANONICAL_FAMILY_ORDER)
+    assert relations["contract"] == RELATION_FAMILY_REGISTRY_CONTRACT
+    assert relations["schema_version"] == 4
+    region = next(
+        row for row in relations["families"] if row["family_id"] == "REGION"
+    )
+    assert region["raw_feature_groups"] == {
+        "same_cluster_indicators_K2_K4_K8": 3,
+        "lca_depth": 1,
+        "lca_merge": 4,
+        "endpoint_cluster_descriptors": 18,
+        "within_cluster_particle_pt_fractions": 6,
+        "endpoint_to_axis_distances": 6,
+        "signed_cluster_pt_rank_differences": 3,
+    }
+    assert sum(region["raw_feature_groups"].values()) == region["raw_dimension"] == 41
+    assert screening["contract"] == SCREENING_REGISTRY_CONTRACT
+    assert screening["schema_version"] == 2
+    assert screening["wide_capacity_search"]["tie_breaks"] == [
+        "minimum_absolute_incremental_parameter_mismatch",
+        "lower_analytically_calculated_pair_encoder_FLOPs_at_128_valid_particles",
+        "smaller_width_sum",
+        "smaller_width_tuple_lexicographically",
+    ]
+    assert (
+        screening["wide_capacity_search"]["flops_source"]
+        == "locked_exact_symbolic_pair_encoder_formula"
+    )
     assert screening["row_count"] == 21
     assert len({row["run_id"] for row in screening["rows"]}) == 21
     assert sum(row["relational_selection_eligible"] for row in screening["rows"]) == 18
@@ -309,6 +348,192 @@ def test_registries_are_complete_hashed_and_training_independent() -> None:
     )["configuration_role"] == "semantic_control"
     for artifact in (relations, screening, confirmation, semantic):
         assert validate_content_hash(artifact) == artifact["content_hash"]
+
+
+def test_corrected_registry_versions_reject_legacy_contracts() -> None:
+    relations = build_relation_family_registry()
+    legacy_relations = dict(relations)
+    legacy_relations.pop("content_hash")
+    legacy_relations["contract"] = "relational_part_relation_family_registry_v1"
+    legacy_relations["schema_version"] = 1
+    legacy_relations = with_content_hash(legacy_relations)
+    with pytest.raises(ValueError, match="contract mismatch"):
+        validate_content_hash(
+            legacy_relations,
+            expected_contract=RELATION_FAMILY_REGISTRY_CONTRACT,
+        )
+
+    screening = build_screening_registry(
+        relation_registry_sha256=relations["content_hash"]
+    )
+    legacy_screening = dict(screening)
+    legacy_screening.pop("content_hash")
+    legacy_screening["contract"] = "relational_part_screening_registry_v1"
+    legacy_screening["schema_version"] = 1
+    legacy_screening = with_content_hash(legacy_screening)
+    with pytest.raises(ValueError, match="contract mismatch"):
+        validate_screening_registry(legacy_screening)
+
+
+def test_global_determinism_policy_is_complete_exact_and_not_tunable() -> None:
+    policy = build_global_determinism_contract()
+    assert policy["contract"] == GLOBAL_DETERMINISM_CONTRACT
+    assert validate_global_determinism_contract(policy) == policy["content_hash"]
+    assert policy["fixed_before_scientific_results"] is True
+    assert policy["model_specific_override_allowed"] is False
+
+    weaver = policy["parity"]["authoritative_weaver_explicit_uu"]
+    assert weaver == {
+        "device_path": "real_installed_weaver",
+        "dtype": "float32",
+        "autocast_enabled": False,
+        "gradient_scaler_enabled": False,
+        "evaluation_mode": True,
+        "atol": 1.0e-6,
+        "rtol": 1.0e-6,
+        "applies_to": [
+            "standard_four_pair_features",
+            "logits",
+            "input_gradients",
+            "parameter_gradients",
+            "valid_token_padding_invariance",
+        ],
+        "nonfinite_is_failure": True,
+    }
+    exact = set(policy["parity"]["exact_fields"])
+    assert {
+        "integer_tree_topology",
+        "particle_masks",
+        "categorical_states",
+        "event_identities",
+    } <= exact
+
+    bootstrap = policy["paired_bootstrap"]
+    assert bootstrap["seed"] == 917_301
+    assert bootstrap["replicates"] == 10_000
+    assert bootstrap["sampling_unit"] == "aligned_event_identity"
+    assert bootstrap["seed_reused_for_every_paired_comparison"] is True
+    assert bootstrap["stratification"]["draws_per_class"] == (
+        "original_event_count_in_that_class"
+    )
+    assert bootstrap["stratification"]["within_class_source_order"] == (
+        "split_manifest_event_identity_order"
+    )
+    assert bootstrap["interval"] == {
+        "kind": "two_sided_percentile",
+        "lower_percent": 2.5,
+        "upper_percent": 97.5,
+        "quantile_method": "Hyndman_Fan_type_7_linear",
+        "numpy_method": "linear",
+        "bootstrap_mean_used_as_endpoint": False,
+    }
+
+    ece = policy["calibration"]["ece"]
+    assert ece["kind"] == "top_label_multiclass"
+    assert ece["bin_count"] == 15
+    assert ece["membership"] == (
+        "left_closed_right_open_except_final_bin_closed"
+    )
+    assert ece["empty_bin_contribution"] == 0.0
+
+    rejection = policy["qcd_signal_rejection"]
+    assert rejection["discriminant"] == "logit_signal_minus_logit_QCD"
+    assert rejection["threshold"]["pass_rule"] == (
+        "score_greater_than_or_equal_to_threshold"
+    )
+    assert rejection["zero_background_behavior"] == {
+        "background_rejection": None,
+        "background_rejection_is_infinite": True,
+        "qcd_false_positive_rate": 0.0,
+        "qcd_false_positive_count": 0,
+        "reason": "avoid_nonfinite_JSON_while_preserving_exact_meaning",
+    }
+
+    changed = copy.deepcopy(policy)
+    changed.pop("content_hash")
+    changed["paired_bootstrap"]["seed"] += 1
+    changed = with_content_hash(changed)
+    with pytest.raises(ValueError, match="differ from the locked"):
+        validate_global_determinism_contract(changed)
+
+
+def test_raw_input_charge_quantization_is_versioned_and_exact() -> None:
+    schema = build_raw_input_schema_contract()
+    assert schema["contract"] == RAW_INPUT_SCHEMA_CONTRACT
+    assert schema["schema_version"] == 2
+    assert schema["charge_states"] == [-1, 0, 1]
+    assert schema["charge_integer_tolerance"] == 1.0e-6
+    assert schema["charge_quantization"] == (
+        "nearest_locked_state_after_tolerance_validation"
+    )
+    legacy = dict(schema)
+    legacy.pop("content_hash")
+    legacy["contract"] = "relational_part_raw_input_schema_v1"
+    legacy["schema_version"] = 1
+    legacy.pop("charge_integer_tolerance")
+    legacy.pop("charge_quantization")
+    legacy = with_content_hash(legacy)
+    with pytest.raises(ValueError, match="contract mismatch"):
+        validate_content_hash(legacy, expected_contract=RAW_INPUT_SCHEMA_CONTRACT)
+
+
+def test_locked_optimizer_update_and_warmup_integer_rules() -> None:
+    schedule = build_global_determinism_contract()["optimizer_update_schedule"]
+    assert schedule["accumulation_groups_cross_epoch_boundary"] is False
+    assert schedule["dataloader_drop_last"] is False
+    assert schedule["gradient_normalization"] == (
+        "sum_of_event_losses_divided_by_actual_event_count_"
+        "in_accumulation_group"
+    )
+    assert optimizer_update_counts(training_event_count=0, maximum_epochs=40) == {
+        "microbatches_per_epoch": 0,
+        "optimizer_updates_per_epoch": 0,
+        "total_optimizer_updates": 0,
+        "warmup_updates": 0,
+    }
+    assert optimizer_update_counts(training_event_count=1, maximum_epochs=1) == {
+        "microbatches_per_epoch": 1,
+        "optimizer_updates_per_epoch": 1,
+        "total_optimizer_updates": 1,
+        "warmup_updates": 1,
+    }
+    assert optimizer_update_counts(training_event_count=128, maximum_epochs=1) == {
+        "microbatches_per_epoch": 2,
+        "optimizer_updates_per_epoch": 1,
+        "total_optimizer_updates": 1,
+        "warmup_updates": 1,
+    }
+    production = optimizer_update_counts(
+        training_event_count=1_000_000,
+        maximum_epochs=40,
+    )
+    assert production == {
+        "microbatches_per_epoch": 15_625,
+        "optimizer_updates_per_epoch": 7_813,
+        "total_optimizer_updates": 312_520,
+        "warmup_updates": 15_626,
+    }
+    assert scheduled_learning_rate(
+        update_ordinal=1,
+        total_optimizer_updates=1,
+        warmup_updates=1,
+        base_lr=1.0e-3,
+        minimum_lr=1.0e-5,
+    ) == pytest.approx(1.0e-3)
+    assert scheduled_learning_rate(
+        update_ordinal=15_626,
+        total_optimizer_updates=312_520,
+        warmup_updates=15_626,
+        base_lr=1.0e-3,
+        minimum_lr=1.0e-5,
+    ) == pytest.approx(1.0e-3)
+    assert scheduled_learning_rate(
+        update_ordinal=312_520,
+        total_optimizer_updates=312_520,
+        warmup_updates=15_626,
+        base_lr=1.0e-3,
+        minimum_lr=1.0e-5,
+    ) == pytest.approx(1.0e-5)
 
 
 def test_storage_projection_is_measured_and_fails_closed() -> None:
@@ -386,6 +611,16 @@ def test_step1_bundle_is_deterministic_and_publishes_immutably(
     assert first["step1_report"]["ready_for_step2"] is True
     assert first["step1_report"]["screening_row_count"] == 21
     assert first["campaign_spec"]["campaign_profile"] == "nonproduction_miniature_test"
+    assert first["campaign_spec"]["contract"] == CAMPAIGN_SPEC_CONTRACT
+    assert first["campaign_spec"]["schema_version"] == 2
+    assert (
+        first["campaign_spec"]["global_determinism"]
+        == first["global_determinism"]
+    )
+    assert (
+        first["campaign_spec"]["parent_artifact_hashes"]["global_determinism"]
+        == first["global_determinism"]["content_hash"]
+    )
     assert first["campaign_spec"]["scientific_results_allowed"] is False
     assert (
         first["storage_projection"]["measurement_artifact_sha256"]

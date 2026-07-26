@@ -9,11 +9,15 @@ from typing import Any, Mapping
 
 from jetclass_fresh.jetclass_data import PARTICLE_READ_BRANCHES
 
-from .contracts import require_git_object_id, with_content_hash
+from .contracts import (
+    require_git_object_id,
+    validate_content_hash,
+    with_content_hash,
+)
 
 
-ARTIFACT_LAYOUT_CONTRACT = "relational_part_artifact_layout_v1"
-RAW_INPUT_SCHEMA_CONTRACT = "relational_part_raw_input_schema_v1"
+ARTIFACT_LAYOUT_CONTRACT = "relational_part_artifact_layout_v2"
+RAW_INPUT_SCHEMA_CONTRACT = "relational_part_raw_input_schema_v2"
 
 
 REQUIRED_DIRECTORIES = (
@@ -35,7 +39,7 @@ def build_raw_input_schema_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": RAW_INPUT_SCHEMA_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "schema_id": "jetclass_hlt_raw_v1",
             "required_particle_branches": list(PARTICLE_READ_BRANCHES),
             "pid_branches": [
@@ -74,16 +78,35 @@ def build_raw_input_schema_contract() -> dict[str, Any]:
             "pid_zero_hot_policy": "unknown_category",
             "pid_multi_hot_policy": "fail_preflight",
             "charge_states": [-1, 0, 1],
+            "charge_integer_tolerance": 1.0e-6,
+            "charge_quantization": (
+                "nearest_locked_state_after_tolerance_validation"
+            ),
             "sentinel_inference_from_observed_distribution_allowed": False,
         }
     )
+
+
+def validate_raw_input_schema_contract(schema: Mapping[str, Any]) -> str:
+    digest = validate_content_hash(
+        schema,
+        expected_contract=RAW_INPUT_SCHEMA_CONTRACT,
+    )
+    semantic = dict(schema)
+    semantic.pop("content_hash", None)
+    semantic.pop("source", None)
+    expected = build_raw_input_schema_contract()
+    expected.pop("content_hash")
+    if semantic != expected:
+        raise ValueError("raw-input schema differs from the locked schema")
+    return digest
 
 
 def build_artifact_layout_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": ARTIFACT_LAYOUT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "directories": list(REQUIRED_DIRECTORIES),
             "step1_files": [
                 "campaign_spec.json",
@@ -97,6 +120,7 @@ def build_artifact_layout_contract() -> dict[str, Any]:
                 "registry/screening_registry.json",
                 "registry/confirmation_architecture_registry.json",
                 "registry/semantic_control_registry.json",
+                "registry/global_determinism.json",
                 "registry/artifact_layout.json",
                 "storage_measurements.json",
                 "storage_projection.json",
@@ -185,4 +209,5 @@ __all__ = [
     "build_raw_input_schema_contract",
     "initialize_artifact_layout",
     "source_snapshot",
+    "validate_raw_input_schema_contract",
 ]

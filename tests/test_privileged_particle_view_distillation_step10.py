@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -25,6 +26,12 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_particle_view_registry,
     build_unified_split_manifest,
     build_quality_warning,
+    build_runtime_command_catalog,
+    build_runtime_execution_manifest,
+    build_runtime_handler_catalog,
+    build_runtime_task_result,
+    build_scientific_handler_commands,
+    build_scientific_task_catalog,
     plan_particle_view_submissions,
     reconcile_particle_view_production_graph,
     submit_particle_view_graph,
@@ -33,7 +40,14 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     miniature_parent_manifest,
     miniature_split_config,
     validate_low_data_campaign_registry,
+    execute_runtime_node,
+    execute_scientific_task,
+    sha256_file,
+    validate_runtime_execution_manifest,
+    validate_scientific_task_catalog,
     write_quality_warning_jsonl,
+    write_immutable_json,
+    with_content_hash,
 )
 
 
@@ -98,6 +112,58 @@ def _low_data_registry(**kwargs):
     return unified, build_low_data_campaign_registry(
         unified_split_manifest=unified,
         **kwargs,
+    )
+
+
+def _runtime_registry():
+    return build_particle_view_registry(
+        unified_split_manifest_sha256=_sha("runtime-manifest"),
+        train_identity_sha256=_sha("runtime-train"),
+        run_specs=[
+            ParticleViewRunSpec(
+                run_id="runtime_source",
+                stage="source",
+                scientific_role="source:runtime_fixture",
+                selection_family="infrastructure",
+                uses_labels=False,
+                train_split=None,
+            ),
+            ParticleViewRunSpec(
+                run_id="runtime_baseline",
+                stage="baseline",
+                scientific_role="baseline:runtime_fixture",
+                selection_family="infrastructure",
+                seed_ids=(101, 202, 303),
+                parent_run_ids=("runtime_source",),
+            ),
+        ],
+        campaign_id="runtime_fixture",
+    )
+
+
+def _runtime_manifest(tmp_path):
+    registry = _runtime_registry()
+    handlers = build_runtime_handler_catalog(
+        {
+            category: [
+                sys.executable,
+                "worker.py",
+                "--run-id",
+                "{run_id}",
+                "--seed",
+                "{seed}",
+                "--output-dir",
+                "{task_output_dir}",
+            ]
+            for category in ("baseline", "source")
+        }
+    )
+    return registry, build_runtime_execution_manifest(
+        registry=registry,
+        registry_path=str(tmp_path / "registry.json"),
+        handler_catalog=handlers,
+        handler_catalog_path=str(tmp_path / "handlers.json"),
+        artifact_root=str(tmp_path / "campaign"),
     )
 
 
@@ -180,6 +246,240 @@ def test_step10_full_low_data_registry_reconciles_to_all_logical_nodes():
     assert reconciliation["counts"]["declared_seed_replicas"] == 300
     assert reconciliation["counts"]["generated_seed_replicas"] == 300
     assert reconciliation["invalid_parent_edges"] == []
+
+
+def test_step10_runtime_manifest_expands_seeds_and_generates_all_node_commands(
+    tmp_path,
+):
+    registry, manifest = _runtime_manifest(tmp_path)
+    audit = validate_runtime_execution_manifest(manifest, registry=registry)
+    assert audit["task_count"] == 4
+    assert audit["node_task_counts"] == {
+        "pv00_source": 1,
+        "pv01_baselines": 3,
+    }
+    tasks = {row["task_id"]: row for row in manifest["tasks"]}
+    for seed in (101, 202, 303):
+        task = tasks[f"runtime_baseline__seed_{seed}"]
+        assert task["parent_task_ids"] == ["runtime_source__seed_101"]
+        assert str(seed) in task["command"]
+    commands = build_runtime_command_catalog(
+        execution_manifest_path=str(tmp_path / "execution.json"),
+    )
+    assert set(commands) == {row[0] for row in LOGICAL_NODE_LAYOUT}
+    assert all(
+        "scripts/run_particle_view_campaign_node.py" in command
+        for command in commands.values()
+    )
+
+
+def test_step10_runtime_manifest_rejects_missing_handler_categories(tmp_path):
+    registry = _runtime_registry()
+    incomplete = build_runtime_handler_catalog(
+        {
+            "source": [
+                "worker",
+                "{run_id}",
+                "{seed}",
+                "{task_output_dir}",
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="handler coverage mismatch"):
+        build_runtime_execution_manifest(
+            registry=registry,
+            registry_path=str(tmp_path / "registry.json"),
+            handler_catalog=incomplete,
+            handler_catalog_path=str(tmp_path / "handlers.json"),
+            artifact_root=str(tmp_path / "campaign"),
+        )
+
+
+def test_step10_runtime_node_executes_resumes_and_authenticates_results(tmp_path):
+    _, manifest = _runtime_manifest(tmp_path)
+    calls = []
+
+    def successful_runner(command, **kwargs):
+        calls.append(command)
+        environment = kwargs["env"]
+        output = Path(environment["PARTICLE_VIEW_TASK_OUTPUT_DIR"])
+        artifact = output / "payload.txt"
+        artifact.write_text(
+            environment["PARTICLE_VIEW_TASK_ID"],
+            encoding="utf-8",
+        )
+        result = build_runtime_task_result(
+            task_id=environment["PARTICLE_VIEW_TASK_ID"],
+            artifacts=[
+                {"path": str(artifact), "sha256": _sha(artifact.read_text())}
+            ],
+        )
+        write_immutable_json(output / "task_result.json", result)
+        return subprocess.CompletedProcess(command, 0)
+
+    source = execute_runtime_node(
+        manifest=manifest,
+        node_id="pv00_source",
+        runner=successful_runner,
+    )
+    assert source["completed_count"] == 1
+    baseline = execute_runtime_node(
+        manifest=manifest,
+        node_id="pv01_baselines",
+        runner=successful_runner,
+    )
+    assert baseline["completed_count"] == 3
+    assert len(calls) == 4
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("completed tasks must be resumed, not rerun")
+
+    resumed = execute_runtime_node(
+        manifest=manifest,
+        node_id="pv01_baselines",
+        runner=forbidden,
+    )
+    assert resumed["completed_count"] == 3
+    assert {row["action"] for row in resumed["records"]} == {
+        "reuse_complete"
+    }
+
+
+def test_step10_runtime_zero_exit_without_result_is_a_hard_failure(tmp_path):
+    _, manifest = _runtime_manifest(tmp_path)
+
+    def no_result(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0)
+
+    report = execute_runtime_node(
+        manifest=manifest,
+        node_id="pv00_source",
+        runner=no_result,
+    )
+    assert report["exit_code"] == 1
+    assert report["failed_count"] == 1
+    assert report["records"][0]["action"] == "invalid_result"
+
+
+def test_step10_runtime_resume_rejects_a_tampered_completed_artifact(tmp_path):
+    _, manifest = _runtime_manifest(tmp_path)
+
+    def successful_runner(command, **kwargs):
+        environment = kwargs["env"]
+        output = Path(environment["PARTICLE_VIEW_TASK_OUTPUT_DIR"])
+        artifact = output / "payload.txt"
+        artifact.write_text("original", encoding="utf-8")
+        result = build_runtime_task_result(
+            task_id=environment["PARTICLE_VIEW_TASK_ID"],
+            artifacts=[
+                {"path": str(artifact), "sha256": _sha("original")}
+            ],
+        )
+        write_immutable_json(output / "task_result.json", result)
+        return subprocess.CompletedProcess(command, 0)
+
+    execute_runtime_node(
+        manifest=manifest,
+        node_id="pv00_source",
+        runner=successful_runner,
+    )
+    source_task = next(
+        task for task in manifest["tasks"] if task["node_id"] == "pv00_source"
+    )
+    artifact = Path(source_task["output_dir"]) / "payload.txt"
+    artifact.write_text("tampered", encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact changed"):
+        execute_runtime_node(
+            manifest=manifest,
+            node_id="pv00_source",
+            runner=successful_runner,
+        )
+
+
+def test_step10_scientific_catalog_requires_exact_coverage_and_executes_action(
+    tmp_path,
+    monkeypatch,
+):
+    registry = build_particle_view_registry(
+        unified_split_manifest_sha256=_sha("scientific-manifest"),
+        train_identity_sha256=_sha("scientific-train"),
+        run_specs=[
+            ParticleViewRunSpec(
+                run_id="scientific_source",
+                stage="source",
+                scientific_role="source:preflight",
+                selection_family="infrastructure",
+                uses_labels=False,
+                train_split=None,
+            )
+        ],
+        campaign_id="scientific_fixture",
+    )
+    config = with_content_hash(
+        {"contract": "scientific_factory_fixture_v1", "value": 7}
+    )
+    config_path = tmp_path / "factory_config.json"
+    write_immutable_json(config_path, config)
+    module_path = tmp_path / "scientific_fixture_factory.py"
+    module_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "def build(**context):",
+                "    artifact = Path(context['output_dir']) / 'source.json'",
+                "    def action(*, path):",
+                "        Path(path).parent.mkdir(parents=True, exist_ok=True)",
+                "        Path(path).write_text('source-ok', encoding='utf-8')",
+                "    return {",
+                "        'kwargs': {'path': str(artifact)},",
+                "        'artifact_paths': [str(artifact)],",
+                "        'action': action,",
+                "    }",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    task_specs = {
+        "scientific_source": {
+            "operation": "source_preflight",
+            "factory": "scientific_fixture_factory:build",
+            "factory_config_path": str(config_path),
+            "factory_config_sha256": sha256_file(config_path),
+        }
+    }
+    catalog = build_scientific_task_catalog(
+        registry=registry,
+        task_specs=task_specs,
+    )
+    assert validate_scientific_task_catalog(
+        catalog,
+        registry=registry,
+    )["run_count"] == 1
+    handler_commands = build_scientific_handler_commands(
+        catalog=catalog,
+        catalog_path=str(tmp_path / "scientific_catalog.json"),
+    )
+    assert set(handler_commands) == {"source"}
+    assert "{registry_path}" in handler_commands["source"]
+    assert "scripts/execute_particle_view_scientific_task.py" in (
+        handler_commands["source"]
+    )
+    output = tmp_path / "task"
+    result = execute_scientific_task(
+        catalog=catalog,
+        registry=registry,
+        run_id="scientific_source",
+        seed=101,
+        task_id="scientific_source__seed_101",
+        output_dir=output,
+    )
+    assert result["status"] == "complete"
+    assert (output / "source.json").read_text(encoding="utf-8") == "source-ok"
+    assert (output / "task_result.json").is_file()
+    with pytest.raises(ValueError, match="coverage mismatch"):
+        build_scientific_task_catalog(registry=registry, task_specs={})
 
 
 def test_step10_graph_reconciles_every_registry_run_and_locked_tigris_contract():
@@ -560,3 +860,55 @@ def test_step10_low_data_registry_cli_and_unified_submission_bootstrap(tmp_path)
     )
     assert reconciliation["reconciled"] is True
     assert reconciliation["counts"]["declared_runs"] == 230
+
+    handler_commands = {
+        category: [
+            "python",
+            "role_worker.py",
+            "--run-id",
+            "{run_id}",
+            "--seed",
+            "{seed}",
+            "--output-dir",
+            "{task_output_dir}",
+        ]
+        for category in EXPECTED_LOW_DATA_CATEGORY_COUNTS
+    }
+    handler_path = tmp_path / "handler_commands.json"
+    handler_path.write_text(json.dumps(handler_commands), encoding="utf-8")
+    runtime_root = tmp_path / "runtime_campaign"
+    runtime_result = subprocess.run(
+        [
+            str(Path(".venv/Scripts/python.exe")),
+            "scripts/submit_particle_view_full_pilot.py",
+            "--unified-manifest",
+            str(unified_path),
+            "--handler-commands",
+            str(handler_path),
+            "--artifact-root",
+            str(runtime_root),
+            "--source-commit",
+            "f" * 40,
+            "--dry-run",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert runtime_result.returncode == 0, runtime_result.stderr
+    runtime_preflight = runtime_root / "preflight"
+    execution = json.loads(
+        (runtime_preflight / "runtime_execution_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    graph = json.loads(
+        (runtime_preflight / "production_graph.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert execution["seed_expanded_task_count"] == 300
+    assert all(
+        "scripts/run_particle_view_campaign_node.py" in node["command"]
+        for node in graph["nodes"]
+    )

@@ -232,12 +232,21 @@ def train_particle_view_consumer(
 
     required_lineage = {
         "a0_registration_sha256",
-        "target_registration_sha256",
         "train_identity_sha256",
         "model_val_stop_split_sha256",
     }
     if not required_lineage.issubset(lineage):
         raise ValueError("consumer lineage is incomplete")
+    if config.role == "Cview_discovery":
+        if not (
+            "target_recipe_sha256" in lineage
+            or "target_registration_sha256" in lineage
+        ):
+            raise ValueError(
+                "discovery lineage requires its acyclic target recipe"
+            )
+    elif "target_registration_sha256" not in lineage:
+        raise ValueError("normalized consumer requires target registration")
     for name, value in lineage.items():
         require_sha256(name, value)
     if config.role != "Cview_discovery" and "normalizer_sha256" not in lineage:

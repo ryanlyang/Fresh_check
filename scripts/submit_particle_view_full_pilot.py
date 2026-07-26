@@ -18,6 +18,9 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (  # 
     build_particle_view_production_graph,
     build_low_data_campaign_inventory,
     build_low_data_campaign_registry,
+    build_runtime_command_catalog,
+    build_runtime_execution_manifest,
+    build_runtime_handler_catalog,
     load_hashed_json,
     reconcile_particle_view_production_graph,
     submit_particle_view_graph,
@@ -33,6 +36,14 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--registry")
     source.add_argument("--unified-manifest")
     parser.add_argument("--command-catalog")
+    parser.add_argument(
+        "--handler-commands",
+        help=(
+            "Category-to-argv-template JSON; generates the runtime manifest "
+            "and graph command catalog automatically."
+        ),
+    )
+    parser.add_argument("--runtime-python-executable", default="python")
     parser.add_argument("--artifact-root")
     parser.add_argument("--source-commit")
     parser.add_argument("--graph-id", default="particle_view_full_pilot_v1")
@@ -79,7 +90,6 @@ def main(argv: list[str] | None = None) -> int:
         missing = [
             name
             for name, value in (
-                ("--command-catalog", args.command_catalog),
                 ("--artifact-root", args.artifact_root),
                 ("--source-commit", args.source_commit),
             )
@@ -88,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             raise ValueError(
                 "registry bootstrap also requires " + ", ".join(missing)
+            )
+        if bool(args.command_catalog) == bool(args.handler_commands):
+            raise ValueError(
+                "registry bootstrap requires exactly one of "
+                "--command-catalog or --handler-commands"
             )
         if args.registry:
             registry = load_hashed_json(args.registry)
@@ -100,10 +115,48 @@ def main(argv: list[str] | None = None) -> int:
                 teacher_mix_compatible=args.teacher_mix_compatible,
             )
             inventory = build_low_data_campaign_inventory(registry)
-        catalog = json.loads(
-            Path(args.command_catalog).read_text(encoding="utf-8")
-        )
         artifact_root = Path(args.artifact_root).resolve()
+        runtime_artifacts = None
+        if args.command_catalog:
+            catalog = json.loads(
+                Path(args.command_catalog).read_text(encoding="utf-8")
+            )
+        else:
+            handler_commands = json.loads(
+                Path(args.handler_commands).read_text(encoding="utf-8")
+            )
+            if not isinstance(handler_commands, dict):
+                raise ValueError("handler commands must be a JSON object")
+            handler_catalog = build_runtime_handler_catalog(handler_commands)
+            preflight = artifact_root / "preflight"
+            registry_path = (
+                Path(args.registry).resolve()
+                if args.registry
+                else preflight / "low_data_campaign_registry.json"
+            )
+            handler_catalog_path = (
+                preflight / "runtime_handler_catalog.json"
+            )
+            execution_manifest_path = (
+                preflight / "runtime_execution_manifest.json"
+            )
+            execution_manifest = build_runtime_execution_manifest(
+                registry=registry,
+                registry_path=str(registry_path),
+                handler_catalog=handler_catalog,
+                handler_catalog_path=str(handler_catalog_path),
+                artifact_root=str(artifact_root),
+            )
+            catalog = build_runtime_command_catalog(
+                execution_manifest_path=str(execution_manifest_path),
+                python_executable=args.runtime_python_executable,
+            )
+            runtime_artifacts = (
+                handler_catalog_path,
+                handler_catalog,
+                execution_manifest_path,
+                execution_manifest,
+            )
         graph = build_particle_view_production_graph(
             registry=registry,
             artifact_root=str(artifact_root),
@@ -128,6 +181,18 @@ def main(argv: list[str] | None = None) -> int:
                     / "preflight"
                     / "low_data_campaign_inventory.json",
                     inventory,
+                )
+            if runtime_artifacts is not None:
+                (
+                    handler_catalog_path,
+                    handler_catalog,
+                    execution_manifest_path,
+                    execution_manifest,
+                ) = runtime_artifacts
+                write_immutable_json(handler_catalog_path, handler_catalog)
+                write_immutable_json(
+                    execution_manifest_path,
+                    execution_manifest,
                 )
             write_immutable_json(graph_path, graph)
             write_immutable_json(

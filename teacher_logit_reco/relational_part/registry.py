@@ -8,8 +8,8 @@ from typing import Any, Iterable, Mapping
 from .contracts import require_sha256, validate_content_hash, with_content_hash
 
 
-RELATION_FAMILY_REGISTRY_CONTRACT = "relational_part_relation_family_registry_v1"
-SCREENING_REGISTRY_CONTRACT = "relational_part_screening_registry_v1"
+RELATION_FAMILY_REGISTRY_CONTRACT = "relational_part_relation_family_registry_v4"
+SCREENING_REGISTRY_CONTRACT = "relational_part_screening_registry_v2"
 CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT = (
     "relational_part_confirmation_architecture_registry_v1"
 )
@@ -54,7 +54,23 @@ def build_relation_family_registry() -> dict[str, Any]:
             "raw_dimension": 10,
             "encoded_dimension": 8,
             "requires_tree": False,
-            "normalization": "robust_featurewise_model_train",
+            "normalization": {
+                "robust_feature_names": [
+                    "query_log_pt_fraction",
+                    "context_log_pt_fraction",
+                    "context_minus_query_log_pt_fraction",
+                    "log_pair_scalar_pt_fraction",
+                ],
+                "fixed_scale_feature_names": [
+                    "query_pt_fraction",
+                    "context_pt_fraction",
+                    "signed_context_minus_query_pt_asymmetry",
+                    "query_average_normalized_pt_rank",
+                    "context_average_normalized_pt_rank",
+                    "context_minus_query_pt_rank",
+                ],
+                "fit_split": "model_train",
+            },
         },
         {
             "family_id": "TRACK",
@@ -82,7 +98,36 @@ def build_relation_family_registry() -> dict[str, Any]:
             "pair_encoder_input_dimension": 81,
             "encoded_dimension": 12,
             "requires_tree": False,
-            "normalization": "applicability_aware_robust_model_train",
+            "normalization": {
+                "node_robust_feature_names": [
+                    "d0",
+                    "dz",
+                    "log_d0_sigma_effective",
+                    "log_dz_sigma_effective",
+                    "asinh_d0_significance",
+                    "asinh_dz_significance",
+                ],
+                "pair_robust_feature_names": [
+                    "log1p_chi2",
+                    "minimum_abs_d0_significance",
+                    "maximum_abs_d0_significance",
+                    "minimum_abs_dz_significance",
+                    "maximum_abs_dz_significance",
+                    "d0_significance_product",
+                    "dz_significance_product",
+                    "context_minus_query_normalized_d0",
+                    "context_minus_query_normalized_dz",
+                    "log_delta_r",
+                ],
+                "fixed_scale_feature_names": [
+                    "track_valid",
+                    "validity_one_hot",
+                    "exp_minus_half_clipped_chi2",
+                    "sin_query_minus_context_delta_phi",
+                    "cos_query_minus_context_delta_phi",
+                ],
+                "fit_split": "model_train",
+            },
         },
         {
             "family_id": "PID",
@@ -120,7 +165,21 @@ def build_relation_family_registry() -> dict[str, Any]:
             "family_encoder_input_dimension": 12,
             "encoded_dimension": 6,
             "requires_tree": False,
-            "normalization": "continuous_only_robust_model_train",
+            "normalization": {
+                "robust_feature_names": [
+                    "query_charge",
+                    "context_charge",
+                    "charge_product",
+                    "half_absolute_charge_difference",
+                ],
+                "binary_feature_names": [
+                    "both_neutral",
+                    "exactly_one_charged",
+                    "same_nonzero_sign",
+                    "opposite_nonzero_sign",
+                ],
+                "fit_split": "model_train",
+            },
         },
         {
             "family_id": "DENSITY",
@@ -138,15 +197,46 @@ def build_relation_family_registry() -> dict[str, Any]:
             "raw_pair_dimension": 66,
             "encoded_dimension": 12,
             "requires_tree": False,
-            "normalization": "node_once_robust_model_train",
+            "normalization": {
+                "robust_feature_names": [
+                    "annulus_0_count",
+                    "annulus_0_pt_fraction",
+                    "annulus_1_count",
+                    "annulus_1_pt_fraction",
+                    "annulus_2_count",
+                    "annulus_2_pt_fraction",
+                    "annulus_3_count",
+                    "annulus_3_pt_fraction",
+                    "smooth_0_count",
+                    "smooth_0_pt_fraction",
+                    "smooth_1_count",
+                    "smooth_1_pt_fraction",
+                    "smooth_2_count",
+                    "smooth_2_pt_fraction",
+                    "smooth_3_count",
+                    "smooth_3_pt_fraction",
+                    "local_charged_pt_fraction",
+                    "local_neutral_hadron_pt_fraction",
+                    "local_photon_pt_fraction",
+                    "local_displaced_track_pt_fraction",
+                    "valid_neighbor_fraction_R0p40",
+                    "self_share_R0p20",
+                ],
+                "applicability": "valid_particles_counted_once",
+                "fit_split": "model_train",
+            },
         },
         {
             "family_id": "REGION",
             "kind": "beam_free_exclusive_angular_tree_pair",
             "raw_feature_groups": {
                 "same_cluster_indicators_K2_K4_K8": 3,
-                "endpoint_cluster_descriptors": 36,
-                "lca_and_merge_features": 2,
+                "lca_depth": 1,
+                "lca_merge": 4,
+                "endpoint_cluster_descriptors": 18,
+                "within_cluster_particle_pt_fractions": 6,
+                "endpoint_to_axis_distances": 6,
+                "signed_cluster_pt_rank_differences": 3,
             },
             "raw_dimension": 41,
             "encoded_dimension": 12,
@@ -161,14 +251,32 @@ def build_relation_family_registry() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": RELATION_FAMILY_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 4,
             "canonical_family_order": list(CANONICAL_FAMILY_ORDER),
             "families": families,
+            "relation_normalization_artifact_contract": (
+                "relational_part_relation_normalization_v2"
+            ),
             "invalid_pair_policy": "zero_after_every_learned_encoder",
             "query_context_direction": "i_is_query_j_is_context",
             "global_epsilon": 1.0e-6,
         }
     )
+
+
+def validate_relation_family_registry(registry: Mapping[str, Any]) -> str:
+    digest = validate_content_hash(
+        registry,
+        expected_contract=RELATION_FAMILY_REGISTRY_CONTRACT,
+    )
+    semantic = dict(registry)
+    semantic.pop("content_hash", None)
+    semantic.pop("source", None)
+    expected = build_relation_family_registry()
+    expected.pop("content_hash")
+    if semantic != expected:
+        raise ValueError("relation-family registry differs from the locked registry")
+    return digest
 
 
 @dataclass(frozen=True)
@@ -293,7 +401,7 @@ def build_screening_registry(*, relation_registry_sha256: str) -> dict[str, Any]
     return with_content_hash(
         {
             "contract": SCREENING_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "relation_registry_sha256": relation_registry_sha256,
             "screening_seed": 101,
             "fixed_before_validation": True,
@@ -309,9 +417,12 @@ def build_screening_registry(*, relation_registry_sha256: str) -> dict[str, Any]
                 "maximum_relative_incremental_mismatch": 0.02,
                 "tie_breaks": [
                     "minimum_absolute_incremental_parameter_mismatch",
-                    "lower_measured_forward_FLOPs",
+                    "lower_analytically_calculated_pair_encoder_FLOPs_at_128_valid_particles",
+                    "smaller_width_sum",
                     "smaller_width_tuple_lexicographically",
                 ],
+                "parameter_count_verification": "instantiate_and_count_active_parameters",
+                "flops_source": "locked_exact_symbolic_pair_encoder_formula",
             },
         }
     )
@@ -599,5 +710,6 @@ __all__ = [
     "build_screening_registry",
     "build_semantic_control_registry",
     "resolve_registered_run",
+    "validate_relation_family_registry",
     "validate_screening_registry",
 ]

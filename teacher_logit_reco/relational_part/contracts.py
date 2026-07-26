@@ -12,8 +12,8 @@ from typing import Any, Mapping
 
 
 CANONICAL_JSON_CONTRACT = "relational_part_canonical_json_v1"
-CAMPAIGN_SPEC_CONTRACT = "relational_part_campaign_spec_v1"
-STEP1_REPORT_CONTRACT = "relational_part_step1_report_v1"
+CAMPAIGN_SPEC_CONTRACT = "relational_part_campaign_spec_v2"
+STEP1_REPORT_CONTRACT = "relational_part_step1_report_v2"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -202,6 +202,7 @@ def build_campaign_spec(
     campaign_id: str,
     source_snapshot: Mapping[str, Any],
     artifact_hashes: Mapping[str, str],
+    global_determinism: Mapping[str, Any],
     split_manifest_hash: str,
     hlt_cache_status: str,
     campaign_profile: str = "production_1m_125k_0_125k_500k",
@@ -230,6 +231,7 @@ def build_campaign_spec(
         "confirmation_architecture_registry",
         "semantic_control_registry",
         "artifact_layout",
+        "global_determinism",
         "storage_projection",
     }
     missing = sorted(required - set(parents))
@@ -246,11 +248,20 @@ def build_campaign_spec(
     if campaign_profile not in allowed_profiles:
         raise ValueError(f"invalid campaign_profile {campaign_profile!r}")
     scientific_results_allowed = campaign_profile.startswith("production_")
+    global_determinism_hash = validate_content_hash(global_determinism)
+    if parents["global_determinism"] != global_determinism_hash:
+        raise ValueError(
+            "campaign global-determinism artifact differs from its parent hash"
+        )
+    if global_determinism.get("fixed_before_scientific_results") is not True:
+        raise ValueError("global deterministic conventions must be fixed pre-results")
+    if global_determinism.get("model_specific_override_allowed") is not False:
+        raise ValueError("model-specific deterministic-policy overrides are forbidden")
 
     return with_content_hash(
         {
             "contract": CAMPAIGN_SPEC_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": campaign_id,
             "scientific_program": "relational_particle_transformer_attention_bias",
             "campaign_stage": "step1_contracts_only",
@@ -266,6 +277,7 @@ def build_campaign_spec(
             ),
             "hlt_cache_status": hlt_cache_status,
             "parent_artifact_hashes": parents,
+            "global_determinism": dict(global_determinism),
             "global_epsilon": 1.0e-6,
             "hlt_only_inference": True,
             "offline_or_teacher_required": False,
