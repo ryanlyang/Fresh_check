@@ -131,6 +131,7 @@ def _merge_task_specs(
     fragments: Sequence[Mapping[str, Mapping[str, str]]],
     *,
     registry: Mapping[str, Any],
+    expected_run_ids: set[str] | None = None,
 ) -> dict[str, dict[str, str]]:
     merged: dict[str, dict[str, str]] = {}
     for fragment in fragments:
@@ -138,7 +139,11 @@ def _merge_task_specs(
             if run_id in merged:
                 raise ValueError(f"duplicate full-bootstrap run {run_id}")
             merged[run_id] = dict(spec)
-    registered = {row["run_id"] for row in registry["runs"]}
+    registered = (
+        {row["run_id"] for row in registry["runs"]}
+        if expected_run_ids is None
+        else set(expected_run_ids)
+    )
     if set(merged) != registered:
         raise ValueError(
             "full-bootstrap task coverage mismatch: "
@@ -220,11 +225,22 @@ def _representative_serialized_model_sizes(
     """Measure state-dict serialization; retain an exact formula fallback."""
 
     target = resource_plan["canonical_target"]
-    fallback = {
+    from jetclass_fresh.hlt_baseline import default_part_config
+    from jetclass_fresh.jetclass_data import LABEL_NAMES
+    from .direct_control import particle_transformer_parameter_count
+
+    measured = {
         "canonical_deployable_float32_parameter_bytes": (
             int(target["deployed_parameters"]) * 4
         )
     }
+    for model_size in ("base", "large"):
+        config = default_part_config(
+            num_classes=len(LABEL_NAMES), model_size=model_size
+        )
+        measured[f"teacher_{model_size}_state_dict_bytes"] = int(
+            particle_transformer_parameter_count(config) * 4 * 1.01
+        )
     try:
         import torch
         from jetclass_fresh.hlt_baseline import (
@@ -232,7 +248,6 @@ def _representative_serialized_model_sizes(
         )
         from jetclass_fresh.jetclass_data import LABEL_NAMES
 
-        measured = {}
         for model_size in ("base", "large"):
             model = build_particle_transformer_classifier(
                 num_classes=len(LABEL_NAMES),
@@ -244,9 +259,54 @@ def _representative_serialized_model_sizes(
                 buffer.getbuffer()
             )
             del model
-        return measured
     except (ImportError, RuntimeError):
-        return fallback
+        pass
+    return measured
+
+
+def _checkpoint_multiplicity(run_id: str, operation: str) -> int:
+    fixed = {
+        "source_preflight": 0,
+        "teacher_training": 1,
+        "existing_teacher_registration": 0,
+        "direct_control_training": 1,
+        "consumer_interface_screen": 1,
+        "configuration_selection": 0,
+        "selected_view_publication": 0,
+        "consumer_training": 1,
+        "pview0_training": 3,
+        "residual_sampler_fit": 0,
+        "robust_consumer_training": 1,
+        "frozen_distillation": 1,
+        "joint_finetuning": 1,
+        "trained_control_training": 1,
+        "structural_control_evaluation": 0,
+        "confirmation_training": 2,
+        "stack_evaluation": 0,
+        "fusion": 0,
+        "reporting": 0,
+        "bundle_export": 1,
+        "bundle_reload": 0,
+        "final_test": 0,
+    }
+    if operation == "target_discovery":
+        return 8 if run_id == "VGEN_RECODESIGN" else 4
+    if operation == "focused_composite_training":
+        return 9
+    if operation == "fairness_closure":
+        if run_id == "SELECTED_PATH_FAIRNESS_LEDGER":
+            return 0
+        if run_id.endswith(
+            ("A0_VIEW_LONG_DEPLOY", "A0_VIEW_TOTAL_LABEL_BUDGET")
+        ):
+            return 2
+        # A winner-family alias creates no new checkpoint when both families
+        # resolve identically. That fact is unknowable before selection, so
+        # preflight safely reserves the distinct-family one-checkpoint case.
+        return 1
+    if operation not in fixed:
+        raise ValueError(f"checkpoint inventory lacks operation {operation!r}")
+    return fixed[operation]
 
 
 def _derived_storage_reservation_inputs(
@@ -254,6 +314,7 @@ def _derived_storage_reservation_inputs(
     registry: Mapping[str, Any],
     runtime_data_config: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
+    task_specs: Mapping[str, Mapping[str, str]],
 ) -> tuple[dict[str, int], list[dict[str, Any]], int, dict[str, Any]]:
     from jetclass_fresh.hlt_baseline import default_part_config
     from jetclass_fresh.jetclass_data import LABEL_NAMES
@@ -267,21 +328,9 @@ def _derived_storage_reservation_inputs(
     representative_sizes = _representative_serialized_model_sizes(
         resource_plan
     )
-    training_configuration_count = sum(
-        1
-        for row in registry["runs"]
-        if row["uses_labels"] is True and row["train_split"] == "train"
-    )
-    retained_confirmation_count = sum(
-        1
-        for row in registry["runs"]
-        if row["uses_labels"] is True
-        and row["train_split"] == "train"
-        and row["three_seed_confirmation"] is True
-    )
-    checkpoint_count = retained_confirmation_count + min(
-        16, training_configuration_count
-    )
+    runs = {row["run_id"]: row for row in registry["runs"]}
+    if set(task_specs) != set(runs) - {"PV_SOURCE_PREFLIGHT"}:
+        raise ValueError("storage task-operation inventory is incomplete")
     representative_checkpoint_bytes = max(
         int(
             representative_sizes.get(
@@ -291,28 +340,41 @@ def _derived_storage_reservation_inputs(
         ),
         int(resource_plan["canonical_target"]["deployed_parameters"]) * 4,
     )
-    large_increment = max(
-        0,
-        int(
-            representative_sizes.get(
-                "teacher_large_state_dict_bytes",
-                representative_checkpoint_bytes,
+    checkpoint_inventory = []
+    checkpoint_count = 0
+    retained_checkpoint_bytes = 0
+    for run_id in sorted(task_specs):
+        operation = task_specs[run_id]["operation"]
+        multiplicity = _checkpoint_multiplicity(run_id, operation)
+        seed_count = len(runs[run_id]["seed_ids"])
+        task_checkpoint_count = multiplicity * seed_count
+        size_role = "canonical_deployable"
+        unit_bytes = representative_checkpoint_bytes
+        if operation == "teacher_training":
+            architecture = "large" if "LARGE" in run_id.upper() else "base"
+            size_role = f"teacher_{architecture}"
+            unit_bytes = int(
+                representative_sizes[f"teacher_{architecture}_state_dict_bytes"]
             )
+        checkpoint_count += task_checkpoint_count
+        retained_checkpoint_bytes += task_checkpoint_count * unit_bytes
+        checkpoint_inventory.append(
+            {
+                "run_id": run_id,
+                "operation": operation,
+                "seed_count": seed_count,
+                "checkpoint_multiplicity_per_task": multiplicity,
+                "reserved_checkpoint_count": task_checkpoint_count,
+                "representative_size_role": size_role,
+                "representative_bytes": unit_bytes,
+                "reserved_bytes": task_checkpoint_count * unit_bytes,
+                "conditional_alias_creates_no_checkpoint": (
+                    operation == "fairness_closure"
+                    and run_id.startswith("FAIR_PRIVILEGED_SCIENTIFIC_")
+                ),
+            }
         )
-        - representative_checkpoint_bytes,
-    )
-    large_configuration_count = sum(
-        1
-        for row in registry["runs"]
-        if row["uses_labels"] is True and "LARGE" in row["run_id"].upper()
-    )
-    retained_checkpoint_bytes = int(
-        (
-            checkpoint_count * representative_checkpoint_bytes
-            + large_configuration_count * large_increment
-        )
-        * 1.20
-    )
+    retained_checkpoint_bytes = int(retained_checkpoint_bytes * 1.10)
     seed_expanded_tasks = sum(
         len(row["seed_ids"]) for row in registry["runs"]
     )
@@ -323,8 +385,27 @@ def _derived_storage_reservation_inputs(
     )
     selected_view_bytes = selected_count * max_particles * 8 * 4
     selected_mask_bytes = selected_count * max_particles
+    target_logit_npz_count_per_task = 3
+    target_logit_npz_header_allowance_bytes = 4096
+    per_task_target_logit_bytes = (
+        selected_count * (len(LABEL_NAMES) * 4 + 8)
+        + target_logit_npz_count_per_task
+        * target_logit_npz_header_allowance_bytes
+    )
+    logit_operations = {
+        "frozen_distillation",
+        "joint_finetuning",
+        "focused_composite_training",
+        "trained_control_training",
+        "confirmation_training",
+    }
+    target_logit_cache_task_count = sum(
+        len(runs[run_id]["seed_ids"])
+        for run_id, spec in task_specs.items()
+        if spec["operation"] in logit_operations
+    )
     selected_logit_bytes = (
-        selected_count * len(LABEL_NAMES) * 4 * 2
+        per_task_target_logit_bytes * target_logit_cache_task_count
     )
     selected_product_bytes = int(
         (selected_view_bytes + selected_mask_bytes + selected_logit_bytes)
@@ -390,14 +471,14 @@ def _derived_storage_reservation_inputs(
         "teacher_tap_split": "train",
         "teacher_tap_split_count": int(train["count"]),
         "teacher_tap_max_particles": max_particles,
-        "training_configuration_count_from_registry": training_configuration_count,
-        "retained_confirmation_count_from_registry": retained_confirmation_count,
-        "peak_checkpoint_count": checkpoint_count,
+        "seed_expanded_checkpoint_count": checkpoint_count,
+        "checkpoint_inventory_by_operation": checkpoint_inventory,
         "checkpoint_retention_basis": (
-            "confirmed configurations plus one 16-way active task wave; "
-            "unselected screen checkpoints are evicted after metrics"
+            "every task-result-bound checkpoint remains restart-authenticated"
         ),
-        "large_checkpoint_configuration_count": large_configuration_count,
+        "conditional_stage_g_alias_policy": (
+            "reserve distinct-family checkpoint; identical-family alias adds zero"
+        ),
         "seed_expanded_task_count": seed_expanded_tasks,
         "representative_serialized_model_sizes": representative_sizes,
         "selected_product_split_counts": {
@@ -406,6 +487,14 @@ def _derived_storage_reservation_inputs(
         },
         "selected_product_max_view_dim": 8,
         "selected_product_class_count": len(LABEL_NAMES),
+        "target_logit_cache_task_count": target_logit_cache_task_count,
+        "per_task_target_logit_bytes": per_task_target_logit_bytes,
+        "target_logit_dtype": "float32",
+        "target_logit_event_id_dtype": "int64",
+        "target_logit_npz_count_per_task": target_logit_npz_count_per_task,
+        "target_logit_npz_header_allowance_bytes": (
+            target_logit_npz_header_allowance_bytes
+        ),
         "transient_ram_formula": "serialized_source_caches_plus_8GiB_workspace",
     }
     return planned, tap_rows, transient_ram_bytes, evidence
@@ -439,7 +528,7 @@ def publish_full_pilot_scientific_bootstrap(
     max_val_batches: int | None = None,
     max_stack_batches: int | None = None,
     production: bool = True,
-    persistent_storage_budget_bytes: int = 12 * 1024**3,
+    persistent_storage_budget_bytes: int = 32 * 1024**3,
     allocation_ram_bytes: int = 128 * 1024**3,
 ) -> dict[str, Any]:
     """Publish the complete, exactly covered scientific execution bootstrap."""
@@ -588,9 +677,53 @@ def publish_full_pilot_scientific_bootstrap(
     config_paths = {
         name: root / filename for name, filename in _CONFIG_FILENAMES.items()
     }
+    # Publish all non-source configs first so checkpoint retention can be
+    # derived from the same exact operation inventory the runtime will use.
+    for name, payload in configs.items():
+        write_immutable_json(config_paths[name], payload)
+    non_source_fragments = [
+        build_stage_a_teacher_task_specs(
+            factory_config_path=config_paths["baseline"]
+        ),
+        build_stage_a_direct_task_specs(
+            factory_config_path=config_paths["direct_control"]
+        ),
+        build_target_discovery_task_specs(
+            factory_config_path=config_paths["target_discovery"]
+        ),
+        build_consumer_screen_task_specs(
+            factory_config_path=config_paths["consumer_screen"]
+        ),
+        build_target_selection_task_specs(
+            factory_config_path=config_paths["target_selection"]
+        ),
+        build_post_target_task_specs(
+            factory_config_path=config_paths["post_target"]
+        ),
+        build_distillation_task_specs(
+            factory_config_path=config_paths["distillation"]
+        ),
+        build_focused_control_task_specs(
+            factory_config_path=config_paths["focused_control"]
+        ),
+        build_confirmation_task_specs(
+            factory_config_path=config_paths["confirmation"]
+        ),
+        build_fairness_task_specs(
+            factory_config_path=config_paths["fairness"]
+        ),
+        build_stack_task_specs(factory_config_path=config_paths["stack"]),
+        build_report_task_specs(factory_config_path=config_paths["report"]),
+        build_final_task_specs(factory_config_path=config_paths["final"]),
+    ]
+    registered_run_ids = {row["run_id"] for row in registry["runs"]}
+    non_source_specs = _merge_task_specs(
+        non_source_fragments,
+        registry=registry,
+        expected_run_ids=registered_run_ids - {"PV_SOURCE_PREFLIGHT"},
+    )
     # Measure an actual published campaign artifact, reserve every planned
     # persistent class, and bind the reservation into PV00 before submission.
-    write_immutable_json(config_paths["runtime_data"], configs["runtime_data"])
     campaign_root = root.parent.parent
     campaign_root.mkdir(parents=True, exist_ok=True)
     diagnostic_budget = build_diagnostic_budget()
@@ -603,6 +736,7 @@ def publish_full_pilot_scientific_bootstrap(
         registry=registry,
         runtime_data_config=runtime_data_config,
         resource_plan=resource_plan,
+        task_specs=non_source_specs,
     )
     storage_reservation = build_storage_reservation(
         campaign_root=campaign_root,
@@ -641,39 +775,7 @@ def publish_full_pilot_scientific_bootstrap(
         build_source_preflight_task_specs(
             source_preflight_config_path=config_paths["source_preflight"]
         ),
-        build_stage_a_teacher_task_specs(
-            factory_config_path=config_paths["baseline"]
-        ),
-        build_stage_a_direct_task_specs(
-            factory_config_path=config_paths["direct_control"]
-        ),
-        build_target_discovery_task_specs(
-            factory_config_path=config_paths["target_discovery"]
-        ),
-        build_consumer_screen_task_specs(
-            factory_config_path=config_paths["consumer_screen"]
-        ),
-        build_target_selection_task_specs(
-            factory_config_path=config_paths["target_selection"]
-        ),
-        build_post_target_task_specs(
-            factory_config_path=config_paths["post_target"]
-        ),
-        build_distillation_task_specs(
-            factory_config_path=config_paths["distillation"]
-        ),
-        build_focused_control_task_specs(
-            factory_config_path=config_paths["focused_control"]
-        ),
-        build_confirmation_task_specs(
-            factory_config_path=config_paths["confirmation"]
-        ),
-        build_fairness_task_specs(
-            factory_config_path=config_paths["fairness"]
-        ),
-        build_stack_task_specs(factory_config_path=config_paths["stack"]),
-        build_report_task_specs(factory_config_path=config_paths["report"]),
-        build_final_task_specs(factory_config_path=config_paths["final"]),
+        *non_source_fragments,
     ]
     specs = _merge_task_specs(fragments, registry=registry)
     specs_path = root / "scientific_task_specs.json"

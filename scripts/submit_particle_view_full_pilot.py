@@ -67,7 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--persistent-storage-budget-gib",
         type=int,
-        default=12,
+        default=32,
         help="Campaign-local persistent storage reservation in GiB.",
     )
     parser.add_argument(

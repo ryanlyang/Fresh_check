@@ -731,7 +731,41 @@ def test_full_scientific_bootstrap_has_exact_coverage_and_builds_graph(
     derivation = source_config["storage_reservation"]["derivation_evidence"]
     assert derivation["cache_shape_dtype_inventory"]
     assert derivation["representative_serialized_model_sizes"]
-    assert derivation["peak_checkpoint_count"] > 0
+    assert derivation["seed_expanded_checkpoint_count"] > 0
+    assert derivation["seed_expanded_checkpoint_count"] > 41
+    assert derivation["checkpoint_inventory_by_operation"]
+    assert derivation["target_logit_cache_task_count"] > 0
+    selected_count = sum(
+        derivation["selected_product_split_counts"].values()
+    )
+    assert derivation["per_task_target_logit_bytes"] == (
+        selected_count
+        * (derivation["selected_product_class_count"] * 4 + 8)
+        + derivation["target_logit_npz_count_per_task"]
+        * derivation["target_logit_npz_header_allowance_bytes"]
+    )
+    assert derivation["target_logit_event_id_dtype"] == "int64"
+    multiplicity_by_operation = {
+        row["operation"]: max(
+            candidate["checkpoint_multiplicity_per_task"]
+            for candidate in derivation["checkpoint_inventory_by_operation"]
+            if candidate["operation"] == row["operation"]
+        )
+        for row in derivation["checkpoint_inventory_by_operation"]
+    }
+    assert multiplicity_by_operation["pview0_training"] == 3
+    assert multiplicity_by_operation["target_discovery"] >= 4
+    assert multiplicity_by_operation["confirmation_training"] == 2
+    fairness_rows = [
+        row
+        for row in derivation["checkpoint_inventory_by_operation"]
+        if row["operation"] == "fairness_closure"
+    ]
+    assert all(
+        row["conditional_alias_creates_no_checkpoint"]
+        == row["run_id"].startswith("FAIR_PRIVILEGED_SCIENTIFIC_")
+        for row in fairness_rows
+    )
     assert (
         source_config["storage_reservation"]["persistent_required_bytes"]
         <= source_config["storage_reservation"]["persistent_budget_bytes"]

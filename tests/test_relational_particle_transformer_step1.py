@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import pytest
 
+from scripts.measure_relational_part_storage import build_measurement_artifact
 from jetclass_fresh.hlt_cache import (
     HLT_ARRAY_FILENAME,
     HLT_METADATA_FILENAME,
@@ -590,6 +591,56 @@ def test_storage_measurements_are_source_bound_and_tamper_evident() -> None:
             total_tree_jets=1000,
             final_test_events=100,
         )
+
+
+def test_storage_measurement_cli_builds_exact_format_evidence(
+    tmp_path: Path,
+) -> None:
+    event_count = 6
+    tokens = np.zeros((event_count, 128, 14), dtype=np.float32)
+    mask = np.zeros((event_count, 128), dtype=bool)
+    for index, count in enumerate((1, 2, 3, 4, 5, 6)):
+        mask[index, :count] = True
+        tokens[index, :count, 0] = np.arange(count, 0, -1)
+        tokens[index, :count, 1] = np.linspace(-0.4, 0.4, count)
+        tokens[index, :count, 2] = np.linspace(-1.0, 1.0, count)
+        tokens[index, :count, 3] = (
+            tokens[index, :count, 0]
+            * np.cosh(tokens[index, :count, 1])
+        )
+        tokens[index, :count, 5] = 1
+    hlt = tmp_path / "model_train_fixed_hlt.npz"
+    np.savez_compressed(
+        hlt,
+        tokens=tokens,
+        mask=mask,
+        labels=np.arange(event_count, dtype=np.int64) % 10,
+        jet_file_indices=np.zeros(event_count, dtype=np.int32),
+        jet_entries=np.arange(event_count, dtype=np.int64),
+    )
+    checkpoint = tmp_path / "best_model_val.pt"
+    checkpoint.write_bytes(b"representative-checkpoint")
+    output = tmp_path / "bootstrap" / "storage_measurements.json"
+    artifact = build_measurement_artifact(
+        hlt_cache=hlt,
+        checkpoint=checkpoint,
+        output=output,
+        tree_sample_jets=4,
+        prediction_sample_events=20,
+        fixed_overhead_bytes=1024,
+        workers=1,
+    )
+    validate_content_hash(artifact)
+    assert artifact["measurements"]["hlt_sample_jets"] == event_count
+    assert artifact["measurements"]["tree_sample_jets"] == 4
+    assert artifact["measurements"]["prediction_sample_events"] == 20
+    assert set(artifact["source_evidence"]) == {
+        "checkpoint",
+        "hlt_cache",
+        "predictions",
+        "tree_sidecar",
+    }
+    assert output.is_file()
 
 
 def test_step1_bundle_is_deterministic_and_publishes_immutably(

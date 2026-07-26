@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import threading
 
 import numpy as np
 import pytest
@@ -90,6 +92,76 @@ def test_final_recovery_authorization_is_consumed_once_and_chained(tmp_path):
         second_consumption["previous_recovery_consumption_sha256"]
         == first_consumption["content_hash"]
     )
+
+
+def test_concurrent_final_recovery_authorizations_compete_for_one_slot(
+    tmp_path,
+    monkeypatch,
+):
+    from teacher_logit_reco.local_particle_residual_field.particle_view import (
+        final_runtime,
+    )
+
+    claim = with_content_hash(
+        {
+            "contract": "particle_view_final_access_claim_v1",
+            "permit_sha256": _sha("permit"),
+            "evaluation_plan_sha256": _sha("plan"),
+            "final_test_split_sha256": _sha("split"),
+            "final_test_identity_sha256": _sha("identity"),
+            "source_commit": "a" * 40,
+            "central_output_dir": str(tmp_path),
+            "one_time_access_claimed": True,
+        }
+    )
+    authorizations = [
+        build_final_recovery_authorization(
+            access_claim=claim,
+            reason=f"concurrent recovery {index}",
+            authorized_by=f"operator_{index}",
+        )
+        for index in range(2)
+    ]
+    original_tail = final_runtime._recovery_consumption_tail
+    barrier = threading.Barrier(2)
+
+    def synchronized_tail(*args, **kwargs):
+        result = original_tail(*args, **kwargs)
+        barrier.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        final_runtime, "_recovery_consumption_tail", synchronized_tail
+    )
+
+    def consume(authorization):
+        try:
+            return (
+                "ok",
+                final_runtime._consume_final_recovery_authorization(
+                    central=tmp_path,
+                    claim=claim,
+                    authorization=authorization,
+                ),
+            )
+        except Exception as error:
+            return ("error", error)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(consume, authorizations))
+    assert [status for status, _ in results].count("ok") == 1
+    assert [status for status, _ in results].count("error") == 1
+    error = next(value for status, value in results if status == "error")
+    assert isinstance(error, (FileExistsError, PermissionError))
+    monkeypatch.setattr(
+        final_runtime, "_recovery_consumption_tail", original_tail
+    )
+    tail, ordered = original_tail(
+        tmp_path,
+        access_claim_sha256=claim["content_hash"],
+    )
+    assert tail == ordered[0]
+    assert len(ordered) == 1
 
 
 def _permit() -> dict:

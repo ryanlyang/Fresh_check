@@ -744,18 +744,22 @@ def _consume_final_recovery_authorization(
         or authorization.get("allow_one_recovery_access") is not True
     ):
         raise PermissionError("final recovery authorization belongs to another claim")
+    declared_predecessor = authorization.get(
+        "previous_recovery_consumption_sha256"
+    )
     root = central / "recovery_authorization_consumptions"
-    destination = root / f"{authorization['content_hash']}.json"
+    predecessor_slot = declared_predecessor or "initial"
+    destination = root / f"consumption_after_{predecessor_slot}.json"
     if destination.exists():
-        raise PermissionError("final recovery authorization was already consumed")
+        raise PermissionError(
+            "a final recovery authorization for this predecessor was already "
+            "consumed"
+        )
     tail_sha256, _ = _recovery_consumption_tail(
         central,
         access_claim_sha256=claim["content_hash"],
     )
-    if (
-        authorization.get("previous_recovery_consumption_sha256")
-        != tail_sha256
-    ):
+    if declared_predecessor != tail_sha256:
         raise PermissionError(
             "final recovery authorization is stale or omits the previous "
             "recovery consumption"
