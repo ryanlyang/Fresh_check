@@ -51,6 +51,8 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     ABPH_LEVEL_CAPACITIES,
     ABPH_RECONSTRUCTOR_VARIANTS,
     ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    ABPH_RUNTIME_BENCHMARK_CONTRACT,
+    ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY,
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryTargetBatchSource,
     PseudoViewInputs,
@@ -804,6 +806,11 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         rank=requested_rank,
         world_size=requested_world_size,
     )
+    runtime_reference_validation_jets = (
+        int(os.environ.get("ABPH_RUNTIME_REFERENCE_VALIDATION_JETS", "4096"))
+        if args.runtime_reference_benchmark
+        else None
+    )
     val_source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
         target_cache_dir=root / "targets",
@@ -813,6 +820,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         shuffle_shards=False,
         seed=24732,
         maximum_batches=(1 if args.smoke else int(os.environ.get("ABPH_MAX_VAL_BATCHES", "0")) or None),
+        validation_maximum_jets=runtime_reference_validation_jets,
         rank=requested_rank,
         world_size=requested_world_size,
     )
@@ -1046,7 +1054,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         )
         benchmark_ok = (
             completed_updates == benchmark_updates
-            and validation_count >= 1
+            and validation_count == 1
             and profile_path.is_file()
         )
         return {
@@ -1058,9 +1066,12 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
                 else "runtime_reference_benchmark_failed"
             ),
             "runtime_reference_benchmark": {
-                "contract": "adaptive_binary_pseudooffline_runtime_reference_v1",
+                "contract": ABPH_RUNTIME_BENCHMARK_CONTRACT,
+                "validation_policy": ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY,
                 "updates": benchmark_updates,
-                "full_model_val_evaluations": validation_count,
+                "fixed_model_val_evaluations": validation_count,
+                "curriculum_transition_validations": 0,
+                "validation_jets": runtime_reference_validation_jets,
                 "runtime_profile": str(profile_path),
                 "fixed_seed": int(trainer.seed),
                 "fixed_batch_order": True,

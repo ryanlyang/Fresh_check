@@ -359,12 +359,29 @@ def build_low_data_campaign_registry(
             if target_id == "VGEN_MEMORY_HLT"
             else (101,)
         )
+        if target_id == "VGEN_TEACHER_LARGE":
+            target_parents = ("A0_VIEW", "TOFF_VIEW_LARGE")
+        elif target_id == "VGEN_TEACHER_EXISTING":
+            target_parents = ("A0_VIEW", "TOFF_VIEW_EXISTING")
+        elif target_id == "VGEN_TEACHER_MIX2":
+            target_parents = (
+                "A0_VIEW",
+                "TOFF_VIEW_BASE",
+                "TOFF_VIEW_LARGE",
+            )
+        elif target_id in {
+            "VGEN_MEMORY_HLT",
+            "VGEN_MEMORY_HLT_SELFMASK",
+        }:
+            target_parents = ("A0_VIEW",)
+        else:
+            target_parents = ("A0_VIEW", "TOFF_VIEW_BASE")
         add(
             target_id,
             stage="target_screen",
             category="target_generator",
             detail=target_id,
-            parents=("A0_VIEW", "TOFF_VIEW_BASE"),
+            parents=target_parents,
             seeds=seeds,
             selectable=not diagnostic,
             diagnostic=diagnostic,

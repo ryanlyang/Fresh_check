@@ -8,15 +8,21 @@ import torch
 
 from teacher_logit_reco.local_particle_residual_field.particle_view import (
     CANONICAL_TARGET_DISCOVERY_RUN_ID,
+    CandidateViewSet,
+    IndexedCandidateViewProvider,
     MatchingFreeParticleViewGenerator,
     ParticleViewGeneratorConfig,
+    RecoveryProbeConfig,
+    FixedCapacityRecoveryProbe,
     StagedContextualMemory,
     StagedDiscoveryViewProvider,
     TARGET_SCREEN_IDS,
     build_tap_stage_reservation,
     build_target_screen_recipe,
+    fit_particle_view_normalizer,
     lorentz_vectors_to_particle_geometry,
     particle_view_generator_config_from_payload,
+    predict_recovery_probe_views,
     stage_teacher_tap_float16,
 )
 
@@ -221,3 +227,101 @@ def test_staged_provider_reorders_parent_rows_and_injects_offline_logits():
     provided["view"].square().sum().backward()
     assert generator.memory_projection.weight.grad is not None
 
+
+def test_candidate_view_set_normalizes_train_only_and_reorders_by_parent():
+    view_set = CandidateViewSet(
+        views=torch.tensor(
+            [
+                [[1.0, -1.0], [3.0, 1.0], [0.0, 0.0]],
+                [[5.0, 3.0], [7.0, 5.0], [9.0, 7.0]],
+            ],
+            dtype=torch.float32,
+        ),
+        mask=torch.tensor(
+            [[True, True, False], [True, True, True]],
+            dtype=torch.bool,
+        ),
+        parent_indices=torch.tensor([8, 4], dtype=torch.int64),
+        logical_split_sha256=_sha("train-split"),
+        ordered_identity_sha256=_sha("train-order"),
+    )
+    normalizer = fit_particle_view_normalizer(
+        view_set.views,
+        view_set.mask,
+        train_split_sha256=_sha("train-split"),
+        generator_checkpoint_sha256=_sha("generator"),
+    )
+    normalized = view_set.normalized(normalizer)
+    assert normalized.views[normalized.mask].mean(dim=0).tolist() == pytest.approx(
+        [0.0, 0.0], abs=1.0e-6
+    )
+    assert torch.count_nonzero(normalized.views[~normalized.mask]) == 0
+    provider = IndexedCandidateViewProvider(normalized)
+    provided = provider(
+        {
+            "features": torch.zeros(2, 17, 3),
+            "mask": torch.tensor(
+                [
+                    [[True, True, True]],
+                    [[True, True, False]],
+                ]
+            ),
+            "parent_indices": torch.tensor([4, 8]),
+        }
+    )
+    assert torch.equal(provided["view"][0], normalized.views[1])
+    assert torch.equal(provided["view"][1], normalized.views[0])
+    assert provided["raw_centered_view"] is provided["view"]
+
+
+def test_recovery_prediction_loader_is_label_free_and_preserves_order(
+    monkeypatch,
+):
+    import teacher_logit_reco.local_particle_residual_field.particle_view.target_runtime as runtime
+
+    truth = CandidateViewSet(
+        views=torch.randn(2, 3, 1),
+        mask=torch.ones(2, 3, dtype=torch.bool),
+        parent_indices=torch.tensor([5, 9], dtype=torch.int64),
+        logical_split_sha256=_sha("select-split"),
+        ordered_identity_sha256=_sha("select-order"),
+    )
+    batch = {
+        "features": torch.randn(2, 17, 3),
+        "mask": truth.mask.clone(),
+        "true_view": truth.views.clone(),
+    }
+    observed = {}
+
+    def loader(*args, **kwargs):
+        observed["mode"] = kwargs["mode"]
+        observed["true_views"] = kwargs["true_views"]
+        return [batch]
+
+    monkeypatch.setattr(runtime, "make_logical_data_loader", loader)
+    config = RecoveryProbeConfig(view_dim=1)
+    model = FixedCapacityRecoveryProbe(config).eval()
+    aligned = SimpleNamespace(
+        logical_split_sha256=truth.logical_split_sha256,
+    )
+    prediction = predict_recovery_probe_views(
+        model=model,
+        aligned=aligned,
+        true_views=truth,
+        device="cpu",
+        num_workers=0,
+    )
+    assert observed["mode"] == "recovery_probe"
+    assert "labels" not in batch
+    assert prediction.parent_indices.tolist() == [5, 9]
+    assert torch.equal(prediction.mask, truth.mask)
+
+    batch["labels"] = torch.tensor([0, 1])
+    with pytest.raises(ValueError, match="unexpected fields"):
+        predict_recovery_probe_views(
+            model=model,
+            aligned=aligned,
+            true_views=truth,
+            device="cpu",
+            num_workers=0,
+        )

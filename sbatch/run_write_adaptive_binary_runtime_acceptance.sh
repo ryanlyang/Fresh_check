@@ -31,7 +31,7 @@ cmd=("${PYTHON_BIN}" -u scripts/write_adaptive_binary_runtime_acceptance.py
   --ddp4-root-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/B1_semantic_query_root/runtime_batch_contract.json"
   --ddp4-deep-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/D1_kt32_mh4_particles/runtime_batch_contract.json"
   --single-path-acceptance "${ABPH_SINGLE_PATH_ACCEPTANCE_PATH}"
-  --expected-validation-jets "${ABPH_EXPECTED_MODEL_VAL_JETS:-150000}"
+  --expected-validation-jets "${ABPH_RUNTIME_REFERENCE_VALIDATION_JETS:-4096}"
   --output "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/runtime_acceptance.json")
 
 if [[ -n "${ABPH_ROOT_EXTENSION_REPORT:-}" || -n "${ABPH_DEEP_EXTENSION_REPORT:-}" ]]; then

@@ -246,6 +246,7 @@ class RegionNormalizer(_ModuleBase):
         validate_content_hash(
             artifact, expected_contract=REGION_NORMALIZATION_CONTRACT
         )
+        self.artifact_sha256 = str(artifact["content_hash"])
         lookup = {
             str(record["feature_name"]): record
             for record in artifact["records"]
@@ -270,6 +271,11 @@ class RegionNormalizer(_ModuleBase):
             (safe - self.center.to(safe)) / self.scale.to(safe), -8.0, 8.0
         )
         output = _torch.where(self.robust, transformed, safe)
+        length = int(raw.shape[-1])
+        diagonal = _torch.eye(
+            length, dtype=_torch.bool, device=raw.device
+        ).view(1, 1, length, length)
+        output[:, 4:8] = output[:, 4:8].masked_fill(diagonal, 0.0)
         return output.masked_fill(~valid_pair_mask(mask), 0.0)
 
 
@@ -281,6 +287,7 @@ class RegionEncoder(_ModuleBase):
         torch = require_torch()
         super().__init__()
         self.normalizer = RegionNormalizer(normalization_artifact)
+        self.normalization_sha256 = self.normalizer.artifact_sha256
         self.encoder = torch.nn.Sequential(
             torch.nn.Linear(REGION_RAW_DIMENSION, 32),
             torch.nn.GELU(),

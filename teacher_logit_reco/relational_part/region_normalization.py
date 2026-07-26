@@ -18,10 +18,13 @@ from .normalization import (
     validate_relation_normalization_artifact,
 )
 from .relation_region import (
+    REGION_AXIS_DISTANCE_NAMES,
+    REGION_ENDPOINT_DESCRIPTOR_NAMES,
     REGION_LCA_NAMES,
     REGION_NORMALIZATION_CONTRACT,
     REGION_RAW_FEATURE_NAMES,
     REGION_ROBUST_FEATURE_NAMES,
+    REGION_WITHIN_CLUSTER_PT_NAMES,
     build_region_raw_features,
 )
 from .region_tree import validate_tree
@@ -82,11 +85,10 @@ def fit_region_normalization(
                     if query != context
                 ]
                 applicability = "REGION_merge"
-            elif (
-                "query_" in name
-                or "context_" in name
-                or "_axis_" in name
-                or "_particle_pt_" in name
+            elif name in (
+                *REGION_ENDPOINT_DESCRIPTOR_NAMES,
+                *REGION_WITHIN_CLUSTER_PT_NAMES,
+                *REGION_AXIS_DISTANCE_NAMES,
             ):
                 domain = [(index, index) for index in valid_indices]
                 applicability = "REGION_node"
@@ -104,11 +106,10 @@ def fit_region_normalization(
             raise ValueError(f"REGION feature {name} has no fit samples")
         if name in REGION_LCA_NAMES[1:]:
             applicability = "REGION_merge"
-        elif (
-            "query_" in name
-            or "context_" in name
-            or "_axis_" in name
-            or "_particle_pt_" in name
+        elif name in (
+            *REGION_ENDPOINT_DESCRIPTOR_NAMES,
+            *REGION_WITHIN_CLUSTER_PT_NAMES,
+            *REGION_AXIS_DISTANCE_NAMES,
         ):
             applicability = "REGION_node"
         else:

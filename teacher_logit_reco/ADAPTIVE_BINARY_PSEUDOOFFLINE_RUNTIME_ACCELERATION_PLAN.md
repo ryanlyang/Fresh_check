@@ -220,9 +220,13 @@ does not become a new bottleneck.
 ### Reference benchmark
 
 Before optimization, run a fixed 20-update benchmark for one representative root variant
-and one deepest renderer/distribution variant on one GH200. Run one complete model-val
-evaluation. The same fixed batch identities and deterministic seeds are reused for the
-post-change parity benchmark.
+and one deepest renderer/distribution variant on one GH200. Run exactly one fixed,
+identity-attested 4,096-jet model-val timing evaluation at update 20. Curriculum
+transitions in this timing-only harness reset optimizer/EMA handoff state but do not run
+checkpoint-selection validation. The same fixed identities and deterministic seeds are
+reused for the DDP4 parity benchmark. This bounded timing evaluation is not a scientific
+selection result: every production training run retains complete model-val evaluation at
+every real checkpoint-selection boundary.
 
 ## 2. Accelerated Screening Curriculum Budgets
 

@@ -10,6 +10,7 @@ import torch
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_DDP_SMOKE_CONTRACT,
     ABPH_RUNTIME_BENCHMARK_CONTRACT,
+    ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY,
     ABPH_RUNTIME_PROFILE_BUCKETS,
     ABPH_RUNTIME_PROFILE_CONTRACT,
     ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT,
@@ -50,14 +51,19 @@ def _benchmark(
     validation_seconds: float,
     score: float = 1.0,
 ) -> Path:
+    validation_jets = 4_096
     ordered_ranges = [
-        {"rank": rank, "start": 150_000 * rank // world_size, "stop": 150_000 * (rank + 1) // world_size}
+        {
+            "rank": rank,
+            "start": validation_jets * rank // world_size,
+            "stop": validation_jets * (rank + 1) // world_size,
+        }
         for rank in range(world_size)
     ]
     coverage = {
         "contract": "adaptive_binary_validation_coverage_v1",
         "split": "model_val",
-        "n_jets": 150_000,
+        "n_jets": validation_jets,
         "world_size": world_size,
         "ordered_ranges": ordered_ranges,
     }
@@ -109,7 +115,11 @@ def _benchmark(
             "profile_content_hash": profile["profile_content_hash"]
         },
         "runtime_reference_benchmark": {
-            "contract": ABPH_RUNTIME_BENCHMARK_CONTRACT
+            "contract": ABPH_RUNTIME_BENCHMARK_CONTRACT,
+            "validation_policy": ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY,
+            "fixed_model_val_evaluations": 1,
+            "curriculum_transition_validations": 0,
+            "validation_jets": validation_jets,
         },
         "provenance": {"manifest_hash": "same", "hlt_cache_hash": "same"},
     }
@@ -121,7 +131,7 @@ def _benchmark(
                 {
                     "model_val_rollout": {
                         "selection_score": score,
-                        "n_jets": 150_000,
+                        "n_jets": validation_jets,
                         "validation_coverage": coverage,
                     }
                 }
@@ -334,6 +344,7 @@ def test_acceptance_separates_runtime_pilot_and_highdata_gates(tmp_path: Path):
         ddp4_smoke_path=smokes[1],
         ddp4_batch_contracts=contracts,
         single_path_acceptance=single_path,
+        expected_validation_jets=4_096,
     )
     assert runtime_only["promotion"]["ddp4_runtime_approved"] is True
     assert runtime_only["promotion"]["optimized_pilot_submission_allowed"] is False
@@ -349,6 +360,7 @@ def test_acceptance_separates_runtime_pilot_and_highdata_gates(tmp_path: Path):
         ddp4_smoke_path=smokes[1],
         ddp4_batch_contracts=contracts,
         single_path_acceptance=single_path,
+        expected_validation_jets=4_096,
         extension_reports=extensions,
         optimized_pilot_report=_pilot(tmp_path / "pilot.json"),
     )
@@ -367,9 +379,28 @@ def test_deep_speedup_below_promotion_floor_fails_closed(tmp_path: Path):
         ddp4_smoke_path=smokes[1],
         ddp4_batch_contracts=contracts,
         single_path_acceptance=single_path,
+        expected_validation_jets=4_096,
     )
     assert report["ok"] is False
     assert report["runtime_gate"]["checks"]["deep_ddp4_speedup_at_least_1p8"] is False
+
+
+def test_acceptance_rejects_references_with_repeated_full_validation(tmp_path: Path):
+    single, ddp4, contracts, smokes, single_path = _evidence(tmp_path)
+    report_path = single[DEEP_VARIANT] / "run_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["runtime_reference_benchmark"]["fixed_model_val_evaluations"] = 8
+    _write_json(report_path, report)
+    with pytest.raises(ValueError, match="exactly one fixed validation"):
+        build_runtime_acceptance_report(
+            single_run_dirs=single,
+            ddp4_run_dirs=ddp4,
+            single_smoke_path=smokes[0],
+            ddp4_smoke_path=smokes[1],
+            ddp4_batch_contracts=contracts,
+            single_path_acceptance=single_path,
+            expected_validation_jets=4_096,
+        )
 
 
 def test_acceptance_rehashes_evidence_when_reused(tmp_path: Path):

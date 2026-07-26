@@ -19,7 +19,10 @@ from .runtime_profile import ABPH_RUNTIME_PROFILE_CONTRACT
 
 ABPH_DDP_SMOKE_CONTRACT = "adaptive_binary_ddp_acceptance_smoke_v1"
 ABPH_RUNTIME_ACCEPTANCE_CONTRACT = "adaptive_binary_runtime_acceptance_v1"
-ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_reference_v1"
+ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_reference_v2"
+ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY = (
+    "one_fixed_model_val_subset_at_fixed_update_v1"
+)
 ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT = "adaptive_binary_single_path_acceptance_v1"
 ABPH_RUNTIME_REPRESENTATIVE_VARIANTS = (
     "B1_semantic_query_root",
@@ -113,6 +116,15 @@ def _benchmark_evidence(
         raise ValueError(f"runtime benchmark is incomplete: {directory}")
     if benchmark.get("contract") != ABPH_RUNTIME_BENCHMARK_CONTRACT:
         raise ValueError(f"runtime benchmark contract mismatch: {directory}")
+    if (
+        benchmark.get("validation_policy")
+        != ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY
+        or int(benchmark.get("fixed_model_val_evaluations", -1)) != 1
+        or int(benchmark.get("curriculum_transition_validations", -1)) != 0
+    ):
+        raise ValueError(
+            f"runtime benchmark did not execute exactly one fixed validation: {directory}"
+        )
     if report.get("variant_name") != expected_variant:
         raise ValueError(f"runtime benchmark variant mismatch: {directory}")
     runtime = report.get("distributed_runtime")
@@ -135,6 +147,8 @@ def _benchmark_evidence(
     n_jets = int(validation.get("n_jets", -1))
     if not math.isfinite(selection_score) or n_jets <= 0:
         raise ValueError(f"runtime benchmark validation is incomplete: {directory}")
+    if int(benchmark.get("validation_jets", -1)) != n_jets:
+        raise ValueError(f"runtime benchmark validation count mismatch: {directory}")
     coverage = validation.get("validation_coverage")
     if not isinstance(coverage, Mapping) or coverage.get("selection_eligible") is not True:
         raise ValueError(f"runtime benchmark lacks validation identity coverage: {directory}")
@@ -420,7 +434,7 @@ def build_runtime_acceptance_report(
     single_path_acceptance: str | Path,
     extension_reports: Mapping[str, str | Path] | None = None,
     optimized_pilot_report: str | Path | None = None,
-    expected_validation_jets: int = 150_000,
+    expected_validation_jets: int = 4_096,
 ) -> dict[str, Any]:
     variants = ABPH_RUNTIME_REPRESENTATIVE_VARIANTS
     if set(single_run_dirs) != set(variants) or set(ddp4_run_dirs) != set(variants):
@@ -618,6 +632,7 @@ __all__ = [
     "ABPH_RUNTIME_ACCEPTANCE_CONTRACT",
     "ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS",
     "ABPH_RUNTIME_BENCHMARK_CONTRACT",
+    "ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY",
     "ABPH_RUNTIME_REPRESENTATIVE_VARIANTS",
     "ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT",
     "build_runtime_acceptance_report",

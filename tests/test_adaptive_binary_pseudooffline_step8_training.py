@@ -18,6 +18,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
     ReconstructorStepResult,
     ReconstructorTrainerConfig,
     RuntimeProfileConfig,
+    _should_evaluate_after_update,
     active_reconstruction_loss_names,
     assemble_reconstruction_loss_terms,
     build_reconstructor_optimizer,
@@ -31,6 +32,27 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.convergence_schedule impor
     ABPH_ACCELERATED_SCHEDULE_CONTRACT,
     StageScheduleBudget,
 )
+
+
+def test_runtime_benchmark_evaluates_only_at_the_fixed_interval() -> None:
+    assert not _should_evaluate_after_update(
+        transitioned=True,
+        global_update=1,
+        evaluation_interval=20,
+        benchmark_mode=True,
+    )
+    assert _should_evaluate_after_update(
+        transitioned=False,
+        global_update=20,
+        evaluation_interval=20,
+        benchmark_mode=True,
+    )
+    assert _should_evaluate_after_update(
+        transitioned=True,
+        global_update=1,
+        evaluation_interval=20,
+        benchmark_mode=False,
+    )
 
 
 class _TinyCurriculumModel(torch.nn.Module):
@@ -147,6 +169,36 @@ def _validation_batches():
             "target": torch.ones(8, 1),
         }
     ]
+
+
+def test_runtime_benchmark_skips_transition_selection_scans(tmp_path) -> None:
+    curriculum = replace(_curriculum(updates=1), evaluation_interval=8)
+    config = replace(
+        _trainer_config(tmp_path / "benchmark", updates=1),
+        curriculum=curriculum,
+        save_last_checkpoint=False,
+        runtime_profile=RuntimeProfileConfig(
+            enabled=False,
+            benchmark_mode=True,
+            benchmark_updates=8,
+        ),
+    )
+    model = _TinyCurriculumModel()
+    report = train_reconstructor_curriculum(
+        model,
+        model.module_groups(),
+        _source(),
+        _validation_batches,
+        _step,
+        config,
+        provenance={"manifest_hash": "benchmark-manifest"},
+        maximum_optimizer_updates=8,
+        optimizer_policies=_policies(),
+    )
+    assert report["ok"] is True
+    assert report["curriculum"]["global_update"] == 8
+    assert report["rollout_validation_count"] == 1
+    assert set(report["best_by_stage"]) == {"phase4_distribution"}
 
 
 def test_curriculum_uses_locked_depth_and_teacher_forcing_schedule():

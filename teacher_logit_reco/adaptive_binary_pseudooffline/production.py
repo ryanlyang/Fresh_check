@@ -312,6 +312,7 @@ class AdaptiveBinaryTargetBatchSource:
         shuffle_shards: bool,
         seed: int,
         maximum_batches: int | None = None,
+        validation_maximum_jets: int | None = None,
         rank: int = 0,
         world_size: int = 1,
         runtime_contract_hash: str = ABPH_PRODUCTION_RUNTIME_CONTRACT,
@@ -330,6 +331,16 @@ class AdaptiveBinaryTargetBatchSource:
         self.shuffle_shards = bool(shuffle_shards)
         self.seed = int(seed)
         self.maximum_batches = None if maximum_batches is None else int(maximum_batches)
+        self.validation_maximum_jets = (
+            None
+            if validation_maximum_jets is None
+            else int(validation_maximum_jets)
+        )
+        if (
+            self.validation_maximum_jets is not None
+            and self.validation_maximum_jets <= 0
+        ):
+            raise ValueError("validation_maximum_jets must be positive")
         self.rank = int(rank)
         self.world_size = int(world_size)
         if self.world_size <= 0 or not 0 <= self.rank < self.world_size:
@@ -837,8 +848,9 @@ class AdaptiveBinaryTargetBatchSource:
         )
 
     def iter_epoch(self) -> Iterable[Mapping[str, Any]]:
+        validation_jet_ids = self.validation_expected_jet_ids
         start, stop = contiguous_validation_range(
-            n_jets=len(self.hlt_view.jet_ids),
+            n_jets=len(validation_jet_ids),
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -877,12 +889,19 @@ class AdaptiveBinaryTargetBatchSource:
                 rank=self.rank,
                 start=start,
                 stop=stop,
-                jet_ids=self.hlt_view.jet_ids,
+                jet_ids=validation_jet_ids,
             )
 
     @property
     def last_validation_range(self):
         return self._last_validation_range
+
+    @property
+    def validation_expected_jet_ids(self):
+        limit = self.validation_maximum_jets
+        if limit is None:
+            return tuple(self.hlt_view.jet_ids)
+        return tuple(self.hlt_view.jet_ids[: min(limit, len(self.hlt_view.jet_ids))])
 
     def state_dict(self) -> dict[str, Any]:
         cursor = self._cursor_state()

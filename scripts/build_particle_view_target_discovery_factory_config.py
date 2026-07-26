@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the first cache-backed Stage-B target-discovery factory."""
+"""Build the complete cache-backed Stage-B target-discovery factory."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from teacher_logit_reco.local_particle_residual_field.particle_view import (  # noqa: E402
-    build_canonical_target_discovery_task_specs,
+    build_target_discovery_task_specs,
     build_target_discovery_factory_config,
     load_hashed_json,
     write_immutable_json,
@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
+    parser.add_argument("--existing-teacher-compatible", action="store_true")
+    parser.add_argument("--teacher-mix-compatible", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     config = build_target_discovery_factory_config(
@@ -38,11 +40,13 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=args.num_workers,
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
+        existing_teacher_compatible=args.existing_teacher_compatible,
+        teacher_mix_compatible=args.teacher_mix_compatible,
     )
     if not args.dry_run:
         write_immutable_json(args.output, config)
         if args.task_specs_output:
-            specs = build_canonical_target_discovery_task_specs(
+            specs = build_target_discovery_task_specs(
                 factory_config_path=args.output
             )
             destination = Path(args.task_specs_output)
@@ -58,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                     encoded, encoding="utf-8", newline="\n"
                 )
     print(
-        "supported_target_runs=1 compiled_target_screens=36 "
+        "supported_target_runs=36 compiled_target_screens=36 "
         f"content_hash={config['content_hash']} dry_run={args.dry_run}"
     )
     return 0

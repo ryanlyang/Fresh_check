@@ -1,16 +1,10 @@
 """Cache-backed runtime integration for Stage-B particle-view discovery.
 
-This module is deliberately narrower than the complete Stage-B campaign.  It
-turns the canonical ``VGEN_TAP_PENULT`` row into a real scientific workload:
-authenticated Stage-A teachers are reloaded, the offline contextual memory is
-staged in allocation-local RAM, ``Gview`` and ``Cview_discovery`` are trained
-jointly, and the selected generator is registered without a descendant hash.
-
-The target-screen recipe compiler covers the complete declared screen so later
-runtime packs cannot silently reinterpret an ablation.  The production factory
-currently advertises only the canonical row and runs its complete two-pass
-normalizer/consumer/recovery-probe evaluation.  Task-catalog construction
-remains fail-closed for screen rows not yet promoted to this runtime path.
+Every declared target-generator row uses this runtime.  Frozen Stage-A
+teachers are authenticated and reloaded, contextual memories are staged in
+allocation-local RAM, learned tap/source adapters are checkpointed alongside
+``Gview``, and every available candidate runs the same complete two-pass
+normalizer/consumer/recovery-probe evaluation.
 """
 
 from __future__ import annotations
@@ -109,6 +103,73 @@ PARTICLE_VIEW_GENERATOR_CHECKPOINT_CONTRACT = (
 )
 
 CANONICAL_TARGET_DISCOVERY_RUN_ID = "VGEN_TAP_PENULT"
+TARGET_SCREEN_FORWARD_COUNT = 2
+
+
+class TwoTeacherTokenMixture(torch.nn.Module):
+    """Learned common-width mixture of frozen base/large teacher tokens."""
+
+    contract = "particle_view_two_teacher_token_mixture_v1"
+
+    def __init__(
+        self,
+        *,
+        base_dim: int = 128,
+        large_dim: int = 192,
+        output_dim: int = 160,
+    ) -> None:
+        super().__init__()
+        if (base_dim, large_dim, output_dim) != (128, 192, 160):
+            raise ValueError("two-teacher mixture dimensions drifted")
+        self.base_dim = base_dim
+        self.large_dim = large_dim
+        self.output_dim = output_dim
+        self.base_projection = torch.nn.Linear(base_dim, output_dim)
+        self.large_projection = torch.nn.Linear(large_dim, output_dim)
+        self.source_logits = torch.nn.Parameter(torch.zeros(2))
+
+    def config_payload(self) -> dict[str, Any]:
+        return {
+            "contract": self.contract,
+            "base_dim": self.base_dim,
+            "large_dim": self.large_dim,
+            "output_dim": self.output_dim,
+            "mixture": "learned_softmax",
+            "teachers_frozen": True,
+        }
+
+    def forward(
+        self,
+        base_tokens: torch.Tensor,
+        large_tokens: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            base_tokens.ndim != 3
+            or large_tokens.ndim != 3
+            or base_tokens.shape[:2] != large_tokens.shape[:2]
+            or base_tokens.shape[2] != self.base_dim
+            or large_tokens.shape[2] != self.large_dim
+            or mask.shape != base_tokens.shape[:2]
+            or mask.dtype is not torch.bool
+        ):
+            raise ValueError("two-teacher token mixture input changed")
+        weights = torch.softmax(self.source_logits, dim=0)
+        mixed = (
+            weights[0] * self.base_projection(base_tokens)
+            + weights[1] * self.large_projection(large_tokens)
+        )
+        return mixed.masked_fill(~mask.unsqueeze(-1), 0.0)
+
+    def mix_logits(
+        self,
+        base_logits: torch.Tensor,
+        large_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        if base_logits.shape != large_logits.shape or base_logits.ndim != 2:
+            raise ValueError("two-teacher logits differ in shape")
+        weights = torch.softmax(self.source_logits, dim=0)
+        return weights[0] * base_logits + weights[1] * large_logits
 
 
 def _optional_positive(value: int | None, *, name: str) -> int | None:
@@ -477,7 +538,19 @@ def stage_contextual_memory(
             ],
             batch[f"{prefix}mask" if prefix else "mask"],
         )
-        token_rows.append(context.single_layer_tokens.float().cpu())
+        if context.particle_tokens.shape[1] == 1:
+            staged_tokens = context.single_layer_tokens
+        else:
+            # Preserve every frozen layer in one authenticated rank-3 staging
+            # tensor.  The learned layer mixture remains live and trainable.
+            staged_tokens = context.particle_tokens.permute(
+                0, 2, 1, 3
+            ).reshape(
+                context.particle_tokens.shape[0],
+                context.particle_tokens.shape[2],
+                -1,
+            )
+        token_rows.append(staged_tokens.float().cpu())
         mask_rows.append(context.particle_mask.cpu())
         logit_rows.append(context.logits.float().cpu())
         parent_rows.append(batch["parent_indices"].cpu())
@@ -527,16 +600,31 @@ class StagedDiscoveryViewProvider:
         query_tap_choice: str,
         memory_source: str = "offline",
         query_mixture: FrozenTokenLayerMixture | None = None,
+        memory_mixture: FrozenTokenLayerMixture | None = None,
+        memory_layer_width: int | None = None,
+        secondary_staged_memory: StagedContextualMemory | None = None,
+        teacher_mixture: TwoTeacherTokenMixture | None = None,
     ) -> None:
-        if memory_source != "offline":
-            raise ValueError(
-                "this first runtime pack supports offline staged memory only"
-            )
+        if memory_source not in {"offline", "hlt"}:
+            raise ValueError("memory_source must be offline or hlt")
+        if (memory_mixture is None) != (memory_layer_width is None):
+            raise ValueError("memory layer mixture/width must be paired")
+        if (secondary_staged_memory is None) != (teacher_mixture is None):
+            raise ValueError("secondary memory/teacher mixture must be paired")
+        if memory_mixture is not None and teacher_mixture is not None:
+            raise ValueError("layer and teacher mixtures cannot be combined")
+        if teacher_mixture is not None and memory_source != "offline":
+            raise ValueError("two-teacher mixture requires offline memory")
         self.generator = generator
         self.query_teacher = query_teacher
         self.staged_memory = staged_memory
         self.query_tap_choice = query_tap_choice
+        self.memory_source = memory_source
         self.query_mixture = query_mixture
+        self.memory_mixture = memory_mixture
+        self.memory_layer_width = memory_layer_width
+        self.secondary_staged_memory = secondary_staged_memory
+        self.teacher_mixture = teacher_mixture
 
     def __call__(self, batch: Mapping[str, Any]) -> dict[str, torch.Tensor]:
         required = {
@@ -573,10 +661,47 @@ class StagedDiscoveryViewProvider:
         memory_mask = self.staged_memory.staged_tap.mask[positions].to(
             device=device
         )
-        expected_mask = batch["offline_mask"][:, 0]
+        expected_mask = (
+            batch["mask"][:, 0]
+            if self.memory_source == "hlt"
+            else batch["offline_mask"][:, 0]
+        )
         if not torch.equal(memory_mask, expected_mask):
             raise ValueError("RAM-staged memory mask differs from aligned cache")
+        if self.memory_mixture is not None:
+            width = int(self.memory_layer_width)
+            if memory_tokens.shape[2] != 3 * width:
+                raise ValueError("staged layer-mixture width changed")
+            memory_tokens = self.memory_mixture(
+                memory_tokens.reshape(
+                    memory_tokens.shape[0],
+                    memory_tokens.shape[1],
+                    3,
+                    width,
+                ).permute(0, 2, 1, 3),
+                memory_mask,
+            )
         offline_logits = self.staged_memory.logits[positions].to(device=device)
+        if self.teacher_mixture is not None:
+            secondary = self.secondary_staged_memory
+            secondary_positions = secondary.positions(batch["parent_indices"])
+            secondary_mask = secondary.staged_tap.mask[
+                secondary_positions
+            ].to(device=device)
+            if not torch.equal(secondary_mask, memory_mask):
+                raise ValueError("two-teacher staged masks differ")
+            secondary_tokens = secondary.staged_tap.tokens[
+                secondary_positions
+            ].to(device=device, dtype=torch.float32)
+            memory_tokens = self.teacher_mixture(
+                memory_tokens,
+                secondary_tokens,
+                memory_mask,
+            )
+            offline_logits = self.teacher_mixture.mix_logits(
+                offline_logits,
+                secondary.logits[secondary_positions].to(device=device),
+            )
         if isinstance(batch, dict):
             batch["offline_logits"] = offline_logits
         else:
@@ -588,7 +713,16 @@ class StagedDiscoveryViewProvider:
                 batch["lorentz_vectors"], batch["mask"]
             ),
             memory_geometry=lorentz_vectors_to_particle_geometry(
-                batch["offline_lorentz_vectors"], batch["offline_mask"]
+                (
+                    batch["lorentz_vectors"]
+                    if self.memory_source == "hlt"
+                    else batch["offline_lorentz_vectors"]
+                ),
+                (
+                    batch["mask"]
+                    if self.memory_source == "hlt"
+                    else batch["offline_mask"]
+                ),
             ),
             query_mask=batch["mask"][:, 0],
             memory_mask=memory_mask,
@@ -951,6 +1085,7 @@ def _generator_checkpoint(
     *,
     consumer_checkpoint_path: Path,
     generator: MatchingFreeParticleViewGenerator,
+    source_modules: Mapping[str, torch.nn.Module],
     recipe: Mapping[str, Any],
     output_path: Path,
 ) -> str:
@@ -960,9 +1095,13 @@ def _generator_checkpoint(
         weights_only=False,
     )
     states = checkpoint.get("joint_model_state_dicts", {})
-    if set(states) != {"Gview"}:
-        raise ValueError("discovery checkpoint omitted the exact Gview state")
+    expected_states = {"Gview", *source_modules}
+    if set(states) != expected_states:
+        raise ValueError("discovery checkpoint joint-module inventory differs")
     generator.load_state_dict(states["Gview"], strict=True)
+    for name, module in source_modules.items():
+        module.load_state_dict(states[name], strict=True)
+        module.eval()
     torch.save(
         {
             "contract": PARTICLE_VIEW_GENERATOR_CHECKPOINT_CONTRACT,
@@ -973,6 +1112,23 @@ def _generator_checkpoint(
             "selected_consumer_epoch": int(checkpoint["epoch"]),
             "model_val_stop": dict(checkpoint["model_val_stop"]),
             "model_state_dict": generator.state_dict(),
+            "source_adapter_configs": {
+                name: (
+                    module.config_payload()
+                    if isinstance(module, TwoTeacherTokenMixture)
+                    else {
+                        "contract": "particle_view_token_layer_mixture_v1",
+                        "layer_count": 3,
+                        "mixture": "learned_softmax",
+                        "teachers_frozen": True,
+                    }
+                )
+                for name, module in source_modules.items()
+            },
+            "source_adapter_state_dicts": {
+                name: module.state_dict()
+                for name, module in source_modules.items()
+            },
         },
         output_path,
     )
@@ -984,13 +1140,18 @@ def run_canonical_target_discovery(
     recipe: TargetScreenRecipe,
     query_teacher: FrozenContextualParticleTeacher,
     memory_teacher: FrozenContextualParticleTeacher,
+    secondary_memory_teacher: FrozenContextualParticleTeacher | None,
     consumer_model: ParticleViewConsumer,
     probe_consumer_model: ParticleViewConsumer,
+    query_mixture: FrozenTokenLayerMixture | None,
+    memory_mixture: FrozenTokenLayerMixture | None,
+    teacher_mixture: TwoTeacherTokenMixture | None,
     train_aligned: AlignedLogicalJetView,
     stop_aligned: AlignedLogicalJetView,
     select_aligned: AlignedLogicalJetView,
     a0_registration: Mapping[str, Any],
     memory_registration: Mapping[str, Any],
+    secondary_memory_registration: Mapping[str, Any] | None,
     query_tap_registration: Mapping[str, Any],
     memory_tap_registration: Mapping[str, Any],
     runtime_data_config: Mapping[str, Any],
@@ -1001,12 +1162,20 @@ def run_canonical_target_discovery(
     max_val_batches: int | None,
     seed: int,
 ) -> None:
-    """Run canonical discovery plus its complete two-pass candidate probe."""
+    """Run one declared discovery row plus its complete two-pass probe."""
 
-    if recipe.run_id != CANONICAL_TARGET_DISCOVERY_RUN_ID:
-        raise ValueError("canonical discovery action received another screen row")
+    if recipe.run_id not in TARGET_SCREEN_IDS:
+        raise ValueError("target discovery action received another screen row")
     validate_teacher_registration(a0_registration)
     validate_teacher_registration(memory_registration)
+    if secondary_memory_registration is not None:
+        validate_teacher_registration(secondary_memory_registration)
+    if (secondary_memory_teacher is None) != (
+        secondary_memory_registration is None
+    ):
+        raise ValueError("secondary teacher/registration must be paired")
+    if (teacher_mixture is None) != (secondary_memory_teacher is None):
+        raise ValueError("two-teacher adapter/secondary teacher must be paired")
     resolved_device = _resolve_device(device)
     source_manifest_sha256 = runtime_data_config["parent_manifest"][
         "manifest_sha256"
@@ -1017,8 +1186,16 @@ def run_canonical_target_discovery(
         teacher_checkpoint_sha256=memory_registration["checkpoint_sha256"],
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
-        source_role="offline_teacher",
-        source_view="offline",
+        source_role=(
+            "hlt_teacher"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline_teacher"
+        ),
+        source_view=(
+            "fixed_hlt"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline"
+        ),
         device=resolved_device,
         num_workers=num_workers,
     )
@@ -1028,11 +1205,51 @@ def run_canonical_target_discovery(
         teacher_checkpoint_sha256=memory_registration["checkpoint_sha256"],
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
-        source_role="offline_teacher",
-        source_view="offline",
+        source_role=(
+            "hlt_teacher"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline_teacher"
+        ),
+        source_view=(
+            "fixed_hlt"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline"
+        ),
         device=resolved_device,
         num_workers=num_workers,
     )
+    train_secondary_memory = stop_secondary_memory = None
+    if secondary_memory_teacher is not None:
+        train_secondary_memory = stage_contextual_memory(
+            aligned=train_aligned,
+            teacher=secondary_memory_teacher,
+            teacher_checkpoint_sha256=secondary_memory_registration[
+                "checkpoint_sha256"
+            ],
+            tap_spec_sha256=memory_tap_registration[
+                "secondary_tap_spec_sha256"
+            ],
+            source_manifest_sha256=source_manifest_sha256,
+            source_role="offline_teacher_secondary",
+            source_view="offline",
+            device=resolved_device,
+            num_workers=num_workers,
+        )
+        stop_secondary_memory = stage_contextual_memory(
+            aligned=stop_aligned,
+            teacher=secondary_memory_teacher,
+            teacher_checkpoint_sha256=secondary_memory_registration[
+                "checkpoint_sha256"
+            ],
+            tap_spec_sha256=memory_tap_registration[
+                "secondary_tap_spec_sha256"
+            ],
+            source_manifest_sha256=source_manifest_sha256,
+            source_role="offline_teacher_secondary",
+            source_view="offline",
+            device=resolved_device,
+            num_workers=num_workers,
+        )
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     recipe_payload = with_content_hash(
@@ -1042,6 +1259,11 @@ def run_canonical_target_discovery(
             "memory_teacher_registration_sha256": memory_registration[
                 "content_hash"
             ],
+            "secondary_memory_teacher_registration_sha256": (
+                None
+                if secondary_memory_registration is None
+                else secondary_memory_registration["content_hash"]
+            ),
             "query_tap_registration_sha256": query_tap_registration[
                 "content_hash"
             ],
@@ -1078,13 +1300,42 @@ def run_canonical_target_discovery(
         query_teacher=query_teacher,
         staged_memory=train_memory,
         query_tap_choice=recipe.query_tap_choice,
+        memory_source=recipe.generator_config.memory_source,
+        query_mixture=query_mixture,
+        memory_mixture=memory_mixture,
+        memory_layer_width=(
+            memory_registration["recipe"]["architecture"]["embed_dims"][-1]
+            if memory_mixture is not None
+            else None
+        ),
+        secondary_staged_memory=train_secondary_memory,
+        teacher_mixture=teacher_mixture,
     )
     stop_provider = StagedDiscoveryViewProvider(
         generator=generator,
         query_teacher=query_teacher,
         staged_memory=stop_memory,
         query_tap_choice=recipe.query_tap_choice,
+        memory_source=recipe.generator_config.memory_source,
+        query_mixture=query_mixture,
+        memory_mixture=memory_mixture,
+        memory_layer_width=(
+            memory_registration["recipe"]["architecture"]["embed_dims"][-1]
+            if memory_mixture is not None
+            else None
+        ),
+        secondary_staged_memory=stop_secondary_memory,
+        teacher_mixture=teacher_mixture,
     )
+    source_modules = {
+        name: module
+        for name, module in {
+            "query_layer_mixture": query_mixture,
+            "memory_layer_mixture": memory_mixture,
+            "teacher_source_mixture": teacher_mixture,
+        }.items()
+        if module is not None
+    }
     train_loader = _LimitedLoader(
         make_logical_data_loader(
             train_aligned,
@@ -1131,13 +1382,14 @@ def run_canonical_target_discovery(
         view_provider=train_provider,
         validation_view_provider=stop_provider,
         oracle_config=recipe.oracle_objective,
-        joint_trainable_modules={"Gview": generator},
+        joint_trainable_modules={"Gview": generator, **source_modules},
         device=resolved_device,
     )
     generator_path = output / "generator_model_val_stop.pt"
     generator_sha256 = _generator_checkpoint(
         consumer_checkpoint_path=output / "best_model_val_stop.pt",
         generator=generator,
+        source_modules=source_modules,
         recipe=recipe_payload,
         output_path=generator_path,
     )
@@ -1157,7 +1409,11 @@ def run_canonical_target_discovery(
         query_checkpoint_sha256=a0_registration["checkpoint_sha256"],
         memory_tap_registration_sha256=memory_tap_registration["content_hash"],
         memory_checkpoint_sha256=memory_registration["checkpoint_sha256"],
-        staged_tap_source_role="offline_teacher",
+        staged_tap_source_role=(
+            "hlt_memory_control"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline_teacher"
+        ),
         staged_tap_reservation_sha256=train_memory.staged_tap.manifest[
             "reservation_sha256"
         ],
@@ -1168,9 +1424,17 @@ def run_canonical_target_discovery(
             "logical_content_sha256"
         ],
         generator_checkpoint_sha256=generator_sha256,
-        offline_source_sha256=memory_registration["source_sha256"],
-        privileged_claim_eligible=True,
-        deployment_control_eligible=False,
+        offline_source_sha256=(
+            None
+            if recipe.generator_config.memory_source == "hlt"
+            else memory_registration["source_sha256"]
+        ),
+        privileged_claim_eligible=(
+            recipe.generator_config.memory_source == "offline"
+        ),
+        deployment_control_eligible=(
+            recipe.run_id == "VGEN_MEMORY_HLT"
+        ),
     )
     write_immutable_json(output / "target_candidate_registration.json", target)
 
@@ -1213,6 +1477,7 @@ def run_canonical_target_discovery(
     ]
     del raw_train, raw_stop, train_provider, stop_provider
     del train_memory, stop_memory
+    del train_secondary_memory, stop_secondary_memory
     if resolved_device.type == "cuda":
         torch.cuda.empty_cache()
 
@@ -1330,11 +1595,36 @@ def run_canonical_target_discovery(
         teacher_checkpoint_sha256=memory_registration["checkpoint_sha256"],
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
-        source_role="offline_teacher",
-        source_view="offline",
+        source_role=(
+            "hlt_teacher"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline_teacher"
+        ),
+        source_view=(
+            "fixed_hlt"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline"
+        ),
         device=resolved_device,
         num_workers=num_workers,
     )
+    select_secondary_memory = None
+    if secondary_memory_teacher is not None:
+        select_secondary_memory = stage_contextual_memory(
+            aligned=select_aligned,
+            teacher=secondary_memory_teacher,
+            teacher_checkpoint_sha256=secondary_memory_registration[
+                "checkpoint_sha256"
+            ],
+            tap_spec_sha256=memory_tap_registration[
+                "secondary_tap_spec_sha256"
+            ],
+            source_manifest_sha256=source_manifest_sha256,
+            source_role="offline_teacher_secondary",
+            source_view="offline",
+            device=resolved_device,
+            num_workers=num_workers,
+        )
     write_immutable_json(
         output / "model_val_select_staged_tap_manifest.json",
         select_memory.staged_tap.manifest,
@@ -1344,6 +1634,16 @@ def run_canonical_target_discovery(
         query_teacher=query_teacher,
         staged_memory=select_memory,
         query_tap_choice=recipe.query_tap_choice,
+        memory_source=recipe.generator_config.memory_source,
+        query_mixture=query_mixture,
+        memory_mixture=memory_mixture,
+        memory_layer_width=(
+            memory_registration["recipe"]["architecture"]["embed_dims"][-1]
+            if memory_mixture is not None
+            else None
+        ),
+        secondary_staged_memory=select_secondary_memory,
+        teacher_mixture=teacher_mixture,
     )
     raw_select = materialize_candidate_views_in_ram(
         aligned=select_aligned,
@@ -1508,7 +1808,8 @@ def run_canonical_target_discovery(
     )
     write_immutable_json(output / "target_discovery_result.json", result)
     del raw_select, normalized_select, predicted_select
-    del select_provider, select_memory, normalized_train, normalized_stop
+    del select_provider, select_memory, select_secondary_memory
+    del normalized_train, normalized_stop
     if resolved_device.type == "cuda":
         torch.cuda.empty_cache()
 
@@ -1520,8 +1821,10 @@ def build_target_discovery_factory_config(
     num_workers: int = 0,
     max_train_batches: int | None = None,
     max_val_batches: int | None = None,
+    existing_teacher_compatible: bool = False,
+    teacher_mix_compatible: bool = False,
 ) -> dict[str, Any]:
-    """Bind the canonical target-discovery workload to exact source caches."""
+    """Bind every target-discovery workload to exact source caches."""
 
     validate_runtime_data_config(runtime_data_config, verify_cache_files=True)
     if not isinstance(device, str) or not device:
@@ -1546,13 +1849,23 @@ def build_target_discovery_factory_config(
                     max_val_batches, name="max_val_batches"
                 ),
             },
-            "supported_run_ids": [CANONICAL_TARGET_DISCOVERY_RUN_ID],
+            "supported_run_ids": list(TARGET_SCREEN_IDS),
             "complete_target_screen_count": len(TARGET_SCREEN_IDS),
             "screen_recipes": {
-                run_id: build_target_screen_recipe(run_id).to_payload()
+                run_id: build_target_screen_recipe(
+                    run_id,
+                    existing_teacher_compatible=existing_teacher_compatible,
+                    teacher_mix_compatible=teacher_mix_compatible,
+                ).to_payload()
                 for run_id in TARGET_SCREEN_IDS
             },
-            "production_scope": "canonical_two_pass_candidate_v1",
+            "compatibility": {
+                "existing_teacher_compatible": bool(
+                    existing_teacher_compatible
+                ),
+                "teacher_mix_compatible": bool(teacher_mix_compatible),
+            },
+            "production_scope": "complete_target_screen_two_pass_v1",
             "two_pass_probe_required_before_target_ranking": True,
             "quality_warnings_non_gating": True,
         }
@@ -1578,6 +1891,7 @@ def validate_target_discovery_factory_config(
         "supported_run_ids",
         "complete_target_screen_count",
         "screen_recipes",
+        "compatibility",
         "production_scope",
         "two_pass_probe_required_before_target_ranking",
         "quality_warnings_non_gating",
@@ -1608,22 +1922,41 @@ def validate_target_discovery_factory_config(
     for name in ("max_train_batches", "max_val_batches"):
         _optional_positive(runtime[name], name=name)
     if (
-        payload["supported_run_ids"] != [CANONICAL_TARGET_DISCOVERY_RUN_ID]
+        payload["supported_run_ids"] != list(TARGET_SCREEN_IDS)
         or payload["complete_target_screen_count"] != len(TARGET_SCREEN_IDS)
         or set(payload["screen_recipes"]) != set(TARGET_SCREEN_IDS)
-        or payload["production_scope"] != "canonical_two_pass_candidate_v1"
+        or payload["production_scope"]
+        != "complete_target_screen_two_pass_v1"
         or payload["two_pass_probe_required_before_target_ranking"] is not True
         or payload["quality_warnings_non_gating"] is not True
     ):
         raise ValueError("target-discovery scope/policy changed")
+    compatibility = payload["compatibility"]
+    if (
+        set(compatibility)
+        != {"existing_teacher_compatible", "teacher_mix_compatible"}
+        or any(
+            not isinstance(value, bool)
+            for value in compatibility.values()
+        )
+    ):
+        raise ValueError("target-discovery compatibility inventory changed")
     for run_id in TARGET_SCREEN_IDS:
-        rebuilt = build_target_screen_recipe(run_id).to_payload()
+        rebuilt = build_target_screen_recipe(
+            run_id,
+            existing_teacher_compatible=compatibility[
+                "existing_teacher_compatible"
+            ],
+            teacher_mix_compatible=compatibility[
+                "teacher_mix_compatible"
+            ],
+        ).to_payload()
         if payload["screen_recipes"][run_id] != rebuilt:
             raise ValueError(f"target-screen recipe changed for {run_id}")
     return {
         "ok": True,
         "content_hash": payload["content_hash"],
-        "supported_run_count": 1,
+        "supported_run_count": len(TARGET_SCREEN_IDS),
         "compiled_screen_count": len(TARGET_SCREEN_IDS),
     }
 
@@ -1645,6 +1978,37 @@ def _parent_artifact(
     return path
 
 
+def _target_parent_ids(run_id: str) -> tuple[str, ...]:
+    if run_id == "VGEN_TEACHER_LARGE":
+        return ("A0_VIEW", "TOFF_VIEW_LARGE")
+    if run_id == "VGEN_TEACHER_EXISTING":
+        return ("A0_VIEW", "TOFF_VIEW_EXISTING")
+    if run_id == "VGEN_TEACHER_MIX2":
+        return ("A0_VIEW", "TOFF_VIEW_BASE", "TOFF_VIEW_LARGE")
+    if run_id in {"VGEN_MEMORY_HLT", "VGEN_MEMORY_HLT_SELFMASK"}:
+        return ("A0_VIEW",)
+    return ("A0_VIEW", "TOFF_VIEW_BASE")
+
+
+def _registered_parent_teacher(
+    parents: Mapping[str, Any],
+    parent_id: str,
+):
+    registration_path = _parent_artifact(
+        parents, parent_id, "teacher_registration.json"
+    )
+    checkpoint_path = _parent_artifact(
+        parents, parent_id, "best_model_val_stop.pt"
+    )
+    registration = load_hashed_json(registration_path)
+    validate_teacher_registration(registration)
+    model = reload_registered_teacher(
+        registration=registration,
+        checkpoint_path=checkpoint_path,
+    )
+    return registration, checkpoint_path, model
+
+
 def build_target_discovery_factory(
     *,
     operation: str,
@@ -1663,7 +2027,7 @@ def build_target_discovery_factory(
     validate_particle_view_registry(registry)
     rows = {row["run_id"]: row for row in registry["runs"]}
     if (
-        run_id != CANONICAL_TARGET_DISCOVERY_RUN_ID
+        run_id not in TARGET_SCREEN_IDS
         or run_id not in rows
         or int(seed) not in rows[run_id]["seed_ids"]
         or not str(rows[run_id]["scientific_role"]).startswith(
@@ -1679,54 +2043,80 @@ def build_target_discovery_factory(
         run_id=run_id,
         seed=int(seed),
     )
-    if set(parents) != {"A0_VIEW", "TOFF_VIEW_BASE"}:
-        raise ValueError(
-            "canonical target discovery requires exact A0/base-Toff parents"
-        )
-    a0_registration_path = _parent_artifact(
-        parents, "A0_VIEW", "teacher_registration.json"
-    )
-    a0_checkpoint_path = _parent_artifact(
-        parents, "A0_VIEW", "best_model_val_stop.pt"
-    )
-    memory_registration_path = _parent_artifact(
-        parents, "TOFF_VIEW_BASE", "teacher_registration.json"
-    )
-    memory_checkpoint_path = _parent_artifact(
-        parents, "TOFF_VIEW_BASE", "best_model_val_stop.pt"
-    )
-    a0_registration = load_hashed_json(a0_registration_path)
-    memory_registration = load_hashed_json(memory_registration_path)
-    validate_teacher_registration(a0_registration)
-    validate_teacher_registration(memory_registration)
-    a0_query_model = reload_registered_teacher(
-        registration=a0_registration,
-        checkpoint_path=a0_checkpoint_path,
+    expected_parents = _target_parent_ids(run_id)
+    if set(parents) != set(expected_parents):
+        raise ValueError("target discovery parent inventory differs")
+    a0_registration, a0_checkpoint_path, a0_query_model = (
+        _registered_parent_teacher(parents, "A0_VIEW")
     )
     a0_consumer_model = reload_registered_teacher(
-        registration=a0_registration,
-        checkpoint_path=a0_checkpoint_path,
+        registration=a0_registration, checkpoint_path=a0_checkpoint_path
     )
     a0_probe_consumer_model = reload_registered_teacher(
-        registration=a0_registration,
-        checkpoint_path=a0_checkpoint_path,
+        registration=a0_registration, checkpoint_path=a0_checkpoint_path
     )
     for parameter in a0_consumer_model.parameters():
         parameter.requires_grad_(True)
     for parameter in a0_probe_consumer_model.parameters():
         parameter.requires_grad_(True)
-    memory_model = reload_registered_teacher(
-        registration=memory_registration,
-        checkpoint_path=memory_checkpoint_path,
+    compatibility = config["compatibility"]
+    recipe = build_target_screen_recipe(
+        run_id,
+        existing_teacher_compatible=compatibility[
+            "existing_teacher_compatible"
+        ],
+        teacher_mix_compatible=compatibility[
+            "teacher_mix_compatible"
+        ],
     )
-    recipe = build_target_screen_recipe(run_id)
+    if run_id == "VGEN_TEACHER_EXISTING":
+        raise ValueError(
+            "configured existing-teacher checkpoint runtime is not bound"
+        )
+    memory_parent = (
+        "A0_VIEW"
+        if recipe.generator_config.memory_source == "hlt"
+        else "TOFF_VIEW_LARGE"
+        if recipe.teacher_source == "large"
+        else "TOFF_VIEW_BASE"
+    )
+    if memory_parent == "A0_VIEW":
+        memory_registration = a0_registration
+        memory_checkpoint_path = a0_checkpoint_path
+        memory_model = reload_registered_teacher(
+            registration=a0_registration,
+            checkpoint_path=a0_checkpoint_path,
+        )
+    else:
+        (
+            memory_registration,
+            memory_checkpoint_path,
+            memory_model,
+        ) = _registered_parent_teacher(parents, memory_parent)
+    secondary_memory_registration = None
+    secondary_memory_model = None
+    if recipe.teacher_source == "base_large_mix":
+        (
+            secondary_memory_registration,
+            _,
+            secondary_memory_model,
+        ) = _registered_parent_teacher(parents, "TOFF_VIEW_LARGE")
+    query_context_tap = (
+        "raw_embed"
+        if recipe.query_tap_choice == "raw_features"
+        else recipe.query_tap_choice
+    )
     query_spec = ParticleTokenTapSpec(
         particle_source="fixed_hlt",
         architecture=a0_registration["recipe"]["architecture_name"],
-        tap_choice=recipe.query_tap_choice,
+        tap_choice=query_context_tap,
     )
     memory_spec = ParticleTokenTapSpec(
-        particle_source="offline",
+        particle_source=(
+            "fixed_hlt"
+            if recipe.generator_config.memory_source == "hlt"
+            else "offline"
+        ),
         architecture=memory_registration["recipe"]["architecture_name"],
         tap_choice=recipe.memory_tap_choice,
     )
@@ -1744,6 +2134,36 @@ def build_target_discovery_factory(
             "preprocessing_sha256"
         ],
     )
+    if secondary_memory_registration is not None:
+        secondary_spec = ParticleTokenTapSpec(
+            particle_source="offline",
+            architecture=secondary_memory_registration["recipe"][
+                "architecture_name"
+            ],
+            tap_choice=recipe.memory_tap_choice,
+        )
+        secondary_tap = build_token_tap_registration(
+            teacher_registration=secondary_memory_registration,
+            tap_spec=secondary_spec,
+            input_normalization_sha256=secondary_memory_registration[
+                "preprocessing_sha256"
+            ],
+        )
+        memory_tap_registration = with_content_hash(
+            {
+                "contract": "particle_view_two_teacher_tap_binding_v1",
+                "primary_tap": memory_tap_registration,
+                "tap_spec_sha256": memory_spec.content_hash,
+                "primary_tap_spec_sha256": memory_spec.content_hash,
+                "secondary_tap": secondary_tap,
+                "secondary_tap_spec_sha256": secondary_spec.content_hash,
+                "teacher_order": ["base", "large"],
+            }
+        )
+    elif recipe.generator_config.memory_source == "hlt":
+        # The HLT-memory controls must bind the exact same A0 tap hash on
+        # both query and memory sides.
+        memory_tap_registration = query_tap_registration
     data = config["runtime_data_config"]
     train = load_aligned_logical_jet_view(data, "train")
     stop = load_aligned_logical_jet_view(data, "model_val_stop")
@@ -1772,6 +2192,24 @@ def build_target_discovery_factory(
             learned_trust=True,
         ),
     )
+    query_mixture = (
+        FrozenTokenLayerMixture()
+        if recipe.query_tap_choice == "mix_last3"
+        else None
+    )
+    memory_mixture = (
+        FrozenTokenLayerMixture()
+        if (
+            recipe.memory_tap_choice == "mix_last3"
+            and recipe.teacher_source != "base_large_mix"
+        )
+        else None
+    )
+    teacher_mixture = (
+        TwoTeacherTokenMixture()
+        if recipe.teacher_source == "base_large_mix"
+        else None
+    )
     output = Path(output_dir).resolve()
     runtime = config["runtime"]
     return {
@@ -1783,13 +2221,27 @@ def build_target_discovery_factory(
             "memory_teacher": FrozenContextualParticleTeacher(
                 memory_model, memory_spec
             ),
+            "secondary_memory_teacher": (
+                None
+                if secondary_memory_model is None
+                else FrozenContextualParticleTeacher(
+                    secondary_memory_model,
+                    secondary_spec,
+                )
+            ),
             "consumer_model": consumer,
             "probe_consumer_model": probe_consumer,
+            "query_mixture": query_mixture,
+            "memory_mixture": memory_mixture,
+            "teacher_mixture": teacher_mixture,
             "train_aligned": train,
             "stop_aligned": stop,
             "select_aligned": select,
             "a0_registration": a0_registration,
             "memory_registration": memory_registration,
+            "secondary_memory_registration": (
+                secondary_memory_registration
+            ),
             "query_tap_registration": query_tap_registration,
             "memory_tap_registration": memory_tap_registration,
             "runtime_data_config": data,
@@ -1834,26 +2286,38 @@ def build_target_discovery_factory(
     }
 
 
-def build_canonical_target_discovery_task_specs(
+def build_target_discovery_task_specs(
     *,
     factory_config_path: str | Path,
 ) -> dict[str, dict[str, str]]:
-    """Return the catalog fragment for the first runnable Stage-B row."""
+    """Return catalog fragments for all declared target-generator rows."""
 
     path = Path(factory_config_path).resolve()
     config = load_hashed_json(path)
     validate_target_discovery_factory_config(config)
-    return {
-        CANONICAL_TARGET_DISCOVERY_RUN_ID: {
-            "operation": "target_discovery",
-            "factory": (
-                "teacher_logit_reco.local_particle_residual_field.particle_view."
-                "target_runtime:build_target_discovery_factory"
-            ),
-            "factory_config_path": str(path),
-            "factory_config_sha256": sha256_file(path),
-        }
+    common = {
+        "operation": "target_discovery",
+        "factory": (
+            "teacher_logit_reco.local_particle_residual_field.particle_view."
+            "target_runtime:build_target_discovery_factory"
+        ),
+        "factory_config_path": str(path),
+        "factory_config_sha256": sha256_file(path),
     }
+    return {
+        run_id: dict(common) for run_id in TARGET_SCREEN_IDS
+    }
+
+
+def build_canonical_target_discovery_task_specs(
+    *,
+    factory_config_path: str | Path,
+) -> dict[str, dict[str, str]]:
+    """Backward-compatible alias; now returns the complete target screen."""
+
+    return build_target_discovery_task_specs(
+        factory_config_path=factory_config_path
+    )
 
 
 __all__ = [
@@ -1868,7 +2332,9 @@ __all__ = [
     "StagedContextualMemory",
     "StagedDiscoveryViewProvider",
     "TargetScreenRecipe",
+    "TwoTeacherTokenMixture",
     "build_canonical_target_discovery_task_specs",
+    "build_target_discovery_task_specs",
     "build_target_discovery_factory",
     "build_target_discovery_factory_config",
     "build_target_screen_recipe",

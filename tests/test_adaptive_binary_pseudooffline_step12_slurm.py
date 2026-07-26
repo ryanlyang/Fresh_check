@@ -892,6 +892,13 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "abph_fresh_run_srun_with_port_retry" in worker
     assert "run_adaptive_binary_ddp_acceptance_smoke.py" in worker
     assert "--runtime-reference-benchmark" in worker
+    trainer = (
+        REPO_ROOT / "scripts" / "train_adaptive_binary_pseudooffline_variant.py"
+    ).read_text(encoding="utf-8")
+    assert "validation_count == 1" in trainer
+    assert '"curriculum_transition_validations": 0' in trainer
+    assert 'ABPH_RUNTIME_REFERENCE_VALIDATION_JETS", "4096"' in trainer
+    assert 'ABPH_RUNTIME_REFERENCE_VALIDATION_JETS:-4096' in compiler
     assert "cleanup_benchmark_checkpoints" in worker
     assert "trap cleanup_benchmark_checkpoints EXIT" in worker
     assert '"${output_root}" != "${acceptance_root}"/*' in worker

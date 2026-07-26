@@ -259,10 +259,25 @@ def validate_tree(tree: Mapping[str, Any]) -> None:
         raise ValueError("tree leaf map shape differs")
     for name in ("parent", "left", "right", "depth", "pt", "mass", "multiplicity",
                  "merge_delta_r", "merge_kt", "merge_z", "merge_mass"):
-        if np.asarray(tree.get(name)).shape != (n_nodes,):
+        values = np.asarray(tree.get(name))
+        if values.shape != (n_nodes,):
             raise ValueError(f"tree {name} shape differs")
-    if np.asarray(tree.get("vectors")).shape != (n_nodes, 4):
+        expected_dtype = (
+            np.dtype(np.int32)
+            if name in ("parent", "left", "right", "depth", "multiplicity")
+            else np.dtype(np.float32)
+        )
+        if values.dtype != expected_dtype:
+            raise TypeError(f"tree {name} dtype differs")
+        if np.issubdtype(values.dtype, np.floating) and not np.isfinite(values).all():
+            raise FloatingPointError(f"tree {name} contains NaN or infinity")
+    vectors = np.asarray(tree.get("vectors"))
+    if vectors.shape != (n_nodes, 4):
         raise ValueError("tree vector shape differs")
+    if vectors.dtype != np.float32 or not np.isfinite(vectors).all():
+        raise TypeError("tree vector storage must be finite float32")
+    if np.asarray(tree["leaf_to_node"]).dtype != np.int32:
+        raise TypeError("tree leaf map dtype differs")
     assignments = tree.get("assignments")
     if not isinstance(assignments, Mapping) or set(assignments) != {
         str(k) for k in EXCLUSIVE_RESOLUTIONS
@@ -271,6 +286,8 @@ def validate_tree(tree: Mapping[str, Any]) -> None:
     for values in assignments.values():
         if np.asarray(values).shape != (length,):
             raise ValueError("tree assignment shape differs")
+        if np.asarray(values).dtype != np.int32:
+            raise TypeError("tree assignment dtype differs")
 
 
 def tree_content_sha256(tree: Mapping[str, Any]) -> str:

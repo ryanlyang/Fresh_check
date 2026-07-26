@@ -846,3 +846,18 @@ def test_training_source_fills_microbatches_across_target_shards(monkeypatch):
     assert [row["hlt_tokens"].shape[0] for row in validation_batches] == [4]
     assert sum(row["hlt_tokens"].shape[0] for row in validation_batches) == 4
     assert validation_source.last_validation_range.n_jets == 4
+
+    bounded_validation_source = AdaptiveBinaryTargetBatchSource(
+        hlt_cache_dir="unused",
+        target_cache_dir="unused",
+        split="model_val",
+        grouping="exclusive_kt",
+        batch_size=4,
+        shuffle_shards=False,
+        seed=24731,
+        validation_maximum_jets=2,
+    )
+    bounded_batches = list(bounded_validation_source.iter_epoch())
+    assert [row["indices"].tolist() for row in bounded_batches] == [[0, 1]]
+    assert bounded_validation_source.validation_expected_jet_ids == jet_ids[:2]
+    assert bounded_validation_source.last_validation_range.n_jets == 2

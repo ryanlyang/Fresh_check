@@ -33,7 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--root-extension-report")
     parser.add_argument("--deep-extension-report")
     parser.add_argument("--optimized-pilot-report")
-    parser.add_argument("--expected-validation-jets", type=int, default=150_000)
+    parser.add_argument("--expected-validation-jets", type=int, default=4_096)
     parser.add_argument("--output", required=True)
     return parser
 

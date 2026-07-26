@@ -7,8 +7,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import platform
-import sys
 import tempfile
 from typing import Any, Mapping, Sequence
 
@@ -48,6 +46,81 @@ def build_angular_tree_resource_contract(
 ) -> dict[str, Any]:
     split_binding_sha256 = require_sha256(
         split_binding_sha256, name="split_binding_sha256"
+    )
+    return with_content_hash(
+        {
+            "contract": ANGULAR_TREE_RESOURCE_CONTRACT,
+            "schema_version": 1,
+            "split_binding_sha256": split_binding_sha256,
+            "backend_contract": ANGULAR_TREE_BACKEND_CONTRACT,
+            "algorithm": {
+                "kind": "beam_free_exclusive_angular_tree",
+                "distance": "delta_r_squared",
+                "beam_distance": None,
+                "recombination": "E_scheme",
+                "merge_until_roots": 1,
+                "reference_radius": 0.8,
+                "reference_radius_affects_topology": False,
+                "exclusive_resolutions": [2, 4, 8],
+                "n_less_than_k_policy": "n_valid_singleton_clusters",
+                "all_invalid_policy": "zero_relation_tensor",
+            },
+            "canonicalization": {
+                "leaf_order": "lexicographic_canonical_raw_hlt_physics_bytes",
+                "signed_zero_canonicalized": True,
+                "nan_policy_from_raw_input_schema": True,
+                "merge_tie_break": "ordered_cluster_leaf_key_multisets",
+                "input_row_index_allowed": False,
+            },
+            "backend": {
+                "mechanism": "torch_cpp_extension_cpu",
+                "cpp_standard": "c++17",
+                "openmp_required": True,
+                "compile_once_per_campaign": True,
+                "worker_jit_allowed": False,
+                "required_flags": [
+                    "-O3", "-fno-fast-math", "-fno-associative-math",
+                    "-ffp-contract=off",
+                ],
+                "prohibited_flags": ["-Ofast", "-ffast-math"],
+                "calculation_precision": "ieee_float64",
+                "storage_precision": "ieee_float32",
+                "time_complexity": "O(N^2 log N)",
+                "temporary_memory_complexity": "O(N^2)",
+                "maximum_constituents": 128,
+            },
+            "required_backend_identity": [
+                "contract_id", "schema_version", "source_sha256",
+                "binary_sha256", "compiler_identity",
+                "compiler_major_version", "compiler_flags",
+                "platform_architecture", "python_major_minor",
+                "pytorch_version", "pytorch_cxx11_abi",
+                "openmp_available", "self_test_sha256",
+            ],
+            "sharding": {
+                "maximum_jets_per_shard": 10_000,
+                "ordering": "split_manifest_identity_order",
+                "publication": "job_unique_temporary_then_atomic_rename",
+                "resume": "reuse_only_fully_hash_valid_shards",
+                "split_manifest_publish_after_all_shards": True,
+            },
+            "throughput_probe": {
+                "sample_split": "model_train",
+                "sample_count": 20_000,
+                "strata": [list(value) for value in TREE_PROBE_STRATA],
+                "initial_quota_per_stratum": 2_000,
+                "selection_salt": "rpt_tree_probe_v1",
+                "undersized_policy": (
+                    "population_proportional_largest_remainder"
+                ),
+                "parity_sample_count": 1_000,
+                "parity_salt": "rpt_tree_probe_parity_v1",
+                "maximum_projected_shard_hours": 2.0,
+                "maximum_projected_cpu_node_hours": 48.0,
+            },
+            "persistent_pair_matrices_allowed": False,
+            "runtime_recomputation_from_hlt_only": True,
+        }
     )
 
 
@@ -111,7 +184,12 @@ def load_tree_backend(
         "contract_id", "schema_version", "compiler_flags",
         "pytorch_cxx11_abi", "openmp_available",
     ):
-        if runtime_manifest.get(field) != manifest.get(field):
+        runtime_value = runtime_manifest.get(field)
+        manifest_value = manifest.get(field)
+        if field == "compiler_flags":
+            runtime_value = list(runtime_value)
+            manifest_value = list(manifest_value)
+        if runtime_value != manifest_value:
             raise RuntimeError(f"loaded tree backend differs at {field}")
     self_test = module.self_test()
     self_test_sha = hashlib.sha256(
@@ -120,6 +198,47 @@ def load_tree_backend(
     if self_test_sha != manifest["self_test_sha256"]:
         raise RuntimeError("loaded tree backend self-test differs")
     return module
+
+
+def build_compiled_tree(
+    module: Any,
+    vectors: np.ndarray,
+    raw_tokens: np.ndarray,
+    mask: np.ndarray,
+) -> dict[str, Any]:
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("compiled tree execution requires PyTorch") from exc
+    raw = module.build_tree(
+        torch.as_tensor(vectors, dtype=torch.float64),
+        torch.as_tensor(raw_tokens, dtype=torch.float64),
+        torch.as_tensor(mask, dtype=torch.bool),
+    )
+    tree: dict[str, Any] = {
+        "contract": TREE_SCHEMA_CONTRACT,
+        "n_particles": int(raw["n_particles"]),
+        "n_valid": int(raw["n_valid"]),
+        "n_nodes": int(raw["n_nodes"]),
+        "root": int(raw["root"]),
+        "assignments": {},
+        "actual_cluster_counts": {},
+    }
+    for name in (
+        "leaf_to_node", "parent", "left", "right", "depth", "vectors", "pt",
+        "mass", "multiplicity", "merge_delta_r", "merge_kt", "merge_z",
+        "merge_mass",
+    ):
+        tree[name] = raw[name].detach().cpu().numpy()
+    for resolution in EXCLUSIVE_RESOLUTIONS:
+        tree["assignments"][str(resolution)] = (
+            raw[f"assignment_K{resolution}"].detach().cpu().numpy()
+        )
+        tree["actual_cluster_counts"][str(resolution)] = int(
+            raw[f"actual_count_K{resolution}"]
+        )
+    validate_tree(tree)
+    return tree
 
 
 def _identity_key(identity: Any) -> str:
@@ -175,6 +294,42 @@ def pack_tree_shard(
             dtype=np.int16,
         )
     return packed
+
+
+def unpack_tree_shard(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
+    with np.load(path, allow_pickle=False) as packed:
+        identities = [str(value) for value in packed["identity"]]
+        offsets = packed["node_offsets"]
+        trees: list[dict[str, Any]] = []
+        for row in range(len(identities)):
+            start, stop = map(int, offsets[row:row + 2])
+            width = int(packed["leaf_to_node"].shape[1])
+            n_valid = int(packed["n_valid"][row])
+            tree = {
+                "contract": TREE_SCHEMA_CONTRACT,
+                "n_particles": width,
+                "n_valid": n_valid,
+                "n_nodes": stop - start,
+                "root": int(packed["root"][row]),
+                "leaf_to_node": packed["leaf_to_node"][row].copy(),
+                "assignments": {
+                    str(k): packed[f"assignment_K{k}"][row].copy()
+                    for k in EXCLUSIVE_RESOLUTIONS
+                },
+                "actual_cluster_counts": {
+                    str(k): int(packed[f"actual_count_K{k}"][row])
+                    for k in EXCLUSIVE_RESOLUTIONS
+                },
+            }
+            for name in (
+                "parent", "left", "right", "depth", "vectors", "pt", "mass",
+                "multiplicity", "merge_delta_r", "merge_kt", "merge_z",
+                "merge_mass",
+            ):
+                tree[name] = packed[name][start:stop].copy()
+            validate_tree(tree)
+            trees.append(tree)
+    return identities, trees
 
 
 def write_tree_shard(
@@ -386,97 +541,113 @@ def select_tree_probe(
         "selection_salt": "rpt_tree_probe_v1",
         "parity_salt": "rpt_tree_probe_parity_v1",
     }
+
+
+def build_tree_probe_artifact(
+    selection: Mapping[str, Any],
+    valid_counts: Sequence[int],
+    elapsed_milliseconds: Sequence[float],
+    persisted_bytes: Sequence[int],
+    *,
+    peak_resident_bytes: int,
+    parity_topology_exact: bool,
+    parity_max_continuous_absolute_error: float,
+    total_campaign_jets: int = 1_750_000,
+    operational_override: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected = np.asarray(selection["selected_indices"], dtype=np.int64)
+    elapsed = np.asarray(elapsed_milliseconds, dtype=np.float64)
+    storage = np.asarray(persisted_bytes, dtype=np.float64)
+    if elapsed.shape != selected.shape or storage.shape != selected.shape:
+        raise ValueError("tree probe measurement counts differ")
+    if (
+        np.any(~np.isfinite(elapsed))
+        or np.any(elapsed <= 0)
+        or np.any(~np.isfinite(storage))
+        or np.any(storage < 0)
+    ):
+        raise ValueError("tree probe measurements are invalid")
+    populations = np.asarray(selection["stratum_populations"], dtype=np.float64)
+    weights = populations / populations.sum()
+    stratum_rows = []
+    weighted_ms = 0.0
+    weighted_bytes = 0.0
+    counts = np.asarray(valid_counts)
+    for index, (lower, upper) in enumerate(TREE_PROBE_STRATA):
+        positions = np.flatnonzero(
+            (counts[selected] >= lower) & (counts[selected] <= upper)
+        )
+        if positions.size == 0:
+            mean_ms = 0.0
+            mean_bytes = 0.0
+            jets_per_second = None
+        else:
+            mean_ms = float(elapsed[positions].mean())
+            mean_bytes = float(storage[positions].mean())
+            jets_per_second = 1000.0 / mean_ms
+        weighted_ms += float(weights[index]) * mean_ms
+        weighted_bytes += float(weights[index]) * mean_bytes
+        stratum_rows.append(
+            {
+                "bounds": [lower, upper],
+                "population": int(populations[index]),
+                "probe_count": int(positions.size),
+                "mean_milliseconds": mean_ms,
+                "jets_per_second": jets_per_second,
+                "mean_persisted_bytes": mean_bytes,
+            }
+        )
+    projected_shard_hours = TREE_SHARD_MAX_JETS * weighted_ms / 3.6e6
+    projected_cpu_node_hours = int(total_campaign_jets) * weighted_ms / 3.6e6
+    limits_ok = (
+        projected_shard_hours <= 2.0
+        and projected_cpu_node_hours <= 48.0
+        and parity_topology_exact
+    )
+    if not limits_ok and operational_override is None:
+        raise RuntimeError("tree throughput/parity probe blocks bulk-cache submission")
     return with_content_hash(
         {
-            "contract": ANGULAR_TREE_RESOURCE_CONTRACT,
+            "contract": ANGULAR_TREE_PROBE_CONTRACT,
             "schema_version": 1,
-            "split_binding_sha256": split_binding_sha256,
-            "backend_contract": ANGULAR_TREE_BACKEND_CONTRACT,
-            "algorithm": {
-                "kind": "beam_free_exclusive_angular_tree",
-                "distance": "delta_r_squared",
-                "beam_distance": None,
-                "recombination": "E_scheme",
-                "merge_until_roots": 1,
-                "reference_radius": 0.8,
-                "reference_radius_affects_topology": False,
-                "exclusive_resolutions": [2, 4, 8],
-                "n_less_than_k_policy": "n_valid_singleton_clusters",
-                "all_invalid_policy": "zero_relation_tensor",
-            },
-            "canonicalization": {
-                "leaf_order": "lexicographic_canonical_raw_hlt_physics_bytes",
-                "signed_zero_canonicalized": True,
-                "nan_policy_from_raw_input_schema": True,
-                "merge_tie_break": "ordered_cluster_leaf_key_multisets",
-                "input_row_index_allowed": False,
-            },
-            "backend": {
-                "mechanism": "torch_cpp_extension_cpu",
-                "cpp_standard": "c++17",
-                "openmp_required": True,
-                "compile_once_per_campaign": True,
-                "worker_jit_allowed": False,
-                "required_flags": [
-                    "-O3",
-                    "-fno-fast-math",
-                    "-fno-associative-math",
-                    "-ffp-contract=off",
-                ],
-                "prohibited_flags": ["-Ofast", "-ffast-math"],
-                "calculation_precision": "ieee_float64",
-                "storage_precision": "ieee_float32",
-                "time_complexity": "O(N^2 log N)",
-                "temporary_memory_complexity": "O(N^2)",
-                "maximum_constituents": 128,
-            },
-            "required_backend_identity": [
-                "contract_id",
-                "schema_version",
-                "source_sha256",
-                "binary_sha256",
-                "compiler_identity",
-                "compiler_major_version",
-                "compiler_flags",
-                "platform_architecture",
-                "python_major_minor",
-                "pytorch_version",
-                "pytorch_cxx11_abi",
-                "openmp_available",
-                "self_test_sha256",
+            "selection_salt": selection["selection_salt"],
+            "parity_salt": selection["parity_salt"],
+            "selected_identity_sha256": selection[
+                "selected_identity_sha256"
             ],
-            "sharding": {
-                "maximum_jets_per_shard": 10_000,
-                "ordering": "split_manifest_identity_order",
-                "publication": "job_unique_temporary_then_atomic_rename",
-                "resume": "reuse_only_fully_hash_valid_shards",
-                "split_manifest_publish_after_all_shards": True,
+            "sample_count": int(selected.size),
+            "parity_sample_count": int(
+                len(selection["parity_indices"])
+            ),
+            "strata": stratum_rows,
+            "weighted_jets_per_second": 1000.0 / weighted_ms,
+            "milliseconds": {
+                "p50": float(np.quantile(elapsed, .5, method="linear")),
+                "p95": float(np.quantile(elapsed, .95, method="linear")),
+                "maximum": float(elapsed.max()),
             },
-            "throughput_probe": {
-                "sample_split": "model_train",
-                "sample_count": 20_000,
-                "strata": [
-                    [0, 8],
-                    [9, 16],
-                    [17, 24],
-                    [25, 32],
-                    [33, 40],
-                    [41, 48],
-                    [49, 64],
-                    [65, 80],
-                    [81, 96],
-                    [97, 128],
-                ],
-                "initial_quota_per_stratum": 2_000,
-                "selection_salt": "rpt_tree_probe_v1",
-                "undersized_policy": "population_proportional_largest_remainder",
-                "parity_sample_count": 1_000,
-                "parity_salt": "rpt_tree_probe_parity_v1",
+            "peak_resident_bytes": int(peak_resident_bytes),
+            "weighted_persisted_bytes_per_jet": weighted_bytes,
+            "projected_campaign_storage_bytes": (
+                weighted_bytes * int(total_campaign_jets)
+            ),
+            "projected_shard_hours": projected_shard_hours,
+            "projected_cpu_node_hours": projected_cpu_node_hours,
+            "parity": {
+                "topology_exact": bool(parity_topology_exact),
+                "max_continuous_absolute_error": float(
+                    parity_max_continuous_absolute_error
+                ),
+                "storage_cast": "float64_to_float32_once",
+            },
+            "limits": {
                 "maximum_projected_shard_hours": 2.0,
                 "maximum_projected_cpu_node_hours": 48.0,
+                "passed": limits_ok,
             },
-            "persistent_pair_matrices_allowed": False,
-            "runtime_recomputation_from_hlt_only": True,
+            "operational_override": (
+                None if operational_override is None else dict(operational_override)
+            ),
         }
     )
 
@@ -491,10 +662,13 @@ __all__ = [
     "TREE_PROBE_STRATA",
     "TREE_SHARD_MAX_JETS",
     "build_angular_tree_resource_contract",
+    "build_compiled_tree",
+    "build_tree_probe_artifact",
     "finalize_tree_split",
     "load_tree_backend",
     "pack_tree_shard",
     "select_tree_probe",
+    "unpack_tree_shard",
     "validate_backend_manifest",
     "write_tree_shard",
 ]

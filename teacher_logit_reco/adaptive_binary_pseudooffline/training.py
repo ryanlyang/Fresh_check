@@ -112,6 +112,21 @@ class _SynchronizedForwardRetry(RuntimeError):
     pass
 
 
+def _should_evaluate_after_update(
+    *,
+    transitioned: bool,
+    global_update: int,
+    evaluation_interval: int,
+    benchmark_mode: bool,
+) -> bool:
+    """Keep runtime references to one timed validation at the fixed interval."""
+
+    if int(global_update) <= 0 or int(evaluation_interval) <= 0:
+        raise ValueError("evaluation update and interval must be positive")
+    interval_boundary = int(global_update) % int(evaluation_interval) == 0
+    return bool(interval_boundary or (transitioned and not benchmark_mode))
+
+
 def _canonical_hash(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -1547,7 +1562,11 @@ def evaluate_reconstructor_rollout(
     assert effective_weights is not None
     validation_range = getattr(validation_owner, "last_validation_range", None)
     hlt_view = getattr(validation_owner, "hlt_view", None)
-    expected_jet_ids = None if hlt_view is None else tuple(hlt_view.jet_ids)
+    expected_jet_ids = getattr(
+        validation_owner, "validation_expected_jet_ids", None
+    )
+    if expected_jet_ids is None and hlt_view is not None:
+        expected_jet_ids = tuple(hlt_view.jet_ids)
     reduced = finalize_typed_validation(
         accumulator,
         runtime=runtime,
@@ -2156,9 +2175,13 @@ def train_reconstructor_curriculum(
         update_failed = False
         train_rows: list[dict[str, float]] = []
         training_required_losses: tuple[str, ...] = ()
+        # A stage handoff remains a prefetch boundary even when the runtime
+        # benchmark suppresses its expensive checkpoint-selection validation.
         will_evaluate = (
             state.stage_update + 1 >= state.stage_maximum_updates
-            or (state.global_update + 1) % int(config.curriculum.evaluation_interval) == 0
+            or (state.global_update + 1)
+            % int(config.curriculum.evaluation_interval)
+            == 0
         )
         objective_gradient_sums: dict[str, float] = {}
         global_batch_plan_hashes: list[str] = []
@@ -2652,11 +2675,18 @@ def train_reconstructor_curriculum(
         transitioned = controller.advance()
         updates_this_call += 1
 
-        should_evaluate = (
-            transitioned
-            or controller.global_update % int(config.curriculum.evaluation_interval) == 0
+        should_evaluate = _should_evaluate_after_update(
+            transitioned=transitioned,
+            global_update=controller.global_update,
+            evaluation_interval=int(config.curriculum.evaluation_interval),
+            benchmark_mode=bool(config.runtime_profile.benchmark_mode),
         )
         if not should_evaluate:
+            if bool(config.runtime_profile.benchmark_mode) and transitioned:
+                # Timing references skip stage-selection scans but retain the
+                # optimizer/EMA handoff boundary used by real training.
+                optimizer.state.clear()
+                ema.reset_from(model)
             continue
         runtime_profiler.begin_validation(state)
         validation_local_batch_size = (

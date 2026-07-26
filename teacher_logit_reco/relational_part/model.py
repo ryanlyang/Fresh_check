@@ -9,6 +9,12 @@ from typing import Any, Mapping
 from jetclass_fresh.hlt_baseline import default_part_config
 
 from .contracts import require_sha256, validate_content_hash, with_content_hash
+from .capacity import (
+    WIDE_CAPACITY_CONTRACT,
+    pair_encoder_parameter_count,
+    select_wide_widths,
+)
+from .region_normalization import validate_region_normalization
 from .normalization import validate_relation_normalization_artifact
 from .pair_builder import (
     SUPPORTED_FAMILY_DIMENSIONS,
@@ -38,6 +44,7 @@ except ImportError:  # pragma: no cover - environment dependent
 RPT_BASE_MODEL_CONTRACT = "relational_part_rpt_base_model_v1"
 STEP3_RELATIONAL_MODEL_CONTRACT = "relational_part_step3_model_v1"
 STEP4_RELATIONAL_MODEL_CONTRACT = "relational_part_step4_model_v1"
+STEP5_RELATIONAL_MODEL_CONTRACT = "relational_part_step5_model_v1"
 
 RPT_BASE_CONFIG: dict[str, Any] = {
     "input_dim": 17,
@@ -348,6 +355,70 @@ class RelationalParticleTransformer(_ModuleBase):
     ) -> Any:
         self._validate_batch(points, features, lorentz_vectors, mask)
         uu = self.explicit_standard_four(lorentz_vectors, mask)
+        return self.mod(features, v=lorentz_vectors, mask=mask, uu=uu)
+
+
+class WideBaseParticleTransformer(_ModuleBase):
+    """Base4-only active pair-stem capacity control."""
+
+    def __init__(
+        self,
+        *,
+        capacity_artifact: Mapping[str, Any] | None = None,
+        weaver_module: Any | None = None,
+    ) -> None:
+        require_torch()
+        super().__init__()
+        artifact = (
+            select_wide_widths()
+            if capacity_artifact is None
+            else dict(capacity_artifact)
+        )
+        validate_content_hash(
+            artifact, expected_contract=WIDE_CAPACITY_CONTRACT
+        )
+        if artifact != select_wide_widths():
+            raise ValueError("wide capacity artifact differs from the locked search")
+        self.run_id = "RPT_BASE_WIDE_MAX"
+        widths = tuple(int(value) for value in artifact["selected_widths"])
+        config = exact_rpt_base_config()
+        config["pair_embed_dims"] = list(widths)
+        module = _import_weaver_module() if weaver_module is None else weaver_module
+        transformer = getattr(module, "ParticleTransformer", None)
+        if transformer is None:
+            raise RuntimeError("Weaver module lacks ParticleTransformer")
+        self.capacity_artifact = artifact
+        self.config = copy.deepcopy(config)
+        self.mod = transformer(**config)
+        self.mod.pair_embed = ExplicitStandardFourPairEmbed(self.mod.pair_embed)
+        observed_pair_parameters = sum(
+            parameter.numel() for parameter in self.mod.pair_embed.parameters()
+        )
+        expected_pair_parameters = pair_encoder_parameter_count(4, widths)
+        if observed_pair_parameters != expected_pair_parameters:
+            raise RuntimeError(
+                "instantiated Weaver pair-stem count differs from the locked "
+                f"formula: {observed_pair_parameters} != {expected_pair_parameters}"
+            )
+        self.verified_pair_encoder_parameters = observed_pair_parameters
+        object.__setattr__(self, "_weaver_module", module)
+
+    def no_weight_decay(self) -> set[str]:
+        return {"mod.cls_token"}
+
+    def forward(
+        self,
+        points: Any,
+        features: Any,
+        lorentz_vectors: Any,
+        mask: Any,
+    ) -> Any:
+        RelationalParticleTransformer._validate_batch(
+            points, features, lorentz_vectors, mask
+        )
+        uu = build_standard_four_pair_features(
+            lorentz_vectors, mask=mask, module=self._weaver_module
+        )
         return self.mod(features, v=lorentz_vectors, mask=mask, uu=uu)
 
 
@@ -727,6 +798,52 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     local_activity.masked_select(valid[:, 0]).mean().cpu()
                 ),
             }
+        if "REGION" in self.families:
+            if clean_raw is None or region_trees is None:
+                raise ValueError("REGION diagnostics require raw tokens and trees")
+            region_encoder = self.pair_builder.encoders["REGION"]
+            region_details = region_encoder(
+                clean_raw, valid, region_trees, return_details=True
+            )
+            region_raw = region_details["raw"]
+            output["REGION"] = {
+                "normalization_sha256": region_encoder.normalization_sha256,
+                "requested_cluster_counts": [2, 4, 8],
+                "actual_cluster_counts": {
+                    str(k): [
+                        int(tree["actual_cluster_counts"][str(k)])
+                        for tree in region_trees
+                    ]
+                    for k in (2, 4, 8)
+                },
+                "node_counts": [int(tree["n_nodes"]) for tree in region_trees],
+                "maximum_leaf_depths": [
+                    (
+                        int(max(tree["depth"][:tree["n_valid"]]))
+                        if int(tree["n_valid"]) else 0
+                    )
+                    for tree in region_trees
+                ],
+                "same_cluster_fractions": {
+                    str(k): float(
+                        region_raw[:, index]
+                        .masked_select(pair_mask[:, 0])
+                        .mean()
+                        .cpu()
+                    )
+                    for index, k in enumerate((2, 4, 8))
+                },
+                "mean_normalized_lca_depth": float(
+                    region_raw[:, 3]
+                    .masked_select(pair_mask[:, 0])
+                    .mean()
+                    .cpu()
+                ),
+                "headwise_same_cluster_bias": {
+                    str(k): head_means(region_raw[:, index:index + 1].bool())
+                    for index, k in enumerate((2, 4, 8))
+                },
+            }
         return output
 
 
@@ -828,6 +945,26 @@ def build_registered_screening_model(
     )
     model.run_id = str(run_id)
     return model
+
+
+def build_registered_wide_model(
+    run_id: str,
+    *,
+    screening_registry: Mapping[str, Any],
+    capacity_artifact: Mapping[str, Any] | None = None,
+    weaver_module: Any | None = None,
+) -> WideBaseParticleTransformer:
+    validate_screening_registry(screening_registry)
+    row = resolve_registered_run(run_id, screening_registry=screening_registry)
+    if (
+        row.get("run_id") != "RPT_BASE_WIDE_MAX"
+        or row.get("attention_architecture") != "wide_pair_encoder"
+    ):
+        raise ValueError(f"{run_id} is not the registered wide capacity control")
+    return WideBaseParticleTransformer(
+        capacity_artifact=capacity_artifact,
+        weaver_module=weaver_module,
+    )
 
 
 def build_step3_model_contract(
@@ -962,6 +1099,8 @@ def build_step4_model_contract(
         relation_registry_sha256=relation_registry_sha256,
         raw_input_schema_sha256=raw_input_schema_sha256,
     )
+
+
     if screening_registry.get(
         "relation_registry_sha256"
     ) != require_sha256(
@@ -1053,6 +1192,88 @@ def build_step4_model_contract(
     )
 
 
+def build_step5_model_contract(
+    run_id: str,
+    *,
+    normalization_artifact: Mapping[str, Any],
+    screening_registry: Mapping[str, Any],
+    relation_registry_sha256: str,
+    pair_base_sha256: str,
+    family_contract_sha256: Mapping[str, str],
+    weaver_runtime_sha256: str,
+    global_determinism_sha256: str,
+    region_normalization_artifact: Mapping[str, Any] | None = None,
+    wide_capacity_artifact: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    screening_sha = validate_screening_registry(screening_registry)
+    base_normalizer_sha = validate_relation_normalization_artifact(
+        normalization_artifact,
+        relation_registry_sha256=relation_registry_sha256,
+    )
+    row = resolve_registered_run(run_id, screening_registry=screening_registry)
+    families = tuple(row.get("new_relation_families", ()))
+    required_hashes = {
+        family: require_sha256(
+            family_contract_sha256.get(family),
+            name=f"family_contract_sha256.{family}",
+        )
+        for family in families
+    }
+    region_normalizer_sha = None
+    if "REGION" in families:
+        if region_normalization_artifact is None:
+            raise ValueError("REGION model contract requires REGION normalization")
+        region_normalizer_sha = validate_region_normalization(
+            region_normalization_artifact,
+            relation_normalization_sha256=base_normalizer_sha,
+        )
+    capacity_sha = None
+    if run_id == "RPT_BASE_WIDE_MAX":
+        if wide_capacity_artifact is None:
+            raise ValueError("wide model contract requires capacity search artifact")
+        capacity_sha = validate_content_hash(
+            wide_capacity_artifact, expected_contract=WIDE_CAPACITY_CONTRACT
+        )
+    combined_dimension = STANDARD_FOUR_CHANNELS + sum(
+        SUPPORTED_FAMILY_DIMENSIONS[family] for family in families
+    )
+    return with_content_hash(
+        {
+            "contract": STEP5_RELATIONAL_MODEL_CONTRACT,
+            "schema_version": 1,
+            "run_id": run_id,
+            "configuration_role": row["configuration_role"],
+            "screening_registry_sha256": screening_sha,
+            "relation_registry_sha256": require_sha256(
+                relation_registry_sha256, name="relation_registry_sha256"
+            ),
+            "pair_base_sha256": require_sha256(
+                pair_base_sha256, name="pair_base_sha256"
+            ),
+            "relation_normalization_sha256": base_normalizer_sha,
+            "region_normalization_sha256": region_normalizer_sha,
+            "family_contract_sha256": required_hashes,
+            "wide_capacity_sha256": capacity_sha,
+            "weaver_runtime_sha256": require_sha256(
+                weaver_runtime_sha256, name="weaver_runtime_sha256"
+            ),
+            "global_determinism_sha256": require_sha256(
+                global_determinism_sha256, name="global_determinism_sha256"
+            ),
+            "enabled_relations": ["base4", *families],
+            "new_relation_families": list(families),
+            "canonical_concatenation_order": ["base4", *families],
+            "combined_dimension": combined_dimension,
+            "relation_input_mode": row["relation_input_mode"],
+            "attention_architecture": row["attention_architecture"],
+            "initialization": "from_scratch",
+            "full_zero_exact_shape": run_id == "RPT_FULL_ZERO_REL",
+            "persistent_N_by_N_cache": False,
+            "hlt_only_inference": True,
+        }
+    )
+
+
 def build_rpt_base_model_contract(
     *,
     pair_base_sha256: str,
@@ -1098,13 +1319,18 @@ __all__ = [
     "RPT_BASE_MODEL_CONTRACT",
     "STEP3_RELATIONAL_MODEL_CONTRACT",
     "STEP4_RELATIONAL_MODEL_CONTRACT",
+    "STEP5_RELATIONAL_MODEL_CONTRACT",
     "RelationalFamilyParticleTransformer",
     "RelationalParticleTransformer",
+    "WideBaseParticleTransformer",
+    "build_registered_screening_model",
+    "build_registered_wide_model",
     "build_registered_step3_model",
     "build_registered_step4_model",
     "build_relational_particle_transformer",
     "build_rpt_base_model_contract",
     "build_step3_model_contract",
     "build_step4_model_contract",
+    "build_step5_model_contract",
     "exact_rpt_base_config",
 ]
