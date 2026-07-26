@@ -40,7 +40,17 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-SEMANTIC_PERTURBATION_CONTRACT = "relational_part_semantic_perturbations_v3"
+SEMANTIC_RUN_DIAGNOSTICS_CONTRACT = (
+    "relational_part_semantic_run_diagnostics_v2"
+)
+SEMANTIC_PERTURBATION_CONTRACT = "relational_part_semantic_perturbations_v5"
+SEMANTIC_COVERAGE_POLICY = (
+    "nominal winner plus every confirmation model with at least two relation "
+    "families or REGION and scientific_finalist role; each receives the "
+    "global perturbations, combinations receive every family dropout, "
+    "REGION models receive K=2/4/8 ablations, and a CHARGE-only winner "
+    "receives zero-CHARGE"
+)
 UNARY_CONTROL_REGISTRY_CONTRACT = "relational_part_unary_control_registry_v1"
 UNARY_MODEL_CONTRACT = "relational_part_unary_model_v1"
 UNARY_FAMILY_WIDTHS = {
@@ -220,7 +230,7 @@ def zero_region_resolution(
     region_trees: Sequence[Mapping[str, Any]],
     resolution: int,
 ) -> tuple[Any, dict[str, Any]]:
-    """Re-encode REGION with exactly one K-specific raw channel group zeroed."""
+    """Re-encode REGION with one normalized K-specific channel group zeroed."""
 
     module = require_torch()
     families = canonical_supported_families(getattr(model, "families", ()))
@@ -252,7 +262,7 @@ def zero_region_resolution(
             value for value in EXCLUSIVE_RESOLUTIONS
             if value != int(resolution)
         ],
-        "raw_zeroed_channel_indices": [
+        "normalized_zeroed_channel_indices": [
             EXCLUSIVE_RESOLUTIONS.index(int(resolution)),
             *range(
                 8 + EXCLUSIVE_RESOLUTIONS.index(int(resolution)) * 6,
@@ -383,9 +393,11 @@ def wrong_event_relations(
 
 def build_semantic_perturbation_artifact(
     *,
-    nominal_winner_run_id: str,
-    nominal_checkpoint_sha256: str,
-    nominal_checkpoint_registration_sha256: str,
+    run_id: str,
+    families: Sequence[str],
+    checkpoint_sha256: str,
+    checkpoint_registration_sha256: str,
+    model_contract_sha256: str,
     confirmation_summary_sha256: str,
     metrics: Mapping[str, Mapping[str, Any]],
     diagnostics: Mapping[str, Mapping[str, Any]],
@@ -424,15 +436,20 @@ def build_semantic_perturbation_artifact(
         )
     return with_content_hash(
         {
-            "contract": SEMANTIC_PERTURBATION_CONTRACT,
-            "schema_version": 3,
-            "nominal_winner_run_id": nominal_winner_run_id,
-            "nominal_checkpoint_sha256": require_sha256(
-                nominal_checkpoint_sha256, name="nominal_checkpoint_sha256"
+            "contract": SEMANTIC_RUN_DIAGNOSTICS_CONTRACT,
+            "schema_version": 2,
+            "run_id": str(run_id),
+            "seed": 101,
+            "families": list(canonical_supported_families(families)),
+            "checkpoint_sha256": require_sha256(
+                checkpoint_sha256, name="checkpoint_sha256"
             ),
-            "nominal_checkpoint_registration_sha256": require_sha256(
-                nominal_checkpoint_registration_sha256,
-                name="nominal_checkpoint_registration_sha256",
+            "checkpoint_registration_sha256": require_sha256(
+                checkpoint_registration_sha256,
+                name="checkpoint_registration_sha256",
+            ),
+            "model_contract_sha256": require_sha256(
+                model_contract_sha256, name="model_contract_sha256"
             ),
             "confirmation_summary_sha256": require_sha256(
                 confirmation_summary_sha256,
@@ -447,6 +464,232 @@ def build_semantic_perturbation_artifact(
             "final_test_accessed": False,
         }
     )
+
+
+def semantic_diagnostic_rows(
+    confirmation_summary: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Select the globally fixed seed-101 diagnostic population."""
+
+    winner = str(confirmation_summary["nominal_relational_winner_id"])
+    selected = []
+    for row in confirmation_summary["rows"]:
+        families = tuple(map(str, row["new_relation_families"]))
+        scientific = str(row["configuration_role"]) == "scientific_finalist"
+        if (
+            str(row["run_id"]) == winner
+            or (
+                scientific
+                and (len(families) >= 2 or "REGION" in families)
+            )
+        ):
+            selected.append(
+                {
+                    "run_id": str(row["run_id"]),
+                    "families": list(families),
+                    "checkpoint_sha256": require_sha256(
+                        row["checkpoint_hashes"]["101"],
+                        name=f"{row['run_id']}.checkpoint_sha256",
+                    ),
+                    "checkpoint_registration_sha256": require_sha256(
+                        row["checkpoint_registration_hashes"]["101"],
+                        name=(
+                            f"{row['run_id']}."
+                            "checkpoint_registration_sha256"
+                        ),
+                    ),
+                    "model_contract_sha256": require_sha256(
+                        row["model_contract_sha256"],
+                        name=f"{row['run_id']}.model_contract_sha256",
+                    ),
+                }
+            )
+    if not selected or winner not in {row["run_id"] for row in selected}:
+        raise ValueError("semantic diagnostic population omits nominal winner")
+    return selected
+
+
+def _expected_semantic_controls(
+    row: Mapping[str, Any],
+    *,
+    nominal_winner_run_id: str,
+) -> set[str]:
+    controls = {
+        "full_model",
+        "within_jet_shuffled_relations",
+        "wrong_event_relations",
+        "directional_swap",
+    }
+    families = tuple(map(str, row["families"]))
+    if len(families) >= 2 or (
+        str(row["run_id"]) == nominal_winner_run_id
+        and families == ("CHARGE",)
+    ):
+        controls.update(f"family_dropout_{family}" for family in families)
+    if "REGION" in families:
+        controls.update(
+            f"region_resolution_dropout_K{k}"
+            for k in EXCLUSIVE_RESOLUTIONS
+        )
+    return controls
+
+
+def validate_semantic_run_diagnostics_artifact(
+    artifact: Mapping[str, Any],
+    *,
+    expected_row: Mapping[str, Any],
+    confirmation_summary_sha256: str,
+    nominal_winner_run_id: str,
+) -> str:
+    """Reauthenticate one reusable seed-101 semantic result."""
+
+    from .contracts import validate_content_hash
+
+    artifact_sha = validate_content_hash(
+        artifact, expected_contract=SEMANTIC_RUN_DIAGNOSTICS_CONTRACT
+    )
+    run_id = str(expected_row["run_id"])
+    expected_controls = _expected_semantic_controls(
+        expected_row,
+        nominal_winner_run_id=nominal_winner_run_id,
+    )
+    if (
+        artifact.get("run_id") != run_id
+        or artifact.get("seed") != 101
+        or artifact.get("families") != list(expected_row["families"])
+        or artifact.get("confirmation_summary_sha256")
+        != confirmation_summary_sha256
+        or artifact.get("checkpoint_sha256")
+        != expected_row["checkpoint_sha256"]
+        or artifact.get("checkpoint_registration_sha256")
+        != expected_row["checkpoint_registration_sha256"]
+        or artifact.get("model_contract_sha256")
+        != expected_row["model_contract_sha256"]
+        or artifact.get("split") != "val_select"
+        or artifact.get("performance_gate") is not False
+        or artifact.get("final_test_accessed") is not False
+        or set(artifact.get("metrics", {})) != expected_controls
+        or set(artifact.get("diagnostics", {})) != expected_controls
+    ):
+        raise ValueError(
+            f"{run_id} semantic artifact differs from seed-101 coverage "
+            "or lineage"
+        )
+    return artifact_sha
+
+
+def build_semantic_diagnostics_bundle(
+    *,
+    confirmation_summary: Mapping[str, Any],
+    run_artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Authenticate complete seed-101 semantic coverage in one artifact."""
+
+    from .contracts import validate_content_hash
+
+    confirmation_sha = validate_content_hash(confirmation_summary)
+    expected_rows = semantic_diagnostic_rows(confirmation_summary)
+    expected = {row["run_id"]: row for row in expected_rows}
+    observed: dict[str, dict[str, Any]] = {}
+    for artifact in run_artifacts:
+        run_id = str(artifact["run_id"])
+        if run_id in observed:
+            raise ValueError(f"duplicate semantic run artifact for {run_id}")
+        if run_id not in expected:
+            raise ValueError(f"unexpected semantic run artifact for {run_id}")
+        row = expected[run_id]
+        artifact_sha = validate_semantic_run_diagnostics_artifact(
+            artifact,
+            expected_row=row,
+            confirmation_summary_sha256=confirmation_sha,
+            nominal_winner_run_id=str(
+                confirmation_summary["nominal_relational_winner_id"]
+            ),
+        )
+        observed[run_id] = {
+            "artifact_sha256": artifact_sha,
+            "artifact": dict(artifact),
+        }
+    if set(observed) != set(expected):
+        missing = sorted(set(expected) - set(observed))
+        raise ValueError(
+            f"semantic diagnostics lack applicable seed-101 runs: {missing}"
+        )
+    ordered_ids = [row["run_id"] for row in expected_rows]
+    bundle = with_content_hash(
+        {
+            "contract": SEMANTIC_PERTURBATION_CONTRACT,
+            "schema_version": 5,
+            "confirmation_summary_sha256": confirmation_sha,
+            "nominal_winner_run_id": str(
+                confirmation_summary["nominal_relational_winner_id"]
+            ),
+            "seed": 101,
+            "split": "val_select",
+            "coverage_policy": SEMANTIC_COVERAGE_POLICY,
+            "run_ids": ordered_ids,
+            "runs": {run_id: observed[run_id] for run_id in ordered_ids},
+            "coverage_complete": True,
+            "performance_gate": False,
+            "final_test_accessed": False,
+        }
+    )
+    validate_semantic_diagnostics_bundle(
+        bundle, confirmation_summary=confirmation_summary
+    )
+    return bundle
+
+
+def validate_semantic_diagnostics_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    confirmation_summary: Mapping[str, Any],
+) -> str:
+    """Revalidate bundle coverage, nested hashes, controls, and lineage."""
+
+    from .contracts import validate_content_hash
+    from .selection import CONFIRMATION_SUMMARY_CONTRACT
+
+    bundle_sha = validate_content_hash(
+        bundle, expected_contract=SEMANTIC_PERTURBATION_CONTRACT
+    )
+    confirmation_sha = validate_content_hash(
+        confirmation_summary,
+        expected_contract=CONFIRMATION_SUMMARY_CONTRACT,
+    )
+    expected_rows = semantic_diagnostic_rows(confirmation_summary)
+    expected = {row["run_id"]: row for row in expected_rows}
+    ordered_ids = [row["run_id"] for row in expected_rows]
+    if (
+        bundle.get("confirmation_summary_sha256") != confirmation_sha
+        or bundle.get("schema_version") != 5
+        or bundle.get("nominal_winner_run_id")
+        != confirmation_summary["nominal_relational_winner_id"]
+        or bundle.get("seed") != 101
+        or bundle.get("split") != "val_select"
+        or bundle.get("run_ids") != ordered_ids
+        or bundle.get("coverage_policy") != SEMANTIC_COVERAGE_POLICY
+        or set(bundle.get("runs", {})) != set(expected)
+        or bundle.get("coverage_complete") is not True
+        or bundle.get("performance_gate") is not False
+        or bundle.get("final_test_accessed") is not False
+    ):
+        raise ValueError("semantic bundle coverage or parent binding differs")
+    for run_id in ordered_ids:
+        entry = bundle["runs"][run_id]
+        if set(entry) != {"artifact_sha256", "artifact"}:
+            raise ValueError(f"{run_id} semantic bundle entry is malformed")
+        artifact_sha = validate_semantic_run_diagnostics_artifact(
+            entry["artifact"],
+            expected_row=expected[run_id],
+            confirmation_summary_sha256=confirmation_sha,
+            nominal_winner_run_id=str(
+                confirmation_summary["nominal_relational_winner_id"]
+            ),
+        )
+        if entry["artifact_sha256"] != artifact_sha:
+            raise ValueError(f"{run_id} nested semantic hash differs")
+    return bundle_sha
 
 
 def _chunks_without_singletons(indices: Sequence[int], size: int = 64):
@@ -512,7 +755,7 @@ def evaluate_semantic_perturbations(
         ],
         "directional_swap": all_groups,
     }
-    if len(families) >= 2:
+    if len(families) >= 2 or families == ("CHARGE",):
         for family in families:
             specifications[f"family_dropout_{family}"] = all_groups
     if "REGION" in families:
@@ -712,6 +955,20 @@ def evaluate_semantic_perturbations(
                     )
                 )
                 for category in full
+            }
+        if (
+            "TRACK" in families
+            and "family_dropout_TRACK" in metrics
+        ):
+            full_class = metrics["full_model"]["per_class_efficiency"]
+            dropped_class = metrics["family_dropout_TRACK"][
+                "per_class_efficiency"
+            ]
+            metrics["full_model"][
+                "track_required_class_gain_vs_track_dropout"
+            ] = {
+                name: full_class[name] - dropped_class[name]
+                for name in ("Hbb", "Hcc", "Tbqq", "Tbl")
             }
     finally:
         if was_training:
@@ -1168,12 +1425,15 @@ def build_unary_model_contract(
 
 
 __all__ = [
+    "SEMANTIC_COVERAGE_POLICY",
     "SEMANTIC_PERTURBATION_CONTRACT",
+    "SEMANTIC_RUN_DIAGNOSTICS_CONTRACT",
     "UNARY_CONTROL_REGISTRY_CONTRACT",
     "UNARY_FAMILY_WIDTHS",
     "UNARY_MODEL_CONTRACT",
     "UnaryEndpointFeatureBuilder",
     "UnaryEndpointParticleTransformer",
+    "build_semantic_diagnostics_bundle",
     "build_semantic_perturbation_artifact",
     "build_unary_control_registry",
     "build_unary_model_contract",
@@ -1181,6 +1441,9 @@ __all__ = [
     "zero_relation_family",
     "zero_region_resolution",
     "evaluate_semantic_perturbations",
+    "semantic_diagnostic_rows",
+    "validate_semantic_diagnostics_bundle",
+    "validate_semantic_run_diagnostics_artifact",
     "select_unary_widths",
     "unary_adapter_flops",
     "unary_adapter_parameter_count",

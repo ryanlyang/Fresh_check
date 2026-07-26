@@ -23,6 +23,7 @@ python scripts/write_relational_part_report.py \
   --campaign-spec "${CAMPAIGN_ROOT}/campaign_spec.json" \
   --locked-finalists "${CAMPAIGN_ROOT}/selection/locked_finalists.json" \
   --confirmation-summary "${CAMPAIGN_ROOT}/selection/confirmation_summary.json" \
+  --semantic-perturbations "${CAMPAIGN_ROOT}/selection/semantic_controls/perturbation_metrics.json" \
   "${evaluation_args[@]}" \
   --json-output "${CAMPAIGN_ROOT}/reports/relational_part_report.json" \
   --markdown-output "${CAMPAIGN_ROOT}/reports/relational_part_report.md"

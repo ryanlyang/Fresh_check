@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import (
@@ -428,12 +429,29 @@ def build_runtime_command_catalog(
     *,
     execution_manifest_path: str,
     python_executable: str = "python",
+    execution_manifest_sha256: str | None = None,
 ) -> dict[str, list[str]]:
     """Generate the 11 graph-node commands; no hand-authored catalog remains."""
 
     if not python_executable:
         raise ValueError("python_executable must be nonempty")
     manifest_path = str(Path(execution_manifest_path).resolve())
+    if execution_manifest_sha256 is None and Path(manifest_path).is_file():
+        manifest = load_hashed_json(manifest_path)
+        validate_runtime_execution_manifest(manifest)
+        execution_manifest_sha256 = manifest["content_hash"]
+    if execution_manifest_sha256 is not None:
+        require_sha256(
+            "execution_manifest_sha256", execution_manifest_sha256
+        )
+    manifest_binding = (
+        [
+            "--expected-manifest-sha256",
+            execution_manifest_sha256,
+        ]
+        if execution_manifest_sha256 is not None
+        else []
+    )
     return {
         node_id: [
             python_executable,
@@ -441,6 +459,7 @@ def build_runtime_command_catalog(
             "scripts/run_particle_view_campaign_node.py",
             "--execution-manifest",
             manifest_path,
+            *manifest_binding,
             "--node-id",
             node_id,
         ]
@@ -517,6 +536,25 @@ def validate_runtime_task_result(
     }
 
 
+def _reject_transaction_path_leakage(
+    *,
+    attempt_dir: Path,
+    artifact_rows: Sequence[Mapping[str, str]],
+) -> None:
+    """Reject metadata that would point at the renamed attempt directory."""
+
+    attempt_text = str(attempt_dir.resolve())
+    for row in artifact_rows:
+        path = Path(row["path"]).resolve()
+        if path.suffix not in {".json", ".jsonl"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if attempt_text in text or ".attempt_" in text:
+            raise ValueError(
+                f"transaction-attempt path leaked into published metadata: {path}"
+            )
+
+
 def _build_task_completion(
     *,
     manifest: Mapping[str, Any],
@@ -587,6 +625,7 @@ def execute_runtime_node(
     *,
     manifest: Mapping[str, Any],
     node_id: str,
+    task_ids: Sequence[str] | None = None,
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> dict[str, Any]:
@@ -600,6 +639,21 @@ def execute_runtime_node(
         for task in manifest["tasks"]
         if task["node_id"] == node_id
     ]
+    if task_ids is not None:
+        requested = list(task_ids)
+        if (
+            not requested
+            or len(requested) != len(set(requested))
+            or any(
+                task_id not in {row["task_id"] for row in ordered}
+                for task_id in requested
+            )
+        ):
+            raise ValueError("runtime task filter is empty, duplicate, or cross-node")
+        requested_set = set(requested)
+        ordered = [
+            task for task in ordered if task["task_id"] in requested_set
+        ]
     task_by_id = audit["tasks"]
     records = []
     failed_or_blocked: set[str] = set()
@@ -615,6 +669,33 @@ def execute_runtime_node(
                 }
             )
             continue
+        result_path = Path(task["result_path"])
+        if result_path.is_file():
+            try:
+                recovered_result = load_hashed_json(result_path)
+                validate_runtime_task_result(
+                    recovered_result,
+                    expected_task_id=task["task_id"],
+                )
+                completion = _build_task_completion(
+                    manifest=manifest,
+                    task=task,
+                    result=recovered_result,
+                )
+                write_immutable_json(task["completion_path"], completion)
+                records.append(
+                    {
+                        "task_id": task["task_id"],
+                        "action": "recover_published_result",
+                        "exit_code": 0,
+                        "completion_sha256": completion["content_hash"],
+                    }
+                )
+                continue
+            except Exception:
+                # An incomplete historical attempt must never be written into
+                # on retry. Preserve it under a campaign-scoped quarantine.
+                pass
         blocking = [
             parent
             for parent in task["parent_task_ids"]
@@ -657,15 +738,36 @@ def execute_runtime_node(
                 }
             )
             continue
-        output_dir = Path(task["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(task["output_dir"]).resolve()
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        if output_dir.exists():
+            if output_dir.is_symlink() or not output_dir.is_dir():
+                raise ValueError("runtime task output is unsafe")
+            quarantine_root = (
+                Path(manifest["artifact_root"]).resolve()
+                / "failed_task_attempts"
+            )
+            quarantine_root.mkdir(parents=True, exist_ok=True)
+            quarantine = quarantine_root / (
+                f"{task['task_id']}__{time.time_ns()}"
+            )
+            output_dir.replace(quarantine)
+        attempt_dir = output_dir.parent / (
+            f".{output_dir.name}.attempt_{time.time_ns()}"
+        )
+        attempt_dir.mkdir(parents=False, exist_ok=False)
+        task_command = [
+            str(attempt_dir) if token == str(output_dir) else token
+            for token in task["command"]
+        ]
         environment = dict(os.environ)
         environment.update(
             {
                 "PARTICLE_VIEW_TASK_ID": task["task_id"],
                 "PARTICLE_VIEW_RUN_ID": task["run_id"],
                 "PARTICLE_VIEW_SEED": str(task["seed"]),
-                "PARTICLE_VIEW_TASK_OUTPUT_DIR": task["output_dir"],
+                "PARTICLE_VIEW_TASK_OUTPUT_DIR": str(attempt_dir),
+                "PARTICLE_VIEW_TASK_FINAL_OUTPUT_DIR": str(output_dir),
                 "PARTICLE_VIEW_EXECUTION_MANIFEST_SHA256": manifest[
                     "content_hash"
                 ],
@@ -673,7 +775,7 @@ def execute_runtime_node(
             }
         )
         completed = runner(
-            task["command"],
+            task_command,
             check=False,
             env=environment,
         )
@@ -685,15 +787,41 @@ def execute_runtime_node(
                     "task_id": task["task_id"],
                     "action": "failed",
                     "exit_code": returncode,
+                    "attempt_dir": str(attempt_dir),
                 }
             )
             continue
         try:
-            result = load_hashed_json(task["result_path"])
+            attempt_result_path = attempt_dir / "task_result.json"
+            result = load_hashed_json(attempt_result_path)
             validate_runtime_task_result(
                 result,
                 expected_task_id=task["task_id"],
             )
+            _reject_transaction_path_leakage(
+                attempt_dir=attempt_dir,
+                artifact_rows=result["artifacts"],
+            )
+            mapped_artifacts = []
+            for artifact in result["artifacts"]:
+                artifact_path = Path(artifact["path"]).resolve()
+                try:
+                    relative = artifact_path.relative_to(attempt_dir)
+                except ValueError:
+                    mapped_path = artifact_path
+                else:
+                    mapped_path = output_dir / relative
+                mapped_artifacts.append(
+                    {"path": str(mapped_path), "sha256": artifact["sha256"]}
+                )
+            attempt_result_path.unlink()
+            attempt_dir.replace(output_dir)
+            result = build_runtime_task_result(
+                task_id=task["task_id"],
+                artifacts=mapped_artifacts,
+                warning_sha256=result["warning_sha256"],
+            )
+            write_immutable_json(task["result_path"], result)
             completion = _build_task_completion(
                 manifest=manifest,
                 task=task,
@@ -708,6 +836,7 @@ def execute_runtime_node(
                     "action": "invalid_result",
                     "exit_code": 1,
                     "error": f"{type(exc).__name__}: {exc}",
+                    "attempt_dir": str(attempt_dir),
                 }
             )
             continue
@@ -732,11 +861,15 @@ def execute_runtime_node(
             "contract": PARTICLE_VIEW_RUNTIME_NODE_REPORT_CONTRACT,
             "execution_manifest_sha256": manifest["content_hash"],
             "node_id": node_id,
+            "task_filter": (
+                None if task_ids is None else list(task_ids)
+            ),
             "dry_run": bool(dry_run),
             "records": records,
             "task_count": len(ordered),
             "completed_count": sum(
                 row["action"] in {"completed", "reuse_complete"}
+                or row["action"] == "recover_published_result"
                 for row in records
             ),
             "failed_count": failed_count,

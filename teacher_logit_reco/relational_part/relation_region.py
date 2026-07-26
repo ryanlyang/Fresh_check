@@ -499,8 +499,9 @@ class RegionEncoder(_ModuleBase):
         disabled = tuple(sorted({int(value) for value in disabled_resolutions}))
         if any(value not in EXCLUSIVE_RESOLUTIONS for value in disabled):
             raise ValueError("REGION ablation resolution must be K=2, K=4, or K=8")
+        normalized = self.normalizer(raw, mask)
         if disabled:
-            raw = raw.clone()
+            normalized = normalized.clone()
             for resolution in disabled:
                 index = EXCLUSIVE_RESOLUTIONS.index(resolution)
                 resolution_channels = (
@@ -510,8 +511,7 @@ class RegionEncoder(_ModuleBase):
                     *range(32 + index * 2, 34 + index * 2),
                     38 + index,
                 )
-                raw[:, resolution_channels] = 0.0
-        normalized = self.normalizer(raw, mask)
+                normalized[:, resolution_channels] = 0.0
         encoded = self.encoder(normalized.permute(0, 2, 3, 1))
         encoded = encoded.permute(0, 3, 1, 2).contiguous()
         encoded = encoded.masked_fill(~valid_pair_mask(mask), 0.0)
@@ -521,6 +521,9 @@ class RegionEncoder(_ModuleBase):
                 "normalized": normalized,
                 "encoded": encoded,
                 "disabled_resolutions": list(disabled),
+                "resolution_ablation_domain": (
+                    "registered_normalized_K_specific_channels_before_encoder"
+                ),
             }
         return encoded
 

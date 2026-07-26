@@ -8,8 +8,11 @@ publication. A factory cannot replace the scientific operation with a no-op.
 from __future__ import annotations
 
 import importlib
+import json
+import os
 from pathlib import Path
-from typing import Any, Callable, Mapping
+import tempfile
+from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import (
     load_hashed_json,
@@ -259,6 +262,10 @@ def _load_factory(path: str) -> Callable[..., Mapping[str, Any]]:
 
 
 def _operation_callable(operation: str) -> Callable[..., Any] | None:
+    if operation == "teacher_training":
+        from .teacher_train import train_particle_view_teacher
+
+        return train_particle_view_teacher
     if operation == "consumer_interface_screen":
         from .consumer_interface_runtime import (
             run_consumer_interface_screen,
@@ -364,6 +371,295 @@ def _operation_callable(operation: str) -> Callable[..., Any] | None:
     return None
 
 
+def _warning_candidates(value: Any, *, key: str = "") -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, Mapping):
+        code = value.get("warning_code")
+        if isinstance(code, str) and code.startswith("WARN_"):
+            rows.append(dict(value))
+        for child_key, child in value.items():
+            if (
+                child_key in {
+                    "warning",
+                    "warnings",
+                    "quality_warning",
+                    "quality_warnings",
+                    "scientific_warning",
+                    "scientific_warnings",
+                }
+                or isinstance(child, (Mapping, list, tuple))
+            ):
+                rows.extend(_warning_candidates(child, key=str(child_key)))
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            rows.extend(_warning_candidates(child, key=key))
+    elif isinstance(value, str) and value.startswith("WARN_"):
+        rows.append({"warning_code": value})
+    return rows
+
+
+def _published_path_string(value: str) -> str:
+    """Map a task-transaction path to its immutable published location."""
+
+    raw_attempt = os.environ.get("PARTICLE_VIEW_TASK_OUTPUT_DIR")
+    raw_final = os.environ.get("PARTICLE_VIEW_TASK_FINAL_OUTPUT_DIR")
+    if not raw_attempt or not raw_final:
+        return value
+    attempt = str(Path(raw_attempt).resolve())
+    final = str(Path(raw_final).resolve())
+    if value == attempt:
+        return final
+    normalized = value.replace("\\", "/")
+    normalized_attempt = attempt.replace("\\", "/").rstrip("/")
+    prefix = normalized_attempt + "/"
+    if normalized.startswith(prefix):
+        return str(Path(final) / Path(normalized[len(prefix) :]))
+    return value
+
+
+def _replace_strings(value: Any, replacements: Mapping[str, str]) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _replace_strings(child, replacements)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_replace_strings(child, replacements) for child in value]
+    if isinstance(value, str):
+        return _published_path_string(replacements.get(value, value))
+    return value
+
+
+def _encoded_json(payload: Any) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _replace_file(path: Path, encoded: bytes) -> None:
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.canonical.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _canonicalize_published_json_artifacts(
+    artifact_paths: Sequence[str | Path],
+) -> None:
+    """Rewrite transaction paths and same-task hashes before publication."""
+
+    documents: dict[Path, dict[str, Any]] = {}
+    jsonl_paths: list[Path] = []
+    old_identifiers: dict[str, Path] = {}
+    for raw_path in artifact_paths:
+        path = Path(raw_path).resolve()
+        if path.suffix == ".json":
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            documents[path] = payload
+            old_identifiers[sha256_file(path)] = path
+            content_hash = payload.get("content_hash")
+            if isinstance(content_hash, str) and len(content_hash) == 64:
+                old_identifiers[content_hash] = path
+        elif path.suffix == ".jsonl":
+            jsonl_paths.append(path)
+
+    visiting: set[Path] = set()
+    complete: set[Path] = set()
+    replacements: dict[str, str] = {}
+
+    def identifiers(value: Any) -> set[str]:
+        if isinstance(value, Mapping):
+            return {
+                item
+                for child in value.values()
+                for item in identifiers(child)
+            }
+        if isinstance(value, (list, tuple)):
+            return {item for child in value for item in identifiers(child)}
+        return {value} if isinstance(value, str) else set()
+
+    def publish(path: Path) -> None:
+        if path in complete:
+            return
+        if path in visiting:
+            raise ValueError("task JSON artifacts contain cyclic hash lineage")
+        visiting.add(path)
+        payload = documents[path]
+        for identifier in identifiers(payload):
+            dependency = old_identifiers.get(identifier)
+            if dependency is not None and dependency != path:
+                publish(dependency)
+        updated = _replace_strings(payload, replacements)
+        old_content_hash = payload.get("content_hash")
+        if old_content_hash is not None:
+            unhashed = dict(updated)
+            unhashed.pop("content_hash", None)
+            updated = with_content_hash(unhashed)
+        old_file_hash = sha256_file(path)
+        _replace_file(path, _encoded_json(updated))
+        if isinstance(old_content_hash, str):
+            replacements[old_content_hash] = str(updated["content_hash"])
+        replacements[old_file_hash] = sha256_file(path)
+        documents[path] = updated
+        visiting.remove(path)
+        complete.add(path)
+
+    for document_path in documents:
+        publish(document_path)
+
+    for path in jsonl_paths:
+        rows = [
+            _replace_strings(json.loads(line), replacements)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        _replace_file(
+            path,
+            b"".join(
+                json.dumps(
+                    row,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+                for row in rows
+            ),
+        )
+
+
+def _normalized_warning_severity(value: Any) -> str:
+    normalized = str(value if value is not None else "warning").strip().lower()
+    normalized = {
+        "scientific": "warning",
+        "scientific_warning": "warning",
+        "warn": "warning",
+        "error": "high",
+        "critical": "high",
+    }.get(normalized, normalized)
+    return normalized if normalized in {"info", "warning", "high"} else "warning"
+
+
+def _publish_task_quality_warnings(
+    *,
+    artifact_rows: list[dict[str, str]],
+    output_dir: Path,
+    registry: Mapping[str, Any],
+    run_id: str,
+    seed: int,
+    source_commit: str,
+) -> tuple[Path, list[str]] | None:
+    from .production import (
+        LOGICAL_NODE_LAYOUT,
+        build_quality_warning,
+        write_quality_warning_jsonl,
+    )
+
+    stage = next(
+        row["stage"] for row in registry["runs"] if row["run_id"] == run_id
+    )
+    graph_node = next(
+        node_id
+        for node_id, stages, _ in LOGICAL_NODE_LAYOUT
+        if stage in stages
+    )
+    warnings = []
+    seen = set()
+    for artifact in artifact_rows:
+        path = Path(artifact["path"])
+        if path.suffix not in {".json", ".jsonl"} or path.name == "task_result.json":
+            continue
+        try:
+            if path.suffix == ".json":
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                candidates = _warning_candidates(payload)
+            else:
+                candidates = []
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        candidates.extend(_warning_candidates(json.loads(line)))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        for candidate in candidates:
+            code = str(candidate["warning_code"])
+            identity = (code, artifact["sha256"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            warnings.append(
+                build_quality_warning(
+                    warning_code=code,
+                    severity=_normalized_warning_severity(
+                        candidate.get("severity", "warning")
+                    ),
+                    graph_node=graph_node,
+                    configuration_id=str(
+                        candidate.get("configuration_id", run_id)
+                    ),
+                    seed=int(candidate.get("seed", seed)),
+                    split=str(
+                        candidate.get(
+                            "split",
+                            candidate.get("selection_split", "not_applicable"),
+                        )
+                    ),
+                    observed_value=candidate.get("observed_value"),
+                    reference_value=candidate.get("reference_value"),
+                    warning_threshold=candidate.get(
+                        "warning_threshold",
+                        candidate.get("declared_warning_threshold"),
+                    ),
+                    interpretation=str(
+                        candidate.get(
+                            "interpretation",
+                            f"{code} emitted by {path.name}",
+                        )
+                    ),
+                    suggested_diagnostic=str(
+                        candidate.get(
+                            "suggested_diagnostic",
+                            "Inspect the bound supporting artifact.",
+                        )
+                    ),
+                    supporting_artifacts=[
+                        {
+                            **artifact,
+                            "path": _published_path_string(artifact["path"]),
+                        }
+                    ],
+                    source_commit=source_commit,
+                )
+            )
+    if not warnings:
+        return None
+    path = output_dir / "quality_warnings.jsonl"
+    write_quality_warning_jsonl(path, warnings)
+    return path, [row["content_hash"] for row in warnings]
+
+
 def execute_scientific_task(
     *,
     catalog: Mapping[str, Any],
@@ -415,13 +711,37 @@ def execute_scientific_task(
                 f"operation {operation} requires a callable factory action"
             )
         action(**dict(prepared["kwargs"]))
+    _canonicalize_published_json_artifacts(prepared["artifact_paths"])
     artifacts = []
     for raw_path in prepared["artifact_paths"]:
         path = Path(raw_path).resolve()
         artifacts.append({"path": str(path), "sha256": sha256_file(path)})
+    source_commit = str(config.get("source_commit", "0" * 40))
+    graph_path = os.environ.get("PARTICLE_VIEW_GRAPH")
+    if graph_path:
+        graph = load_hashed_json(graph_path)
+        source_commit = str(graph["source_commit"])
+    warning_publication = _publish_task_quality_warnings(
+        artifact_rows=artifacts,
+        output_dir=Path(output_dir),
+        registry=registry,
+        run_id=run_id,
+        seed=int(seed),
+        source_commit=source_commit,
+    )
+    warning_hashes: list[str] = []
+    if warning_publication is not None:
+        warning_path, warning_hashes = warning_publication
+        artifacts.append(
+            {
+                "path": str(warning_path.resolve()),
+                "sha256": sha256_file(warning_path),
+            }
+        )
     result = build_runtime_task_result(
         task_id=task_id,
         artifacts=artifacts,
+        warning_sha256=warning_hashes,
     )
     destination = Path(output_dir) / "task_result.json"
     write_immutable_json(destination, result)

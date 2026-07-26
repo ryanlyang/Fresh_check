@@ -47,6 +47,7 @@ PARTICLE_VIEW_FAIRNESS_INPUT_INDEX_CONTRACT = (
     "particle_view_fairness_input_index_v1"
 )
 PARTICLE_VIEW_STAGE_G_RESULT_CONTRACT = "particle_view_stage_g_result_v1"
+PARTICLE_VIEW_STAGE_G_ALIAS_CONTRACT = "particle_view_stage_g_alias_v1"
 
 
 def _direct_candidates() -> list[dict[str, Any]]:
@@ -928,6 +929,49 @@ def _prepare_stage_g_control(
     ]
     if len(entries) != 1:
         raise ValueError("fairness family does not resolve to one entry")
+    if (
+        family == "PRIVILEGED_SCIENTIFIC"
+        and set(entries[0]["winner_families"])
+        == {
+            "selected_privileged_scientific_model",
+            "selected_pre_stage_g_hlt_deployable_model",
+        }
+    ):
+        canonical_run_id = (
+            f"FAIR_PRE_STAGE_G_DEPLOYABLE_{control_id}"
+        )
+        canonical_artifacts = _task_artifacts(
+            root, registry, canonical_run_id, seed
+        )
+        required_names = [
+            "best_model_val_stop_within_budget.pt",
+            "training_curves.json",
+            "stage_g_result.json",
+        ]
+        if control_id in {"SELECTED_PARAMETER_MATCH", "SELECTED_FLOP_MATCH"}:
+            required_names.append("direct_trial_summary.json")
+        paths = [_artifact(canonical_artifacts, name) for name in required_names]
+        alias_path = output / "stage_g_alias.json"
+        return {
+            "kwargs": {
+                "output_path": str(alias_path),
+                "run_id": run_id,
+                "canonical_run_id": canonical_run_id,
+                "seed": seed,
+                "fairness_entry_sha256": entries[0][
+                    "fairness_entry_sha256"
+                ],
+                "canonical_artifacts": [
+                    {
+                        "path": str(path),
+                        "sha256": sha256_file(path),
+                    }
+                    for path in paths
+                ],
+            },
+            "artifact_paths": [*(str(path) for path in paths), str(alias_path)],
+            "action": _publish_stage_g_alias,
+        }
     configuration_id = entries[0]["configuration_id"]
     jobs = [
         row
@@ -1013,6 +1057,34 @@ def _prepare_stage_g_control(
         ],
         "action": _run_direct_stage_g,
     }
+
+
+def _publish_stage_g_alias(
+    *,
+    output_path: str,
+    run_id: str,
+    canonical_run_id: str,
+    seed: int,
+    fairness_entry_sha256: str,
+    canonical_artifacts: list[dict[str, str]],
+) -> None:
+    write_immutable_json(
+        output_path,
+        with_content_hash(
+            {
+                "contract": PARTICLE_VIEW_STAGE_G_ALIAS_CONTRACT,
+                "run_id": run_id,
+                "canonical_run_id": canonical_run_id,
+                "seed": int(seed),
+                "fairness_entry_sha256": require_sha256(
+                    "fairness_entry_sha256", fairness_entry_sha256
+                ),
+                "canonical_artifacts": canonical_artifacts,
+                "independent_retraining_performed": False,
+                "numerically_identical_by_construction": True,
+            }
+        ),
+    )
 
 
 def build_fairness_task_specs(

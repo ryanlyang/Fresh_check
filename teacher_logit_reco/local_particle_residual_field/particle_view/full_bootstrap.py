@@ -8,10 +8,15 @@ that the existing runtime-manifest/submission machinery consumes directly.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
+import shutil
 import sys
 from typing import Any, Mapping, Sequence
+import zipfile
+
+import numpy as np
 
 from .confirmation_runtime import (
     build_confirmation_factory_config,
@@ -22,6 +27,7 @@ from .consumer_interface_runtime import (
     build_consumer_screen_task_specs,
 )
 from .contracts import (
+    canonical_sha256,
     load_hashed_json,
     sha256_file,
     validate_content_hash,
@@ -53,12 +59,15 @@ from .post_target_runtime import (
     build_post_target_task_specs,
 )
 from .production_factories import (
+    PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT,
     build_baseline_factory_config,
     build_direct_control_factory_config,
     build_source_preflight_task_specs,
     build_stage_a_direct_task_specs,
     build_stage_a_teacher_task_specs,
 )
+from .storage import build_diagnostic_budget, build_storage_reservation
+from .tap_staging import build_tap_stage_reservation
 from .registry import validate_particle_view_registry
 from .report_runtime import (
     build_report_factory_config,
@@ -90,6 +99,7 @@ PARTICLE_VIEW_FULL_BOOTSTRAP_CONTRACT = (
 
 _CONFIG_FILENAMES = {
     "runtime_data": "runtime_data_config.json",
+    "source_preflight": "source_preflight_factory_config.json",
     "direct_resource_plan": "stage_a_direct_resource_plan.json",
     "baseline": "baseline_factory_config.json",
     "direct_control": "direct_control_factory_config.json",
@@ -138,6 +148,269 @@ def _merge_task_specs(
     return {run_id: merged[run_id] for run_id in sorted(merged)}
 
 
+def _npy_header(handle: Any) -> tuple[tuple[int, ...], np.dtype[Any]]:
+    version = np.lib.format.read_magic(handle)
+    if version == (1, 0):
+        shape, _, dtype = np.lib.format.read_array_header_1_0(handle)
+    else:
+        shape, _, dtype = np.lib.format.read_array_header_2_0(handle)
+    return tuple(int(value) for value in shape), np.dtype(dtype)
+
+
+def _cache_shape_inventory(
+    runtime_data_config: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    inventory = []
+    total_bytes = 0
+    for record in runtime_data_config["parent_cache_records"]:
+        for source_kind in ("hlt_array", "offline_array"):
+            binding = record[source_kind]
+            path = Path(binding["path"])
+            arrays = []
+            if path.suffix == ".npz":
+                with zipfile.ZipFile(path) as archive:
+                    for member in sorted(archive.namelist()):
+                        if not member.endswith(".npy"):
+                            continue
+                        with archive.open(member) as handle:
+                            shape, dtype = _npy_header(handle)
+                        arrays.append(
+                            {
+                                "name": Path(member).stem,
+                                "shape": list(shape),
+                                "dtype": dtype.str,
+                                "logical_bytes": int(
+                                    np.prod(shape, dtype=np.int64)
+                                    * dtype.itemsize
+                                ),
+                            }
+                        )
+            elif path.suffix == ".npy":
+                with path.open("rb") as handle:
+                    shape, dtype = _npy_header(handle)
+                arrays.append(
+                    {
+                        "name": path.stem,
+                        "shape": list(shape),
+                        "dtype": dtype.str,
+                        "logical_bytes": int(
+                            np.prod(shape, dtype=np.int64) * dtype.itemsize
+                        ),
+                    }
+                )
+            else:
+                raise ValueError(f"unsupported bound cache format: {path}")
+            serialized_bytes = path.stat().st_size
+            total_bytes += serialized_bytes
+            inventory.append(
+                {
+                    "parent_split": record["parent_split"],
+                    "source_kind": source_kind,
+                    "path_sha256": binding["sha256"],
+                    "serialized_bytes": serialized_bytes,
+                    "arrays": arrays,
+                }
+            )
+    return inventory, total_bytes
+
+
+def _representative_serialized_model_sizes(
+    resource_plan: Mapping[str, Any],
+) -> dict[str, int]:
+    """Measure state-dict serialization; retain an exact formula fallback."""
+
+    target = resource_plan["canonical_target"]
+    fallback = {
+        "canonical_deployable_float32_parameter_bytes": (
+            int(target["deployed_parameters"]) * 4
+        )
+    }
+    try:
+        import torch
+        from jetclass_fresh.hlt_baseline import (
+            build_particle_transformer_classifier,
+        )
+        from jetclass_fresh.jetclass_data import LABEL_NAMES
+
+        measured = {}
+        for model_size in ("base", "large"):
+            model = build_particle_transformer_classifier(
+                num_classes=len(LABEL_NAMES),
+                model_size=model_size,
+            )
+            buffer = io.BytesIO()
+            torch.save(model.state_dict(), buffer)
+            measured[f"teacher_{model_size}_state_dict_bytes"] = len(
+                buffer.getbuffer()
+            )
+            del model
+        return measured
+    except (ImportError, RuntimeError):
+        return fallback
+
+
+def _derived_storage_reservation_inputs(
+    *,
+    registry: Mapping[str, Any],
+    runtime_data_config: Mapping[str, Any],
+    resource_plan: Mapping[str, Any],
+) -> tuple[dict[str, int], list[dict[str, Any]], int, dict[str, Any]]:
+    from jetclass_fresh.hlt_baseline import default_part_config
+    from jetclass_fresh.jetclass_data import LABEL_NAMES
+
+    unified = load_hashed_json(runtime_data_config["unified_manifest"]["path"])
+    logical = unified["logical_splits"]
+    max_particles = int(unified["split_config"]["max_particles"])
+    cache_inventory, source_cache_bytes = _cache_shape_inventory(
+        runtime_data_config
+    )
+    representative_sizes = _representative_serialized_model_sizes(
+        resource_plan
+    )
+    training_configuration_count = sum(
+        1
+        for row in registry["runs"]
+        if row["uses_labels"] is True and row["train_split"] == "train"
+    )
+    retained_confirmation_count = sum(
+        1
+        for row in registry["runs"]
+        if row["uses_labels"] is True
+        and row["train_split"] == "train"
+        and row["three_seed_confirmation"] is True
+    )
+    checkpoint_count = retained_confirmation_count + min(
+        16, training_configuration_count
+    )
+    representative_checkpoint_bytes = max(
+        int(
+            representative_sizes.get(
+                "teacher_base_state_dict_bytes",
+                resource_plan["canonical_target"]["deployed_parameters"] * 4,
+            )
+        ),
+        int(resource_plan["canonical_target"]["deployed_parameters"]) * 4,
+    )
+    large_increment = max(
+        0,
+        int(
+            representative_sizes.get(
+                "teacher_large_state_dict_bytes",
+                representative_checkpoint_bytes,
+            )
+        )
+        - representative_checkpoint_bytes,
+    )
+    large_configuration_count = sum(
+        1
+        for row in registry["runs"]
+        if row["uses_labels"] is True and "LARGE" in row["run_id"].upper()
+    )
+    retained_checkpoint_bytes = int(
+        (
+            checkpoint_count * representative_checkpoint_bytes
+            + large_configuration_count * large_increment
+        )
+        * 1.20
+    )
+    seed_expanded_tasks = sum(
+        len(row["seed_ids"]) for row in registry["runs"]
+    )
+    json_bytes = max(64 * 1024**2, seed_expanded_tasks * 2 * 1024**2)
+    selected_count = sum(
+        int(logical[name]["count"])
+        for name in ("train", "model_val_stop", "model_val_select")
+    )
+    selected_view_bytes = selected_count * max_particles * 8 * 4
+    selected_mask_bytes = selected_count * max_particles
+    selected_logit_bytes = (
+        selected_count * len(LABEL_NAMES) * 4 * 2
+    )
+    selected_product_bytes = int(
+        (selected_view_bytes + selected_mask_bytes + selected_logit_bytes)
+        * 1.10
+    )
+
+    train = logical["train"]
+    tap_rows = []
+    for role, architecture, source_role in (
+        ("A0_VIEW", "base", "hlt_memory_control"),
+        ("TOFF_VIEW_BASE", "base", "offline_teacher"),
+        ("TOFF_VIEW_LARGE", "large", "offline_teacher"),
+    ):
+        architecture_config = default_part_config(
+            num_classes=len(LABEL_NAMES),
+            model_size=architecture,
+        )
+        token_width = int(architecture_config["embed_dims"][-1])
+        planned_teacher_identity = canonical_sha256(
+            {
+                "contract": "particle_view_planned_teacher_reservation_v1",
+                "role": role,
+                "architecture": architecture_config,
+                "registry_sha256": registry["content_hash"],
+            }
+        )
+        tap_spec_sha256 = canonical_sha256(
+            {
+                "contract": "particle_view_planned_tap_spec_v1",
+                "role": role,
+                "tap_choice": "penultimate",
+                "token_width": token_width,
+            }
+        )
+        tap_rows.append(
+            build_tap_stage_reservation(
+                source_role=source_role,
+                source_manifest_sha256=runtime_data_config["content_hash"],
+                logical_split_sha256=train["content_hash"],
+                ordered_identity_sha256=train["ordered_identity_sha256"],
+                teacher_checkpoint_sha256=planned_teacher_identity,
+                tap_spec_sha256=tap_spec_sha256,
+                jets=int(train["count"]),
+                max_particles=max_particles,
+                token_width=token_width,
+                identity_columns=1,
+            )
+        )
+    transient_ram_bytes = source_cache_bytes + 8 * 1024**3
+    planned = {
+        "retained_checkpoints_and_bundles": max(
+            retained_checkpoint_bytes, 128 * 1024**2
+        ),
+        "json_metrics_registries_and_reports": json_bytes,
+        "selected_view_and_logit_products": max(
+            selected_product_bytes, 32 * 1024**2
+        ),
+    }
+    evidence = {
+        "contract": "particle_view_storage_derivation_evidence_v1",
+        "cache_shape_dtype_inventory": cache_inventory,
+        "source_cache_serialized_bytes": source_cache_bytes,
+        "teacher_tap_split": "train",
+        "teacher_tap_split_count": int(train["count"]),
+        "teacher_tap_max_particles": max_particles,
+        "training_configuration_count_from_registry": training_configuration_count,
+        "retained_confirmation_count_from_registry": retained_confirmation_count,
+        "peak_checkpoint_count": checkpoint_count,
+        "checkpoint_retention_basis": (
+            "confirmed configurations plus one 16-way active task wave; "
+            "unselected screen checkpoints are evicted after metrics"
+        ),
+        "large_checkpoint_configuration_count": large_configuration_count,
+        "seed_expanded_task_count": seed_expanded_tasks,
+        "representative_serialized_model_sizes": representative_sizes,
+        "selected_product_split_counts": {
+            name: int(logical[name]["count"])
+            for name in ("train", "model_val_stop", "model_val_select")
+        },
+        "selected_product_max_view_dim": 8,
+        "selected_product_class_count": len(LABEL_NAMES),
+        "transient_ram_formula": "serialized_source_caches_plus_8GiB_workspace",
+    }
+    return planned, tap_rows, transient_ram_bytes, evidence
+
+
 def publish_full_pilot_scientific_bootstrap(
     *,
     output_dir: str | Path,
@@ -166,6 +439,8 @@ def publish_full_pilot_scientific_bootstrap(
     max_val_batches: int | None = None,
     max_stack_batches: int | None = None,
     production: bool = True,
+    persistent_storage_budget_bytes: int = 12 * 1024**3,
+    allocation_ram_bytes: int = 128 * 1024**3,
 ) -> dict[str, Any]:
     """Publish the complete, exactly covered scientific execution bootstrap."""
 
@@ -313,12 +588,58 @@ def publish_full_pilot_scientific_bootstrap(
     config_paths = {
         name: root / filename for name, filename in _CONFIG_FILENAMES.items()
     }
+    # Measure an actual published campaign artifact, reserve every planned
+    # persistent class, and bind the reservation into PV00 before submission.
+    write_immutable_json(config_paths["runtime_data"], configs["runtime_data"])
+    campaign_root = root.parent.parent
+    campaign_root.mkdir(parents=True, exist_ok=True)
+    diagnostic_budget = build_diagnostic_budget()
+    (
+        planned_persistent_bytes,
+        tap_stage_reservations,
+        transient_ram_bytes,
+        storage_derivation_evidence,
+    ) = _derived_storage_reservation_inputs(
+        registry=registry,
+        runtime_data_config=runtime_data_config,
+        resource_plan=resource_plan,
+    )
+    storage_reservation = build_storage_reservation(
+        campaign_root=campaign_root,
+        measured_artifacts={
+            "runtime_data_config": config_paths["runtime_data"],
+        },
+        planned_persistent_bytes=planned_persistent_bytes,
+        tap_stage_reservations=tap_stage_reservations,
+        persistent_budget_bytes=int(persistent_storage_budget_bytes),
+        filesystem_available_bytes=int(
+            shutil.disk_usage(campaign_root).free
+        ),
+        allocation_ram_bytes=int(allocation_ram_bytes),
+        transient_ram_bytes=transient_ram_bytes,
+        diagnostic_budget=diagnostic_budget,
+        derivation_evidence=storage_derivation_evidence,
+    )
+    source_preflight = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT,
+            "runtime_data_config": dict(runtime_data_config),
+            "runtime_data_config_sha256": runtime_data_config["content_hash"],
+            "storage_reservation": storage_reservation,
+            "storage_reservation_sha256": storage_reservation["content_hash"],
+            "diagnostic_budget": diagnostic_budget,
+            "diagnostic_budget_sha256": diagnostic_budget["content_hash"],
+            "storage_is_execution_gating": True,
+            "scientific_metrics_are_execution_gating": False,
+        }
+    )
+    configs["source_preflight"] = source_preflight
     for name, payload in configs.items():
         write_immutable_json(config_paths[name], payload)
 
     fragments = [
         build_source_preflight_task_specs(
-            runtime_data_config_path=config_paths["runtime_data"]
+            source_preflight_config_path=config_paths["source_preflight"]
         ),
         build_stage_a_teacher_task_specs(
             factory_config_path=config_paths["baseline"]

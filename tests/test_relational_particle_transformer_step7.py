@@ -47,9 +47,15 @@ from teacher_logit_reco.relational_part.selection import (
     validate_locked_finalists,
 )
 from teacher_logit_reco.relational_part.semantic_controls import (
+    SEMANTIC_PERTURBATION_CONTRACT,
+    SEMANTIC_RUN_DIAGNOSTICS_CONTRACT,
+    build_semantic_diagnostics_bundle,
+    build_semantic_perturbation_artifact,
     build_unary_control_registry,
     directional_swap_relations,
     evaluate_semantic_perturbations,
+    semantic_diagnostic_rows,
+    validate_semantic_diagnostics_bundle,
     select_unary_widths,
     zero_relation_family,
     zero_region_resolution,
@@ -58,6 +64,11 @@ from teacher_logit_reco.relational_part.semantic_controls import (
     wrong_event_relations,
 )
 from teacher_logit_reco.relational_part.workflow import reject_final_test_paths
+from scripts.run_relational_part_semantic_perturbation import (
+    _load_reusable_artifact,
+)
+import scripts.run_relational_part_semantic_perturbation as semantic_runner
+from teacher_logit_reco.relational_part import write_immutable_json
 
 
 def _digest(value: str) -> str:
@@ -239,6 +250,13 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
                         "split": "val_select",
                         "accuracy": accuracy,
                         "cross_entropy": 0.5 + run_index / 1000,
+                        "per_class_efficiency": {
+                            name: accuracy
+                            for name in (
+                                "QCD", "Hbb", "Hcc", "Hgg", "H4q",
+                                "Hqql", "Zqq", "Wqq", "Tbqq", "Tbl",
+                            )
+                        },
                     },
                 }
             )
@@ -296,6 +314,16 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
     assert summary["content_hash"] == preliminary["content_hash"]
     assert summary["confirmation_gain_positive"] is False
     assert summary["nominal_relational_winner_id"] != "RPT_BASE"
+    track_rows = [
+        row for row in summary["rows"]
+        if "TRACK" in row["new_relation_families"]
+    ]
+    assert track_rows
+    assert all(
+        set(row["track_required_class_gains"])
+        == {"Hbb", "Hcc", "Tbqq", "Tbl"}
+        for row in track_rows
+    )
     assert lock["final_test_used_for_selection"] is False
     validate_locked_finalists(
         lock,
@@ -356,6 +384,10 @@ def test_semantic_perturbations_preserve_base_and_exact_domains() -> None:
 
 
 class _SemanticModel(torch.nn.Module):
+    def __init__(self, families=()):
+        super().__init__()
+        self.families = tuple(families)
+
     def forward(
         self,
         points,
@@ -367,7 +399,10 @@ class _SemanticModel(torch.nn.Module):
     ):
         del points, features
         batch, _, particles = lorentz_vectors.shape
-        pairs = lorentz_vectors.new_zeros(batch, 7, particles, particles)
+        channel_count = 10 if self.families == ("CHARGE",) else 7
+        pairs = lorentz_vectors.new_zeros(
+            batch, channel_count, particles, particles
+        )
         pairs[:, 4] = (
             raw_tokens[:, :, 0].unsqueeze(-1)
             - raw_tokens[:, :, 0].unsqueeze(-2)
@@ -423,6 +458,210 @@ def test_semantic_evaluator_uses_exact_global_multiplicity_strata() -> None:
     ] == 1
     assert diagnostics["wrong_event_relations"]["excluded_event_count"] == 1
     assert diagnostics["wrong_event_relations"]["fixed_point_count"] == 0
+
+
+def test_charge_single_gets_matched_zero_charge_control() -> None:
+    jets, particles = 20, 3
+    tokens = np.zeros((jets, particles, 14), dtype=np.float32)
+    mask = np.ones((jets, particles), dtype=bool)
+    tokens[:, :, 0] = np.asarray([3.0, 2.0, 1.0])
+    tokens[:, :, 1] = np.asarray([0.1, 0.2, 0.3])
+    tokens[:, :, 2] = np.asarray([-0.1, 0.2, 0.4])
+    tokens[:, :, 3] = tokens[:, :, 0] * np.cosh(tokens[:, :, 1])
+    tokens[:, :, 5] = 1
+    dataset = RelationalJetDataset(
+        SimpleNamespace(
+            tokens=tokens,
+            mask=mask,
+            labels=np.arange(jets, dtype=np.int64) % 10,
+            jet_ids=[
+                JetIdentity(
+                    file="charge-semantic.root",
+                    entry=index,
+                    label=index % 10,
+                )
+                for index in range(jets)
+            ],
+            split="stack_val",
+        )
+    )
+    metrics, diagnostics = evaluate_semantic_perturbations(
+        _SemanticModel(("CHARGE",)),
+        SimpleNamespace(dataset=dataset),
+    )
+    assert "family_dropout_CHARGE" in metrics
+    assert "family_dropout_CHARGE" in diagnostics
+    assert (
+        "charge_gain_conditioned_on_pid_vs_charge_dropout"
+        in metrics["full_model"]
+    )
+
+
+def test_semantic_bundle_requires_all_applicable_seed101_rows(
+    tmp_path: Path,
+) -> None:
+    def row(run_id, families, role="scientific_finalist"):
+        return {
+            "run_id": run_id,
+            "configuration_role": role,
+            "new_relation_families": list(families),
+            "checkpoint_hashes": {"101": _digest(f"checkpoint-{run_id}")},
+            "checkpoint_registration_hashes": {
+                "101": _digest(f"registration-{run_id}")
+            },
+            "model_contract_sha256": _digest(f"model-{run_id}"),
+        }
+
+    summary = with_content_hash(
+        {
+            "contract": CONFIRMATION_SUMMARY_CONTRACT,
+            "schema_version": 3,
+            "nominal_relational_winner_id": "RPT_PT",
+            "rows": [
+                row("RPT_PT", ("PT",)),
+                row("RPT_CHARGE", ("CHARGE",)),
+                row("RPT_PT_PID", ("PT", "PID")),
+                row("RPT_REGION", ("REGION",)),
+                row(
+                    "RPT_FULL_ZERO_REL",
+                    ("PT", "TRACK", "PID", "CHARGE", "DENSITY", "REGION"),
+                    role="shape_control",
+                ),
+            ],
+        }
+    )
+    selected = semantic_diagnostic_rows(summary)
+    assert [value["run_id"] for value in selected] == [
+        "RPT_PT",
+        "RPT_PT_PID",
+        "RPT_REGION",
+    ]
+
+    artifacts = []
+    for value in selected:
+        required_metrics = {
+            "full_model": {},
+            "within_jet_shuffled_relations": {},
+            "wrong_event_relations": {},
+            "directional_swap": {},
+        }
+        if len(value["families"]) >= 2:
+            required_metrics.update(
+                {
+                    f"family_dropout_{family}": {}
+                    for family in value["families"]
+                }
+            )
+        if "REGION" in value["families"]:
+            required_metrics.update(
+                {
+                    f"region_resolution_dropout_K{k}": {}
+                    for k in (2, 4, 8)
+                }
+            )
+        artifacts.append(
+            build_semantic_perturbation_artifact(
+                run_id=value["run_id"],
+                families=value["families"],
+                checkpoint_sha256=value["checkpoint_sha256"],
+                checkpoint_registration_sha256=value[
+                    "checkpoint_registration_sha256"
+                ],
+                model_contract_sha256=value["model_contract_sha256"],
+                confirmation_summary_sha256=summary["content_hash"],
+                metrics=required_metrics,
+                diagnostics={
+                    name: {} for name in required_metrics
+                },
+            )
+        )
+    assert all(
+        value["contract"] == SEMANTIC_RUN_DIAGNOSTICS_CONTRACT
+        for value in artifacts
+    )
+    with pytest.raises(ValueError, match="lack applicable"):
+        build_semantic_diagnostics_bundle(
+            confirmation_summary=summary,
+            run_artifacts=artifacts[:-1],
+        )
+    bundle = build_semantic_diagnostics_bundle(
+        confirmation_summary=summary,
+        run_artifacts=artifacts,
+    )
+    assert bundle["contract"] == SEMANTIC_PERTURBATION_CONTRACT
+    assert bundle["coverage_complete"] is True
+    tampered = dict(bundle)
+    tampered.pop("content_hash")
+    tampered["runs"] = {
+        name: dict(entry) for name, entry in bundle["runs"].items()
+    }
+    tampered["runs"]["RPT_PT"]["artifact_sha256"] = "0" * 64
+    tampered = with_content_hash(tampered)
+    with pytest.raises(ValueError, match="nested semantic hash"):
+        validate_semantic_diagnostics_bundle(
+            tampered, confirmation_summary=summary
+        )
+    reusable_path = tmp_path / "RPT_PT.json"
+    write_immutable_json(reusable_path, artifacts[0])
+    reused = _load_reusable_artifact(
+        reusable_path,
+        row=selected[0],
+        confirmation_summary=summary,
+    )
+    assert reused["content_hash"] == artifacts[0]["content_hash"]
+    stale_row = dict(selected[0])
+    stale_row["checkpoint_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="coverage or lineage"):
+        _load_reusable_artifact(
+            reusable_path,
+            row=stale_row,
+            confirmation_summary=summary,
+        )
+
+
+def test_all_reused_semantic_restart_rejects_source_drift_before_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = with_content_hash(
+        {
+            "contract": "test_campaign",
+            "schema_version": 1,
+            "source": {
+                "commit": "0" * 40,
+                "status_sha256": "0" * 64,
+                "dirty": False,
+            },
+        }
+    )
+    write_immutable_json(tmp_path / "campaign_spec.json", campaign)
+    reusable = (
+        tmp_path
+        / "selection"
+        / "semantic_controls"
+        / "per_run"
+        / "RPT_PT.json"
+    )
+    reusable.parent.mkdir(parents=True)
+    reusable.write_text('{"authenticated_reusable_artifact": true}\n')
+
+    def reject_drift(*args, **kwargs):
+        raise ValueError(
+            "active repository source snapshot differs from campaign_spec.json"
+        )
+
+    def reuse_must_not_be_considered(*args, **kwargs):
+        pytest.fail("semantic reuse was considered before source validation")
+
+    monkeypatch.setattr(
+        semantic_runner, "validate_campaign_source", reject_drift
+    )
+    monkeypatch.setattr(
+        semantic_runner, "_load_reusable_artifact", reuse_must_not_be_considered
+    )
+    with pytest.raises(ValueError, match="source snapshot differs"):
+        semantic_runner.main(["--campaign-root", str(tmp_path)])
+    assert reusable.is_file()
 
 
 def test_combination_family_dropout_zeros_only_selected_channels() -> None:
@@ -499,7 +738,7 @@ def test_region_resolution_ablation_reencodes_only_region_slice() -> None:
         (mask.unsqueeze(-1) & mask.unsqueeze(-2)).expand(-1, 12, -1, -1)
     ).eq(4).all()
     assert detail["zeroed_resolution"] == 4
-    assert detail["raw_zeroed_channel_indices"] == [
+    assert detail["normalized_zeroed_channel_indices"] == [
         1, 14, 15, 16, 17, 18, 19, 28, 29, 34, 35, 39
     ]
 
@@ -678,8 +917,8 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
         }
     lock = with_content_hash(
         {
-            "contract": LOCKED_FINALISTS_CONTRACT,
-            "schema_version": 2,
+                "contract": LOCKED_FINALISTS_CONTRACT,
+                "schema_version": 3,
             "campaign_spec_sha256": "5" * 64,
             "split_manifest_sha256": "6" * 64,
             "hlt_cache_hashes": hashes,
@@ -798,14 +1037,29 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
 
 
 def test_negative_json_and_markdown_report_remain_valid() -> None:
+    checkpoints = {
+        str(seed): _digest(f"checkpoint-{seed}") for seed in (101, 202, 303)
+    }
     confirmation = with_content_hash(
         {
             "contract": CONFIRMATION_SUMMARY_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "confirmation_registry_sha256": "1" * 64,
             "rows": [
                 {
                     "run_id": "RPT_PT",
+                    "configuration_role": "scientific_finalist",
+                    "new_relation_families": ["PT"],
+                    "checkpoint_hashes": checkpoints,
+                    "checkpoint_registration_hashes": {
+                        str(seed): _digest(
+                            f"report-registration-RPT_PT-{seed}"
+                        )
+                        for seed in (101, 202, 303)
+                    },
+                    "model_contract_sha256": _digest(
+                        "report-model-RPT_PT"
+                    ),
                     "mean_matched_seed_accuracy_difference": -0.01,
                     "seeds_beating_matched_baseline": 0,
                 }
@@ -819,9 +1073,6 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
             "negative_campaign_valid": True,
         }
     )
-    checkpoints = {
-        str(seed): _digest(f"checkpoint-{seed}") for seed in (101, 202, 303)
-    }
     report_lineage = {
         "campaign_spec": "2" * 64,
         "split_manifest": "3" * 64,
@@ -841,16 +1092,44 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
             "lineage_hashes": report_lineage,
             "lineage_authenticated": True,
         }
+    semantic_metrics = {
+        name: {"accuracy": value}
+        for name, value in (
+            ("full_model", 0.50),
+            ("within_jet_shuffled_relations", 0.40),
+            ("wrong_event_relations", 0.35),
+            ("directional_swap", 0.45),
+        )
+    }
+    semantic_run = build_semantic_perturbation_artifact(
+        run_id="RPT_PT",
+        families=("PT",),
+        checkpoint_sha256=checkpoints["101"],
+        checkpoint_registration_sha256=_digest(
+            "report-registration-RPT_PT-101"
+        ),
+        model_contract_sha256=_digest("report-model-RPT_PT"),
+        confirmation_summary_sha256=confirmation["content_hash"],
+        metrics=semantic_metrics,
+        diagnostics={
+            name: {"evaluated_event_count": 100}
+            for name in semantic_metrics
+        },
+    )
+    semantic = build_semantic_diagnostics_bundle(
+        confirmation_summary=confirmation,
+        run_artifacts=[semantic_run],
+    )
     lock = with_content_hash(
         {
             "contract": LOCKED_FINALISTS_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_spec_sha256": "2" * 64,
             "split_manifest_sha256": "3" * 64,
             "hlt_cache_hashes": {"final_test": "4" * 64},
             "confirmation_registry_sha256": "1" * 64,
             "confirmation_summary_sha256": confirmation["content_hash"],
-            "semantic_perturbation_sha256": "5" * 64,
+            "semantic_perturbation_sha256": semantic["content_hash"],
             "unary_control_registry_sha256": "6" * 64,
             "confirmation_results_envelope_sha256": "7" * 64,
             "unary_results_envelope_sha256": "8" * 64,
@@ -955,11 +1234,15 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
     report = build_relational_part_report(
         locked_finalists=lock,
         confirmation_summary=confirmation,
+        semantic_diagnostics=semantic,
         final_evaluations=evaluations,
         paired_statistics=paired,
     )
     assert report["fully_negative_campaign_completed_validly"] is True
     assert report["positive_architecture_result"] is False
+    assert report["semantic_validation_diagnostics"]["run_ids"] == ["RPT_PT"]
     assert "Final-test results were used for reporting only" in (
         render_relational_part_markdown(report)
     )
+    markdown = render_relational_part_markdown(report)
+    assert "`wrong_event_relations` | 0.350000 | -0.150000" in markdown

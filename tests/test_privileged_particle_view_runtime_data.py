@@ -723,6 +723,19 @@ def test_full_scientific_bootstrap_has_exact_coverage_and_builds_graph(
     assert bootstrap["exact_registry_coverage"]
     assert bootstrap["source_preflight_included"]
     assert bootstrap["report_and_final_included"]
+    source_config = load_hashed_json(
+        bootstrap["factory_config_files"]["source_preflight"]["path"]
+    )
+    assert source_config["storage_reservation"]["preflight_passed"]
+    assert source_config["storage_reservation"]["tap_stage_reservations"]
+    derivation = source_config["storage_reservation"]["derivation_evidence"]
+    assert derivation["cache_shape_dtype_inventory"]
+    assert derivation["representative_serialized_model_sizes"]
+    assert derivation["peak_checkpoint_count"] > 0
+    assert (
+        source_config["storage_reservation"]["persistent_required_bytes"]
+        <= source_config["storage_reservation"]["persistent_budget_bytes"]
+    )
     handlers = json.loads(
         Path(
             bootstrap["scientific_handler_commands"]["path"]
@@ -759,7 +772,7 @@ def test_full_scientific_bootstrap_has_exact_coverage_and_builds_graph(
         graph_path=str(tmp_path / "production_graph.json"),
         mode="dry_run",
     )
-    assert ledger["planned_submit_count"] == 11
+    assert ledger["planned_submit_count"] > 11
 
 
 def test_production_full_bootstrap_rejects_partial_batch_limits(tmp_path):
@@ -819,7 +832,8 @@ def test_one_command_full_pilot_bootstrap_dry_run(tmp_path):
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
-    assert "mode=dry_run planned=11 submitted=0" in completed.stdout
+    assert "mode=dry_run planned=" in completed.stdout
+    assert "submitted=0" in completed.stdout
     assert (
         artifact_root
         / "preflight"

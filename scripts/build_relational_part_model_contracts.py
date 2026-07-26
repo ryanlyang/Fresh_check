@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +41,33 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
 
 
 MODEL_CONTRACT_INDEX = "relational_part_screening_model_contract_index_v1"
-PARITY_REPORT_CONTRACT = "relational_part_weaver_parity_report_v1"
+PARITY_REPORT_CONTRACT = "relational_part_weaver_parity_report_v3"
+EXPECTED_TRIMMING_DIAGNOSTIC = {
+    "warmup_deliberately_exhausted": True,
+    "partial_batch_size": 8,
+    "original_padded_width": 7,
+    "maximum_valid_count": 4,
+    "ordinary_trimmed_width": 4,
+    "diagnostic_captured_width": 7,
+    "trimmer_state_restored": True,
+}
+
+
+def validate_parity_execution_binding(
+    parity: Mapping[str, Any],
+    *,
+    current_source: Mapping[str, Any],
+) -> None:
+    if parity.get("source") != current_source:
+        raise ValueError(
+            "Weaver parity source snapshot differs from current execution"
+        )
+    if parity.get("sequence_trimming_diagnostic") != (
+        EXPECTED_TRIMMING_DIAGNOSTIC
+    ):
+        raise ValueError(
+            "authoritative Weaver parity did not validate active trimming"
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -97,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parity_runtime = parity["weaver_runtime"]
     validate_content_hash(parity_runtime)
     source = source_snapshot(REPO_ROOT)
+    validate_parity_execution_binding(parity, current_source=source)
 
     def bind(value: dict[str, Any]) -> dict[str, Any]:
         return bind_source_provenance(value, source_snapshot=source)

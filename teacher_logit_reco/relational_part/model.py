@@ -1207,16 +1207,32 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                         DIAGNOSTIC_BIN_EDGES["track_absolute_significance"],
                     ),
                 },
+                "asinh_absolute_significance_distributions": {
+                    "d0": histogram(
+                        track_details["continuous"][:, 4].abs(),
+                        track_valid,
+                        DIAGNOSTIC_BIN_EDGES[
+                            "track_asinh_absolute_significance"
+                        ],
+                    ),
+                    "dz": histogram(
+                        track_details["continuous"][:, 5].abs(),
+                        track_valid,
+                        DIAGNOSTIC_BIN_EDGES[
+                            "track_asinh_absolute_significance"
+                        ],
+                    ),
+                },
                 "compatibility_chi2_distribution": histogram(
                     track_details["chi2"],
-                    both_tracks_valid[:, 0],
+                    both_tracks_valid,
                     DIAGNOSTIC_BIN_EDGES["track_compatibility_chi2"],
                 ),
                 "bias_by_minimum_absolute_displacement_significance": (
                     binned_pair_bias(
                         endpoint_min,
                         DIAGNOSTIC_BIN_EDGES["track_absolute_significance"],
-                        applicable=both_tracks_valid[:, 0],
+                        applicable=both_tracks_valid,
                     )
                 ),
                 "required_class_performance": track_class_performance,
@@ -1253,6 +1269,18 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 "mean_local_activity": float(
                     local_activity.masked_select(valid[:, 0]).mean().cpu()
                 ),
+                "annulus_occupancy_count_distributions": {
+                    str(index): histogram(
+                        density_details["annulus_masks"][:, index]
+                        .sum(dim=-1)
+                        .to(clean_vectors.dtype),
+                        particle_valid,
+                        DIAGNOSTIC_BIN_EDGES[
+                            "density_annulus_neighbor_count"
+                        ],
+                    )
+                    for index in range(4)
+                },
                 "bias_by_context_local_activity_fraction": binned_pair_bias(
                     context_activity,
                     DIAGNOSTIC_BIN_EDGES["density_local_activity"],

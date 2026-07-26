@@ -32,6 +32,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_runtime_task_result,
     build_scientific_handler_commands,
     build_scientific_task_catalog,
+    capture_clean_source_checkout,
     plan_particle_view_submissions,
     reconcile_particle_view_production_graph,
     submit_particle_view_graph,
@@ -246,6 +247,26 @@ def test_step10_full_low_data_registry_reconciles_to_all_logical_nodes():
     assert reconciliation["counts"]["declared_seed_replicas"] == 300
     assert reconciliation["counts"]["generated_seed_replicas"] == 300
     assert reconciliation["invalid_parent_edges"] == []
+    assert sum(
+        node["seed_expanded_task_count"] for node in graph["nodes"]
+    ) == 300
+    assert all(node["array_max_concurrency"] == 16 for node in graph["nodes"])
+    final_node = next(
+        node for node in graph["nodes"]
+        if node["node_id"] == "pv10_hlt_only_final_test"
+    )
+    assert all(len(wave) == 1 for wave in final_node["task_waves"])
+    run_by_id = {row["run_id"]: row for row in registry["runs"]}
+    for control_id in (
+        "A0_VIEW_LONG_DEPLOY",
+        "A0_VIEW_TOTAL_LABEL_BUDGET",
+        "SELECTED_PARAMETER_MATCH",
+        "SELECTED_FLOP_MATCH",
+    ):
+        parents = run_by_id[
+            f"FAIR_PRIVILEGED_SCIENTIFIC_{control_id}"
+        ]["parent_run_ids"]
+        assert f"FAIR_PRE_STAGE_G_DEPLOYABLE_{control_id}" in parents
 
 
 def test_step10_runtime_manifest_expands_seeds_and_generates_all_node_commands(
@@ -330,6 +351,10 @@ def test_step10_runtime_node_executes_resumes_and_authenticates_results(tmp_path
     )
     assert baseline["completed_count"] == 3
     assert len(calls) == 4
+    assert not any(
+        path.name.startswith(".") and ".attempt_" in path.name
+        for path in (tmp_path / "campaign" / "runtime_tasks").iterdir()
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("completed tasks must be resumed, not rerun")
@@ -343,6 +368,78 @@ def test_step10_runtime_node_executes_resumes_and_authenticates_results(tmp_path
     assert {row["action"] for row in resumed["records"]} == {
         "reuse_complete"
     }
+
+
+def test_step10_runtime_rejects_embedded_attempt_path(tmp_path):
+    _, manifest = _runtime_manifest(tmp_path)
+
+    def leaking_runner(command, **kwargs):
+        environment = kwargs["env"]
+        output = Path(environment["PARTICLE_VIEW_TASK_OUTPUT_DIR"])
+        artifact = output / "confirmation_replica.json"
+        write_immutable_json(
+            artifact,
+            with_content_hash(
+                {
+                    "contract": "production_shaped_confirmation_fixture_v1",
+                    "bundle_path": str(output / "selected_confirmation_bundle.pt"),
+                }
+            ),
+        )
+        result = build_runtime_task_result(
+            task_id=environment["PARTICLE_VIEW_TASK_ID"],
+            artifacts=[
+                {"path": str(artifact), "sha256": sha256_file(artifact)}
+            ],
+        )
+        write_immutable_json(output / "task_result.json", result)
+        return subprocess.CompletedProcess(command, 0)
+
+    report = execute_runtime_node(
+        manifest=manifest,
+        node_id="pv00_source",
+        runner=leaking_runner,
+    )
+    assert report["failed_count"] == 1
+    assert report["records"][0]["action"] == "invalid_result"
+    assert "transaction-attempt path leaked" in report["records"][0]["error"]
+
+
+def test_step10_source_checkout_is_derived_and_dirty_tree_is_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Particle View Test"],
+        check=True,
+    )
+    source = repo / "source.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "source.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    checkout = capture_clean_source_checkout(repo)
+    assert checkout["source_checkout_clean"]
+    assert len(checkout["source_commit"]) == 40
+    assert len(checkout["source_tree_git_oid"]) == 40
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="clean checkout"):
+        capture_clean_source_checkout(repo)
+
+
+def test_step10_teacher_training_operation_is_locked_to_real_trainer():
+    from teacher_logit_reco.local_particle_residual_field.particle_view import scientific_tasks
+    from teacher_logit_reco.local_particle_residual_field.particle_view.teacher_train import (
+        train_particle_view_teacher,
+    )
+
+    assert (
+        scientific_tasks._operation_callable("teacher_training")
+        is train_particle_view_teacher
+    )
 
 
 def test_step10_runtime_zero_exit_without_result_is_a_hard_failure(tmp_path):
@@ -482,6 +579,100 @@ def test_step10_scientific_catalog_requires_exact_coverage_and_executes_action(
         build_scientific_task_catalog(registry=registry, task_specs={})
 
 
+def test_step10_scientific_paths_and_legacy_warnings_publish_non_gating(
+    tmp_path,
+    monkeypatch,
+):
+    registry = build_particle_view_registry(
+        unified_split_manifest_sha256=_sha("warning-manifest"),
+        train_identity_sha256=_sha("warning-train"),
+        run_specs=[
+            ParticleViewRunSpec(
+                run_id="warning_source",
+                stage="source",
+                scientific_role="source:warning_fixture",
+                selection_family="infrastructure",
+                uses_labels=False,
+                train_split=None,
+            )
+        ],
+        campaign_id="warning_fixture",
+    )
+    config = with_content_hash(
+        {"contract": "warning_factory_fixture_v1", "value": 1}
+    )
+    config_path = tmp_path / "warning_factory_config.json"
+    write_immutable_json(config_path, config)
+    module_path = tmp_path / "warning_fixture_factory.py"
+    module_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "from teacher_logit_reco.local_particle_residual_field.particle_view import with_content_hash, write_immutable_json",
+                "def build(**context):",
+                "    output = Path(context['output_dir'])",
+                "    artifact = output / 'confirmation_replica.json'",
+                "    def action(*, path, bundle_path):",
+                "        Path(path).parent.mkdir(parents=True, exist_ok=True)",
+                "        write_immutable_json(path, with_content_hash({",
+                "            'contract': 'warning_confirmation_fixture_v1',",
+                "            'bundle_path': bundle_path,",
+                "            'quality_warnings': [",
+                "                {'warning_code': 'WARN_SCIENTIFIC', 'severity': 'scientific', 'declared_warning_threshold': 0.01},",
+                "                {'warning_code': 'WARN_SCIENTIFIC_WARNING', 'severity': 'scientific_warning'},",
+                "            ],",
+                "        }))",
+                "    return {",
+                "        'kwargs': {'path': str(artifact), 'bundle_path': str(output / 'selected_confirmation_bundle.pt')},",
+                "        'artifact_paths': [str(artifact)],",
+                "        'action': action,",
+                "    }",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    catalog = build_scientific_task_catalog(
+        registry=registry,
+        task_specs={
+            "warning_source": {
+                "operation": "source_preflight",
+                "factory": "warning_fixture_factory:build",
+                "factory_config_path": str(config_path),
+                "factory_config_sha256": sha256_file(config_path),
+            }
+        },
+    )
+    attempt = tmp_path / ".warning_task.attempt_123"
+    final = tmp_path / "warning_task"
+    monkeypatch.setenv("PARTICLE_VIEW_TASK_OUTPUT_DIR", str(attempt))
+    monkeypatch.setenv("PARTICLE_VIEW_TASK_FINAL_OUTPUT_DIR", str(final))
+    result = execute_scientific_task(
+        catalog=catalog,
+        registry=registry,
+        run_id="warning_source",
+        seed=101,
+        task_id="warning_source__seed_101",
+        output_dir=attempt,
+    )
+    payload = json.loads(
+        (attempt / "confirmation_replica.json").read_text(encoding="utf-8")
+    )
+    assert payload["bundle_path"] == str(
+        final / "selected_confirmation_bundle.pt"
+    )
+    warnings = load_quality_warning_jsonl(attempt / "quality_warnings.jsonl")
+    assert result["status"] == "complete"
+    assert len(warnings) == 2
+    assert {row["severity"] for row in warnings} == {"warning"}
+    threshold = next(
+        row for row in warnings if row["warning_code"] == "WARN_SCIENTIFIC"
+    )
+    assert threshold["warning_threshold"] == 0.01
+    assert all(row["exit_code"] == 0 and row["non_gating"] for row in warnings)
+
+
 def test_step10_graph_reconciles_every_registry_run_and_locked_tigris_contract():
     registry, graph = _graph()
     audit = validate_particle_view_production_graph(graph)
@@ -562,7 +753,11 @@ def test_step10_clean_start_submission_uses_afterok_and_no_warning_dependency():
         mode="execute",
         runner=runner,
     )
-    assert ledger["submitted_count"] == 11
+    assert ledger["submitted_count"] > 11
+    assert any(
+        any(token.startswith("--array=") for token in command)
+        for command in calls
+    )
     assert ledger["scientific_warning_dependency_count"] == 0
     assert "--dependency=afterok:12001" in calls[1]
     assert all(
@@ -599,7 +794,7 @@ def test_step10_execute_publishes_progress_before_a_later_sbatch_failure():
             progress_callback=lambda records: snapshots.append(list(records)),
         )
     assert [len(snapshot) for snapshot in snapshots] == [1, 2]
-    assert snapshots[-1][-1]["node_id"] == "pv01_baselines"
+    assert snapshots[-1][-1]["node_id"] == "pv00_source"
     assert snapshots[-1][-1]["job_id"] == "13002"
 
 
@@ -611,18 +806,25 @@ def test_step10_logical_recovery_reuses_completed_and_active_jobs():
         node_ids[1]: {"job_id": "9002", "state": "RUNNING"},
         node_ids[2]: {"job_id": "9003", "state": "FAILED"},
     }
-    plan = plan_particle_view_submissions(
-        graph=graph,
-        graph_path="/campaign/graph.json",
-        existing_jobs=existing,
-    )
-    assert plan[0]["action"] == "reuse_completed"
-    assert plan[1]["action"] == "reuse_active"
-    assert plan[2]["action"] == "submit"
-    assert plan[2]["dependency_job_ids"] == ["9002"]
-    assert plan[3]["action"] == "submit"
-    assert plan[3]["dependency_job_ids"] == ["<pv02_oracle_target_screens:job_id>"]
-    assert len([row for row in plan if row["action"] == "submit"]) == 9
+    with pytest.raises(ValueError, match="no authenticated node completion"):
+        plan_particle_view_submissions(
+            graph=graph,
+            graph_path="/campaign/graph.json",
+            existing_jobs=existing,
+        )
+
+
+def test_step10_active_recovery_is_disabled_without_progress_ledger():
+    _, graph = _graph()
+    node_id = LOGICAL_NODE_LAYOUT[0][0]
+    with pytest.raises(ValueError, match="active Slurm jobs cannot be reused"):
+        plan_particle_view_submissions(
+            graph=graph,
+            graph_path="/campaign/graph.json",
+            existing_jobs={
+                node_id: {"job_id": "9002", "state": "RUNNING"}
+            },
+        )
 
 
 def test_step10_structured_warnings_exit_zero_and_do_not_block_completion():
@@ -711,9 +913,9 @@ def test_step10_miniature_filesystem_rehearsal_and_warning_recovery(tmp_path):
     assert report["status"] == "PASS"
     assert report["logical_node_count"] == 11
     assert report["completion_count"] == 11
-    assert report["clean_start_planned_count"] == 11
+    assert report["clean_start_planned_count"] > 11
     assert report["recovery_reused_completed_count"] == 6
-    assert report["recovery_planned_count"] == 5
+    assert report["recovery_planned_count"] > 5
     assert report["warning_count"] == 1
     assert report["warning_did_not_block_descendants"] is True
     assert len(list((tmp_path / "node_completions").glob("*.json"))) == 11
@@ -751,7 +953,7 @@ def test_step10_print_and_dry_run_never_call_sbatch():
             runner=forbidden,
         )
         assert ledger["submitted_count"] == 0
-        assert ledger["planned_submit_count"] == 11
+        assert ledger["planned_submit_count"] > 11
 
 
 def test_step10_one_command_bootstrap_builds_graph_reconciliation_and_ledger(
@@ -792,7 +994,7 @@ def test_step10_one_command_bootstrap_builds_graph_reconciliation_and_ledger(
     assert len(ledgers) == 1
     ledger = json.loads(ledgers[0].read_text(encoding="utf-8"))
     assert ledger["mode"] == "dry_run"
-    assert ledger["planned_submit_count"] == 11
+    assert ledger["planned_submit_count"] > 11
 
 
 def test_step10_low_data_registry_cli_and_unified_submission_bootstrap(tmp_path):

@@ -17,6 +17,12 @@ PARTICLE_VIEW_SPLIT_AUTHORIZATION_CONTRACT = "particle_view_split_authorization_
 PARTICLE_VIEW_STACK_REPORT_CONTRACT = "particle_view_stack_confirmation_v1"
 PARTICLE_VIEW_SEED_EXPANSION_CONTRACT = "particle_view_seed_expansion_v1"
 LOCKED_CONFIRMATION_SEEDS = (101, 202, 303)
+_EXPECTED_STAGE_G_CONTROLS = {
+    "A0_VIEW_LONG_DEPLOY",
+    "A0_VIEW_TOTAL_LABEL_BUDGET",
+    "SELECTED_PARAMETER_MATCH",
+    "SELECTED_FLOP_MATCH",
+}
 
 
 def expand_three_seed_confirmation_rows(
@@ -565,11 +571,16 @@ def build_stack_confirmation_report(
         if row.get("split") != "stack_val" or not _finite(row.get("accuracy")):
             raise ValueError("invalid stack-validation metric row")
         normalized.append(dict(row))
-    controls = [row for row in normalized if row.get("role") == "stage_g_control"]
     summaries: dict[str, Any] = {}
-    for family in (
-        "selected_privileged_scientific_model",
-        "selected_pre_stage_g_hlt_deployable_model",
+    for family, registry_family in (
+        (
+            "selected_privileged_scientific_model",
+            "PRIVILEGED_SCIENTIFIC",
+        ),
+        (
+            "selected_pre_stage_g_hlt_deployable_model",
+            "PRE_STAGE_G_DEPLOYABLE",
+        ),
     ):
         winner = selection[family]
         winner_hashes = {row["bundle_sha256"] for row in winner["replicas"]}
@@ -582,14 +593,42 @@ def build_stack_confirmation_report(
             raise ValueError("stack report requires all three winner replicas")
         winner_mean = sum(winner_values) / 3.0
         grouped_controls: dict[str, list[float]] = defaultdict(list)
-        for row in controls:
-            grouped_controls[str(row["configuration_id"])].append(
+        family_controls = [
+            row
+            for row in normalized
+            if (
+                row.get("role") == "stage_g_control"
+                and row.get("winner_family") == registry_family
+            )
+        ]
+        legacy_controls = [
+            row
+            for row in normalized
+            if row.get("role") == "stage_g_control"
+            and row.get("winner_family") is None
+        ]
+        if not family_controls and legacy_controls:
+            # Backward-compatible report ingestion only. Production PV08
+            # always writes winner_family and therefore takes the strict path.
+            grouped_controls["legacy_stage_g_control"] = [
+                float(row["accuracy"]) for row in legacy_controls
+            ]
+        for row in family_controls:
+            parts = str(row["configuration_id"]).split("/", 2)
+            if len(parts) != 3 or parts[0] != registry_family:
+                raise ValueError("Stage-G control family identity changed")
+            grouped_controls[parts[1]].append(
                 float(row["accuracy"])
             )
+        if family_controls and set(grouped_controls) != _EXPECTED_STAGE_G_CONTROLS:
+            raise ValueError("stack report Stage-G control inventory is incomplete")
+        if any(len(values) != 3 for values in grouped_controls.values()):
+            raise ValueError(
+                "stack report requires exactly three seeds per family/control"
+            )
         control_means = {
-            control_id: sum(values) / len(values)
+            control_id: sum(values) / 3.0
             for control_id, values in grouped_controls.items()
-            if len(values) == 3
         }
         strongest = (
             max(control_means, key=lambda key: (control_means[key], key))

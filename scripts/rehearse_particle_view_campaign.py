@@ -21,6 +21,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (  # 
     build_particle_view_registry,
     build_quality_warning,
     reconcile_particle_view_production_graph,
+    sha256_file,
     submit_particle_view_graph,
     with_content_hash,
     write_immutable_json,
@@ -138,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             graph=graph,
             node_id=node_id,
             output_artifacts=[
-                {"path": str(support_path), "sha256": support["content_hash"]}
+                {"path": str(support_path), "sha256": sha256_file(support_path)}
             ],
             warning_sha256=(
                 [warning["content_hash"]]
@@ -166,7 +167,11 @@ def main(argv: list[str] | None = None) -> int:
         existing_jobs=existing,
         mode="dry_run",
     )
-    first_recovered = recovery_ledger["records"][6]
+    first_recovered = next(
+        row
+        for row in recovery_ledger["records"]
+        if row["node_id"] == "pv06_confirmation_selection"
+    )
     warning_did_not_block_descendants = (
         first_recovered["node_id"] == "pv06_confirmation_selection"
         and first_recovered["action"] == "submit"

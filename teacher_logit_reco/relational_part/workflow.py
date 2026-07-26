@@ -17,6 +17,7 @@ from .provenance import source_snapshot
 
 
 RUN_RESULT_ENVELOPE_CONTRACT = "relational_part_run_results_v1"
+CHECKPOINT_REGISTRATION_CONTRACT = "relational_part_checkpoint_registration_v2"
 
 
 def parse_named_hashes(values: Sequence[str]) -> dict[str, str]:
@@ -145,7 +146,10 @@ def load_run_result(
     expected_model_contract_sha256: str | None = None,
 ) -> dict[str, Any]:
     root = Path(run_directory)
-    registration = load_hashed_json(root / "checkpoint_registration.json")
+    registration = load_hashed_json(
+        root / "checkpoint_registration.json",
+        expected_contract=CHECKPOINT_REGISTRATION_CONTRACT,
+    )
     metrics = load_hashed_json(root / "val_select_metrics.json")
     if registration.get("val_select_metrics_sha256") != metrics["content_hash"]:
         raise ValueError(f"{root} registration and val_select metrics disagree")

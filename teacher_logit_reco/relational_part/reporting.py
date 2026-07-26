@@ -16,15 +16,17 @@ from .selection import (
     LOCKED_FINALISTS_CONTRACT,
     validate_locked_finalists,
 )
+from .semantic_controls import validate_semantic_diagnostics_bundle
 
 
-REPORT_CONTRACT = "relational_part_report_v2"
+REPORT_CONTRACT = "relational_part_report_v4"
 
 
 def build_relational_part_report(
     *,
     locked_finalists: Mapping[str, Any],
     confirmation_summary: Mapping[str, Any],
+    semantic_diagnostics: Mapping[str, Any],
     final_evaluations: Sequence[Mapping[str, Any]],
     paired_statistics: Mapping[str, Mapping[str, Mapping[str, Any]]],
 ) -> dict[str, Any]:
@@ -39,6 +41,20 @@ def build_relational_part_report(
     )
     if locked_finalists.get("confirmation_summary_sha256") != confirmation_sha:
         raise ValueError("report lock and confirmation summary disagree")
+    semantic_sha = validate_semantic_diagnostics_bundle(
+        semantic_diagnostics,
+        confirmation_summary=confirmation_summary,
+    )
+    if (
+        locked_finalists.get("semantic_perturbation_sha256") != semantic_sha
+        or semantic_diagnostics.get("confirmation_summary_sha256")
+        != confirmation_sha
+    ):
+        raise ValueError(
+            "report semantic diagnostics disagree with the finalist lock"
+        )
+    if semantic_diagnostics.get("coverage_complete") is not True:
+        raise ValueError("report semantic diagnostic coverage is incomplete")
     expected_rows = {
         str(row["run_id"]): row for row in locked_finalists["evaluation_rows"]
     }
@@ -252,12 +268,39 @@ def build_relational_part_report(
         and confirmation_winner["mean_matched_seed_accuracy_difference"] >= 0.003
         and confirmation_winner["seeds_beating_matched_baseline"] == 3
     )
+    semantic_rows = {}
+    for run_id in semantic_diagnostics["run_ids"]:
+        run_entry = semantic_diagnostics["runs"][run_id]
+        artifact = run_entry["artifact"]
+        semantic_rows[run_id] = {
+            "artifact_sha256": run_entry["artifact_sha256"],
+            "seed": artifact["seed"],
+            "families": list(artifact["families"]),
+            "checkpoint_sha256": artifact["checkpoint_sha256"],
+            "checkpoint_registration_sha256": artifact[
+                "checkpoint_registration_sha256"
+            ],
+            "model_contract_sha256": artifact["model_contract_sha256"],
+            "metrics": {
+                name: dict(value)
+                for name, value in artifact["metrics"].items()
+            },
+            "diagnostics": {
+                name: {
+                    key: value
+                    for key, value in detail.items()
+                    if key != "batch_diagnostics"
+                }
+                for name, detail in artifact["diagnostics"].items()
+            },
+        }
     return with_content_hash(
         {
             "contract": REPORT_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 4,
             "locked_finalists_sha256": lock_sha,
             "confirmation_summary_sha256": confirmation_sha,
+            "semantic_perturbation_sha256": semantic_sha,
             "campaign_spec_sha256": require_sha256(
                 locked_finalists["campaign_spec_sha256"],
                 name="campaign_spec_sha256",
@@ -273,6 +316,15 @@ def build_relational_part_report(
             "particularly_strong_result": strong,
             "fully_negative_campaign_completed_validly": not confirmation_gain,
             "rows": rows,
+            "semantic_validation_diagnostics": {
+                "artifact_sha256": semantic_sha,
+                "coverage_policy": semantic_diagnostics["coverage_policy"],
+                "coverage_complete": True,
+                "seed": 101,
+                "split": "val_select",
+                "run_ids": list(semantic_diagnostics["run_ids"]),
+                "runs": semantic_rows,
+            },
             "claims": {
                 "selection_used_final_test": False,
                 "final_test_reporting_only": True,
@@ -294,6 +346,7 @@ def render_relational_part_markdown(report: Mapping[str, Any]) -> str:
         f"- Capacity control reproduces gain: `{str(report['capacity_control_reproduces_gain']).lower()}`",
         f"- Positive sealed-test gain: `{str(report['winner_final_test_gain_positive']).lower()}`",
         f"- Positive architecture result: `{str(report['positive_architecture_result']).lower()}`",
+        f"- Semantic diagnostics artifact: `{report['semantic_perturbation_sha256']}`",
         "",
         "Final-test results were used for reporting only, never model selection.",
         "",
@@ -315,8 +368,27 @@ def render_relational_part_markdown(report: Mapping[str, Any]) -> str:
             "",
             "Inference dependencies were authenticated as HLT-only for every row.",
             "",
+            "## Validation-only semantic diagnostics",
+            "",
+            report["semantic_validation_diagnostics"]["coverage_policy"],
+            "",
+            "| Seed-101 run | Control | Accuracy | Change vs full |",
+            "|---|---|---:|---:|",
         ]
     )
+    for run_id in report["semantic_validation_diagnostics"]["run_ids"]:
+        controls = report["semantic_validation_diagnostics"]["runs"][run_id][
+            "metrics"
+        ]
+        full_accuracy = float(controls["full_model"]["accuracy"])
+        for control_name, metrics in controls.items():
+            accuracy = float(metrics["accuracy"])
+            delta = accuracy - full_accuracy
+            lines.append(
+                f"| `{run_id}` | `{control_name}` | "
+                f"{accuracy:.6f} | {delta:+.6f} |"
+            )
+    lines.append("")
     return "\n".join(lines)
 
 

@@ -672,12 +672,20 @@ def build_low_data_campaign_registry(
     for family_id in _WINNER_FAMILIES:
         for control_id in _FAIRNESS_CONTROL_IDS:
             run_id = f"FAIR_{family_id}_{control_id}"
+            parents = ["SELECTED_PATH_FAIRNESS_LEDGER"]
+            if family_id == "PRIVILEGED_SCIENTIFIC":
+                # When both selected families resolve to the same fairness
+                # entry, this canonical pre-Stage-G task is reused instead of
+                # training a numerically independent duplicate.
+                parents.append(
+                    f"FAIR_PRE_STAGE_G_DEPLOYABLE_{control_id}"
+                )
             add(
                 run_id,
                 stage="fairness",
                 category="fairness_control",
                 detail=f"{family_id}/{control_id}",
-                parents=("SELECTED_PATH_FAIRNESS_LEDGER",),
+                parents=tuple(parents),
                 seeds=PARTICLE_VIEW_SEEDS,
             )
             fairness_run_ids.append(run_id)

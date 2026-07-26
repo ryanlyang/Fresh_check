@@ -6,9 +6,10 @@
 #SBATCH --partition=tigris
 #SBATCH --account=reu-aisocial
 #SBATCH --nodes=1
-#SBATCH --time=04:00:00
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=8
+#SBATCH --time=3-00:00:00
+#SBATCH --mem=128G
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=12
 
 set -euo pipefail
 IFS=$'\n\t'

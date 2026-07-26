@@ -23,7 +23,9 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (  # 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--execution-manifest", required=True)
+    parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--node-id", required=True)
+    parser.add_argument("--task-id")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -31,9 +33,15 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     manifest = load_hashed_json(args.execution_manifest)
+    if (
+        args.expected_manifest_sha256 is not None
+        and manifest["content_hash"] != args.expected_manifest_sha256
+    ):
+        raise ValueError("runtime execution manifest changed after graph creation")
     report = execute_runtime_node(
         manifest=manifest,
         node_id=args.node_id,
+        task_ids=None if args.task_id is None else [args.task_id],
         dry_run=args.dry_run,
     )
     if not args.dry_run:

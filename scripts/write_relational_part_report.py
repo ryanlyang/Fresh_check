@@ -18,6 +18,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     CONFIRMATION_SUMMARY_CONTRACT,
     FINAL_EVALUATION_CONTRACT,
     LOCKED_FINALISTS_CONTRACT,
+    SEMANTIC_PERTURBATION_CONTRACT,
     build_relational_part_report,
     load_final_predictions,
     load_hashed_json,
@@ -51,6 +52,7 @@ def main() -> int:
     parser.add_argument("--locked-finalists", type=Path, required=True)
     parser.add_argument("--confirmation-summary", type=Path, required=True)
     parser.add_argument("--campaign-spec", type=Path, required=True)
+    parser.add_argument("--semantic-perturbations", type=Path, required=True)
     parser.add_argument(
         "--final-evaluation", type=Path, action="append", default=[]
     )
@@ -68,12 +70,25 @@ def main() -> int:
         expected_contract=CONFIRMATION_SUMMARY_CONTRACT,
     )
     campaign = load_hashed_json(args.campaign_spec)
+    semantic = load_hashed_json(
+        args.semantic_perturbations,
+        expected_contract=SEMANTIC_PERTURBATION_CONTRACT,
+    )
     validate_campaign_source(campaign, repo_root=REPO_ROOT)
     if (
         lock.get("campaign_spec_sha256") != campaign["content_hash"]
         or confirmation.get("campaign_spec_sha256") != campaign["content_hash"]
     ):
         raise ValueError("report inputs belong to another campaign source lock")
+    if (
+        semantic.get("confirmation_summary_sha256")
+        != confirmation["content_hash"]
+        or lock.get("semantic_perturbation_sha256")
+        != semantic["content_hash"]
+    ):
+        raise ValueError(
+            "semantic diagnostics differ from the report source lock"
+        )
     evaluations = [
         load_hashed_json(path, expected_contract=FINAL_EVALUATION_CONTRACT)
         for path in args.final_evaluation
@@ -82,6 +97,7 @@ def main() -> int:
     resolved = {
         "locked_finalists_sha256": lock["content_hash"],
         "confirmation_summary_sha256": confirmation["content_hash"],
+        "semantic_perturbation_sha256": semantic["content_hash"],
         "expected_final_evaluation_count": expected,
         "supplied_final_evaluation_count": len(evaluations),
         "bootstrap_replicates": args.bootstrap_replicates,
@@ -130,6 +146,7 @@ def main() -> int:
     report = build_relational_part_report(
         locked_finalists=lock,
         confirmation_summary=confirmation,
+        semantic_diagnostics=semantic,
         final_evaluations=evaluations,
         paired_statistics=paired,
     )

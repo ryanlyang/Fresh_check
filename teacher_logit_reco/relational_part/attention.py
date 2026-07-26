@@ -82,22 +82,126 @@ def explicit_edge_value_message(
     return (attention_weights.unsqueeze(-1) * pair_values).sum(dim=3)
 
 
+def _is_weaver_custom_attention(value: Any, module: Any) -> bool:
+    """Recognize Weaver's batch-first Attention without importing Weaver."""
+
+    return (
+        not isinstance(value, module.nn.MultiheadAttention)
+        and isinstance(getattr(value, "in_proj", None), module.nn.Linear)
+        and isinstance(getattr(value, "out_proj", None), module.nn.Linear)
+        and isinstance(getattr(value, "num_heads", None), int)
+        and isinstance(getattr(value, "head_dim", None), int)
+        and callable(getattr(value, "q_norm", None))
+        and callable(getattr(value, "k_norm", None))
+    )
+
+
+def _weaver_custom_attention_weights(
+    attention: Any,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+) -> Any:
+    """Recompute the probabilities used by Weaver's custom Attention."""
+
+    module = _require_torch()
+    query = args[0] if len(args) > 0 else kwargs["query"]
+    key = args[1] if len(args) > 1 else kwargs["key"]
+    value = args[2] if len(args) > 2 else kwargs["value"]
+    batch, query_count, _ = map(int, query.shape)
+    context_count = int(key.shape[1])
+    heads = int(attention.num_heads)
+    head_dim = int(attention.head_dim)
+    q, k, _ = F._in_projection_packed(
+        query,
+        key,
+        value,
+        attention.in_proj.weight,
+        attention.in_proj.bias,
+    )
+    q = attention.q_norm(
+        q.view(batch, query_count, heads, head_dim)
+    ).transpose(1, 2)
+    k = attention.k_norm(
+        k.view(batch, context_count, heads, head_dim)
+    ).transpose(1, 2)
+    logits = (q * math.sqrt(1.0 / float(head_dim))) @ k.transpose(-2, -1)
+
+    def additive(mask_value: Any) -> Any:
+        if mask_value.dtype == module.bool:
+            return module.zeros_like(
+                mask_value, dtype=logits.dtype
+            ).masked_fill(mask_value, -module.inf)
+        return mask_value.to(dtype=logits.dtype, device=logits.device)
+
+    attention_mask = kwargs.get(
+        "attn_mask", args[4] if len(args) > 4 else None
+    )
+    if attention_mask is not None:
+        attention_mask = additive(attention_mask.to(logits.device))
+        if attention_mask.ndim == 2:
+            attention_mask = attention_mask.view(
+                1, 1, query_count, context_count
+            )
+        elif attention_mask.ndim == 3:
+            if int(attention_mask.shape[0]) == batch * heads:
+                attention_mask = attention_mask.view(
+                    batch, heads, query_count, context_count
+                )
+            else:
+                attention_mask = attention_mask.unsqueeze(1)
+        logits = logits + attention_mask
+    padding_mask = kwargs.get(
+        "key_padding_mask", args[3] if len(args) > 3 else None
+    )
+    if padding_mask is not None:
+        padding_mask = additive(padding_mask.to(logits.device))
+        logits = logits + padding_mask.view(batch, 1, 1, context_count)
+    probabilities = F.softmax(logits, dim=-1)
+    if bool(attention.training) and float(attention.dropout) > 0:
+        raise RuntimeError(
+            "custom Weaver attention diagnostics require evaluation mode"
+        )
+    return probabilities
+
+
 def capture_multihead_attention_weights(
     model: Any,
     forward_call: Any,
 ) -> list[Any]:
-    """Run one diagnostic forward while transparently retaining MHA weights."""
+    """Capture weights with Weaver sequence trimming disabled and restored."""
 
     module = _require_torch()
-    attentions = [
+    trimmers = [
+        value
+        for value in model.modules()
+        if value.__class__.__name__ == "SequenceTrimmer"
+        and hasattr(value, "enabled")
+        and hasattr(value, "_counter")
+    ]
+    trimmer_states = [
+        (
+            value,
+            bool(value.enabled),
+            value._counter.detach().clone(),
+        )
+        for value in trimmers
+    ]
+    multihead_attentions = [
         value
         for value in model.modules()
         if isinstance(value, module.nn.MultiheadAttention)
     ]
+    custom_attentions = [
+        value
+        for value in model.modules()
+        if _is_weaver_custom_attention(value, module)
+    ]
     originals = []
     captured: list[Any] = []
     try:
-        for attention in attentions:
+        for trimmer, _, _ in trimmer_states:
+            trimmer.enabled = False
+        for attention in multihead_attentions:
             original = attention.forward
             originals.append((attention, original))
 
@@ -119,10 +223,29 @@ def capture_multihead_attention_weights(
                 return output, weights if requested else None
 
             attention.forward = wrapped
+        for attention in custom_attentions:
+            original = attention.forward
+            originals.append((attention, original))
+
+            def wrapped_custom(*args: Any, _attention=attention,
+                               _original=original, **kwargs: Any):
+                output = _original(*args, **kwargs)
+                captured.append(
+                    _weaver_custom_attention_weights(
+                        _attention, args, kwargs
+                    ).detach()
+                )
+                return output
+
+            attention.forward = wrapped_custom
         forward_call()
     finally:
         for attention, original in originals:
             attention.forward = original
+        for trimmer, enabled, counter in trimmer_states:
+            trimmer.enabled = enabled
+            with module.no_grad():
+                trimmer._counter.copy_(counter)
     return captured
 
 
@@ -130,11 +253,14 @@ def attention_allocation_diagnostics(
     weights_by_layer: Sequence[Any],
     lorentz_vectors: Any,
     mask: Any,
+    *,
+    expected_particle_layer_count: int = 8,
 ) -> dict[str, Any]:
     """Aggregate actual attention fractions by pT group and angular band."""
 
     module = _require_torch()
     valid = mask[:, 0].bool()
+    particle_count = int(valid.shape[1])
     pt = module.hypot(lorentz_vectors[:, 0], lorentz_vectors[:, 1])
     masked_pt = pt.masked_fill(~valid, -module.inf)
     leading_pt = masked_pt.amax(dim=1, keepdim=True)
@@ -175,10 +301,29 @@ def attention_allocation_diagnostics(
             labels.append(f"({left:.2f},inf)")
         band_masks.append(selected & pair_valid)
 
+    particle_weights = []
+    captured_shapes = []
+    for weights in weights_by_layer:
+        shape = tuple(int(value) for value in weights.shape)
+        captured_shapes.append(list(shape))
+        if len(shape) != 4:
+            continue
+        if (
+            shape[0] == int(valid.shape[0])
+            and shape[2] == particle_count
+            and shape[3] == particle_count
+        ):
+            particle_weights.append(weights)
+    if len(particle_weights) != int(expected_particle_layer_count):
+        raise RuntimeError(
+            "attention diagnostics require exactly "
+            f"{int(expected_particle_layer_count)} particle self-attention "
+            "layers with [batch,heads,N,N] weights; captured shapes were "
+            f"{captured_shapes}"
+        )
+
     layers = []
-    for layer, weights in enumerate(weights_by_layer):
-        if int(weights.shape[0]) != int(valid.shape[0]):
-            continue  # Ignore class-attention blocks with a different query.
+    for layer, weights in enumerate(particle_weights):
         query_valid = valid
         per_head = []
         for head in range(int(weights.shape[1])):
@@ -275,6 +420,18 @@ def attention_allocation_diagnostics(
         ),
         "layers": layers,
         "captured_particle_attention_layer_count": len(layers),
+        "captured_attention_shapes": captured_shapes,
+        "particle_attention_shape_policy": (
+            "accept only [batch,heads,particle_count,particle_count]; "
+            "class/cross-attention shapes are excluded"
+        ),
+        "expected_particle_attention_layer_count": int(
+            expected_particle_layer_count
+        ),
+        "sequence_trimming_policy": (
+            "disable only during diagnostic forward; restore enabled flag "
+            "and counter exactly"
+        ),
     }
 
 

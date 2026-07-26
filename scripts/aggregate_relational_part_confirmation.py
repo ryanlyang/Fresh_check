@@ -21,6 +21,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     load_hashed_json,
     write_immutable_json,
     validate_campaign_source,
+    validate_semantic_diagnostics_bundle,
 )
 from teacher_logit_reco.relational_part.workflow import (  # noqa: E402
     expected_training_lineage,
@@ -141,6 +142,10 @@ def main() -> int:
         ),
         seal_finalists=not args.summary_only,
     )
+    if semantic is not None:
+        validate_semantic_diagnostics_bundle(
+            semantic, confirmation_summary=summary
+        )
     if semantic is not None and semantic.get(
         "confirmation_summary_sha256"
     ) != summary["content_hash"]:

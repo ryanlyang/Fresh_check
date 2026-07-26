@@ -209,6 +209,7 @@ def build_storage_reservation(
     allocation_ram_bytes: int,
     transient_ram_bytes: int,
     diagnostic_budget: Mapping[str, Any],
+    derivation_evidence: Mapping[str, Any] | None = None,
     safety_margin_bytes: int = 2 * 1024**3,
 ) -> dict[str, Any]:
     """Reserve measured disk and RAM before a campaign is submitted."""
@@ -282,6 +283,7 @@ def build_storage_reservation(
             "measured_artifacts": measured,
             "planned_persistent_artifacts": planned,
             "tap_stage_reservations": tap_rows,
+            "derivation_evidence": dict(derivation_evidence or {}),
             "diagnostic_budget_sha256": diagnostic_budget["content_hash"],
             "measured_persistent_bytes": measured_bytes,
             "planned_persistent_bytes": planned_bytes,

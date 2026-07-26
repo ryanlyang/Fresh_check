@@ -31,6 +31,7 @@ from teacher_logit_reco.relational_part import (
     build_registered_screening_model,
     build_registered_wide_model,
     build_step5_model_contract,
+    canonical_json_bytes,
     fit_region_normalization,
     fit_relation_normalization,
     finalize_tree_split,
@@ -46,6 +47,7 @@ from teacher_logit_reco.relational_part import (
     write_tree_shard,
     with_content_hash,
 )
+from teacher_logit_reco.relational_part.train import _capture_diagnostics
 
 
 def _sample(
@@ -222,6 +224,19 @@ def test_region_normalizer_encoder_and_masking() -> None:
     assert torch.isfinite(details["encoded"]).all()
     diagonal = torch.arange(6)
     assert details["normalized"][:, 4:8, diagonal, diagonal].count_nonzero() == 0
+    ablated = encoder(
+        raw,
+        valid,
+        trees[:2],
+        return_details=True,
+        disabled_resolutions=(4,),
+    )
+    k4_channels = [1, *range(14, 20), *range(28, 30), *range(34, 36), 39]
+    assert ablated["normalized"][:, k4_channels].count_nonzero() == 0
+    assert (
+        ablated["resolution_ablation_domain"]
+        == "registered_normalized_K_specific_channels_before_encoder"
+    )
     details["encoded"].square().sum().backward()
     assert encoder.encoder[0].weight.grad is not None
 
@@ -438,10 +453,29 @@ class _Transformer(torch.nn.Module):
             hidden=tuple(config["pair_embed_dims"]),
         )
         self.cls_token = torch.nn.Parameter(torch.zeros(1))
+        self.blocks = torch.nn.ModuleList(
+            [
+                torch.nn.MultiheadAttention(
+                    17, 1, dropout=0, batch_first=True
+                )
+                for _ in range(8)
+            ]
+        )
         self.head = torch.nn.Linear(25, 10)
 
     def forward(self, x, v=None, mask=None, uu=None):
         bias = self.pair_embed(v, uu=uu, mask=mask)
+        tokens = x.transpose(1, 2)
+        for attention in self.blocks:
+            update, _ = attention(
+                tokens,
+                tokens,
+                tokens,
+                key_padding_mask=~mask[:, 0].bool(),
+                need_weights=False,
+            )
+            tokens = tokens + update
+        x = tokens.transpose(1, 2)
         particle = (x * mask).sum(-1) / mask.sum(-1).clamp_min(1)
         pair_mask = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).to(x)
         pair = (bias * pair_mask).sum((-1, -2)) / pair_mask.sum(
@@ -524,6 +558,57 @@ def test_all_standard_screening_combinations_and_full_zero_shape_control() -> No
     } == {
         name: tuple(value.shape) for name, value in zero.state_dict().items()
     }
+    full.eval()
+    diagnostics = full.diagnostics(
+        torch.from_numpy(inputs.pf_features),
+        torch.from_numpy(inputs.pf_vectors),
+        torch.from_numpy(inputs.pf_mask),
+        torch.from_numpy(tokens[:2]),
+        trees[:2],
+        labels=torch.tensor([1, 8]),
+    )
+    canonical_json_bytes(diagnostics)
+    assert set(diagnostics["REGION"]["lca_distributions"]) == {
+        "normalized_depth",
+        "log_merge_delta_r",
+        "log_merge_kt",
+        "merge_z",
+        "log_merge_mass_fraction",
+    }
+    assert set(diagnostics["REGION"]["cluster_property_distributions"]) == {
+        "2", "4", "8"
+    }
+    assert diagnostics["REGION"]["performance_by_tree_depth"][
+        "event_counts"
+    ]
+    assert (
+        diagnostics["CHARGE"]["pid_conditioned_performance"]
+        is not None
+    )
+    repeated = {
+        "points": torch.from_numpy(inputs.pf_points[:1]).repeat(65, 1, 1),
+        "features": torch.from_numpy(inputs.pf_features[:1]).repeat(65, 1, 1),
+        "lorentz_vectors": torch.from_numpy(
+            inputs.pf_vectors[:1]
+        ).repeat(65, 1, 1),
+        "mask": torch.from_numpy(inputs.pf_mask[:1]).repeat(65, 1, 1),
+        "raw_tokens": torch.from_numpy(tokens[:1]).repeat(65, 1, 1),
+        "labels": torch.arange(65) % 10,
+        "region_trees": [trees[0]] * 65,
+    }
+    population = _capture_diagnostics(
+        full,
+        [
+            {name: value[:64] for name, value in repeated.items()},
+            {name: value[64:] for name, value in repeated.items()},
+        ],
+        torch.device("cpu"),
+    )
+    assert population["event_count"] == 65
+    assert len(population["values"]["REGION"]["node_counts"]) == 65
+    assert len(
+        population["values"]["REGION"]["actual_cluster_counts"]["8"]
+    ) == 65
     details = zero.pair_features(
         torch.from_numpy(inputs.pf_features),
         torch.from_numpy(inputs.pf_vectors),

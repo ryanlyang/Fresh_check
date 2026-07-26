@@ -30,6 +30,13 @@ from teacher_logit_reco.relational_part import (
     update_patience,
 )
 from teacher_logit_reco.relational_part.train import _capture_diagnostics
+from teacher_logit_reco.relational_part.attention import (
+    attention_allocation_diagnostics,
+    capture_multihead_attention_weights,
+)
+from scripts.validate_relational_part_weaver_parity import (
+    _assert_trimmer_state_restored,
+)
 
 
 def test_global_checkpoint_window_and_exact_patience() -> None:
@@ -125,6 +132,176 @@ def test_edge_value_efficient_reference_zero_projection_and_masking() -> None:
     assert returned is None
     assert wrapped.last_diagnostics["masked_query_count"] == 3
     assert wrapped.last_diagnostics["materialized_pair_value_tensor"] is False
+
+
+class _CustomWeaverAttention(torch.nn.Module):
+    """Small local stand-in for Weaver's newer custom Attention."""
+
+    def __init__(self, dimension=8, heads=2):
+        super().__init__()
+        self.num_heads = heads
+        self.head_dim = dimension // heads
+        self.dropout = 0.0
+        self.in_proj = torch.nn.Linear(dimension, 3 * dimension)
+        self.out_proj = torch.nn.Linear(dimension, dimension)
+        self.q_norm = torch.nn.Identity()
+        self.k_norm = torch.nn.Identity()
+
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        key_padding_mask=None,
+        attn_mask=None,
+    ):
+        batch, query_count, dimension = query.shape
+        context_count = key.shape[1]
+        q, k, v = torch.nn.functional._in_projection_packed(
+            query,
+            key,
+            value,
+            self.in_proj.weight,
+            self.in_proj.bias,
+        )
+        q = q.view(
+            batch, query_count, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        k = k.view(
+            batch, context_count, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        v = v.view(
+            batch, context_count, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        mask = None
+        if key_padding_mask is not None:
+            mask = torch.zeros_like(
+                key_padding_mask, dtype=query.dtype
+            ).masked_fill(key_padding_mask, -torch.inf)
+            mask = mask[:, None, None, :]
+        if attn_mask is not None:
+            mask = attn_mask if mask is None else mask + attn_mask
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, mask
+        )
+        output = output.transpose(1, 2).reshape(
+            batch, query_count, dimension
+        )
+        return self.out_proj(output), None
+
+
+class SequenceTrimmer(torch.nn.Module):
+    """Official-Weaver-shaped eval trimmer used by capture regressions."""
+
+    def __init__(self, warmup_steps=5):
+        super().__init__()
+        self.enabled = True
+        self.warmup_steps = warmup_steps
+        self.register_buffer(
+            "_counter", torch.zeros(1, dtype=torch.long), persistent=False
+        )
+
+    def forward(self, x, v=None, mask=None, uu=None):
+        if self.enabled:
+            if int(self._counter.item()) < self.warmup_steps:
+                self._counter.add_(1)
+            else:
+                maximum = int(mask.sum(dim=-1).max().item())
+                x = x[..., :maximum]
+                mask = mask[..., :maximum]
+                if v is not None:
+                    v = v[..., :maximum]
+                if uu is not None:
+                    uu = uu[..., :maximum, :maximum]
+        return x, v, mask, uu
+
+
+class _TrimmedAttentionModel(torch.nn.Module):
+    def __init__(self, *, custom: bool):
+        super().__init__()
+        self.trimmer = SequenceTrimmer()
+        self.attention = (
+            _CustomWeaverAttention()
+            if custom
+            else torch.nn.MultiheadAttention(
+                8, 2, dropout=0, batch_first=True
+            )
+        )
+        self.last_width = None
+
+    def forward(self, tokens, valid):
+        x, _, mask, _ = self.trimmer(
+            tokens.transpose(1, 2),
+            mask=valid.unsqueeze(1),
+        )
+        x = x.transpose(1, 2)
+        self.last_width = int(x.shape[1])
+        kwargs = {"key_padding_mask": ~mask[:, 0]}
+        if isinstance(self.attention, torch.nn.MultiheadAttention):
+            kwargs["need_weights"] = False
+        return self.attention(x, x, x, **kwargs)[0]
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_attention_capture_disables_and_restores_active_sequence_trimming(
+    custom: bool,
+) -> None:
+    torch.manual_seed(19)
+    model = _TrimmedAttentionModel(custom=custom).eval()
+    tokens = torch.randn(8, 7, 8)
+    valid = torch.zeros(8, 7, dtype=torch.bool)
+    for row, count in enumerate((3, 2, 4, 1, 3, 2, 4, 1)):
+        valid[row, :count] = True
+    for _ in range(5):
+        model(tokens, valid)
+    model(tokens, valid)
+    assert model.last_width == 4
+    counter = model.trimmer._counter.clone()
+    captured = capture_multihead_attention_weights(
+        model, lambda: model(tokens, valid)
+    )
+    assert model.last_width == 7
+    assert model.trimmer.enabled is True
+    assert torch.equal(model.trimmer._counter, counter)
+    assert [list(value.shape[-2:]) for value in captured] == [[7, 7]]
+
+
+def test_parity_attestation_rejects_trimmer_enabled_flag_drift() -> None:
+    counter = torch.tensor([5], dtype=torch.long)
+    trimmer = SimpleNamespace(enabled=False, _counter=counter.clone())
+    with pytest.raises(AssertionError, match="enabled flag"):
+        _assert_trimmer_state_restored(
+            torch,
+            trimmer,
+            counter_before=counter,
+        )
+
+
+def test_custom_weaver_attention_capture_and_particle_shape_filter() -> None:
+    torch.manual_seed(17)
+    attention = _CustomWeaverAttention().eval()
+    tokens = torch.randn(2, 4, 8)
+    valid = torch.tensor(
+        [[True, True, True, False], [True, True, False, False]]
+    )
+    captured = capture_multihead_attention_weights(
+        attention,
+        lambda: attention(
+            tokens,
+            tokens,
+            tokens,
+            key_padding_mask=~valid,
+        ),
+    )
+    assert [list(value.shape) for value in captured] == [[2, 2, 4, 4]]
+    vectors = torch.randn(2, 4, 4)
+    allocation = attention_allocation_diagnostics(
+        captured,
+        vectors,
+        valid.unsqueeze(1),
+        expected_particle_layer_count=1,
+    )
+    assert allocation["captured_particle_attention_layer_count"] == 1
 
 
 class _MiniDataset(torch.utils.data.Dataset):
@@ -392,11 +569,28 @@ class _FakeParticleBlock(torch.nn.Module):
 
 
 class _FakeClassBlock(torch.nn.Module):
+    def __init__(self, dimension: int, heads: int):
+        super().__init__()
+        self.attn = torch.nn.MultiheadAttention(
+            dimension, heads, dropout=0, batch_first=True
+        )
+
     def forward(self, x, x_cls=None, padding_mask=None):
-        weights = (~padding_mask).to(x).unsqueeze(-1)
-        return x_cls + (x * weights).sum(1, keepdim=True) / weights.sum(
-            1, keepdim=True
-        ).clamp_min(1)
+        context = torch.cat([x_cls, x], dim=1)
+        cls_padding = torch.zeros(
+            padding_mask.shape[0],
+            1,
+            dtype=torch.bool,
+            device=padding_mask.device,
+        )
+        update, _ = self.attn(
+            x_cls,
+            context,
+            context,
+            key_padding_mask=torch.cat([cls_padding, padding_mask], dim=1),
+            need_weights=False,
+        )
+        return x_cls + update
 
 
 class _FakeArchitectureTransformer(torch.nn.Module):
@@ -412,7 +606,9 @@ class _FakeArchitectureTransformer(torch.nn.Module):
             [_FakeParticleBlock(dimension, heads) for _ in range(8)]
         )
         self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, dimension))
-        self.cls_blocks = torch.nn.ModuleList([_FakeClassBlock()])
+        self.cls_blocks = torch.nn.ModuleList(
+            [_FakeClassBlock(dimension, heads)]
+        )
         self.norm = torch.nn.LayerNorm(dimension)
         self.fc = torch.nn.Linear(dimension, 10)
 
@@ -464,6 +660,8 @@ def test_full_layerwise_and_edgevalue_base4_topology_zero_message_parity() -> No
     diagnostics = edge.diagnostics(**batch)
     allocation = diagnostics["attention_allocation"]
     assert allocation["captured_particle_attention_layer_count"] == 8
+    assert allocation["captured_attention_shapes"][-1][2:] == [1, 5]
+    assert len(allocation["captured_attention_shapes"]) == 9
     assert allocation["angular_band_edges"] == [0.0, 0.05, 0.1, 0.2, 0.4]
     first_head = allocation["layers"][0]["per_head"][0]
     context_total = sum(

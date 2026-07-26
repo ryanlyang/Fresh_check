@@ -10,16 +10,27 @@ from typing import Mapping
 from .contracts import validate_content_hash, with_content_hash
 
 
-GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v3"
+GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v5"
 DIAGNOSTIC_BIN_EDGES = {
     "track_raw_displacement": (
         -math.inf, -1.0, -0.1, 0.0, 0.1, 1.0, math.inf
     ),
     "track_absolute_significance": (0.0, 1.0, 2.0, 4.0, 8.0, math.inf),
+    "track_asinh_absolute_significance": (
+        0.0,
+        math.asinh(1.0),
+        math.asinh(2.0),
+        math.asinh(4.0),
+        math.asinh(8.0),
+        math.inf,
+    ),
     "track_compatibility_chi2": (
         0.0, 1.0, 4.0, 9.0, 16.0, 25.0, math.inf
     ),
     "density_local_activity": (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+    "density_annulus_neighbor_count": (
+        0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, math.inf
+    ),
     "jet_multiplicity": (0.0, 20.0, 40.0, 60.0, 80.0, 100.0, math.inf),
     "leading_particle_pt_fraction": (
         0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0
@@ -70,11 +81,22 @@ def build_global_determinism_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": GLOBAL_DETERMINISM_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 5,
             "fixed_before_scientific_results": True,
             "model_specific_override_allowed": False,
             "attention_diagnostics": {
                 "population": "complete_val_select",
+                "captured_particle_attention_shape": "[B,H,N,N]",
+                "expected_particle_attention_layer_count": 8,
+                "class_attention_policy": (
+                    "exclude any captured weight whose query or context "
+                    "dimension differs from particle_count"
+                ),
+                "missing_or_extra_particle_layer_policy": "fail_closed",
+                "sequence_trimming_policy": (
+                    "disable_only_for_diagnostic_forward_and_restore_enabled_"
+                    "flag_and_counter_exactly"
+                ),
                 "aggregation": (
                     "schema_aware_sufficient_statistics_across_complete_"
                     "validation_population"
@@ -97,10 +119,24 @@ def build_global_determinism_contract() -> dict[str, Any]:
                     "(0.20,0.40],(0.40,inf)"
                 ),
                 "combination_family_dropouts": (
-                    "zero_exactly_one_encoded_family_after_base4_"
+                    "for_every_seed101_confirmation_model_with_two_or_more_"
+                    "families_zero_each_encoded_family_after_base4_"
                     "concatenation_without_retraining"
                 ),
-                "region_resolution_dropouts": [2, 4, 8],
+                "charge_single_control": (
+                    "if_CHARGE_only_is_nominal_winner_run_matched_zero_CHARGE"
+                ),
+                "region_resolution_dropouts": {
+                    "population": (
+                        "every_seed101_confirmation_model_containing_REGION"
+                    ),
+                    "exclusive_resolutions": [2, 4, 8],
+                },
+                "semantic_diagnostic_population": (
+                    "nominal_winner_union_every_seed101_confirmation_model_"
+                    "with_scientific_finalist_role_and_at_least_two_"
+                    "families_or_REGION"
+                ),
                 "diagnostic_bin_edges": _serialized_diagnostic_edges(),
                 "diagnostic_bin_endpoint_policy": (
                     "first bin [left,right], later bins (left,right]"
@@ -418,7 +454,7 @@ def validate_global_determinism_contract(payload: Mapping[str, Any]) -> str:
     expected.pop("content_hash", None)
     if actual != expected:
         raise ValueError(
-            "global deterministic conventions differ from the locked v3 policy"
+            "global deterministic conventions differ from the locked v5 policy"
         )
     return digest
 

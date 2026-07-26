@@ -23,8 +23,8 @@ from .pair_builder import SUPPORTED_FAMILY_DIMENSIONS, canonical_supported_famil
 
 SCREENING_SUMMARY_CONTRACT = "relational_part_screening_summary_v2"
 CONFIRMATION_REGISTRY_CONTRACT = "relational_part_confirmation_registry_v2"
-CONFIRMATION_SUMMARY_CONTRACT = "relational_part_confirmation_summary_v2"
-LOCKED_FINALISTS_CONTRACT = "relational_part_locked_finalists_v2"
+CONFIRMATION_SUMMARY_CONTRACT = "relational_part_confirmation_summary_v3"
+LOCKED_FINALISTS_CONTRACT = "relational_part_locked_finalists_v3"
 SELECTED_UNION_MODEL_CONTRACT = "relational_part_selected_union_model_v1"
 CONFIRMATION_SEEDS = (101, 202, 303)
 SINGLE_RUN_IDS = (
@@ -589,6 +589,36 @@ def _aggregate_one(
         for index, seed in enumerate(CONFIRMATION_SEEDS)
     ]
     first = by_seed[101]
+    track_required_class_gains = None
+    if "TRACK" in set(map(str, families)):
+        track_required_class_gains = {
+            class_name: {
+                "per_seed_accuracy_difference": {
+                    str(seed): (
+                        _finite(
+                            _metrics(by_seed[seed])[
+                                "per_class_efficiency"
+                            ][class_name],
+                            name=f"{class_name}_candidate_accuracy",
+                        )
+                        - _finite(
+                            _metrics(baseline_by_seed[seed])[
+                                "per_class_efficiency"
+                            ][class_name],
+                            name=f"{class_name}_baseline_accuracy",
+                        )
+                    )
+                    for seed in CONFIRMATION_SEEDS
+                }
+            }
+            for class_name in ("Hbb", "Hcc", "Tbqq", "Tbl")
+        }
+        for value in track_required_class_gains.values():
+            value["mean_accuracy_difference"] = float(
+                statistics.fmean(
+                    value["per_seed_accuracy_difference"].values()
+                )
+            )
     return {
         "run_id": run_id,
         "configuration_role": str(first["configuration_role"]),
@@ -637,6 +667,7 @@ def _aggregate_one(
         "model_contract_sha256": next(iter(model_contracts)),
         "lineage_hashes": lineages[0],
         "lineage_authenticated": True,
+        "track_required_class_gains": track_required_class_gains,
     }
 
 
@@ -727,7 +758,7 @@ def aggregate_confirmation(
     summary = with_content_hash(
         {
             "contract": CONFIRMATION_SUMMARY_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
             ),
@@ -802,7 +833,7 @@ def aggregate_confirmation(
     lock = with_content_hash(
         {
             "contract": LOCKED_FINALISTS_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
             ),

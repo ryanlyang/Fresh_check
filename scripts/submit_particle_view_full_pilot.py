@@ -22,6 +22,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (  # 
     build_runtime_data_config,
     build_runtime_execution_manifest,
     build_runtime_handler_catalog,
+    capture_clean_source_checkout,
     load_hashed_json,
     publish_full_pilot_scientific_bootstrap,
     reconcile_particle_view_production_graph,
@@ -63,6 +64,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--bootstrap-replicates", type=int, default=10_000)
     parser.add_argument("--linear-fusion-steps", type=int, default=300)
+    parser.add_argument(
+        "--persistent-storage-budget-gib",
+        type=int,
+        default=12,
+        help="Campaign-local persistent storage reservation in GiB.",
+    )
+    parser.add_argument(
+        "--allocation-ram-gib",
+        type=int,
+        default=128,
+        help="Per-allocation RAM available to cache/tap staging in GiB.",
+    )
     parser.add_argument("--optional-p7b-resource")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--existing-checkpoint")
@@ -114,12 +127,35 @@ def _existing(values: list[str]):
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     mode = "execute" if args.execute else "print_only" if args.print_only else "dry_run"
+    source_checkout = None
+    if not args.graph and mode == "execute":
+        source_checkout = capture_clean_source_checkout(
+            PROJECT_ROOT,
+            expected_commit=args.source_commit,
+        )
+        args.source_commit = source_checkout["source_commit"]
     if args.graph:
         if args.bootstrap_scientific:
             raise ValueError("--bootstrap-scientific cannot modify an existing graph")
         graph_path = Path(args.graph).resolve()
         graph = load_hashed_json(graph_path)
         artifact_root = Path(graph["artifact_root"])
+        if mode == "execute":
+            if graph.get("source_checkout_clean") is not True:
+                raise ValueError(
+                    "existing production graph is not bound to a clean checkout"
+                )
+            observed_checkout = capture_clean_source_checkout(
+                PROJECT_ROOT,
+                expected_commit=graph["source_commit"],
+            )
+            for key in (
+                "source_tree_git_oid",
+                "source_status_sha256",
+                "source_checkout_clean",
+            ):
+                if observed_checkout[key] != graph[key]:
+                    raise ValueError(f"existing graph source changed: {key}")
     else:
         missing = [
             name
@@ -240,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
                 existing_description=args.existing_description,
                 existing_teacher_compatible=args.existing_teacher_compatible,
                 teacher_mix_compatible=args.teacher_mix_compatible,
+                persistent_storage_budget_bytes=(
+                    args.persistent_storage_budget_gib * 1024**3
+                ),
+                allocation_ram_bytes=args.allocation_ram_gib * 1024**3,
                 python_executable=sys.executable,
                 handler_python_executable=(
                     args.runtime_python_executable
@@ -282,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog = build_runtime_command_catalog(
                 execution_manifest_path=str(execution_manifest_path),
                 python_executable=args.runtime_python_executable,
+                execution_manifest_sha256=execution_manifest["content_hash"],
             )
             runtime_artifacts = (
                 handler_catalog_path,
@@ -293,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             registry=registry,
             artifact_root=str(artifact_root),
             source_commit=args.source_commit,
+            source_checkout=source_checkout,
             command_catalog=catalog,
             graph_id=args.graph_id,
         )

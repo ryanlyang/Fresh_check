@@ -10,8 +10,10 @@ import subprocess
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import (
+    canonical_sha256,
     canonical_json_bytes,
     require_sha256,
+    sha256_file,
     validate_content_hash,
     with_content_hash,
     write_immutable_json,
@@ -139,8 +141,107 @@ def _source_commit(value: str) -> str:
     return value
 
 
+def capture_clean_source_checkout(
+    project_root: str | Path,
+    *,
+    expected_commit: str | None = None,
+) -> dict[str, Any]:
+    """Bind an execution to the clean checked-out commit and Git tree."""
+
+    root = Path(project_root).resolve()
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "git command failed")
+        return completed.stdout.strip()
+
+    commit = git("rev-parse", "HEAD").lower()
+    _source_commit(commit)
+    if expected_commit is not None and commit != _source_commit(expected_commit):
+        raise ValueError("requested source commit is not the executed checkout")
+    status = git("status", "--porcelain=v1", "--untracked-files=all")
+    if status:
+        raise ValueError(
+            "production execution requires a clean checkout; commit or "
+            "remove every tracked/untracked source change first"
+        )
+    tree = git("rev-parse", "HEAD^{tree}").lower()
+    _source_commit(tree)
+    return {
+        "source_commit": commit,
+        "source_tree_git_oid": tree,
+        "source_status_sha256": canonical_sha256(
+            {"git_status_porcelain_v1": status}
+        ),
+        "source_checkout_clean": True,
+    }
+
+
 def _node_ids() -> tuple[str, ...]:
     return tuple(row[0] for row in LOGICAL_NODE_LAYOUT)
+
+
+def _seed_expanded_task_waves(
+    *,
+    registry: Mapping[str, Any],
+    run_ids: Sequence[str],
+) -> list[list[str]]:
+    """Partition one logical node into dependency-safe Slurm-array waves."""
+
+    runs = {row["run_id"]: row for row in registry["runs"]}
+    selected = set(run_ids)
+    task_ids = {
+        (run_id, int(seed)): f"{run_id}__seed_{int(seed)}"
+        for run_id in selected
+        for seed in runs[run_id]["seed_ids"]
+    }
+    levels: dict[tuple[str, int], int] = {}
+    unresolved = set(task_ids)
+    while unresolved:
+        progressed = False
+        for identity in sorted(unresolved):
+            run_id, seed = identity
+            same_node_parents: list[tuple[str, int]] = []
+            ready = True
+            for parent_run_id in runs[run_id]["parent_run_ids"]:
+                if parent_run_id not in selected:
+                    continue
+                parent_seeds = [int(value) for value in runs[parent_run_id]["seed_ids"]]
+                parent_seed = seed if seed in parent_seeds else 101
+                parent_identity = (parent_run_id, parent_seed)
+                if parent_identity not in levels:
+                    ready = False
+                    break
+                same_node_parents.append(parent_identity)
+            if not ready:
+                continue
+            levels[identity] = (
+                1 + max(levels[parent] for parent in same_node_parents)
+                if same_node_parents
+                else 0
+            )
+            unresolved.remove(identity)
+            progressed = True
+        if not progressed:
+            raise ValueError("cannot construct dependency-safe task waves")
+    waves: list[list[str]] = []
+    for level in range(max(levels.values(), default=-1) + 1):
+        waves.append(
+            sorted(
+                task_ids[identity]
+                for identity, task_level in levels.items()
+                if task_level == level
+            )
+        )
+    if any(not wave for wave in waves):
+        raise ValueError("task-wave construction emitted an empty wave")
+    return waves
 
 
 def _topological_nodes(nodes: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -171,6 +272,7 @@ def build_particle_view_production_graph(
     registry: Mapping[str, Any],
     artifact_root: str,
     source_commit: str,
+    source_checkout: Mapping[str, Any] | None = None,
     command_catalog: Mapping[str, Sequence[str]],
     graph_id: str = "particle_view_full_pilot_v1",
 ) -> dict[str, Any]:
@@ -178,6 +280,23 @@ def build_particle_view_production_graph(
 
     registry_audit = validate_particle_view_registry(registry)
     _source_commit(source_commit)
+    if source_checkout is None:
+        source_checkout = {
+            "source_commit": source_commit,
+            "source_tree_git_oid": source_commit,
+            "source_status_sha256": canonical_sha256(
+                {"source_checkout": "not_execution_verified"}
+            ),
+            "source_checkout_clean": False,
+        }
+    if source_checkout.get("source_commit") != source_commit:
+        raise ValueError("source checkout/graph commit mismatch")
+    _source_commit(str(source_checkout.get("source_tree_git_oid")))
+    require_sha256(
+        "source_status_sha256", source_checkout.get("source_status_sha256")
+    )
+    if not isinstance(source_checkout.get("source_checkout_clean"), bool):
+        raise ValueError("source checkout clean flag must be boolean")
     if not graph_id or not artifact_root:
         raise ValueError("graph_id and artifact_root must be nonempty")
     if set(command_catalog) != set(_node_ids()):
@@ -198,6 +317,16 @@ def build_particle_view_production_graph(
         run_ids = sorted(
             run_id for stage in stages for run_id in runs_by_stage.get(stage, [])
         )
+        task_waves = _seed_expanded_task_waves(
+            registry=registry,
+            run_ids=run_ids,
+        )
+        if node_id == "pv10_hlt_only_final_test":
+            task_waves = [
+                [task_id]
+                for wave in task_waves
+                for task_id in wave
+            ]
         nodes.append(
             {
                 "contract": PARTICLE_VIEW_GRAPH_NODE_CONTRACT,
@@ -205,6 +334,9 @@ def build_particle_view_production_graph(
                 "stages": list(stages),
                 "parent_node_ids": list(parents),
                 "run_ids": run_ids,
+                "task_waves": task_waves,
+                "seed_expanded_task_count": sum(map(len, task_waves)),
+                "array_max_concurrency": 16,
                 "command": command,
                 "sbatch_script": NODE_WRAPPERS[node_id],
                 "dependency_policy": "afterok_integrity_only",
@@ -224,6 +356,9 @@ def build_particle_view_production_graph(
         "registry_sha256": registry["content_hash"],
         "artifact_root": artifact_root,
         "source_commit": source_commit,
+        "source_tree_git_oid": source_checkout["source_tree_git_oid"],
+        "source_status_sha256": source_checkout["source_status_sha256"],
+        "source_checkout_clean": source_checkout["source_checkout_clean"],
         "nodes": nodes,
         "quality_policy": PARTICLE_VIEW_QUALITY_POLICY,
         "scientific_warnings_are_non_gating": True,
@@ -251,6 +386,9 @@ def validate_particle_view_production_graph(
         "registry_sha256",
         "artifact_root",
         "source_commit",
+        "source_tree_git_oid",
+        "source_status_sha256",
+        "source_checkout_clean",
         "nodes",
         "quality_policy",
         "scientific_warnings_are_non_gating",
@@ -262,6 +400,10 @@ def validate_particle_view_production_graph(
         raise ValueError("production graph field inventory mismatch")
     require_sha256("registry_sha256", graph["registry_sha256"])
     _source_commit(graph["source_commit"])
+    _source_commit(graph["source_tree_git_oid"])
+    require_sha256("source_status_sha256", graph["source_status_sha256"])
+    if not isinstance(graph["source_checkout_clean"], bool):
+        raise ValueError("production source checkout flag is invalid")
     if graph["quality_policy"] != PARTICLE_VIEW_QUALITY_POLICY:
         raise ValueError("production graph quality policy mismatch")
     if (
@@ -282,6 +424,9 @@ def validate_particle_view_production_graph(
             "stages",
             "parent_node_ids",
             "run_ids",
+            "task_waves",
+            "seed_expanded_task_count",
+            "array_max_concurrency",
             "command",
             "sbatch_script",
             "dependency_policy",
@@ -313,6 +458,19 @@ def validate_particle_view_production_graph(
             raise ValueError("Tigris execution contract mismatch")
         if not isinstance(raw.get("command"), list) or not raw["command"]:
             raise ValueError("production node command is empty")
+        if "scripts/run_particle_view_campaign_node.py" in raw["command"]:
+            try:
+                binding_index = raw["command"].index(
+                    "--expected-manifest-sha256"
+                )
+                require_sha256(
+                    "expected runtime manifest sha256",
+                    raw["command"][binding_index + 1],
+                )
+            except (ValueError, IndexError) as exc:
+                raise ValueError(
+                    "runtime node command is not hash-bound to its manifest"
+                ) from exc
         run_ids = raw.get("run_ids")
         if (
             not isinstance(run_ids, list)
@@ -322,6 +480,24 @@ def validate_particle_view_production_graph(
             raise ValueError(
                 "production node run_ids must be sorted, unique, nonempty strings"
             )
+        waves = raw.get("task_waves")
+        if (
+            not isinstance(waves, list)
+            or any(
+                not isinstance(wave, list)
+                or not wave
+                or wave != sorted(set(wave))
+                for wave in waves
+            )
+        ):
+            raise ValueError("production task waves are invalid")
+        expanded = [task_id for wave in waves for task_id in wave]
+        if (
+            len(expanded) != len(set(expanded))
+            or int(raw.get("seed_expanded_task_count", -1)) != len(expanded)
+            or not 1 <= int(raw.get("array_max_concurrency", 0)) <= 64
+        ):
+            raise ValueError("production task-wave inventory is inconsistent")
         nodes[node_id] = raw
     expected_layout = {
         node_id: (list(stages), list(parents))
@@ -395,6 +571,21 @@ def reconcile_particle_view_production_graph(
     generated_seed_replicas = sum(
         len(registered[run_id]["seed_ids"]) for run_id in assigned
     )
+    waved_task_ids = [
+        task_id
+        for node in graph["nodes"]
+        for wave in node["task_waves"]
+        for task_id in wave
+    ]
+    expected_task_ids = {
+        f"{run_id}__seed_{int(seed)}"
+        for run_id, run in registered.items()
+        for seed in run["seed_ids"]
+    }
+    task_wave_inventory_valid = (
+        len(waved_task_ids) == len(set(waved_task_ids))
+        and set(waved_task_ids) == expected_task_ids
+    )
     counts = {
         "declared_runs": len(registered),
         "generated_run_assignments": len(assigned),
@@ -415,6 +606,9 @@ def reconcile_particle_view_production_graph(
         {
             "contract": PARTICLE_VIEW_GRAPH_RECONCILIATION_CONTRACT,
             "graph_sha256": graph["content_hash"],
+            "source_commit": graph["source_commit"],
+            "source_tree_git_oid": graph["source_tree_git_oid"],
+            "source_status_sha256": graph["source_status_sha256"],
             "registry_sha256": registry["content_hash"],
             "counts": counts,
             "missing_run_ids": missing,
@@ -427,6 +621,7 @@ def reconcile_particle_view_production_graph(
                 and not duplicates
                 and not invalid_parent_edges
                 and declared_seed_replicas == generated_seed_replicas
+                and task_wave_inventory_valid
             ),
             "single_training_pool": registry_audit["single_training_pool"],
         }
@@ -672,6 +867,67 @@ def _normalize_existing_jobs(
     return result
 
 
+def _validate_reusable_node_completion(
+    *, graph: Mapping[str, Any], node_id: str
+) -> Mapping[str, Any]:
+    path = (
+        Path(graph["artifact_root"])
+        / "node_completions"
+        / f"{node_id}.json"
+    )
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(
+            f"completed Slurm job for {node_id} has no authenticated "
+            "node completion"
+        )
+    completion = json.loads(path.read_text(encoding="utf-8"))
+    validate_content_hash(
+        completion,
+        expected_contract=PARTICLE_VIEW_NODE_COMPLETION_CONTRACT,
+    )
+    expected = {
+        "graph_sha256": graph["content_hash"],
+        "source_commit": graph["source_commit"],
+        "source_tree_git_oid": graph["source_tree_git_oid"],
+        "source_status_sha256": graph["source_status_sha256"],
+        "node_id": node_id,
+        "run_ids": next(
+            row["run_ids"] for row in graph["nodes"] if row["node_id"] == node_id
+        ),
+        "integrity_status": "complete",
+        "exit_code": 0,
+    }
+    for key, value in expected.items():
+        if completion.get(key) != value:
+            raise ValueError(f"stale node completion for {node_id}: {key}")
+    if not completion.get("output_artifacts"):
+        raise ValueError(
+            f"node completion for {node_id} authenticates no outputs"
+        )
+    node = next(
+        row for row in graph["nodes"] if row["node_id"] == node_id
+    )
+    if "scripts/run_particle_view_campaign_node.py" in node["command"]:
+        expected_artifact_count = (
+            2 * int(node["seed_expanded_task_count"]) + 1
+        )
+        if len(completion["output_artifacts"]) != expected_artifact_count:
+            raise ValueError(
+                f"node completion for {node_id} omits runtime task outputs"
+            )
+    for artifact in completion["output_artifacts"]:
+        artifact_path = Path(str(artifact["path"]))
+        if (
+            artifact_path.is_symlink()
+            or not artifact_path.is_file()
+            or sha256_file(artifact_path) != artifact["sha256"]
+        ):
+            raise ValueError(
+                f"node completion output is absent or stale: {artifact_path}"
+            )
+    return completion
+
+
 def plan_particle_view_submissions(
     *,
     graph: Mapping[str, Any],
@@ -682,61 +938,108 @@ def plan_particle_view_submissions(
 
     audit = validate_particle_view_production_graph(graph)
     existing = _normalize_existing_jobs(existing_jobs)
-    records: dict[str, dict[str, Any]] = {}
+    terminal_records: dict[str, dict[str, Any]] = {}
     output = []
     for node_id in audit["topological_order"]:
         node = audit["nodes"][node_id]
         prior = existing.get(node_id)
         if prior and prior["state"] in TERMINAL_SUCCESS_STATES:
+            completion = _validate_reusable_node_completion(
+                graph=graph, node_id=node_id
+            )
             record = {
+                "submission_id": node_id,
                 "node_id": node_id,
+                "submission_kind": "logical_node_barrier",
                 "action": "reuse_completed",
                 "job_id": prior["job_id"],
                 "dependency_job_ids": [],
                 "command": None,
+                "node_completion_sha256": completion["content_hash"],
             }
-            records[node_id] = record
+            terminal_records[node_id] = record
             output.append(record)
             continue
         if prior and prior["state"] in ACTIVE_SLURM_STATES:
-            record = {
-                "node_id": node_id,
-                "action": "reuse_active",
-                "job_id": prior["job_id"],
-                "dependency_job_ids": [],
-                "command": None,
-            }
-            records[node_id] = record
-            output.append(record)
-            continue
-        dependencies = []
+            raise ValueError(
+                "active Slurm jobs cannot be reused without an authenticated "
+                f"campaign progress ledger: {node_id}={prior['job_id']}. "
+                "Wait for completion or cancel the active job before recovery."
+            )
+        parent_dependencies = []
         for parent in node["parent_node_ids"]:
-            parent_record = records[parent]
+            parent_record = terminal_records[parent]
             if parent_record["action"] != "reuse_completed":
-                dependencies.append(parent_record["job_id"])
+                parent_dependencies.append(parent_record["job_id"])
+        dependencies = parent_dependencies
+        last_record = None
+        for wave_index, wave in enumerate(node["task_waves"]):
+            submission_id = f"{node_id}__wave_{wave_index:02d}"
+            export = (
+                "ALL,"
+                f"PARTICLE_VIEW_GRAPH={graph_path},"
+                f"PARTICLE_VIEW_NODE_ID={node_id},"
+                f"PARTICLE_VIEW_TASK_WAVE_INDEX={wave_index}"
+            )
+            command = ["sbatch", "--parsable"]
+            if dependencies:
+                command.append(
+                    f"--dependency=afterok:{':'.join(dependencies)}"
+                )
+            command.extend(
+                [
+                    (
+                        f"--array=0-{len(wave) - 1}%"
+                        f"{node['array_max_concurrency']}"
+                    ),
+                    f"--export={export}",
+                    str(node["sbatch_script"]),
+                    node_id,
+                ]
+            )
+            record = {
+                "submission_id": submission_id,
+                "node_id": node_id,
+                "submission_kind": "task_wave_array",
+                "task_wave_index": wave_index,
+                "array_task_count": len(wave),
+                "action": "submit",
+                "job_id": f"<{submission_id}:job_id>",
+                "dependency_job_ids": list(dependencies),
+                "command": command,
+                "node_completion_sha256": None,
+            }
+            output.append(record)
+            last_record = record
+            dependencies = [record["job_id"]]
+        if last_record is None:
+            raise ValueError(f"logical node {node_id} has no task waves")
+        submission_id = f"{node_id}__barrier"
         export = (
             "ALL,"
             f"PARTICLE_VIEW_GRAPH={graph_path},"
-            f"PARTICLE_VIEW_NODE_ID={node_id}"
+            f"PARTICLE_VIEW_NODE_ID={node_id},"
+            "PARTICLE_VIEW_NODE_BARRIER=1"
         )
-        command = ["sbatch", "--parsable"]
-        if dependencies:
-            command.append(f"--dependency=afterok:{':'.join(dependencies)}")
-        command.extend(
-            [
-                f"--export={export}",
-                str(node["sbatch_script"]),
-                node_id,
-            ]
-        )
+        command = [
+            "sbatch",
+            "--parsable",
+            f"--dependency=afterok:{last_record['job_id']}",
+            f"--export={export}",
+            str(node["sbatch_script"]),
+            node_id,
+        ]
         record = {
+            "submission_id": submission_id,
             "node_id": node_id,
+            "submission_kind": "logical_node_barrier",
             "action": "submit",
-            "job_id": f"<{node_id}:job_id>",
-            "dependency_job_ids": dependencies,
+            "job_id": f"<{submission_id}:job_id>",
+            "dependency_job_ids": [last_record["job_id"]],
             "command": command,
+            "node_completion_sha256": None,
         }
-        records[node_id] = record
+        terminal_records[node_id] = record
         output.append(record)
     return output
 
@@ -759,31 +1062,22 @@ def submit_particle_view_graph(
     records = []
     for planned in plan:
         record = dict(planned)
-        dependencies = [
-            resolved_job_ids.get(value.removeprefix("<").split(":", 1)[0], value)
-            if value.startswith("<")
-            else value
-            for value in record["dependency_job_ids"]
-        ]
+        dependencies = []
+        for value in record["dependency_job_ids"]:
+            if value.startswith("<"):
+                submission_id = value[1:].split(":", 1)[0]
+                dependencies.append(resolved_job_ids[submission_id])
+            else:
+                dependencies.append(value)
         if record["action"].startswith("reuse_"):
-            resolved_job_ids[record["node_id"]] = record["job_id"]
+            resolved_job_ids[record["submission_id"]] = record["job_id"]
         elif mode == "execute":
             command = list(record["command"])
-            parent_ids: list[str] = []
             for index, value in enumerate(command):
                 if value.startswith("--dependency=afterok:"):
-                    parent_ids = [
-                        resolved_job_ids[parent]
-                        for parent in validate_particle_view_production_graph(graph)[
-                            "nodes"
-                        ][record["node_id"]]["parent_node_ids"]
-                        if records
-                        and next(
-                            item for item in records if item["node_id"] == parent
-                        )["action"]
-                        != "reuse_completed"
-                    ]
-                    command[index] = f"--dependency=afterok:{':'.join(parent_ids)}"
+                    command[index] = (
+                        f"--dependency=afterok:{':'.join(dependencies)}"
+                    )
             completed = runner(
                 command,
                 check=False,
@@ -799,12 +1093,12 @@ def submit_particle_view_graph(
             if not job_id.isdigit():
                 raise RuntimeError("sbatch did not return a numeric job ID")
             record["command"] = command
-            record["dependency_job_ids"] = parent_ids
+            record["dependency_job_ids"] = dependencies
             record["job_id"] = job_id
-            resolved_job_ids[record["node_id"]] = job_id
+            resolved_job_ids[record["submission_id"]] = job_id
         else:
             record["dependency_job_ids"] = dependencies
-            resolved_job_ids[record["node_id"]] = record["job_id"]
+            resolved_job_ids[record["submission_id"]] = record["job_id"]
         records.append(record)
         if progress_callback is not None:
             progress_callback(tuple(dict(row) for row in records))
@@ -854,6 +1148,9 @@ def build_node_completion(
         {
             "contract": PARTICLE_VIEW_NODE_COMPLETION_CONTRACT,
             "graph_sha256": graph["content_hash"],
+            "source_commit": graph["source_commit"],
+            "source_tree_git_oid": graph["source_tree_git_oid"],
+            "source_status_sha256": graph["source_status_sha256"],
             "node_id": node_id,
             "run_ids": list(audit["nodes"][node_id]["run_ids"]),
             "output_artifacts": artifacts,
@@ -887,6 +1184,7 @@ __all__ = [
     "build_node_completion",
     "build_particle_view_production_graph",
     "build_quality_warning",
+    "capture_clean_source_checkout",
     "plan_particle_view_submissions",
     "load_quality_warning_jsonl",
     "reconcile_particle_view_production_graph",

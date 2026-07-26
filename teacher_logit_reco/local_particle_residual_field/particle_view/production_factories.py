@@ -51,6 +51,9 @@ PARTICLE_VIEW_BASELINE_FACTORY_CONFIG_CONTRACT = (
 PARTICLE_VIEW_DIRECT_FACTORY_CONFIG_CONTRACT = (
     "particle_view_direct_control_factory_config_v1"
 )
+PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT = (
+    "particle_view_source_preflight_config_v1"
+)
 PARTICLE_VIEW_EXISTING_TEACHER_RUNTIME_LINEAGE_CONTRACT = (
     "particle_view_existing_teacher_runtime_lineage_v1"
 )
@@ -876,9 +879,21 @@ def _publish_source_cache_audit(
     *,
     runtime_data_config: Mapping[str, Any],
     output_path: str,
+    storage_reservation: Mapping[str, Any] | None = None,
+    storage_output_path: str | None = None,
 ) -> None:
     audit = audit_runtime_data_sources(runtime_data_config)
     write_immutable_json(output_path, audit)
+    if storage_reservation is not None:
+        validate_content_hash(
+            storage_reservation,
+            expected_contract="particle_view_storage_reservation_v1",
+        )
+        if storage_reservation.get("preflight_passed") is not True:
+            raise ValueError("storage reservation did not pass preflight")
+        if storage_output_path is None:
+            raise ValueError("storage reservation output path is absent")
+        write_immutable_json(storage_output_path, storage_reservation)
 
 
 def build_source_preflight_factory(
@@ -896,9 +911,35 @@ def build_source_preflight_factory(
     del task_id
     if operation != "source_preflight":
         raise ValueError("source-preflight factory received another operation")
-    validate_content_hash(
-        config, expected_contract=PARTICLE_VIEW_RUNTIME_DATA_CONFIG_CONTRACT
-    )
+    storage_reservation = None
+    if config.get("contract") == PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT:
+        validate_content_hash(
+            config,
+            expected_contract=PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT,
+        )
+        runtime_data_config = config["runtime_data_config"]
+        storage_reservation = config["storage_reservation"]
+        validate_runtime_data_config(
+            runtime_data_config, verify_cache_files=False
+        )
+        validate_content_hash(
+            storage_reservation,
+            expected_contract="particle_view_storage_reservation_v1",
+        )
+        if (
+            config.get("runtime_data_config_sha256")
+            != runtime_data_config["content_hash"]
+            or config.get("storage_reservation_sha256")
+            != storage_reservation["content_hash"]
+            or config.get("storage_is_execution_gating") is not True
+            or config.get("scientific_metrics_are_execution_gating") is not False
+        ):
+            raise ValueError("source-preflight config lineage/policy changed")
+    else:
+        validate_content_hash(
+            config, expected_contract=PARTICLE_VIEW_RUNTIME_DATA_CONFIG_CONTRACT
+        )
+        runtime_data_config = config
     validate_particle_view_registry(registry)
     rows = {row["run_id"]: row for row in registry["runs"]}
     if run_id not in rows or not str(rows[run_id]["scientific_role"]).startswith(
@@ -908,25 +949,63 @@ def build_source_preflight_factory(
     if int(seed) not in rows[run_id]["seed_ids"]:
         raise ValueError("source-preflight seed is not registered")
     destination = Path(output_dir).resolve() / "source_cache_audit.json"
+    storage_destination = (
+        Path(output_dir).resolve() / "storage_reservation.json"
+    )
     return {
         "kwargs": {
-            "runtime_data_config": config,
+            "runtime_data_config": runtime_data_config,
             "output_path": str(destination),
+            "storage_reservation": storage_reservation,
+            "storage_output_path": (
+                str(storage_destination)
+                if storage_reservation is not None
+                else None
+            ),
         },
-        "artifact_paths": [str(destination)],
+        "artifact_paths": [
+            str(destination),
+            *(
+                [str(storage_destination)]
+                if storage_reservation is not None
+                else []
+            ),
+        ],
         "action": _publish_source_cache_audit,
     }
 
 
 def build_source_preflight_task_specs(
-    *, runtime_data_config_path: str | Path
+    *,
+    runtime_data_config_path: str | Path | None = None,
+    source_preflight_config_path: str | Path | None = None,
 ) -> dict[str, dict[str, str]]:
     """Bind the registry's source node to the authenticated runtime sources."""
 
-    path = Path(runtime_data_config_path).resolve()
-    validate_runtime_data_config(
-        load_hashed_json(path), verify_cache_files=False
-    )
+    if (runtime_data_config_path is None) == (
+        source_preflight_config_path is None
+    ):
+        raise ValueError("supply exactly one source-preflight config path")
+    path = Path(
+        source_preflight_config_path
+        if source_preflight_config_path is not None
+        else runtime_data_config_path
+    ).resolve()
+    payload = load_hashed_json(path)
+    if source_preflight_config_path is None:
+        validate_runtime_data_config(payload, verify_cache_files=False)
+    else:
+        validate_content_hash(
+            payload,
+            expected_contract=PARTICLE_VIEW_SOURCE_PREFLIGHT_CONFIG_CONTRACT,
+        )
+        validate_runtime_data_config(
+            payload["runtime_data_config"], verify_cache_files=False
+        )
+        validate_content_hash(
+            payload["storage_reservation"],
+            expected_contract="particle_view_storage_reservation_v1",
+        )
     return {
         "PV_SOURCE_PREFLIGHT": {
             "operation": "source_preflight",

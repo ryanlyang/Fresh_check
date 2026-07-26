@@ -28,6 +28,7 @@ from teacher_logit_reco.relational_part import (
     build_track_node_features,
     build_track_relation_contract,
     build_step4_model_contract,
+    canonical_json_bytes,
     fit_relation_normalization,
     validate_content_hash,
     validate_relation_normalization_artifact,
@@ -51,10 +52,29 @@ class _MiniParticleTransformer(torch.nn.Module):
         self.pair_extra_dim = int(config["pair_extra_dim"])
         self.pair_embed = _MiniPairEmbed(self.pair_extra_dim)
         self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, 17))
+        self.blocks = torch.nn.ModuleList(
+            [
+                torch.nn.MultiheadAttention(
+                    17, 1, dropout=0, batch_first=True
+                )
+                for _ in range(8)
+            ]
+        )
         self.classifier = torch.nn.Linear(25, int(config["num_classes"]))
 
     def forward(self, x, v=None, mask=None, uu=None):
         pair_bias = self.pair_embed(v, uu=uu, mask=mask)
+        tokens = x.transpose(1, 2)
+        for attention in self.blocks:
+            update, _ = attention(
+                tokens,
+                tokens,
+                tokens,
+                key_padding_mask=~mask[:, 0].bool(),
+                need_weights=False,
+            )
+            tokens = tokens + update
+        x = tokens.transpose(1, 2)
         weights = mask.to(x.dtype)
         particle_summary = (x * weights).sum(dim=-1) / weights.sum(
             dim=-1
@@ -390,6 +410,43 @@ def test_registered_step4_singles_train_and_preserve_event_logits_under_permutat
             raw[:, permutation],
         )
         torch.testing.assert_close(reference, permuted, atol=2e-6, rtol=2e-6)
+        diagnostics = model.diagnostics(
+            features,
+            vectors,
+            mask,
+            raw,
+            labels=torch.tensor([1, 8]),
+        )
+        canonical_json_bytes(diagnostics)
+        if family == "TRACK":
+            assert (
+                "bias_by_minimum_absolute_displacement_significance"
+                in diagnostics["TRACK"]
+            )
+            assert (
+                "asinh_absolute_significance_distributions"
+                in diagnostics["TRACK"]
+            )
+            assert (
+                diagnostics["TRACK"]["required_class_performance"][
+                    "event_counts"
+                ]
+                == [1, 0, 1, 0]
+            )
+        else:
+            assert (
+                "bias_by_context_local_activity_fraction"
+                in diagnostics["DENSITY"]
+            )
+            assert (
+                "performance_by_jet_multiplicity"
+                in diagnostics["DENSITY"]
+            )
+            assert set(
+                diagnostics["DENSITY"][
+                    "annulus_occupancy_count_distributions"
+                ]
+            ) == {"0", "1", "2", "3"}
         model.train()
         loss = torch.nn.functional.cross_entropy(
             model(points, features, vectors, mask, raw),

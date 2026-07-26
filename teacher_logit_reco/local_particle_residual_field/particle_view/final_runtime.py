@@ -9,6 +9,7 @@ the campaign provenance, but this module deliberately never reads them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -85,6 +86,18 @@ PARTICLE_VIEW_FINAL_PUBLICATION_CONTRACT = (
 )
 PARTICLE_VIEW_FINAL_FAMILY_BINDING_CONTRACT = (
     "particle_view_final_family_binding_v1"
+)
+PARTICLE_VIEW_FINAL_ACCESS_CLAIM_CONTRACT = (
+    "particle_view_final_access_claim_v1"
+)
+PARTICLE_VIEW_FINAL_RECOVERY_AUTHORIZATION_CONTRACT = (
+    "particle_view_final_recovery_authorization_v1"
+)
+PARTICLE_VIEW_FINAL_RECOVERY_CONSUMPTION_CONTRACT = (
+    "particle_view_final_recovery_consumption_v1"
+)
+PARTICLE_VIEW_FINAL_ACCESS_RECEIPT_CONTRACT = (
+    "particle_view_final_access_receipt_v1"
 )
 
 _FINAL_RUN_FAMILIES = {
@@ -633,12 +646,146 @@ def _write_or_validate(path: Path, payload: Mapping[str, Any]) -> None:
         write_immutable_json(path, payload)
 
 
+def build_final_recovery_authorization(
+    *,
+    access_claim: Mapping[str, Any],
+    reason: str,
+    authorized_by: str,
+    previous_recovery_consumption: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_content_hash(
+        access_claim,
+        expected_contract=PARTICLE_VIEW_FINAL_ACCESS_CLAIM_CONTRACT,
+    )
+    if not reason or not authorized_by:
+        raise ValueError("final recovery reason/authorizer must be nonempty")
+    previous_sha256 = None
+    if previous_recovery_consumption is not None:
+        validate_content_hash(
+            previous_recovery_consumption,
+            expected_contract=PARTICLE_VIEW_FINAL_RECOVERY_CONSUMPTION_CONTRACT,
+        )
+        if (
+            previous_recovery_consumption.get("access_claim_sha256")
+            != access_claim["content_hash"]
+        ):
+            raise ValueError("previous recovery consumption belongs to another claim")
+        previous_sha256 = previous_recovery_consumption["content_hash"]
+    return with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_FINAL_RECOVERY_AUTHORIZATION_CONTRACT,
+            "access_claim_sha256": access_claim["content_hash"],
+            "reason": reason,
+            "authorized_by": authorized_by,
+            "previous_recovery_consumption_sha256": previous_sha256,
+            "allow_one_recovery_access": True,
+        }
+    )
+
+
+def _recovery_consumption_tail(
+    central: Path,
+    *,
+    access_claim_sha256: str,
+) -> tuple[str | None, list[str]]:
+    root = central / "recovery_authorization_consumptions"
+    if not root.exists():
+        return None, []
+    rows = []
+    for path in sorted(root.glob("*.json")):
+        row = load_hashed_json(path)
+        validate_content_hash(
+            row,
+            expected_contract=PARTICLE_VIEW_FINAL_RECOVERY_CONSUMPTION_CONTRACT,
+        )
+        if row.get("access_claim_sha256") != access_claim_sha256:
+            raise ValueError("recovery consumption belongs to another access claim")
+        rows.append(row)
+    by_hash = {row["content_hash"]: row for row in rows}
+    if len(by_hash) != len(rows):
+        raise ValueError("duplicate final recovery consumption")
+    children: dict[str | None, list[str]] = {}
+    for row in rows:
+        previous = row.get("previous_recovery_consumption_sha256")
+        if previous is not None and previous not in by_hash:
+            raise ValueError("final recovery consumption chain is broken")
+        children.setdefault(previous, []).append(row["content_hash"])
+    cursor = None
+    ordered: list[str] = []
+    while children.get(cursor):
+        candidates = children[cursor]
+        if len(candidates) != 1:
+            raise ValueError("final recovery consumption chain forks")
+        cursor = candidates[0]
+        if cursor in ordered:
+            raise ValueError("final recovery consumption chain cycles")
+        ordered.append(cursor)
+    if len(ordered) != len(rows):
+        raise ValueError("final recovery consumption chain is disconnected")
+    return cursor, ordered
+
+
+def _consume_final_recovery_authorization(
+    *,
+    central: Path,
+    claim: Mapping[str, Any],
+    authorization: Mapping[str, Any],
+) -> dict[str, Any]:
+    validate_content_hash(
+        claim,
+        expected_contract=PARTICLE_VIEW_FINAL_ACCESS_CLAIM_CONTRACT,
+    )
+    validate_content_hash(
+        authorization,
+        expected_contract=PARTICLE_VIEW_FINAL_RECOVERY_AUTHORIZATION_CONTRACT,
+    )
+    if (
+        authorization.get("access_claim_sha256") != claim["content_hash"]
+        or authorization.get("allow_one_recovery_access") is not True
+    ):
+        raise PermissionError("final recovery authorization belongs to another claim")
+    root = central / "recovery_authorization_consumptions"
+    destination = root / f"{authorization['content_hash']}.json"
+    if destination.exists():
+        raise PermissionError("final recovery authorization was already consumed")
+    tail_sha256, _ = _recovery_consumption_tail(
+        central,
+        access_claim_sha256=claim["content_hash"],
+    )
+    if (
+        authorization.get("previous_recovery_consumption_sha256")
+        != tail_sha256
+    ):
+        raise PermissionError(
+            "final recovery authorization is stale or omits the previous "
+            "recovery consumption"
+        )
+    consumption = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_FINAL_RECOVERY_CONSUMPTION_CONTRACT,
+            "access_claim_sha256": claim["content_hash"],
+            "recovery_authorization_sha256": authorization["content_hash"],
+            "previous_recovery_consumption_sha256": tail_sha256,
+            "task_id": os.environ.get(
+                "PARTICLE_VIEW_TASK_ID", "manual_final_recovery"
+            ),
+            "run_id": os.environ.get(
+                "PARTICLE_VIEW_RUN_ID", "manual_final_recovery"
+            ),
+            "authorization_consumed_before_cache_open": True,
+        }
+    )
+    write_immutable_json(destination, consumption)
+    return consumption
+
+
 def _finalize_publication(
     *,
     central: Path,
     permit: Mapping[str, Any],
     plan: Mapping[str, Any],
     pre_final_report: Mapping[str, Any],
+    pre_final_strong_support: Mapping[str, Any],
     deployment_export_sha256: Sequence[str],
     results: Mapping[str, Sequence[Mapping[str, Any]]],
     source_audit: Mapping[str, Any],
@@ -764,12 +911,7 @@ def _finalize_publication(
         )
         for row, configuration_id, seed, gain in warning_specs
     ]
-    warning_stream = (
-        central.parent
-        / "quality_warnings"
-        / "pv10_hlt_only_final_test"
-        / "quality_warnings.jsonl"
-    )
+    warning_stream = central / "final_scientific_warnings.jsonl"
     write_quality_warning_jsonl(warning_stream, warnings)
     warning_index = with_content_hash(
         {
@@ -784,6 +926,54 @@ def _finalize_publication(
         }
     )
     _write_or_validate(central / "final_quality_warning_index.json", warning_index)
+    privileged_final = [
+        row
+        for row in results["standalone"]
+        if "selected_privileged_scientific_model" in row["winner_families"]
+    ]
+    final_gain = (
+        float(privileged_final[0]["accuracy_gain_over_matched_a0"])
+        if len(privileged_final) == 1
+        else None
+    )
+    criteria = [dict(row) for row in pre_final_strong_support["criteria"]]
+    criterion9 = next(row for row in criteria if row["criterion"] == 9)
+    criterion9.update(
+        {
+            "status": "pass" if final_gain is not None and final_gain > 0 else "fail",
+            "passed": bool(final_gain is not None and final_gain > 0),
+            "evidence": {"final_test_accuracy_gain_over_matched_a0": final_gain},
+            "warning_code": (
+                None
+                if final_gain is not None and final_gain > 0
+                else "WARN_STRONG_SUPPORT_CRITERION_9"
+            ),
+        }
+    )
+    final_assessment = with_content_hash(
+        {
+            "contract": "particle_view_strong_support_assessment_v1",
+            "selection_sha256": pre_final_strong_support["selection_sha256"],
+            "split": "final",
+            "criteria": criteria,
+            "passed_count": sum(row["passed"] is True for row in criteria),
+            "failed_count": sum(row["passed"] is False for row in criteria),
+            "pending_count": 0,
+            "strong_support_status": (
+                "strongly_supported"
+                if all(row["passed"] is True for row in criteria)
+                else "not_strongly_supported"
+            ),
+            "warning_codes": sorted(
+                row["warning_code"] for row in criteria if row["warning_code"]
+            ),
+            "warnings_are_non_gating": True,
+        }
+    )
+    _write_or_validate(
+        central / "final_strong_support_assessment.json",
+        final_assessment,
+    )
     report = build_separated_campaign_report(
         sections=sections,
         selection_sha256=pre_final_report["selection_sha256"],
@@ -850,6 +1040,7 @@ def run_final_test_campaign(
     baseline_models: Mapping[str, torch.nn.Module],
     fusion_recipes: Sequence[Mapping[str, Any]],
     pre_final_report: Mapping[str, Any],
+    pre_final_strong_support: Mapping[str, Any],
     deployment_export_sha256: Sequence[str],
     class_names: Sequence[str],
     device: str,
@@ -884,7 +1075,27 @@ def run_final_test_campaign(
     central = Path(central_output_dir)
     central.mkdir(parents=True, exist_ok=True)
     _write_or_validate(central / "final_evaluation_plan.json", evaluation_plan)
+    claim_path = central / "final_access_claim.json"
+    claim_existed = claim_path.exists()
+    claim = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_FINAL_ACCESS_CLAIM_CONTRACT,
+            "permit_sha256": permit["content_hash"],
+            "evaluation_plan_sha256": evaluation_plan["content_hash"],
+            "final_test_split_sha256": evaluation_plan[
+                "final_test_split_sha256"
+            ],
+            "final_test_identity_sha256": evaluation_plan[
+                "final_test_identity_sha256"
+            ],
+            "source_commit": evaluation_plan["source_commit"],
+            "central_output_dir": str(central.resolve()),
+            "one_time_access_claimed": True,
+        }
+    )
+    _write_or_validate(claim_path, claim)
     index_path = central / "final_result_index.json"
+    recovery_consumption = None
     if not index_path.exists():
         paths = _result_paths(central, permit, fusion_recipes)
         audit_path = central / "final_hlt_source_audit.json"
@@ -916,6 +1127,35 @@ def run_final_test_campaign(
                 results[group].append(row)
             audit = load_hashed_json(audit_path)
         else:
+            if claim_existed:
+                authorization_path = os.environ.get(
+                    "PARTICLE_VIEW_FINAL_RECOVERY_AUTHORIZATION"
+                )
+                if not authorization_path:
+                    raise PermissionError(
+                        "an incomplete claimed final-test access requires an "
+                        "explicit recovery authorization"
+                    )
+                authorization = load_hashed_json(authorization_path)
+                validate_content_hash(
+                    authorization,
+                    expected_contract=(
+                        PARTICLE_VIEW_FINAL_RECOVERY_AUTHORIZATION_CONTRACT
+                    ),
+                )
+                if (
+                    authorization.get("access_claim_sha256")
+                    != claim["content_hash"]
+                    or authorization.get("allow_one_recovery_access") is not True
+                ):
+                    raise PermissionError(
+                        "final recovery authorization belongs to another claim"
+                    )
+                recovery_consumption = _consume_final_recovery_authorization(
+                    central=central,
+                    claim=claim,
+                    authorization=authorization,
+                )
             view, audit = load_final_hlt_view(runtime_data_config)
             if (
                 view.logical_split_sha256
@@ -978,6 +1218,7 @@ def run_final_test_campaign(
             permit=permit,
             plan=evaluation_plan,
             pre_final_report=pre_final_report,
+            pre_final_strong_support=pre_final_strong_support,
             deployment_export_sha256=deployment_export_sha256,
             results=results,
             source_audit=audit,
@@ -1003,6 +1244,27 @@ def run_final_test_campaign(
         or publication["one_time_hlt_only_final_test"] is not True
     ):
         raise ValueError("PV10 central publication lineage changed")
+    _, recovery_consumption_sha256 = _recovery_consumption_tail(
+        central,
+        access_claim_sha256=claim["content_hash"],
+    )
+    receipt = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_FINAL_ACCESS_RECEIPT_CONTRACT,
+            "access_claim_sha256": claim["content_hash"],
+            "permit_sha256": permit["content_hash"],
+            "evaluation_plan_sha256": evaluation_plan["content_hash"],
+            "result_index_sha256": index["content_hash"],
+            "final_publication_sha256": publication["content_hash"],
+            "recovery_consumption_sha256": recovery_consumption_sha256,
+            "recovery_authorization_consumed_before_cache_open": (
+                bool(recovery_consumption_sha256)
+            ),
+            "final_cache_access_completed": True,
+            "one_time_hlt_only_final_test": True,
+        }
+    )
+    _write_or_validate(central / "final_access_receipt.json", receipt)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     write_immutable_json(
@@ -1146,19 +1408,22 @@ def build_final_factory(
     pre_report = load_hashed_json(
         _artifact(aggregate, "pre_final_campaign_report.json")
     )
+    pre_strong_support = load_hashed_json(
+        _artifact(aggregate, "strong_support_assessment.json")
+    )
     paths = _result_paths(central, permit, recipes)
     artifact_paths = [
         central / "final_evaluation_plan.json",
+        central / "final_access_claim.json",
+        central / "final_access_receipt.json",
         central / "final_hlt_source_audit.json",
         *paths.values(),
         central / "final_quality_warning_index.json",
+        central / "final_strong_support_assessment.json",
         central / "final_campaign_report.json",
         central / "final_result_index.json",
         central / "final_publication.json",
-        root
-        / "quality_warnings"
-        / "pv10_hlt_only_final_test"
-        / "quality_warnings.jsonl",
+        central / "final_scientific_warnings.jsonl",
         output / "final_family_binding.json",
     ]
     runtime = config["runtime"]
@@ -1174,6 +1439,7 @@ def build_final_factory(
             "baseline_models": baseline_models,
             "fusion_recipes": recipes,
             "pre_final_report": pre_report,
+            "pre_final_strong_support": pre_strong_support,
             "deployment_export_sha256": [
                 row["content_hash"] for row in exports
             ],

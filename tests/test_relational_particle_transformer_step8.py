@@ -7,6 +7,10 @@ import sys
 
 import numpy as np
 import pytest
+from scripts.build_relational_part_model_contracts import (
+    EXPECTED_TRIMMING_DIAGNOSTIC,
+    validate_parity_execution_binding,
+)
 
 from jetclass_fresh.jetclass_data import (
     DEFAULT_SPLIT_SEEDS,
@@ -39,6 +43,37 @@ from teacher_logit_reco.relational_part import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_parity_consumption_requires_exact_source_and_active_trim_fixture() -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_status_sha256": "b" * 64,
+        "source_dirty": True,
+    }
+    parity = {
+        "source": source,
+        "sequence_trimming_diagnostic": dict(
+            EXPECTED_TRIMMING_DIAGNOSTIC
+        ),
+    }
+    validate_parity_execution_binding(parity, current_source=source)
+    with pytest.raises(ValueError, match="source snapshot"):
+        validate_parity_execution_binding(
+            parity,
+            current_source=source | {"source_status_sha256": "c" * 64},
+        )
+    with pytest.raises(ValueError, match="active trimming"):
+        validate_parity_execution_binding(
+            parity
+            | {
+                "sequence_trimming_diagnostic": (
+                    EXPECTED_TRIMMING_DIAGNOSTIC
+                    | {"ordinary_trimmed_width": 7}
+                )
+            },
+            current_source=source,
+        )
 
 
 def _miniature_manifest() -> SplitManifest:
@@ -371,6 +406,7 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         sbatch / "run_write_relational_part_report.sh"
     ).read_text(encoding="utf-8")
     assert "--campaign-spec" in semantic_runner
+    assert "validate_campaign_source" in semantic_runner
     assert "checkpoint_registration_hashes" in semantic_worker
     assert "validate_campaign_source" in semantic_worker
     assert "validate_campaign_source" in report_worker

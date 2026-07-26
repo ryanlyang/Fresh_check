@@ -106,7 +106,10 @@ def _perturb(args) -> int:
     )
     campaign = load_hashed_json(args.campaign_spec)
     validate_campaign_source(campaign, repo_root=REPO_ROOT)
-    registration = load_hashed_json(args.checkpoint_registration)
+    registration = load_hashed_json(
+        args.checkpoint_registration,
+        expected_contract="relational_part_checkpoint_registration_v2",
+    )
     model_contract = load_hashed_json(args.model_contract)
     screening = load_hashed_json(
         args.screening_registry, expected_contract=SCREENING_REGISTRY_CONTRACT
@@ -114,14 +117,16 @@ def _perturb(args) -> int:
     normalization, region = _common_normalizers(args)
     if args.seed != 101:
         raise ValueError("semantic perturbations are bound to confirmed seed 101")
-    if summary["nominal_relational_winner_id"] != args.run_id:
-        raise ValueError("semantic perturbations must use the nominal winner")
     winner_rows = [
         row for row in summary["rows"] if row["run_id"] == args.run_id
     ]
     if len(winner_rows) != 1:
-        raise ValueError("confirmation summary has no unique nominal winner row")
+        raise ValueError("confirmation summary has no unique requested run row")
     winner = winner_rows[0]
+    if list(args.families) != list(winner["new_relation_families"]):
+        raise ValueError(
+            "semantic relation families differ from the confirmation row"
+        )
     if (
         registration["content_hash"]
         != winner["checkpoint_registration_hashes"]["101"]
@@ -132,7 +137,7 @@ def _perturb(args) -> int:
     ):
         raise ValueError(
             "semantic checkpoint, registration, or model contract is not "
-            "the exact confirmed seed-101 winner"
+            "the exact confirmed seed-101 model"
         )
     resolved = {
         "run_id": args.run_id,
@@ -181,9 +186,11 @@ def _perturb(args) -> int:
         model, loader, device=device
     )
     artifact = build_semantic_perturbation_artifact(
-        nominal_winner_run_id=args.run_id,
-        nominal_checkpoint_sha256=registration["checkpoint_sha256"],
-        nominal_checkpoint_registration_sha256=registration["content_hash"],
+        run_id=args.run_id,
+        families=args.families,
+        checkpoint_sha256=registration["checkpoint_sha256"],
+        checkpoint_registration_sha256=registration["content_hash"],
+        model_contract_sha256=model_contract["content_hash"],
         confirmation_summary_sha256=summary["content_hash"],
         metrics=metrics,
         diagnostics=diagnostics,

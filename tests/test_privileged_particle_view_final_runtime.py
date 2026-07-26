@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 
 import numpy as np
+import pytest
 
 from teacher_logit_reco.local_particle_residual_field.particle_view import (
     PARTICLE_VIEW_FINAL_EVALUATION_PLAN_CONTRACT,
     PARTICLE_VIEW_FINAL_TEST_PERMIT_CONTRACT,
     PARTICLE_VIEW_FUSION_RECIPE_CONTRACT,
+    build_final_recovery_authorization,
     build_final_result_payloads,
     with_content_hash,
 )
@@ -15,6 +17,79 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
 
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_final_recovery_authorization_binds_exact_access_claim():
+    claim = with_content_hash(
+        {
+            "contract": "particle_view_final_access_claim_v1",
+            "permit_sha256": _sha("permit"),
+            "evaluation_plan_sha256": _sha("plan"),
+            "final_test_split_sha256": _sha("split"),
+            "final_test_identity_sha256": _sha("identity"),
+            "source_commit": "a" * 40,
+            "central_output_dir": "/campaign/final",
+            "one_time_access_claimed": True,
+        }
+    )
+    authorization = build_final_recovery_authorization(
+        access_claim=claim,
+        reason="allocation terminated after the claim was published",
+        authorized_by="test_operator",
+    )
+    assert authorization["access_claim_sha256"] == claim["content_hash"]
+    assert authorization["allow_one_recovery_access"]
+    assert authorization["previous_recovery_consumption_sha256"] is None
+
+
+def test_final_recovery_authorization_is_consumed_once_and_chained(tmp_path):
+    from teacher_logit_reco.local_particle_residual_field.particle_view import (
+        final_runtime,
+    )
+
+    claim = with_content_hash(
+        {
+            "contract": "particle_view_final_access_claim_v1",
+            "permit_sha256": _sha("permit"),
+            "evaluation_plan_sha256": _sha("plan"),
+            "final_test_split_sha256": _sha("split"),
+            "final_test_identity_sha256": _sha("identity"),
+            "source_commit": "a" * 40,
+            "central_output_dir": str(tmp_path),
+            "one_time_access_claimed": True,
+        }
+    )
+    first = build_final_recovery_authorization(
+        access_claim=claim,
+        reason="first interrupted allocation",
+        authorized_by="test_operator",
+    )
+    first_consumption = final_runtime._consume_final_recovery_authorization(
+        central=tmp_path,
+        claim=claim,
+        authorization=first,
+    )
+    with pytest.raises(PermissionError, match="already consumed"):
+        final_runtime._consume_final_recovery_authorization(
+            central=tmp_path,
+            claim=claim,
+            authorization=first,
+        )
+    second = build_final_recovery_authorization(
+        access_claim=claim,
+        reason="second interrupted allocation",
+        authorized_by="test_operator",
+        previous_recovery_consumption=first_consumption,
+    )
+    second_consumption = final_runtime._consume_final_recovery_authorization(
+        central=tmp_path,
+        claim=claim,
+        authorization=second,
+    )
+    assert (
+        second_consumption["previous_recovery_consumption_sha256"]
+        == first_consumption["content_hash"]
+    )
 
 
 def _permit() -> dict:

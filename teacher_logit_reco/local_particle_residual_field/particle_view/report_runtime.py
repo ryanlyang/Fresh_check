@@ -45,6 +45,11 @@ from .reporting import (
 from .selection import (
     build_stack_confirmation_report,
 )
+from .storage import (
+    RetentionCandidate,
+    build_retention_plan,
+    execute_retention_plan,
+)
 from .stack_runtime import (
     PARTICLE_VIEW_OPTIONAL_FUSION_STATUS_CONTRACT,
     PARTICLE_VIEW_STACK_EVALUATION_CONTRACT,
@@ -226,6 +231,7 @@ def _collect_pv08(
         config=config["stack_factory_config"],
     )
     evaluation_artifacts = []
+    paired_statistics = []
     row_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
     fusion_rows = []
     fusion_recipe_hashes = []
@@ -244,6 +250,7 @@ def _collect_pv08(
                     expected_contract=PARTICLE_VIEW_STACK_EVALUATION_CONTRACT,
                 )
                 evaluation_artifacts.append(payload)
+                paired_statistics.extend(payload["paired_statistics"])
                 for row in payload["rows"]:
                     identity = (
                         row["bundle_sha256"],
@@ -374,6 +381,7 @@ def _collect_pv08(
         "final_authorization": final_authorization,
         "stack_rows": list(row_by_identity.values()),
         "evaluation_artifacts": evaluation_artifacts,
+        "paired_statistics": paired_statistics,
         "fusions": fusion_rows,
         "optional_status": optional_status,
         "stack_run_count": len(expected_stack_runs),
@@ -733,6 +741,204 @@ def _report_sections(
     return sections
 
 
+def _strong_support_assessment(
+    *,
+    selection: Mapping[str, Any],
+    stack_report: Mapping[str, Any],
+    stack_rows: Sequence[Mapping[str, Any]],
+    paired_statistics: Sequence[Mapping[str, Any]],
+    reload_audits: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate the nine locked claims without gating any campaign work."""
+
+    family_key = "selected_privileged_scientific_model"
+    winner = selection[family_key]
+    replicas = list(winner["replicas"])
+    oracle = [row.get("oracle_gain") for row in replicas]
+    predicted = [row.get("predicted_gain") for row in replicas]
+    criteria: list[dict[str, Any]] = []
+
+    def add(index: int, passed: bool | None, evidence: Mapping[str, Any]) -> None:
+        criteria.append(
+            {
+                "criterion": index,
+                "status": (
+                    "pass" if passed is True else "fail" if passed is False else "pending"
+                ),
+                "passed": passed,
+                "evidence": dict(evidence),
+                "warning_code": (
+                    None
+                    if passed is True or passed is None
+                    else f"WARN_STRONG_SUPPORT_CRITERION_{index}"
+                ),
+                "non_gating": True,
+            }
+        )
+
+    oracle_finite = all(value is not None for value in oracle)
+    add(
+        1,
+        (
+            sum(float(value) > 0.0 for value in oracle) >= 2
+            and sum(float(value) for value in oracle) / 3.0 >= 0.002
+        )
+        if oracle_finite
+        else False,
+        {"oracle_gain_by_seed": oracle, "required_mean": 0.002},
+    )
+    predicted_finite = all(value is not None for value in predicted)
+    privileged_rows = [
+        row
+        for row in stack_rows
+        if row.get("role") == "preselected_winner_replica"
+        and row.get("winner_family") == "PRIVILEGED_SCIENTIFIC"
+    ]
+    stack_gains = [
+        float(row["accuracy"]) - float(row["matched_a0_metrics"]["accuracy"])
+        for row in privileged_rows
+    ]
+    add(
+        2,
+        (
+            sum(float(value) > 0.0 for value in predicted) >= 2
+            and sum(value > 0.0 for value in stack_gains) >= 2
+        )
+        if predicted_finite and len(stack_gains) == 3
+        else False,
+        {
+            "predicted_view_gain_over_zero_by_seed": predicted,
+            "sealed_gain_over_matched_a0_by_seed": stack_gains,
+        },
+    )
+    mean_stack_gain = (
+        sum(stack_gains) / 3.0 if len(stack_gains) == 3 else None
+    )
+    add(
+        3,
+        mean_stack_gain is not None and mean_stack_gain >= 0.002,
+        {"mean_stack_accuracy_gain": mean_stack_gain, "required_gain": 0.002},
+    )
+    representative_hash = winner["representative_bundle_sha256"]
+    paired = [
+        row
+        for row in paired_statistics
+        if row.get("candidate_artifact_sha256") == representative_hash
+        and row.get("split") == "stack_val"
+    ]
+    paired_row = paired[0] if len(paired) == 1 else None
+    lower = (
+        float(paired_row["paired_bootstrap"]["ci95_percentile"][0])
+        if paired_row is not None
+        else None
+    )
+    pvalue = (
+        float(paired_row["mcnemar"]["exact_two_sided_binomial_p"])
+        if paired_row is not None
+        else None
+    )
+    add(
+        4,
+        lower is not None and lower > 0.0 and pvalue is not None and pvalue < 0.05,
+        {"paired_bootstrap_lower_95": lower, "mcnemar_p": pvalue},
+    )
+    stage_summary = stack_report["winner_summaries"][family_key]
+    control_delta = stage_summary["strongest_control_minus_winner_accuracy"]
+    add(
+        5,
+        control_delta is not None and float(control_delta) < 0.0,
+        {
+            "strongest_stage_g_control_id": stage_summary[
+                "strongest_stage_g_control_id"
+            ],
+            "strongest_control_minus_winner_accuracy": control_delta,
+            "strict_winner_required": True,
+        },
+    )
+    ce_rows = [
+        row for row in stack_rows if row.get("role") == "matched_ce_only_comparator"
+    ]
+    if len(privileged_rows) == 3 and len(ce_rows) == 3:
+        mean_accuracy = sum(float(row["accuracy"]) for row in privileged_rows) / 3.0
+        ce_accuracy = sum(float(row["accuracy"]) for row in ce_rows) / 3.0
+        mean_ece = sum(
+            float(row["ece_top_label_15_equal_width"]) for row in privileged_rows
+        ) / 3.0
+        ce_ece = sum(
+            float(row["ece_top_label_15_equal_width"]) for row in ce_rows
+        ) / 3.0
+        mean_brier = sum(float(row["multiclass_brier"]) for row in privileged_rows) / 3.0
+        ce_brier = sum(float(row["multiclass_brier"]) for row in ce_rows) / 3.0
+        comparable = abs(mean_accuracy - ce_accuracy) <= 0.001
+        calibration_better = (
+            ce_ece - mean_ece >= 0.002
+            or (
+                abs(ce_ece - mean_ece) < 0.002
+                and ce_brier - mean_brier >= 0.002
+            )
+        )
+        criterion6 = mean_accuracy > ce_accuracy or (
+            comparable and calibration_better
+        )
+        calibration_evidence = {
+            "mean_accuracy": mean_accuracy,
+            "ce_mean_accuracy": ce_accuracy,
+            "mean_ece": mean_ece,
+            "ce_mean_ece": ce_ece,
+            "mean_brier": mean_brier,
+            "ce_mean_brier": ce_brier,
+        }
+    else:
+        criterion6 = False
+        calibration_evidence = {"complete_three_seed_rows": False}
+    add(6, criterion6, calibration_evidence)
+    recoveries = [row.get("recovery_fraction") for row in replicas]
+    recovery_statuses = [row.get("recovery_status") for row in replicas]
+    complete_finite_recovery = (
+        len(recoveries) == 3
+        and len(recovery_statuses) == 3
+        and all(status == "finite" for status in recovery_statuses)
+        and all(value is not None for value in recoveries)
+    )
+    mean_recovery = (
+        sum(float(value) for value in recoveries) / 3.0
+        if complete_finite_recovery
+        else None
+    )
+    add(
+        7,
+        mean_recovery is not None and mean_recovery > 0.0,
+        {
+            "recovery_status_by_seed": recovery_statuses,
+            "recovery_fraction_by_seed": recoveries,
+            "mean_recovery_fraction": mean_recovery,
+            "requires_three_finite_replicas": True,
+        },
+    )
+    reload_passed = bool(reload_audits) and all(
+        row.get("passed") is True and row.get("only_hlt_inputs_visible") is True
+        for row in reload_audits
+    )
+    add(8, reload_passed, {"reload_audit_count": len(reload_audits)})
+    add(9, None, {"reason": "awaiting one-time HLT-only final_test"})
+    return with_content_hash(
+        {
+            "contract": "particle_view_strong_support_assessment_v1",
+            "selection_sha256": selection["content_hash"],
+            "split": "pre_final",
+            "criteria": criteria,
+            "passed_count": sum(row["passed"] is True for row in criteria),
+            "failed_count": sum(row["passed"] is False for row in criteria),
+            "pending_count": sum(row["passed"] is None for row in criteria),
+            "strong_support_status": "pending_final_test",
+            "warning_codes": sorted(
+                row["warning_code"] for row in criteria if row["warning_code"]
+            ),
+            "warnings_are_non_gating": True,
+        }
+    )
+
+
 def run_report_aggregate(
     *,
     output_dir: str,
@@ -740,7 +946,9 @@ def run_report_aggregate(
     selection: Mapping[str, Any],
     final_authorization: Mapping[str, Any],
     fairness: Mapping[str, Any],
+    storage_reservation: Mapping[str, Any],
     stack_rows: Sequence[Mapping[str, Any]],
+    paired_statistics: Sequence[Mapping[str, Any]],
     fusions: Sequence[Mapping[str, Any]],
     optional_status: Sequence[Mapping[str, Any]],
     deployment_lineages: Sequence[Mapping[str, Any]],
@@ -754,6 +962,30 @@ def run_report_aggregate(
         selection=selection,
         authorization=final_authorization,
         stack_rows=stack_rows,
+    )
+    validate_content_hash(
+        storage_reservation,
+        expected_contract="particle_view_storage_reservation_v1",
+    )
+    strong_support = _strong_support_assessment(
+        selection=selection,
+        stack_report=stack_report,
+        stack_rows=stack_rows,
+        paired_statistics=paired_statistics,
+        reload_audits=reload_audits,
+    )
+    paired_index = with_content_hash(
+        {
+            "contract": "particle_view_paired_statistics_index_v1",
+            "selection_sha256": selection["content_hash"],
+            "split": "stack_val",
+            "paired_statistics": [dict(row) for row in paired_statistics],
+            "paired_statistics_sha256": sorted(
+                row["content_hash"] for row in paired_statistics
+            ),
+            "report_count": len(paired_statistics),
+            "final_test_loaded": False,
+        }
     )
     label_index = with_content_hash(
         {
@@ -802,6 +1034,7 @@ def run_report_aggregate(
         }
     )
     warnings = []
+    warnings.extend(strong_support["warning_codes"])
     for status in optional_status:
         if status.get("status") != "run":
             warnings.append(str(status.get("reason")))
@@ -830,7 +1063,7 @@ def run_report_aggregate(
         stack_report_sha256=stack_report["content_hash"],
         fairness_ledger_sha256=fairness["content_hash"],
         label_exposure_ledger_sha256=label_index["content_hash"],
-        storage_reservation_sha256=storage["content_hash"],
+        storage_reservation_sha256=storage_reservation["content_hash"],
         lineage_graph_sha256=lineage_index["content_hash"],
         deployment_export_sha256=[
             row["content_hash"] for row in deployment_exports
@@ -840,6 +1073,8 @@ def run_report_aggregate(
     for name, payload in (
         ("sealed_split_authorization.json", final_authorization),
         ("stack_confirmation_report.json", stack_report),
+        ("strong_support_assessment.json", strong_support),
+        ("paired_statistics_index.json", paired_index),
         ("selected_label_exposure_index.json", label_index),
         ("selected_deployment_lineage_index.json", lineage_index),
         ("measured_storage_snapshot.json", storage),
@@ -847,6 +1082,51 @@ def run_report_aggregate(
         ("pre_final_campaign_report.json", report),
     ):
         write_immutable_json(output / name, payload)
+    bound_paths = set()
+    for result_path in campaign.glob("runtime_tasks/*/task_result.json"):
+        try:
+            result = load_hashed_json(result_path)
+        except (OSError, ValueError):
+            continue
+        bound_paths.update(
+            str(Path(row["path"]).resolve())
+            for row in result.get("artifacts", [])
+        )
+    candidates = []
+    for path in sorted(campaign.rglob("*")):
+        if not path.is_file() or str(path.resolve()) in bound_paths:
+            continue
+        lower = path.name.lower()
+        kind = (
+            "optimizer_state"
+            if lower.startswith("optimizer") and path.suffix == ".pt"
+            else (
+                "attention_diagnostic"
+                if "attention" in lower and path.suffix == ".npz"
+                else None
+            )
+        )
+        if kind is not None:
+            candidates.append(
+                RetentionCandidate(
+                    relative_path=path.resolve().relative_to(
+                        campaign.resolve()
+                    ).as_posix(),
+                    kind=kind,
+                    sha256=sha256_file(path),
+                    metrics_finalized=True,
+                )
+            )
+    retention = build_retention_plan(
+        campaign_root=campaign,
+        candidates=candidates,
+    )
+    write_immutable_json(output / "retention_plan.json", retention)
+    execute_retention_plan(
+        campaign,
+        retention,
+        output_path=output / "eviction_report.json",
+    )
     write_immutable_json(
         output / "report_publication.json",
         with_content_hash(
@@ -1113,6 +1393,12 @@ def build_report_factory(
                 fairness_artifacts, "selected_path_fairness_ledger.json"
             )
         )
+        source_artifacts = _task_artifacts(
+            root, registry, "PV_SOURCE_PREFLIGHT", 101
+        )
+        storage_reservation = load_hashed_json(
+            _artifact(source_artifacts, "storage_reservation.json")
+        )
         return {
             "kwargs": {
                 "output_dir": str(output),
@@ -1120,7 +1406,9 @@ def build_report_factory(
                 "selection": pv08["selection"],
                 "final_authorization": pv08["final_authorization"],
                 "fairness": fairness,
+                "storage_reservation": storage_reservation,
                 "stack_rows": pv08["stack_rows"],
+                "paired_statistics": pv08["paired_statistics"],
                 "fusions": pv08["fusions"],
                 "optional_status": pv08["optional_status"],
                 "deployment_lineages": lineages,
@@ -1131,12 +1419,16 @@ def build_report_factory(
             "artifact_paths": [
                 str(output / "sealed_split_authorization.json"),
                 str(output / "stack_confirmation_report.json"),
+                str(output / "strong_support_assessment.json"),
+                str(output / "paired_statistics_index.json"),
                 str(output / "selected_label_exposure_index.json"),
                 str(output / "selected_deployment_lineage_index.json"),
                 str(output / "measured_storage_snapshot.json"),
                 str(output / "quality_warning_index.json"),
                 str(output / "pre_final_campaign_report.json"),
                 str(output / "report_publication.json"),
+                str(output / "retention_plan.json"),
+                str(output / "eviction_report.json"),
             ],
             "action": None,
         }

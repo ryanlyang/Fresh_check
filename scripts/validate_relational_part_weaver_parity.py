@@ -36,7 +36,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
 )
 
 
-PARITY_REPORT_CONTRACT = "relational_part_weaver_parity_report_v1"
+PARITY_REPORT_CONTRACT = "relational_part_weaver_parity_report_v3"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -91,6 +91,22 @@ def _difference(torch, candidate, reference) -> dict[str, float]:
 def _assert_close(torch, candidate, reference, *, atol: float, rtol: float):
     torch.testing.assert_close(candidate, reference, atol=atol, rtol=rtol)
     return _difference(torch, candidate, reference)
+
+
+def _assert_trimmer_state_restored(
+    torch,
+    trimmer,
+    *,
+    counter_before,
+) -> None:
+    if bool(trimmer.enabled) is not True:
+        raise AssertionError(
+            "diagnostic capture changed SequenceTrimmer enabled flag"
+        )
+    if not torch.equal(trimmer._counter, counter_before):
+        raise AssertionError(
+            "diagnostic capture changed SequenceTrimmer counter"
+        )
 
 
 def _reference_pair_bias(reference, vectors, mask):
@@ -202,6 +218,56 @@ def _run(device_name: str, expected_version: str | None) -> dict[str, Any]:
         logit_difference = _assert_close(
             torch, explicit_logits, reference_logits, atol=atol, rtol=rtol
         )
+        trim_points, trim_features, trim_vectors, trim_mask = _batch(
+            torch,
+            device,
+            valid_counts=(3, 2, 4, 1, 3, 2, 4, 1),
+            length=7,
+            seed=9002,
+        )
+        del trim_points
+        trim_uu = explicit.explicit_standard_four(trim_vectors, trim_mask)
+        trimmer = explicit.mod.trimmer
+        if bool(getattr(trimmer, "enabled", False)) is not True:
+            raise RuntimeError("authoritative parity requires active trimming")
+        initial_counter = trimmer._counter.detach().clone()
+        trimmer_state_restored = False
+        try:
+            remaining = max(
+                0,
+                int(trimmer.warmup_steps)
+                - int(trimmer._counter.detach().cpu().item()),
+            )
+            for _ in range(remaining):
+                trimmer(
+                    trim_features,
+                    v=trim_vectors,
+                    mask=trim_mask,
+                    uu=trim_uu,
+                )
+            trimmed = trimmer(
+                trim_features,
+                v=trim_vectors,
+                mask=trim_mask,
+                uu=trim_uu,
+            )
+            if int(trimmed[2].shape[-1]) != 4:
+                raise AssertionError(
+                    "Weaver trimming fixture did not reduce width 7 to 4"
+                )
+            counter_before_diagnostics = trimmer._counter.detach().clone()
+            attention_capture = explicit.diagnostics(
+                trim_features, trim_vectors, trim_mask
+            )["attention_allocation"]
+            _assert_trimmer_state_restored(
+                torch,
+                trimmer,
+                counter_before=counter_before_diagnostics,
+            )
+            trimmer_state_restored = True
+        finally:
+            with torch.no_grad():
+                trimmer._counter.copy_(initial_counter)
 
     reference.zero_grad(set_to_none=True)
     explicit.zero_grad(set_to_none=True)
@@ -308,7 +374,7 @@ def _run(device_name: str, expected_version: str | None) -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": PARITY_REPORT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 3,
             "ok": True,
             "source": source_snapshot(REPO_ROOT),
             "device": str(device),
@@ -331,6 +397,16 @@ def _run(device_name: str, expected_version: str | None) -> dict[str, Any]:
             "standard_four_pair_features": pair_difference,
             "pair_bias": bias_difference,
             "logits": logit_difference,
+            "attention_capture": attention_capture,
+            "sequence_trimming_diagnostic": {
+                "warmup_deliberately_exhausted": True,
+                "partial_batch_size": 8,
+                "original_padded_width": 7,
+                "maximum_valid_count": 4,
+                "ordinary_trimmed_width": 4,
+                "diagnostic_captured_width": 7,
+                "trimmer_state_restored": trimmer_state_restored,
+            },
             "input_gradients": input_gradient_difference,
             "parameter_gradients": parameter_gradient_maximum,
             "padding": {

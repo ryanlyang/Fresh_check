@@ -242,7 +242,7 @@ def build_step1_bundle(
     report = bind(with_content_hash(
         {
             "contract": STEP1_REPORT_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 5,
             "campaign_spec_sha256": campaign_spec["content_hash"],
             "campaign_id": campaign_id,
             "campaign_profile": (

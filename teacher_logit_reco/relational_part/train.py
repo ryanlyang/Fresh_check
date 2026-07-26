@@ -565,11 +565,18 @@ def _capture_diagnostics(
             ):
                 if key in sum_scalar_fields:
                     return int(sum(int(value) for value in present))
-                denominator = float(sum(weights))
+                weighted_values = [
+                    (value, weights[index])
+                    for index, value in enumerate(values)
+                    if value is not None
+                ]
+                denominator = float(
+                    sum(weight for _, weight in weighted_values)
+                )
                 return float(
                     sum(
-                        float(value) * weights[index]
-                        for index, value in enumerate(values)
+                        float(value) * weight
+                        for value, weight in weighted_values
                     )
                     / denominator
                 )
