@@ -8,9 +8,9 @@ jointly, and the selected generator is registered without a descendant hash.
 
 The target-screen recipe compiler covers the complete declared screen so later
 runtime packs cannot silently reinterpret an ablation.  The production factory
-currently advertises only the canonical row; task-catalog construction remains
-fail-closed for every screen row that has not yet received its complete
-normalizer/probe implementation.
+currently advertises only the canonical row and runs its complete two-pass
+normalizer/consumer/recovery-probe evaluation.  Task-catalog construction
+remains fail-closed for screen rows not yet promoted to this runtime path.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import torch
 
 from jetclass_fresh.part_inputs import PF_FEATURE_NAMES
@@ -32,6 +33,7 @@ from .campaign import (
 from .consumer import ParticleViewConsumer, ParticleViewConsumerConfig
 from .consumer_train import (
     ParticleViewConsumerTrainConfig,
+    evaluate_view_counterfactuals,
     train_particle_view_consumer,
 )
 from .contracts import (
@@ -50,7 +52,16 @@ from .offline_teacher import (
     reload_registered_teacher,
     validate_teacher_registration,
 )
-from .oracle_discovery import OracleObjectiveConfig
+from .oracle_discovery import (
+    OracleObjectiveConfig,
+    build_target_metrics_from_counterfactual,
+    build_two_pass_candidate_artifact,
+)
+from .recovery_probe import (
+    FixedCapacityRecoveryProbe,
+    RecoveryProbeConfig,
+    train_recovery_probe,
+)
 from .registry import validate_particle_view_registry
 from .runtime_data import (
     PARTICLE_VIEW_RUNTIME_DATA_CONFIG_CONTRACT,
@@ -72,6 +83,13 @@ from .target_generator import (
     ParticleViewGeneratorConfig,
 )
 from .target_provenance import build_target_candidate_registration
+from .view_cache import (
+    ParticleViewNormalizer,
+    fit_particle_view_normalizer,
+    normalize_particle_view,
+    quantized_view_diagnostics,
+    write_particle_view_normalizer,
+)
 
 
 PARTICLE_VIEW_TARGET_DISCOVERY_FACTORY_CONFIG_CONTRACT = (
@@ -82,6 +100,9 @@ PARTICLE_VIEW_TARGET_DISCOVERY_RECIPE_CONTRACT = (
 )
 PARTICLE_VIEW_TARGET_DISCOVERY_RESULT_CONTRACT = (
     "particle_view_target_discovery_result_v1"
+)
+PARTICLE_VIEW_TARGET_TWO_PASS_RESULT_CONTRACT = (
+    "particle_view_target_two_pass_result_v1"
 )
 PARTICLE_VIEW_GENERATOR_CHECKPOINT_CONTRACT = (
     "particle_view_generator_checkpoint_v1"
@@ -578,6 +599,195 @@ class StagedDiscoveryViewProvider:
         }
 
 
+@dataclass
+class CandidateViewSet:
+    """One logical split of candidate views retained only in process RAM."""
+
+    views: torch.Tensor
+    mask: torch.Tensor
+    parent_indices: torch.Tensor
+    logical_split_sha256: str
+    ordered_identity_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.views.device.type != "cpu"
+            or self.views.dtype is not torch.float32
+            or self.views.ndim != 3
+            or self.mask.device.type != "cpu"
+            or self.mask.dtype is not torch.bool
+            or self.mask.shape != self.views.shape[:2]
+            or self.parent_indices.device.type != "cpu"
+            or self.parent_indices.dtype is not torch.int64
+            or self.parent_indices.shape != (self.views.shape[0],)
+        ):
+            raise ValueError("candidate view-set tensor inventory is invalid")
+        if not torch.isfinite(self.views).all():
+            raise ValueError("candidate views contain nonfinite entries")
+        if torch.count_nonzero(self.views[~self.mask]):
+            raise ValueError("candidate views must be exactly zero on padding")
+        if torch.unique(self.parent_indices).numel() != self.parent_indices.numel():
+            raise ValueError("candidate view set has duplicate parent rows")
+        for name, value in (
+            ("logical_split_sha256", self.logical_split_sha256),
+            ("ordered_identity_sha256", self.ordered_identity_sha256),
+        ):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        self._position_by_parent = {
+            int(parent): index
+            for index, parent in enumerate(self.parent_indices.tolist())
+        }
+
+    def positions(self, parent_indices: torch.Tensor) -> torch.Tensor:
+        requested = parent_indices.detach().cpu().to(dtype=torch.int64)
+        try:
+            values = [
+                self._position_by_parent[int(parent)]
+                for parent in requested.tolist()
+            ]
+        except KeyError as exc:
+            raise ValueError("batch parent row is absent from candidate views") from exc
+        return torch.tensor(values, dtype=torch.int64)
+
+    def normalized(
+        self, normalizer: ParticleViewNormalizer
+    ) -> "CandidateViewSet":
+        normalized = normalize_particle_view(
+            self.views,
+            self.mask,
+            normalizer,
+        ).float().cpu().contiguous()
+        return CandidateViewSet(
+            views=normalized,
+            mask=self.mask,
+            parent_indices=self.parent_indices,
+            logical_split_sha256=self.logical_split_sha256,
+            ordered_identity_sha256=self.ordered_identity_sha256,
+        )
+
+    def numpy_views(self) -> np.ndarray:
+        return np.ascontiguousarray(self.views.numpy(), dtype="<f4")
+
+
+class IndexedCandidateViewProvider:
+    """Attach one immutable RAM view set to aligned batches by parent row."""
+
+    def __init__(self, view_set: CandidateViewSet) -> None:
+        self.view_set = view_set
+
+    def __call__(self, batch: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+        if "parent_indices" not in batch:
+            raise ValueError("candidate-view batch omitted parent indices")
+        positions = self.view_set.positions(batch["parent_indices"])
+        device = batch["features"].device
+        view = self.view_set.views[positions].to(device=device)
+        mask = self.view_set.mask[positions].to(device=device)
+        if not torch.equal(mask, batch["mask"][:, 0]):
+            raise ValueError("candidate view mask differs from HLT batch mask")
+        return {"view": view, "raw_centered_view": view}
+
+
+def materialize_candidate_views_in_ram(
+    *,
+    aligned: AlignedLogicalJetView,
+    provider: StagedDiscoveryViewProvider,
+    device: str | torch.device,
+    num_workers: int,
+) -> CandidateViewSet:
+    """Evaluate the frozen generator once without writing view payloads."""
+
+    resolved_device = _resolve_device(device)
+    provider.generator.eval()
+    loader = make_logical_data_loader(
+        aligned,
+        mode="aligned",
+        batch_size=128,
+        shuffle=False,
+        num_workers=num_workers,
+        seed=101,
+    )
+    view_rows: list[torch.Tensor] = []
+    mask_rows: list[torch.Tensor] = []
+    parent_rows: list[torch.Tensor] = []
+    with torch.no_grad():
+        for raw in loader:
+            batch = {
+                name: (
+                    value.to(resolved_device, non_blocking=True)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+                for name, value in raw.items()
+            }
+            generated = provider(batch)["raw_centered_view"]
+            view_rows.append(generated.float().cpu())
+            mask_rows.append(batch["mask"][:, 0].cpu())
+            parent_rows.append(batch["parent_indices"].cpu())
+    if not view_rows:
+        raise ValueError("cannot materialize views for an empty split")
+    result = CandidateViewSet(
+        views=torch.cat(view_rows, dim=0).contiguous(),
+        mask=torch.cat(mask_rows, dim=0).contiguous(),
+        parent_indices=torch.cat(parent_rows, dim=0)
+        .to(dtype=torch.int64)
+        .contiguous(),
+        logical_split_sha256=aligned.logical_split_sha256,
+        ordered_identity_sha256=aligned.ordered_identity_sha256,
+    )
+    expected_parents = torch.from_numpy(
+        np.asarray(aligned.parent_row_indices, dtype=np.int64)
+    )
+    if not torch.equal(result.parent_indices, expected_parents):
+        raise ValueError("candidate view materialization changed logical row order")
+    return result
+
+
+class _CounterfactualLoader:
+    def __init__(
+        self,
+        loader,
+        *,
+        true_views: CandidateViewSet,
+        predicted_views: CandidateViewSet,
+    ) -> None:
+        if (
+            true_views.logical_split_sha256
+            != predicted_views.logical_split_sha256
+            or true_views.ordered_identity_sha256
+            != predicted_views.ordered_identity_sha256
+            or not torch.equal(
+                true_views.parent_indices, predicted_views.parent_indices
+            )
+            or not torch.equal(true_views.mask, predicted_views.mask)
+        ):
+            raise ValueError("true/predicted counterfactual view sets differ")
+        self.loader = loader
+        self.true_views = true_views
+        self.predicted_views = predicted_views
+        self.batch_size = getattr(loader, "batch_size", None)
+
+    def __iter__(self):
+        for raw in self.loader:
+            batch = dict(raw)
+            positions = self.true_views.positions(batch["parent_indices"])
+            true_view = self.true_views.views[positions]
+            predicted_view = self.predicted_views.views[positions]
+            expected_mask = self.true_views.mask[positions]
+            if not torch.equal(expected_mask, batch["mask"][:, 0]):
+                raise ValueError("counterfactual view mask differs from HLT batch")
+            batch["true_view"] = true_view
+            batch["predicted_view"] = predicted_view
+            yield batch
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+
 class _LimitedLoader:
     def __init__(self, loader, maximum_batches: int | None) -> None:
         self.loader = loader
@@ -594,6 +804,147 @@ class _LimitedLoader:
         return base if self.maximum_batches is None else min(
             base, self.maximum_batches
         )
+
+
+def _load_selected_probe_consumer(
+    model: ParticleViewConsumer,
+    checkpoint_path: Path,
+    *,
+    expected_role: str,
+    device: torch.device,
+) -> ParticleViewConsumer:
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    if (
+        checkpoint.get("role") != expected_role
+        or checkpoint.get("consumer_config") != model.config.to_payload()
+        or checkpoint.get("consumer_config_sha256") != model.config.content_hash
+        or set(checkpoint.get("joint_model_state_dicts", {}))
+    ):
+        raise ValueError("probe-consumer checkpoint contract differs")
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    model.to(device).eval()
+    return model
+
+
+def _load_selected_recovery_probe(
+    checkpoint_path: Path,
+    *,
+    config: RecoveryProbeConfig,
+    device: torch.device,
+) -> FixedCapacityRecoveryProbe:
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    if (
+        checkpoint.get("contract") != "particle_view_recovery_probe_v1"
+        or checkpoint.get("config") != config.to_payload()
+        or checkpoint.get("config_sha256") != config.content_hash
+    ):
+        raise ValueError("recovery-probe checkpoint contract differs")
+    model = FixedCapacityRecoveryProbe(config)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    return model.to(device).eval()
+
+
+def predict_recovery_probe_views(
+    *,
+    model: FixedCapacityRecoveryProbe,
+    aligned: AlignedLogicalJetView,
+    true_views: CandidateViewSet,
+    device: str | torch.device,
+    num_workers: int,
+) -> CandidateViewSet:
+    """Predict one split without exposing labels to the fixed probe."""
+
+    if true_views.logical_split_sha256 != aligned.logical_split_sha256:
+        raise ValueError("recovery truth belongs to another logical split")
+    resolved_device = _resolve_device(device)
+    loader = make_logical_data_loader(
+        aligned,
+        mode="recovery_probe",
+        true_views=true_views.numpy_views(),
+        batch_size=128,
+        shuffle=False,
+        num_workers=num_workers,
+        seed=101,
+    )
+    predictions: list[torch.Tensor] = []
+    masks: list[torch.Tensor] = []
+    with torch.no_grad():
+        for raw in loader:
+            if set(raw) != {"features", "mask", "true_view"}:
+                raise ValueError("recovery inference exposed unexpected fields")
+            features = raw["features"].to(resolved_device, non_blocking=True)
+            mask = raw["mask"].to(resolved_device, non_blocking=True)
+            prediction = model(features, mask)
+            predictions.append(prediction.float().cpu())
+            masks.append(mask.cpu())
+    if not predictions:
+        raise ValueError("cannot predict an empty recovery split")
+    predicted_mask = torch.cat(masks, dim=0).contiguous()
+    if not torch.equal(predicted_mask, true_views.mask):
+        raise ValueError("recovery prediction changed logical mask order")
+    return CandidateViewSet(
+        views=torch.cat(predictions, dim=0).contiguous(),
+        mask=predicted_mask,
+        parent_indices=true_views.parent_indices,
+        logical_split_sha256=true_views.logical_split_sha256,
+        ordered_identity_sha256=true_views.ordered_identity_sha256,
+    )
+
+
+def evaluate_independent_a0_accuracy(
+    *,
+    query_teacher: FrozenContextualParticleTeacher,
+    aligned: AlignedLogicalJetView,
+    device: str | torch.device,
+    num_workers: int,
+    maximum_batches: int | None,
+) -> float:
+    """Evaluate the untouched A0 checkpoint on the exact ranking rows."""
+
+    resolved_device = _resolve_device(device)
+    query_teacher = query_teacher.to(resolved_device).eval()
+    loader = _LimitedLoader(
+        make_logical_data_loader(
+            aligned,
+            mode="aligned",
+            batch_size=128,
+            shuffle=False,
+            num_workers=num_workers,
+            seed=101,
+        ),
+        maximum_batches,
+    )
+    correct = total = 0
+    with torch.no_grad():
+        for raw in loader:
+            batch = {
+                name: (
+                    value.to(resolved_device, non_blocking=True)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+                for name, value in raw.items()
+            }
+            context = query_teacher(
+                batch["points"],
+                batch["features"],
+                batch["lorentz_vectors"],
+                batch["mask"],
+            )
+            labels = batch["labels"]
+            correct += int(context.logits.argmax(dim=1).eq(labels).sum().item())
+            total += int(labels.numel())
+    if total == 0:
+        raise ValueError("independent A0 ranking loader is empty")
+    return correct / total
 
 
 def _generator_checkpoint(
@@ -634,8 +985,10 @@ def run_canonical_target_discovery(
     query_teacher: FrozenContextualParticleTeacher,
     memory_teacher: FrozenContextualParticleTeacher,
     consumer_model: ParticleViewConsumer,
+    probe_consumer_model: ParticleViewConsumer,
     train_aligned: AlignedLogicalJetView,
     stop_aligned: AlignedLogicalJetView,
+    select_aligned: AlignedLogicalJetView,
     a0_registration: Mapping[str, Any],
     memory_registration: Mapping[str, Any],
     query_tap_registration: Mapping[str, Any],
@@ -648,7 +1001,7 @@ def run_canonical_target_discovery(
     max_val_batches: int | None,
     seed: int,
 ) -> None:
-    """Run the canonical raw-coordinate discovery phase and publish lineage."""
+    """Run canonical discovery plus its complete two-pass candidate probe."""
 
     if recipe.run_id != CANONICAL_TARGET_DISCOVERY_RUN_ID:
         raise ValueError("canonical discovery action received another screen row")
@@ -820,7 +1173,315 @@ def run_canonical_target_discovery(
         deployment_control_eligible=False,
     )
     write_immutable_json(output / "target_candidate_registration.json", target)
-    consumer_registration = load_hashed_json(
+
+    # Freeze the exact selected Gview, materialize raw candidate coordinates
+    # only in process RAM, and fit the provisional candidate normalizer on
+    # train.  No contextual tap or candidate-view payload is persisted.
+    for parameter in generator.parameters():
+        parameter.requires_grad_(False)
+        parameter.grad = None
+    generator.eval()
+    raw_train = materialize_candidate_views_in_ram(
+        aligned=train_aligned,
+        provider=train_provider,
+        device=resolved_device,
+        num_workers=num_workers,
+    )
+    raw_stop = materialize_candidate_views_in_ram(
+        aligned=stop_aligned,
+        provider=stop_provider,
+        device=resolved_device,
+        num_workers=num_workers,
+    )
+    normalizer = fit_particle_view_normalizer(
+        raw_train.views,
+        raw_train.mask,
+        train_split_sha256=train_split_sha256,
+        generator_checkpoint_sha256=generator_sha256,
+    )
+    normalizer_artifact = write_particle_view_normalizer(
+        output / "provisional_normalizer.json",
+        normalizer,
+    )
+    normalized_train = raw_train.normalized(normalizer)
+    normalized_stop = raw_stop.normalized(normalizer)
+    train_stage_manifest_sha256 = train_memory.staged_tap.manifest[
+        "content_hash"
+    ]
+    stop_stage_manifest_sha256 = stop_memory.staged_tap.manifest[
+        "content_hash"
+    ]
+    del raw_train, raw_stop, train_provider, stop_provider
+    del train_memory, stop_memory
+    if resolved_device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    # The probe consumer is a fresh copy of A0.  It never inherits discovery
+    # consumer weights, and the normalizer is present from epoch zero.
+    probe_root = output / "probe_consumer"
+    probe_train_loader = _LimitedLoader(
+        make_logical_data_loader(
+            train_aligned,
+            mode="aligned",
+            batch_size=128,
+            shuffle=True,
+            num_workers=num_workers,
+            seed=seed,
+        ),
+        max_train_batches,
+    )
+    probe_stop_loader = _LimitedLoader(
+        make_logical_data_loader(
+            stop_aligned,
+            mode="aligned",
+            batch_size=128,
+            shuffle=False,
+            num_workers=num_workers,
+            seed=seed + 1,
+        ),
+        max_val_batches,
+    )
+    probe_consumer_registration = train_particle_view_consumer(
+        model=probe_consumer_model,
+        train_loader=probe_train_loader,
+        model_val_stop_loader=probe_stop_loader,
+        config=ParticleViewConsumerTrainConfig.for_role(
+            "Cview_probe", seed=seed
+        ),
+        output_dir=probe_root,
+        lineage={
+            "a0_registration_sha256": a0_registration["content_hash"],
+            "target_registration_sha256": target["content_hash"],
+            "train_identity_sha256": train_identity_sha256,
+            "model_val_stop_split_sha256": (
+                stop_aligned.logical_split_sha256
+            ),
+            "normalizer_sha256": normalizer_artifact["content_hash"],
+        },
+        view_provider=IndexedCandidateViewProvider(normalized_train),
+        validation_view_provider=IndexedCandidateViewProvider(
+            normalized_stop
+        ),
+        device=resolved_device,
+    )
+    probe_consumer_model = _load_selected_probe_consumer(
+        probe_consumer_model,
+        probe_root / "best_model_val_stop.pt",
+        expected_role="Cview_probe",
+        device=resolved_device,
+    )
+
+    # The fixed-capacity recovery probe sees HLT tensors and normalized views
+    # only.  The recovery_probe loader intentionally contains no labels.
+    recovery_root = output / "recovery_probe"
+    recovery_config = RecoveryProbeConfig(
+        view_dim=recipe.generator_config.bottleneck_width,
+        seed=seed,
+    )
+    recovery_train_loader = _LimitedLoader(
+        make_logical_data_loader(
+            train_aligned,
+            mode="recovery_probe",
+            true_views=normalized_train.numpy_views(),
+            batch_size=128,
+            shuffle=True,
+            num_workers=num_workers,
+            seed=seed,
+        ),
+        max_train_batches,
+    )
+    recovery_stop_loader = _LimitedLoader(
+        make_logical_data_loader(
+            stop_aligned,
+            mode="recovery_probe",
+            true_views=normalized_stop.numpy_views(),
+            batch_size=128,
+            shuffle=False,
+            num_workers=num_workers,
+            seed=seed + 1,
+        ),
+        max_val_batches,
+    )
+    recovery_registration = train_recovery_probe(
+        config=recovery_config,
+        train_loader=recovery_train_loader,
+        model_val_stop_loader=recovery_stop_loader,
+        output_dir=recovery_root,
+        target_registration_sha256=target["content_hash"],
+        normalizer_sha256=normalizer_artifact["content_hash"],
+        train_identity_sha256=train_identity_sha256,
+        model_val_stop_split_sha256=stop_aligned.logical_split_sha256,
+        hlt_preprocessing_sha256=a0_registration[
+            "preprocessing_sha256"
+        ],
+        device=resolved_device,
+    )
+    recovery_model = _load_selected_recovery_probe(
+        recovery_root / "best_model_val_stop.pt",
+        config=recovery_config,
+        device=resolved_device,
+    )
+
+    # model_val_select is opened only after every train/stop checkpoint is
+    # fixed.  It is used once for candidate ranking and never for fitting.
+    select_memory = stage_contextual_memory(
+        aligned=select_aligned,
+        teacher=memory_teacher,
+        teacher_checkpoint_sha256=memory_registration["checkpoint_sha256"],
+        tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
+        source_manifest_sha256=source_manifest_sha256,
+        source_role="offline_teacher",
+        source_view="offline",
+        device=resolved_device,
+        num_workers=num_workers,
+    )
+    write_immutable_json(
+        output / "model_val_select_staged_tap_manifest.json",
+        select_memory.staged_tap.manifest,
+    )
+    select_provider = StagedDiscoveryViewProvider(
+        generator=generator,
+        query_teacher=query_teacher,
+        staged_memory=select_memory,
+        query_tap_choice=recipe.query_tap_choice,
+    )
+    raw_select = materialize_candidate_views_in_ram(
+        aligned=select_aligned,
+        provider=select_provider,
+        device=resolved_device,
+        num_workers=num_workers,
+    )
+    normalized_select = raw_select.normalized(normalizer)
+    quantization = with_content_hash(
+        {
+            "contract": "particle_view_candidate_quantization_diagnostics_v1",
+            "target_registration_sha256": target["content_hash"],
+            "normalizer_sha256": normalizer_artifact["content_hash"],
+            "split": "model_val_select",
+            "split_sha256": select_aligned.logical_split_sha256,
+            "four_bit": quantized_view_diagnostics(
+                normalized_select.views,
+                normalized_select.mask,
+                normalizer,
+                bits=4,
+            ),
+            "eight_bit": quantized_view_diagnostics(
+                normalized_select.views,
+                normalized_select.mask,
+                normalizer,
+                bits=8,
+            ),
+            "diagnostic_only": True,
+        }
+    )
+    write_immutable_json(
+        output / "candidate_quantization_diagnostics.json",
+        quantization,
+    )
+    predicted_select = predict_recovery_probe_views(
+        model=recovery_model,
+        aligned=select_aligned,
+        true_views=normalized_select,
+        device=resolved_device,
+        num_workers=num_workers,
+    )
+    ranking_loader = _LimitedLoader(
+        make_logical_data_loader(
+            select_aligned,
+            mode="aligned",
+            batch_size=128,
+            shuffle=False,
+            num_workers=num_workers,
+            seed=seed + 2,
+        ),
+        max_val_batches,
+    )
+    counterfactual_loader = _CounterfactualLoader(
+        ranking_loader,
+        true_views=normalized_select,
+        predicted_views=predicted_select,
+    )
+    counterfactual_metrics = evaluate_view_counterfactuals(
+        probe_consumer_model,
+        counterfactual_loader,
+        device=resolved_device,
+        split="model_val_select",
+    )
+    write_immutable_json(
+        output / "model_val_select_counterfactual_metrics.json",
+        counterfactual_metrics,
+    )
+    a0_accuracy = evaluate_independent_a0_accuracy(
+        query_teacher=query_teacher,
+        aligned=select_aligned,
+        device=resolved_device,
+        num_workers=num_workers,
+        maximum_batches=max_val_batches,
+    )
+    target_metrics = build_target_metrics_from_counterfactual(
+        counterfactual_metrics=counterfactual_metrics,
+        run_id=recipe.run_id,
+        target_id=recipe.run_id,
+        bottleneck_width=recipe.generator_config.bottleneck_width,
+        a0_accuracy=a0_accuracy,
+        target_registration_sha256=target["content_hash"],
+        selection_status=recipe.selection_status,
+    )
+    write_immutable_json(
+        output / "target_candidate_metrics.json",
+        target_metrics,
+    )
+    two_pass = build_two_pass_candidate_artifact(
+        target_registration_sha256=target["content_hash"],
+        discovery_consumer_checkpoint_sha256=sha256_file(
+            output / "best_model_val_stop.pt"
+        ),
+        frozen_generator_checkpoint_sha256=generator_sha256,
+        provisional_normalizer_sha256=normalizer_artifact["content_hash"],
+        probe_consumer_checkpoint_sha256=probe_consumer_registration[
+            "checkpoint_sha256"
+        ],
+        recovery_probe_registration_sha256=recovery_registration[
+            "content_hash"
+        ],
+        model_val_select_metrics_sha256=counterfactual_metrics[
+            "content_hash"
+        ],
+    )
+    write_immutable_json(output / "two_pass_candidate.json", two_pass)
+    two_pass_result = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_TARGET_TWO_PASS_RESULT_CONTRACT,
+            "run_id": recipe.run_id,
+            "seed": seed,
+            "target_candidate_registration_sha256": target["content_hash"],
+            "normalizer_sha256": normalizer_artifact["content_hash"],
+            "probe_consumer_registration_sha256": (
+                probe_consumer_registration["content_hash"]
+            ),
+            "recovery_probe_registration_sha256": recovery_registration[
+                "content_hash"
+            ],
+            "counterfactual_metrics_sha256": counterfactual_metrics[
+                "content_hash"
+            ],
+            "target_metrics_sha256": target_metrics["content_hash"],
+            "two_pass_candidate_sha256": two_pass["content_hash"],
+            "quantization_diagnostics_sha256": quantization["content_hash"],
+            "model_val_select_staged_tap_manifest_sha256": (
+                select_memory.staged_tap.manifest["content_hash"]
+            ),
+            "view_payloads_persisted": False,
+            "model_val_select_used_for_fitting": False,
+            "quality_gate_used": False,
+        }
+    )
+    write_immutable_json(
+        output / "target_two_pass_result.json",
+        two_pass_result,
+    )
+
+    discovery_consumer_registration = load_hashed_json(
         output / "consumer_registration.json"
     )
     result = with_content_hash(
@@ -830,22 +1491,26 @@ def run_canonical_target_discovery(
             "seed": seed,
             "target_discovery_recipe_sha256": recipe_payload["content_hash"],
             "target_candidate_registration_sha256": target["content_hash"],
-            "consumer_registration_sha256": consumer_registration[
+            "consumer_registration_sha256": discovery_consumer_registration[
                 "content_hash"
             ],
             "generator_checkpoint_sha256": generator_sha256,
-            "train_staged_tap_manifest_sha256": train_memory.staged_tap.manifest[
-                "content_hash"
-            ],
+            "train_staged_tap_manifest_sha256": train_stage_manifest_sha256,
             "model_val_stop_staged_tap_manifest_sha256": (
-                stop_memory.staged_tap.manifest["content_hash"]
+                stop_stage_manifest_sha256
             ),
             "raw_discovery_coordinate_only": True,
-            "two_pass_probe_pending": True,
+            "two_pass_probe_pending": False,
+            "two_pass_probe_completed": True,
+            "target_two_pass_result_sha256": two_pass_result["content_hash"],
             "quality_gate_used": False,
         }
     )
     write_immutable_json(output / "target_discovery_result.json", result)
+    del raw_select, normalized_select, predicted_select
+    del select_provider, select_memory, normalized_train, normalized_stop
+    if resolved_device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def build_target_discovery_factory_config(
@@ -887,7 +1552,7 @@ def build_target_discovery_factory_config(
                 run_id: build_target_screen_recipe(run_id).to_payload()
                 for run_id in TARGET_SCREEN_IDS
             },
-            "production_scope": "canonical_raw_discovery_phase_v1",
+            "production_scope": "canonical_two_pass_candidate_v1",
             "two_pass_probe_required_before_target_ranking": True,
             "quality_warnings_non_gating": True,
         }
@@ -946,7 +1611,7 @@ def validate_target_discovery_factory_config(
         payload["supported_run_ids"] != [CANONICAL_TARGET_DISCOVERY_RUN_ID]
         or payload["complete_target_screen_count"] != len(TARGET_SCREEN_IDS)
         or set(payload["screen_recipes"]) != set(TARGET_SCREEN_IDS)
-        or payload["production_scope"] != "canonical_raw_discovery_phase_v1"
+        or payload["production_scope"] != "canonical_two_pass_candidate_v1"
         or payload["two_pass_probe_required_before_target_ranking"] is not True
         or payload["quality_warnings_non_gating"] is not True
     ):
@@ -1042,7 +1707,13 @@ def build_target_discovery_factory(
         registration=a0_registration,
         checkpoint_path=a0_checkpoint_path,
     )
+    a0_probe_consumer_model = reload_registered_teacher(
+        registration=a0_registration,
+        checkpoint_path=a0_checkpoint_path,
+    )
     for parameter in a0_consumer_model.parameters():
+        parameter.requires_grad_(True)
+    for parameter in a0_probe_consumer_model.parameters():
         parameter.requires_grad_(True)
     memory_model = reload_registered_teacher(
         registration=memory_registration,
@@ -1076,10 +1747,22 @@ def build_target_discovery_factory(
     data = config["runtime_data_config"]
     train = load_aligned_logical_jet_view(data, "train")
     stop = load_aligned_logical_jet_view(data, "model_val_stop")
+    select = load_aligned_logical_jet_view(data, "model_val_select")
     hidden = int(a0_registration["recipe"]["architecture"]["embed_dims"][-1])
     heads = int(a0_registration["recipe"]["architecture"]["num_heads"])
     consumer = ParticleViewConsumer(
         a0_consumer_model,
+        ParticleViewConsumerConfig(
+            view_dim=recipe.generator_config.bottleneck_width,
+            hidden_dim=hidden,
+            num_heads=heads,
+            injection_block=0,
+            view_path="token_and_pair",
+            learned_trust=True,
+        ),
+    )
+    probe_consumer = ParticleViewConsumer(
+        a0_probe_consumer_model,
         ParticleViewConsumerConfig(
             view_dim=recipe.generator_config.bottleneck_width,
             hidden_dim=hidden,
@@ -1101,8 +1784,10 @@ def build_target_discovery_factory(
                 memory_model, memory_spec
             ),
             "consumer_model": consumer,
+            "probe_consumer_model": probe_consumer,
             "train_aligned": train,
             "stop_aligned": stop,
+            "select_aligned": select,
             "a0_registration": a0_registration,
             "memory_registration": memory_registration,
             "query_tap_registration": query_tap_registration,
@@ -1127,6 +1812,23 @@ def build_target_discovery_factory(
             str(output / "target_discovery_result.json"),
             str(output / "train_staged_tap_manifest.json"),
             str(output / "model_val_stop_staged_tap_manifest.json"),
+            str(output / "model_val_select_staged_tap_manifest.json"),
+            str(output / "provisional_normalizer.json"),
+            str(output / "probe_consumer" / "best_model_val_stop.pt"),
+            str(output / "probe_consumer" / "consumer_registration.json"),
+            str(output / "probe_consumer" / "training_curves.json"),
+            str(output / "recovery_probe" / "best_model_val_stop.pt"),
+            str(
+                output
+                / "recovery_probe"
+                / "recovery_probe_registration.json"
+            ),
+            str(output / "recovery_probe" / "training_curves.json"),
+            str(output / "candidate_quantization_diagnostics.json"),
+            str(output / "model_val_select_counterfactual_metrics.json"),
+            str(output / "target_candidate_metrics.json"),
+            str(output / "two_pass_candidate.json"),
+            str(output / "target_two_pass_result.json"),
         ],
         "action": None,
     }
@@ -1160,6 +1862,9 @@ __all__ = [
     "PARTICLE_VIEW_TARGET_DISCOVERY_FACTORY_CONFIG_CONTRACT",
     "PARTICLE_VIEW_TARGET_DISCOVERY_RECIPE_CONTRACT",
     "PARTICLE_VIEW_TARGET_DISCOVERY_RESULT_CONTRACT",
+    "PARTICLE_VIEW_TARGET_TWO_PASS_RESULT_CONTRACT",
+    "CandidateViewSet",
+    "IndexedCandidateViewProvider",
     "StagedContextualMemory",
     "StagedDiscoveryViewProvider",
     "TargetScreenRecipe",
@@ -1167,7 +1872,10 @@ __all__ = [
     "build_target_discovery_factory",
     "build_target_discovery_factory_config",
     "build_target_screen_recipe",
+    "evaluate_independent_a0_accuracy",
     "lorentz_vectors_to_particle_geometry",
+    "materialize_candidate_views_in_ram",
+    "predict_recovery_probe_views",
     "run_canonical_target_discovery",
     "stage_contextual_memory",
     "validate_target_discovery_factory_config",

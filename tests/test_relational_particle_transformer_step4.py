@@ -22,6 +22,7 @@ from teacher_logit_reco.relational_part import (
     build_normalization_contract,
     build_raw_input_schema_contract,
     build_relation_family_registry,
+    build_registered_step4_model,
     build_screening_registry,
     build_track_compatibility,
     build_track_node_features,
@@ -31,6 +32,49 @@ from teacher_logit_reco.relational_part import (
     validate_content_hash,
     validate_relation_normalization_artifact,
 )
+
+
+class _MiniPairEmbed(torch.nn.Module):
+    def __init__(self, input_dimension: int) -> None:
+        super().__init__()
+        self.pairwise_lv_dim = 0
+        self.pairwise_input_dim = input_dimension
+        self.out_dim = 8
+        self.remove_self_pair = False
+        self.fts_embed = torch.nn.Conv1d(input_dimension, 8, 1)
+
+
+class _MiniParticleTransformer(torch.nn.Module):
+    def __init__(self, **config) -> None:
+        super().__init__()
+        self.use_amp = False
+        self.pair_extra_dim = int(config["pair_extra_dim"])
+        self.pair_embed = _MiniPairEmbed(self.pair_extra_dim)
+        self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, 17))
+        self.classifier = torch.nn.Linear(25, int(config["num_classes"]))
+
+    def forward(self, x, v=None, mask=None, uu=None):
+        pair_bias = self.pair_embed(v, uu=uu, mask=mask)
+        weights = mask.to(x.dtype)
+        particle_summary = (x * weights).sum(dim=-1) / weights.sum(
+            dim=-1
+        ).clamp_min(1)
+        pair_mask = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).to(x.dtype)
+        pair_summary = (pair_bias * pair_mask).sum(dim=(-1, -2)) / pair_mask.sum(
+            dim=(-1, -2)
+        ).clamp_min(1)
+        return self.classifier(torch.cat((particle_summary, pair_summary), dim=1))
+
+
+def _mini_weaver():
+    def pairwise(xi, xj, num_outputs=4):
+        base = xi[:, :1] + xj[:, :1]
+        return torch.cat(tuple(base + index for index in range(num_outputs)), dim=1)
+
+    return SimpleNamespace(
+        ParticleTransformer=_MiniParticleTransformer,
+        pairwise_lv_fts=pairwise,
+    )
 
 
 def _fit_input() -> tuple[np.ndarray, np.ndarray, list[JetIdentity]]:
@@ -308,6 +352,52 @@ def test_step4_encoders_and_pair_builder_are_permutation_equivariant() -> None:
             torch.from_numpy(inputs.pf_vectors),
             torch.from_numpy(inputs.pf_mask),
         )
+
+
+def test_registered_step4_singles_train_and_preserve_event_logits_under_permutation() -> None:
+    tokens, mask_np, _, registry, _, artifact = _artifact()
+    screening = build_screening_registry(
+        relation_registry_sha256=registry["content_hash"]
+    )
+    inputs = build_particle_transformer_inputs_from_tokens(
+        tokens[:2], mask_np[:2], source_view="fixed_hlt"
+    )
+    points = torch.from_numpy(inputs.pf_points)
+    features = torch.from_numpy(inputs.pf_features)
+    vectors = torch.from_numpy(inputs.pf_vectors)
+    mask = torch.from_numpy(inputs.pf_mask)
+    raw = torch.from_numpy(tokens[:2])
+    permutation = torch.tensor([3, 0, 4, 1, 2])
+    for run_id, family in (
+        ("RPT_TRACK", "TRACK"),
+        ("RPT_DENSITY", "DENSITY"),
+    ):
+        torch.manual_seed(91)
+        model = build_registered_step4_model(
+            run_id,
+            normalization_artifact=artifact,
+            screening_registry=screening,
+            weaver_module=_mini_weaver(),
+        )
+        assert model.families == (family,)
+        model.eval()
+        reference = model(points, features, vectors, mask, raw)
+        permuted = model(
+            points[:, :, permutation],
+            features[:, :, permutation],
+            vectors[:, :, permutation],
+            mask[:, :, permutation],
+            raw[:, permutation],
+        )
+        torch.testing.assert_close(reference, permuted, atol=2e-6, rtol=2e-6)
+        model.train()
+        loss = torch.nn.functional.cross_entropy(
+            model(points, features, vectors, mask, raw),
+            torch.tensor([0, 1]),
+        )
+        loss.backward()
+        parameters = list(model.pair_builder.encoders[family].parameters())
+        assert parameters and any(parameter.grad is not None for parameter in parameters)
 
 
 def test_step4_family_contracts_bind_normalizer_registry_and_raw_schema() -> None:

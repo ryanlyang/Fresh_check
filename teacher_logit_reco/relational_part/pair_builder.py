@@ -21,6 +21,7 @@ from .relation_pid_charge import (
 from .relation_pt import PT_ENCODED_DIMENSION, PTEncoder, valid_pair_mask
 from .relation_track import TRACK_ENCODED_DIMENSION, TrackEncoder
 from .relation_density import DENSITY_ENCODED_DIMENSION, DensityEncoder
+from .relation_region import REGION_ENCODED_DIMENSION, RegionEncoder
 
 try:
     import torch as _torch
@@ -34,11 +35,12 @@ STEP3_FAMILY_DIMENSIONS = {
     "PID": PID_ENCODED_DIMENSION,
     "CHARGE": CHARGE_ENCODED_DIMENSION,
 }
-SUPPORTED_FAMILY_ORDER = ("PT", "TRACK", "PID", "CHARGE", "DENSITY")
+SUPPORTED_FAMILY_ORDER = ("PT", "TRACK", "PID", "CHARGE", "DENSITY", "REGION")
 SUPPORTED_FAMILY_DIMENSIONS = {
     **STEP3_FAMILY_DIMENSIONS,
     "TRACK": TRACK_ENCODED_DIMENSION,
     "DENSITY": DENSITY_ENCODED_DIMENSION,
+    "REGION": REGION_ENCODED_DIMENSION,
 }
 _EXPECTED_FEATURE_INDICES = {
     "part_charge": 5,
@@ -111,6 +113,7 @@ class RelationalPairBuilder(_ModuleBase):
         *,
         normalization_artifact: Mapping[str, Any],
         weaver_module: Any,
+        region_normalization_artifact: Mapping[str, Any] | None = None,
     ) -> None:
         torch = require_torch()
         super().__init__()
@@ -130,6 +133,10 @@ class RelationalPairBuilder(_ModuleBase):
             modules["TRACK"] = TrackEncoder(normalization_artifact)
         if "DENSITY" in self.families:
             modules["DENSITY"] = DensityEncoder(normalization_artifact)
+        if "REGION" in self.families:
+            if region_normalization_artifact is None:
+                raise ValueError("REGION requires its tree normalization artifact")
+            modules["REGION"] = RegionEncoder(region_normalization_artifact)
         self.encoders = torch.nn.ModuleDict(modules)
         object.__setattr__(self, "_weaver_module", weaver_module)
         self.output_dimension = STANDARD_FOUR_CHANNELS + sum(
@@ -142,6 +149,7 @@ class RelationalPairBuilder(_ModuleBase):
         lorentz_vectors: Any,
         mask: Any,
         raw_tokens: Any | None = None,
+        region_trees: Sequence[Mapping[str, Any]] | None = None,
         *,
         return_details: bool = False,
     ) -> Any:
@@ -157,7 +165,9 @@ class RelationalPairBuilder(_ModuleBase):
             encoded["PID"] = self.encoders["PID"](features[:, 6:11], mask)
         if "CHARGE" in self.encoders:
             encoded["CHARGE"] = self.encoders["CHARGE"](features[:, 5], mask)
-        if "TRACK" in self.encoders or "DENSITY" in self.encoders:
+        if any(
+            family in self.encoders for family in ("TRACK", "DENSITY", "REGION")
+        ):
             if (
                 not isinstance(raw_tokens, _torch.Tensor)
                 or raw_tokens.ndim != 3
@@ -166,14 +176,22 @@ class RelationalPairBuilder(_ModuleBase):
                 or int(raw_tokens.shape[2]) != 14
             ):
                 raise ValueError(
-                    "TRACK/DENSITY require raw HLT tokens [batch,particles,14]"
+                    "TRACK/DENSITY/REGION require raw HLT tokens [batch,particles,14]"
                 )
             if raw_tokens.device != features.device:
                 raise ValueError("raw HLT tokens must share the model device")
+            if raw_tokens.dtype != features.dtype:
+                raise TypeError("raw HLT tokens must share the model dtype")
         if "TRACK" in self.encoders:
             encoded["TRACK"] = self.encoders["TRACK"](raw_tokens, mask)
         if "DENSITY" in self.encoders:
             encoded["DENSITY"] = self.encoders["DENSITY"](raw_tokens, mask)
+        if "REGION" in self.encoders:
+            if region_trees is None:
+                raise ValueError("REGION requires compact tree resources")
+            encoded["REGION"] = self.encoders["REGION"](
+                raw_tokens, mask, region_trees
+            )
         combined = _torch.cat(
             [base4, *(encoded[family] for family in self.families)],
             dim=1,

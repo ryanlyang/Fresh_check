@@ -364,6 +364,7 @@ def test_tigris_submitter_locks_data_graph_and_separates_final_test() -> None:
         'ARCHITECTURE_VIEW_10CLASS_OFFLINE_SPLITS="model_train model_val stack_val"',
         'LOCAL_RESIDUAL_FIELD_TARGET_SPLITS="model_train model_val stack_val"',
         "LOCAL_RESIDUAL_FIELD_INCLUDE_FINAL_TEST_TARGETS=0",
+        "LOCAL_RESIDUAL_FIELD_HIGH_DATA_MIN_FREE_GIB:=50",
         "for seed in 20522 20623",
         "for seed in 20421 20522 20623",
         "DependencyNeverSatisfied",

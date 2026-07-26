@@ -359,11 +359,14 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         families: tuple[str, ...] | list[str],
         *,
         normalization_artifact: Mapping[str, Any],
+        region_normalization_artifact: Mapping[str, Any] | None = None,
+        force_zero_relations: bool = False,
         weaver_module: Any | None = None,
     ) -> None:
         torch = require_torch()
         super().__init__()
         self.run_id: str | None = None
+        self.force_zero_relations = bool(force_zero_relations)
         self.families = canonical_supported_families(families)
         self.normalization_sha256 = validate_relation_normalization_artifact(
             normalization_artifact
@@ -393,6 +396,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             self.families,
             normalization_artifact=normalization_artifact,
             weaver_module=module,
+            region_normalization_artifact=region_normalization_artifact,
         )
         object.__setattr__(self, "_weaver_module", module)
         forward_parameters = inspect.signature(self.mod.forward).parameters
@@ -408,16 +412,30 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         lorentz_vectors: Any,
         mask: Any,
         raw_tokens: Any | None = None,
+        region_trees: Any | None = None,
         *,
         return_details: bool = False,
     ) -> Any:
-        return self.pair_builder(
+        result = self.pair_builder(
             features,
             lorentz_vectors,
             mask,
             raw_tokens,
+            region_trees,
             return_details=return_details,
         )
+        if not self.force_zero_relations:
+            return result
+        if return_details:
+            result = dict(result)
+            combined = result["combined"].clone()
+            combined[:, STANDARD_FOUR_CHANNELS:] = 0
+            result["combined"] = combined
+            result["relations_forced_zero"] = True
+            return result
+        output = result.clone()
+        output[:, STANDARD_FOUR_CHANNELS:] = 0
+        return output
 
     def forward(
         self,
@@ -426,6 +444,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         lorentz_vectors: Any,
         mask: Any,
         raw_tokens: Any | None = None,
+        region_trees: Any | None = None,
     ) -> Any:
         torch = require_torch()
         RelationalParticleTransformer._validate_batch(
@@ -448,7 +467,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 ~valid[:, 0].unsqueeze(-1), 0.0
             )
         uu = self.pair_features(
-            clean_features, clean_vectors, valid, clean_raw
+            clean_features, clean_vectors, valid, clean_raw, region_trees
         )
         return self.mod(
             clean_features,
@@ -471,6 +490,9 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             "particle_transformer_config": copy.deepcopy(self.config),
             "internal_amp": False,
             "hlt_only": True,
+            "relation_input_mode": (
+                "forced_zero" if self.force_zero_relations else "active"
+            ),
         }
 
     def diagnostics(
@@ -479,6 +501,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
         lorentz_vectors: Any,
         mask: Any,
         raw_tokens: Any | None = None,
+        region_trees: Any | None = None,
     ) -> dict[str, Any]:
         """Return the prespecified family and head-wise pair-bias diagnostics."""
 
@@ -499,6 +522,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 clean_vectors,
                 valid,
                 clean_raw,
+                region_trees,
                 return_details=True,
             )
             bias = self.mod.pair_embed(
@@ -771,6 +795,35 @@ def build_registered_step4_model(
     model = RelationalFamilyParticleTransformer(
         families,
         normalization_artifact=normalization_artifact,
+        weaver_module=weaver_module,
+    )
+    model.run_id = str(run_id)
+    return model
+
+
+def build_registered_screening_model(
+    run_id: str,
+    *,
+    normalization_artifact: Mapping[str, Any],
+    screening_registry: Mapping[str, Any],
+    region_normalization_artifact: Mapping[str, Any] | None = None,
+    weaver_module: Any | None = None,
+) -> RelationalFamilyParticleTransformer:
+    """Instantiate any standard shared-bias screening relation row."""
+
+    validate_screening_registry(screening_registry)
+    validate_relation_normalization_artifact(normalization_artifact)
+    row = resolve_registered_run(run_id, screening_registry=screening_registry)
+    if row.get("attention_architecture") == "wide_pair_encoder":
+        raise ValueError("RPT_BASE_WIDE_MAX requires the wide-control builder")
+    families = tuple(row.get("new_relation_families", ()))
+    if not families:
+        raise ValueError("RPT_BASE uses the exact base-model builder")
+    model = RelationalFamilyParticleTransformer(
+        families,
+        normalization_artifact=normalization_artifact,
+        region_normalization_artifact=region_normalization_artifact,
+        force_zero_relations=row.get("relation_input_mode") == "forced_zero",
         weaver_module=weaver_module,
     )
     model.run_id = str(run_id)

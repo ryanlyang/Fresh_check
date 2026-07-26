@@ -92,6 +92,6 @@ bash sbatch/submit_lprf_p7b_high_data_seed_study_tigris.sh validation_report CAM
 
 The default source-data root is
 `/home/ryreu/atlas/PracticeTagging/data`. The submitter requires at least
-150 GiB free before a fresh cache build; override
+50 GiB free before a fresh cache build; override
 `LOCAL_RESIDUAL_FIELD_HIGH_DATA_MIN_FREE_GIB` only after checking the projected
 cache footprint.
