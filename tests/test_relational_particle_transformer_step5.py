@@ -11,6 +11,7 @@ import torch
 
 from jetclass_fresh.jetclass_data import JetIdentity
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
+from scripts.build_relational_part_tree_backend import _canonical_smoke_parity
 from teacher_logit_reco.relational_part import (
     EXCLUSIVE_RESOLUTIONS,
     REGION_RAW_FEATURE_NAMES,
@@ -308,6 +309,11 @@ def test_compact_sidecar_atomic_resume_and_runtime_round_trip(tmp_path: Path) ->
 
 
 def test_backend_source_and_abi_manifest_fail_closed() -> None:
+    resource = build_angular_tree_resource_contract(
+        split_binding_sha256="0" * 64
+    )
+    assert resource["contract"] == "relational_part_angular_tree_resource_v3"
+    assert resource["schema_version"] == 3
     source = (
         Path(__file__).resolve().parents[1]
         / "teacher_logit_reco" / "relational_part" / "csrc"
@@ -324,8 +330,8 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
         assert value in source
     manifest = with_content_hash(
         {
-            "contract": "relational_ca_tree_backend_manifest_v2",
-            "schema_version": 2,
+            "contract": "relational_ca_tree_backend_manifest_v3",
+            "schema_version": 3,
             "contract_id": "relational_ca_tree_v1",
             "backend_schema_version": 1,
             "source_sha256": "1" * 64,
@@ -345,7 +351,25 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
             "pytorch_cxx11_abi": True,
             "openmp_available": True,
             "self_test_sha256": "3" * 64,
-            "compiled_reference_smoke_tree_sha256": "4" * 64,
+            "compiled_smoke_tree_sha256": "4" * 64,
+            "reference_smoke_tree_sha256": "5" * 64,
+            "canonical_smoke_parity": {
+                "topology_and_categories_exact": True,
+                "continuous_shapes_exact": True,
+                "continuous_values_finite": True,
+                "maximum_continuous_absolute_error": 1.0e-8,
+                "per_field_maximum_absolute_error": {
+                    "vectors": 1.0e-8,
+                    "pt": 0.0,
+                    "mass": 0.0,
+                    "merge_delta_r": 0.0,
+                    "merge_kt": 0.0,
+                    "merge_z": 0.0,
+                    "merge_mass": 0.0,
+                },
+                "continuous_absolute_tolerance": 2.0e-6,
+                "passed": True,
+            },
         }
     )
     assert validate_backend_manifest(manifest) == manifest["content_hash"]
@@ -354,6 +378,57 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
     unsafe["compiler_flags"] = [*unsafe["compiler_flags"], "-ffast-math"]
     with pytest.raises(ValueError, match="compiler flags"):
         validate_backend_manifest(with_content_hash(unsafe))
+    old_contract = dict(manifest)
+    old_contract.pop("content_hash")
+    old_contract["contract"] = "relational_ca_tree_backend_manifest_v2"
+    old_contract["schema_version"] = 2
+    with pytest.raises(ValueError, match="contract differs"):
+        validate_backend_manifest(with_content_hash(old_contract))
+    false_attestation = dict(manifest)
+    false_attestation.pop("content_hash")
+    false_attestation["canonical_smoke_parity"] = dict(
+        false_attestation["canonical_smoke_parity"],
+        passed=False,
+    )
+    with pytest.raises(ValueError, match="smoke parity failed"):
+        validate_backend_manifest(with_content_hash(false_attestation))
+
+
+def test_backend_canonical_smoke_parity_is_exact_for_topology_and_tolerant_for_floats() -> None:
+    _, mask, vectors, _ = _sample(jets=1)
+    reference = build_reference_tree(vectors[0], mask[0])
+    continuous_drift = {
+        key: (
+            value.copy()
+            if isinstance(value, np.ndarray)
+            else (
+                {nested_key: nested_value.copy() for nested_key, nested_value in value.items()}
+                if key == "assignments"
+                else dict(value) if key == "actual_cluster_counts" else value
+            )
+        )
+        for key, value in reference.items()
+    }
+    continuous_drift["mass"][0] += 1.0e-7
+    assert tree_content_sha256(continuous_drift) != tree_content_sha256(reference)
+    parity = _canonical_smoke_parity(continuous_drift, reference)
+    assert parity["passed"] is True
+    assert parity["topology_and_categories_exact"] is True
+    assert parity["maximum_continuous_absolute_error"] < 2.0e-6
+
+    topology_drift = dict(continuous_drift)
+    topology_drift["parent"] = topology_drift["parent"].copy()
+    topology_drift["parent"][0] += 1
+    parity = _canonical_smoke_parity(topology_drift, reference)
+    assert parity["passed"] is False
+    assert parity["topology_and_categories_exact"] is False
+
+    excessive_continuous_drift = dict(continuous_drift)
+    excessive_continuous_drift["mass"] = excessive_continuous_drift["mass"].copy()
+    excessive_continuous_drift["mass"][0] += 3.0e-6
+    parity = _canonical_smoke_parity(excessive_continuous_drift, reference)
+    assert parity["passed"] is False
+    assert parity["maximum_continuous_absolute_error"] > 2.0e-6
 
 
 def test_probe_largest_remainder_and_wide_capacity_tie_breaks() -> None:

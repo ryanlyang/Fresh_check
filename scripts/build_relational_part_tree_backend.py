@@ -45,6 +45,84 @@ FLAGS = [
     "-ffp-contract=off",
 ]
 
+_TOPOLOGY_ARRAYS = (
+    "leaf_to_node",
+    "parent",
+    "left",
+    "right",
+    "depth",
+    "multiplicity",
+)
+_CONTINUOUS_ARRAYS = (
+    "vectors",
+    "pt",
+    "mass",
+    "merge_delta_r",
+    "merge_kt",
+    "merge_z",
+    "merge_mass",
+)
+_CONTINUOUS_ABSOLUTE_TOLERANCE = 2.0e-6
+
+
+def _canonical_smoke_parity(compiled, reference) -> dict:
+    topology_exact = all(
+        int(compiled[name]) == int(reference[name])
+        for name in ("n_particles", "n_valid", "n_nodes", "root")
+    )
+    topology_exact = topology_exact and all(
+        np.array_equal(compiled[name], reference[name])
+        for name in _TOPOLOGY_ARRAYS
+    )
+    topology_exact = (
+        topology_exact
+        and compiled["actual_cluster_counts"]
+        == reference["actual_cluster_counts"]
+        and all(
+            np.array_equal(
+                compiled["assignments"][str(resolution)],
+                reference["assignments"][str(resolution)],
+            )
+            for resolution in (2, 4, 8)
+        )
+    )
+    shapes_exact = True
+    values_finite = True
+    per_field = {}
+    for name in _CONTINUOUS_ARRAYS:
+        left = np.asarray(compiled[name], dtype=np.float64)
+        right = np.asarray(reference[name], dtype=np.float64)
+        if left.shape != right.shape:
+            shapes_exact = False
+            per_field[name] = None
+            continue
+        finite = bool(np.isfinite(left).all() and np.isfinite(right).all())
+        values_finite = values_finite and finite
+        per_field[name] = (
+            float(np.max(np.abs(left - right)))
+            if finite and left.size
+            else (0.0 if finite else None)
+        )
+    finite_errors = [
+        float(value) for value in per_field.values() if value is not None
+    ]
+    maximum_error = max(finite_errors, default=0.0)
+    passed = (
+        topology_exact
+        and shapes_exact
+        and values_finite
+        and maximum_error <= _CONTINUOUS_ABSOLUTE_TOLERANCE
+    )
+    return {
+        "topology_and_categories_exact": bool(topology_exact),
+        "continuous_shapes_exact": bool(shapes_exact),
+        "continuous_values_finite": bool(values_finite),
+        "maximum_continuous_absolute_error": float(maximum_error),
+        "per_field_maximum_absolute_error": per_field,
+        "continuous_absolute_tolerance": _CONTINUOUS_ABSOLUTE_TOLERANCE,
+        "passed": bool(passed),
+    }
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -144,14 +222,19 @@ def main() -> int:
     )
     compiled_smoke_sha = tree_content_sha256(compiled_smoke)
     reference_smoke_sha = tree_content_sha256(reference_smoke)
-    if compiled_smoke_sha != reference_smoke_sha:
+    smoke_parity = _canonical_smoke_parity(
+        compiled_smoke,
+        reference_smoke,
+    )
+    if smoke_parity["passed"] is not True:
         raise RuntimeError(
-            "compiled backend canonical smoke tree differs from Python reference"
+            "compiled backend canonical smoke parity failed: "
+            + json.dumps(smoke_parity, sort_keys=True)
         )
     manifest = with_content_hash(
         {
             "contract": ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "contract_id": ANGULAR_TREE_BACKEND_CONTRACT,
             "backend_schema_version": int(runtime["schema_version"]),
             "source_sha256": sha256_file(source),
@@ -174,7 +257,9 @@ def main() -> int:
             "self_test_sha256": hashlib.sha256(
                 canonical_json_bytes(self_test)
             ).hexdigest(),
-            "compiled_reference_smoke_tree_sha256": compiled_smoke_sha,
+            "compiled_smoke_tree_sha256": compiled_smoke_sha,
+            "reference_smoke_tree_sha256": reference_smoke_sha,
+            "canonical_smoke_parity": smoke_parity,
             "binary_filename": binary_target.name,
         }
     )

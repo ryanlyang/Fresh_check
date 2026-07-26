@@ -32,13 +32,22 @@ from .region_tree import (
 )
 
 
-ANGULAR_TREE_RESOURCE_CONTRACT = "relational_part_angular_tree_resource_v2"
+ANGULAR_TREE_RESOURCE_CONTRACT = "relational_part_angular_tree_resource_v3"
 ANGULAR_TREE_BACKEND_CONTRACT = "relational_ca_tree_v1"
-ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT = "relational_ca_tree_backend_manifest_v2"
+ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT = "relational_ca_tree_backend_manifest_v3"
 ANGULAR_TREE_SHARD_CONTRACT = "relational_ca_tree_shard_v1"
 ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT = "relational_ca_tree_split_manifest_v1"
 ANGULAR_TREE_PROBE_CONTRACT = "relational_ca_tree_throughput_probe_v2"
 TREE_SHARD_MAX_JETS = 10_000
+_TREE_CONTINUOUS_FIELDS = {
+    "vectors",
+    "pt",
+    "mass",
+    "merge_delta_r",
+    "merge_kt",
+    "merge_z",
+    "merge_mass",
+}
 TREE_PROBE_STRATA = (
     (0, 8), (9, 16), (17, 24), (25, 32), (33, 40),
     (41, 48), (49, 64), (65, 80), (81, 96), (97, 128),
@@ -55,7 +64,7 @@ def build_angular_tree_resource_contract(
     return with_content_hash(
         {
             "contract": ANGULAR_TREE_RESOURCE_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "split_binding_sha256": split_binding_sha256,
             "backend_contract": ANGULAR_TREE_BACKEND_CONTRACT,
             "algorithm": {
@@ -104,7 +113,9 @@ def build_angular_tree_resource_contract(
                 "platform_architecture", "python_major_minor",
                 "pytorch_version", "pytorch_cxx11_abi",
                 "openmp_available", "self_test_sha256",
-                "compiled_reference_smoke_tree_sha256",
+                "compiled_smoke_tree_sha256",
+                "reference_smoke_tree_sha256",
+                "canonical_smoke_parity",
             ],
             "sharding": {
                 "maximum_jets_per_shard": 10_000,
@@ -151,13 +162,14 @@ def validate_backend_manifest(
         "compiler_executable", "compiler_driver_version_line", "compiler_flags",
         "platform_architecture", "python_major_minor", "pytorch_version",
         "pytorch_cxx11_abi", "openmp_available", "self_test_sha256",
-        "compiled_reference_smoke_tree_sha256",
+        "compiled_smoke_tree_sha256", "reference_smoke_tree_sha256",
+        "canonical_smoke_parity",
     }
     if not required.issubset(manifest):
         raise ValueError("tree backend manifest lacks required ABI identity")
     if manifest["contract_id"] != ANGULAR_TREE_BACKEND_CONTRACT:
         raise ValueError("tree backend contract ID differs")
-    if int(manifest.get("schema_version", -1)) != 2:
+    if int(manifest.get("schema_version", -1)) != 3:
         raise ValueError("tree backend manifest schema differs")
     if (
         not str(manifest["compiler_identity"])
@@ -179,9 +191,38 @@ def validate_backend_manifest(
         "source_sha256",
         "binary_sha256",
         "self_test_sha256",
-        "compiled_reference_smoke_tree_sha256",
+        "compiled_smoke_tree_sha256",
+        "reference_smoke_tree_sha256",
     ):
         require_sha256(manifest[field], name=field)
+    smoke_parity = manifest["canonical_smoke_parity"]
+    if not isinstance(smoke_parity, Mapping):
+        raise ValueError("tree backend canonical smoke parity is absent")
+    tolerance = 2.0e-6
+    maximum_error = float(
+        smoke_parity.get("maximum_continuous_absolute_error", float("nan"))
+    )
+    per_field = smoke_parity.get("per_field_maximum_absolute_error")
+    if not isinstance(per_field, Mapping) or set(per_field) != _TREE_CONTINUOUS_FIELDS:
+        raise ValueError("tree backend canonical smoke parity fields differ")
+    per_field_errors = np.asarray(
+        [float(per_field[field]) for field in sorted(_TREE_CONTINUOUS_FIELDS)],
+        dtype=np.float64,
+    )
+    if (
+        smoke_parity.get("topology_and_categories_exact") is not True
+        or smoke_parity.get("continuous_shapes_exact") is not True
+        or smoke_parity.get("continuous_values_finite") is not True
+        or smoke_parity.get("passed") is not True
+        or float(smoke_parity.get("continuous_absolute_tolerance", -1.0))
+        != tolerance
+        or not np.isfinite(maximum_error)
+        or not np.isfinite(per_field_errors).all()
+        or (per_field_errors < 0.0).any()
+        or maximum_error != float(per_field_errors.max())
+        or maximum_error > tolerance
+    ):
+        raise ValueError("tree backend canonical smoke parity failed")
     if binary_path is not None and sha256_file(binary_path) != manifest["binary_sha256"]:
         raise ValueError("tree backend binary hash differs")
     if source_path is not None and sha256_file(source_path) != manifest["source_sha256"]:

@@ -926,6 +926,8 @@ def test_step10_miniature_filesystem_rehearsal_and_warning_recovery(tmp_path):
 
 
 def test_step10_all_tigris_wrappers_use_full_account_miniforge_and_no_user_site():
+    common = Path("sbatch/common.sh").read_text(encoding="utf-8")
+    assert 'export PYTHONDONTWRITEBYTECODE' in common
     wrappers = set(NODE_WRAPPERS.values())
     wrappers.add("sbatch/run_particle_view_controls.sh")
     wrappers.add("sbatch/submit_particle_view_full_pilot.sh")
