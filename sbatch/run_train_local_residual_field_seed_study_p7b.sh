@@ -50,10 +50,19 @@ fresh_require_file "${c0_checkpoint}"
 fresh_require_file "${consumer_checkpoint}"
 fresh_require_file "${consumer_teacher_config}"
 fresh_require_file "${consumer_run_report}"
+reuse_completed_training=0
 if ! fresh_is_dry_run && [[ -d "${OUTPUT_DIR}" ]]; then
-  partial_dir="${OUTPUT_DIR}.partial_$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID:-manual}"
-  echo "Quarantining incomplete P7b seed directory: ${OUTPUT_DIR} -> ${partial_dir}"
-  mv -- "${OUTPUT_DIR}" "${partial_dir}"
+  if [[ -f "${OUTPUT_DIR}/best_model_val.pt" \
+      && -f "${OUTPUT_DIR}/run_report.json" \
+      && -f "${OUTPUT_DIR}/source_metadata.json" \
+      && -f "${OUTPUT_DIR}/curriculum_schedule.json" ]]; then
+    reuse_completed_training=1
+    echo "Reusing completed P7b training artifacts; only the completion audit will rerun: ${OUTPUT_DIR}"
+  else
+    partial_dir="${OUTPUT_DIR}.partial_$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID:-manual}"
+    echo "Quarantining incomplete P7b seed directory: ${OUTPUT_DIR} -> ${partial_dir}"
+    mv -- "${OUTPUT_DIR}" "${partial_dir}"
+  fi
 fi
 mkdir -p "$(dirname "${OUTPUT_DIR}")"
 
@@ -86,7 +95,9 @@ record_cmd=(
 )
 fresh_write_run_config "${LOCAL_RESIDUAL_FIELD_SEED_STUDY_ROOT}/run_configs/P7b_seed_${SEED}" \
   "local_residual_field_seed_study_P7b_${SEED}" "${train_cmd[@]}" "${record_cmd[@]}"
-fresh_run "${train_cmd[@]}"
+if [[ "${reuse_completed_training}" -eq 0 ]]; then
+  fresh_run "${train_cmd[@]}"
+fi
 fresh_run "${record_cmd[@]}"
 if ! fresh_is_dry_run; then
   fresh_assert_json_ok "${OUTPUT_DIR}/seed_study_completion.json"

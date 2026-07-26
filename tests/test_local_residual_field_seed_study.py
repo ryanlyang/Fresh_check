@@ -229,3 +229,5 @@ def test_tigris_submitter_queues_only_missing_a0_and_all_matched_p7b() -> None:
     assert "--oracle-teacher-logits-dir" not in p7b_job
     assert "--student-warm-start-checkpoint \"${consumer_checkpoint}\"" in p7b_job
     assert "--predictor-warm-start-checkpoint \"${c0_checkpoint}\"" in p7b_job
+    assert "Reusing completed P7b training artifacts" in p7b_job
+    assert "reuse_completed_training" in p7b_job

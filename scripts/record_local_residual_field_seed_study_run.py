@@ -64,12 +64,41 @@ def main(argv: list[str] | None = None) -> int:
         for key in set(reference_config) | set(config)
         if reference_config.get(key) != config.get(key)
     )
-    expected_recipe_differences = ["oracle_teacher_logits_dir", "output_dir", "seed"]
+    expected_recipe_differences = [
+        "oracle_teacher_checkpoint",
+        "oracle_teacher_logits_dir",
+        "output_dir",
+        "seed",
+        "student_warm_start_checkpoint",
+    ]
     if recipe_differences != expected_recipe_differences:
         raise ValueError(
             "P7b seed-study replicate does not match the frozen active recipe; "
             f"expected differences {expected_recipe_differences}, observed {recipe_differences}"
         )
+    reference_report = load_json_object(
+        Path(manifest["p7b_reference_dir"]) / "run_report.json"
+    )
+    checkpoint_identity_pairs = {
+        "oracle_teacher_checkpoint": (
+            reference_report.get("oracle_teacher_checkpoint_hash"),
+            report.get("oracle_teacher_checkpoint_hash"),
+        ),
+        "student_warm_start_checkpoint": (
+            (reference_report.get("student_initialization") or {}).get(
+                "student_init_checkpoint_hash"
+            ),
+            (report.get("student_initialization") or {}).get(
+                "student_init_checkpoint_hash"
+            ),
+        ),
+    }
+    for field_name, (reference_hash, candidate_hash) in checkpoint_identity_pairs.items():
+        if not reference_hash or candidate_hash != reference_hash:
+            raise ValueError(
+                f"P7b {field_name} path changed without matching checkpoint identity: "
+                f"reference={reference_hash!r}, candidate={candidate_hash!r}"
+            )
     if bool(config.get("oracle_logit_only_fallback")):
         raise ValueError("P7b seed study must use the online frozen-oracle forward")
     if dict(report.get("oracle_teacher_logits_paths") or {}):
@@ -87,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
         "final_test_evaluated": False,
         "oracle_execution_mode": "frozen_checkpoint_online",
         "recipe_difference_paths": recipe_differences,
+        "path_alias_checkpoint_identities": {
+            field_name: candidate_hash
+            for field_name, (_, candidate_hash) in checkpoint_identity_pairs.items()
+        },
         "manifest_path": str(manifest_path.resolve()),
         "checkpoint_path": str(checkpoint_path.resolve()),
         "checkpoint_sha256": sha256_file(checkpoint_path),

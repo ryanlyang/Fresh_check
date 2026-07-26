@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Submit or print the full Step-10 graph with logical-node recovery."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import shlex
+import sys
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from teacher_logit_reco.local_particle_residual_field.particle_view import (  # noqa: E402
+    build_particle_view_production_graph,
+    build_low_data_campaign_inventory,
+    build_low_data_campaign_registry,
+    load_hashed_json,
+    reconcile_particle_view_production_graph,
+    submit_particle_view_graph,
+    with_content_hash,
+    write_immutable_json,
+)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--graph")
+    source.add_argument("--registry")
+    source.add_argument("--unified-manifest")
+    parser.add_argument("--command-catalog")
+    parser.add_argument("--artifact-root")
+    parser.add_argument("--source-commit")
+    parser.add_argument("--graph-id", default="particle_view_full_pilot_v1")
+    parser.add_argument("--existing-teacher-compatible", action="store_true")
+    parser.add_argument("--teacher-mix-compatible", action="store_true")
+    parser.add_argument("--ledger-output")
+    parser.add_argument(
+        "--existing-job",
+        action="append",
+        default=[],
+        metavar="NODE=JOB_ID:STATE",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--print-only", action="store_true")
+    return parser
+
+
+def _existing(values: list[str]):
+    result = {}
+    for value in values:
+        try:
+            node_id, job_state = value.split("=", 1)
+            job_id, state = job_state.split(":", 1)
+        except ValueError as exc:
+            raise ValueError(
+                "--existing-job must use NODE=JOB_ID:STATE"
+            ) from exc
+        if node_id in result:
+            raise ValueError(f"duplicate existing logical node {node_id}")
+        result[node_id] = {"job_id": job_id, "state": state}
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    mode = "execute" if args.execute else "print_only" if args.print_only else "dry_run"
+    if args.graph:
+        graph_path = Path(args.graph).resolve()
+        graph = load_hashed_json(graph_path)
+        artifact_root = Path(graph["artifact_root"])
+    else:
+        missing = [
+            name
+            for name, value in (
+                ("--command-catalog", args.command_catalog),
+                ("--artifact-root", args.artifact_root),
+                ("--source-commit", args.source_commit),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "registry bootstrap also requires " + ", ".join(missing)
+            )
+        if args.registry:
+            registry = load_hashed_json(args.registry)
+            inventory = None
+        else:
+            unified = load_hashed_json(args.unified_manifest)
+            registry = build_low_data_campaign_registry(
+                unified_split_manifest=unified,
+                existing_teacher_compatible=args.existing_teacher_compatible,
+                teacher_mix_compatible=args.teacher_mix_compatible,
+            )
+            inventory = build_low_data_campaign_inventory(registry)
+        catalog = json.loads(
+            Path(args.command_catalog).read_text(encoding="utf-8")
+        )
+        artifact_root = Path(args.artifact_root).resolve()
+        graph = build_particle_view_production_graph(
+            registry=registry,
+            artifact_root=str(artifact_root),
+            source_commit=args.source_commit,
+            command_catalog=catalog,
+            graph_id=args.graph_id,
+        )
+        reconciliation = reconcile_particle_view_production_graph(
+            graph=graph, registry=registry
+        )
+        graph_path = artifact_root / "preflight" / "production_graph.json"
+        if mode != "print_only":
+            if inventory is not None:
+                write_immutable_json(
+                    artifact_root
+                    / "preflight"
+                    / "low_data_campaign_registry.json",
+                    registry,
+                )
+                write_immutable_json(
+                    artifact_root
+                    / "preflight"
+                    / "low_data_campaign_inventory.json",
+                    inventory,
+                )
+            write_immutable_json(graph_path, graph)
+            write_immutable_json(
+                artifact_root / "preflight" / "graph_reconciliation.json",
+                reconciliation,
+            )
+    progress_dir = (
+        artifact_root
+        / "job_ledgers"
+        / "submission_progress"
+        / graph["content_hash"][:16]
+    )
+
+    def persist_progress(records) -> None:
+        if mode != "execute":
+            return
+        snapshot = with_content_hash(
+            {
+                "contract": "particle_view_submission_progress_v1",
+                "graph_sha256": graph["content_hash"],
+                "graph_path": str(graph_path),
+                "records": list(records),
+                "last_node_id": records[-1]["node_id"],
+                "record_count": len(records),
+            }
+        )
+        write_immutable_json(
+            progress_dir
+            / (
+                f"{len(records):02d}_{records[-1]['node_id']}_"
+                f"{snapshot['content_hash'][:16]}.json"
+            ),
+            snapshot,
+        )
+
+    ledger = submit_particle_view_graph(
+        graph=graph,
+        graph_path=str(graph_path),
+        existing_jobs=_existing(args.existing_job),
+        mode=mode,
+        progress_callback=persist_progress,
+    )
+    for row in ledger["records"]:
+        if row["command"] is None:
+            print(f"{row['node_id']}: {row['action']} job={row['job_id']}")
+        else:
+            print(f"{row['node_id']}: {shlex.join(row['command'])}")
+    if mode != "print_only":
+        ledger_output = (
+            Path(args.ledger_output)
+            if args.ledger_output
+            else artifact_root
+            / "job_ledgers"
+            / (
+                f"submission_{graph['content_hash'][:16]}_{mode}_"
+                f"{ledger['content_hash'][:16]}.json"
+            )
+        )
+        write_immutable_json(ledger_output, ledger)
+    print(
+        f"mode={mode} planned={ledger['planned_submit_count']} "
+        f"submitted={ledger['submitted_count']} "
+        f"content_hash={ledger['content_hash']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
