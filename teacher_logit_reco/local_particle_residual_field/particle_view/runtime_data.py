@@ -127,8 +127,12 @@ def build_runtime_data_config(
 
     hlt_root = Path(hlt_cache_dir).resolve()
     offline_root = Path(offline_cache_dir).resolve()
+    final_parent_split = str(
+        unified["logical_splits"]["final_test"]["parent_split"]
+    )
     records = []
     for split in _source_parent_splits(unified):
+        final_test_hlt_only = split == final_parent_split
         records.append(
             {
                 "parent_split": split,
@@ -138,13 +142,25 @@ def build_runtime_data_config(
                 "hlt_metadata": _file_binding(
                     hlt_root / HLT_METADATA_FILENAME.format(split=split)
                 ),
-                "offline_array": _file_binding(
-                    offline_root
-                    / ARCHITECTURE_VIEW_OFFLINE_ARRAY_FILENAME.format(split=split)
+                "offline_array": (
+                    None
+                    if final_test_hlt_only
+                    else _file_binding(
+                        offline_root
+                        / ARCHITECTURE_VIEW_OFFLINE_ARRAY_FILENAME.format(
+                            split=split
+                        )
+                    )
                 ),
-                "offline_metadata": _file_binding(
-                    offline_root
-                    / ARCHITECTURE_VIEW_OFFLINE_METADATA_FILENAME.format(split=split)
+                "offline_metadata": (
+                    None
+                    if final_test_hlt_only
+                    else _file_binding(
+                        offline_root
+                        / ARCHITECTURE_VIEW_OFFLINE_METADATA_FILENAME.format(
+                            split=split
+                        )
+                    )
                 ),
             }
         )
@@ -226,6 +242,9 @@ def validate_runtime_data_config(
 
     parent, unified, _ = _load_bound_manifests(payload)
     expected_splits = _source_parent_splits(unified)
+    final_parent_split = str(
+        unified["logical_splits"]["final_test"]["parent_split"]
+    )
     records = payload["parent_cache_records"]
     if (
         not isinstance(records, list)
@@ -257,6 +276,16 @@ def validate_runtime_data_config(
         }
         for kind, expected_path in expected_paths.items():
             binding = row[kind]
+            if kind.startswith("offline_") and split == final_parent_split:
+                if binding is not None:
+                    raise ValueError(
+                        "runtime final_test must not bind an offline cache"
+                    )
+                continue
+            if binding is None:
+                raise ValueError(
+                    f"runtime {split} requires a bound {kind} cache file"
+                )
             if set(binding) != {"path", "sha256"}:
                 raise ValueError("runtime cache-file binding inventory mismatch")
             path = Path(binding["path"])
@@ -333,6 +362,10 @@ def load_aligned_logical_jet_view(
     parent, unified, config = _load_bound_manifests(payload)
     if logical_split not in PARTICLE_VIEW_LOGICAL_SPLITS:
         raise KeyError(f"unknown particle-view logical split {logical_split!r}")
+    if logical_split == "final_test":
+        raise PermissionError(
+            "final_test is HLT-only; aligned HLT/offline loading is forbidden"
+        )
     split_payload = unified["logical_splits"][logical_split]
     parent_split = str(split_payload["parent_split"])
     record = next(
@@ -592,24 +625,46 @@ def audit_runtime_data_sources(payload: Mapping[str, Any]) -> dict[str, Any]:
         payload, verify_cache_files=True
     )
     parent, unified, _ = _load_bound_manifests(payload)
+    final_parent_split = str(
+        unified["logical_splits"]["final_test"]["parent_split"]
+    )
     parent_reports: dict[str, Any] = {}
     for split in config_audit["parent_splits"]:
         hlt = load_cached_hlt_view(
             payload["hlt_cache_dir"], split, verify_hash=True
         )
-        offline = load_cached_offline_view(
-            payload["offline_cache_dir"], split, verify_hash=True
+        expected = parent.splits[split]
+        expected_keys = _identity_keys(expected)
+        if _identity_keys(hlt.jet_ids) != expected_keys:
+            raise ValueError(
+                f"HLT cache identity order differs from parent split {split}"
+            )
+        expected_labels = np.asarray(
+            [row.label for row in expected], dtype=np.int64
         )
-        _require_exact_parent_alignment(
-            parent=parent, split=split, hlt=hlt, offline=offline
-        )
+        if not np.array_equal(hlt.labels, expected_labels):
+            raise ValueError(
+                f"HLT cache labels differ from parent split {split}"
+            )
+        final_test_hlt_only = split == final_parent_split
+        offline_content_sha256 = None
+        if not final_test_hlt_only:
+            offline = load_cached_offline_view(
+                payload["offline_cache_dir"], split, verify_hash=True
+            )
+            _require_exact_parent_alignment(
+                parent=parent, split=split, hlt=hlt, offline=offline
+            )
+            offline_content_sha256 = offline.metadata.get(
+                "offline_content_hash"
+            )
         parent_reports[split] = {
             "count": len(hlt.jet_ids),
             "hlt_content_sha256": hlt.metadata.get("hlt_content_hash"),
-            "offline_content_sha256": offline.metadata.get(
-                "offline_content_hash"
-            ),
+            "offline_content_sha256": offline_content_sha256,
             "identity_order_matches_parent": True,
+            "offline_cache_bound": not final_test_hlt_only,
+            "hlt_only": final_test_hlt_only,
         }
     logical_reports = {
         name: {
@@ -637,6 +692,7 @@ def audit_runtime_data_sources(payload: Mapping[str, Any]) -> dict[str, Any]:
             "parent_splits": parent_reports,
             "logical_splits": logical_reports,
             "hlt_offline_identity_alignment": True,
+            "final_test_hlt_only": True,
             "single_training_pool": True,
             "cross_fit": False,
             "labels_used": False,

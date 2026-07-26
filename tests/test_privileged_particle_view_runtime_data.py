@@ -166,7 +166,8 @@ def _runtime_sources(tmp_path: Path, *, reorder_offline: str | None = None):
                 split=split,
                 metadata=dict(canonical.metadata),
             )
-        save_cached_offline_view(offline, offline_root)
+        if split != "final_test":
+            save_cached_offline_view(offline, offline_root)
     runtime_config = build_runtime_data_config(
         parent_manifest_path=parent_path,
         unified_manifest_path=unified_path,
@@ -185,6 +186,21 @@ def test_runtime_data_aligns_logical_slices_and_builds_label_free_probe(tmp_path
         "model_val",
         "stack_val",
     ]
+    final_record = next(
+        row
+        for row in config["parent_cache_records"]
+        if row["parent_split"] == "final_test"
+    )
+    assert final_record["offline_array"] is None
+    assert final_record["offline_metadata"] is None
+    assert not (
+        Path(config["offline_cache_dir"]) / "final_test_offline.npz"
+    ).exists()
+    with pytest.raises(PermissionError, match="final_test is HLT-only"):
+        load_aligned_logical_jet_view(config, "final_test")
+    final_view, final_audit = load_final_hlt_view(config)
+    assert len(final_view) == 20
+    assert final_audit["offline_cache_opened"] is False
 
     stop = load_aligned_logical_jet_view(config, "model_val_stop")
     select = load_aligned_logical_jet_view(config, "model_val_select")
@@ -1382,6 +1398,23 @@ def test_runtime_data_config_rejects_cache_changed_after_binding(tmp_path):
     path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="hash changed"):
         validate_runtime_data_config(config)
+
+
+def test_runtime_data_config_rejects_any_offline_final_test_binding(tmp_path):
+    _, _, config = _runtime_sources(tmp_path)
+    payload = dict(config)
+    payload.pop("content_hash")
+    records = [dict(row) for row in payload["parent_cache_records"]]
+    final_record = next(
+        row for row in records if row["parent_split"] == "final_test"
+    )
+    final_record["offline_array"] = dict(final_record["hlt_array"])
+    payload["parent_cache_records"] = records
+    stale = with_content_hash(payload)
+    with pytest.raises(
+        ValueError, match="final_test must not bind an offline cache"
+    ):
+        validate_runtime_data_config(stale)
 
 
 def test_parent_artifact_resolver_uses_seed_fallback_and_authenticates(tmp_path):

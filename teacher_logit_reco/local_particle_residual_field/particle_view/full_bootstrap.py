@@ -167,9 +167,24 @@ def _cache_shape_inventory(
 ) -> tuple[list[dict[str, Any]], int]:
     inventory = []
     total_bytes = 0
+    unified = load_hashed_json(
+        runtime_data_config["unified_manifest"]["path"]
+    )
+    final_parent_split = str(
+        unified["logical_splits"]["final_test"]["parent_split"]
+    )
     for record in runtime_data_config["parent_cache_records"]:
         for source_kind in ("hlt_array", "offline_array"):
             binding = record[source_kind]
+            if binding is None:
+                if (
+                    source_kind != "offline_array"
+                    or record["parent_split"] != final_parent_split
+                ):
+                    raise ValueError(
+                        "only the final_test offline cache may be unbound"
+                    )
+                continue
             path = Path(binding["path"])
             arrays = []
             if path.suffix == ".npz":
