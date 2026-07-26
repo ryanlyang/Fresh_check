@@ -23,6 +23,7 @@ from .registry import validate_particle_view_registry
 from .runtime_data import resolve_parent_task_artifacts
 from .target_runtime import (
     CANONICAL_TARGET_DISCOVERY_RUN_ID,
+    PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT,
     TARGET_SCREEN_FORWARD_COUNT,
 )
 
@@ -103,13 +104,12 @@ def validate_target_selection_factory_config(
 def run_target_selection(
     *,
     candidates: Sequence[Mapping[str, Any]],
+    unavailable_targets: Sequence[Mapping[str, Any]],
     source_commit: str,
     output_path: str,
     warnings_path: str,
     result_path: str,
 ) -> None:
-    if len(candidates) != len(TARGET_SCREEN_IDS):
-        raise ValueError("target selection requires every declared screen row")
     by_id: dict[str, Mapping[str, Any]] = {}
     for candidate in candidates:
         validate_content_hash(
@@ -120,9 +120,21 @@ def run_target_selection(
         if target_id in by_id:
             raise ValueError("target selection contains a duplicate target")
         by_id[target_id] = candidate
-    if set(by_id) != set(TARGET_SCREEN_IDS):
+    unavailable_by_id = {}
+    for unavailable in unavailable_targets:
+        validate_content_hash(
+            unavailable,
+            expected_contract=PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT,
+        )
+        target_id = str(unavailable["run_id"])
+        if target_id in by_id or target_id in unavailable_by_id:
+            raise ValueError("target availability inventory has duplicates")
+        unavailable_by_id[target_id] = unavailable
+    if set(by_id) | set(unavailable_by_id) != set(TARGET_SCREEN_IDS):
         raise ValueError("target selection screen coverage mismatch")
-    ordered = [by_id[run_id] for run_id in TARGET_SCREEN_IDS]
+    ordered = [
+        by_id[run_id] for run_id in TARGET_SCREEN_IDS if run_id in by_id
+    ]
     selection = select_target_candidates(
         ordered,
         canonical_target_id=CANONICAL_TARGET_DISCOVERY_RUN_ID,
@@ -153,6 +165,12 @@ def run_target_selection(
             "candidate_metric_sha256_by_run": {
                 run_id: by_id[run_id]["content_hash"]
                 for run_id in TARGET_SCREEN_IDS
+                if run_id in by_id
+            },
+            "unavailable_target_sha256_by_run": {
+                run_id: unavailable_by_id[run_id]["content_hash"]
+                for run_id in TARGET_SCREEN_IDS
+                if run_id in unavailable_by_id
             },
             "forwarded_target_ids": selection["forwarded_target_ids"],
             "warning_count": len(warnings),
@@ -193,26 +211,42 @@ def build_target_selection_factory(
         seed=int(seed),
     )
     candidates = []
+    unavailable_targets = []
     for target_id in TARGET_SCREEN_IDS:
-        try:
-            binding = parents[target_id]["artifacts"][
+        artifacts = parents[target_id]["artifacts"]
+        binding = artifacts.get(
                 "target_candidate_metrics.json"
-            ]
-        except KeyError as exc:
+            )
+        expected_contract = PARTICLE_VIEW_TARGET_METRICS_CONTRACT
+        if binding is None:
+            binding = artifacts.get("target_unavailable.json")
+            expected_contract = PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT
+        if binding is None:
             raise ValueError(
                 f"target parent {target_id} omitted ranking metrics"
-            ) from exc
+            )
         path = Path(binding["path"]).resolve()
         if not path.is_file() or sha256_file(path) != binding["sha256"]:
             raise ValueError(f"target metric changed for {target_id}")
         metric = load_hashed_json(path)
-        if metric.get("target_id") != target_id:
+        validate_content_hash(metric, expected_contract=expected_contract)
+        identity = (
+            metric.get("target_id")
+            if expected_contract == PARTICLE_VIEW_TARGET_METRICS_CONTRACT
+            else metric.get("run_id")
+        )
+        if identity != target_id:
             raise ValueError("target metric/run identity mismatch")
-        candidates.append(metric)
+        (
+            candidates
+            if expected_contract == PARTICLE_VIEW_TARGET_METRICS_CONTRACT
+            else unavailable_targets
+        ).append(metric)
     output = Path(output_dir).resolve()
     return {
         "kwargs": {
             "candidates": candidates,
+            "unavailable_targets": unavailable_targets,
             "source_commit": config["source_commit"],
             "output_path": str(output / "selected_targets.json"),
             "warnings_path": str(output / "scientific_warnings.jsonl"),

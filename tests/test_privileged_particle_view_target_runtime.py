@@ -17,12 +17,18 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     StagedContextualMemory,
     StagedDiscoveryViewProvider,
     TARGET_SCREEN_IDS,
+    TargetCandidateMetrics,
+    TwoTeacherTokenMixture,
+    build_target_metrics_artifact,
     build_tap_stage_reservation,
     build_target_screen_recipe,
     fit_particle_view_normalizer,
     lorentz_vectors_to_particle_geometry,
     particle_view_generator_config_from_payload,
     predict_recovery_probe_views,
+    run_target_discovery_operation,
+    run_target_selection,
+    load_hashed_json,
     stage_teacher_tap_float16,
 )
 
@@ -325,3 +331,95 @@ def test_recovery_prediction_loader_is_label_free_and_preserves_order(
             device="cpu",
             num_workers=0,
         )
+
+
+def test_two_teacher_mixture_is_masked_trainable_and_dimension_locked():
+    mixture = TwoTeacherTokenMixture()
+    base = torch.randn(2, 4, 128, requires_grad=True)
+    large = torch.randn(2, 4, 192, requires_grad=True)
+    mask = torch.tensor(
+        [[True, True, False, False], [True, True, True, False]]
+    )
+    mixed = mixture(base, large, mask)
+    assert mixed.shape == (2, 4, 160)
+    assert torch.count_nonzero(mixed[~mask]) == 0
+    mixed.square().sum().backward()
+    assert mixture.source_logits.grad is not None
+    assert mixture.base_projection.weight.grad is not None
+    with pytest.raises(ValueError, match="dimensions"):
+        TwoTeacherTokenMixture(output_dim=128)
+
+
+def test_full_target_selection_accepts_unavailable_diagnostic_and_never_gates(
+    tmp_path,
+):
+    unavailable_path = tmp_path / "unavailable.json"
+    run_target_discovery_operation(
+        unavailable={
+            "run_id": "VGEN_TEACHER_EXISTING",
+            "seed": 101,
+            "reason": "fixture_unavailable",
+            "source_registration_sha256": _sha("unavailable-source"),
+            "output_path": str(unavailable_path),
+        }
+    )
+    unavailable = load_hashed_json(unavailable_path)
+    candidates = []
+    for index, run_id in enumerate(TARGET_SCREEN_IDS):
+        if run_id == "VGEN_TEACHER_EXISTING":
+            continue
+        recipe = build_target_screen_recipe(run_id)
+        predicted_gain = (
+            0.010
+            if run_id == "VGEN_TAP_RAW"
+            else 0.009
+            if run_id == "VGEN_TAP_MID"
+            else -0.001 - index * 1.0e-5
+        )
+        candidates.append(
+            build_target_metrics_artifact(
+                TargetCandidateMetrics(
+                    run_id=run_id,
+                    target_id=run_id,
+                    bottleneck_width=(
+                        recipe.generator_config.bottleneck_width
+                    ),
+                    predicted_view_gain=predicted_gain,
+                    oracle_gain=-0.002,
+                    predicted_view_cross_entropy=0.7 + index * 1.0e-4,
+                    zero_view_accuracy=0.70,
+                    predicted_view_accuracy=0.70 + predicted_gain,
+                    oracle_accuracy=0.698,
+                    a0_accuracy=0.70,
+                    target_registration_sha256=_sha(run_id),
+                    selection_status=recipe.selection_status,
+                )
+            )
+        )
+    selection_path = tmp_path / "selection.json"
+    warnings_path = tmp_path / "warnings.jsonl"
+    result_path = tmp_path / "result.json"
+    run_target_selection(
+        candidates=candidates,
+        unavailable_targets=[unavailable],
+        source_commit="abc123",
+        output_path=str(selection_path),
+        warnings_path=str(warnings_path),
+        result_path=str(result_path),
+    )
+    selection = load_hashed_json(selection_path)
+    assert selection["forwarded_target_ids"][:2] == [
+        "VGEN_TAP_RAW",
+        "VGEN_TAP_MID",
+    ]
+    assert "VGEN_TAP_PENULT" in selection["forwarded_target_ids"]
+    assert "VGEN_MEMORY_HLT" in selection["forwarded_target_ids"]
+    assert "VGEN_TEACHER_EXISTING" not in selection[
+        "forwarded_target_ids"
+    ]
+    assert selection["quality_threshold_used_as_gate"] is False
+    result = load_hashed_json(result_path)
+    assert result["warnings_stop_execution"] is False
+    assert set(result["unavailable_target_sha256_by_run"]) == {
+        "VGEN_TEACHER_EXISTING"
+    }

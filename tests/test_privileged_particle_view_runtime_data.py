@@ -27,6 +27,8 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     build_stage_a_teacher_task_specs,
     build_stage_a_direct_resource_plan,
     build_stage_a_direct_task_specs,
+    build_target_discovery_factory_config,
+    build_target_discovery_task_specs,
     build_unified_split_manifest,
     execute_scientific_task,
     load_aligned_logical_jet_view,
@@ -39,6 +41,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     validate_runtime_data_config,
     validate_baseline_factory_config,
     validate_stage_a_direct_resource_plan,
+    validate_target_discovery_factory_config,
     train_direct_hlt_control,
     write_immutable_json,
 )
@@ -170,6 +173,28 @@ def test_runtime_data_aligns_logical_slices_and_builds_label_free_probe(tmp_path
     assert set(probe_batch) == {"features", "mask", "true_view"}
     assert probe_batch["features"].shape[1] == 17
     assert probe_batch["mask"].shape == (4, 128)
+
+
+def test_target_factory_promotes_complete_36_row_two_pass_screen(tmp_path):
+    _, _, runtime = _runtime_sources(tmp_path)
+    config = build_target_discovery_factory_config(
+        runtime_data_config=runtime,
+        device="cpu",
+        max_train_batches=1,
+        max_val_batches=1,
+    )
+    audit = validate_target_discovery_factory_config(config)
+    assert audit["supported_run_count"] == 36
+    assert config["supported_run_ids"] == list(config["screen_recipes"])
+    assert config["production_scope"] == "complete_target_screen_two_pass_v1"
+    path = tmp_path / "target_factory.json"
+    write_immutable_json(path, config)
+    specs = build_target_discovery_task_specs(factory_config_path=path)
+    assert set(specs) == set(config["supported_run_ids"])
+    assert all(
+        row["operation"] == "target_discovery"
+        for row in specs.values()
+    )
 
 
 def test_runtime_data_rejects_mutually_consistent_but_parent_reordered_cache(

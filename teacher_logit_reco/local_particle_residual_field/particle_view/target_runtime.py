@@ -42,6 +42,8 @@ from .offline_teacher import (
     FrozenContextualParticleTeacher,
     FrozenTokenLayerMixture,
     ParticleTokenTapSpec,
+    ParticleViewTeacherRecipe,
+    build_teacher_registration,
     build_token_tap_registration,
     reload_registered_teacher,
     validate_teacher_registration,
@@ -97,6 +99,9 @@ PARTICLE_VIEW_TARGET_DISCOVERY_RESULT_CONTRACT = (
 )
 PARTICLE_VIEW_TARGET_TWO_PASS_RESULT_CONTRACT = (
     "particle_view_target_two_pass_result_v1"
+)
+PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT = (
+    "particle_view_target_unavailable_v1"
 )
 PARTICLE_VIEW_GENERATOR_CHECKPOINT_CONTRACT = (
     "particle_view_generator_checkpoint_v1"
@@ -1814,6 +1819,33 @@ def run_canonical_target_discovery(
         torch.cuda.empty_cache()
 
 
+def run_target_discovery_operation(
+    *,
+    unavailable: Mapping[str, Any] | None = None,
+    **kwargs,
+) -> None:
+    """Locked target operation with a non-gating unavailable-source branch."""
+
+    if unavailable is None:
+        run_canonical_target_discovery(**kwargs)
+        return
+    if kwargs:
+        raise ValueError("unavailable target cannot receive training kwargs")
+    fields = dict(unavailable)
+    output_path = fields.pop("output_path")
+    artifact = with_content_hash(
+        {
+            "contract": PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT,
+            **fields,
+            "metrics_available": False,
+            "selection_status": "diagnostic_unavailable",
+            "quality_gate_used": False,
+            "stops_execution": False,
+        }
+    )
+    write_immutable_json(output_path, artifact)
+
+
 def build_target_discovery_factory_config(
     *,
     runtime_data_config: Mapping[str, Any],
@@ -1823,6 +1855,7 @@ def build_target_discovery_factory_config(
     max_val_batches: int | None = None,
     existing_teacher_compatible: bool = False,
     teacher_mix_compatible: bool = False,
+    baseline_factory_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind every target-discovery workload to exact source caches."""
 
@@ -1832,6 +1865,59 @@ def build_target_discovery_factory_config(
     workers = int(num_workers)
     if workers < 0:
         raise ValueError("num_workers must be nonnegative")
+    existing_teacher = None
+    baseline_factory_config_sha256 = None
+    if baseline_factory_config is not None:
+        validate_content_hash(
+            baseline_factory_config,
+            expected_contract="particle_view_baseline_factory_config_v1",
+        )
+        if (
+            baseline_factory_config.get("runtime_data_config_sha256")
+            != runtime_data_config["content_hash"]
+        ):
+            raise ValueError(
+                "baseline/target factories bind different runtime data"
+            )
+        existing_teacher = baseline_factory_config.get("existing_teacher")
+        if (
+            existing_teacher is not None
+            and not isinstance(
+                existing_teacher.get("serialized_recipe"), Mapping
+            )
+        ):
+            existing_teacher = None
+        baseline_factory_config_sha256 = baseline_factory_config[
+            "content_hash"
+        ]
+    if existing_teacher_compatible and existing_teacher is None:
+        raise ValueError(
+            "compatible existing teacher requires baseline factory evidence"
+        )
+    if existing_teacher_compatible and (
+        existing_teacher.get("recipe_reproduced_exactly") is not True
+        or existing_teacher.get("observed_train_identity_sha256")
+        != logical_split_binding(
+            load_hashed_json(
+                runtime_data_config["unified_manifest"]["path"]
+            ),
+            "train",
+        )[2]
+    ):
+        # The exact identity comparison is performed again by the Stage-A
+        # source registration.  Do not allow a CLI flag alone to promote it.
+        raise ValueError(
+            "existing teacher compatibility lacks exact provenance evidence"
+        )
+    existing_memory_dim = (
+        128
+        if existing_teacher is None
+        else int(
+            existing_teacher["serialized_recipe"]["architecture"][
+                "embed_dims"
+            ][-1]
+        )
+    )
     artifact = with_content_hash(
         {
             "contract": (
@@ -1854,6 +1940,11 @@ def build_target_discovery_factory_config(
             "screen_recipes": {
                 run_id: build_target_screen_recipe(
                     run_id,
+                    memory_dim=(
+                        existing_memory_dim
+                        if run_id == "VGEN_TEACHER_EXISTING"
+                        else 128
+                    ),
                     existing_teacher_compatible=existing_teacher_compatible,
                     teacher_mix_compatible=teacher_mix_compatible,
                 ).to_payload()
@@ -1865,6 +1956,10 @@ def build_target_discovery_factory_config(
                 ),
                 "teacher_mix_compatible": bool(teacher_mix_compatible),
             },
+            "existing_teacher": existing_teacher,
+            "baseline_factory_config_sha256": (
+                baseline_factory_config_sha256
+            ),
             "production_scope": "complete_target_screen_two_pass_v1",
             "two_pass_probe_required_before_target_ranking": True,
             "quality_warnings_non_gating": True,
@@ -1892,6 +1987,8 @@ def validate_target_discovery_factory_config(
         "complete_target_screen_count",
         "screen_recipes",
         "compatibility",
+        "existing_teacher",
+        "baseline_factory_config_sha256",
         "production_scope",
         "two_pass_probe_required_before_target_ranking",
         "quality_warnings_non_gating",
@@ -1941,9 +2038,38 @@ def validate_target_discovery_factory_config(
         )
     ):
         raise ValueError("target-discovery compatibility inventory changed")
+    existing = payload["existing_teacher"]
+    baseline_hash = payload["baseline_factory_config_sha256"]
+    if baseline_hash is not None:
+        if (
+            not isinstance(baseline_hash, str)
+            or len(baseline_hash) != 64
+            or any(character not in "0123456789abcdef" for character in baseline_hash)
+        ):
+            raise ValueError("baseline factory hash is invalid")
+        if existing is not None and not isinstance(existing, Mapping):
+            raise ValueError("existing-teacher evidence must be an object")
+    elif existing is not None:
+        raise ValueError("existing-teacher evidence lacks baseline binding")
+    if compatibility["existing_teacher_compatible"] and existing is None:
+        raise ValueError("selectable existing teacher has no evidence")
     for run_id in TARGET_SCREEN_IDS:
+        existing_memory_dim = (
+            128
+            if existing is None
+            else int(
+                existing["serialized_recipe"]["architecture"][
+                    "embed_dims"
+                ][-1]
+            )
+        )
         rebuilt = build_target_screen_recipe(
             run_id,
+            memory_dim=(
+                existing_memory_dim
+                if run_id == "VGEN_TEACHER_EXISTING"
+                else 128
+            ),
             existing_teacher_compatible=compatibility[
                 "existing_teacher_compatible"
             ],
@@ -2046,6 +2172,35 @@ def build_target_discovery_factory(
     expected_parents = _target_parent_ids(run_id)
     if set(parents) != set(expected_parents):
         raise ValueError("target discovery parent inventory differs")
+    if run_id == "VGEN_TEACHER_EXISTING" and config["existing_teacher"] is None:
+        source_path = _parent_artifact(
+            parents,
+            "TOFF_VIEW_EXISTING",
+            "existing_teacher_source_registration.json",
+        )
+        source = load_hashed_json(source_path)
+        if source.get("selectable") is not False:
+            raise ValueError(
+                "unbound existing teacher unexpectedly claims selectability"
+            )
+        output = Path(output_dir).resolve()
+        return {
+            "kwargs": {
+                "unavailable": {
+                    "run_id": run_id,
+                    "seed": int(seed),
+                    "reason": (
+                        "existing_teacher_not_configured_or_recipe_unbound"
+                    ),
+                    "source_registration_sha256": source["content_hash"],
+                    "output_path": str(output / "target_unavailable.json"),
+                }
+            },
+            "artifact_paths": [
+                str(output / "target_unavailable.json"),
+            ],
+            "action": None,
+        }
     a0_registration, a0_checkpoint_path, a0_query_model = (
         _registered_parent_teacher(parents, "A0_VIEW")
     )
@@ -2062,6 +2217,18 @@ def build_target_discovery_factory(
     compatibility = config["compatibility"]
     recipe = build_target_screen_recipe(
         run_id,
+        memory_dim=(
+            int(
+                config["existing_teacher"]["serialized_recipe"][
+                    "architecture"
+                ]["embed_dims"][-1]
+            )
+            if (
+                run_id == "VGEN_TEACHER_EXISTING"
+                and config["existing_teacher"] is not None
+            )
+            else 128
+        ),
         existing_teacher_compatible=compatibility[
             "existing_teacher_compatible"
         ],
@@ -2069,10 +2236,77 @@ def build_target_discovery_factory(
             "teacher_mix_compatible"
         ],
     )
+    existing_teacher = config["existing_teacher"]
     if run_id == "VGEN_TEACHER_EXISTING":
-        raise ValueError(
-            "configured existing-teacher checkpoint runtime is not bound"
+        source_registration_path = _parent_artifact(
+            parents,
+            "TOFF_VIEW_EXISTING",
+            "existing_teacher_source_registration.json",
         )
+        source_registration = load_hashed_json(source_registration_path)
+        if existing_teacher is None:
+            raise ValueError(
+                "existing teacher is unavailable; target row must use the "
+                "non-gating unavailable-target runtime"
+            )
+        checkpoint_path = Path(
+            existing_teacher["checkpoint"]["path"]
+        ).resolve()
+        if (
+            not checkpoint_path.is_file()
+            or sha256_file(checkpoint_path)
+            != existing_teacher["checkpoint"]["sha256"]
+            or source_registration.get("checkpoint_sha256")
+            != existing_teacher["checkpoint"]["sha256"]
+        ):
+            raise ValueError("existing teacher checkpoint/source binding changed")
+        serialized = existing_teacher["serialized_recipe"]
+        if not isinstance(serialized, Mapping):
+            raise ValueError("existing teacher omitted its serialized recipe")
+        existing_recipe = ParticleViewTeacherRecipe(
+            role=serialized["role"],
+            particle_source=serialized["particle_source"],
+            architecture=serialized["architecture_name"],
+            seed=int(serialized["seed"]),
+            unified_split_manifest_sha256=serialized[
+                "unified_split_manifest_sha256"
+            ],
+            train_identity_sha256=serialized["train_identity_sha256"],
+            train_split_sha256=serialized["train_split_sha256"],
+            model_val_stop_split_sha256=serialized[
+                "model_val_stop_split_sha256"
+            ],
+            preprocessing_sha256=serialized["preprocessing_sha256"],
+            source_sha256=serialized["source_sha256"],
+            initialization_implementation_sha256=serialized[
+                "initialization_implementation_sha256"
+            ],
+            library_versions_sha256=serialized[
+                "library_versions_sha256"
+            ],
+        )
+        if existing_recipe.to_payload() != dict(serialized):
+            raise ValueError("existing teacher recipe is noncanonical")
+        memory_registration = build_teacher_registration(
+            recipe=existing_recipe,
+            checkpoint_path=checkpoint_path,
+            selected_checkpoint_kind=(
+                "existing_provenance_compatible"
+                if recipe.selection_status == "selectable"
+                else "existing_diagnostic"
+            ),
+            selectable=recipe.selection_status == "selectable",
+            provenance_reason=source_registration["selection_status"],
+        )
+        memory_checkpoint_path = checkpoint_path
+        memory_model = reload_registered_teacher(
+            registration=memory_registration,
+            checkpoint_path=memory_checkpoint_path,
+        )
+    else:
+        memory_registration = None
+        memory_model = None
+        memory_checkpoint_path = None
     memory_parent = (
         "A0_VIEW"
         if recipe.generator_config.memory_source == "hlt"
@@ -2080,7 +2314,9 @@ def build_target_discovery_factory(
         if recipe.teacher_source == "large"
         else "TOFF_VIEW_BASE"
     )
-    if memory_parent == "A0_VIEW":
+    if run_id == "VGEN_TEACHER_EXISTING":
+        pass
+    elif memory_parent == "A0_VIEW":
         memory_registration = a0_registration
         memory_checkpoint_path = a0_checkpoint_path
         memory_model = reload_registered_teacher(
@@ -2327,6 +2563,7 @@ __all__ = [
     "PARTICLE_VIEW_TARGET_DISCOVERY_RECIPE_CONTRACT",
     "PARTICLE_VIEW_TARGET_DISCOVERY_RESULT_CONTRACT",
     "PARTICLE_VIEW_TARGET_TWO_PASS_RESULT_CONTRACT",
+    "PARTICLE_VIEW_TARGET_UNAVAILABLE_CONTRACT",
     "CandidateViewSet",
     "IndexedCandidateViewProvider",
     "StagedContextualMemory",
@@ -2343,6 +2580,7 @@ __all__ = [
     "materialize_candidate_views_in_ram",
     "predict_recovery_probe_views",
     "run_canonical_target_discovery",
+    "run_target_discovery_operation",
     "stage_contextual_memory",
     "validate_target_discovery_factory_config",
 ]

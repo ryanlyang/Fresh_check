@@ -262,9 +262,9 @@ def _operation_callable(operation: str) -> Callable[..., Any] | None:
 
         return train_direct_hlt_control
     if operation == "target_discovery":
-        from .target_runtime import run_canonical_target_discovery
+        from .target_runtime import run_target_discovery_operation
 
-        return run_canonical_target_discovery
+        return run_target_discovery_operation
     if operation == "recovery_probe_training":
         from .recovery_probe import train_recovery_probe
 

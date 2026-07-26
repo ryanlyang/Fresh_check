@@ -45,6 +45,7 @@ RPT_BASE_MODEL_CONTRACT = "relational_part_rpt_base_model_v1"
 STEP3_RELATIONAL_MODEL_CONTRACT = "relational_part_step3_model_v1"
 STEP4_RELATIONAL_MODEL_CONTRACT = "relational_part_step4_model_v1"
 STEP5_RELATIONAL_MODEL_CONTRACT = "relational_part_step5_model_v1"
+STEP6_RELATIONAL_MODEL_CONTRACT = "relational_part_step6_model_v1"
 
 RPT_BASE_CONFIG: dict[str, Any] = {
     "input_dim": 17,
@@ -967,6 +968,56 @@ def build_registered_wide_model(
     )
 
 
+def build_confirmation_architecture_model(
+    run_id: str,
+    *,
+    selected_families: tuple[str, ...] | list[str] = (),
+    normalization_artifact: Mapping[str, Any] | None = None,
+    region_normalization_artifact: Mapping[str, Any] | None = None,
+    weaver_module: Any | None = None,
+):
+    """Instantiate one of the four prespecified Step-6 architecture rows."""
+
+    from .attention import ConfirmationArchitectureParticleTransformer
+
+    allowed = {
+        "RPT_BASE_LAYERWISE": (False, True),
+        "RPT_BASE_EDGEVALUE": (True, True),
+        "RPT_SELECTED_LAYERWISE": (False, False),
+        "RPT_SELECTED_EDGEVALUE": (True, False),
+    }
+    if run_id not in allowed:
+        raise ValueError(f"{run_id!r} is not a Step-6 architecture run")
+    edge_value, base_control = allowed[run_id]
+    families = (
+        () if base_control else canonical_supported_families(selected_families)
+    )
+    if base_control and tuple(selected_families):
+        raise ValueError("base4 architecture controls cannot receive relations")
+    combined_dimension = STANDARD_FOUR_CHANNELS + sum(
+        SUPPORTED_FAMILY_DIMENSIONS[family] for family in families
+    )
+    module = _import_weaver_module() if weaver_module is None else weaver_module
+    transformer = getattr(module, "ParticleTransformer", None)
+    if transformer is None:
+        raise RuntimeError("Weaver module lacks ParticleTransformer")
+    config = exact_rpt_base_config()
+    config["pair_input_dim"] = 0
+    config["pair_extra_dim"] = combined_dimension
+    instantiated = transformer(**config)
+    model = ConfirmationArchitectureParticleTransformer(
+        transformer=instantiated,
+        weaver_module=module,
+        families=families,
+        normalization_artifact=normalization_artifact,
+        region_normalization_artifact=region_normalization_artifact,
+        edge_value=edge_value,
+    )
+    model.run_id = run_id
+    model.config = copy.deepcopy(config)
+    return model
+
+
 def build_step3_model_contract(
     run_id: str,
     *,
@@ -1320,10 +1371,12 @@ __all__ = [
     "STEP3_RELATIONAL_MODEL_CONTRACT",
     "STEP4_RELATIONAL_MODEL_CONTRACT",
     "STEP5_RELATIONAL_MODEL_CONTRACT",
+    "STEP6_RELATIONAL_MODEL_CONTRACT",
     "RelationalFamilyParticleTransformer",
     "RelationalParticleTransformer",
     "WideBaseParticleTransformer",
     "build_registered_screening_model",
+    "build_confirmation_architecture_model",
     "build_registered_wide_model",
     "build_registered_step3_model",
     "build_registered_step4_model",
