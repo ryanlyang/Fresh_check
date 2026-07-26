@@ -10,7 +10,53 @@ from typing import Mapping
 from .contracts import validate_content_hash, with_content_hash
 
 
-GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v2"
+GLOBAL_DETERMINISM_CONTRACT = "relational_part_global_determinism_v3"
+DIAGNOSTIC_BIN_EDGES = {
+    "track_raw_displacement": (
+        -math.inf, -1.0, -0.1, 0.0, 0.1, 1.0, math.inf
+    ),
+    "track_absolute_significance": (0.0, 1.0, 2.0, 4.0, 8.0, math.inf),
+    "track_compatibility_chi2": (
+        0.0, 1.0, 4.0, 9.0, 16.0, 25.0, math.inf
+    ),
+    "density_local_activity": (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+    "jet_multiplicity": (0.0, 20.0, 40.0, 60.0, 80.0, 100.0, math.inf),
+    "leading_particle_pt_fraction": (
+        0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0
+    ),
+    "region_lca_depth": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    "region_log_merge_delta_r": (
+        -math.inf, -4.0, -3.0, -2.0, -1.0, 0.0, math.inf
+    ),
+    "region_log_merge_kt": (
+        -math.inf, -4.0, -2.0, 0.0, 2.0, 4.0, math.inf
+    ),
+    "region_merge_z": (0.0, 0.05, 0.1, 0.2, 0.35, 0.5),
+    "region_log_merge_mass_fraction": (
+        -math.inf, -6.0, -4.0, -2.0, -1.0, 0.0, math.inf
+    ),
+    "region_log_cluster_pt_fraction": (
+        -math.inf, -4.0, -2.0, -1.0, -0.5, 0.0
+    ),
+    "region_log_cluster_mass_fraction": (
+        -math.inf, -6.0, -4.0, -2.0, -1.0, 0.0
+    ),
+    "region_cluster_multiplicity_fraction": (
+        0.0, 0.1, 0.25, 0.5, 0.75, 1.0
+    ),
+    "region_tree_depth": (0.0, 4.0, 8.0, 12.0, 16.0, math.inf),
+    "region_hard_prong_count": (0.0, 2.0, 4.0, 6.0, 8.0, math.inf),
+}
+
+
+def _serialized_diagnostic_edges() -> dict[str, list[float | str]]:
+    return {
+        name: [
+            "-inf" if value == -math.inf else "+inf" if value == math.inf else value
+            for value in edges
+        ]
+        for name, edges in DIAGNOSTIC_BIN_EDGES.items()
+    }
 
 
 def build_global_determinism_contract() -> dict[str, Any]:
@@ -24,12 +70,20 @@ def build_global_determinism_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": GLOBAL_DETERMINISM_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "fixed_before_scientific_results": True,
             "model_specific_override_allowed": False,
             "attention_diagnostics": {
                 "population": "complete_val_select",
-                "aggregation": "event_count_weighted_across_batches",
+                "aggregation": (
+                    "schema_aware_sufficient_statistics_across_complete_"
+                    "validation_population"
+                ),
+                "mean_denominators": {
+                    "attention": "valid_particle_queries",
+                    "pair_bias": "applicable_valid_directed_pairs",
+                    "performance": "events_in_declared_bin",
+                },
                 "context_groups": {
                     "leading": "all_valid_particles_at_maximum_pt",
                     "subleading": (
@@ -45,6 +99,11 @@ def build_global_determinism_contract() -> dict[str, Any]:
                 "combination_family_dropouts": (
                     "zero_exactly_one_encoded_family_after_base4_"
                     "concatenation_without_retraining"
+                ),
+                "region_resolution_dropouts": [2, 4, 8],
+                "diagnostic_bin_edges": _serialized_diagnostic_edges(),
+                "diagnostic_bin_endpoint_policy": (
+                    "first bin [left,right], later bins (left,right]"
                 ),
             },
             "parity": {
@@ -359,13 +418,14 @@ def validate_global_determinism_contract(payload: Mapping[str, Any]) -> str:
     expected.pop("content_hash", None)
     if actual != expected:
         raise ValueError(
-            "global deterministic conventions differ from the locked v2 policy"
+            "global deterministic conventions differ from the locked v3 policy"
         )
     return digest
 
 
 __all__ = [
     "GLOBAL_DETERMINISM_CONTRACT",
+    "DIAGNOSTIC_BIN_EDGES",
     "build_global_determinism_contract",
     "optimizer_update_counts",
     "scheduled_learning_rate",

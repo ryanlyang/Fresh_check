@@ -351,6 +351,15 @@ def _capture_diagnostics(
             "valid_particle_count",
             "track_valid_count",
             "masked_query_count",
+            "zero_hot_count",
+            "multi_hot_count",
+            "invalid_binary_value_count",
+            "electron_query_pairs",
+            "electron_context_pairs",
+            "muon_query_pairs",
+            "muon_context_pairs",
+            "finite_entry_count",
+            "count",
         }
         sum_sequence_fields = {
             "category_counts",
@@ -433,6 +442,25 @@ def _capture_diagnostics(
                         denominator, specification["denominator"]
                     )
                 return divide_values(numerator, denominator)
+            if kind == "root_mean_square":
+                square_sum = specifications[0]["square_sum"]
+                denominator = specifications[0]["denominator"]
+                for specification in specifications[1:]:
+                    square_sum = add_values(
+                        square_sum, specification["square_sum"]
+                    )
+                    denominator = add_values(
+                        denominator, specification["denominator"]
+                    )
+                mean_square = divide_values(square_sum, denominator)
+                if isinstance(mean_square, list):
+                    return [
+                        None if value is None else math.sqrt(value)
+                        for value in mean_square
+                    ]
+                return (
+                    None if mean_square is None else math.sqrt(mean_square)
+                )
             if kind == "concatenate":
                 return [
                     item

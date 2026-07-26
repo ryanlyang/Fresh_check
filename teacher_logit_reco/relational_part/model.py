@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import math
 from typing import Any, Mapping
 
 from jetclass_fresh.hlt_baseline import default_part_config
@@ -19,6 +20,7 @@ from .capacity import (
     pair_encoder_parameter_count,
     select_wide_widths,
 )
+from .determinism import DIAGNOSTIC_BIN_EDGES
 from .region_normalization import validate_region_normalization
 from .normalization import validate_relation_normalization_artifact
 from .pair_builder import (
@@ -703,6 +705,38 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 )
             return output
 
+        def head_mean_mapping(
+            groups: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            values: dict[str, list[float | None]] = {}
+            statistics: dict[str, Any] = {}
+            for name, group in groups.items():
+                selected = pair_mask & group.bool()
+                count = int(selected[:, 0].sum().cpu())
+                sums = [
+                    float(
+                        bias[:, head]
+                        .masked_select(selected[:, 0])
+                        .sum()
+                        .detach()
+                        .cpu()
+                    )
+                    for head in range(int(bias.shape[1]))
+                ]
+                values[str(name)] = [
+                    None if count == 0 else value / count
+                    for value in sums
+                ]
+                statistics[str(name)] = {
+                    "kind": "ratio",
+                    "numerator": sums,
+                    "denominator": [count] * len(sums),
+                }
+            return {
+                **values,
+                "_population_statistics": statistics,
+            }
+
         def histogram(
             values: Any,
             selected: Any,
@@ -923,12 +957,12 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 valid,
             )
             rank_bin = torch.clamp((rank * 10.0).floor().long(), 0, 9)
-            rank_means = {
-                str(index): head_means(
+            rank_means = head_mean_mapping({
+                str(index): (
                     (rank_bin == index).unsqueeze(1).unsqueeze(-2)
                 )
                 for index in range(10)
-            }
+            })
             leading = torch.zeros_like(rank, dtype=torch.bool)
             subleading = torch.zeros_like(rank, dtype=torch.bool)
             soft = torch.zeros_like(rank, dtype=torch.bool)
@@ -945,10 +979,25 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             swap = []
             for head in range(int(bias.shape[1])):
                 values = difference[:, head].masked_select(pair_mask[:, 0])
+                value_count = int(values.numel())
+                absolute_sum = float(values.abs().sum().cpu())
+                square_sum = float(values.square().sum().cpu())
                 swap.append(
                     {
-                        "mean_absolute": float(values.abs().mean().cpu()),
-                        "rms": float(values.square().mean().sqrt().cpu()),
+                        "mean_absolute": absolute_sum / value_count,
+                        "rms": math.sqrt(square_sum / value_count),
+                        "_population_statistics": {
+                            "mean_absolute": {
+                                "kind": "ratio",
+                                "numerator": absolute_sum,
+                                "denominator": value_count,
+                            },
+                            "rms": {
+                                "kind": "root_mean_square",
+                                "square_sum": square_sum,
+                                "denominator": value_count,
+                            },
+                        },
                     }
                 )
             output["PT"] = {
@@ -961,17 +1010,17 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     "leading=lowest_tied_rank; subleading=next_distinct_tied_rank; "
                     "soft=remaining_valid"
                 ),
-                "headwise_bias": {
-                    "leading_context": head_means(
+                "headwise_bias": head_mean_mapping({
+                    "leading_context": (
                         leading.unsqueeze(1).unsqueeze(-2)
                     ),
-                    "subleading_context": head_means(
+                    "subleading_context": (
                         subleading.unsqueeze(1).unsqueeze(-2)
                     ),
-                    "soft_context": head_means(
+                    "soft_context": (
                         soft.unsqueeze(1).unsqueeze(-2)
                     ),
-                },
+                }),
                 "directional_swap": swap,
                 "normalized_finite": bool(
                     torch.isfinite(pt_details["normalized"]).all()
@@ -985,24 +1034,22 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             pair_index = pid_details["pair_indices"]
             output["PID"] = {
                 **pid_encoder.diagnostics(clean_features[:, 6:11], valid),
-                "headwise_mean_bias_by_directed_pair": {
-                    str(index): head_means(
+                "headwise_mean_bias_by_directed_pair": head_mean_mapping({
+                    str(index): (
                         (pair_index == index).unsqueeze(1)
                     )
                     for index in range(36)
-                },
-                "headwise_same_pid_bias": head_means(
-                    (
+                }),
+                "headwise_pid_pair_type_bias": head_mean_mapping({
+                    "same_pid": (
                         pid_details["categories"].unsqueeze(-1)
                         == pid_details["categories"].unsqueeze(-2)
-                    ).unsqueeze(1)
-                ),
-                "headwise_mixed_pid_bias": head_means(
-                    (
+                    ).unsqueeze(1),
+                    "mixed_pid": (
                         pid_details["categories"].unsqueeze(-1)
                         != pid_details["categories"].unsqueeze(-2)
-                    ).unsqueeze(1)
-                ),
+                    ).unsqueeze(1),
+                }),
             }
         if "CHARGE" in self.families:
             charge_encoder = self.pair_builder.encoders["CHARGE"]
@@ -1025,12 +1072,12 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             dominant_pid = pid_population.argmax(dim=1)
             output["CHARGE"] = {
                 **charge_encoder.diagnostics(clean_features[:, 5], valid),
-                "headwise_bias": {
-                    "opposite_sign": head_means(raw[:, 7:8].bool()),
-                    "same_nonzero_sign": head_means(raw[:, 6:7].bool()),
-                    "charged_neutral": head_means(raw[:, 5:6].bool()),
-                    "neutral_neutral": head_means(raw[:, 4:5].bool()),
-                },
+                "headwise_bias": head_mean_mapping({
+                    "opposite_sign": raw[:, 7:8].bool(),
+                    "same_nonzero_sign": raw[:, 6:7].bool(),
+                    "charged_neutral": raw[:, 5:6].bool(),
+                    "neutral_neutral": raw[:, 4:5].bool(),
+                }),
                 "pid_conditioned_performance": categorical_performance(
                     dominant_pid,
                     (
@@ -1113,26 +1160,20 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             output["TRACK"] = {
                 **track_encoder.diagnostics(clean_raw, valid),
                 "displaced_threshold_raw_absolute_significance": 2.0,
-                "headwise_bias": {
-                    "prompt_prompt": head_means(
-                        (
+                "headwise_bias": head_mean_mapping({
+                    "prompt_prompt": (
                             endpoint_prompt.unsqueeze(-1)
                             & endpoint_prompt.unsqueeze(-2)
-                        ).unsqueeze(1)
-                    ),
-                    "prompt_displaced": head_means(
-                        (
+                        ).unsqueeze(1),
+                    "prompt_displaced": (
                             endpoint_displaced.unsqueeze(-1)
                             ^ endpoint_displaced.unsqueeze(-2)
-                        ).unsqueeze(1)
-                    ),
-                    "displaced_displaced": head_means(
-                        (
+                        ).unsqueeze(1),
+                    "displaced_displaced": (
                             endpoint_displaced.unsqueeze(-1)
                             & endpoint_displaced.unsqueeze(-2)
-                        ).unsqueeze(1)
-                    ),
-                },
+                        ).unsqueeze(1),
+                }),
                 "minimum_absolute_displacement_significance_mean": (
                     float(
                         endpoint_min.masked_select(
@@ -1146,35 +1187,35 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     "d0": histogram(
                         track_details["d0"],
                         track_valid,
-                        (-float("inf"), -1.0, -0.1, 0.0, 0.1, 1.0, float("inf")),
+                        DIAGNOSTIC_BIN_EDGES["track_raw_displacement"],
                     ),
                     "dz": histogram(
                         track_details["dz"],
                         track_valid,
-                        (-float("inf"), -1.0, -0.1, 0.0, 0.1, 1.0, float("inf")),
+                        DIAGNOSTIC_BIN_EDGES["track_raw_displacement"],
                     ),
                 },
                 "absolute_significance_distributions": {
                     "d0": histogram(
                         track_details["raw_d0_significance"].abs(),
                         track_valid,
-                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                        DIAGNOSTIC_BIN_EDGES["track_absolute_significance"],
                     ),
                     "dz": histogram(
                         track_details["raw_dz_significance"].abs(),
                         track_valid,
-                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                        DIAGNOSTIC_BIN_EDGES["track_absolute_significance"],
                     ),
                 },
                 "compatibility_chi2_distribution": histogram(
                     track_details["chi2"],
                     both_tracks_valid[:, 0],
-                    (0.0, 1.0, 4.0, 9.0, 16.0, 25.0, float("inf")),
+                    DIAGNOSTIC_BIN_EDGES["track_compatibility_chi2"],
                 ),
                 "bias_by_minimum_absolute_displacement_significance": (
                     binned_pair_bias(
                         endpoint_min,
-                        (0.0, 1.0, 2.0, 4.0, 8.0, float("inf")),
+                        DIAGNOSTIC_BIN_EDGES["track_absolute_significance"],
                         applicable=both_tracks_valid[:, 0],
                     )
                 ),
@@ -1187,6 +1228,7 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             density_details = density_encoder(
                 clean_raw, valid, return_details=True
             )
+            density_audit = density_encoder.diagnostics(clean_raw, valid)
             local_activity = density_details["descriptor"][:, 20]
             particle_valid = valid[:, 0]
             multiplicity = particle_valid.sum(1).to(clean_vectors.dtype)
@@ -1199,8 +1241,12 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
             context_activity = local_activity.unsqueeze(-2).expand(
                 -1, int(local_activity.shape[1]), -1
             )
+            local_activity_sum = float(
+                local_activity.masked_select(particle_valid).sum().cpu()
+            )
+            valid_particle_count = int(particle_valid.sum().cpu())
             output["DENSITY"] = {
-                **density_encoder.diagnostics(clean_raw, valid),
+                **density_audit,
                 "local_activity_definition": (
                     "valid_neighbor_fraction_R0p40"
                 ),
@@ -1209,18 +1255,28 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 ),
                 "bias_by_context_local_activity_fraction": binned_pair_bias(
                     context_activity,
-                    (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+                    DIAGNOSTIC_BIN_EDGES["density_local_activity"],
                 ),
                 "performance_by_jet_multiplicity": binned_performance(
                     multiplicity,
-                    (0.0, 20.0, 40.0, 60.0, 80.0, 100.0, float("inf")),
+                    DIAGNOSTIC_BIN_EDGES["jet_multiplicity"],
                 ),
                 "performance_by_leading_particle_pt_fraction": (
                     binned_performance(
                         leading_fraction,
-                        (0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0),
+                        DIAGNOSTIC_BIN_EDGES[
+                            "leading_particle_pt_fraction"
+                        ],
                     )
                 ),
+                "_population_statistics": {
+                    **density_audit["_population_statistics"],
+                    "mean_local_activity": {
+                        "kind": "ratio",
+                        "numerator": local_activity_sum,
+                        "denominator": valid_particle_count,
+                    },
+                },
             }
         if "REGION" in self.families:
             if clean_raw is None or region_trees is None:
@@ -1256,6 +1312,42 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                 ]
                 for k in (2, 4, 8)
             }
+            valid_pair_count = int(pair_mask[:, 0].sum().cpu())
+            same_cluster_sums = {
+                str(k): float(
+                    region_raw[:, index]
+                    .masked_select(pair_mask[:, 0])
+                    .sum()
+                    .cpu()
+                )
+                for index, k in enumerate((2, 4, 8))
+            }
+            same_cluster_bias_sums = {}
+            same_cluster_bias_denominators = {}
+            for index, k in enumerate((2, 4, 8)):
+                selected = pair_mask[:, 0] & region_raw[:, index].bool()
+                selected_count = int(selected.sum().cpu())
+                same_cluster_bias_sums[str(k)] = [
+                    float(
+                        bias[:, head].masked_select(selected).sum().cpu()
+                    )
+                    for head in range(int(bias.shape[1]))
+                ]
+                same_cluster_bias_denominators[str(k)] = [
+                    selected_count
+                ] * int(bias.shape[1])
+            lca_depth_sum = float(
+                region_raw[:, 3]
+                .masked_select(pair_mask[:, 0])
+                .sum()
+                .cpu()
+            )
+            off_diagonal = ~torch.eye(
+                int(region_raw.shape[-1]),
+                dtype=torch.bool,
+                device=region_raw.device,
+            ).unsqueeze(0)
+            merge_pair_mask = pair_mask[:, 0] & off_diagonal
             output["REGION"] = {
                 "normalization_sha256": region_encoder.normalization_sha256,
                 "requested_cluster_counts": [2, 4, 8],
@@ -1278,13 +1370,20 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     for tree in region_trees
                 ],
                 "same_cluster_fractions": {
-                    str(k): float(
-                        region_raw[:, index]
-                        .masked_select(pair_mask[:, 0])
-                        .mean()
-                        .cpu()
-                    )
-                    for index, k in enumerate((2, 4, 8))
+                    **{
+                        str(k): (
+                            same_cluster_sums[str(k)] / valid_pair_count
+                        )
+                        for k in (2, 4, 8)
+                    },
+                    "_population_statistics": {
+                        str(k): {
+                            "kind": "ratio",
+                            "numerator": same_cluster_sums[str(k)],
+                            "denominator": valid_pair_count,
+                        }
+                        for k in (2, 4, 8)
+                    },
                 },
                 "mean_normalized_lca_depth": float(
                     region_raw[:, 3]
@@ -1293,58 +1392,52 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                     .cpu()
                 ),
                 "headwise_same_cluster_bias": {
-                    str(k): head_means(region_raw[:, index:index + 1].bool())
-                    for index, k in enumerate((2, 4, 8))
+                    **{
+                        str(k): head_means(
+                            region_raw[:, index:index + 1].bool()
+                        )
+                        for index, k in enumerate((2, 4, 8))
+                    },
+                    "_population_statistics": {
+                        str(k): {
+                            "kind": "ratio",
+                            "numerator": same_cluster_bias_sums[str(k)],
+                            "denominator": (
+                                same_cluster_bias_denominators[str(k)]
+                            ),
+                        }
+                        for k in (2, 4, 8)
+                    },
                 },
                 "lca_distributions": {
                     "normalized_depth": histogram(
                         region_raw[:, 3],
                         pair_mask[:, 0],
-                        (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                        DIAGNOSTIC_BIN_EDGES["region_lca_depth"],
                     ),
                     "log_merge_delta_r": histogram(
                         region_raw[:, 4],
-                        pair_mask[:, 0],
-                        (
-                            -float("inf"),
-                            -4.0,
-                            -3.0,
-                            -2.0,
-                            -1.0,
-                            0.0,
-                            float("inf"),
-                        ),
+                        merge_pair_mask,
+                        DIAGNOSTIC_BIN_EDGES[
+                            "region_log_merge_delta_r"
+                        ],
                     ),
                     "log_merge_kt": histogram(
                         region_raw[:, 5],
-                        pair_mask[:, 0],
-                        (
-                            -float("inf"),
-                            -4.0,
-                            -2.0,
-                            0.0,
-                            2.0,
-                            4.0,
-                            float("inf"),
-                        ),
+                        merge_pair_mask,
+                        DIAGNOSTIC_BIN_EDGES["region_log_merge_kt"],
                     ),
                     "merge_z": histogram(
                         region_raw[:, 6],
-                        pair_mask[:, 0],
-                        (0.0, 0.05, 0.1, 0.2, 0.35, 0.5),
+                        merge_pair_mask,
+                        DIAGNOSTIC_BIN_EDGES["region_merge_z"],
                     ),
                     "log_merge_mass_fraction": histogram(
                         region_raw[:, 7],
-                        pair_mask[:, 0],
-                        (
-                            -float("inf"),
-                            -6.0,
-                            -4.0,
-                            -2.0,
-                            -1.0,
-                            0.0,
-                            float("inf"),
-                        ),
+                        merge_pair_mask,
+                        DIAGNOSTIC_BIN_EDGES[
+                            "region_log_merge_mass_fraction"
+                        ],
                     ),
                 },
                 "cluster_property_distributions": {
@@ -1352,43 +1445,42 @@ class RelationalFamilyParticleTransformer(_ModuleBase):
                         "log_pt_fraction": histogram(
                             region_raw[:, 8 + index * 6],
                             pair_mask[:, 0],
-                            (
-                                -float("inf"),
-                                -4.0,
-                                -2.0,
-                                -1.0,
-                                -0.5,
-                                0.0,
-                            ),
+                            DIAGNOSTIC_BIN_EDGES[
+                                "region_log_cluster_pt_fraction"
+                            ],
                         ),
                         "log_mass_fraction": histogram(
                             region_raw[:, 9 + index * 6],
                             pair_mask[:, 0],
-                            (
-                                -float("inf"),
-                                -6.0,
-                                -4.0,
-                                -2.0,
-                                -1.0,
-                                0.0,
-                            ),
+                            DIAGNOSTIC_BIN_EDGES[
+                                "region_log_cluster_mass_fraction"
+                            ],
                         ),
                         "multiplicity_fraction": histogram(
                             region_raw[:, 10 + index * 6],
                             pair_mask[:, 0],
-                            (0.0, 0.1, 0.25, 0.5, 0.75, 1.0),
+                            DIAGNOSTIC_BIN_EDGES[
+                                "region_cluster_multiplicity_fraction"
+                            ],
                         ),
                     }
                     for index, k in enumerate((2, 4, 8))
                 },
                 "performance_by_tree_depth": binned_performance(
                     depth_per_event,
-                    (0.0, 4.0, 8.0, 12.0, 16.0, float("inf")),
+                    DIAGNOSTIC_BIN_EDGES["region_tree_depth"],
                 ),
                 "performance_by_hard_prong_count": binned_performance(
                     hard_prongs,
-                    (0.0, 2.0, 4.0, 6.0, 8.0, float("inf")),
+                    DIAGNOSTIC_BIN_EDGES["region_hard_prong_count"],
                 ),
+                "_population_statistics": {
+                    "mean_normalized_lca_depth": {
+                        "kind": "ratio",
+                        "numerator": lca_depth_sum,
+                        "denominator": valid_pair_count,
+                    },
+                },
             }
         return output
 

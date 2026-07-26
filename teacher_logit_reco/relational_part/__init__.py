@@ -64,6 +64,7 @@ from .contracts import (
     write_immutable_json,
 )
 from .determinism import (
+    DIAGNOSTIC_BIN_EDGES,
     GLOBAL_DETERMINISM_CONTRACT,
     build_global_determinism_contract,
     optimizer_update_counts,
@@ -414,6 +415,7 @@ __all__ = [
     "CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT",
     "GIB",
     "GLOBAL_DETERMINISM_CONTRACT",
+    "DIAGNOSTIC_BIN_EDGES",
     "GLOBAL_EPSILON",
     "EVALUATION_CONTRACT",
     "RESOURCE_PROFILE_CONTRACT",

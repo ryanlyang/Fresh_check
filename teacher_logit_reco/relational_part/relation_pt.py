@@ -179,8 +179,11 @@ class PTEncoder(_ModuleBase):
         raw = build_pt_raw_features(lorentz_vectors, mask)
         pair_mask = valid_pair_mask(mask)[:, 0]
         means = []
+        sums = []
+        pair_count = int(pair_mask.sum().detach().cpu())
         for channel in range(len(self.raw_feature_names)):
             values = raw[:, channel].masked_select(pair_mask)
+            sums.append(float(values.sum().detach().cpu()))
             means.append(
                 0.0
                 if int(values.numel()) == 0
@@ -195,6 +198,17 @@ class PTEncoder(_ModuleBase):
             "epsilon": GLOBAL_EPSILON,
             "query_context_direction": "i_is_query_j_is_context",
             "finite": bool(torch.isfinite(raw).all()),
+            "_population_statistics": {
+                "valid_directed_pair_count": {
+                    "kind": "sum",
+                    "value": pair_count,
+                },
+                "raw_feature_means": {
+                    "kind": "ratio",
+                    "numerator": sums,
+                    "denominator": [pair_count] * len(sums),
+                },
+            },
         }
 
 

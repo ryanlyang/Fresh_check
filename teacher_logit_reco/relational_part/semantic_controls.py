@@ -396,9 +396,16 @@ def build_semantic_perturbation_artifact(
         "wrong_event_relations",
         "directional_swap",
     }
+    region_controls = {
+        "region_resolution_dropout_K2",
+        "region_resolution_dropout_K4",
+        "region_resolution_dropout_K8",
+    }
+    observed_region_controls = set(metrics) & region_controls
     if (
         not required.issubset(metrics)
         or set(metrics) != set(diagnostics)
+        or observed_region_controls not in (set(), region_controls)
         or any(
             not (
                 name.startswith("family_dropout_")

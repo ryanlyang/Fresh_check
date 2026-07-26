@@ -326,6 +326,7 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         "run_select_relational_part_screening.sh",
         "run_submit_relational_part_confirmation.sh",
         "run_aggregate_relational_part_confirmation.sh",
+        "run_evaluate_relational_part_semantic_controls.sh",
         "run_submit_relational_part_final_test.sh",
         "run_evaluate_relational_part_final_test.sh",
         "run_write_relational_part_report.sh",
@@ -357,6 +358,23 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     assert "preflight_relational_part_data.py" in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top
+    semantic_runner = (
+        ROOT / "scripts" / "run_relational_part_semantic_perturbation.py"
+    ).read_text(encoding="utf-8")
+    semantic_worker = (
+        ROOT / "scripts" / "evaluate_relational_part_semantic_controls.py"
+    ).read_text(encoding="utf-8")
+    report_worker = (
+        ROOT / "scripts" / "write_relational_part_report.py"
+    ).read_text(encoding="utf-8")
+    report_sbatch = (
+        sbatch / "run_write_relational_part_report.sh"
+    ).read_text(encoding="utf-8")
+    assert "--campaign-spec" in semantic_runner
+    assert "checkpoint_registration_hashes" in semantic_worker
+    assert "validate_campaign_source" in semantic_worker
+    assert "validate_campaign_source" in report_worker
+    assert "--campaign-spec" in report_sbatch
 
 
 def test_continuation_source_snapshot_and_dynamic_ledger_fail_closed(

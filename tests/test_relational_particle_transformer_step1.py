@@ -609,6 +609,7 @@ def test_step1_bundle_is_deterministic_and_publishes_immutably(
     second = build_step1_bundle(**arguments)
     assert first["campaign_spec"]["content_hash"] == second["campaign_spec"]["content_hash"]
     assert first["step1_report"]["ready_for_step2"] is True
+    assert first["step1_report"]["schema_version"] == 3
     assert first["step1_report"]["screening_row_count"] == 21
     assert first["campaign_spec"]["campaign_profile"] == "nonproduction_miniature_test"
     assert first["campaign_spec"]["contract"] == CAMPAIGN_SPEC_CONTRACT
@@ -616,6 +617,13 @@ def test_step1_bundle_is_deterministic_and_publishes_immutably(
     assert (
         first["campaign_spec"]["global_determinism"]
         == first["global_determinism"]
+    )
+    assert first["global_determinism"]["schema_version"] == 3
+    assert (
+        first["global_determinism"]["attention_diagnostics"][
+            "region_resolution_dropouts"
+        ]
+        == [2, 4, 8]
     )
     assert (
         first["campaign_spec"]["parent_artifact_hashes"]["global_determinism"]
