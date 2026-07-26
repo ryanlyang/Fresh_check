@@ -66,26 +66,32 @@ _CONTINUOUS_ABSOLUTE_TOLERANCE = 2.0e-6
 
 
 def _canonical_smoke_parity(compiled, reference) -> dict:
-    topology_exact = all(
-        int(compiled[name]) == int(reference[name])
+    exact_field_matches = {
+        name: int(compiled[name]) == int(reference[name])
         for name in ("n_particles", "n_valid", "n_nodes", "root")
+    }
+    exact_field_matches.update(
+        {
+            name: bool(np.array_equal(compiled[name], reference[name]))
+            for name in _TOPOLOGY_ARRAYS
+        }
     )
-    topology_exact = topology_exact and all(
-        np.array_equal(compiled[name], reference[name])
-        for name in _TOPOLOGY_ARRAYS
-    )
-    topology_exact = (
-        topology_exact
-        and compiled["actual_cluster_counts"]
+    exact_field_matches["actual_cluster_counts"] = (
+        compiled["actual_cluster_counts"]
         == reference["actual_cluster_counts"]
-        and all(
-            np.array_equal(
-                compiled["assignments"][str(resolution)],
-                reference["assignments"][str(resolution)],
+    )
+    exact_field_matches.update(
+        {
+            f"assignment_K{resolution}": bool(
+                np.array_equal(
+                    compiled["assignments"][str(resolution)],
+                    reference["assignments"][str(resolution)],
+                )
             )
             for resolution in (2, 4, 8)
-        )
+        }
     )
+    topology_exact = all(exact_field_matches.values())
     shapes_exact = True
     values_finite = True
     per_field = {}
@@ -115,6 +121,12 @@ def _canonical_smoke_parity(compiled, reference) -> dict:
     )
     return {
         "topology_and_categories_exact": bool(topology_exact),
+        "exact_field_matches": exact_field_matches,
+        "nonmatching_exact_fields": sorted(
+            name
+            for name, exact in exact_field_matches.items()
+            if not exact
+        ),
         "continuous_shapes_exact": bool(shapes_exact),
         "continuous_values_finite": bool(values_finite),
         "maximum_continuous_absolute_error": float(maximum_error),

@@ -103,7 +103,7 @@ Candidate make_candidate(
   auto first_keys = nodes[first].leaf_keys;
   auto second_keys = nodes[second].leaf_keys;
   if (second_keys < first_keys) {
-    std::swap(first, second);
+    // Canonicalize only the tie key; child links preserve active-node order.
     std::swap(first_keys, second_keys);
   }
   const double dr = delta_r(nodes[first].vector, nodes[second].vector);

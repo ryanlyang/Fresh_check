@@ -328,6 +328,8 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
         "_OPENMP",
     ):
         assert value in source
+    assert "std::swap(first_keys, second_keys);" in source
+    assert "std::swap(first, second);" not in source
     manifest = with_content_hash(
         {
             "contract": "relational_ca_tree_backend_manifest_v3",
@@ -395,8 +397,8 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
 
 
 def test_backend_canonical_smoke_parity_is_exact_for_topology_and_tolerant_for_floats() -> None:
-    _, mask, vectors, _ = _sample(jets=1)
-    reference = build_reference_tree(vectors[0], mask[0])
+    tokens, mask, vectors, _ = _sample(jets=1)
+    reference = build_reference_tree(vectors[0], tokens[0], mask[0])
     continuous_drift = {
         key: (
             value.copy()
@@ -422,6 +424,7 @@ def test_backend_canonical_smoke_parity_is_exact_for_topology_and_tolerant_for_f
     parity = _canonical_smoke_parity(topology_drift, reference)
     assert parity["passed"] is False
     assert parity["topology_and_categories_exact"] is False
+    assert parity["nonmatching_exact_fields"] == ["parent"]
 
     excessive_continuous_drift = dict(continuous_drift)
     excessive_continuous_drift["mass"] = excessive_continuous_drift["mass"].copy()
