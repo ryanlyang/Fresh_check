@@ -89,7 +89,20 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if determinism["content_hash"] != expected_determinism:
         raise ValueError("campaign global deterministic policy drifted")
-    config = TrainingConfig(seed=args.seed)
+    miniature = campaign.get("campaign_profile") == (
+        "nonproduction_miniature_test"
+    )
+    config = (
+        TrainingConfig(
+            seed=args.seed,
+            maximum_epochs=2,
+            minimum_epochs=2,
+            early_stop_patience=2,
+            campaign_profile="miniature_test",
+        )
+        if miniature
+        else TrainingConfig(seed=args.seed)
+    )
     training_contract = config.artifact(
         global_determinism_sha256=determinism["content_hash"]
     )

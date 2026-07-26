@@ -214,3 +214,14 @@ def test_pv08_task_specs_cover_all_19_registry_runs(monkeypatch, tmp_path):
         row["operation"] == "stack_evaluation" for row in specs.values()
     ) == 11
     assert sum(row["operation"] == "fusion" for row in specs.values()) == 8
+
+
+def test_pv08_tigris_wrapper_requests_gpu_and_correct_environment():
+    text = Path("sbatch/run_particle_view_fusion.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "#SBATCH --account=reu-aisocial" in text
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --time=1-00:00:00" in text
+    assert "export PYTHONNOUSERSITE=1" in text
+    assert "CONDA_ENV:=atlas_kd_tigris" in text

@@ -17,9 +17,13 @@ mode="submit"
 case "${1:-}" in
   --dry-run) mode="dry-run" ;;
   --smoke-simulate) mode="smoke-simulate" ;;
+  --smoke-submit)
+    mode="submit"
+    RPT_MINIATURE=1
+    ;;
   "") ;;
   *)
-    echo "Usage: $0 [--dry-run|--smoke-simulate]" >&2
+    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit]" >&2
     exit 2
     ;;
 esac

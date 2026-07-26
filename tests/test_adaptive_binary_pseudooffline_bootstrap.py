@@ -187,6 +187,9 @@ def test_prepared_prune_is_approved_exact_and_preserves_results(
         (root / name / "payload.bin").write_bytes(b"x" * 100)
     (root / "runs").mkdir()
     (root / "runs" / "result.json").write_text("{}", encoding="utf-8")
+    stale_evidence = root / "audits" / "bootstrap_stale"
+    stale_evidence.mkdir()
+    (stale_evidence / "old-profile.json").write_bytes(b"z" * 100)
     monkeypatch.setattr(
         prepared_prune, "require_runtime_acceptance", lambda *args, **kwargs: {"ok": True}
     )
@@ -207,5 +210,11 @@ def test_prepared_prune_is_approved_exact_and_preserves_results(
         ]
     ) == 0
     assert all(not (root / name).exists() for name in ("archives", "targets", "inputs"))
+    assert not stale_evidence.exists()
+    assert evidence.is_dir()
     assert (root / "runs" / "result.json").is_file()
-    assert json.loads(receipt.read_text(encoding="utf-8"))["ok"] is True
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["ok"] is True
+    assert payload["removed_stale_bootstrap_directories"] == [
+        {"bytes": 100, "path": str(stale_evidence.resolve())}
+    ]

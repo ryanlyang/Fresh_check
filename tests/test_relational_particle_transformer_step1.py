@@ -612,7 +612,7 @@ def test_step1_bundle_is_deterministic_and_publishes_immutably(
     assert first["step1_report"]["screening_row_count"] == 21
     assert first["campaign_spec"]["campaign_profile"] == "nonproduction_miniature_test"
     assert first["campaign_spec"]["contract"] == CAMPAIGN_SPEC_CONTRACT
-    assert first["campaign_spec"]["schema_version"] == 2
+    assert first["campaign_spec"]["schema_version"] == 3
     assert (
         first["campaign_spec"]["global_determinism"]
         == first["global_determinism"]

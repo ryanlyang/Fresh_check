@@ -22,7 +22,8 @@ if (( count <= 0 )); then
   exit 2
 fi
 last="$((count - 1))"
-train_job="$(sbatch --parsable \
+train_job="$(rpt_submit_dynamic_once confirmation_training \
+  "afterok:${SLURM_JOB_ID}" \
   --account="${SBATCH_ACCOUNT}" \
   --partition="${SBATCH_PARTITION}" \
   --gres="${GPU_GRES}" \
@@ -34,8 +35,8 @@ train_job="$(sbatch --parsable \
   --array="0-${last}%${RPT_CONFIRMATION_CONCURRENCY}" \
   --export="ALL,RPT_TRAIN_MODE=confirmation,RPT_TASK_REGISTRY=${tasks}" \
   "${SCRIPT_DIR}/run_train_relational_part.sh")"
-rpt_record_dynamic_job confirmation_training "${train_job}" "afterok:${SLURM_JOB_ID}"
-summary_job="$(sbatch --parsable \
+summary_job="$(rpt_submit_dynamic_once confirmation_summary \
+  "afterok:${train_job}" \
   --account="${SBATCH_ACCOUNT}" \
   --partition="${SBATCH_PARTITION}" \
   --cpus-per-task="${CPU_CPUS_PER_TASK}" \
@@ -45,6 +46,5 @@ summary_job="$(sbatch --parsable \
   --dependency="afterok:${train_job}" \
   --export="ALL,RPT_AGGREGATE_MODE=summary" \
   "${SCRIPT_DIR}/run_aggregate_relational_part_confirmation.sh")"
-rpt_record_dynamic_job confirmation_summary "${summary_job}" "afterok:${train_job}"
 printf 'confirmation training array: %s\nconfirmation summary: %s\n' \
   "${train_job}" "${summary_job}"

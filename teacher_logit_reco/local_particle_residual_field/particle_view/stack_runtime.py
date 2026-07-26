@@ -537,10 +537,13 @@ def _load_selection_and_authorization(
     control_rows = []
     controls: dict[tuple[str, str, int], dict[str, Any]] = {}
     for seed in (101, 202, 303):
-        a0 = _load_a0_source(root, registry, seed)
+        a0_artifacts = _task_artifacts(root, registry, "A0_VIEW", seed)
+        a0_checkpoint = _artifact(
+            a0_artifacts, "best_model_val_stop.pt"
+        )
         control_rows.append(
             {
-                "bundle_sha256": a0["bundle_sha256"],
+                "bundle_sha256": sha256_file(a0_checkpoint),
                 "seed": seed,
                 "role": "matched_a0_baseline",
             }

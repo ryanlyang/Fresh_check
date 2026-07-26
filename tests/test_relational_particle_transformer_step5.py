@@ -280,13 +280,17 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
         assert value in source
     manifest = with_content_hash(
         {
-            "contract": "relational_ca_tree_backend_manifest_v1",
-            "schema_version": 1,
+            "contract": "relational_ca_tree_backend_manifest_v2",
+            "schema_version": 2,
             "contract_id": "relational_ca_tree_v1",
+            "backend_schema_version": 1,
             "source_sha256": "1" * 64,
             "binary_sha256": "2" * 64,
             "compiler_identity": "gcc",
-            "compiler_major_version": "13",
+            "compiler_major_version": 13,
+            "compiler_version": "13.2.0",
+            "compiler_executable": "/usr/bin/g++",
+            "compiler_driver_version_line": "g++ 13.2.0",
             "compiler_flags": [
                 "-O3", "-std=c++17", "-fopenmp", "-fno-fast-math",
                 "-fno-associative-math", "-ffp-contract=off",

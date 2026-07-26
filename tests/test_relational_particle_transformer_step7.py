@@ -62,11 +62,45 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _result_lineage(
+    run_id: str,
+    seed: int,
+    hashes: dict[str, str],
+    *,
+    campaign: str = "5" * 64,
+    split: str = "6" * 64,
+) -> dict:
+    return {
+        "checkpoint_registration_sha256": _digest(
+            f"registration-{run_id}-{seed}"
+        ),
+        "val_select_metrics_sha256": _digest(f"metrics-{run_id}-{seed}"),
+        "model_contract_sha256": _digest(f"model-{run_id}"),
+        "training_contract_sha256": _digest(f"training-{run_id}-{seed}"),
+        "run_registry_sha256": _digest(f"registry-{run_id}-{seed}"),
+        "relation_registry_sha256": _digest("relation-registry"),
+        "lineage_hashes": {
+            "campaign_spec": campaign,
+            "split_manifest": split,
+            "hlt_model_train": hashes["model_train"],
+            "hlt_model_val": hashes["model_val"],
+            "hlt_stack_val": hashes["stack_val"],
+        },
+        "lineage_authenticated": True,
+    }
+
+
 def _screening():
     relation = build_relation_family_registry()
     registry = build_screening_registry(
         relation_registry_sha256=relation["content_hash"]
     )
+    hashes = {
+        "model_train": "1" * 64,
+        "model_val": "2" * 64,
+        "stack_val": "3" * 64,
+        "final_test": "4" * 64,
+    }
     results = []
     for index, row in enumerate(registry["rows"]):
         run_id = row["run_id"]
@@ -84,6 +118,7 @@ def _screening():
                 "configuration_role": row["configuration_role"],
                 "checkpoint_sha256": _digest(run_id),
                 "parameter_count": 1000 + index,
+                **_result_lineage(run_id, 101, hashes),
                 "val_select": {
                     "split": "val_select",
                     "accuracy": accuracy,
@@ -91,18 +126,13 @@ def _screening():
                 },
             }
         )
-    hashes = {
-        "model_train": "1" * 64,
-        "model_val": "2" * 64,
-        "stack_val": "3" * 64,
-        "final_test": "4" * 64,
-    }
     summary = build_screening_summary(
         screening_registry=registry,
         results=results,
         campaign_spec_sha256="5" * 64,
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
+        results_envelope_sha256="7" * 64,
     )
     architecture = build_confirmation_architecture_registry(
         relation_registry_sha256=relation["content_hash"],
@@ -179,6 +209,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
                     ],
                     "checkpoint_sha256": checkpoint,
                     "parameter_count": 1000 + run_index,
+                    **_result_lineage(row["run_id"], seed, hashes),
                     "val_select": {
                         "split": "val_select",
                         "accuracy": accuracy,
@@ -194,6 +225,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
             "relational_selection_eligible": False,
             "checkpoint_sha256": _digest(f"unary-{seed}"),
             "parameter_count": 1100,
+            **_result_lineage("RPT_SELECTED_UNARY", seed, hashes),
             "val_select": {
                 "split": "val_select",
                 "accuracy": 0.799,
@@ -209,6 +241,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
             campaign_spec_sha256="5" * 64,
             split_manifest_sha256="6" * 64,
             hlt_cache_hashes=hashes,
+            results_envelope_sha256="9" * 64,
         )
     preliminary, preliminary_lock = aggregate_confirmation(
         confirmation_registry=confirmation,
@@ -216,6 +249,7 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
         campaign_spec_sha256="5" * 64,
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
+        results_envelope_sha256="9" * 64,
         seal_finalists=False,
     )
     assert preliminary_lock is None
@@ -225,7 +259,9 @@ def test_confirmation_negative_campaign_locks_and_stale_seal_fails_closed() -> N
         campaign_spec_sha256="5" * 64,
         split_manifest_sha256="6" * 64,
         hlt_cache_hashes=hashes,
+        results_envelope_sha256="9" * 64,
         semantic_unary_results=unary,
+        unary_results_envelope_sha256="a" * 64,
         semantic_perturbation_sha256="7" * 64,
         unary_control_registry_sha256="8" * 64,
     )
@@ -349,6 +385,7 @@ def test_semantic_evaluator_uses_exact_global_multiplicity_strata() -> None:
         _SemanticModel(), SimpleNamespace(dataset=dataset)
     )
     assert set(metrics) == {
+        "full_model",
         "within_jet_shuffled_relations",
         "wrong_event_relations",
         "directional_swap",
@@ -486,10 +523,56 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
         "final_test": "4" * 64,
     }
     checkpoint = "a" * 64
+    lineage = {
+        "campaign_spec": "5" * 64,
+        "split_manifest": "6" * 64,
+        "hlt_model_train": hashes["model_train"],
+        "hlt_model_val": hashes["model_val"],
+        "hlt_stack_val": hashes["stack_val"],
+    }
+    registration = with_content_hash(
+        {
+            "contract": "relational_part_checkpoint_registration_v1",
+            "schema_version": 1,
+            "run_id": "RPT_BASE",
+            "seed": 101,
+            "checkpoint_sha256": checkpoint,
+            "model_contract_sha256": "d" * 64,
+            "lineage_hashes": lineage,
+            "val_select_used_for_checkpoint_selection": False,
+            "hlt_only_inference": True,
+            "offline_or_teacher_required": False,
+            "parameter_and_flop_profile": {
+                "trainable_parameters": 1,
+                "forward_flops_per_event": 2,
+                "latency_ms": {"mean": 1, "median": 1},
+                "peak_incremental_device_memory_bytes": 3,
+            },
+        }
+    )
+    def locked_fields(run_id: str):
+        registrations = {
+            str(seed): _digest(f"locked-registration-{run_id}-{seed}")
+            for seed in (101, 202, 303)
+        }
+        if run_id == "RPT_BASE":
+            registrations["101"] = registration["content_hash"]
+        return {
+            "checkpoint_registration_hashes": registrations,
+            "val_select_metrics_hashes": {
+                str(seed): _digest(f"locked-metrics-{run_id}-{seed}")
+                for seed in (101, 202, 303)
+            },
+            "model_contract_sha256": (
+                "d" * 64 if run_id == "RPT_BASE" else _digest(f"model-{run_id}")
+            ),
+            "lineage_hashes": lineage,
+            "lineage_authenticated": True,
+        }
     lock = with_content_hash(
         {
             "contract": LOCKED_FINALISTS_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_spec_sha256": "5" * 64,
             "split_manifest_sha256": "6" * 64,
             "hlt_cache_hashes": hashes,
@@ -510,6 +593,7 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
                         "303": "c" * 64,
                     },
                     "new_relation_families": [],
+                    **locked_fields("RPT_BASE"),
                 },
                 {
                     "run_id": "RPT_SELECTED_UNARY",
@@ -522,6 +606,7 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
                         "303": "f" * 64,
                     },
                     "new_relation_families": ["PT"],
+                    **locked_fields("RPT_SELECTED_UNARY"),
                 },
                 {
                     "run_id": "RPT_PT",
@@ -534,6 +619,7 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
                         "303": "3" * 64,
                     },
                     "new_relation_families": ["PT"],
+                    **locked_fields("RPT_PT"),
                 },
             ],
             "nominal_relational_winner_id": "RPT_PT",
@@ -545,20 +631,6 @@ def test_sealed_final_evaluation_predictions_and_paired_bootstrap(tmp_path: Path
             "final_test_reporting_only": True,
         }
     )
-    registration = {
-        "run_id": "RPT_BASE",
-        "seed": 101,
-        "checkpoint_sha256": checkpoint,
-        "val_select_used_for_checkpoint_selection": False,
-        "hlt_only_inference": True,
-        "offline_or_teacher_required": False,
-        "parameter_and_flop_profile": {
-            "trainable_parameters": 1,
-            "forward_flops_per_event": 2,
-            "latency_ms": {"mean": 1, "median": 1},
-            "peak_incremental_device_memory_bytes": 3,
-        },
-    }
     result = evaluate_locked_finalist(
         _FinalModel(),
         _final_loader(),
@@ -619,7 +691,7 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
     confirmation = with_content_hash(
         {
             "contract": CONFIRMATION_SUMMARY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "confirmation_registry_sha256": "1" * 64,
             "rows": [
                 {
@@ -640,10 +712,29 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
     checkpoints = {
         str(seed): _digest(f"checkpoint-{seed}") for seed in (101, 202, 303)
     }
+    report_lineage = {
+        "campaign_spec": "2" * 64,
+        "split_manifest": "3" * 64,
+    }
+
+    def report_locked_fields(run_id: str):
+        return {
+            "checkpoint_registration_hashes": {
+                str(seed): _digest(f"report-registration-{run_id}-{seed}")
+                for seed in (101, 202, 303)
+            },
+            "val_select_metrics_hashes": {
+                str(seed): _digest(f"report-val-{run_id}-{seed}")
+                for seed in (101, 202, 303)
+            },
+            "model_contract_sha256": _digest(f"report-model-{run_id}"),
+            "lineage_hashes": report_lineage,
+            "lineage_authenticated": True,
+        }
     lock = with_content_hash(
         {
             "contract": LOCKED_FINALISTS_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_spec_sha256": "2" * 64,
             "split_manifest_sha256": "3" * 64,
             "hlt_cache_hashes": {"final_test": "4" * 64},
@@ -664,6 +755,7 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
                     "new_relation_families": (
                         ["PT"] if run_id != "RPT_BASE" else []
                     ),
+                    **report_locked_fields(run_id),
                 }
                 for run_id, role in (
                     ("RPT_BASE", "reference_baseline"),
@@ -703,6 +795,16 @@ def test_negative_json_and_markdown_report_remain_valid() -> None:
                         "relational_selection_eligible": run_id == "RPT_PT",
                         "locked_finalists_sha256": lock["content_hash"],
                         "checkpoint_sha256": checkpoints[str(seed)],
+                        "checkpoint_registration_sha256": (
+                            _digest(
+                                f"report-registration-{run_id}-{seed}"
+                            )
+                        ),
+                        "model_contract_sha256": _digest(
+                            f"report-model-{run_id}"
+                        ),
+                        "checkpoint_lineage_hashes": report_lineage,
+                        "lineage_authenticated": True,
                         "campaign_spec_sha256": "2" * 64,
                         "split_manifest_sha256": "3" * 64,
                         "final_test_hlt_cache_sha256": "4" * 64,

@@ -66,6 +66,20 @@ def main(argv: list[str] | None = None) -> int:
         measured = path.stat().st_size
         removable_files.append({"path": str(path), "bytes": measured})
         removable_bytes += measured
+    stale_bootstrap_directories = []
+    audits_root = (root / "audits").resolve()
+    if audits_root.is_dir():
+        for path in sorted(audits_root.glob("bootstrap_*")):
+            resolved = path.resolve()
+            if resolved == evidence:
+                continue
+            if resolved.parent != audits_root or path.is_symlink() or not path.is_dir():
+                raise ValueError(f"unexpected stale bootstrap evidence path: {path}")
+            measured = _tree_bytes(path)
+            stale_bootstrap_directories.append(
+                {"path": str(resolved), "bytes": measured}
+            )
+            removable_bytes += measured
     projected_retained = before - removable_bytes
     if projected_retained > int(args.maximum_retained_bytes):
         raise RuntimeError(
@@ -78,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(path)
     for row in removable_files:
         Path(row["path"]).unlink()
+    for row in stale_bootstrap_directories:
+        shutil.rmtree(Path(row["path"]))
     after = _tree_bytes(root)
     if after > int(args.maximum_retained_bytes):
         raise RuntimeError("prepared root exceeds retained-byte allowance after pruning")
@@ -92,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         "maximum_retained_bytes": int(args.maximum_retained_bytes),
         "removed_directories": removals,
         "removed_runtime_benchmark_checkpoints": removable_files,
+        "removed_stale_bootstrap_directories": stale_bootstrap_directories,
         "preserved_runs": str(root / "runs"),
         "preserved_bootstrap_evidence": str(evidence),
     }

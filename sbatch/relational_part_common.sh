@@ -59,6 +59,50 @@ rpt_record_dynamic_job() {
   ) 9>>"${ledger}"
 }
 
+rpt_submit_dynamic_once() {
+  local logical_name="$1"
+  local dependency="$2"
+  shift 2
+  local ledger="${CAMPAIGN_ROOT}/job_ledgers/dynamic_jobs.json"
+  local lock="${CAMPAIGN_ROOT}/job_ledgers/dynamic_jobs.lock"
+  local job_name="${CAMPAIGN_ID:-rpt}_${logical_name}"
+  local existing=""
+  local recovered=""
+  local job_id=""
+  (
+    flock 9
+    existing="$(python scripts/register_relational_part_dynamic_job.py \
+      --ledger "${ledger}" \
+      --campaign-spec "${CAMPAIGN_ROOT}/campaign_spec.json" \
+      --logical-name "${logical_name}" \
+      --query)"
+    if [[ -n "${existing}" ]]; then
+      printf '%s\n' "${existing}"
+      exit 0
+    fi
+    recovered="$(squeue --noheader --name="${job_name}" --format='%A' \
+      | head -n 1 | tr -d '[:space:]')"
+    if [[ -z "${recovered}" ]]; then
+      recovered="$(sacct --noheader --name="${job_name}" \
+        --starttime=1970-01-01 --format=JobIDRaw \
+        | awk 'NF && $1 !~ /[._]/ {print $1; exit}')"
+    fi
+    if [[ -n "${recovered}" && "${recovered}" =~ ^[0-9]+$ ]]; then
+      job_id="${recovered}"
+    else
+      job_id="$(sbatch --parsable --job-name="${job_name}" "$@")"
+    fi
+    python scripts/register_relational_part_dynamic_job.py \
+      --ledger "${ledger}" \
+      --campaign-spec "${CAMPAIGN_ROOT}/campaign_spec.json" \
+      --logical-name "${logical_name}" \
+      --job-id "${job_id}" \
+      --dependency "${dependency}" >/dev/null
+    rpt_record_dynamic_job "${logical_name}" "${job_id}" "${dependency}"
+    printf '%s\n' "${job_id}"
+  ) 9>"${lock}"
+}
+
 rpt_hlt_hash_args() {
   local binding="${CAMPAIGN_ROOT}/inputs/hlt_cache_audit.json"
   local split

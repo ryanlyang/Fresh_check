@@ -37,7 +37,8 @@ if [[ "${mode}" == "summary" ]]; then
     --summary-only
   python scripts/prepare_relational_part_semantic_controls.py \
     --campaign-root "${CAMPAIGN_ROOT}"
-  semantic_job="$(sbatch --parsable \
+  semantic_job="$(rpt_submit_dynamic_once semantic_controls \
+    "afterok:${SLURM_JOB_ID}" \
     --account="${SBATCH_ACCOUNT}" \
     --partition="${SBATCH_PARTITION}" \
     --gres="${GPU_GRES}" \
@@ -47,7 +48,8 @@ if [[ "${mode}" == "summary" ]]; then
     --error="${CAMPAIGN_ROOT}/job_ledgers/slurm/%x_%A_%a.err" \
     --dependency="afterok:${SLURM_JOB_ID}" \
     "${SCRIPT_DIR}/run_evaluate_relational_part_semantic_controls.sh")"
-  unary_job="$(sbatch --parsable \
+  unary_job="$(rpt_submit_dynamic_once unary_training \
+    "afterok:${SLURM_JOB_ID}" \
     --account="${SBATCH_ACCOUNT}" \
     --partition="${SBATCH_PARTITION}" \
     --gres="${GPU_GRES}" \
@@ -59,9 +61,8 @@ if [[ "${mode}" == "summary" ]]; then
     --array="0-2%3" \
     --export="ALL,RPT_TRAIN_MODE=unary" \
     "${SCRIPT_DIR}/run_train_relational_part.sh")"
-  rpt_record_dynamic_job semantic_controls "${semantic_job}" "afterok:${SLURM_JOB_ID}"
-  rpt_record_dynamic_job unary_training "${unary_job}" "afterok:${SLURM_JOB_ID}"
-  lock_job="$(sbatch --parsable \
+  lock_job="$(rpt_submit_dynamic_once finalist_lock \
+    "afterok:${semantic_job}:${unary_job}" \
     --account="${SBATCH_ACCOUNT}" \
     --partition="${SBATCH_PARTITION}" \
     --cpus-per-task="${CPU_CPUS_PER_TASK}" \
@@ -71,7 +72,6 @@ if [[ "${mode}" == "summary" ]]; then
     --dependency="afterok:${semantic_job}:${unary_job}" \
     --export="ALL,RPT_AGGREGATE_MODE=lock" \
     "${SCRIPT_DIR}/run_aggregate_relational_part_confirmation.sh")"
-  rpt_record_dynamic_job finalist_lock "${lock_job}" "afterok:${semantic_job}:${unary_job}"
   printf 'semantic controls: %s\nunary training: %s\nfinalist lock: %s\n' \
     "${semantic_job}" "${unary_job}" "${lock_job}"
 elif [[ "${mode}" == "lock" ]]; then
@@ -92,7 +92,8 @@ elif [[ "${mode}" == "lock" ]]; then
     "${hash_args[@]}" \
     --summary-output "${CAMPAIGN_ROOT}/selection/confirmation_summary.json" \
     --lock-output "${CAMPAIGN_ROOT}/selection/locked_finalists.json"
-  final_submit="$(sbatch --parsable \
+  final_submit="$(rpt_submit_dynamic_once final_test_submit \
+    "afterok:${SLURM_JOB_ID}" \
     --account="${SBATCH_ACCOUNT}" \
     --partition="${SBATCH_PARTITION}" \
     --cpus-per-task="${CPU_CPUS_PER_TASK}" \
@@ -101,7 +102,6 @@ elif [[ "${mode}" == "lock" ]]; then
     --error="${CAMPAIGN_ROOT}/job_ledgers/slurm/%x_%A_%a.err" \
     --dependency="afterok:${SLURM_JOB_ID}" \
     "${SCRIPT_DIR}/run_submit_relational_part_final_test.sh")"
-  rpt_record_dynamic_job final_test_submit "${final_submit}" "afterok:${SLURM_JOB_ID}"
   printf 'final-test continuation: %s\n' "${final_submit}"
 else
   echo "Unknown RPT_AGGREGATE_MODE=${mode}" >&2
