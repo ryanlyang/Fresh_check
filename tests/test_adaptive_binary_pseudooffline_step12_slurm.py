@@ -877,6 +877,9 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     worker = (
         REPO_ROOT / "sbatch" / "run_adaptive_binary_runtime_acceptance.sh"
     ).read_text(encoding="utf-8")
+    paired_worker = (
+        REPO_ROOT / "sbatch" / "run_adaptive_binary_matched_single_path.sh"
+    ).read_text(encoding="utf-8")
     compiler = (
         REPO_ROOT / "sbatch" / "run_write_adaptive_binary_runtime_acceptance.sh"
     ).read_text(encoding="utf-8")
@@ -884,7 +887,15 @@ def test_step10_runtime_acceptance_submitter_is_four_node_and_fail_closed() -> N
     assert "--nodes=4" in submitter and "--ntasks=4" in submitter
     assert "afterok:" in submitter
     assert "C5_kt_32/best_model_val.pt" not in submitter
-    assert "benchmark_uninstrumented" in submitter
+    assert "run_adaptive_binary_matched_single_path.sh" in submitter
+    assert "benchmark_paired" in submitter
+    assert "benchmark_uninstrumented D1_kt32_mh4_particles" in paired_worker
+    assert "benchmark D1_kt32_mh4_particles" in paired_worker
+    assert paired_worker.index("benchmark_uninstrumented") < paired_worker.index(
+        "benchmark D1_kt32_mh4_particles"
+    )
+    assert "ABPH_MATCHED_SINGLE_PATH_PAIR_ID" in paired_worker
+    assert 'afterok:${paired_job_id}' in submitter
     assert "run_compile_adaptive_binary_single_path_acceptance.sh" in submitter
     for worker_name in (
         "run_compile_adaptive_binary_single_path_acceptance.sh",

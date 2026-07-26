@@ -298,6 +298,13 @@ def _single_path(path: Path) -> Path:
         "contract": ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT,
         "ok": True,
         "instrumentation_overhead_fraction": 0.02,
+        "projected_production_instrumentation_overhead_fraction": 0.0002,
+        "matched_allocation_identity": {
+            "hostname": "gh-a-001.rc.rit.edu",
+            "slurm_job_id": "12345",
+            "slurm_job_nodelist": "gh-a-001",
+            "matched_pair_id": "12345:D1_kt32_mh4_particles",
+        },
         "deep_training_speedup": 1.4,
         "profiler_explanation": None,
         "checks": {

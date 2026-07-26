@@ -75,14 +75,31 @@ submit_case() {
 for profile in single ddp4; do
   submit_case "${profile}" smoke
   submit_case "${profile}" benchmark B1_semantic_query_root
-  submit_case "${profile}" benchmark D1_kt32_mh4_particles
+  if [[ "${profile}" == "ddp4" ]]; then
+    submit_case "${profile}" benchmark D1_kt32_mh4_particles
+  fi
 done
-submit_case single benchmark_uninstrumented D1_kt32_mh4_particles
 
+export ABPH_RECONSTRUCTOR_PARALLELISM=single ABPH_JOB_LAUNCHER=direct
+export ABPH_DISTRIBUTED_NODES=1 ABPH_DISTRIBUTED_NTASKS=1
+export ABPH_DISTRIBUTED_NTASKS_PER_NODE=1 ABPH_DISTRIBUTED_WORLD_SIZE=1
+paired_worker="${PROJECT_DIR}/sbatch/run_adaptive_binary_matched_single_path.sh"
 if fresh_is_dry_run; then
+  fresh_print_shell_command sbatch "${single_args[@]}" "${paired_worker}"
   exit 0
 fi
-single_path_dependency="afterok:${case_job_ids[single:benchmark:D1_kt32_mh4_particles]}:${case_job_ids[single:benchmark_uninstrumented:D1_kt32_mh4_particles]}"
+paired_submitted="$(sbatch "${single_args[@]}" "${paired_worker}")"
+paired_job_id="${paired_submitted%%;*}"
+[[ "${paired_job_id}" =~ ^[0-9]+$ ]] || {
+  echo "Invalid paired sbatch response: ${paired_submitted}" >&2
+  exit 2
+}
+printf 'single\tbenchmark_paired\tD1_kt32_mh4_particles\t%s\n' \
+  "${paired_job_id}" >> "${submission_manifest}"
+job_ids+=("${paired_job_id}")
+echo "${paired_submitted}"
+
+single_path_dependency="afterok:${paired_job_id}"
 single_path_submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
   --partition="${ABPH_SBATCH_PARTITION}" --dependency="${single_path_dependency}" \
   "${PROJECT_DIR}/sbatch/run_compile_adaptive_binary_single_path_acceptance.sh")"

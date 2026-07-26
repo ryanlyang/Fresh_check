@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.build_adaptive_binary_bootstrap_storage_projection import (
     main as build_projection,
 )
 from scripts.compile_adaptive_binary_bootstrap_single_path_acceptance import (
-    INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING,
     main as compile_single_path,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
@@ -55,7 +56,14 @@ def test_bootstrap_projection_is_bound_to_fresh_root(tmp_path: Path) -> None:
     }
 
 
-def _runtime_run(path: Path, *, profiled: bool, seconds: float) -> None:
+def _runtime_run(
+    path: Path,
+    *,
+    profiled: bool,
+    seconds: float,
+    matched_pair_id: str = "12345:D1_kt32_mh4_particles",
+    slurm_job_id: str = "12345",
+) -> None:
     _json(path / "run_report.json", {"ok": True})
     _json(
         path / "training_curves.json",
@@ -64,9 +72,15 @@ def _runtime_run(path: Path, *, profiled: bool, seconds: float) -> None:
     _json(
         path / "wall_time.json",
         {
-            "contract": "adaptive_binary_runtime_walltime_v1",
+            "contract": "adaptive_binary_runtime_walltime_v2",
             "elapsed_seconds": seconds,
             "runtime_profile_enabled": profiled,
+            "allocation_identity": {
+                "hostname": "gh-a-001.rc.rit.edu",
+                "slurm_job_id": slurm_job_id,
+                "slurm_job_nodelist": "gh-a-001",
+                "matched_pair_id": matched_pair_id,
+            },
         },
     )
     _json(
@@ -111,7 +125,8 @@ def test_single_path_bootstrap_uses_measured_matched_runs(tmp_path: Path) -> Non
     ) == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["ok"] is True
-    assert payload["instrumentation_overhead_fraction"] < 0.03
+    assert payload["dense_instrumentation_overhead_fraction"] < 0.03
+    assert payload["matched_allocation_identity"]["slurm_job_id"] == "12345"
     assert payload["checks"]["metric_and_checkpoint_parity"] is True
     assert set(payload["source_artifacts"]) >= {
         "uninstrumented_reference",
@@ -141,15 +156,15 @@ def test_single_path_accepts_measured_dense_profile_above_sparse_target(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["ok"] is True
     assert (
-        payload["advisories"]["instrumentation_overhead_target_below_3_percent"]
+        payload["advisories"]["dense_instrumentation_overhead_target_below_3_percent"]
         is False
     )
     assert payload["checks"][
-        "instrumentation_overhead_below_10_percent_operational_ceiling"
+        "projected_sparse_instrumentation_overhead_below_3_percent"
     ] is True
 
 
-def test_single_path_rejects_overhead_above_operational_ceiling(
+def test_single_path_rejects_projected_sparse_overhead_above_ceiling(
     tmp_path: Path,
 ) -> None:
     plain = tmp_path / "plain"
@@ -158,7 +173,7 @@ def test_single_path_rejects_overhead_above_operational_ceiling(
     _runtime_run(
         profiled,
         profiled=True,
-        seconds=100.0 * (1.0 + INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING + 0.01),
+        seconds=100.0 * 4.5,
     )
     output = tmp_path / "single_path.json"
     assert compile_single_path(
@@ -172,6 +187,30 @@ def test_single_path_rejects_overhead_above_operational_ceiling(
         ]
     ) == 1
     assert json.loads(output.read_text(encoding="utf-8"))["ok"] is False
+
+
+def test_single_path_rejects_cross_allocation_comparison(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    profiled = tmp_path / "profiled"
+    _runtime_run(plain, profiled=False, seconds=100.0)
+    _runtime_run(
+        profiled,
+        profiled=True,
+        seconds=101.0,
+        slurm_job_id="67890",
+        matched_pair_id="67890:D1_kt32_mh4_particles",
+    )
+    with pytest.raises(ValueError, match="allocation-matched"):
+        compile_single_path(
+            [
+                "--uninstrumented-run",
+                str(plain),
+                "--instrumented-run",
+                str(profiled),
+                "--output",
+                str(tmp_path / "single_path.json"),
+            ]
+        )
 
 
 def test_prepared_prune_is_approved_exact_and_preserves_results(

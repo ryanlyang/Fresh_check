@@ -24,7 +24,7 @@ ABPH_RUNTIME_BENCHMARK_CONTRACT = "adaptive_binary_pseudooffline_runtime_referen
 ABPH_RUNTIME_BENCHMARK_VALIDATION_POLICY = (
     "one_fixed_model_val_subset_at_fixed_update_v1"
 )
-ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT = "adaptive_binary_single_path_acceptance_v2"
+ABPH_SINGLE_PATH_ACCEPTANCE_CONTRACT = "adaptive_binary_single_path_acceptance_v3"
 ABPH_RUNTIME_REPRESENTATIVE_VARIANTS = (
     "B1_semantic_query_root",
     "D1_kt32_mh4_particles",
@@ -539,12 +539,25 @@ def _single_path_report(path: str | Path) -> dict[str, Any]:
     source_artifacts = payload.get("source_artifacts")
     if not isinstance(source_artifacts, Mapping) or not source_artifacts:
         raise ValueError("single-path acceleration evidence lacks bound sources")
+    matched_allocation = payload.get("matched_allocation_identity")
+    if not isinstance(matched_allocation, Mapping) or any(
+        not str(matched_allocation.get(key) or "")
+        for key in ("hostname", "slurm_job_id", "slurm_job_nodelist", "matched_pair_id")
+    ):
+        raise ValueError("single-path acceleration evidence is not allocation-matched")
+    projected_overhead = float(
+        payload["projected_production_instrumentation_overhead_fraction"]
+    )
+    if not math.isfinite(projected_overhead) or projected_overhead < 0.0:
+        raise ValueError("single-path projected production overhead is invalid")
     _verify_referenced_artifacts(source_artifacts, location="single_path.source_artifacts")
     return {
         "ok": True,
         "instrumentation_overhead_fraction": float(
             payload["instrumentation_overhead_fraction"]
         ),
+        "projected_production_instrumentation_overhead_fraction": projected_overhead,
+        "matched_allocation_identity": dict(matched_allocation),
         "deep_training_speedup": float(payload["deep_training_speedup"]),
         "profiler_explanation": payload.get("profiler_explanation"),
         "checks": dict(checks),

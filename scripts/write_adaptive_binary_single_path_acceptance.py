@@ -21,6 +21,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
 
 INSTRUMENTATION_OVERHEAD_TARGET = 0.03
 INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING = 0.10
+PRODUCTION_INSTRUMENTATION_OVERHEAD_CEILING = 0.03
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,6 +34,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--deep-optimized-jets-per-second", type=float, required=True)
     parser.add_argument("--metric-checkpoint-parity", action="store_true")
     parser.add_argument("--timing-coverage-complete", action="store_true")
+    parser.add_argument("--matched-hostname", required=True)
+    parser.add_argument("--matched-slurm-job-id", required=True)
+    parser.add_argument("--matched-slurm-job-nodelist", required=True)
+    parser.add_argument("--matched-pair-id", required=True)
+    parser.add_argument("--production-profile-sample-interval", type=int, default=100)
     parser.add_argument("--profiler-explanation")
     parser.add_argument("--output", required=True)
     return parser
@@ -57,13 +63,20 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.deep_reference_jets_per_second <= 0 or args.deep_optimized_jets_per_second <= 0:
         raise ValueError("throughput measurements must be positive")
+    if args.production_profile_sample_interval <= 0:
+        raise ValueError("production profile sample interval must be positive")
     speedup = args.deep_optimized_jets_per_second / args.deep_reference_jets_per_second
+    projected_production_overhead = (
+        args.instrumentation_overhead_fraction
+        / float(args.production_profile_sample_interval)
+    )
     explanation = (args.profiler_explanation or "").strip()
     checks = {
-        "instrumentation_overhead_below_10_percent_operational_ceiling": (
+        "matched_single_allocation_identity": True,
+        "projected_sparse_instrumentation_overhead_below_3_percent": (
             0.0
-            <= args.instrumentation_overhead_fraction
-            < INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING
+            <= projected_production_overhead
+            < PRODUCTION_INSTRUMENTATION_OVERHEAD_CEILING
         ),
         "timing_coverage_complete": bool(args.timing_coverage_complete),
         "metric_and_checkpoint_parity": bool(args.metric_checkpoint_parity),
@@ -71,10 +84,15 @@ def main(argv: list[str] | None = None) -> int:
         or bool(explanation),
     }
     advisories = {
-        "instrumentation_overhead_target_below_3_percent": (
+        "dense_instrumentation_overhead_target_below_3_percent": (
             0.0
             <= args.instrumentation_overhead_fraction
             < INSTRUMENTATION_OVERHEAD_TARGET
+        ),
+        "dense_instrumentation_overhead_below_10_percent": (
+            0.0
+            <= args.instrumentation_overhead_fraction
+            < INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING
         ),
     }
     report = {
@@ -82,16 +100,32 @@ def main(argv: list[str] | None = None) -> int:
         "ok": all(checks.values()),
         "final_test_loaded": False,
         "instrumentation_overhead_fraction": args.instrumentation_overhead_fraction,
+        "dense_instrumentation_overhead_fraction": (
+            args.instrumentation_overhead_fraction
+        ),
+        "projected_production_instrumentation_overhead_fraction": (
+            projected_production_overhead
+        ),
+        "matched_allocation_identity": {
+            "hostname": args.matched_hostname,
+            "slurm_job_id": args.matched_slurm_job_id,
+            "slurm_job_nodelist": args.matched_slurm_job_nodelist,
+            "matched_pair_id": args.matched_pair_id,
+        },
         "deep_reference_jets_per_second": args.deep_reference_jets_per_second,
         "deep_optimized_jets_per_second": args.deep_optimized_jets_per_second,
         "deep_training_speedup": speedup,
         "instrumentation_overhead_policy": {
-            "target_fraction": INSTRUMENTATION_OVERHEAD_TARGET,
-            "operational_ceiling_fraction": (
+            "dense_target_fraction": INSTRUMENTATION_OVERHEAD_TARGET,
+            "dense_operational_ceiling_fraction": (
                 INSTRUMENTATION_OVERHEAD_OPERATIONAL_CEILING
             ),
-            "target_is_blocking": False,
-            "operational_ceiling_is_blocking": True,
+            "production_sample_interval": args.production_profile_sample_interval,
+            "projected_production_ceiling_fraction": (
+                PRODUCTION_INSTRUMENTATION_OVERHEAD_CEILING
+            ),
+            "dense_targets_are_blocking": False,
+            "projected_production_ceiling_is_blocking": True,
         },
         "profiler_explanation": explanation or None,
         "checks": checks,

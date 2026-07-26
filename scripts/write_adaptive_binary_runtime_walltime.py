@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import socket
 
 
 def main() -> int:
@@ -25,10 +26,16 @@ def main() -> int:
     if args.delete_selected_checkpoint and checkpoint.is_file():
         checkpoint.unlink()
     payload = {
-        "contract": "adaptive_binary_runtime_walltime_v1",
+        "contract": "adaptive_binary_runtime_walltime_v2",
         "elapsed_seconds": float(args.elapsed_seconds),
         "runtime_profile_enabled": args.profile_enabled == "1",
         "run_report": str(report),
+        "allocation_identity": {
+            "hostname": socket.gethostname(),
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            "slurm_job_nodelist": os.environ.get("SLURM_JOB_NODELIST"),
+            "matched_pair_id": os.environ.get("ABPH_MATCHED_SINGLE_PATH_PAIR_ID"),
+        },
         "selected_checkpoint_removed": bool(
             args.delete_selected_checkpoint and checkpoint_bytes > 0
         ),

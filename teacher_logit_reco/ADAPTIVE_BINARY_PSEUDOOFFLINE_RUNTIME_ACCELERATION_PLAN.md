@@ -234,6 +234,15 @@ reused for the DDP4 parity benchmark. This bounded timing evaluation is not a sc
 selection result: every production training run retains complete model-val evaluation at
 every real checkpoint-selection boundary.
 
+The deepest single-rank profiler-overhead controls must run sequentially inside the same
+Slurm allocation and record an identical job id, host, node list, and matched-pair id.
+Comparing independent nodes is forbidden because node and filesystem variation cannot be
+attributed to instrumentation. The benchmark deliberately samples every eligible update,
+while production samples one update in every 100. Raw dense overhead remains a diagnostic;
+the blocking `3%` production-overhead gate uses the pre-registered dense-overhead
+projection divided by that immutable production sample interval. Metric/checkpoint parity
+and complete timing coverage remain independently blocking.
+
 ## 2. Accelerated Screening Curriculum Budgets
 
 This section is not an exact runtime-equivalence change. Reducing a root stage from
