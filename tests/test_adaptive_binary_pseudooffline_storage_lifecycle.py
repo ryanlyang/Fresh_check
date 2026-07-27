@@ -373,6 +373,7 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
     )
     assert "fresh_setup\n" in worker
     assert "fresh_setup_job" not in worker
+    assert "fresh_require_conda_python_package pytest" in worker
     assert "ram_lifecycle_smoke)" in worker
     ordered_actions = (
         "abph_reserve_ram_workspace",

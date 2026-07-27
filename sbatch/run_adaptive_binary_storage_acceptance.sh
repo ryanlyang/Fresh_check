@@ -8,6 +8,7 @@ CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
 export CONDA_BASE CONDA_ENV PYTHONNOUSERSITE=1
 source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_setup
+fresh_require_conda_python_package pytest
 
 : "${ABPH_ROOT:?ABPH_ROOT is required}"
 : "${ABPH_CAMPAIGN_MODE:=pilot}"
