@@ -118,6 +118,31 @@ class _FakeA0(nn.Module):
         return self.mod(features, v=lorentz_vectors, mask=mask)
 
 
+class _FakeTrimPart(_FakePart):
+    """Mimic Weaver's batch-local trim before pair/embed transformer work."""
+
+    def forward(self, features, *, v, mask):
+        particles = int(mask[:, 0].sum(dim=1).max().item())
+        features = features[:, :, :particles]
+        v = v[:, :, :particles]
+        trimmed_mask = mask[:, :, :particles]
+        pair = self.pair_embed(v)
+        values = self.embed(features).permute(2, 0, 1)
+        pair_context = pair.mean(dim=(1, 3)).transpose(0, 1)[..., None]
+        values = values + pair_context
+        for block in self.blocks:
+            values = block(values)
+        valid = trimmed_mask[:, 0].transpose(0, 1)[..., None]
+        pooled = (values * valid).sum(dim=0) / valid.sum(dim=0).clamp_min(1)
+        return self.head(pooled)
+
+
+class _FakeTrimA0(_FakeA0):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.mod = _FakeTrimPart()
+
+
 def _consumer_batch(batch: int = 3, particles: int = 5, dim: int = 4):
     torch.manual_seed(13)
     mask = torch.ones(batch, 1, particles, dtype=torch.bool)
@@ -234,6 +259,44 @@ def test_zero_scaled_warm_start_and_two_step_gradient_reachability():
     )
     assert bounded.effective_token_scale.item() == 1
     assert bounded.effective_pair_scale.item() == -1
+
+
+def test_consumer_accepts_weaver_trimmed_token_and_pair_layouts():
+    batch = _consumer_batch(batch=3, particles=7)
+    batch["mask"][:, :, -2:] = False
+    model = ParticleViewConsumer(
+        _FakeTrimA0(),
+        ParticleViewConsumerConfig(
+            view_dim=4,
+            hidden_dim=16,
+            num_heads=4,
+            view_path="token_and_pair",
+        ),
+    )
+    audit = audit_zero_scaled_a0_endpoint(
+        model,
+        points=batch["points"],
+        features=batch["features"],
+        lorentz_vectors=batch["lorentz_vectors"],
+        mask=batch["mask"],
+        view=batch["true_view"],
+    )
+    assert audit["ok"]
+    with torch.no_grad():
+        model.raw_token_scale.fill_(0.3)
+        model.raw_pair_scale.fill_(0.2)
+    output = model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        batch["true_view"],
+    )
+    assert output.logits.shape == (3, 3)
+    assert output.token_correction.shape == (3, 7, 16)
+    assert output.pair_bias.shape == (3, 4, 7, 7)
+    assert torch.count_nonzero(output.token_correction[:, -2:]) == 0
+    assert torch.count_nonzero(output.pair_bias[:, :, -2:]) == 0
 
 
 @pytest.mark.parametrize("path", ["token_only", "pair_only", "token_and_pair"])

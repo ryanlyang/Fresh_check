@@ -77,8 +77,8 @@ from .runtime_data import (
 from .splits import logical_split_binding
 from .tap_staging import (
     StagedTeacherTap,
+    StreamingTeacherTapBuilder,
     build_tap_stage_reservation,
-    stage_teacher_tap_float16,
     validate_staged_teacher_tap,
 )
 from .target_generator import (
@@ -525,11 +525,13 @@ def stage_contextual_memory(
         num_workers=num_workers,
         seed=101,
     )
-    token_rows: list[torch.Tensor] = []
-    mask_rows: list[torch.Tensor] = []
-    logit_rows: list[torch.Tensor] = []
-    parent_rows: list[torch.Tensor] = []
-    label_rows: list[torch.Tensor] = []
+    total_rows = len(aligned)
+    if total_rows <= 0:
+        raise ValueError("cannot stage an empty logical split")
+    builder: StreamingTeacherTapBuilder | None = None
+    logits: torch.Tensor | None = None
+    parents = torch.empty(total_rows, dtype=torch.int64)
+    cursor = 0
     prefix = "" if source_view == "fixed_hlt" else "offline_"
     for raw in loader:
         batch = {
@@ -562,37 +564,48 @@ def stage_contextual_memory(
                 context.particle_tokens.shape[2],
                 -1,
             )
-        token_rows.append(staged_tokens.float().cpu())
-        mask_rows.append(context.particle_mask.cpu())
-        logit_rows.append(context.logits.float().cpu())
-        parent_rows.append(batch["parent_indices"].cpu())
-        label_rows.append(batch["labels"].cpu())
-    if not token_rows:
+        staged_tokens = staged_tokens.float()
+        batch_rows = int(staged_tokens.shape[0])
+        end = cursor + batch_rows
+        if end > total_rows:
+            raise ValueError("staged contextual memory exceeds logical split")
+        if builder is None:
+            reservation = build_tap_stage_reservation(
+                source_role=source_role,
+                source_manifest_sha256=source_manifest_sha256,
+                logical_split_sha256=aligned.logical_split_sha256,
+                ordered_identity_sha256=aligned.ordered_identity_sha256,
+                teacher_checkpoint_sha256=teacher_checkpoint_sha256,
+                tap_spec_sha256=tap_spec_sha256,
+                jets=total_rows,
+                max_particles=int(staged_tokens.shape[1]),
+                token_width=int(staged_tokens.shape[2]),
+                identity_columns=2,
+            )
+            builder = StreamingTeacherTapBuilder(reservation=reservation)
+            logits = torch.empty(
+                (total_rows, int(context.logits.shape[1])),
+                dtype=torch.float32,
+            )
+        elif tuple(staged_tokens.shape[1:]) != tuple(builder.tokens.shape[1:]):
+            raise ValueError("teacher tap shape changed between staging batches")
+        assert logits is not None
+        if context.logits.shape[1] != logits.shape[1]:
+            raise ValueError("teacher logit width changed between staging batches")
+        batch_parents = batch["parent_indices"].detach().cpu().to(torch.int64)
+        batch_labels = batch["labels"].detach().cpu().to(torch.int64)
+        identities = torch.stack((batch_parents, batch_labels), dim=1)
+        builder.append(staged_tokens, context.particle_mask, identities)
+        logits[cursor:end].copy_(context.logits.detach().float().cpu())
+        parents[cursor:end].copy_(batch_parents)
+        cursor = end
+    if builder is None or logits is None:
         raise ValueError("cannot stage an empty logical split")
-    tokens = torch.cat(token_rows, dim=0).contiguous()
-    masks = torch.cat(mask_rows, dim=0).contiguous()
-    logits = torch.cat(logit_rows, dim=0).contiguous()
-    parents = torch.cat(parent_rows, dim=0).to(dtype=torch.int64).contiguous()
-    labels = torch.cat(label_rows, dim=0).to(dtype=torch.int64).contiguous()
-    identities = torch.stack((parents, labels), dim=1)
-    reservation = build_tap_stage_reservation(
-        source_role=source_role,
-        source_manifest_sha256=source_manifest_sha256,
-        logical_split_sha256=aligned.logical_split_sha256,
-        ordered_identity_sha256=aligned.ordered_identity_sha256,
-        teacher_checkpoint_sha256=teacher_checkpoint_sha256,
-        tap_spec_sha256=tap_spec_sha256,
-        jets=tokens.shape[0],
-        max_particles=tokens.shape[1],
-        token_width=tokens.shape[2],
-        identity_columns=2,
-    )
-    staged = stage_teacher_tap_float16(
-        tokens,
-        masks,
-        identities,
-        reservation=reservation,
-    )
+    if cursor != total_rows:
+        raise ValueError(
+            "staged contextual memory row count differs from logical split"
+        )
+    staged = builder.finalize()
     return StagedContextualMemory(
         staged_tap=staged,
         logits=logits,
@@ -1643,7 +1656,7 @@ def run_canonical_target_discovery(
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
         source_role=(
-            "hlt_teacher"
+            "hlt_memory_control"
             if recipe.generator_config.memory_source == "hlt"
             else "offline_teacher"
         ),
@@ -1662,7 +1675,7 @@ def run_canonical_target_discovery(
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
         source_role=(
-            "hlt_teacher"
+            "hlt_memory_control"
             if recipe.generator_config.memory_source == "hlt"
             else "offline_teacher"
         ),
@@ -2077,7 +2090,7 @@ def run_canonical_target_discovery(
         tap_spec_sha256=memory_tap_registration["tap_spec_sha256"],
         source_manifest_sha256=source_manifest_sha256,
         source_role=(
-            "hlt_teacher"
+            "hlt_memory_control"
             if recipe.generator_config.memory_source == "hlt"
             else "offline_teacher"
         ),

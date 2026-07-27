@@ -477,21 +477,52 @@ class ContextualParticleTokens:
         return self.particle_tokens[:, 0]
 
 
-def _batch_particle_layout(value, *, batch_size: int, particles: int):
+def _batch_particle_layout(
+    value,
+    *,
+    batch_size: int,
+    particles: int,
+    particle_mask=None,
+):
+    """Normalize Weaver token layouts and restore its trimmed padding suffix.
+
+    Weaver trims each batch to the largest active particle count before its
+    transformer blocks.  The external particle-view contract remains fixed
+    width, so a legitimately trimmed inactive suffix is restored as exact
+    zeros.  Trimming any active particle remains a fail-closed error.
+    """
+
+    torch = require_torch()
     if isinstance(value, (tuple, list)):
         if not value:
             raise ValueError("token-tap module returned no tensor")
         value = value[0]
     if not hasattr(value, "ndim") or value.ndim != 3:
         raise ValueError("particle token tap must be rank 3")
-    if tuple(value.shape[:2]) == (batch_size, particles):
-        return value
-    if tuple(value.shape[:2]) == (particles, batch_size):
-        return value.permute(1, 0, 2).contiguous()
-    raise ValueError(
-        f"token shape {tuple(value.shape)} disagrees with "
-        f"batch={batch_size}, particles={particles}"
+    if value.shape[0] == batch_size and value.shape[1] <= particles:
+        normalized = value
+    elif value.shape[1] == batch_size and value.shape[0] <= particles:
+        normalized = value.permute(1, 0, 2).contiguous()
+    else:
+        raise ValueError(
+            f"token shape {tuple(value.shape)} disagrees with "
+            f"batch={batch_size}, particles={particles}"
+        )
+
+    observed_particles = int(normalized.shape[1])
+    if observed_particles == particles:
+        return normalized
+    if particle_mask is None or tuple(particle_mask.shape) != (
+        batch_size,
+        particles,
+    ):
+        raise ValueError("trimmed particle tokens require the full particle mask")
+    if particle_mask[:, observed_particles:].any():
+        raise ValueError("Weaver trimmed one or more active particles")
+    padding = normalized.new_zeros(
+        (batch_size, particles - observed_particles, normalized.shape[2])
     )
+    return torch.cat((normalized, padding), dim=1)
 
 
 class FrozenContextualParticleTeacher(_ModuleBase):
@@ -566,6 +597,7 @@ class FrozenContextualParticleTeacher(_ModuleBase):
                 captured[index],
                 batch_size=batch_size,
                 particles=particles,
+                particle_mask=valid,
             ).detach()
             if not torch.isfinite(tokens).all():
                 raise FloatingPointError("teacher particle tokens are non-finite")

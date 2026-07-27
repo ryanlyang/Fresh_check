@@ -217,17 +217,78 @@ class ParticleViewConsumer(nn.Module):
         self.raw_token_scale = nn.Parameter(torch.zeros(()))
         self.raw_pair_scale = nn.Parameter(torch.zeros(()))
 
-    def _token_layout(self, values: torch.Tensor, batch: int, particles: int):
-        if tuple(values.shape[:2]) == (batch, particles):
-            return values, "batch_particle_hidden"
-        if tuple(values.shape[:2]) == (particles, batch):
-            return values.permute(1, 0, 2), "particle_batch_hidden"
+    @staticmethod
+    def _require_inactive_trimmed_suffix(
+        valid: torch.Tensor,
+        observed_particles: int,
+        *,
+        tensor_name: str,
+    ) -> None:
+        particles = int(valid.shape[1])
+        if observed_particles <= 0 or observed_particles > particles:
+            raise ValueError(f"{tensor_name} particle dimension is invalid")
+        if observed_particles < particles and valid[:, observed_particles:].any():
+            raise ValueError(f"{tensor_name} trimmed one or more active particles")
+
+    def _token_layout(
+        self,
+        values: torch.Tensor,
+        batch: int,
+        particles: int,
+        valid: torch.Tensor,
+        *,
+        channel_first: bool = False,
+    ):
+        if channel_first:
+            if not (
+                values.ndim == 3
+                and values.shape[0] == batch
+                and values.shape[2] <= particles
+            ):
+                raise ValueError("A0 channel-first embedding layout changed")
+            observed = int(values.shape[2])
+            self._require_inactive_trimmed_suffix(
+                valid, observed, tensor_name="A0 particle-block output"
+            )
+            return (
+                values.permute(0, 2, 1),
+                "batch_hidden_particle",
+                observed,
+            )
+        if values.ndim == 3 and (
+            values.shape[0] == batch and values.shape[1] <= particles
+        ):
+            observed = int(values.shape[1])
+            self._require_inactive_trimmed_suffix(
+                valid, observed, tensor_name="A0 particle-block output"
+            )
+            return values, "batch_particle_hidden", observed
+        if values.ndim == 3 and (
+            values.shape[1] == batch and values.shape[0] <= particles
+        ):
+            observed = int(values.shape[0])
+            self._require_inactive_trimmed_suffix(
+                valid, observed, tensor_name="A0 particle-block output"
+            )
+            return (
+                values.permute(1, 0, 2),
+                "particle_batch_hidden",
+                observed,
+            )
         # Weaver's embedding stack is channel-first [B,C,P], whereas its
         # particle blocks are sequence-first [P,B,C].
         if values.ndim == 3 and (
-            values.shape[0] == batch and values.shape[2] == particles
+            values.shape[0] == batch and values.shape[2] <= particles
         ):
-            return values.permute(0, 2, 1), "batch_hidden_particle"
+            observed = int(values.shape[2])
+            self._require_inactive_trimmed_suffix(
+                valid, observed, tensor_name="A0 particle-block output"
+            )
+            return (
+                values.permute(0, 2, 1),
+                "batch_hidden_particle",
+                observed,
+            )
         raise ValueError("A0 particle-block output layout changed")
 
     @staticmethod
@@ -279,9 +340,15 @@ class ParticleViewConsumer(nn.Module):
         )
         batch, particles = valid.shape
         embedded = self.a0_model.mod.embed(features)
-        embedded, _ = self._token_layout(
-            _first_tensor(embedded), batch, particles
+        embedded, _, embedded_particles = self._token_layout(
+            _first_tensor(embedded),
+            batch,
+            particles,
+            valid,
+            channel_first=True,
         )
+        if embedded_particles != particles:
+            raise ValueError("A0 embedding unexpectedly trimmed particle inputs")
         if embedded.shape[-1] != self.config.hidden_dim:
             raise ValueError("A0 embedding width differs from consumer")
         if self.config.learned_trust:
@@ -310,20 +377,27 @@ class ParticleViewConsumer(nn.Module):
             state["token_correction"] = raw_correction
 
         def token_hook(_module, _inputs, output):
-            values, layout = self._token_layout(
-                _first_tensor(output), batch, particles
+            values, layout, observed_particles = self._token_layout(
+                _first_tensor(output),
+                batch,
+                particles,
+                valid,
+                channel_first=self.config.injection_block == -1,
             )
             if values.shape[-1] != self.config.hidden_dim:
                 raise ValueError("A0 hidden width differs from consumer")
             gate = state["gate"]
-            correction = self.view_adapter(view) * gate
-            correction = torch.where(
-                valid[:, :, None], correction, torch.zeros_like(correction)
+            full_correction = self.view_adapter(view) * gate
+            full_correction = torch.where(
+                valid[:, :, None],
+                full_correction,
+                torch.zeros_like(full_correction),
             )
+            correction = full_correction[:, :observed_particles]
             effective = torch.tanh(self.raw_token_scale)
             updated = values + effective * correction
             state["gate"] = gate
-            state["token_correction"] = correction
+            state["token_correction"] = full_correction
             updated = self._restore_token_layout(updated, layout)
             return _replace_first(output, updated)
 
@@ -343,21 +417,49 @@ class ParticleViewConsumer(nn.Module):
             pair = torch.where(pair_valid, pair, torch.zeros_like(pair))
             effective = torch.tanh(self.raw_pair_scale)
             original = _first_tensor(output)
-            if original.shape == pair.shape:
-                updated = original + effective * pair
-            elif original.shape == (
-                batch * self.config.num_heads,
-                particles,
-                particles,
+            if (
+                original.ndim == 4
+                and original.shape[0] == batch
+                and original.shape[1] == self.config.num_heads
+                and original.shape[2] == original.shape[3]
             ):
-                updated = original + effective * pair.reshape_as(original)
-            elif original.shape == (
-                batch,
-                particles,
-                particles,
-                self.config.num_heads,
+                observed_particles = int(original.shape[2])
+                self._require_inactive_trimmed_suffix(
+                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                )
+                updated = original + effective * pair[
+                    :, :, :observed_particles, :observed_particles
+                ]
+            elif (
+                original.ndim == 3
+                and original.shape[0] == batch * self.config.num_heads
+                and original.shape[1] == original.shape[2]
             ):
-                updated = original + effective * pair.permute(0, 2, 3, 1)
+                observed_particles = int(original.shape[1])
+                self._require_inactive_trimmed_suffix(
+                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                )
+                trimmed_pair = pair[
+                    :, :, :observed_particles, :observed_particles
+                ]
+                updated = original + effective * trimmed_pair.reshape_as(original)
+            elif (
+                original.ndim == 4
+                and original.shape[0] == batch
+                and original.shape[3] == self.config.num_heads
+                and original.shape[1] == original.shape[2]
+            ):
+                observed_particles = int(original.shape[1])
+                self._require_inactive_trimmed_suffix(
+                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                )
+                trimmed_pair = pair[
+                    :, :, :observed_particles, :observed_particles
+                ]
+                updated = (
+                    original
+                    + effective * trimmed_pair.permute(0, 2, 3, 1)
+                )
             else:
                 raise ValueError("A0 pair-bias tensor layout changed")
             state["pair_bias"] = pair

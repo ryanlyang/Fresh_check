@@ -30,6 +30,14 @@ PARTICLE_VIEW_STAGED_TAP_RESERVATION_CONTRACT = (
 FLOAT16_CONVERSION_POLICY = (
     "ieee754_binary16_round_to_nearest_ties_to_even_no_stochastic_rounding_v1"
 )
+PARTICLE_VIEW_TAP_SOURCE_ROLES = frozenset(
+    {
+        "offline_teacher",
+        "offline_teacher_secondary",
+        "hlt_memory_control",
+    }
+)
+_HASH_CHUNK_BYTES = 32 * 1024 * 1024
 
 
 def _identity_numpy_dtype(dtype: torch.dtype) -> np.dtype:
@@ -86,14 +94,27 @@ def _logical_content_hash(
     mask: np.ndarray,
     identities: np.ndarray,
 ) -> str:
+    def update_array(array: np.ndarray, dtype: np.dtype) -> None:
+        canonical = array.astype(dtype, copy=False)
+        if canonical.ndim == 0:
+            digest.update(memoryview(np.ascontiguousarray(canonical)).cast("B"))
+            return
+        row_bytes = max(1, int(canonical[0:1].nbytes))
+        rows_per_chunk = max(1, _HASH_CHUNK_BYTES // row_bytes)
+        for start in range(0, canonical.shape[0], rows_per_chunk):
+            chunk = np.ascontiguousarray(
+                canonical[start : start + rows_per_chunk]
+            )
+            digest.update(memoryview(chunk).cast("B"))
+
     digest = hashlib.sha256()
     digest.update(canonical_json_bytes(dict(metadata)))
     digest.update(b"\0tokens\0")
-    digest.update(tokens.astype("<f2", copy=False).tobytes(order="C"))
+    update_array(tokens, np.dtype("<f2"))
     digest.update(b"\0mask\0")
-    digest.update(mask.astype(np.bool_, copy=False).tobytes(order="C"))
+    update_array(mask, np.dtype(np.bool_))
     digest.update(b"\0identities\0")
-    digest.update(identities.tobytes(order="C"))
+    update_array(identities, identities.dtype)
     return digest.hexdigest()
 
 
@@ -111,8 +132,11 @@ def build_tap_stage_reservation(
     identity_columns: int,
     identity_dtype: str = "int64",
 ) -> dict[str, Any]:
-    if source_role not in {"offline_teacher", "hlt_memory_control"}:
-        raise ValueError("source_role must be offline_teacher or hlt_memory_control")
+    if source_role not in PARTICLE_VIEW_TAP_SOURCE_ROLES:
+        raise ValueError(
+            "source_role must be offline_teacher, "
+            "offline_teacher_secondary, or hlt_memory_control"
+        )
     hashes = {
         "source_manifest_sha256": source_manifest_sha256,
         "logical_split_sha256": logical_split_sha256,
@@ -188,7 +212,7 @@ def validate_tap_stage_reservation(payload: Mapping[str, Any]) -> int:
         "tap_spec_sha256",
     ):
         require_sha256(name, payload[name])
-    if payload["source_role"] not in {"offline_teacher", "hlt_memory_control"}:
+    if payload["source_role"] not in PARTICLE_VIEW_TAP_SOURCE_ROLES:
         raise ValueError("tap-stage reservation source role changed")
     if (
         payload["token_dtype"] != "float16"
@@ -256,6 +280,149 @@ class StagedTeacherTap:
         return self.tokens.to(device=device, dtype=torch.float32)
 
 
+class StreamingTeacherTapBuilder:
+    """Preallocate the final CPU float16 tap and fill it one batch at a time.
+
+    The builder deliberately never retains a full-dataset float32 token tensor.
+    Its only full-size allocation is the final compact float16/bool/identity
+    payload authenticated by the reservation.
+    """
+
+    def __init__(self, *, reservation: Mapping[str, Any]) -> None:
+        self.reservation = dict(reservation)
+        validate_tap_stage_reservation(self.reservation)
+        jets, particles, width = self.reservation["shape"]
+        identity_rows, identity_columns = self.reservation["identity_shape"]
+        if identity_rows != jets:
+            raise ValueError("reservation identity row count changed")
+        identity_torch_dtype = {
+            "int16": torch.int16,
+            "int32": torch.int32,
+            "int64": torch.int64,
+        }[self.reservation["identity_dtype"]]
+        self.tokens = torch.empty(
+            (jets, particles, width), dtype=torch.float16, device="cpu"
+        )
+        self.mask = torch.empty(
+            (jets, particles), dtype=torch.bool, device="cpu"
+        )
+        self.jet_identities = torch.empty(
+            (jets, identity_columns),
+            dtype=identity_torch_dtype,
+            device="cpu",
+        )
+        self._cursor = 0
+        self._finalized = False
+
+    @property
+    def rows_written(self) -> int:
+        return self._cursor
+
+    def append(
+        self,
+        tokens: torch.Tensor,
+        mask: torch.Tensor,
+        jet_identities: torch.Tensor,
+    ) -> None:
+        if self._finalized:
+            raise RuntimeError("cannot append to a finalized staged tap")
+        _, staged, mask_array, identities = _canonical_stage_arrays(
+            tokens, mask, jet_identities
+        )
+        if identities.ndim == 1:
+            identities = identities[:, None]
+        batch_rows = int(staged.shape[0])
+        expected_tail = tuple(self.reservation["shape"][1:])
+        if tuple(staged.shape[1:]) != expected_tail:
+            raise ValueError("staged tap batch shape differs from reservation")
+        if tuple(identities.shape[1:]) != tuple(
+            self.reservation["identity_shape"][1:]
+        ):
+            raise ValueError("staged identity batch shape differs from reservation")
+        if str(identities.dtype) != self.reservation["identity_dtype"]:
+            raise ValueError("staged identity dtype differs from reservation")
+        end = self._cursor + batch_rows
+        if end > self.tokens.shape[0]:
+            raise ValueError("staged tap contains more rows than reserved")
+        self.tokens[self._cursor : end].copy_(torch.from_numpy(staged))
+        self.mask[self._cursor : end].copy_(torch.from_numpy(mask_array))
+        self.jet_identities[self._cursor : end].copy_(
+            torch.from_numpy(identities)
+        )
+        self._cursor = end
+
+    def finalize(self) -> StagedTeacherTap:
+        if self._finalized:
+            raise RuntimeError("staged tap builder was already finalized")
+        if self._cursor != self.tokens.shape[0]:
+            raise ValueError(
+                "staged tap row count differs from reservation: "
+                f"observed={self._cursor}, expected={self.tokens.shape[0]}"
+            )
+        self._finalized = True
+        token_array = self.tokens.numpy()
+        mask_array = self.mask.numpy()
+        identities = self.jet_identities.numpy()
+        metadata = {
+            "token_dtype": "float16",
+            "token_byte_order": "little",
+            "token_shape": list(token_array.shape),
+            "mask_dtype": "bool",
+            "mask_shape": list(mask_array.shape),
+            "identity_dtype": str(identities.dtype),
+            "identity_shape": list(identities.shape),
+            "conversion_policy": FLOAT16_CONVERSION_POLICY,
+            "reservation_sha256": self.reservation["content_hash"],
+        }
+        logical_hash = _logical_content_hash(
+            metadata=metadata,
+            tokens=token_array,
+            mask=mask_array,
+            identities=identities,
+        )
+        manifest = with_content_hash(
+            {
+                "contract": PARTICLE_VIEW_STAGED_TAP_CONTRACT,
+                "reservation_sha256": self.reservation["content_hash"],
+                "source_role": self.reservation["source_role"],
+                "source_manifest_sha256": self.reservation[
+                    "source_manifest_sha256"
+                ],
+                "logical_split_sha256": self.reservation[
+                    "logical_split_sha256"
+                ],
+                "ordered_identity_sha256": self.reservation[
+                    "ordered_identity_sha256"
+                ],
+                "teacher_checkpoint_sha256": self.reservation[
+                    "teacher_checkpoint_sha256"
+                ],
+                "tap_spec_sha256": self.reservation["tap_spec_sha256"],
+                **metadata,
+                "logical_content_sha256": logical_hash,
+                "valid_token_count": int(mask_array.sum(dtype=np.int64)),
+                "ram_bytes": int(
+                    token_array.nbytes
+                    + mask_array.nbytes
+                    + identities.nbytes
+                ),
+                "persistent_storage_allowed": False,
+            }
+        )
+        staged_object = StagedTeacherTap(
+            tokens=self.tokens,
+            mask=self.mask,
+            jet_identities=self.jet_identities,
+            manifest=manifest,
+        )
+        if staged_object.nbytes != manifest["ram_bytes"]:
+            raise RuntimeError("staged RAM byte accounting mismatch")
+        validate_staged_teacher_tap(
+            staged_object, reservation=self.reservation
+        )
+        return staged_object
+
+
 def stage_teacher_tap_float16(
     tokens: torch.Tensor,
     mask: torch.Tensor,
@@ -265,67 +432,9 @@ def stage_teacher_tap_float16(
 ) -> StagedTeacherTap:
     """Convert once to canonical binary16 and retain the result in CPU RAM."""
 
-    validate_tap_stage_reservation(reservation)
-    source, staged, mask_array, identities = _canonical_stage_arrays(
-        tokens, mask, jet_identities
-    )
-    if list(staged.shape) != reservation["shape"]:
-        raise ValueError("staged tap shape differs from reservation")
-    expected_identity_shape = list(identities.shape)
-    if identities.ndim == 1:
-        expected_identity_shape = [identities.shape[0], 1]
-        identities = identities[:, None]
-    if expected_identity_shape != reservation["identity_shape"]:
-        raise ValueError("staged identity shape differs from reservation")
-    if str(identities.dtype) != reservation["identity_dtype"]:
-        raise ValueError("staged identity dtype differs from reservation")
-    metadata = {
-        "token_dtype": "float16",
-        "token_byte_order": "little",
-        "token_shape": list(staged.shape),
-        "mask_dtype": "bool",
-        "mask_shape": list(mask_array.shape),
-        "identity_dtype": str(identities.dtype),
-        "identity_shape": list(identities.shape),
-        "conversion_policy": FLOAT16_CONVERSION_POLICY,
-        "reservation_sha256": reservation["content_hash"],
-    }
-    logical_hash = _logical_content_hash(
-        metadata=metadata,
-        tokens=staged,
-        mask=mask_array,
-        identities=identities,
-    )
-    manifest = with_content_hash(
-        {
-            "contract": PARTICLE_VIEW_STAGED_TAP_CONTRACT,
-            "reservation_sha256": reservation["content_hash"],
-            "source_role": reservation["source_role"],
-            "source_manifest_sha256": reservation["source_manifest_sha256"],
-            "logical_split_sha256": reservation["logical_split_sha256"],
-            "ordered_identity_sha256": reservation["ordered_identity_sha256"],
-            "teacher_checkpoint_sha256": reservation[
-                "teacher_checkpoint_sha256"
-            ],
-            "tap_spec_sha256": reservation["tap_spec_sha256"],
-            **metadata,
-            "logical_content_sha256": logical_hash,
-            "valid_token_count": int(mask_array.sum()),
-            "ram_bytes": int(staged.nbytes + mask_array.nbytes + identities.nbytes),
-            "persistent_storage_allowed": False,
-        }
-    )
-    staged_object = StagedTeacherTap(
-        tokens=torch.from_numpy(staged),
-        mask=torch.from_numpy(mask_array),
-        jet_identities=torch.from_numpy(identities),
-        manifest=manifest,
-    )
-    if staged_object.nbytes != manifest["ram_bytes"]:
-        raise RuntimeError("staged RAM byte accounting mismatch")
-    validate_staged_teacher_tap(staged_object, reservation=reservation)
-    _ = source  # Retained only to make the one-way conversion explicit.
-    return staged_object
+    builder = StreamingTeacherTapBuilder(reservation=reservation)
+    builder.append(tokens, mask, jet_identities)
+    return builder.finalize()
 
 
 def validate_staged_teacher_tap(
@@ -367,18 +476,55 @@ def validate_staged_teacher_tap(
         raise ValueError("staged mask must remain CPU bool")
     if staged.jet_identities.device.type != "cpu":
         raise ValueError("staged identities must remain in CPU RAM")
-    _, tokens, mask, identities = _canonical_stage_arrays(
-        staged.tokens.to(dtype=torch.float32),
-        staged.mask,
-        staged.jet_identities,
-    )
+    identity_name_by_dtype = {
+        torch.int16: "int16",
+        torch.int32: "int32",
+        torch.int64: "int64",
+    }
+    if staged.jet_identities.dtype not in identity_name_by_dtype:
+        raise ValueError("staged identities use an unsupported integer dtype")
+    if staged.tokens.ndim != 3:
+        raise ValueError("staged tokens must be rank 3")
+    if (
+        staged.mask.ndim != 2
+        or tuple(staged.mask.shape) != tuple(staged.tokens.shape[:2])
+    ):
+        raise ValueError("staged token/mask shapes disagree")
+    if (
+        staged.jet_identities.ndim != 2
+        or staged.jet_identities.shape[0] != staged.tokens.shape[0]
+    ):
+        raise ValueError("staged identity shape disagrees with tokens")
+    if staged.manifest["source_role"] not in PARTICLE_VIEW_TAP_SOURCE_ROLES:
+        raise ValueError("staged teacher-tap source role changed")
+
+    # Validate finiteness, exact zero padding, and valid count in bounded
+    # chunks.  Never promote the full float16 payload back to float32.
+    row_bytes = max(1, int(staged.tokens[0:1].nelement() * 2))
+    rows_per_chunk = max(1, _HASH_CHUNK_BYTES // row_bytes)
+    valid_token_count = 0
+    for start in range(0, staged.tokens.shape[0], rows_per_chunk):
+        end = min(staged.tokens.shape[0], start + rows_per_chunk)
+        token_chunk = staged.tokens[start:end]
+        mask_chunk = staged.mask[start:end]
+        valid_token_count += int(mask_chunk.sum(dtype=torch.int64))
+        valid_values = token_chunk[mask_chunk]
+        if valid_values.numel() and not torch.isfinite(valid_values).all():
+            raise ValueError("staged valid teacher taps contain nonfinite values")
+        padding_values = token_chunk[~mask_chunk]
+        if padding_values.numel() and torch.count_nonzero(padding_values):
+            raise ValueError("staged teacher-tap padding is not exact zero")
+
+    tokens = staged.tokens.numpy()
+    mask = staged.mask.numpy()
+    identities = staged.jet_identities.numpy()
     metadata = {
         "token_dtype": "float16",
         "token_byte_order": "little",
         "token_shape": list(tokens.shape),
         "mask_dtype": "bool",
         "mask_shape": list(mask.shape),
-        "identity_dtype": str(identities.dtype),
+        "identity_dtype": identity_name_by_dtype[staged.jet_identities.dtype],
         "identity_shape": list(identities.shape),
         "conversion_policy": FLOAT16_CONVERSION_POLICY,
         "reservation_sha256": staged.manifest["reservation_sha256"],
@@ -396,7 +542,7 @@ def validate_staged_teacher_tap(
         "logical_content_sha256",
     ):
         require_sha256(name, staged.manifest[name])
-    if staged.manifest["valid_token_count"] != int(mask.sum()):
+    if staged.manifest["valid_token_count"] != valid_token_count:
         raise ValueError("staged teacher tap valid-token count changed")
     if staged.manifest["persistent_storage_allowed"] is not False:
         raise ValueError("staged teacher taps cannot enter persistent storage")
@@ -508,7 +654,9 @@ __all__ = [
     "FLOAT16_CONVERSION_POLICY",
     "PARTICLE_VIEW_STAGED_TAP_CONTRACT",
     "PARTICLE_VIEW_STAGED_TAP_RESERVATION_CONTRACT",
+    "PARTICLE_VIEW_TAP_SOURCE_ROLES",
     "StagedTeacherTap",
+    "StreamingTeacherTapBuilder",
     "audit_live_tap_equivalence",
     "build_tap_stage_reservation",
     "stage_teacher_tap_float16",

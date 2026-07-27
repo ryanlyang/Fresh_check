@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+import teacher_logit_reco.local_particle_residual_field.particle_view.tap_staging as tap_staging_module
 from teacher_logit_reco.local_particle_residual_field.particle_view import (
     ContextualHLTQueryTap,
     ContextualQueryTapConfig,
@@ -19,6 +20,7 @@ from teacher_logit_reco.local_particle_residual_field.particle_view import (
     PARTICLE_VIEW_COORDINATE_PARENT_HASH_FIELDS,
     PARTICLE_VIEW_PAIR_FEATURE_ORDER,
     ParticleViewGeneratorConfig,
+    StreamingTeacherTapBuilder,
     audit_live_tap_equivalence,
     build_hlt_memory_pair_features,
     build_mandatory_hlt_memory_control_configs,
@@ -446,6 +448,90 @@ def test_ram_stage_is_bit_exact_nearest_even_and_detects_mutation() -> None:
     staged.tokens[0, 0, 1] += torch.tensor(0.25, dtype=torch.float16)
     with pytest.raises(ValueError, match="logical content changed"):
         validate_staged_teacher_tap(staged)
+
+
+@pytest.mark.parametrize(
+    "source_role",
+    (
+        "offline_teacher",
+        "offline_teacher_secondary",
+        "hlt_memory_control",
+    ),
+)
+def test_all_declared_teacher_tap_source_roles_are_reservable(source_role):
+    reservation = build_tap_stage_reservation(
+        source_role=source_role,
+        source_manifest_sha256=_sha("source"),
+        logical_split_sha256=_sha("split"),
+        ordered_identity_sha256=_sha("identities"),
+        teacher_checkpoint_sha256=_sha("teacher"),
+        tap_spec_sha256=_sha("tap"),
+        jets=2,
+        max_particles=3,
+        token_width=4,
+        identity_columns=2,
+    )
+    assert reservation["source_role"] == source_role
+
+
+def test_streaming_tap_staging_matches_one_shot_and_validates_without_promotion(
+    monkeypatch,
+):
+    torch.manual_seed(41)
+    tokens = torch.randn(5, 4, 6, dtype=torch.float32)
+    mask = torch.tensor(
+        [
+            [True, True, True, False],
+            [True, True, False, False],
+            [True, True, True, True],
+            [True, False, False, False],
+            [True, True, True, False],
+        ]
+    )
+    tokens[~mask] = float("nan")
+    identities = torch.stack(
+        (torch.arange(5), torch.arange(10, 15)), dim=1
+    ).to(torch.int64)
+    reservation = build_tap_stage_reservation(
+        source_role="offline_teacher_secondary",
+        source_manifest_sha256=_sha("source"),
+        logical_split_sha256=_sha("split"),
+        ordered_identity_sha256=_sha("identities"),
+        teacher_checkpoint_sha256=_sha("teacher"),
+        tap_spec_sha256=_sha("tap"),
+        jets=5,
+        max_particles=4,
+        token_width=6,
+        identity_columns=2,
+    )
+    one_shot = stage_teacher_tap_float16(
+        tokens, mask, identities, reservation=reservation
+    )
+    builder = StreamingTeacherTapBuilder(reservation=reservation)
+    builder.append(tokens[:2], mask[:2], identities[:2])
+    builder.append(tokens[2:], mask[2:], identities[2:])
+    streamed = builder.finalize()
+    assert torch.equal(streamed.tokens, one_shot.tokens)
+    assert torch.equal(streamed.mask, one_shot.mask)
+    assert torch.equal(streamed.jet_identities, one_shot.jet_identities)
+    assert (
+        streamed.manifest["logical_content_sha256"]
+        == one_shot.manifest["logical_content_sha256"]
+    )
+
+    # Validation must operate on the retained half tensor in bounded chunks,
+    # never by recreating the full float32 canonicalization input.
+    monkeypatch.setattr(
+        tap_staging_module,
+        "_canonical_stage_arrays",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full canonicalization was called")
+        ),
+    )
+    assert (
+        validate_staged_teacher_tap(streamed)
+        == streamed.manifest["logical_content_sha256"]
+    )
 
 
 def _registration_kwargs() -> dict:
