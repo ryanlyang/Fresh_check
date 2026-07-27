@@ -194,7 +194,15 @@ def _acceptance_inputs(root: Path, projection_path: Path) -> dict[str, Path]:
             }
         ),
     )
-    runtime_path = _json(root / "runtime.json", {"runtime": "accepted"})
+    runtime_path = _json(
+        root / "runtime.json",
+        {
+            "runtime": "accepted",
+            "promotion": {
+                "production_reconstructor_parallelism": "ddp4",
+            },
+        },
+    )
     ram_smoke_path = _json(
         root / "storage" / "ram_lifecycle_smoke.json",
         _hashed(

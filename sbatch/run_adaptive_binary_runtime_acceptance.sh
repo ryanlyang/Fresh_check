@@ -27,7 +27,7 @@ MODE="${1:?Usage: run_adaptive_binary_runtime_acceptance.sh <smoke|benchmark|ben
 VARIANT="${2:-}"
 : "${ABPH_ROOT:?Set ABPH_ROOT to the prepared pilot campaign root}"
 : "${ABPH_RUNTIME_ACCEPTANCE_ROOT:=${ABPH_ROOT}/audits/runtime_acceptance}"
-: "${ABPH_RECONSTRUCTOR_PARALLELISM:?Set single or ddp4}"
+: "${ABPH_RECONSTRUCTOR_PARALLELISM:?Set single, ddp4, or ddp8}"
 : "${ABPH_JOB_LAUNCHER:?Set direct or srun}"
 : "${ABPH_DISTRIBUTED_NODES:?Set requested node count}"
 : "${ABPH_DISTRIBUTED_NTASKS:?Set requested task count}"
@@ -47,6 +47,13 @@ case "${ABPH_RECONSTRUCTOR_PARALLELISM}" in
     [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]] || { echo "ddp4 acceptance requires srun" >&2; exit 2; }
     [[ "${ABPH_DISTRIBUTED_NODES}" == "4" && "${ABPH_DISTRIBUTED_NTASKS}" == "4" ]] || {
       echo "ddp4 acceptance requires four nodes/tasks" >&2
+      exit 2
+    }
+    ;;
+  ddp8)
+    [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]] || { echo "ddp8 acceptance requires srun" >&2; exit 2; }
+    [[ "${ABPH_DISTRIBUTED_NODES}" == "8" && "${ABPH_DISTRIBUTED_NTASKS}" == "8" ]] || {
+      echo "ddp8 acceptance requires eight nodes/tasks" >&2
       exit 2
     }
     ;;
@@ -131,7 +138,9 @@ if [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]]; then
   }
   mapfile -t allocated_hosts < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
   export MASTER_ADDR="${allocated_hosts[0]:?No DDP master host found}"
-  abph_fresh_run_srun_with_port_retry --nodes=4 --ntasks=4 --ntasks-per-node=1 \
+  abph_fresh_run_srun_with_port_retry \
+    --nodes="${ABPH_DISTRIBUTED_NODES}" \
+    --ntasks="${ABPH_DISTRIBUTED_NTASKS}" --ntasks-per-node=1 \
     --kill-on-bad-exit=1 --cpu-bind=cores --export=ALL "${cmd[@]}"
 else
   fresh_run "${cmd[@]}"

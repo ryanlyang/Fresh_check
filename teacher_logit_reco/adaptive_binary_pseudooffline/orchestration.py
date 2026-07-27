@@ -15,9 +15,12 @@ from .config import (
 )
 from .accounting_preflight import ABPH_STEP4_PREFLIGHT_CONTRACT
 from .cache import load_adaptive_binary_target_cache_metadata
-from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
+from .convergence_schedule import (
+    schedule_contract_for_policy,
+)
 from .report import ABPH_CAMPAIGN_REPORT_CONTRACT
 from .runtime_acceptance import require_runtime_acceptance
+from .runtime_batch import exact_accumulation_steps
 from .tagger_distributed import require_tagger_ddp_acceptance
 from .bundled_scoring import group_scoring_members, scoring_source_family
 from .storage_quota import (
@@ -45,7 +48,11 @@ ABPH_SLURM_ORCHESTRATION_CONTRACT = "adaptive_binary_pseudooffline_slurm_orchest
 ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT = (
     "adaptive_binary_reconstructor_parallelism_v1"
 )
-ABPH_RECONSTRUCTOR_PARALLELISM_MODES: tuple[str, ...] = ("single", "ddp4")
+ABPH_RECONSTRUCTOR_PARALLELISM_MODES: tuple[str, ...] = (
+    "single",
+    "ddp4",
+    "ddp8",
+)
 ABPH_FINAL_CLAIM_CONTRACT = "adaptive_binary_pseudooffline_final_claim_contract_v1"
 ABPH_STAGE_MODES: tuple[str, ...] = (
     "full",
@@ -538,6 +545,7 @@ class AdaptiveBinarySubmissionConfig:
     rebuild_models: bool = True
     rebuild_predictions: bool = True
     reconstructor_parallelism: str = "ddp4"
+    reconstructor_schedule_policy: str = "accelerated_screening_v1"
     runtime_acceptance_path: str | Path | None = None
     tagger_ddp_acceptance_path: str | Path | None = None
     allow_debug_single_reconstructor: bool = False
@@ -580,9 +588,16 @@ class AdaptiveBinarySubmissionConfig:
                 profile=storage_profile,
             )
         if self.reconstructor_parallelism not in ABPH_RECONSTRUCTOR_PARALLELISM_MODES:
-            raise ValueError("reconstructor_parallelism must be single or ddp4")
-        if self.reconstructor_parallelism == "ddp4" and self.cluster != "tigris":
-            raise ValueError("ABPH ddp4 is currently certified only for Tigris")
+            raise ValueError("reconstructor_parallelism must be single, ddp4, or ddp8")
+        schedule_contract_for_policy(self.reconstructor_schedule_policy)
+        if self.reconstructor_parallelism in {"ddp4", "ddp8"} and self.cluster != "tigris":
+            raise ValueError("ABPH distributed reconstructors are certified only for Tigris")
+        if (
+            self.reconstructor_parallelism == "ddp8"
+            and self.reconstructor_schedule_policy
+            != "accelerated_screening_v2_7day"
+        ):
+            raise ValueError("ABPH ddp8 requires accelerated_screening_v2_7day")
         if (
             self.reconstructor_parallelism == "single"
             and self.stage_mode in {"full", "models"}
@@ -590,20 +605,24 @@ class AdaptiveBinarySubmissionConfig:
         ):
             raise PermissionError(
                 "single-GPU full/models submission is debug-only; pass the explicit "
-                "debug override or use the gated ddp4 production profile"
+                "debug override or use a gated distributed production profile"
             )
-        if self.reconstructor_parallelism == "ddp4" and self.stage_mode in {
+        if self.reconstructor_parallelism in {"ddp4", "ddp8"} and self.stage_mode in {
             "full",
             "models",
         }:
             if self.runtime_acceptance_path is None:
                 raise PermissionError(
-                    "ABPH ddp4 full campaigns require a Step-10 runtime acceptance artifact"
+                    "ABPH distributed full campaigns require a runtime acceptance artifact"
                 )
             # The optimized pilot produces the extension and campaign evidence
             # used by later promotion gates. Requiring that evidence before the
             # first optimized pilot would make submission circular.
-            scope = "highdata" if self.campaign_mode == "highdata" else "ddp4_runtime"
+            scope = (
+                "highdata"
+                if self.campaign_mode == "highdata"
+                else f"{self.reconstructor_parallelism}_runtime"
+            )
             require_runtime_acceptance(self.runtime_acceptance_path, scope=scope)
         if self.campaign_mode == "highdata" and self.stage_mode != "final_claims":
             if not self.approve_highdata:
@@ -649,15 +668,16 @@ class AdaptiveBinarySubmissionConfig:
 
     @property
     def reconstructor_topology(self) -> Mapping[str, Any]:
-        if self.reconstructor_parallelism == "ddp4":
+        if self.reconstructor_parallelism in {"ddp4", "ddp8"}:
+            world_size = 4 if self.reconstructor_parallelism == "ddp4" else 8
             return {
                 "contract": ABPH_RECONSTRUCTOR_PARALLELISM_CONTRACT,
-                "mode": "ddp4",
-                "nodes": 4,
-                "ntasks": 4,
+                "mode": self.reconstructor_parallelism,
+                "nodes": world_size,
+                "ntasks": world_size,
                 "ntasks_per_node": 1,
                 "gpus_per_node": 1,
-                "distributed_world_size": 4,
+                "distributed_world_size": world_size,
                 "launcher": "srun",
                 "promotion_status": "requires_step10_runtime_acceptance",
             }
@@ -959,7 +979,11 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
                 f"{split} teacher-logit prediction",
             )
             checked.extend((str(prediction), str(metadata)))
-        expected_world_size = 4 if config.reconstructor_parallelism == "ddp4" else 1
+        expected_world_size = {
+            "single": 1,
+            "ddp4": 4,
+            "ddp8": 8,
+        }[config.reconstructor_parallelism]
         for member in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
             resolved = resolve_variant_config(member)
             grouping = str(
@@ -1115,7 +1139,18 @@ def _runtime_batch_contract_jobs(
     base_dependencies = tuple(dict.fromkeys(str(value) for value in dependencies))
     for name in names:
         probe_keys: list[str] = []
+        valid_probe_specs: list[tuple[str, int]] = []
         for stage_family, local_batch_size in ABPH_RUNTIME_BATCH_PROBE_SPECS:
+            try:
+                exact_accumulation_steps(
+                    stage_family,
+                    world_size=int(topology["distributed_world_size"]),
+                    local_batch_size=int(local_batch_size),
+                )
+            except ValueError:
+                continue
+            valid_probe_specs.append((stage_family, local_batch_size))
+        for stage_family, local_batch_size in valid_probe_specs:
             key = _runtime_batch_probe_job_key(
                 name, stage_family, local_batch_size
             )
@@ -1632,11 +1667,14 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
 
     paths = config.paths
     streaming = config.storage_profile == "streaming_30gb_v1"
+    schedule_contract = schedule_contract_for_policy(
+        config.reconstructor_schedule_policy
+    )
     common_env = {
         "ABPH_ROOT": str(paths.root),
         "ABPH_CAMPAIGN_MODE": config.campaign_mode,
-        "ABPH_RECONSTRUCTOR_SCHEDULE_CONTRACT": ABPH_ACCELERATED_SCHEDULE_CONTRACT,
-        "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY": "accelerated_screening_v1",
+        "ABPH_RECONSTRUCTOR_SCHEDULE_CONTRACT": schedule_contract,
+        "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY": config.reconstructor_schedule_policy,
         "ABPH_DATA_DIR": str(config.data_dir),
         "ABPH_CONFIRM_FINAL_TEST": "1" if config.confirm_final_test else "0",
         "ABPH_STORAGE_PROFILE": config.storage_profile,
@@ -2270,7 +2308,7 @@ def submission_manifest(
             scope=(
                 "highdata"
                 if config.campaign_mode == "highdata"
-                else "ddp4_runtime"
+                else f"{config.reconstructor_parallelism}_runtime"
             ),
         )
         runtime_acceptance = {
@@ -2319,8 +2357,10 @@ def submission_manifest(
         "cluster": config.cluster,
         "split_sizes": dict(config.split_sizes),
         "reconstructor_schedule": {
-            "contract": ABPH_ACCELERATED_SCHEDULE_CONTRACT,
-            "policy_label": "accelerated_screening_v1",
+            "contract": schedule_contract_for_policy(
+                config.reconstructor_schedule_policy
+            ),
+            "policy_label": config.reconstructor_schedule_policy,
             "campaign_profile": config.campaign_mode,
             "profile_selected_from_split_sizes": True,
         },

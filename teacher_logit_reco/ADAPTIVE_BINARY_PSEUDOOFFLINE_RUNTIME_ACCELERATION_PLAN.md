@@ -274,6 +274,46 @@ stays at that minimum during extensions. It must not restart or jump at an exten
 | renderer | 15,000 | 5,000 | 30,000 | 15.4 |
 | distribution | 10,000 | 5,000 | 20,000 | 10.2 |
 
+### Seven-day pilot amendment
+
+The first measured DDP4 deep-stage profile projected the original pilot policy at roughly
+`51.4` days for one D1 critical path. That is too slow for mechanism screening even
+though the implementation is functioning correctly. A second immutable policy,
+`accelerated_screening_v2_7day`, is therefore the production pilot policy:
+
+| Stage | Nominal | Extension block | Hard maximum | Approx. nominal passes |
+|---|---:|---:|---:|---:|
+| root | 3,000 | 1,000 | 4,000 | 6.1 |
+| each hierarchy depth | 1,000 | 1,000 | 2,000 | 2.0 |
+| renderer | 3,000 | 1,000 | 4,000 | 3.1 |
+| distribution | 2,000 | 1,000 | 3,000 | 2.0 |
+
+This changes optimizer exposure, not the scientific data contract. It retains the full
+`500,000`-jet `model_train` split, `150,000`-jet `model_val` split, model dimensions,
+hierarchy depths, four-hypothesis renderer, loss composition, effective global batches
+(`1024` and `512`), and complete model-validation selection every `2,000` updates and at
+every stage boundary.
+
+The production topology for this policy is DDP8 with one GH200 rank per node. Root and
+hierarchy use local-batch candidates `128` then `64`; renderer and distribution use `64`
+then `32`. Gradient accumulation is derived mechanically so the effective global batch
+and learning-rate interpretation do not change.
+
+DDP8 is promoted only after the representative D1 benchmark:
+
+1. preserves single-rank transport/state parity;
+2. uses cache-bound world-size-eight batch contracts;
+3. remains within the existing memory and communication limits;
+4. achieves at least `1.5x` deep-stage throughput over the measured DDP4 reference;
+5. produces compatible model-validation loss;
+6. projects the nominal D1 critical path below seven days, including every serial full
+   validation.
+
+The campaign requests a seven-day Slurm limit. Extension blocks remain deterministic and
+may exceed the nominal seven-day screening target when validation proves that the
+trajectory is still improving. Such an extension is evidence that the nominal screening
+schedule was insufficient, not a silent runtime regression.
+
 ### High-data profile
 
 | Stage | Nominal | Extension block | Hard maximum | Approx. nominal passes |

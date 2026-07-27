@@ -14,7 +14,10 @@ from .config import (
     ABPH_HLT_PROFILE_VERSION,
     canonical_hash,
 )
-from .convergence_schedule import ABPH_ACCELERATED_SCHEDULE_CONTRACT
+from .convergence_schedule import (
+    ABPH_ACCELERATED_SCHEDULE_CONTRACTS,
+    schedule_policy_for_contract,
+)
 from .diagnostics import ABPH_TAGGER_DIAGNOSTIC_CONTRACT
 from .fusion import (
     ABPH_FUSION_FIT_SPLIT,
@@ -420,6 +423,8 @@ def write_adaptive_binary_campaign_report(
     fusion_rows: list[dict[str, Any]] = []
     reports: dict[str, Mapping[str, Any]] = {}
     schedule_rows: list[dict[str, Any]] = []
+    observed_schedule_contract: str | None = None
+    observed_schedule_policy: str | None = None
     report_paths: dict[str, str] = {}
     common_values: dict[tuple[str, str], dict[str, Any]] = {}
     storage_lifecycle: dict[str, Any] | None = None
@@ -541,10 +546,27 @@ def write_adaptive_binary_campaign_report(
         if schedule_required and not isinstance(schedule, Mapping):
             problems.append(f"{variant_name} lacks accelerated schedule provenance")
         if isinstance(schedule, Mapping):
-            if schedule.get("contract") != ABPH_ACCELERATED_SCHEDULE_CONTRACT:
+            schedule_contract = str(schedule.get("contract", ""))
+            schedule_policy = str(schedule.get("policy_label", ""))
+            if schedule_contract not in ABPH_ACCELERATED_SCHEDULE_CONTRACTS:
                 problems.append(f"{variant_name} schedule contract mismatch")
-            if schedule.get("policy_label") != "accelerated_screening_v1":
-                problems.append(f"{variant_name} schedule policy is not accelerated_screening_v1")
+            else:
+                if schedule_policy != schedule_policy_for_contract(
+                    schedule_contract
+                ):
+                    problems.append(
+                        f"{variant_name} schedule policy/contract mismatch"
+                    )
+                if observed_schedule_contract is None:
+                    observed_schedule_contract = schedule_contract
+                    observed_schedule_policy = schedule_policy
+                elif (
+                    schedule_contract != observed_schedule_contract
+                    or schedule_policy != observed_schedule_policy
+                ):
+                    problems.append(
+                        f"{variant_name} schedule differs from the campaign policy"
+                    )
             schedule_rows.append(
                 {
                     "variant": variant_name,
@@ -803,7 +825,8 @@ def write_adaptive_binary_campaign_report(
         "root_identity": root_rows,
         "fusion_membership": fusion_rows,
         "schedule_screening": {
-            "policy_label": "accelerated_screening_v1",
+            "contract": observed_schedule_contract,
+            "policy_label": observed_schedule_policy,
             "runs": schedule_rows,
             "truncated_variants": [
                 row["variant"] for row in schedule_rows if row["schedule_truncated"]

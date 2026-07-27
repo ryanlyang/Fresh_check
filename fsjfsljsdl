@@ -1,0 +1,379 @@
+FUSION_MODEL_LOADING_HANDOFF.md:1: trailing whitespace.
+[32m+[m[32m# Fresh JetClass Fusion Handoff: Model Loading and Evaluation Protocol[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:2: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:3: trailing whitespace.
+[32m+[m[32mThis document is for an independent fresh implementation of the JetClass fusion analysis. The goal is not to reuse the old fusion code. The goal is to load the already trained models, generate logits on cleanly separated fusion splits, and test whether a fusion/meta-classifier gives a real improvement.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:4: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:5: trailing whitespace.
+[32m+[m[32mUse this as a model-loading and experiment-specification handoff. You may write new code however you want, but the data split rules and leakage rules below must be followed exactly.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:6: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:7: trailing whitespace.
+[32m+[m[32m## Core Question[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:8: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:9: trailing whitespace.
+[32m+[m[32mWe have trained JetClass HLT/reconstruction/tagger models on the research compute. Some previous fusion analyses reported very large gains from stacked logistic regression. The purpose of this fresh implementation is to independently test whether those gains are real.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:10: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:11: trailing whitespace.
+[32m+[m[32mThe fresh implementation should report:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:12: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:13: trailing whitespace.
+[32m+[m[32m1. Raw HLT baseline performance.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:14: trailing whitespace.
+[32m+[m[32m2. Raw stage2 model performance for each reconstruction model.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:15: trailing whitespace.
+[32m+[m[32m3. Optional offline teacher performance as an upper reference only.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:16: trailing whitespace.
+[32m+[m[32m4. Fusion performance from the stage2 model logits/probabilities.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:17: trailing whitespace.
+[32m+[m[32m5. Fusion performance from HLT + stage2 logits/probabilities.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:18: trailing whitespace.
+[32m+[m[32m6. Controls that should collapse if the fusion is not leaking labels or row identity.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:19: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:20: trailing whitespace.
+[32m+[m[32m## Research Compute Paths[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:21: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:22: trailing whitespace.
+[32m+[m[32mRun on the research compute where the data and checkpoint files exist.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:23: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:24: trailing whitespace.
+[32m+[m[32mMain data path:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:25: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:26: trailing whitespace.
+[32m+[m[32m```text[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:27: trailing whitespace.
+[32m+[m[32m/home/ryreu/atlas/PracticeTagging/data/jetclass_part0[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:28: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:29: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:30: trailing whitespace.
+[32m+[m[32mOriginal PracticeTagging checkpoint root:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:31: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:32: trailing whitespace.
+[32m+[m[32m```text[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:33: trailing whitespace.
+[32m+[m[32m/home/ryreu/atlas/PracticeTagging/checkpoints[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:34: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:35: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:36: trailing whitespace.
+[32m+[m[32mFresh-check repo may be located elsewhere, for example:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:37: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:38: trailing whitespace.
+[32m+[m[32m```text[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:39: trailing whitespace.
+[32m+[m[32m/home/ryreu/atlas/Fresh_check[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:40: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:41: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:42: trailing whitespace.
+[32m+[m[32mDo not hard-code a local Windows path. Use RC paths for data/checkpoints.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:43: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:44: trailing whitespace.
+[32m+[m[32m## Fixed-HLT Filename 1M Models To Load[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:45: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:46: trailing whitespace.
+[32m+[m[32mThese are the models from the fixed-HLT filename setup. They all use the same intended HLT corruption profile and filename-based class assignment.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:47: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:48: trailing whitespace.
+[32m+[m[32mUse this checkpoint root:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:49: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:50: trailing whitespace.
+[32m+[m[32m```text[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:51: trailing whitespace.
+[32m+[m[32m/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:52: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:53: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:54: trailing whitespace.
+[32m+[m[32mUse this model source list:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:55: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:56: trailing whitespace.
+[32m+[m[32m```python[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:57: trailing whitespace.
+[32m+[m[32mSOURCE_SPECS = [[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:58: trailing whitespace.
+[32m+[m[32m    # HLT-only baseline and offline teacher are both stored in core01_base.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:59: trailing whitespace.
+[32m+[m[32m    ("hlt_baseline", "baseline_hlt", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core01_base"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:60: trailing whitespace.
+[32m+[m[32m    ("offline_teacher", "offline_teacher", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core01_base"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:61: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:62: trailing whitespace.
+[32m+[m[32m    # Twelve stage2 dual-view models.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:63: trailing whitespace.
+[32m+[m[32m    ("m2_base", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core01_base"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:64: trailing whitespace.
+[32m+[m[32m    ("m2_consstrong", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core02_consstrong"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:65: trailing whitespace.
+[32m+[m[32m    ("m2_budgetlite", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core03_budgetlite"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:66: trailing whitespace.
+[32m+[m[32m    ("m2_genlow", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core04_genlow"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:67: trailing whitespace.
+[32m+[m[32m    ("m2_genhigh", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core05_genhigh"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:68: trailing whitespace.
+[32m+[m[32m    ("m2_splitstrong", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core06_splitstrong"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:69: trailing whitespace.
+[32m+[m[32m    ("m2_splitlight", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core07_splitlight"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:70: trailing whitespace.
+[32m+[m[32m    ("m2_physstrong", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core08_physstrong"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:71: trailing whitespace.
+[32m+[m[32m    ("m2_offdropmid", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core09_offdropmid"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:72: trailing whitespace.
+[32m+[m[32m    ("m2_offdrophigh", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core10_offdrophigh"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:73: trailing whitespace.
+[32m+[m[32m    ("m2_topk60ish", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core11_topk60ish"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:74: trailing whitespace.
+[32m+[m[32m    ("m2_antioverlap", "stage2", "/home/ryreu/atlas/PracticeTagging/checkpoints/jetclass_joint_dualview/jetclass_joint_v2attr_1m250k1m_m2hlt_hybridops_adaptivegen_fixedhlt_filename_core12_antioverlap"),[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:75: trailing whitespace.
+[32m+[m[32m][m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:76: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:77: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:78: trailing whitespace.
+[32m+[m[32mRecommended fusion groups:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:79: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:80: trailing whitespace.
+[32m+[m[32m```python[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:81: trailing whitespace.
+[32m+[m[32mFUSION_GROUPS = {[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:82: trailing whitespace.
+[32m+[m[32m    "m2_only": [[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:83: trailing whitespace.
+[32m+[m[32m        "m2_base", "m2_consstrong", "m2_budgetlite", "m2_genlow", "m2_genhigh",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:84: trailing whitespace.
+[32m+[m[32m        "m2_splitstrong", "m2_splitlight", "m2_physstrong", "m2_offdropmid",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:85: trailing whitespace.
+[32m+[m[32m        "m2_offdrophigh", "m2_topk60ish", "m2_antioverlap",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:86: trailing whitespace.
+[32m+[m[32m    ],[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:87: trailing whitespace.
+[32m+[m[32m    "hlt_plus_m2": [[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:88: trailing whitespace.
+[32m+[m[32m        "hlt_baseline", "m2_base", "m2_consstrong", "m2_budgetlite", "m2_genlow",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:89: trailing whitespace.
+[32m+[m[32m        "m2_genhigh", "m2_splitstrong", "m2_splitlight", "m2_physstrong",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:90: trailing whitespace.
+[32m+[m[32m        "m2_offdropmid", "m2_offdrophigh", "m2_topk60ish", "m2_antioverlap",[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:91: trailing whitespace.
+[32m+[m[32m    ],[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:92: trailing whitespace.
+[32m+[m[32m}[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:93: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:94: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:95: trailing whitespace.
+[32m+[m[32mThe offline teacher must not be included in fusion groups. It is only an upper reference.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:96: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:97: trailing whitespace.
+[32m+[m[32m## Checkpoint Files To Load[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:98: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:99: trailing whitespace.
+[32m+[m[32mEach model directory has an `args.json`. Always load it. It defines architecture settings, class assignment, HLT generation parameters, preprocessing, seed, and train/val/test file counts.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:100: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:101: trailing whitespace.
+[32m+[m[32mExpected checkpoint file names:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:102: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:103: trailing whitespace.
+[32m+[m[32m```text[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:104: trailing whitespace.
+[32m+[m[32mbaseline_hlt        -> baseline_hlt_best.pt, fallback baseline_best.pt or baseline.pt[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:105: trailing whitespace.
+[32m+[m[32moffline_teacher     -> teacher_offline_best.pt, fallback teacher.pt[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:106: trailing whitespace.
+[32m+[m[32mstage2 reconstructor -> offline_reconstructor_stage2.pt, fallback offline_reconstructor.pt[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:107: trailing whitespace.
+[32m+[m[32mstage2 dual tagger   -> dual_joint_stage2.pt, fallback dual_joint.pt[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:108: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:109: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:110: trailing whitespace.
+[32m+[m[32mDo not load teacher logits, cached score files, or old fusion `.npz` files. Regenerate logits from model checkpoints on the fresh fusion splits.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:111: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:112: trailing whitespace.
+[32m+[m[32m## Minimal Checkpoint Loading Helpers[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:113: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:114: trailing whitespace.
+[32m+[m[32mUse this pattern for checkpoint discovery. Some checkpoints are raw `state_dict`; some may be dictionaries containing a nested state dict.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:115: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:116: trailing whitespace.
+[32m+[m[32m```python[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:117: trailing whitespace.
+[32m+[m[32mfrom pathlib import Path[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:118: trailing whitespace.
+[32m+[m[32mimport json[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:119: trailing whitespace.
+[32m+[m[32mimport torch[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:120: trailing whitespace.
+[32m+[m[32mfrom types import SimpleNamespace[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:121: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:122: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:123: trailing whitespace.
+[32m+[m[32mdef load_args(run_dir: str | Path) -> SimpleNamespace:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:124: trailing whitespace.
+[32m+[m[32m    run_dir = Path(run_dir)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:125: trailing whitespace.
+[32m+[m[32m    with (run_dir / "args.json").open("r") as f:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:126: trailing whitespace.
+[32m+[m[32m        return SimpleNamespace(**json.load(f))[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:127: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:128: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:129: trailing whitespace.
+[32m+[m[32mdef unwrap_state_dict(obj):[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:130: trailing whitespace.
+[32m+[m[32m    if isinstance(obj, dict):[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:131: trailing whitespace.
+[32m+[m[32m        for key in ("model_state_dict", "state_dict", "net", "model", "reco_state_dict", "dual_state_dict"):[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:132: trailing whitespace.
+[32m+[m[32m            if key in obj and isinstance(obj[key], dict):[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:133: trailing whitespace.
+[32m+[m[32m                return obj[key][m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:134: trailing whitespace.
+[32m+[m[32m    return obj[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:135: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:136: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:137: trailing whitespace.
+[32m+[m[32mdef load_first_state_dict(run_dir: str | Path, candidate_names: tuple[str, ...], map_location="cpu"):[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:138: trailing whitespace.
+[32m+[m[32m    run_dir = Path(run_dir)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:139: trailing whitespace.
+[32m+[m[32m    for name in candidate_names:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:140: trailing whitespace.
+[32m+[m[32m        path = run_dir / name[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:141: trailing whitespace.
+[32m+[m[32m        if path.exists():[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:142: trailing whitespace.
+[32m+[m[32m            obj = torch.load(path, map_location=map_location)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:143: trailing whitespace.
+[32m+[m[32m            return unwrap_state_dict(obj), path[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:144: trailing whitespace.
+[32m+[m[32m    raise FileNotFoundError(f"No checkpoint found in {run_dir}; tried {candidate_names}")[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:145: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:146: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:147: trailing whitespace.
+[32m+[m[32m## Model Construction Contract[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:148: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:149: trailing whitespace.
+[32m+[m[32mThe fresh code must construct models with the same architecture implied by `args.json`.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:150: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:151: trailing whitespace.
+[32m+[m[32mThe model kinds need these inputs and outputs:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:152: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:153: trailing whitespace.
+[32m+[m[32m```python[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:154: trailing whitespace.
+[32m+[m[32m# baseline_hlt:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:155: trailing whitespace.
+[32m+[m[32m# input:  feat_hlt, mask_hlt[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:156: trailing whitespace.
+[32m+[m[32m# output: logits [batch, n_classes][m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:157: trailing whitespace.
+[32m+[m[32mlogits = baseline_model(feat_hlt, mask_hlt)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:158: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:159: trailing whitespace.
+[32m+[m[32m# offline_teacher:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:160: trailing whitespace.
+[32m+[m[32m# input:  feat_offline, mask_offline[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:161: trailing whitespace.
+[32m+[m[32m# output: logits [batch, n_classes][m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:162: trailing whitespace.
+[32m+[m[32m# This is for reference only, not fusion.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:163: trailing whitespace.
+[32m+[m[32mlogits = teacher_model(feat_offline, mask_offline)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:164: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:165: trailing whitespace.
+[32m+[m[32m# stage2:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:166: trailing whitespace.
+[32m+[m[32m# input:  feat_hlt, mask_hlt, const_hlt4[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:167: trailing whitespace.
+[32m+[m[32m# steps:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:168: trailing whitespace.
+[32m+[m[32m# 1. reconstructor predicts corrected candidate constituents.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:169: trailing whitespace.
+[32m+[m[32m# 2. convert reconstructor output into a soft corrected view.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:170: trailing whitespace.
+[32m+[m[32m# 3. dual-view classifier consumes original HLT view plus corrected view.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:171: trailing whitespace.
+[32m+[m[32m# output: logits [batch, n_classes][m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:172: trailing whitespace.
+[32m+[m[32mreco_out = reconstructor(feat_hlt, mask_hlt, const_hlt4, stage_scale=1.0)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:173: trailing whitespace.
+[32m+[m[32mfeat_corr, mask_corr = build_soft_corrected_view(reco_out, weight_floor=1e-4)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:174: trailing whitespace.
+[32m+[m[32mlogits = dual_view_model(feat_hlt, mask_hlt, feat_corr, mask_corr)[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:175: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:176: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:177: trailing whitespace.
+[32m+[m[32mFor stage2 models, load both:[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:178: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:179: trailing whitespace.
+[32m+[m[32m```python[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:180: trailing whitespace.
+[32m+[m[32mreco_sd, reco_ckpt = load_first_state_dict(run_dir, ("offline_reconstructor_stage2.pt", "offline_reconstructor.pt"))[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:181: trailing whitespace.
+[32m+[m[32mdual_sd, dual_ckpt = load_first_state_dict(run_dir, ("dual_joint_stage2.pt", "dual_joint.pt"))[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:182: trailing whitespace.
+[32m+[m[32m```[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:183: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:184: trailing whitespace.
+[32m+[m[32mImportant: the stage2 checkpoints here are `hybrid_ops` reconstructors. If your fresh code has not implemented the hybrid operation-aware reconstructor, loading will fail or produce meaningless output.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:185: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:186: trailing whitespace.
+[32m+[m[32m## Hybrid Ops Detection[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:187: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:188: trailing whitespace.
+[32m+[m[32mThe old implementation detected the reconstructor family from the checkpoint keys. This is useful if your code supports multiple families.[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:189: trailing whitespace.
+[32m+[m[41m[m
+FUSION_MODEL_LOADING_HANDOFF.md:190: trailing

@@ -105,16 +105,22 @@ def _actual_target_preflight(path: Path) -> Path:
     return path
 
 
-def _runtime_acceptance(path: Path, *, highdata: bool = False) -> Path:
+def _runtime_acceptance(
+    path: Path,
+    *,
+    highdata: bool = False,
+    ddp8: bool = False,
+) -> Path:
     payload = {
         "contract": ABPH_RUNTIME_ACCEPTANCE_CONTRACT,
         "ok": True,
         "runtime_gate": {"approved": True, "checks": {"transport": True}},
         "promotion": {
             "ddp4_runtime_approved": True,
+            "ddp8_runtime_approved": bool(ddp8),
             "optimized_pilot_submission_allowed": False,
             "highdata_submission_allowed": bool(highdata),
-            "production_reconstructor_parallelism": "ddp4",
+            "production_reconstructor_parallelism": "ddp8" if ddp8 else "ddp4",
         },
     }
     payload["acceptance_content_hash"] = canonical_hash(payload)
@@ -182,6 +188,45 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
         )
         compiler = next(job for job in graph if job.key == contract_key)
         assert set(compiler.dependencies) == {job.key for job in probes}
+
+
+def test_seven_day_graph_uses_eight_rank_reconstructors_and_valid_probes(
+    tmp_path: Path,
+) -> None:
+    acceptance = _runtime_acceptance(
+        tmp_path / "runtime_acceptance.json",
+        ddp8=True,
+    )
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=tmp_path / "campaign",
+        data_dir=tmp_path / "data",
+        reconstructor_parallelism="ddp8",
+        reconstructor_schedule_policy="accelerated_screening_v2_7day",
+        runtime_acceptance_path=acceptance,
+    )
+    graph = build_submission_graph(config)
+    reconstructors = [
+        job for job in graph if job.stage in {"reconstructor", "renderer"}
+    ]
+    assert reconstructors
+    assert all(job.nodes == 8 for job in reconstructors)
+    assert all(job.distributed_world_size == 8 for job in reconstructors)
+    probes = [job for job in graph if job.stage == "runtime_batch_probe"]
+    assert probes
+    assert all(job.distributed_world_size == 8 for job in probes)
+    assert {
+        (job.arguments[1], int(job.arguments[2])) for job in probes
+    } == {
+        ("root_hierarchy", 128),
+        ("root_hierarchy", 64),
+        ("renderer_distribution", 64),
+        ("renderer_distribution", 32),
+    }
+    assert all(
+        job.environment["ABPH_RECONSTRUCTOR_SCHEDULE_POLICY"]
+        == "accelerated_screening_v2_7day"
+        for job in reconstructors
+    )
 
 
 def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
@@ -953,9 +998,6 @@ def test_streaming_bootstrap_is_projection_and_runtime_gate_ordered() -> None:
     assert "submit_adaptive_binary_runtime_batch_probes_tigris.sh" in submitter
     assert "submit_adaptive_binary_runtime_acceptance_tigris.sh" in submitter
     for isolated_evidence in (
-        "ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT",
-        "ABPH_RUNTIME_BATCH_CONTRACT_ROOT",
-        "ABPH_RUNTIME_BATCH_PROBE_MANIFEST",
         "ABPH_SINGLE_PATH_ACCEPTANCE_PATH",
     ):
         assert (
@@ -968,7 +1010,13 @@ def test_streaming_bootstrap_is_projection_and_runtime_gate_ordered() -> None:
     assert "run_prune_adaptive_binary_prepared_root.sh" in submitter
     assert "--dependency=\"afterok:${prune_job_id}\"" in submitter
     assert "run_submit_adaptive_binary_streaming_campaign.sh" in submitter
-    assert "scope=\"ddp4_runtime\"" in continuation
+    assert "runtime_batch_measurements_ddp4" in submitter
+    assert "runtime_batch_measurements_ddp8" in submitter
+    assert "runtime_batch_contracts_ddp4" in submitter
+    assert "runtime_batch_contracts_ddp8" in submitter
+    assert "scope=\"ddp8_runtime\"" in continuation
+    assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in continuation
+    assert "accelerated_screening_v2_7day" in continuation
     assert "submit_adaptive_binary_pseudooffline_streaming30gb_tigris.sh" in continuation
 
 
@@ -985,7 +1033,9 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
     probe = (
         REPO_ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
     ).read_text(encoding="utf-8")
-    assert "--nodes=4" in submitter and "--ntasks=4" in submitter
+    assert '--nodes="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"' in submitter
+    assert '--ntasks="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"' in submitter
+    assert 'ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "8"' in submitter
     assert "CONDA_BASE:=/home/ryreu/miniforge3-aarch64" in submitter
     assert "afterok:" in submitter
     assert "probe_adaptive_binary_runtime_batch.py" in worker

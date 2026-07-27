@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Queue canonical DDP4 full-step probes and immutable contracts for ABPH variants.
+# Queue canonical full-step probes and immutable contracts for an ABPH topology.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -16,6 +16,15 @@ fresh_activate_env
 : "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT:=${ABPH_ROOT}/runtime_batch_measurements}"
 : "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
 : "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST:=${ABPH_ROOT}/submission_logs/abph_runtime_batch_probes.tsv}"
+: "${ABPH_RUNTIME_BATCH_WORLD_SIZE:=4}"
+[[ "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "4" || "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "8" ]] || {
+  echo "ABPH_RUNTIME_BATCH_WORLD_SIZE must be 4 or 8" >&2
+  exit 2
+}
+export ABPH_DISTRIBUTED_NODES="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
+export ABPH_DISTRIBUTED_NTASKS="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
+export ABPH_DISTRIBUTED_NTASKS_PER_NODE=1
+export ABPH_DISTRIBUTED_WORLD_SIZE="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
 export ABPH_ROOT ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT
 export ABPH_RUNTIME_BATCH_CONTRACT_ROOT PYTHONNOUSERSITE=1
 
@@ -43,8 +52,14 @@ printf 'variant\tstage_family\tlocal_batch_size\tjob_id\n' > "${manifest}"
 
 for variant in "${variants[@]}"; do
   probe_ids=()
-  for spec in root_hierarchy:256 root_hierarchy:128 root_hierarchy:64 \
-              renderer_distribution:128 renderer_distribution:64 renderer_distribution:32; do
+  if [[ "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "8" ]]; then
+    specs=(root_hierarchy:128 root_hierarchy:64 \
+           renderer_distribution:64 renderer_distribution:32)
+  else
+    specs=(root_hierarchy:256 root_hierarchy:128 root_hierarchy:64 \
+           renderer_distribution:128 renderer_distribution:64 renderer_distribution:32)
+  fi
+  for spec in "${specs[@]}"; do
     family="${spec%%:*}"
     batch="${spec##*:}"
     if fresh_is_dry_run; then
@@ -53,7 +68,9 @@ for variant in "${variants[@]}"; do
         "${variant}" "${family}" "${batch}"
     else
       submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
-        --partition="${ABPH_SBATCH_PARTITION}" --nodes=4 --ntasks=4 \
+        --partition="${ABPH_SBATCH_PARTITION}" \
+        --nodes="${ABPH_RUNTIME_BATCH_WORLD_SIZE}" \
+        --ntasks="${ABPH_RUNTIME_BATCH_WORLD_SIZE}" \
         --ntasks-per-node=1 --cpus-per-task=16 --mem=220G \
         --gres=gpu:gh200:1 "${probe_worker}" "${variant}" "${family}" "${batch}")"
     fi
@@ -70,7 +87,7 @@ for variant in "${variants[@]}"; do
   else
     submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
       --partition="${ABPH_SBATCH_PARTITION}" --dependency="${dependency}" \
-      "${compile_worker}" "${variant}")"
+      "${compile_worker}" "${variant}" "${ABPH_RUNTIME_BATCH_WORLD_SIZE}")"
   fi
   printf '%s\tcompile\tall\t%s\n' "${variant}" "${submitted%%;*}" >> "${manifest}"
   echo "${submitted}"
@@ -79,4 +96,5 @@ done
 echo "adaptive_binary_runtime_batch_probe_submission_complete:"
 echo "  root: ${ABPH_ROOT}"
 echo "  variants: ${#variants[@]}"
+echo "  world_size: ${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
 echo "  manifest: ${manifest}"

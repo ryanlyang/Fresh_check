@@ -4,6 +4,7 @@ import pytest
 
 from teacher_logit_reco.adaptive_binary_pseudooffline.convergence_schedule import (
     ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    ABPH_SEVEN_DAY_SCHEDULE_CONTRACT,
     StageScheduleBudget,
     accelerated_stage_budget,
     budget_for_stage_role,
@@ -84,6 +85,21 @@ def test_campaign_profiles_have_the_locked_nominal_extension_and_hard_budgets():
     assert budget_for_stage_role(
         accelerated_stage_budget("pilot", "root"), "warm_started_handoff"
     ) == StageScheduleBudget(1, 0, 1)
+
+
+def test_seven_day_profile_keeps_data_batches_and_bounds_each_stage():
+    expected = {
+        "root": StageScheduleBudget(3_000, 1_000, 4_000),
+        "hierarchy": StageScheduleBudget(1_000, 1_000, 2_000),
+        "renderer": StageScheduleBudget(3_000, 1_000, 4_000),
+        "distribution": StageScheduleBudget(2_000, 1_000, 3_000),
+    }
+    for family, budget in expected.items():
+        assert accelerated_stage_budget(
+            "pilot",
+            family,
+            schedule_contract=ABPH_SEVEN_DAY_SCHEDULE_CONTRACT,
+        ) == budget
 
 
 def test_schedule_profile_is_inferred_only_from_immutable_split_sizes():

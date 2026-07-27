@@ -72,6 +72,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-manifest")
     parser.add_argument("--gpu-memory")
     parser.add_argument("--cpu-memory")
+    parser.add_argument("--gpu-time", default=os.environ.get("ABPH_GPU_TIME"))
+    parser.add_argument("--cpu-time", default=os.environ.get("ABPH_CPU_TIME"))
     parser.add_argument("--gpu-cpus", type=int)
     parser.add_argument("--cpu-cpus", type=int)
     parser.add_argument(
@@ -79,6 +81,18 @@ def _parser() -> argparse.ArgumentParser:
         choices=ABPH_RECONSTRUCTOR_PARALLELISM_MODES,
         default=os.environ.get("ABPH_RECONSTRUCTOR_PARALLELISM", "ddp4"),
         help="Distributed topology for B/C/D reconstructor jobs only.",
+    )
+    parser.add_argument(
+        "--reconstructor-schedule-policy",
+        choices=(
+            "accelerated_screening_v1",
+            "accelerated_screening_v2_7day",
+        ),
+        default=os.environ.get(
+            "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY",
+            "accelerated_screening_v1",
+        ),
+        help="Immutable reconstructor optimization trajectory.",
     )
     parser.add_argument(
         "--allow-debug-single-reconstructor",
@@ -140,6 +154,7 @@ def _config(args: argparse.Namespace) -> AdaptiveBinarySubmissionConfig:
             "final_claims",
         },
         reconstructor_parallelism=args.reconstructor_parallelism,
+        reconstructor_schedule_policy=args.reconstructor_schedule_policy,
         runtime_acceptance_path=args.runtime_acceptance,
         tagger_ddp_acceptance_path=args.tagger_ddp_acceptance,
         allow_debug_single_reconstructor=bool(
@@ -160,6 +175,16 @@ def _resource(
         profile,
         gpu_memory=args.gpu_memory or profile.gpu_memory,
         cpu_memory=args.cpu_memory or profile.cpu_memory,
+        gpu_time=(
+            args.gpu_time
+            or (
+                "7-00:00:00"
+                if config.reconstructor_schedule_policy
+                == "accelerated_screening_v2_7day"
+                else profile.gpu_time
+            )
+        ),
+        cpu_time=args.cpu_time or profile.cpu_time,
         gpu_cpus=args.gpu_cpus or profile.gpu_cpus,
         cpu_cpus=args.cpu_cpus or profile.cpu_cpus,
         nodes=int(topology["nodes"]),

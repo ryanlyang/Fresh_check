@@ -12,6 +12,7 @@ from .config import canonical_hash
 from .convergence_schedule import (
     ABPH_ACCELERATED_STAGE_BUDGETS,
     ABPH_EXTENSION_COMPARISON_CONTRACT,
+    ABPH_SEVEN_DAY_STAGE_BUDGETS,
 )
 from .runtime_batch import RuntimeBatchContract
 from .runtime_profile import ABPH_RUNTIME_PROFILE_CONTRACT
@@ -37,6 +38,8 @@ ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS = {
     "parameter_relative_tolerance": 2.0e-5,
     "memory_utilization_maximum": 0.90,
     "deep_projected_wall_seconds_maximum": 48.0 * 3600.0,
+    "ddp8_over_ddp4_speedup_minimum": 1.5,
+    "seven_day_projected_wall_seconds_maximum": 7.0 * 24.0 * 3600.0,
 }
 _PROJECTED_PROFILE_BUCKETS = (
     "optimizer_update_total",
@@ -286,13 +289,19 @@ def _deep_stage_projection(
     validation_jets: int,
     complete_model_val_jets: int = 150_000,
     evaluation_interval: int = 2_000,
+    stage_budgets: Mapping[str, Any] | None = None,
+    projection_contract: str = "adaptive_binary_d1_stage_aware_wall_projection_v1",
 ) -> dict[str, Any]:
     """Project D1 from its real warm-started stage graph and measured stage medians."""
 
     stages = evidence.get("stage_timings")
     if not isinstance(stages, Mapping):
         raise ValueError("deep runtime evidence lacks stage timing rows")
-    pilot = ABPH_ACCELERATED_STAGE_BUDGETS["pilot"]
+    pilot = (
+        ABPH_ACCELERATED_STAGE_BUDGETS["pilot"]
+        if stage_budgets is None
+        else stage_budgets
+    )
     update_counts = {
         "phase1_root": 1,
         **{
@@ -343,7 +352,7 @@ def _deep_stage_projection(
     )
     validation_seconds = full_validation_seconds * validation_events
     return {
-        "contract": "adaptive_binary_d1_stage_aware_wall_projection_v1",
+        "contract": projection_contract,
         "stages": rows,
         "nominal_updates": sum(update_counts.values()),
         "projected_training_seconds": training_seconds,
@@ -379,6 +388,7 @@ def compare_ddp_smokes(
     single_path: str | Path,
     ddp4_path: str | Path,
     *,
+    distributed_world_size: int = 4,
     parameter_atol: float = ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
         "parameter_absolute_tolerance"
     ],
@@ -389,11 +399,16 @@ def compare_ddp_smokes(
     import torch
 
     single = _load_smoke(single_path, expected_world_size=1)
-    ddp4 = _load_smoke(ddp4_path, expected_world_size=4)
+    distributed_label = f"ddp{int(distributed_world_size)}"
+    ddp4 = _load_smoke(
+        ddp4_path, expected_world_size=int(distributed_world_size)
+    )
     if single.get("global_batch_identity_hash") != ddp4.get(
         "global_batch_identity_hash"
     ):
-        raise ValueError("single/DDP4 smoke global batch identities differ")
+        raise ValueError(
+            f"single/{distributed_label} smoke global batch identities differ"
+        )
 
     def load_state(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         try:
@@ -410,12 +425,16 @@ def compare_ddp_smokes(
         left_rows = left.get(section)
         right_rows = right.get(section)
         if not isinstance(left_rows, Mapping) or set(left_rows) != set(right_rows or {}):
-            raise ValueError(f"single/DDP4 smoke {section} membership differs")
+            raise ValueError(
+                f"single/{distributed_label} smoke {section} membership differs"
+            )
         for name in sorted(left_rows):
             lhs = left_rows[name].detach().to(torch.float64)
             rhs = right_rows[name].detach().to(torch.float64)
             if lhs.shape != rhs.shape:
-                raise ValueError(f"single/DDP4 smoke tensor shape differs for {name}")
+                raise ValueError(
+                    f"single/{distributed_label} smoke tensor shape differs for {name}"
+                )
             delta = (lhs - rhs).abs()
             maximum_absolute = max(maximum_absolute, float(delta.max().item()))
             scale = torch.maximum(lhs.abs(), rhs.abs()).clamp_min(1.0e-12)
@@ -445,11 +464,15 @@ def compare_ddp_smokes(
         "preclip_gradient_norm_within_tolerance": gradient_norm_delta
         <= parameter_atol,
         "single_resume_passed": bool(single["checks"].get("checkpoint_resume")),
-        "ddp4_resume_passed": bool(ddp4["checks"].get("checkpoint_resume")),
-        "ddp4_failure_consensus_passed": bool(
+        f"{distributed_label}_resume_passed": bool(
+            ddp4["checks"].get("checkpoint_resume")
+        ),
+        f"{distributed_label}_failure_consensus_passed": bool(
             ddp4["checks"].get("forward_failure_consensus")
         ),
-        "ddp4_wrapper_rebuild_passed": bool(ddp4["checks"].get("wrapper_rebuild")),
+        f"{distributed_label}_wrapper_rebuild_passed": bool(
+            ddp4["checks"].get("wrapper_rebuild")
+        ),
     }
     return {
         "ok": all(checks.values()),
@@ -461,15 +484,26 @@ def compare_ddp_smokes(
         "gradient_norm_absolute_difference": gradient_norm_delta,
         "compared_tensor_count": compared,
         "single_smoke": _artifact_row(single_path),
-        "ddp4_smoke": _artifact_row(ddp4_path),
+        f"{distributed_label}_smoke": _artifact_row(ddp4_path),
     }
 
 
-def _runtime_batch_contract(path: str | Path, *, variant: str) -> dict[str, Any]:
+def _runtime_batch_contract(
+    path: str | Path,
+    *,
+    variant: str,
+    expected_world_size: int = 4,
+) -> dict[str, Any]:
     payload = _read_json(path)
     contract = RuntimeBatchContract.from_dict(payload)
-    if contract.variant_name != variant or contract.requested_world_size != 4:
-        raise ValueError(f"DDP4 runtime batch contract identity mismatch for {variant}")
+    if (
+        contract.variant_name != variant
+        or contract.requested_world_size != int(expected_world_size)
+    ):
+        raise ValueError(
+            f"DDP{expected_world_size} runtime batch contract identity mismatch "
+            f"for {variant}"
+        )
     if set(contract.selections) != {"root_hierarchy", "renderer_distribution"}:
         raise ValueError(f"runtime batch contract stage membership mismatch for {variant}")
     return {
@@ -570,9 +604,12 @@ def build_runtime_acceptance_report(
     *,
     single_run_dirs: Mapping[str, str | Path],
     ddp4_run_dirs: Mapping[str, str | Path],
+    ddp8_run_dirs: Mapping[str, str | Path] | None = None,
     single_smoke_path: str | Path,
     ddp4_smoke_path: str | Path,
+    ddp8_smoke_path: str | Path | None = None,
     ddp4_batch_contracts: Mapping[str, str | Path],
+    ddp8_batch_contracts: Mapping[str, str | Path] | None = None,
     single_path_acceptance: str | Path,
     extension_reports: Mapping[str, str | Path] | None = None,
     optimized_pilot_report: str | Path | None = None,
@@ -583,6 +620,20 @@ def build_runtime_acceptance_report(
         raise ValueError("runtime acceptance requires exact root/deep benchmark membership")
     if set(ddp4_batch_contracts) != set(variants):
         raise ValueError("runtime acceptance requires exact root/deep DDP4 batch contracts")
+    ddp8_requested = any(
+        value is not None
+        for value in (ddp8_run_dirs, ddp8_smoke_path, ddp8_batch_contracts)
+    )
+    if ddp8_requested and (
+        ddp8_run_dirs is None
+        or ddp8_smoke_path is None
+        or ddp8_batch_contracts is None
+        or set(ddp8_run_dirs) != set(variants)
+        or set(ddp8_batch_contracts) != set(variants)
+    ):
+        raise ValueError(
+            "DDP8 acceptance requires exact root/deep runs, smoke, and batch contracts"
+        )
     single = {
         variant: _benchmark_evidence(
             single_run_dirs[variant], expected_variant=variant, expected_world_size=1
@@ -600,6 +651,34 @@ def build_runtime_acceptance_report(
         variant: _runtime_batch_contract(ddp4_batch_contracts[variant], variant=variant)
         for variant in variants
     }
+    ddp8: dict[str, Any] = {}
+    ddp8_smoke: dict[str, Any] | None = None
+    ddp8_contract_rows: dict[str, Any] = {}
+    if ddp8_requested:
+        assert ddp8_run_dirs is not None
+        assert ddp8_smoke_path is not None
+        assert ddp8_batch_contracts is not None
+        ddp8 = {
+            variant: _benchmark_evidence(
+                ddp8_run_dirs[variant],
+                expected_variant=variant,
+                expected_world_size=8,
+            )
+            for variant in variants
+        }
+        ddp8_smoke = compare_ddp_smokes(
+            single_smoke_path,
+            ddp8_smoke_path,
+            distributed_world_size=8,
+        )
+        ddp8_contract_rows = {
+            variant: _runtime_batch_contract(
+                ddp8_batch_contracts[variant],
+                variant=variant,
+                expected_world_size=8,
+            )
+            for variant in variants
+        }
     single_path = _single_path_report(single_path_acceptance)
     comparisons: dict[str, Any] = {}
     trajectory_checks: list[bool] = []
@@ -672,6 +751,113 @@ def build_runtime_acceptance_report(
         ],
     }
     ddp4_approved = all(runtime_checks.values())
+    ddp8_checks: dict[str, bool] | None = None
+    ddp8_projection: dict[str, Any] | None = None
+    ddp8_approved = False
+    if ddp8_requested:
+        ddp8_trajectory_checks: list[bool] = []
+        ddp8_coverage_checks: list[bool] = []
+        ddp8_memory_checks: list[bool] = []
+        for variant in variants:
+            four = ddp4[variant]
+            eight = ddp8[variant]
+            relative_loss_delta = abs(
+                eight["selection_score"] - four["selection_score"]
+            ) / max(abs(four["selection_score"]), 1.0e-12)
+            comparisons[variant].update(
+                {
+                    "ddp8_jets_per_second": eight["jets_per_second"],
+                    "ddp8_over_ddp4_speedup": (
+                        eight["jets_per_second"] / four["jets_per_second"]
+                    ),
+                    "ddp8_validation_seconds": eight["validation_seconds"],
+                    "ddp8_over_ddp4_validation_speedup": (
+                        four["validation_seconds"] / eight["validation_seconds"]
+                    ),
+                    "ddp8_selection_score": eight["selection_score"],
+                    "ddp8_vs_ddp4_relative_selection_score_difference": (
+                        relative_loss_delta
+                    ),
+                    "ddp8_communication_fraction": eight[
+                        "communication_fraction"
+                    ],
+                    "ddp8_memory_utilization": eight["memory_utilization"],
+                    "ddp8_same_input_provenance": (
+                        eight["input_provenance_hash"]
+                        == four["input_provenance_hash"]
+                    ),
+                }
+            )
+            ddp8_trajectory_checks.append(
+                relative_loss_delta
+                <= ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                    "validation_relative_loss_tolerance"
+                ]
+            )
+            ddp8_coverage_checks.append(
+                eight["validation_n_jets"] == expected_validation_jets
+                and comparisons[variant]["ddp8_same_input_provenance"]
+            )
+            ddp8_memory_checks.append(
+                eight["memory_utilization"]
+                <= ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                    "memory_utilization_maximum"
+                ]
+            )
+        deep8 = comparisons["D1_kt32_mh4_particles"]
+        ddp8_projection = _deep_stage_projection(
+            ddp8["D1_kt32_mh4_particles"],
+            validation_jets=expected_validation_jets,
+            stage_budgets=ABPH_SEVEN_DAY_STAGE_BUDGETS["pilot"],
+            projection_contract=(
+                "adaptive_binary_d1_stage_aware_wall_projection_v2_7day"
+            ),
+        )
+        ddp4_reference_checks = {
+            key: value
+            for key, value in runtime_checks.items()
+            if key != "deep_projected_wall_below_48_hours"
+        }
+        ddp8_communication = deep8["ddp8_communication_fraction"]
+        ddp8_checks = {
+            "ddp4_reference_quality_checks_pass": all(
+                ddp4_reference_checks.values()
+            ),
+            "single_vs_ddp8_transport_parity": bool(ddp8_smoke["ok"]),
+            "exact_ddp8_model_val_identity_counts": all(ddp8_coverage_checks),
+            "ddp8_validation_trajectories_compatible": all(
+                ddp8_trajectory_checks
+            ),
+            "deep_ddp8_speedup_over_ddp4_at_least_1p5": (
+                deep8["ddp8_over_ddp4_speedup"]
+                >= ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                    "ddp8_over_ddp4_speedup_minimum"
+                ]
+            ),
+            "deep_ddp8_communication_fraction_below_35_percent": (
+                ddp8_communication is not None
+                and float(ddp8_communication)
+                < ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                    "communication_fraction_maximum"
+                ]
+            ),
+            "deep_ddp8_validation_faster_than_ddp4": (
+                deep8["ddp8_over_ddp4_validation_speedup"] > 1.0
+            ),
+            "all_ddp8_memory_contracts_pass": all(ddp8_memory_checks),
+            "ddp8_production_topology_batch_contracts_present": (
+                len(ddp8_contract_rows) == 2
+            ),
+            "seven_day_nominal_projection_pass": (
+                float(ddp8_projection["projected_total_wall_seconds"])
+                < ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                    "seven_day_projected_wall_seconds_maximum"
+                ]
+            ),
+        }
+        ddp8_approved = all(ddp8_checks.values())
+    active_approved = ddp8_approved if ddp8_requested else ddp4_approved
+    active_checks = ddp8_checks if ddp8_requested else runtime_checks
 
     extension_rows: dict[str, Any] = {}
     extension_complete = extension_reports is not None and set(extension_reports) == set(
@@ -686,7 +872,9 @@ def build_runtime_acceptance_report(
         extension_complete
         and all(not row["schedule_truncated"] for row in extension_rows.values())
     )
-    representative_screening_approved = bool(ddp4_approved and screening_not_truncated)
+    representative_screening_approved = bool(
+        active_approved and screening_not_truncated
+    )
     pilot = None if optimized_pilot_report is None else _pilot_report(optimized_pilot_report)
     pilot_approved = bool(
         representative_screening_approved
@@ -696,18 +884,29 @@ def build_runtime_acceptance_report(
     )
     report: dict[str, Any] = {
         "contract": ABPH_RUNTIME_ACCEPTANCE_CONTRACT,
-        "ok": ddp4_approved,
-        "status": "ddp4_runtime_approved" if ddp4_approved else "runtime_gate_failed",
+        "ok": active_approved,
+        "status": (
+            "ddp8_runtime_approved"
+            if ddp8_approved
+            else (
+                "ddp4_runtime_approved"
+                if ddp4_approved and not ddp8_requested
+                else "runtime_gate_failed"
+            )
+        ),
         "final_test_loaded": False,
         "thresholds": dict(ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS),
         "expected_validation_jets": int(expected_validation_jets),
         "runtime_gate": {
-            "approved": ddp4_approved,
-            "checks": runtime_checks,
+            "approved": active_approved,
+            "checks": active_checks,
+            "ddp4_reference_checks": runtime_checks,
+            "ddp8_checks": ddp8_checks,
             "comparisons": comparisons,
             "deep_projected_wall_seconds": deep_projected_wall_seconds,
             "deep_nominal_update_projection": deep_nominal_updates,
             "deep_stage_aware_projection": deep_projection,
+            "ddp8_seven_day_projection": ddp8_projection,
             "deep_bottleneck_buckets": ddp4[
                 "D1_kt32_mh4_particles"
             ]["bucket_timings"],
@@ -715,6 +914,9 @@ def build_runtime_acceptance_report(
             "single_runs": single,
             "ddp4_runs": ddp4,
             "ddp4_batch_contracts": batch_contracts,
+            "ddp8_runs": ddp8,
+            "ddp8_batch_contracts": ddp8_contract_rows,
+            "ddp8_transport_smoke": ddp8_smoke,
             "single_path_acceptance": single_path,
         },
         "representative_screening_gate": {
@@ -730,9 +932,19 @@ def build_runtime_acceptance_report(
         },
         "promotion": {
             "ddp4_runtime_approved": ddp4_approved,
+            "ddp8_runtime_approved": ddp8_approved,
             "optimized_pilot_submission_allowed": representative_screening_approved,
             "highdata_submission_allowed": pilot_approved,
-            "production_reconstructor_parallelism": "ddp4" if ddp4_approved else "single",
+            "production_reconstructor_parallelism": (
+                "ddp8"
+                if ddp8_approved
+                else ("ddp4" if ddp4_approved else "single")
+            ),
+            "production_schedule_policy": (
+                "accelerated_screening_v2_7day"
+                if ddp8_approved
+                else "accelerated_screening_v1"
+            ),
         },
     }
     report["acceptance_content_hash"] = canonical_hash(report)
@@ -763,6 +975,7 @@ def require_runtime_acceptance(
         raise ValueError("runtime acceptance artifact is not approved")
     field = {
         "ddp4_runtime": "ddp4_runtime_approved",
+        "ddp8_runtime": "ddp8_runtime_approved",
         "optimized_pilot": "optimized_pilot_submission_allowed",
         "highdata": "highdata_submission_allowed",
     }.get(scope)

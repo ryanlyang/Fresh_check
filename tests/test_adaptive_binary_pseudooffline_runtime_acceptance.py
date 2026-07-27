@@ -206,6 +206,7 @@ def _measurement(
     accumulation: int,
     *,
     variant_name: str,
+    world_size: int = 4,
 ) -> FullStepBatchMeasurement:
     return FullStepBatchMeasurement(
         stage_family=family,
@@ -218,9 +219,9 @@ def _measurement(
         slurm_job_partition="tigris",
         local_batch_size=local,
         accumulation_steps=accumulation,
-        requested_world_size=4,
-        measured_world_size=4,
-        rank_count=4,
+        requested_world_size=world_size,
+        measured_world_size=world_size,
+        rank_count=world_size,
         distributed_backend="nccl",
         successful=True,
         all_ranks_completed=True,
@@ -242,18 +243,22 @@ def _measurement(
         total_device_memory_bytes=1000,
         peak_device_memory_bytes=700,
         free_device_memory_bytes_at_peak=300,
-        rank_measurement_hashes=("r0", "r1", "r2", "r3"),
+        rank_measurement_hashes=tuple(f"r{rank}" for rank in range(world_size)),
     )
 
 
-def _batch_contract(path: Path, variant: str) -> Path:
+def _batch_contract(path: Path, variant: str, *, world_size: int = 4) -> Path:
     contract = calibrate_runtime_batch_contract(
         variant_name=variant,
         resolved_variant_config_hash="config",
         runtime_provenance_hash="runtime",
-        requested_world_size=4,
+        requested_world_size=world_size,
         probe=lambda family, local, accumulation: _measurement(
-            family, local, accumulation, variant_name=variant
+            family,
+            local,
+            accumulation,
+            variant_name=variant,
+            world_size=world_size,
         ),
     )
     return write_runtime_batch_contract(path, contract)
@@ -414,6 +419,57 @@ def test_acceptance_separates_runtime_pilot_and_highdata_gates(tmp_path: Path):
     )
     path = _write_json(tmp_path / "acceptance.json", complete)
     assert require_runtime_acceptance(path, scope="highdata")["ok"] is True
+
+
+def test_ddp8_seven_day_gate_is_bound_to_ddp4_and_world8_contracts(
+    tmp_path: Path,
+):
+    single, ddp4, contracts, smokes, single_path = _evidence(tmp_path)
+    ddp8 = {
+        variant: _benchmark(
+            tmp_path / f"ddp8-{variant}",
+            variant=variant,
+            world_size=8,
+            sampled_jets=800,
+            update_seconds=12.0,
+            validation_seconds=2.5,
+        )
+        for variant in (ROOT_VARIANT, DEEP_VARIANT)
+    }
+    ddp8_contracts = {
+        variant: _batch_contract(
+            tmp_path / f"{variant}-ddp8-batch.json",
+            variant,
+            world_size=8,
+        )
+        for variant in (ROOT_VARIANT, DEEP_VARIANT)
+    }
+    report = build_runtime_acceptance_report(
+        single_run_dirs=single,
+        ddp4_run_dirs=ddp4,
+        ddp8_run_dirs=ddp8,
+        single_smoke_path=smokes[0],
+        ddp4_smoke_path=smokes[1],
+        ddp8_smoke_path=_smoke(tmp_path / "ddp8-smoke", world_size=8),
+        ddp4_batch_contracts=contracts,
+        ddp8_batch_contracts=ddp8_contracts,
+        single_path_acceptance=single_path,
+        expected_validation_jets=4_096,
+    )
+    assert report["ok"] is True
+    assert report["promotion"]["ddp8_runtime_approved"] is True
+    assert (
+        report["promotion"]["production_reconstructor_parallelism"] == "ddp8"
+    )
+    assert (
+        report["promotion"]["production_schedule_policy"]
+        == "accelerated_screening_v2_7day"
+    )
+    projection = report["runtime_gate"]["ddp8_seven_day_projection"]
+    assert projection["nominal_updates"] == 5_006
+    assert projection["projected_validation_events"] == 9
+    path = _write_json(tmp_path / "ddp8-acceptance.json", report)
+    assert require_runtime_acceptance(path, scope="ddp8_runtime")["ok"] is True
 
 
 def test_deep_speedup_below_promotion_floor_fails_closed(tmp_path: Path):

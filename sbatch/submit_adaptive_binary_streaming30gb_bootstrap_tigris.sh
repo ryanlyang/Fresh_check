@@ -38,9 +38,10 @@ fresh_require_file "${ABPH_PREPARED_ROOT}/runs/A0_hlt_part/best_model_val.pt"
 }
 mkdir -p "${ABPH_BOOTSTRAP_EVIDENCE_ROOT}"
 projection="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/storage_projection.json"
-export ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_measurements"
-export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_contracts"
-export ABPH_RUNTIME_BATCH_PROBE_MANIFEST="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_probes.tsv"
+ddp4_measurements="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_measurements_ddp4"
+ddp4_contracts="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_contracts_ddp4"
+ddp8_measurements="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_measurements_ddp8"
+ddp8_contracts="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_contracts_ddp8"
 export ABPH_SINGLE_PATH_ACCEPTANCE_PATH="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_acceptance/single_path_acceptance.json"
 
 fresh_run "${PYTHON_BIN}" scripts/build_adaptive_binary_bootstrap_storage_projection.py \
@@ -53,15 +54,33 @@ export ABPH_ROOT="${ABPH_PREPARED_ROOT}"
 export ABPH_STORAGE_PROFILE=cache_heavy_v1
 export ABPH_RUNTIME_ACCEPTANCE_ROOT="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_acceptance"
 
+export ABPH_RUNTIME_BATCH_WORLD_SIZE=4
+export ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT="${ddp4_measurements}"
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${ddp4_contracts}"
+export ABPH_RUNTIME_BATCH_PROBE_MANIFEST="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_probes_ddp4.tsv"
 bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh" \
   B1_semantic_query_root D1_kt32_mh4_particles
-probe_manifest="${ABPH_RUNTIME_BATCH_PROBE_MANIFEST}"
-mapfile -t contract_job_ids < <(awk -F $'\t' '$2 == "compile" {print $4}' "${probe_manifest}")
-[[ "${#contract_job_ids[@]}" -eq 2 ]] || {
-  echo "Expected exactly two runtime batch contract jobs" >&2
+mapfile -t ddp4_contract_job_ids < <(
+  awk -F $'\t' '$2 == "compile" {print $4}' "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST}"
+)
+
+export ABPH_RUNTIME_BATCH_WORLD_SIZE=8
+export ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT="${ddp8_measurements}"
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${ddp8_contracts}"
+export ABPH_RUNTIME_BATCH_PROBE_MANIFEST="${ABPH_BOOTSTRAP_EVIDENCE_ROOT}/runtime_batch_probes_ddp8.tsv"
+bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh" \
+  B1_semantic_query_root D1_kt32_mh4_particles
+mapfile -t ddp8_contract_job_ids < <(
+  awk -F $'\t' '$2 == "compile" {print $4}' "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST}"
+)
+contract_job_ids=("${ddp4_contract_job_ids[@]}" "${ddp8_contract_job_ids[@]}")
+[[ "${#contract_job_ids[@]}" -eq 4 ]] || {
+  echo "Expected exactly four DDP4/DDP8 runtime batch contract jobs" >&2
   exit 2
 }
 export ABPH_RUNTIME_BATCH_DEPENDENCY="afterok:$(IFS=:; echo "${contract_job_ids[*]}")"
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${ddp4_contracts}"
+export ABPH_RUNTIME_BATCH_CONTRACT_ROOT_DDP8="${ddp8_contracts}"
 
 bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_acceptance_tigris.sh"
 if fresh_is_dry_run; then
@@ -84,6 +103,7 @@ runtime_acceptance="${ABPH_RUNTIME_ACCEPTANCE_ROOT}/runtime_acceptance.json"
 export ABPH_BOOTSTRAP_CAMPAIGN_ROOT
 export ABPH_BOOTSTRAP_STORAGE_PROJECTION="${projection}"
 export ABPH_BOOTSTRAP_RUNTIME_ACCEPTANCE="${runtime_acceptance}"
+export ABPH_BOOTSTRAP_RUNTIME_SCOPE=ddp8_runtime
 export ABPH_BOOTSTRAP_EVIDENCE_ROOT ABPH_PREPARED_ROOT
 continuation="${PROJECT_DIR}/sbatch/run_submit_adaptive_binary_streaming_campaign.sh"
 prune_submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \

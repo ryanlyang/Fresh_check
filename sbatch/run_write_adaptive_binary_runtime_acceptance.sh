@@ -20,6 +20,7 @@ source "${PROJECT_DIR}/sbatch/common.sh"
 : "${ABPH_ROOT:?Set ABPH_ROOT}"
 : "${ABPH_RUNTIME_ACCEPTANCE_ROOT:=${ABPH_ROOT}/audits/runtime_acceptance}"
 : "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
+: "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT_DDP8:=${ABPH_ROOT}/runtime_batch_contracts_ddp8}"
 : "${ABPH_SINGLE_PATH_ACCEPTANCE_PATH:=${ABPH_ROOT}/audits/runtime_reference/single_path_acceptance.json}"
 export PYTHONNOUSERSITE=1
 fresh_setup
@@ -29,10 +30,15 @@ cmd=("${PYTHON_BIN}" -u scripts/write_adaptive_binary_runtime_acceptance.py
   --single-deep-run "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/single/benchmarks/D1_kt32_mh4_particles"
   --ddp4-root-run "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp4/benchmarks/B1_semantic_query_root"
   --ddp4-deep-run "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp4/benchmarks/D1_kt32_mh4_particles"
+  --ddp8-root-run "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp8/benchmarks/B1_semantic_query_root"
+  --ddp8-deep-run "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp8/benchmarks/D1_kt32_mh4_particles"
   --single-smoke "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/single/transport_smoke/smoke_report.json"
   --ddp4-smoke "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp4/transport_smoke/smoke_report.json"
+  --ddp8-smoke "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/ddp8/transport_smoke/smoke_report.json"
   --ddp4-root-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/B1_semantic_query_root/runtime_batch_contract.json"
   --ddp4-deep-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT}/D1_kt32_mh4_particles/runtime_batch_contract.json"
+  --ddp8-root-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT_DDP8}/B1_semantic_query_root/runtime_batch_contract.json"
+  --ddp8-deep-batch-contract "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT_DDP8}/D1_kt32_mh4_particles/runtime_batch_contract.json"
   --single-path-acceptance "${ABPH_SINGLE_PATH_ACCEPTANCE_PATH}"
   --expected-validation-jets "${ABPH_RUNTIME_REFERENCE_VALIDATION_JETS:-4096}"
   --output "${ABPH_RUNTIME_ACCEPTANCE_ROOT}/runtime_acceptance.json")

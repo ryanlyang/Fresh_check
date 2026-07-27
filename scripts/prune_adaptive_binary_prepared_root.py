@@ -47,7 +47,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("prepared root does not look like an ABPH campaign")
     if evidence.parent != root / "audits" or not evidence.name.startswith("bootstrap_"):
         raise ValueError("bootstrap evidence is not the expected retained subtree")
-    require_runtime_acceptance(args.runtime_acceptance, scope="ddp4_runtime")
+    require_runtime_acceptance(
+        args.runtime_acceptance,
+        scope=os.environ.get("ABPH_BOOTSTRAP_RUNTIME_SCOPE", "ddp4_runtime"),
+    )
 
     before = _tree_bytes(root)
     removals = []

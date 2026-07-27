@@ -70,6 +70,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     reconstructor_runtime_provenance,
     reconstructor_step,
     resolve_variant_config,
+    schedule_contract_for_policy,
     train_reconstructor_curriculum,
     variant_spec,
 )
@@ -855,6 +856,16 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
     maximum_capacity = _maximum_capacity(resolved)
     benchmark_updates = 20
     accelerated_schedule = not args.smoke and not args.runtime_reference_benchmark
+    schedule_contract = (
+        schedule_contract_for_policy(
+            os.environ.get(
+                "ABPH_RECONSTRUCTOR_SCHEDULE_POLICY",
+                "accelerated_screening_v1",
+            )
+        )
+        if accelerated_schedule
+        else ABPH_ACCELERATED_SCHEDULE_CONTRACT
+    )
     schedule_profile = None
     root_role = "trained"
     hierarchy_role = "trained" if maximum_capacity > 1 else "disabled"
@@ -870,11 +881,20 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         if source_variant is not None and tier == "D" and maximum_capacity > 1:
             hierarchy_role = "warm_started_handoff"
         root_budget = budget_for_stage_role(
-            accelerated_stage_budget(schedule_profile, "root"), root_role
+            accelerated_stage_budget(
+                schedule_profile,
+                "root",
+                schedule_contract=schedule_contract,
+            ),
+            root_role,
         )
         hierarchy_budget = (
             budget_for_stage_role(
-                accelerated_stage_budget(schedule_profile, "hierarchy"),
+                accelerated_stage_budget(
+                    schedule_profile,
+                    "hierarchy",
+                    schedule_contract=schedule_contract,
+                ),
                 hierarchy_role,
             )
             if hierarchy_role != "disabled"
@@ -882,14 +902,23 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         )
         renderer_budget = (
             budget_for_stage_role(
-                accelerated_stage_budget(schedule_profile, "renderer"), renderer_role
+                accelerated_stage_budget(
+                    schedule_profile,
+                    "renderer",
+                    schedule_contract=schedule_contract,
+                ),
+                renderer_role,
             )
             if renderer_role != "disabled"
             else None
         )
         distribution_budget = (
             budget_for_stage_role(
-                accelerated_stage_budget(schedule_profile, "distribution"),
+                accelerated_stage_budget(
+                    schedule_profile,
+                    "distribution",
+                    schedule_contract=schedule_contract,
+                ),
                 distribution_role,
             )
             if distribution_role != "disabled"
@@ -948,7 +977,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         renderer_enabled=renderer_enabled,
         distribution_enabled=distribution_enabled,
         schedule_contract=(
-            ABPH_ACCELERATED_SCHEDULE_CONTRACT
+            schedule_contract
             if accelerated_schedule
             else "adaptive_binary_pseudooffline_legacy_fixed_v1"
         ),

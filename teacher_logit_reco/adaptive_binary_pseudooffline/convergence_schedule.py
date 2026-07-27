@@ -13,6 +13,17 @@ from .config import canonical_hash
 ABPH_ACCELERATED_SCHEDULE_CONTRACT = (
     "adaptive_binary_pseudooffline_accelerated_screening_v1"
 )
+ABPH_SEVEN_DAY_SCHEDULE_CONTRACT = (
+    "adaptive_binary_pseudooffline_accelerated_screening_v2_7day"
+)
+ABPH_ACCELERATED_SCHEDULE_CONTRACTS: tuple[str, ...] = (
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    ABPH_SEVEN_DAY_SCHEDULE_CONTRACT,
+)
+ABPH_SCHEDULE_POLICY_BY_CONTRACT: Mapping[str, str] = {
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT: "accelerated_screening_v1",
+    ABPH_SEVEN_DAY_SCHEDULE_CONTRACT: "accelerated_screening_v2_7day",
+}
 ABPH_EXTENSION_COMPARISON_CONTRACT = (
     "adaptive_binary_pseudooffline_extension_comparison_v1"
 )
@@ -82,6 +93,29 @@ ABPH_ACCELERATED_STAGE_BUDGETS: Mapping[
     },
 }
 
+ABPH_SEVEN_DAY_STAGE_BUDGETS: Mapping[
+    str, Mapping[str, StageScheduleBudget]
+] = {
+    "pilot": {
+        # Locked global batches make these approximately 6.1, 2.0, 3.1,
+        # and 2.0 passes over the unchanged 500k-jet model_train split.
+        "root": StageScheduleBudget(3_000, 1_000, 4_000),
+        "hierarchy": StageScheduleBudget(1_000, 1_000, 2_000),
+        "renderer": StageScheduleBudget(3_000, 1_000, 4_000),
+        "distribution": StageScheduleBudget(2_000, 1_000, 3_000),
+    },
+    # High-data keeps the established policy until the pilot demonstrates
+    # signal and resolves whether its extension blocks were needed.
+    "highdata": dict(ABPH_ACCELERATED_STAGE_BUDGETS["highdata"]),
+}
+
+ABPH_STAGE_BUDGETS_BY_CONTRACT: Mapping[
+    str, Mapping[str, Mapping[str, StageScheduleBudget]]
+] = {
+    ABPH_ACCELERATED_SCHEDULE_CONTRACT: ABPH_ACCELERATED_STAGE_BUDGETS,
+    ABPH_SEVEN_DAY_SCHEDULE_CONTRACT: ABPH_SEVEN_DAY_STAGE_BUDGETS,
+}
+
 
 def infer_campaign_schedule_profile(
     *, model_train_jets: int, model_val_jets: int
@@ -100,14 +134,43 @@ def infer_campaign_schedule_profile(
     return matches[0]
 
 
-def accelerated_stage_budget(profile: str, stage_family: str) -> StageScheduleBudget:
+def accelerated_stage_budget(
+    profile: str,
+    stage_family: str,
+    *,
+    schedule_contract: str = ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+) -> StageScheduleBudget:
     normalized_profile = str(profile).strip().lower()
     normalized_family = str(stage_family).strip().lower()
-    if normalized_profile not in ABPH_ACCELERATED_STAGE_BUDGETS:
+    budgets = ABPH_STAGE_BUDGETS_BY_CONTRACT.get(str(schedule_contract))
+    if budgets is None:
+        raise ValueError(f"unknown accelerated schedule contract {schedule_contract!r}")
+    if normalized_profile not in budgets:
         raise ValueError(f"unknown accelerated schedule profile {profile!r}")
     if normalized_family not in ABPH_STAGE_FAMILIES:
         raise ValueError(f"unknown stage family {stage_family!r}")
-    return ABPH_ACCELERATED_STAGE_BUDGETS[normalized_profile][normalized_family]
+    return budgets[normalized_profile][normalized_family]
+
+
+def schedule_contract_for_policy(policy_label: str) -> str:
+    normalized = str(policy_label).strip()
+    matches = [
+        contract
+        for contract, label in ABPH_SCHEDULE_POLICY_BY_CONTRACT.items()
+        if label == normalized
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"unknown ABPH schedule policy {policy_label!r}")
+    return matches[0]
+
+
+def schedule_policy_for_contract(schedule_contract: str) -> str:
+    try:
+        return ABPH_SCHEDULE_POLICY_BY_CONTRACT[str(schedule_contract)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown ABPH schedule contract {schedule_contract!r}"
+        ) from exc
 
 
 def budget_for_stage_role(
@@ -391,10 +454,13 @@ def build_extension_comparison_report(
 
 __all__ = [
     "ABPH_ACCELERATED_SCHEDULE_CONTRACT",
+    "ABPH_ACCELERATED_SCHEDULE_CONTRACTS",
     "ABPH_ACCELERATED_STAGE_BUDGETS",
     "ABPH_EXTENSION_COMPARISON_CONTRACT",
     "ABPH_LEGACY_SCHEDULE_CONTRACT",
     "ABPH_SCHEDULE_PROFILES",
+    "ABPH_SEVEN_DAY_SCHEDULE_CONTRACT",
+    "ABPH_SEVEN_DAY_STAGE_BUDGETS",
     "ABPH_STAGE_FAMILIES",
     "ABPH_STAGE_ROLES",
     "StageContinuationDecision",
@@ -406,6 +472,8 @@ __all__ = [
     "infer_campaign_schedule_profile",
     "reconstruction_materially_improved",
     "relative_reconstruction_improvement",
+    "schedule_contract_for_policy",
+    "schedule_policy_for_contract",
     "tagging_conclusion_changed",
     "tagging_signal_category",
 ]

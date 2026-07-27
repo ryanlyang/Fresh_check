@@ -64,6 +64,22 @@ if [[ "${VARIANT}" =~ ^[BCD] ]]; then
       }
       [[ "${ABPH_DISTRIBUTED_WORLD_SIZE}" == "4" ]] || { echo "ddp4 world size must be four" >&2; exit 2; }
       ;;
+    ddp8)
+      [[ "${ABPH_JOB_LAUNCHER}" == "srun" ]] || { echo "ddp8 requires srun" >&2; exit 2; }
+      [[ "${ABPH_DISTRIBUTED_NODES}" == "8" && "${ABPH_DISTRIBUTED_NTASKS}" == "8" ]] || {
+        echo "ddp8 requires eight nodes and eight tasks" >&2
+        exit 2
+      }
+      [[ "${ABPH_DISTRIBUTED_NTASKS_PER_NODE}" == "1" && "${ABPH_DISTRIBUTED_GPUS_PER_NODE}" == "1" ]] || {
+        echo "ddp8 requires one task and one GPU per node" >&2
+        exit 2
+      }
+      [[ "${ABPH_DISTRIBUTED_WORLD_SIZE}" == "8" ]] || { echo "ddp8 world size must be eight" >&2; exit 2; }
+      [[ "${ABPH_RECONSTRUCTOR_SCHEDULE_POLICY:-}" == "accelerated_screening_v2_7day" ]] || {
+        echo "ddp8 requires accelerated_screening_v2_7day" >&2
+        exit 2
+      }
+      ;;
     *)
       echo "unsupported ABPH_RECONSTRUCTOR_PARALLELISM=${ABPH_RECONSTRUCTOR_PARALLELISM}" >&2
       exit 2

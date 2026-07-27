@@ -24,10 +24,12 @@ from jetclass_fresh.hlt_baseline import require_torch, resolve_device, set_train
 
 from .convergence_schedule import (
     ABPH_ACCELERATED_SCHEDULE_CONTRACT,
+    ABPH_ACCELERATED_SCHEDULE_CONTRACTS,
     ABPH_LEGACY_SCHEDULE_CONTRACT,
     ABPH_STAGE_ROLES,
     StageScheduleBudget,
     decide_stage_continuation,
+    schedule_policy_for_contract,
 )
 from .checkpoints import (
     ABPH_COMPACT_SELECTED_CHECKPOINT_CONTRACT,
@@ -279,7 +281,7 @@ class ReconstructorCurriculumConfig:
         for family, role in roles.items():
             if str(role) not in ABPH_STAGE_ROLES:
                 raise ValueError(f"invalid {family} stage role {role!r}")
-        if self.schedule_contract == ABPH_ACCELERATED_SCHEDULE_CONTRACT:
+        if self.schedule_contract in ABPH_ACCELERATED_SCHEDULE_CONTRACTS:
             if self.campaign_schedule_profile not in {"pilot", "highdata"}:
                 raise ValueError(
                     "accelerated schedule requires pilot or highdata campaign profile"
@@ -340,7 +342,7 @@ class ReconstructorCurriculumConfig:
 
     @property
     def accelerated(self) -> bool:
-        return self.schedule_contract == ABPH_ACCELERATED_SCHEDULE_CONTRACT
+        return self.schedule_contract in ABPH_ACCELERATED_SCHEDULE_CONTRACTS
 
     def stage_budget(self, family: str) -> StageScheduleBudget:
         normalized = str(family)
@@ -3155,7 +3157,7 @@ def train_reconstructor_curriculum(
         "schedule": {
             "contract": config.curriculum.schedule_contract,
             "policy_label": (
-                "accelerated_screening_v1"
+                schedule_policy_for_contract(config.curriculum.schedule_contract)
                 if config.curriculum.accelerated
                 else "legacy_fixed_v1"
             ),

@@ -29,7 +29,7 @@ import os
 from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_acceptance import require_runtime_acceptance
 from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import require_storage_projection
 
-require_runtime_acceptance(os.environ["ABPH_BOOTSTRAP_RUNTIME_ACCEPTANCE"], scope="ddp4_runtime")
+require_runtime_acceptance(os.environ["ABPH_BOOTSTRAP_RUNTIME_ACCEPTANCE"], scope="ddp8_runtime")
 require_storage_projection(
     os.environ["ABPH_BOOTSTRAP_STORAGE_PROJECTION"],
     campaign_root=os.environ["ABPH_BOOTSTRAP_CAMPAIGN_ROOT"],
@@ -41,7 +41,8 @@ PY
 export ABPH_ROOT="${ABPH_BOOTSTRAP_CAMPAIGN_ROOT}"
 export ABPH_CAMPAIGN_MODE=pilot
 export ABPH_STAGE_MODE=full
-export ABPH_RECONSTRUCTOR_PARALLELISM=ddp4
+export ABPH_RECONSTRUCTOR_PARALLELISM=ddp8
+export ABPH_RECONSTRUCTOR_SCHEDULE_POLICY=accelerated_screening_v2_7day
 export ABPH_STORAGE_PROFILE=streaming_30gb_v1
 export ABPH_STORAGE_PROJECTION_PATH="${ABPH_BOOTSTRAP_STORAGE_PROJECTION}"
 export ABPH_RUNTIME_ACCEPTANCE_PATH="${ABPH_BOOTSTRAP_RUNTIME_ACCEPTANCE}"

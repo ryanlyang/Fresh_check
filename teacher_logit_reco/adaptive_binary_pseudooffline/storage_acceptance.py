@@ -259,7 +259,21 @@ def build_storage_acceptance(
     if float(target_mode.get("minimum_ram_headroom_fraction", -1.0)) < 0.20:
         problems.append("RAM workspace has less than the required 20% headroom")
 
-    runtime_scope = "highdata" if campaign_mode == "highdata" else "ddp4_runtime"
+    runtime_payload = _read_json(runtime_acceptance)
+    production_parallelism = str(
+        dict(runtime_payload.get("promotion", {})).get(
+            "production_reconstructor_parallelism", ""
+        )
+    )
+    runtime_scope = (
+        "highdata"
+        if campaign_mode == "highdata"
+        else f"{production_parallelism}_runtime"
+    )
+    if runtime_scope not in {"ddp4_runtime", "ddp8_runtime", "highdata"}:
+        raise ValueError(
+            "runtime acceptance does not declare a supported production topology"
+        )
     runtime = require_runtime_acceptance(runtime_acceptance, scope=runtime_scope)
     tests = require_storage_test_evidence(test_evidence)
     ram_smoke = _read_json(ram_lifecycle_smoke)

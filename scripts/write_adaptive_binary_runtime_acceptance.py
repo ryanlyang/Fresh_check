@@ -25,10 +25,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--single-deep-run", required=True)
     parser.add_argument("--ddp4-root-run", required=True)
     parser.add_argument("--ddp4-deep-run", required=True)
+    parser.add_argument("--ddp8-root-run")
+    parser.add_argument("--ddp8-deep-run")
     parser.add_argument("--single-smoke", required=True)
     parser.add_argument("--ddp4-smoke", required=True)
+    parser.add_argument("--ddp8-smoke")
     parser.add_argument("--ddp4-root-batch-contract", required=True)
     parser.add_argument("--ddp4-deep-batch-contract", required=True)
+    parser.add_argument("--ddp8-root-batch-contract")
+    parser.add_argument("--ddp8-deep-batch-contract")
     parser.add_argument("--single-path-acceptance", required=True)
     parser.add_argument("--root-extension-report")
     parser.add_argument("--deep-extension-report")
@@ -65,12 +70,29 @@ def main(argv: list[str] | None = None) -> int:
             root_variant: args.ddp4_root_run,
             deep_variant: args.ddp4_deep_run,
         },
+        ddp8_run_dirs=(
+            {
+                root_variant: args.ddp8_root_run,
+                deep_variant: args.ddp8_deep_run,
+            }
+            if args.ddp8_root_run and args.ddp8_deep_run
+            else None
+        ),
         single_smoke_path=args.single_smoke,
         ddp4_smoke_path=args.ddp4_smoke,
+        ddp8_smoke_path=args.ddp8_smoke,
         ddp4_batch_contracts={
             root_variant: args.ddp4_root_batch_contract,
             deep_variant: args.ddp4_deep_batch_contract,
         },
+        ddp8_batch_contracts=(
+            {
+                root_variant: args.ddp8_root_batch_contract,
+                deep_variant: args.ddp8_deep_batch_contract,
+            }
+            if args.ddp8_root_batch_contract and args.ddp8_deep_batch_contract
+            else None
+        ),
         single_path_acceptance=args.single_path_acceptance,
         extension_reports=extensions,
         optimized_pilot_report=args.optimized_pilot_report,
