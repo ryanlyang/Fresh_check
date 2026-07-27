@@ -3,6 +3,9 @@
 set -euo pipefail
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"
+CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"
+export CONDA_BASE CONDA_ENV PYTHONNOUSERSITE=1
 source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_setup
 
@@ -11,7 +14,6 @@ fresh_setup
 : "${ABPH_STORAGE_PROFILE:=streaming_30gb_v1}"
 : "${ABPH_STORAGE_PROJECTION_PATH:?ABPH_STORAGE_PROJECTION_PATH is required}"
 : "${ABPH_RUNTIME_ACCEPTANCE_PATH:?ABPH_RUNTIME_ACCEPTANCE_PATH is required}"
-export PYTHONNOUSERSITE=1
 
 action="${1:?Usage: run_adaptive_binary_storage_acceptance.sh <tests|ram_lifecycle_smoke|compile>}"
 evidence="${ABPH_ROOT}/storage/storage_acceptance_tests.json"

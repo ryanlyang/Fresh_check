@@ -366,6 +366,11 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
     assert ': "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"' in worker
     assert 'source "${PROJECT_DIR}/sbatch/common.sh"' in worker
     assert '${SCRIPT_DIR}/common.sh' not in worker
+    assert 'CONDA_BASE="${ABPH_CONDA_BASE:-/home/ryreu/miniforge3-aarch64}"' in worker
+    assert 'CONDA_ENV="${ABPH_CONDA_ENV:-atlas_kd_tigris}"' in worker
+    assert worker.index("CONDA_BASE=") < worker.index(
+        'source "${PROJECT_DIR}/sbatch/common.sh"'
+    )
     assert "fresh_setup\n" in worker
     assert "fresh_setup_job" not in worker
     assert "ram_lifecycle_smoke)" in worker
@@ -395,6 +400,9 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
 
 def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) -> None:
     from scripts.repair_adaptive_binary_storage_acceptance_graph import (
+        TIGRIS_CONDA_BASE,
+        TIGRIS_CONDA_ENV,
+        _job_environment,
         repaired_sbatch_command,
     )
 
@@ -423,6 +431,22 @@ def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) 
     assert "--dependency=afterok:10" not in command
     assert "--output=/dev/null" not in command
     assert "--error=/dev/null" not in command
+    environment = _job_environment(
+        {
+            "key": "acceptance:component_parity_tests",
+            "environment": {
+                "ABPH_CONDA_BASE": "/stale/abph",
+                "ABPH_CONDA_ENV": "stale_abph",
+                "CONDA_BASE": "/stale/conda",
+                "CONDA_ENV": "stale_conda",
+            },
+        },
+        tmp_path,
+    )
+    assert environment["ABPH_CONDA_BASE"] == TIGRIS_CONDA_BASE
+    assert environment["CONDA_BASE"] == TIGRIS_CONDA_BASE
+    assert environment["ABPH_CONDA_ENV"] == TIGRIS_CONDA_ENV
+    assert environment["CONDA_ENV"] == TIGRIS_CONDA_ENV
 
 
 def test_ram_lifecycle_smoke_publishes_to_campaign_then_cleans(tmp_path: Path) -> None:

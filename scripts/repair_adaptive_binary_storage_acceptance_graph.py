@@ -17,6 +17,8 @@ TEST_KEY = "acceptance:component_parity_tests"
 SMOKE_KEY = "acceptance:ram_lifecycle_smoke"
 COMPILE_KEY = "acceptance:storage_smoke"
 REQUIRED_KEYS = (TEST_KEY, SMOKE_KEY, COMPILE_KEY)
+TIGRIS_CONDA_BASE = "/home/ryreu/miniforge3-aarch64"
+TIGRIS_CONDA_ENV = "atlas_kd_tigris"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -99,7 +101,11 @@ def _job_environment(row: Mapping[str, Any], project_dir: Path) -> dict[str, str
     environment.update({str(key): str(value) for key, value in recorded.items()})
     environment.update(
         {
+            "ABPH_CONDA_BASE": TIGRIS_CONDA_BASE,
+            "ABPH_CONDA_ENV": TIGRIS_CONDA_ENV,
             "ABPH_SUPPRESS_SLURM_LOGS": "0",
+            "CONDA_BASE": TIGRIS_CONDA_BASE,
+            "CONDA_ENV": TIGRIS_CONDA_ENV,
             "PROJECT_DIR": str(project_dir),
             "PYTHONNOUSERSITE": "1",
         }
