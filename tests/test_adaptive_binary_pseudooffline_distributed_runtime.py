@@ -13,6 +13,9 @@ import pytest
 import torch
 
 from jetclass_fresh.jetclass_data import JetIdentity
+from scripts.run_adaptive_binary_ddp_acceptance_smoke import (
+    _parser as ddp_acceptance_smoke_parser,
+)
 
 from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (
     DistributedRuntime,
@@ -50,6 +53,20 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
     evaluate_reconstructor_rollout,
     train_reconstructor_curriculum,
 )
+
+
+def test_ddp_acceptance_smoke_cli_accepts_production_world_sizes() -> None:
+    parser = ddp_acceptance_smoke_parser()
+    for world_size in (1, 4, 8):
+        parsed = parser.parse_args(
+            [
+                "--output-dir",
+                "unused",
+                "--expected-world-size",
+                str(world_size),
+            ]
+        )
+        assert parsed.expected_world_size == world_size
 
 
 def _step(model, batch, _context):

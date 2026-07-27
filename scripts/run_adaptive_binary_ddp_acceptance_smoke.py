@@ -32,7 +32,12 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_acceptance import 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--expected-world-size", type=int, choices=(1, 4), required=True)
+    parser.add_argument(
+        "--expected-world-size",
+        type=int,
+        choices=(1, 4, 8),
+        required=True,
+    )
     parser.add_argument("--device", default="cuda")
     return parser
 
