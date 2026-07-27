@@ -472,6 +472,57 @@ def test_ddp8_seven_day_gate_is_bound_to_ddp4_and_world8_contracts(
     assert require_runtime_acceptance(path, scope="ddp8_runtime")["ok"] is True
 
 
+@pytest.mark.parametrize(
+    ("deep_ddp8_score", "expected_approved"),
+    ((1.024, True), (1.026, False)),
+)
+def test_ddp8_stochastic_trajectory_tolerance_is_bounded(
+    tmp_path: Path,
+    deep_ddp8_score: float,
+    expected_approved: bool,
+) -> None:
+    single, ddp4, contracts, smokes, single_path = _evidence(tmp_path)
+    ddp8 = {
+        variant: _benchmark(
+            tmp_path / f"ddp8-{variant}",
+            variant=variant,
+            world_size=8,
+            sampled_jets=800,
+            update_seconds=12.0,
+            validation_seconds=2.5,
+            score=deep_ddp8_score if variant == DEEP_VARIANT else 1.0,
+        )
+        for variant in (ROOT_VARIANT, DEEP_VARIANT)
+    }
+    ddp8_contracts = {
+        variant: _batch_contract(
+            tmp_path / f"{variant}-ddp8-batch.json",
+            variant,
+            world_size=8,
+        )
+        for variant in (ROOT_VARIANT, DEEP_VARIANT)
+    }
+    report = build_runtime_acceptance_report(
+        single_run_dirs=single,
+        ddp4_run_dirs=ddp4,
+        ddp8_run_dirs=ddp8,
+        single_smoke_path=smokes[0],
+        ddp4_smoke_path=smokes[1],
+        ddp8_smoke_path=_smoke(tmp_path / "ddp8-smoke", world_size=8),
+        ddp4_batch_contracts=contracts,
+        ddp8_batch_contracts=ddp8_contracts,
+        single_path_acceptance=single_path,
+        expected_validation_jets=4_096,
+    )
+    assert (
+        report["runtime_gate"]["checks"][
+            "ddp8_validation_trajectories_compatible"
+        ]
+        is expected_approved
+    )
+    assert report["promotion"]["ddp8_runtime_approved"] is expected_approved
+
+
 def test_deep_speedup_below_promotion_floor_fails_closed(tmp_path: Path):
     single, ddp4, contracts, smokes, single_path = _evidence(
         tmp_path, deep_ddp_jets=150
