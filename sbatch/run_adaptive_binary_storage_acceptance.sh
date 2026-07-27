@@ -4,7 +4,7 @@ set -euo pipefail
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/common.sh"
-fresh_setup_job
+fresh_setup
 
 : "${ABPH_ROOT:?ABPH_ROOT is required}"
 : "${ABPH_CAMPAIGN_MODE:=pilot}"

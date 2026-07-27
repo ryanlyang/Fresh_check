@@ -366,6 +366,8 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
     assert ': "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"' in worker
     assert 'source "${PROJECT_DIR}/sbatch/common.sh"' in worker
     assert '${SCRIPT_DIR}/common.sh' not in worker
+    assert "fresh_setup\n" in worker
+    assert "fresh_setup_job" not in worker
     assert "ram_lifecycle_smoke)" in worker
     ordered_actions = (
         "abph_reserve_ram_workspace",
