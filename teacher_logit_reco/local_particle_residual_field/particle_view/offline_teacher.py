@@ -477,21 +477,63 @@ class ContextualParticleTokens:
         return self.particle_tokens[:, 0]
 
 
-def _batch_particle_layout(value, *, batch_size: int, particles: int):
+def _batch_particle_layout(
+    value,
+    *,
+    batch_size: int,
+    particles: int,
+    particle_mask=None,
+):
     if isinstance(value, (tuple, list)):
         if not value:
             raise ValueError("token-tap module returned no tensor")
         value = value[0]
     if not hasattr(value, "ndim") or value.ndim != 3:
         raise ValueError("particle token tap must be rank 3")
-    if tuple(value.shape[:2]) == (batch_size, particles):
-        return value
-    if tuple(value.shape[:2]) == (particles, batch_size):
-        return value.permute(1, 0, 2).contiguous()
-    raise ValueError(
-        f"token shape {tuple(value.shape)} disagrees with "
-        f"batch={batch_size}, particles={particles}"
+    if value.shape[0] == batch_size:
+        tokens = value
+    elif value.shape[1] == batch_size:
+        tokens = value.permute(1, 0, 2).contiguous()
+    else:
+        raise ValueError(
+            f"token shape {tuple(value.shape)} disagrees with "
+            f"batch={batch_size}, particles={particles}"
+        )
+
+    observed_particles = int(tokens.shape[1])
+    if observed_particles > particles:
+        raise ValueError(
+            f"token shape {tuple(value.shape)} has {observed_particles} "
+            f"particles, exceeding the external particle count {particles}"
+        )
+    if observed_particles == particles:
+        return tokens
+
+    if particle_mask is None or tuple(particle_mask.shape) != (
+        batch_size,
+        particles,
+    ):
+        raise ValueError(
+            "a full external particle mask is required to restore a trimmed "
+            "particle-token tap"
+        )
+    if bool(particle_mask[:, observed_particles:].any().item()):
+        raise ValueError(
+            "particle-token tap trimmed an active external particle: "
+            f"observed={observed_particles}, external={particles}"
+        )
+
+    # Weaver's ParT trims batch-wide, fully padded suffix columns before the
+    # embedding/transformer blocks. Hooks therefore see only the batch-local
+    # maximum particle count even though repository datasets retain their
+    # fixed-width layout. Restore that suffix so downstream targets remain
+    # aligned with the authenticated external mask and event arrays.
+    padding = tokens.new_zeros(
+        batch_size,
+        particles - observed_particles,
+        int(tokens.shape[2]),
     )
+    return require_torch().cat((tokens, padding), dim=1)
 
 
 class FrozenContextualParticleTeacher(_ModuleBase):
@@ -566,6 +608,7 @@ class FrozenContextualParticleTeacher(_ModuleBase):
                 captured[index],
                 batch_size=batch_size,
                 particles=particles,
+                particle_mask=valid,
             ).detach()
             if not torch.isfinite(tokens).all():
                 raise FloatingPointError("teacher particle tokens are non-finite")

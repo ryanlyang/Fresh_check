@@ -73,6 +73,42 @@ class _FakeTeacher(torch.nn.Module):
         return self.mod(features, mask)
 
 
+class _FakeTrimmedMod(_FakeMod):
+    """Mimic Weaver's batch-local removal of fully padded suffix columns."""
+
+    def forward(self, features, mask):
+        particles = int(mask[:, 0].sum(dim=1).max().item())
+        values = self.embed(features[:, :, :particles].transpose(1, 2))
+        for block in self.blocks:
+            values = block(values)
+        valid = mask[:, 0, :particles].unsqueeze(-1)
+        pooled = (values * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        return self.head(pooled)
+
+
+class _FakeTrimmedTeacher(_FakeTeacher):
+    def __init__(self, *, width: int = 128, layers: int = 8) -> None:
+        torch.nn.Module.__init__(self)
+        self.mod = _FakeTrimmedMod(width=width, layers=layers)
+
+
+class _FakeOverTrimmedMod(_FakeMod):
+    def forward(self, features, mask):
+        particles = int(mask[:, 0].sum(dim=1).max().item()) - 1
+        values = self.embed(features[:, :, :particles].transpose(1, 2))
+        for block in self.blocks:
+            values = block(values)
+        valid = mask[:, 0, :particles].unsqueeze(-1)
+        pooled = (values * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        return self.head(pooled)
+
+
+class _FakeOverTrimmedTeacher(_FakeTeacher):
+    def __init__(self, *, width: int = 128, layers: int = 8) -> None:
+        torch.nn.Module.__init__(self)
+        self.mod = _FakeOverTrimmedMod(width=width, layers=layers)
+
+
 def _manifest():
     parent = miniature_parent_manifest(rows_per_class=4)
     config = miniature_split_config(rows_per_class=4)
@@ -203,6 +239,48 @@ def test_all_tap_locations_and_learned_last_three_mixture():
     mixed.sum().backward()
     assert mixture.logits.grad is not None
     assert all(parameter.grad is None for parameter in teacher.parameters())
+
+
+def test_contextual_tap_restores_weaver_trimmed_padding_suffix():
+    batch = _batch(batch=3, particles=7)
+    batch["mask"][:, :, -2:] = False
+    tapped = FrozenContextualParticleTeacher(
+        _FakeTrimmedTeacher(),
+        ParticleTokenTapSpec(
+            particle_source="fixed_hlt",
+            architecture="base",
+            tap_choice="penultimate",
+        ),
+    )(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+    )
+    assert tapped.particle_tokens.shape == (3, 1, 7, 128)
+    assert torch.count_nonzero(tapped.particle_tokens[:, :, -2:]) == 0
+    assert torch.count_nonzero(tapped.particle_tokens[:, :, :5]) > 0
+    assert torch.equal(tapped.particle_mask, batch["mask"][:, 0])
+
+
+def test_contextual_tap_rejects_trimming_an_active_particle():
+    batch = _batch(batch=3, particles=7)
+    batch["mask"][:, :, -2:] = False
+    tapped = FrozenContextualParticleTeacher(
+        _FakeOverTrimmedTeacher(),
+        ParticleTokenTapSpec(
+            particle_source="fixed_hlt",
+            architecture="base",
+            tap_choice="penultimate",
+        ),
+    )
+    with pytest.raises(ValueError, match="trimmed an active external particle"):
+        tapped(
+            batch["points"],
+            batch["features"],
+            batch["lorentz_vectors"],
+            batch["mask"],
+        )
 
 
 def test_checkpoint_order_is_accuracy_tolerance_then_ce_ece_epoch():
