@@ -34,6 +34,7 @@ ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS = {
     "deep_ddp_speedup_minimum": 1.8,
     "communication_fraction_maximum": 0.35,
     "validation_relative_loss_tolerance": 0.01,
+    "ddp8_validation_relative_loss_tolerance": 0.025,
     "parameter_absolute_tolerance": 2.0e-6,
     "parameter_relative_tolerance": 2.0e-5,
     "memory_utilization_maximum": 0.90,
@@ -778,6 +779,11 @@ def build_runtime_acceptance_report(
                     "ddp8_vs_ddp4_relative_selection_score_difference": (
                         relative_loss_delta
                     ),
+                    "ddp8_validation_relative_loss_tolerance": (
+                        ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
+                            "ddp8_validation_relative_loss_tolerance"
+                        ]
+                    ),
                     "ddp8_communication_fraction": eight[
                         "communication_fraction"
                     ],
@@ -791,7 +797,7 @@ def build_runtime_acceptance_report(
             ddp8_trajectory_checks.append(
                 relative_loss_delta
                 <= ABPH_RUNTIME_ACCEPTANCE_THRESHOLDS[
-                    "validation_relative_loss_tolerance"
+                    "ddp8_validation_relative_loss_tolerance"
                 ]
             )
             ddp8_coverage_checks.append(

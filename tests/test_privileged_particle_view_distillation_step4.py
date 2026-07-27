@@ -143,6 +143,82 @@ class _FakeTrimA0(_FakeA0):
         self.mod = _FakeTrimPart()
 
 
+class _FakePermutingTrimmer(nn.Module):
+    """Drop and reorder active particles exactly as Weaver training can."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer(
+            "indices", torch.tensor([4, 1, 3], dtype=torch.int64)
+        )
+
+    def forward(self, features, vectors, mask, pair_inputs=None):
+        indices = self.indices.to(features.device)
+        return (
+            features.index_select(2, indices),
+            vectors.index_select(2, indices),
+            mask.index_select(2, indices),
+            pair_inputs,
+        )
+
+
+class _FakePermutingPart(_FakePart):
+    def __init__(self, hidden: int = 16, heads: int = 4) -> None:
+        super().__init__(hidden=hidden, heads=heads)
+        self.trimmer = _FakePermutingTrimmer()
+
+    def forward(self, features, *, v, mask):
+        features, v, mask, _ = self.trimmer(features, v, mask, None)
+        pair = self.pair_embed(v)
+        values = self.embed(features).permute(2, 0, 1)
+        pair_context = pair.mean(dim=(1, 3)).transpose(0, 1)[..., None]
+        values = values + pair_context
+        for block in self.blocks:
+            values = block(values)
+        valid = mask[:, 0].transpose(0, 1)[..., None]
+        pooled = (values * valid).sum(dim=0) / valid.sum(dim=0).clamp_min(1)
+        return self.head(pooled)
+
+
+class _FakePermutingA0(_FakeA0):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.mod = _FakePermutingPart()
+
+
+class _FakeWeaverBatchFirstEmbed(nn.Module):
+    def __init__(self, hidden: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(17, hidden)
+
+    def forward(self, features):
+        return self.linear(features.transpose(1, 2))
+
+
+class _FakeWeaverBatchFirstPart(_FakePart):
+    def __init__(self) -> None:
+        super().__init__(hidden=5, heads=1)
+        self.embed = _FakeWeaverBatchFirstEmbed(5)
+        self.trimmer = _FakePermutingTrimmer()
+
+    def forward(self, features, *, v, mask):
+        features, v, mask, _ = self.trimmer(features, v, mask, None)
+        pair = self.pair_embed(v)
+        values = self.embed(features)
+        values = values + pair.mean(dim=(1, 3))[..., None]
+        for block in self.blocks:
+            values = block(values)
+        valid = mask[:, 0, :, None]
+        pooled = (values * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        return self.head(pooled)
+
+
+class _FakeWeaverBatchFirstA0(_FakeA0):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+        self.mod = _FakeWeaverBatchFirstPart()
+
+
 def _consumer_batch(batch: int = 3, particles: int = 5, dim: int = 4):
     torch.manual_seed(13)
     mask = torch.ones(batch, 1, particles, dtype=torch.bool)
@@ -297,6 +373,77 @@ def test_consumer_accepts_weaver_trimmed_token_and_pair_layouts():
     assert output.pair_bias.shape == (3, 4, 7, 7)
     assert torch.count_nonzero(output.token_correction[:, -2:]) == 0
     assert torch.count_nonzero(output.pair_bias[:, :, -2:]) == 0
+
+
+def test_consumer_tracks_weaver_training_permutation_and_active_subsample():
+    batch = _consumer_batch(batch=3, particles=5)
+    batch["mask"][:] = True
+    model = ParticleViewConsumer(
+        _FakePermutingA0(),
+        ParticleViewConsumerConfig(
+            view_dim=4,
+            hidden_dim=16,
+            num_heads=4,
+            view_path="token_and_pair",
+        ),
+    )
+    assert audit_zero_scaled_a0_endpoint(
+        model,
+        points=batch["points"],
+        features=batch["features"],
+        lorentz_vectors=batch["lorentz_vectors"],
+        mask=batch["mask"],
+        view=batch["true_view"],
+    )["ok"]
+    with torch.no_grad():
+        model.raw_token_scale.fill_(0.3)
+        model.raw_pair_scale.fill_(0.2)
+    output = model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        batch["true_view"],
+    )
+    selected = torch.tensor([False, True, False, True, True])
+    assert output.logits.shape == (3, 3)
+    assert torch.count_nonzero(output.token_correction[:, ~selected]) == 0
+    pair_selected = selected[None, :, None] & selected[None, None, :]
+    pair_selected = pair_selected[:, None].expand_as(output.pair_bias)
+    assert torch.count_nonzero(output.pair_bias[~pair_selected]) == 0
+    assert torch.count_nonzero(output.token_correction[:, selected]) > 0
+
+
+def test_consumer_prefers_weaver_batch_first_when_hidden_equals_particles():
+    batch = _consumer_batch(batch=3, particles=5)
+    batch["mask"][:] = True
+    model = ParticleViewConsumer(
+        _FakeWeaverBatchFirstA0(),
+        ParticleViewConsumerConfig(
+            view_dim=4,
+            hidden_dim=5,
+            num_heads=1,
+            view_path="token_and_pair",
+        ),
+    )
+    assert audit_zero_scaled_a0_endpoint(
+        model,
+        points=batch["points"],
+        features=batch["features"],
+        lorentz_vectors=batch["lorentz_vectors"],
+        mask=batch["mask"],
+        view=batch["true_view"],
+    )["ok"]
+    with torch.no_grad():
+        model.raw_token_scale.fill_(0.3)
+        model.raw_pair_scale.fill_(0.2)
+    assert model(
+        batch["points"],
+        batch["features"],
+        batch["lorentz_vectors"],
+        batch["mask"],
+        batch["true_view"],
+    ).logits.shape == (3, 3)
 
 
 @pytest.mark.parametrize("path", ["token_only", "pair_only", "token_and_pair"])

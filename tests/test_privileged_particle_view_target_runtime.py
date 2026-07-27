@@ -239,6 +239,74 @@ def test_staged_provider_reorders_parent_rows_and_injects_offline_logits():
     assert generator.memory_projection.weight.grad is not None
 
 
+def test_hlt_memory_provider_uses_the_staged_float16_query_coordinate():
+    tokens = torch.tensor(
+        [[[0.1, 0.33333334, -2.125], [1.001, -0.2, 0.7]]],
+        dtype=torch.float32,
+    )
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    reservation = build_tap_stage_reservation(
+        source_role="hlt_memory_control",
+        source_manifest_sha256=_sha("source"),
+        logical_split_sha256=_sha("split"),
+        ordered_identity_sha256=_sha("identity"),
+        teacher_checkpoint_sha256=_sha("teacher"),
+        tap_spec_sha256=_sha("tap"),
+        jets=1,
+        max_particles=2,
+        token_width=3,
+        identity_columns=2,
+    )
+    staged = stage_teacher_tap_float16(
+        tokens,
+        mask,
+        torch.tensor([[5, 1]], dtype=torch.int64),
+        reservation=reservation,
+    )
+    memory = StagedContextualMemory(
+        staged_tap=staged,
+        logits=torch.tensor([[0.0, 1.0, 0.0]]),
+        parent_indices=torch.tensor([5], dtype=torch.int64),
+    )
+    generator = MatchingFreeParticleViewGenerator(
+        ParticleViewGeneratorConfig(
+            query_dim=3,
+            memory_dim=3,
+            width=8,
+            num_heads=2,
+            num_cross_attention_blocks=1,
+            bottleneck_width=2,
+            memory_source="hlt",
+        )
+    )
+    provider = StagedDiscoveryViewProvider(
+        generator=generator,
+        query_teacher=_FrozenQuery(),
+        staged_memory=memory,
+        query_tap_choice="penultimate",
+        memory_source="hlt",
+    )
+    momentum = torch.tensor([[[1.0, 0.5], [0.0, 0.0], [0.0, 0.0]]])
+    energy = torch.sqrt(momentum.square().sum(dim=1, keepdim=True) + 1.0)
+    lorentz = torch.cat((momentum, energy), dim=1)
+    batch = {
+        "points": torch.zeros(1, 2, 2),
+        "features": tokens.transpose(1, 2).clone(),
+        "lorentz_vectors": lorentz,
+        "mask": mask[:, None],
+        "offline_lorentz_vectors": lorentz.clone(),
+        "offline_mask": mask[:, None],
+        "parent_indices": torch.tensor([5]),
+    }
+    assert not torch.equal(
+        tokens,
+        tokens.to(dtype=torch.float16).to(dtype=torch.float32),
+    )
+    provided = provider(batch)
+    assert provided["view"].shape == (1, 2, 2)
+    assert batch["offline_logits"].tolist() == [[0.0, 1.0, 0.0]]
+
+
 def test_candidate_view_set_normalizes_train_only_and_reorders_by_parent():
     view_set = CandidateViewSet(
         views=torch.tensor(

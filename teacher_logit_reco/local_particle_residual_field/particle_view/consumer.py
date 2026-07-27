@@ -235,61 +235,200 @@ class ParticleViewConsumer(nn.Module):
         values: torch.Tensor,
         batch: int,
         particles: int,
-        valid: torch.Tensor,
-        *,
-        channel_first: bool = False,
     ):
-        if channel_first:
-            if not (
-                values.ndim == 3
-                and values.shape[0] == batch
-                and values.shape[2] <= particles
-            ):
-                raise ValueError("A0 channel-first embedding layout changed")
-            observed = int(values.shape[2])
-            self._require_inactive_trimmed_suffix(
-                valid, observed, tensor_name="A0 particle-block output"
-            )
-            return (
-                values.permute(0, 2, 1),
-                "batch_hidden_particle",
-                observed,
-            )
-        if values.ndim == 3 and (
-            values.shape[0] == batch and values.shape[1] <= particles
+        if values.ndim != 3:
+            raise ValueError("A0 particle-block output must be rank 3")
+        # Current Weaver returns [B,P,H].  Older/fake backends may expose
+        # [P,B,H] or [B,H,P].  Test the hidden axis explicitly so that the
+        # common H == P == 128 case prefers Weaver's batch-first contract.
+        if (
+            values.shape[0] == batch
+            and values.shape[1] <= particles
+            and values.shape[2] == self.config.hidden_dim
         ):
-            observed = int(values.shape[1])
-            self._require_inactive_trimmed_suffix(
-                valid, observed, tensor_name="A0 particle-block output"
-            )
-            return values, "batch_particle_hidden", observed
-        if values.ndim == 3 and (
-            values.shape[1] == batch and values.shape[0] <= particles
+            return values, "batch_particle_hidden", int(values.shape[1])
+        if (
+            values.shape[1] == batch
+            and values.shape[0] <= particles
+            and values.shape[2] == self.config.hidden_dim
         ):
-            observed = int(values.shape[0])
-            self._require_inactive_trimmed_suffix(
-                valid, observed, tensor_name="A0 particle-block output"
-            )
             return (
                 values.permute(1, 0, 2),
                 "particle_batch_hidden",
-                observed,
+                int(values.shape[0]),
             )
-        # Weaver's embedding stack is channel-first [B,C,P], whereas its
-        # particle blocks are sequence-first [P,B,C].
-        if values.ndim == 3 and (
-            values.shape[0] == batch and values.shape[2] <= particles
+        if (
+            values.shape[0] == batch
+            and values.shape[1] == self.config.hidden_dim
+            and values.shape[2] <= particles
         ):
             observed = int(values.shape[2])
-            self._require_inactive_trimmed_suffix(
-                valid, observed, tensor_name="A0 particle-block output"
-            )
             return (
                 values.permute(0, 2, 1),
                 "batch_hidden_particle",
                 observed,
             )
         raise ValueError("A0 particle-block output layout changed")
+
+    @staticmethod
+    def _match_trimmed_particle_indices(
+        *,
+        source_features: torch.Tensor,
+        source_vectors: torch.Tensor,
+        source_mask: torch.Tensor,
+        trimmed_features: torch.Tensor,
+        trimmed_vectors: torch.Tensor,
+        trimmed_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Recover Weaver's exact gather/permutation from unchanged inputs."""
+
+        if (
+            source_features.ndim != 3
+            or source_vectors.ndim != 3
+            or source_mask.ndim != 3
+            or source_mask.shape[1] != 1
+            or trimmed_features.ndim != 3
+            or trimmed_vectors.ndim != 3
+            or trimmed_mask.ndim != 3
+            or trimmed_mask.shape[1] != 1
+        ):
+            raise ValueError("A0 sequence-trimmer tensor ranks changed")
+        batch, _, particles = source_features.shape
+        if (
+            source_vectors.shape[0] != batch
+            or source_vectors.shape[2] != particles
+            or tuple(source_mask.shape) != (batch, 1, particles)
+            or trimmed_features.shape[0] != batch
+            or trimmed_vectors.shape[0] != batch
+            or trimmed_features.shape[2] != trimmed_vectors.shape[2]
+            or trimmed_mask.shape
+            != (batch, 1, trimmed_features.shape[2])
+        ):
+            raise ValueError("A0 sequence-trimmer tensor shapes changed")
+        source_identity = torch.cat(
+            (
+                source_features.transpose(1, 2),
+                source_vectors.transpose(1, 2),
+            ),
+            dim=-1,
+        )
+        trimmed_identity = torch.cat(
+            (
+                trimmed_features.transpose(1, 2),
+                trimmed_vectors.transpose(1, 2),
+            ),
+            dim=-1,
+        )
+        source_valid = source_mask[:, 0]
+        trimmed_valid = trimmed_mask[:, 0]
+        # Compare one channel at a time.  A direct four-dimensional broadcast
+        # would transiently allocate O(B * L * P * C) booleans every batch.
+        matches = (
+            source_valid[:, None, :]
+            & trimmed_valid[:, :, None]
+        )
+        for channel in range(source_identity.shape[2]):
+            matches = matches & (
+                trimmed_identity[:, :, None, channel]
+                == source_identity[:, None, :, channel]
+            )
+        match_count = matches.sum(dim=-1)
+        if not torch.equal(
+            match_count[trimmed_valid],
+            torch.ones_like(match_count[trimmed_valid]),
+        ):
+            raise ValueError(
+                "A0 sequence-trimmer mapping is missing or ambiguous"
+            )
+        indices = matches.to(dtype=torch.int64).argmax(dim=-1)
+        indices = torch.where(
+            trimmed_valid, indices, torch.zeros_like(indices)
+        )
+        selected = torch.nn.functional.one_hot(
+            indices, num_classes=particles
+        ).to(dtype=torch.int64)
+        selected = selected * trimmed_valid[:, :, None].to(torch.int64)
+        if (selected.sum(dim=1) > 1).any():
+            raise ValueError("A0 sequence trimmer duplicated an active particle")
+        return indices.detach(), trimmed_valid.detach()
+
+    def _active_particle_selection(
+        self,
+        state: dict[str, torch.Tensor],
+        *,
+        valid: torch.Tensor,
+        observed_particles: int,
+        tensor_name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if "active_indices" in state:
+            indices = state["active_indices"]
+            active_mask = state["active_mask"]
+            if tuple(indices.shape) != (valid.shape[0], observed_particles):
+                raise ValueError(
+                    f"{tensor_name} disagrees with A0 sequence-trimmer mapping"
+                )
+            return indices, active_mask
+        self._require_inactive_trimmed_suffix(
+            valid, observed_particles, tensor_name=tensor_name
+        )
+        indices = torch.arange(
+            observed_particles, device=valid.device, dtype=torch.int64
+        ).expand(valid.shape[0], -1)
+        return indices, valid[:, :observed_particles]
+
+    @staticmethod
+    def _gather_particle_values(
+        values: torch.Tensor,
+        indices: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        gathered = torch.gather(
+            values,
+            1,
+            indices[:, :, None].expand(-1, -1, values.shape[2]),
+        )
+        return torch.where(
+            active_mask[:, :, None], gathered, torch.zeros_like(gathered)
+        )
+
+    @staticmethod
+    def _gather_pair_values(
+        values: torch.Tensor,
+        indices: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        heads = values.shape[1]
+        rows = torch.gather(
+            values,
+            2,
+            indices[:, None, :, None].expand(
+                -1, heads, -1, values.shape[3]
+            ),
+        )
+        gathered = torch.gather(
+            rows,
+            3,
+            indices[:, None, None, :].expand(
+                -1, heads, indices.shape[1], -1
+            ),
+        )
+        pair_mask = (
+            active_mask[:, None, :, None]
+            & active_mask[:, None, None, :]
+        )
+        return torch.where(pair_mask, gathered, torch.zeros_like(gathered))
+
+    @staticmethod
+    def _external_selection_mask(
+        valid: torch.Tensor,
+        indices: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        selected = torch.zeros_like(valid, dtype=torch.int64)
+        selected.scatter_add_(
+            1, indices, active_mask.to(dtype=torch.int64)
+        )
+        return selected.gt(0) & valid
 
     @staticmethod
     def _restore_token_layout(values: torch.Tensor, layout: str):
@@ -344,8 +483,6 @@ class ParticleViewConsumer(nn.Module):
             _first_tensor(embedded),
             batch,
             particles,
-            valid,
-            channel_first=True,
         )
         if embedded_particles != particles:
             raise ValueError("A0 embedding unexpectedly trimmed particle inputs")
@@ -376,13 +513,35 @@ class ParticleViewConsumer(nn.Module):
             ) * raw_correction.transpose(1, 2)
             state["token_correction"] = raw_correction
 
+        def trimmer_hook(_module, _inputs, output):
+            if not isinstance(output, (tuple, list)) or len(output) < 3:
+                raise ValueError("A0 sequence-trimmer output contract changed")
+            trimmed_features, trimmed_vectors, trimmed_mask = output[:3]
+            if isinstance(trimmed_vectors, (tuple, list)):
+                if len(trimmed_vectors) != 1:
+                    raise ValueError(
+                        "A0 sequence trimmer returned multiple vector streams"
+                    )
+                trimmed_vectors = trimmed_vectors[0]
+            indices, active_mask = self._match_trimmed_particle_indices(
+                source_features=model_features,
+                source_vectors=lorentz_vectors,
+                source_mask=mask,
+                trimmed_features=trimmed_features,
+                trimmed_vectors=trimmed_vectors,
+                trimmed_mask=trimmed_mask,
+            )
+            state["active_indices"] = indices
+            state["active_mask"] = active_mask
+            state["active_external_mask"] = self._external_selection_mask(
+                valid, indices, active_mask
+            )
+
         def token_hook(_module, _inputs, output):
             values, layout, observed_particles = self._token_layout(
                 _first_tensor(output),
                 batch,
                 particles,
-                valid,
-                channel_first=self.config.injection_block == -1,
             )
             if values.shape[-1] != self.config.hidden_dim:
                 raise ValueError("A0 hidden width differs from consumer")
@@ -393,11 +552,27 @@ class ParticleViewConsumer(nn.Module):
                 full_correction,
                 torch.zeros_like(full_correction),
             )
-            correction = full_correction[:, :observed_particles]
+            indices, active_mask = self._active_particle_selection(
+                state,
+                valid=valid,
+                observed_particles=observed_particles,
+                tensor_name="A0 particle-block output",
+            )
+            correction = self._gather_particle_values(
+                full_correction, indices, active_mask
+            )
             effective = torch.tanh(self.raw_token_scale)
             updated = values + effective * correction
             state["gate"] = gate
-            state["token_correction"] = full_correction
+            selected_external = self._external_selection_mask(
+                valid, indices, active_mask
+            )
+            state["active_external_mask"] = selected_external
+            state["token_correction"] = torch.where(
+                selected_external[:, :, None],
+                full_correction,
+                torch.zeros_like(full_correction),
+            )
             updated = self._restore_token_layout(updated, layout)
             return _replace_first(output, updated)
 
@@ -424,24 +599,31 @@ class ParticleViewConsumer(nn.Module):
                 and original.shape[2] == original.shape[3]
             ):
                 observed_particles = int(original.shape[2])
-                self._require_inactive_trimmed_suffix(
-                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                indices, active_mask = self._active_particle_selection(
+                    state,
+                    valid=valid,
+                    observed_particles=observed_particles,
+                    tensor_name="A0 pair-bias output",
                 )
-                updated = original + effective * pair[
-                    :, :, :observed_particles, :observed_particles
-                ]
+                trimmed_pair = self._gather_pair_values(
+                    pair, indices, active_mask
+                )
+                updated = original + effective * trimmed_pair
             elif (
                 original.ndim == 3
                 and original.shape[0] == batch * self.config.num_heads
                 and original.shape[1] == original.shape[2]
             ):
                 observed_particles = int(original.shape[1])
-                self._require_inactive_trimmed_suffix(
-                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                indices, active_mask = self._active_particle_selection(
+                    state,
+                    valid=valid,
+                    observed_particles=observed_particles,
+                    tensor_name="A0 pair-bias output",
                 )
-                trimmed_pair = pair[
-                    :, :, :observed_particles, :observed_particles
-                ]
+                trimmed_pair = self._gather_pair_values(
+                    pair, indices, active_mask
+                )
                 updated = original + effective * trimmed_pair.reshape_as(original)
             elif (
                 original.ndim == 4
@@ -450,22 +632,44 @@ class ParticleViewConsumer(nn.Module):
                 and original.shape[1] == original.shape[2]
             ):
                 observed_particles = int(original.shape[1])
-                self._require_inactive_trimmed_suffix(
-                    valid, observed_particles, tensor_name="A0 pair-bias output"
+                indices, active_mask = self._active_particle_selection(
+                    state,
+                    valid=valid,
+                    observed_particles=observed_particles,
+                    tensor_name="A0 pair-bias output",
                 )
-                trimmed_pair = pair[
-                    :, :, :observed_particles, :observed_particles
-                ]
+                trimmed_pair = self._gather_pair_values(
+                    pair, indices, active_mask
+                )
                 updated = (
                     original
                     + effective * trimmed_pair.permute(0, 2, 3, 1)
                 )
             else:
                 raise ValueError("A0 pair-bias tensor layout changed")
-            state["pair_bias"] = pair
+            selected_external = self._external_selection_mask(
+                valid, indices, active_mask
+            )
+            state["active_external_mask"] = selected_external
+            selected_pair = (
+                selected_external[:, None, :, None]
+                & selected_external[:, None, None, :]
+            )
+            state["pair_bias"] = torch.where(
+                selected_pair, pair, torch.zeros_like(pair)
+            )
             return _replace_first(output, updated)
 
         handles = []
+        if (
+            (self.config.token_enabled or self.config.pair_enabled)
+            and hasattr(self.a0_model.mod, "trimmer")
+        ):
+            handles.append(
+                self.a0_model.mod.trimmer.register_forward_hook(
+                    trimmer_hook
+                )
+            )
         if self.config.pair_enabled:
             handles.append(self.a0_model.mod.pair_embed.register_forward_hook(pair_hook))
         if self.config.token_enabled:
@@ -504,9 +708,10 @@ class ParticleViewConsumer(nn.Module):
                 dtype=view.dtype,
             ),
         )
+        active_external_mask = state.get("active_external_mask", valid)
         trust_loss = (
-            gate[valid].mean()
-            if self.config.learned_trust and valid.any()
+            gate[active_external_mask].mean()
+            if self.config.learned_trust and active_external_mask.any()
             else logits.new_zeros(())
         )
         return ParticleViewConsumerOutput(

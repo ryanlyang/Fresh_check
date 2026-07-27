@@ -729,6 +729,25 @@ class StagedDiscoveryViewProvider:
                 offline_logits,
                 secondary.logits[secondary_positions].to(device=device),
             )
+        if self.memory_source == "hlt":
+            # The authenticated RAM coordinate is binary16.  Canonicalize the
+            # live frozen query through the same round-trip before enforcing
+            # the HLT-to-HLT identity control and before generator use.
+            canonical_query_tokens = query_tokens.to(
+                dtype=torch.float16
+            ).to(dtype=torch.float32)
+            if (
+                canonical_query_tokens.shape != memory_tokens.shape
+                or not torch.equal(
+                    canonical_query_tokens[memory_mask],
+                    memory_tokens[memory_mask],
+                )
+            ):
+                raise ValueError(
+                    "HLT-memory staged tokens differ after float16 "
+                    "canonicalization"
+                )
+            query_tokens = canonical_query_tokens
         if isinstance(batch, dict):
             batch["offline_logits"] = offline_logits
         else:
