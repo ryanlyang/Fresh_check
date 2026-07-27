@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from scripts.run_adaptive_binary_storage_acceptance_tests import (
+    isolated_test_environment,
+)
 from teacher_logit_reco.adaptive_binary_pseudooffline.accounting_preflight import (
     ABPH_STEP4_PREFLIGHT_CONTRACT,
 )
@@ -391,3 +394,28 @@ def test_full_streaming_graph_gates_models_on_storage_acceptance(tmp_path: Path)
             assert "acceptance:storage_smoke" in job.dependencies
         assert job.environment["ABPH_SUPPRESS_SLURM_LOGS"] == "1"
         assert job.environment["MIRROR_DIAGNOSTICS"] == "0"
+
+
+def test_storage_component_tests_isolate_live_campaign_and_slurm_environment() -> None:
+    environment, removed = isolated_test_environment(
+        {
+            "ABPH_ROOT": "/live/campaign",
+            "ABPH_STORAGE_PROFILE": "streaming_30gb_v1",
+            "CONDA_PREFIX": "/keep/conda",
+            "DATA_DIR": "/live/data",
+            "PATH": "/keep/bin",
+            "SLURM_JOB_ID": "19084",
+            "WORLD_SIZE": "8",
+        }
+    )
+    assert set(removed) == {
+        "ABPH_ROOT",
+        "ABPH_STORAGE_PROFILE",
+        "DATA_DIR",
+        "SLURM_JOB_ID",
+        "WORLD_SIZE",
+    }
+    assert environment["CONDA_PREFIX"] == "/keep/conda"
+    assert environment["PATH"] == "/keep/bin"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"

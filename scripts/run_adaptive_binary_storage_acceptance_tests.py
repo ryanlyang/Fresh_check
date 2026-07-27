@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+from typing import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -40,6 +42,49 @@ def _git(*args: str) -> bytes:
     )
 
 
+_ISOLATED_ENV_PREFIXES = ("ABPH_", "SLURM_")
+_ISOLATED_ENV_NAMES = {
+    "DATA_DIR",
+    "DEVICE",
+    "DIAGNOSTICS_ROOT",
+    "DRY_RUN",
+    "LOCAL_RANK",
+    "LOCAL_WORLD_SIZE",
+    "LOG_DIR",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "MIRROR_DIAGNOSTICS",
+    "OUTPUT_ROOT",
+    "OVERWRITE",
+    "PRINT_ONLY",
+    "RANK",
+    "ROLE_NAME",
+    "ROLE_RANK",
+    "WORLD_SIZE",
+}
+
+
+def isolated_test_environment(
+    source: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Remove live campaign and launcher state from the component tests."""
+
+    environment = dict(os.environ if source is None else source)
+    removed = tuple(
+        sorted(
+            name
+            for name in environment
+            if name in _ISOLATED_ENV_NAMES
+            or name.startswith(_ISOLATED_ENV_PREFIXES)
+        )
+    )
+    for name in removed:
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    return environment, removed
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     command = (
@@ -49,9 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         "-q",
         *ABPH_STORAGE_ACCEPTANCE_TEST_FILES,
     )
+    test_environment, removed_environment_names = isolated_test_environment()
     completed = subprocess.run(
         command,
         cwd=REPO_ROOT,
+        env=test_environment,
         capture_output=True,
         text=True,
         check=False,
@@ -73,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         "python_executable": sys.executable,
         "pytest_output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
         "pytest_output_tail": output[-4000:],
+        "removed_campaign_environment_names": list(removed_environment_names),
     }
     payload["content_hash"] = canonical_hash(payload)
     write_quota_managed_json(
