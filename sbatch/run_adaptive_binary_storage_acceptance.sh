@@ -2,8 +2,8 @@
 # Run Step-10 tests or compile the fail-closed real-data storage gate.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/common.sh"
+: "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+source "${PROJECT_DIR}/sbatch/common.sh"
 fresh_setup_job
 
 : "${ABPH_ROOT:?ABPH_ROOT is required}"

@@ -363,6 +363,9 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
     smoke = (root / "scripts" / "run_adaptive_binary_ram_lifecycle_smoke.py").read_text(
         encoding="utf-8"
     )
+    assert ': "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"' in worker
+    assert 'source "${PROJECT_DIR}/sbatch/common.sh"' in worker
+    assert '${SCRIPT_DIR}/common.sh' not in worker
     assert "ram_lifecycle_smoke)" in worker
     ordered_actions = (
         "abph_reserve_ram_workspace",
@@ -386,6 +389,38 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
     ).read_text(encoding="utf-8")
     assert "ABPH_RAM_LIFECYCLE_SMOKE_CONTRACT" in acceptance
     assert '"ram_lifecycle_smoke"' in acceptance
+
+
+def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) -> None:
+    from scripts.repair_adaptive_binary_storage_acceptance_graph import (
+        repaired_sbatch_command,
+    )
+
+    command = repaired_sbatch_command(
+        {
+            "key": "acceptance:component_parity_tests",
+            "command": [
+                "sbatch",
+                "--parsable",
+                "--job-name=abph_storage_acceptance_tests",
+                "--output=/dev/null",
+                "--error=/dev/null",
+                "--dependency=afterok:10",
+                "/repo/sbatch/run_adaptive_binary_storage_acceptance.sh",
+                "tests",
+            ],
+        },
+        label="storage_tests",
+        dependencies=("20",),
+        log_dir=tmp_path,
+    )
+    assert "--job-name=abph_repair_storage_tests" in command
+    assert f"--output={tmp_path}/abph_repair_storage_tests_%j.out" in command
+    assert f"--error={tmp_path}/abph_repair_storage_tests_%j.err" in command
+    assert "--dependency=afterok:20" in command
+    assert "--dependency=afterok:10" not in command
+    assert "--output=/dev/null" not in command
+    assert "--error=/dev/null" not in command
 
 
 def test_ram_lifecycle_smoke_publishes_to_campaign_then_cleans(tmp_path: Path) -> None:
