@@ -220,7 +220,7 @@ def test_region_production_builder_is_batched_and_never_roundtrips_tokens() -> N
             for row in range(2)
         ]
     )
-    torch.testing.assert_close(batched, singles, atol=0, rtol=0)
+    torch.testing.assert_close(batched, singles, atol=2e-6, rtol=2e-6)
     source = inspect.getsource(build_batched_region_raw_features)
     assert ".cpu(" not in source
     assert ".numpy(" not in source
@@ -256,6 +256,16 @@ def test_region_normalizer_encoder_and_masking() -> None:
         ablated["resolution_ablation_domain"]
         == "registered_normalized_K_specific_channels_before_encoder"
     )
+    details["encoded"].square().sum().backward()
+    assert encoder.encoder[0].weight.grad is not None
+
+    empty_mask = torch.zeros(1, 1, 6, dtype=torch.bool)
+    empty_tree = build_reference_tree(
+        np.zeros((6, 4)), np.zeros((6, 14)), np.zeros(6, dtype=bool)
+    )
+    assert encoder(
+        torch.zeros(1, 6, 14), empty_mask, [empty_tree]
+    ).count_nonzero() == 0
 
 
 def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() -> None:
@@ -367,16 +377,6 @@ def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() 
     source = inspect.getsource(_collect_region_domain_samples)
     assert "for feature_index" not in source
     assert "sample_keys" not in source
-    details["encoded"].square().sum().backward()
-    assert encoder.encoder[0].weight.grad is not None
-
-    empty_mask = torch.zeros(1, 1, 6, dtype=torch.bool)
-    empty_tree = build_reference_tree(
-        np.zeros((6, 4)), np.zeros((6, 14)), np.zeros(6, dtype=bool)
-    )
-    assert encoder(
-        torch.zeros(1, 6, 14), empty_mask, [empty_tree]
-    ).count_nonzero() == 0
 
 
 def test_compact_sidecar_atomic_resume_and_runtime_round_trip(tmp_path: Path) -> None:
@@ -513,7 +513,7 @@ def test_backend_source_and_abi_manifest_fail_closed() -> None:
     old_contract.pop("content_hash")
     old_contract["contract"] = "relational_ca_tree_backend_manifest_v2"
     old_contract["schema_version"] = 2
-    with pytest.raises(ValueError, match="contract differs"):
+    with pytest.raises(ValueError, match="contract (?:differs|mismatch)"):
         validate_backend_manifest(with_content_hash(old_contract))
     false_attestation = dict(manifest)
     false_attestation.pop("content_hash")

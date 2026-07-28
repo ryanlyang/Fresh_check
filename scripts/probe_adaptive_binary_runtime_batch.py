@@ -17,7 +17,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from jetclass_fresh.hlt_baseline import require_torch, resolve_device  # noqa: E402
 from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
-    ABPH_LEVEL_CAPACITIES,
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryTargetBatchSource,
     CurriculumState,
@@ -98,7 +97,7 @@ def _probe_state(resolved: dict, family: str) -> CurriculumState:
         teacher_forcing_probability=0.0,
         distribution_weight=1.0,
         supervised_capacities=tuple(
-            value for value in ABPH_LEVEL_CAPACITIES if value <= active_capacity
+            value for value in capacities if value <= active_capacity
         ),
         stage_nominal_updates=2,
         stage_extension_updates=1,

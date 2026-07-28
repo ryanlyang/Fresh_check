@@ -18,6 +18,22 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (
 from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_batch import (
     ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.variants import (
+    resolve_variant_config,
+)
+from scripts.probe_adaptive_binary_runtime_batch import _probe_state
+
+
+def test_direct_eight_group_probe_preserves_declared_capacity_contract() -> None:
+    resolved = resolve_variant_config("C0_direct_8_group_set")
+
+    root_state = _probe_state(resolved, "root_hierarchy")
+    renderer_state = _probe_state(resolved, "renderer_distribution")
+
+    assert root_state.active_capacity == 8
+    assert root_state.supervised_capacities == (8,)
+    assert renderer_state.active_capacity == 8
+    assert renderer_state.supervised_capacities == (8,)
 
 
 def _measurement(
