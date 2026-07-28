@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -93,7 +94,25 @@ def repaired_sbatch_command(
     return command
 
 
-def _job_environment(row: Mapping[str, Any], project_dir: Path) -> dict[str, str]:
+def _source_identity(project_dir: Path) -> tuple[str, str]:
+    commit = subprocess.check_output(
+        ("git", "-C", str(project_dir), "rev-parse", "HEAD"),
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    status = subprocess.check_output(
+        ("git", "-C", str(project_dir), "status", "--short"),
+        stderr=subprocess.DEVNULL,
+    )
+    return commit, hashlib.sha256(status).hexdigest()
+
+
+def _job_environment(
+    row: Mapping[str, Any],
+    project_dir: Path,
+    *,
+    source_identity: tuple[str, str] | None = None,
+) -> dict[str, str]:
     environment = os.environ.copy()
     recorded = row.get("environment")
     if not isinstance(recorded, Mapping):
@@ -110,6 +129,13 @@ def _job_environment(row: Mapping[str, Any], project_dir: Path) -> dict[str, str
             "PYTHONNOUSERSITE": "1",
         }
     )
+    if source_identity is not None:
+        environment.update(
+            {
+                "ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT": source_identity[0],
+                "ABPH_ACCEPTANCE_SOURCE_STATUS_HASH": source_identity[1],
+            }
+        )
     return environment
 
 
@@ -121,6 +147,7 @@ def _submit(
     project_dir: Path,
     log_dir: Path,
     dry_run: bool,
+    source_identity: tuple[str, str],
 ) -> str:
     command = repaired_sbatch_command(
         row, label=label, dependencies=dependencies, log_dir=log_dir
@@ -131,7 +158,11 @@ def _submit(
     completed = subprocess.run(
         command,
         cwd=project_dir,
-        env=_job_environment(row, project_dir),
+        env=_job_environment(
+            row,
+            project_dir,
+            source_identity=source_identity,
+        ),
         check=True,
         capture_output=True,
         text=True,
@@ -167,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     if 'source "${PROJECT_DIR}/sbatch/common.sh"' not in worker_source:
         raise RuntimeError(f"the repaired project-anchored worker is not present: {worker}")
     rows = _load_rows(manifest)
+    source_identity = _source_identity(project_dir)
 
     old_test = _numeric_job_id(rows[TEST_KEY], key=TEST_KEY)
     old_smoke = _numeric_job_id(rows[SMOKE_KEY], key=SMOKE_KEY)
@@ -185,8 +217,27 @@ def main(argv: list[str] | None = None) -> int:
         log_dir.mkdir(parents=True, exist_ok=True)
         _require_pending(descendant_ids)
 
-    test_dependencies = [str(value) for value in rows[TEST_KEY]["dependencies"]]
-    smoke_dependencies = [str(value) for value in rows[SMOKE_KEY]["dependencies"]]
+    compile_prerequisites = [
+        str(value)
+        for value in rows[COMPILE_KEY]["dependencies"]
+        if str(value) not in {old_test, old_smoke}
+    ]
+    test_dependencies = list(
+        dict.fromkeys(
+            [
+                *(str(value) for value in rows[TEST_KEY]["dependencies"]),
+                *compile_prerequisites,
+            ]
+        )
+    )
+    smoke_dependencies = list(
+        dict.fromkeys(
+            [
+                *(str(value) for value in rows[SMOKE_KEY]["dependencies"]),
+                *compile_prerequisites,
+            ]
+        )
+    )
     new_test = _submit(
         rows[TEST_KEY],
         label="storage_tests",
@@ -194,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         project_dir=project_dir,
         log_dir=log_dir,
         dry_run=args.dry_run,
+        source_identity=source_identity,
     )
     new_smoke = _submit(
         rows[SMOKE_KEY],
@@ -202,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         project_dir=project_dir,
         log_dir=log_dir,
         dry_run=args.dry_run,
+        source_identity=source_identity,
     )
     replacements = {old_test: new_test, old_smoke: new_smoke}
     compile_dependencies = [
@@ -215,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         project_dir=project_dir,
         log_dir=log_dir,
         dry_run=args.dry_run,
+        source_identity=source_identity,
     )
 
     rewired: list[dict[str, Any]] = []
@@ -250,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": True,
                 "dry_run": bool(args.dry_run),
                 "manifest": str(manifest),
+                "source_git_commit": source_identity[0],
+                "source_status_hash": source_identity[1],
                 "replacements": {
                     TEST_KEY: {"old": old_test, "new": new_test},
                     SMOKE_KEY: {"old": old_smoke, "new": new_smoke},

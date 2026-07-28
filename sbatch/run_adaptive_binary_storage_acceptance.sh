@@ -21,11 +21,33 @@ evidence="${ABPH_ROOT}/storage/storage_acceptance_tests.json"
 ram_evidence="${ABPH_ROOT}/storage/ram_lifecycle_smoke.json"
 output="${ABPH_ROOT}/storage/storage_acceptance.json"
 
+abph_acceptance_source_identity() {
+  local commit status_hash
+  commit="$(fresh_source_commit)"
+  status_hash="$(fresh_source_status_hash)"
+  if [[ -n "${ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT:-}" && \
+        "${commit}" != "${ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT}" ]]; then
+    echo "ABPH acceptance checkout changed: expected commit ${ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT}, found ${commit}" >&2
+    return 2
+  fi
+  if [[ -n "${ABPH_ACCEPTANCE_SOURCE_STATUS_HASH:-}" && \
+        "${status_hash}" != "${ABPH_ACCEPTANCE_SOURCE_STATUS_HASH}" ]]; then
+    echo "ABPH acceptance checkout status changed: expected hash ${ABPH_ACCEPTANCE_SOURCE_STATUS_HASH}, found ${status_hash}" >&2
+    return 2
+  fi
+  ABPH_ACCEPTANCE_ACTIVE_COMMIT="${commit}"
+  ABPH_ACCEPTANCE_ACTIVE_STATUS_HASH="${status_hash}"
+  export ABPH_ACCEPTANCE_ACTIVE_COMMIT ABPH_ACCEPTANCE_ACTIVE_STATUS_HASH
+}
+
+abph_acceptance_source_identity
+
 case "${action}" in
   tests)
     fresh_run "${PYTHON_BIN}" -u scripts/run_adaptive_binary_storage_acceptance_tests.py \
       --campaign-root "${ABPH_ROOT}" \
       --output "${evidence}"
+    abph_acceptance_source_identity
     ;;
   ram_lifecycle_smoke)
     source "${PROJECT_DIR}/sbatch/adaptive_binary_ram_workspace.sh"
@@ -47,10 +69,12 @@ case "${action}" in
       --workspace "${ABPH_RAM_WORKSPACE}" \
       --campaign-root "${ABPH_ROOT}" \
       --output "${ram_evidence}" \
-      --source-git-commit "$(fresh_source_commit)" \
-      --source-status-hash "$(fresh_source_status_hash)"
+      --source-git-commit "${ABPH_ACCEPTANCE_ACTIVE_COMMIT}" \
+      --source-status-hash "${ABPH_ACCEPTANCE_ACTIVE_STATUS_HASH}"
+    abph_acceptance_source_identity
     ;;
   compile)
+    abph_acceptance_source_identity
     fresh_run "${PYTHON_BIN}" -u scripts/write_adaptive_binary_storage_acceptance.py \
       --campaign-root "${ABPH_ROOT}" \
       --campaign-mode "${ABPH_CAMPAIGN_MODE}" \
@@ -62,8 +86,8 @@ case "${action}" in
       --runtime-acceptance "${ABPH_RUNTIME_ACCEPTANCE_PATH}" \
       --test-evidence "${evidence}" \
       --ram-lifecycle-smoke "${ram_evidence}" \
-      --source-git-commit "$(fresh_source_commit)" \
-      --source-status-hash "$(fresh_source_status_hash)" \
+      --source-git-commit "${ABPH_ACCEPTANCE_ACTIVE_COMMIT}" \
+      --source-status-hash "${ABPH_ACCEPTANCE_ACTIVE_STATUS_HASH}" \
       --output "${output}"
     ;;
   *)

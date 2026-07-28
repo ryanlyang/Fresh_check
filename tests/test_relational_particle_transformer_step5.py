@@ -12,6 +12,17 @@ import torch
 from jetclass_fresh.jetclass_data import JetIdentity
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from scripts.build_relational_part_tree_backend import _canonical_smoke_parity
+from teacher_logit_reco.relational_part.normalization import (
+    _identity_key,
+    _identity_sequence_hash,
+    select_normalization_jet_indices,
+    select_normalization_pairs,
+)
+from teacher_logit_reco.relational_part.region_normalization import (
+    _RegionDomainSampler,
+    _collect_region_domain_samples,
+    _region_row_sampler,
+)
 from teacher_logit_reco.relational_part import (
     EXCLUSIVE_RESOLUTIONS,
     REGION_RAW_FEATURE_NAMES,
@@ -238,6 +249,89 @@ def test_region_normalizer_encoder_and_masking() -> None:
         ablated["resolution_ablation_domain"]
         == "registered_normalized_K_specific_channels_before_encoder"
     )
+
+
+def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() -> None:
+    tokens, mask, vectors, identities = _sample(jets=4)
+    trees = [
+        build_reference_tree(vectors[row], tokens[row], mask[row])
+        for row in range(4)
+    ]
+    selected = select_normalization_jet_indices(identities)
+    progress = []
+    optimized, optimized_hashes = _collect_region_domain_samples(
+        tokens,
+        mask,
+        identities,
+        trees,
+        selected,
+        progress_callback=progress.append,
+        progress_interval=2,
+    )
+    legacy_rows = {
+        "REGION_pair": [],
+        "REGION_merge": [],
+        "REGION_node": [],
+    }
+    legacy_keys = {
+        "REGION_pair": [],
+        "REGION_merge": [],
+        "REGION_node": [],
+    }
+    for row_value in selected:
+        row = int(row_value)
+        identity = _identity_key(identities[row])
+        valid_indices = np.flatnonzero(mask[row]).tolist()
+        pairs = select_normalization_pairs(
+            identities[row], valid_indices
+        )
+        legacy = _region_row_sampler(
+            trees[row], tokens[row], valid_indices
+        )
+        optimized_sampler = _RegionDomainSampler(
+            trees[row], tokens[row], valid_indices
+        )
+        for query, context in pairs:
+            full = legacy(query, context)
+            pair, merge = optimized_sampler.pair_and_merge(
+                query, context
+            )
+            np.testing.assert_array_equal(
+                pair, full[[3, 38, 39, 40]]
+            )
+            legacy_rows["REGION_pair"].append(full[[3, 38, 39, 40]])
+            legacy_keys["REGION_pair"].append(
+                f"{identity}#REGION_pair:{query}>{context}"
+            )
+            if query != context:
+                assert merge is not None
+                np.testing.assert_array_equal(merge, full[4:8])
+                legacy_rows["REGION_merge"].append(full[4:8])
+                legacy_keys["REGION_merge"].append(
+                    f"{identity}#REGION_merge:{query}>{context}"
+                )
+            else:
+                assert merge is None
+        for index in valid_indices:
+            full = legacy(index, index)
+            node = optimized_sampler.node(index)
+            np.testing.assert_array_equal(node, full[8:38])
+            legacy_rows["REGION_node"].append(full[8:38])
+            legacy_keys["REGION_node"].append(
+                f"{identity}#REGION_node:{index}>{index}"
+            )
+
+    for domain in legacy_rows:
+        expected = np.stack(legacy_rows[domain])
+        np.testing.assert_array_equal(optimized[domain], expected)
+        assert optimized_hashes[domain] == _identity_sequence_hash(
+            legacy_keys[domain]
+        )
+    assert progress[-1]["processed_jets"] == 4
+    assert progress[-1]["fraction_complete"] == 1.0
+    source = inspect.getsource(_collect_region_domain_samples)
+    assert "for feature_index" not in source
+    assert "sample_keys" not in source
     details["encoded"].square().sum().backward()
     assert encoder.encoder[0].weight.grad is not None
 

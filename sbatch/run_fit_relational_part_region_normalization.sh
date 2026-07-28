@@ -4,7 +4,7 @@
 #SBATCH --partition=tigris
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=192G
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
 
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/home/ryreu/atlas/Fresh_check}"

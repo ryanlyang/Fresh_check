@@ -400,10 +400,12 @@ def test_storage_acceptance_runs_real_ram_lifecycle_smoke() -> None:
 
 
 def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
     from scripts.repair_adaptive_binary_storage_acceptance_graph import (
         TIGRIS_CONDA_BASE,
         TIGRIS_CONDA_ENV,
         _job_environment,
+        _source_identity,
         repaired_sbatch_command,
     )
 
@@ -448,6 +450,30 @@ def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) 
     assert environment["CONDA_BASE"] == TIGRIS_CONDA_BASE
     assert environment["ABPH_CONDA_ENV"] == TIGRIS_CONDA_ENV
     assert environment["CONDA_ENV"] == TIGRIS_CONDA_ENV
+    source_identity = _source_identity(root)
+    frozen_environment = _job_environment(
+        {
+            "key": "acceptance:component_parity_tests",
+            "environment": {},
+        },
+        root,
+        source_identity=source_identity,
+    )
+    assert (
+        frozen_environment["ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT"]
+        == source_identity[0]
+    )
+    assert (
+        frozen_environment["ABPH_ACCEPTANCE_SOURCE_STATUS_HASH"]
+        == source_identity[1]
+    )
+
+    worker = (
+        root / "sbatch" / "run_adaptive_binary_storage_acceptance.sh"
+    ).read_text(encoding="utf-8")
+    assert "abph_acceptance_source_identity" in worker
+    assert "ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT" in worker
+    assert "ABPH_ACCEPTANCE_SOURCE_STATUS_HASH" in worker
 
 
 def test_ram_lifecycle_smoke_publishes_to_campaign_then_cleans(tmp_path: Path) -> None:

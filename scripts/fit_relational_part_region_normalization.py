@@ -35,6 +35,7 @@ def main() -> int:
     parser.add_argument("--tree-dir", type=Path, required=True)
     parser.add_argument("--relation-normalization", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--progress-interval", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     base = load_hashed_json(
@@ -48,6 +49,19 @@ def main() -> int:
     if manifest.get("split") != "model_train":
         raise ValueError("REGION normalization may only access model_train")
     view = load_cached_hlt_view(args.cache_dir, "model_train", verify_hash=True)
+    print(
+        json.dumps(
+            {
+                "progress": {
+                    "stage": "load_hlt_cache",
+                    "jet_count": len(view.jet_ids),
+                    "complete": True,
+                }
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     selected = np.sort(
         select_normalization_jet_indices(view.jet_ids)
     )
@@ -56,7 +70,8 @@ def main() -> int:
     identities = []
     global_offset = 0
     expected_all = [identity.key() for identity in view.jet_ids]
-    for row in manifest["shards"]:
+    shard_rows = manifest["shards"]
+    for position, row in enumerate(shard_rows, start=1):
         shard_path = (
             args.tree_dir / "shards" / f"shard_{int(row['shard_index']):05d}.npz"
         )
@@ -72,6 +87,21 @@ def main() -> int:
                 identities.append(view.jet_ids[absolute])
                 trees.append(tree)
         global_offset = stop
+        if position == len(shard_rows) or position % 10 == 0:
+            print(
+                json.dumps(
+                    {
+                        "progress": {
+                            "stage": "load_tree_shards",
+                            "processed_shards": position,
+                            "total_shards": len(shard_rows),
+                            "selected_trees_loaded": len(trees),
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
     if global_offset != len(view.jet_ids) or len(trees) != len(selected):
         raise ValueError("REGION normalizer tree coverage is incomplete")
     artifact = fit_region_normalization(
@@ -83,6 +113,11 @@ def main() -> int:
         angular_tree_resource_sha256=manifest["parents"][
             "tree_resource_sha256"
         ],
+        progress_callback=lambda payload: print(
+            json.dumps({"progress": dict(payload)}, sort_keys=True),
+            flush=True,
+        ),
+        progress_interval=args.progress_interval,
     )
     artifact = bind_source_provenance(
         artifact, source_snapshot=source_snapshot(REPO_ROOT)
