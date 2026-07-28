@@ -74,6 +74,104 @@ export OVERWRITE=1
 export CONFIRM_FINAL_TEST=0
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+mapfile -t missing_contract_variants < <(
+  "${PYTHON_BIN}" - "${campaign_root}" <<'PY'
+import sys
+from pathlib import Path
+
+from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (
+    ABPH_TRAINED_RECONSTRUCTOR_VARIANTS,
+)
+
+root = Path(sys.argv[1])
+for variant in ABPH_TRAINED_RECONSTRUCTOR_VARIANTS:
+    contract = (
+        root
+        / "runtime_batch_contracts"
+        / variant
+        / "runtime_batch_contract.json"
+    )
+    if not contract.is_file():
+        print(variant)
+PY
+)
+if ((${#missing_contract_variants[@]})); then
+  latest_probe_manifest="$(
+    find "${campaign_root}/submission_logs" -maxdepth 1 -type f \
+      -name 'abph_clean_model_recovery_contracts_*.tsv' \
+      -printf '%T@ %p\n' |
+      sort -n |
+      tail -1 |
+      cut -d' ' -f2-
+  )"
+  [[ -f "${latest_probe_manifest}" ]] || {
+    echo "Required runtime contracts are missing and no recovery manifest exists: ${missing_contract_variants[*]}" >&2
+    exit 2
+  }
+
+  producer_jobs=()
+  for variant in "${missing_contract_variants[@]}"; do
+    producer="$(
+      awk -F $'\t' -v variant="${variant}" \
+        '$1 == variant && $2 == "compile" {job=$4} END {print job}' \
+        "${latest_probe_manifest}"
+    )"
+    [[ "${producer}" =~ ^[0-9]+$ ]] || {
+      echo "No compiler job was recorded for missing contract ${variant}." >&2
+      exit 2
+    }
+    active_row="$(
+      (squeue -h -j "${producer}" -o "%T|%R" 2>/dev/null || true) |
+        tail -1
+    )"
+    active_state="${active_row%%|*}"
+    active_reason="${active_row#*|}"
+    if [[ -n "${active_state}" ]] &&
+       [[ "${active_reason}" != "DependencyNeverSatisfied" ]]; then
+      echo "Waiting for ${variant} contract producer ${producer} (${active_state}; ${active_reason})."
+      producer_jobs+=("${producer}")
+      continue
+    fi
+    if [[ "${active_reason}" == "DependencyNeverSatisfied" ]]; then
+      echo "Missing ${variant} contract producer ${producer} cannot run because one of its probes failed." >&2
+      exit 2
+    fi
+    terminal_state="$(
+      sacct -X -n -j "${producer}" --format=State -P |
+        head -1 |
+        cut -d'|' -f1
+    )"
+    echo "Missing ${variant} contract producer ${producer} is ${terminal_state:-UNKNOWN}." >&2
+    exit 2
+  done
+
+  dependency="afterok:$(IFS=:; echo "${producer_jobs[*]}")"
+  continuation="$(
+    sbatch --parsable \
+      --account="${ABPH_SBATCH_ACCOUNT}" \
+      --partition="${ABPH_SBATCH_PARTITION}" \
+      --job-name=fresh_abph_models_resume \
+      --output=/dev/null \
+      --error=/dev/null \
+      --nodes=1 \
+      --ntasks=1 \
+      --cpus-per-task=2 \
+      --mem=16G \
+      --time=00:30:00 \
+      --dependency="${dependency}" \
+      --export=ALL,ABPH_CONFIRM_MODELS_RESUME=1 \
+      --chdir="${PROJECT_DIR}" \
+      "${PROJECT_DIR}/sbatch/resume_adaptive_binary_models_from_contracts_tigris.sh"
+  )"
+  continuation_job="${continuation%%;*}"
+  [[ "${continuation_job}" =~ ^[0-9]+$ ]] || {
+    echo "Invalid models-resume continuation response: ${continuation}" >&2
+    exit 2
+  }
+  echo "Models resume will continue automatically as job ${continuation_job} after ${producer_jobs[*]}."
+  exit 0
+fi
+
 preflight_output="/tmp/abph_models_resume_preflight_${USER}_${stamp}.json"
 echo "Validating retained inputs and all required trained-model contracts..."
 DRY_RUN=1 bash \

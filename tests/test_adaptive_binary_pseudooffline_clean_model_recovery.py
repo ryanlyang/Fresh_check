@@ -90,6 +90,16 @@ def test_models_resume_preflights_before_cancelling_or_submitting() -> None:
     assert preflight < cancellation < submission
 
 
+def test_models_resume_waits_for_inflight_required_contracts() -> None:
+    assert "ABPH_TRAINED_RECONSTRUCTOR_VARIANTS" in RESUME_SCRIPT
+    assert "missing_contract_variants" in RESUME_SCRIPT
+    assert "abph_clean_model_recovery_contracts_*.tsv" in RESUME_SCRIPT
+    assert "fresh_abph_models_resume" in RESUME_SCRIPT
+    assert '--dependency="${dependency}"' in RESUME_SCRIPT
+    assert "--export=ALL,ABPH_CONFIRM_MODELS_RESUME=1" in RESUME_SCRIPT
+    assert "Models resume will continue automatically" in RESUME_SCRIPT
+
+
 def test_models_resume_reuses_prepared_campaign_evidence() -> None:
     assert "abph_full_submission.json" in RESUME_SCRIPT
     assert "runtime_acceptance" in RESUME_SCRIPT
