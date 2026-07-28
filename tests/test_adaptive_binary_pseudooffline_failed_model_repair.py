@@ -8,6 +8,7 @@ from scripts.repair_adaptive_binary_failed_model_wave import (
     _replacement_jobs,
     repaired_variant_command,
 )
+from scripts.repair_adaptive_binary_runtime_batch_contract import _job_replacements
 
 
 def _row(variant: str) -> dict:
@@ -86,3 +87,7 @@ def test_completed_prerequisites_are_not_readded_to_pending_jobs() -> None:
         "afterok:19416,afterok:19619:77",
         state_for_job=states.__getitem__,
     ) == "afterok:19619:77"
+
+
+def test_failed_model_wave_accepts_numeric_prerequisite_replacements() -> None:
+    assert _job_replacements(["18932=19619"]) == {"18932": "19619"}

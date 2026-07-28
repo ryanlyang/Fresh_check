@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.repair_adaptive_binary_runtime_batch_contract import (
+    _job_replacements,
     _live_dependency,
     _rows,
     replace_dependency_job,
@@ -55,6 +56,13 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="VARIANT=JOB_ID",
         help="Resume an interrupted repair using an already submitted replacement.",
+    )
+    parser.add_argument(
+        "--dependency-replacement",
+        action="append",
+        default=[],
+        metavar="OLD_JOB_ID=NEW_JOB_ID",
+        help="Replace a failed prerequisite when replaying a model job.",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -273,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = _rows(manifest)
     requested = tuple(dict.fromkeys(str(value) for value in args.variants))
     replacements = _replacement_jobs(args.replacement_job)
+    prerequisite_replacements = _job_replacements(args.dependency_replacement)
     unknown = [
         variant for variant in requested if f"variant:{variant}" not in rows
     ]
@@ -310,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             if contract_job_id is not None:
                 drop_ids.add(contract_job_id)
         prerequisite_ids = [
-            str(value)
+            prerequisite_replacements.get(str(value), str(value))
             for value in row.get("dependencies", ())
             if str(value) not in drop_ids
         ]
