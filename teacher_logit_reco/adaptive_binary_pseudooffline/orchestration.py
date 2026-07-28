@@ -251,8 +251,20 @@ def require_actual_target_preflight(path: str | Path) -> Mapping[str, Any]:
             raise ValueError(f"preflight subgroup {name} failed")
         if int(row.get("compiler_failure_count", -1)) != 0:
             raise ValueError(f"preflight subgroup {name} has compiler failures")
-        counts = row.get("class_counts")
+        coverage = row.get("coverage")
+        if coverage is not None and not isinstance(coverage, Mapping):
+            raise ValueError(f"preflight subgroup {name} has invalid coverage")
+        # Current Step-4 reports nest coverage fields. Keep the legacy
+        # top-level field readable for prepared roots created before that
+        # schema change, while enforcing the same complete class matrix.
+        counts = (
+            coverage.get("class_counts")
+            if isinstance(coverage, Mapping)
+            else row.get("class_counts")
+        )
         if not isinstance(counts, Mapping) or not counts or any(int(value) <= 0 for value in counts.values()):
+            raise ValueError(f"preflight subgroup {name} is not class-stratified")
+        if isinstance(coverage, Mapping) and coverage.get("all_classes_present") is not True:
             raise ValueError(f"preflight subgroup {name} is not class-stratified")
     synthetic = payload.get("synthetic_edge_cases")
     if not isinstance(synthetic, Mapping) or synthetic.get("ok") is not True:

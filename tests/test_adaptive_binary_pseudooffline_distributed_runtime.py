@@ -53,6 +53,9 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
     evaluate_reconstructor_rollout,
     train_reconstructor_curriculum,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_batch_probe import (
+    _gather_fixed_evidence,
+)
 
 
 def test_ddp_acceptance_smoke_cli_accepts_production_world_sizes() -> None:
@@ -93,6 +96,40 @@ def _compose(result, _context, _weights):
     )
 
 
+def test_training_module_anchors_every_stage_active_parameter() -> None:
+    class BranchModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.left = torch.nn.Linear(2, 1, bias=False)
+            self.right = torch.nn.Linear(2, 1, bias=False)
+
+        def forward(self, values, use_left):
+            return self.left(values) if use_left else self.right(values)
+
+    def step(model, batch, _context):
+        prediction = model(batch["x"], batch["use_left"])
+        loss = prediction.square().mean()
+        return ReconstructorStepResult(
+            loss_terms={"root": loss},
+            metrics={},
+            batch_size=int(prediction.shape[0]),
+            tensors_to_check=(prediction,),
+        )
+
+    model = BranchModel()
+    module = ReconstructorTrainingModule(model, step, _compose, None)
+    output = module(
+        {"x": torch.ones(2, 2), "use_left": True},
+        None,
+    )
+    output["total_loss"].backward()
+
+    assert model.left.weight.grad is not None
+    assert model.right.weight.grad is not None
+    assert torch.count_nonzero(model.right.weight.grad) == 0
+    assert module.last_metadata["complete_parameter_graph_anchored"] is True
+
+
 class _FailBeforeReducer(torch.autograd.Function):
     @staticmethod
     def forward(ctx, value, fail):
@@ -104,6 +141,66 @@ class _FailBeforeReducer(torch.autograd.Function):
         if ctx.fail:
             raise RuntimeError("injected failure before DDP reducer hooks")
         return gradient, None
+
+
+def _rank_divergent_graph_worker(rank: int, world_size: int, port: int) -> None:
+    os.environ.update(
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+        LOCAL_RANK=str(rank),
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        ABPH_DDP_TIMEOUT_SECONDS="30",
+    )
+    runtime = initialize_distributed_runtime(
+        requested_world_size=world_size, device=torch.device("cpu")
+    )
+    try:
+        class BranchModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.left = torch.nn.Linear(2, 1, bias=False)
+                self.right = torch.nn.Linear(2, 1, bias=False)
+
+            def forward(self, values, use_left):
+                return self.left(values) if use_left else self.right(values)
+
+        def step(model, batch, _context):
+            prediction = model(batch["x"], batch["use_left"])
+            loss = prediction.square().mean()
+            return ReconstructorStepResult(
+                loss_terms={"root": loss},
+                metrics={},
+                batch_size=int(prediction.shape[0]),
+                tensors_to_check=(prediction,),
+            )
+
+        torch.manual_seed(402)
+        model = BranchModel()
+        module = ReconstructorTrainingModule(model, step, _compose, None)
+        wrapper = build_stage_ddp_wrapper(
+            module,
+            runtime,
+            device=torch.device("cpu"),
+            # The complete graph anchor makes reducer order independent of
+            # rank-local topology even without unused-parameter discovery.
+            find_unused_parameters=False,
+        )
+        output = wrapper(
+            {"x": torch.ones(2, 2), "use_left": rank == 0},
+            None,
+        )
+        output["total_loss"].backward()
+        assert model.left.weight.grad is not None
+        assert model.right.weight.grad is not None
+        gathered = _gather_fixed_evidence(
+            {"rank": rank, "backward_completed": True},
+            measured_world=world_size,
+            device=torch.device("cpu"),
+        )
+        assert tuple(row["rank"] for row in gathered) == tuple(range(world_size))
+    finally:
+        destroy_distributed_runtime(runtime)
 
 
 def _real_ddp_backward_failure_worker(
@@ -822,6 +919,18 @@ def test_cuda_ddp_contract_rejects_unconverted_batch_norm():
 def test_two_rank_ddp_consensus_and_collective_rebuild():
     torch.multiprocessing.spawn(
         _distributed_worker,
+        args=(2, _free_port()),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_available(), reason="torch.distributed is unavailable"
+)
+def test_two_rank_divergent_topology_uses_one_reducer_sequence():
+    torch.multiprocessing.spawn(
+        _rank_divergent_graph_worker,
         args=(2, _free_port()),
         nprocs=2,
         join=True,

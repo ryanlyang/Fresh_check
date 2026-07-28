@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
+    _ACTIVE_SLURM_STATES,
     _job_environment,
     _require_pending,
     _slurm_job_state,
@@ -38,6 +39,13 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="OLD_JOB_ID=NEW_JOB_ID",
         help="Replace an additional failed prerequisite while rewiring consumers.",
+    )
+    parser.add_argument(
+        "--superseded-contract-job",
+        help=(
+            "Failed replacement contract currently referenced by consumers; "
+            "use this when repairing an already repaired contract."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -209,6 +217,69 @@ def _replace_dependency_if_present(
     )
 
 
+def replace_one_dependency_job(
+    dependency: str,
+    *,
+    old_job_ids: Sequence[str],
+    new_job_id: str,
+) -> str:
+    """Replace exactly one original or superseded dependency reference."""
+
+    candidates = tuple(dict.fromkeys(str(value) for value in old_job_ids))
+    matches = [
+        value
+        for value in candidates
+        if re.search(rf"(?<!\d){re.escape(value)}(?!\d)", dependency)
+    ]
+    if re.search(rf"(?<!\d){re.escape(new_job_id)}(?!\d)", dependency):
+        if matches:
+            raise ValueError(
+                "dependency contains both a stale and the new contract job"
+            )
+        return dependency
+    if len(matches) != 1:
+        raise ValueError(
+            "expected exactly one original or superseded dependency, found "
+            f"{matches}: {dependency}"
+        )
+    return replace_dependency_job(
+        dependency,
+        old_job_id=matches[0],
+        new_job_id=new_job_id,
+    )
+
+
+def update_pending_dependency(job_id: str, dependency: str) -> bool:
+    """Update a pending job, thawing Slurm's frozen DNS state if necessary.
+
+    Returns ``True`` when the requeue-hold recovery path was required.
+    """
+
+    command = (
+        "scontrol",
+        "update",
+        f"JobId={job_id}",
+        f"Dependency={dependency}",
+    )
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return False
+    message = (completed.stderr or completed.stdout or "").strip()
+    if "Job dependency problem" not in message:
+        raise RuntimeError(
+            f"scontrol rejected dependency repair for {job_id}: {message}"
+        )
+    subprocess.run(("scontrol", "requeuehold", job_id), check=True)
+    subprocess.run(command, check=True)
+    subprocess.run(("scontrol", "release", job_id), check=True)
+    return True
+
+
 def _drop_completed_afterok_dependencies(
     dependency: str,
     *,
@@ -272,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = Path(args.log_dir or project_dir / "fresh_check_logs").resolve()
     manifest = Path(args.submission_manifest).resolve()
     companion_replacements = _job_replacements(args.dependency_replacement)
+    superseded_contract = args.superseded_contract_job
+    if superseded_contract is not None and not str(superseded_contract).isdigit():
+        raise ValueError("--superseded-contract-job must be a numeric Slurm job ID")
     rows = _rows(manifest)
     variant = str(args.variant)
     contract_key = f"runtime_batch_contract:{variant}"
@@ -332,9 +406,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run
             else _live_dependency(job_id)
         )
-        dependency = replace_dependency_job(
+        dependency = replace_one_dependency_job(
             current,
-            old_job_id=old_contract,
+            old_job_ids=tuple(
+                value
+                for value in (old_contract, superseded_contract)
+                if value is not None
+            ),
             new_job_id=new_contract,
         )
         for old_job_id, new_job_id in companion_replacements.items():
@@ -359,13 +437,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         else:
-            subprocess.run(
-                ("scontrol", "update", f"JobId={job_id}", f"Dependency={dependency}"),
-                check=True,
-            )
+            update_pending_dependency(job_id, dependency)
         rewired.append(
             {"key": str(row["key"]), "job_id": job_id, "dependency": dependency}
         )
+
+    if not args.dry_run and superseded_contract is not None:
+        if _slurm_job_state(superseded_contract) in _ACTIVE_SLURM_STATES:
+            subprocess.run(("scancel", superseded_contract), check=True)
 
     print(
         json.dumps(

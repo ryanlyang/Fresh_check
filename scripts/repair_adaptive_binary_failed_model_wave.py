@@ -21,6 +21,8 @@ from scripts.repair_adaptive_binary_runtime_batch_contract import (
     _live_dependency,
     _rows,
     replace_dependency_job,
+    replace_one_dependency_job,
+    update_pending_dependency,
 )
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
     _ACTIVE_SLURM_STATES,
@@ -56,6 +58,15 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="VARIANT=JOB_ID",
         help="Resume an interrupted repair using an already submitted replacement.",
+    )
+    parser.add_argument(
+        "--superseded-job",
+        action="append",
+        default=[],
+        metavar="VARIANT=JOB_ID",
+        help=(
+            "Failed prior replacement currently referenced by downstream jobs."
+        ),
     )
     parser.add_argument(
         "--dependency-replacement",
@@ -281,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = _rows(manifest)
     requested = tuple(dict.fromkeys(str(value) for value in args.variants))
     replacements = _replacement_jobs(args.replacement_job)
+    superseded = _replacement_jobs(args.superseded_job)
     prerequisite_replacements = _job_replacements(args.dependency_replacement)
     unknown = [
         variant for variant in requested if f"variant:{variant}" not in rows
@@ -292,6 +304,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             "replacement jobs were supplied for unrequested variants: "
             f"{unexpected_replacements}"
+        )
+    unexpected_superseded = sorted(set(superseded) - set(requested))
+    if unexpected_superseded:
+        raise ValueError(
+            "superseded jobs were supplied for unrequested variants: "
+            f"{unexpected_superseded}"
         )
     if not args.dry_run:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -353,11 +371,17 @@ def main(argv: list[str] | None = None) -> int:
                 if args.dry_run
                 else _live_dependency(consumer_id)
             )
-            dependency, changed = _reconcile_dependency_job(
+            old_candidates = tuple(
+                value
+                for value in (old_job_id, superseded.get(variant))
+                if value is not None
+            )
+            dependency = replace_one_dependency_job(
                 current,
-                old_job_id=old_job_id,
+                old_job_ids=old_candidates,
                 new_job_id=new_job_id,
             )
+            changed = dependency != current
             if not args.dry_run:
                 without_completed = _drop_completed_afterok_dependencies(
                     dependency,
@@ -379,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 print(shlex.join(command))
             elif changed:
-                subprocess.run(command, check=True)
+                update_pending_dependency(consumer_id, dependency)
             rewired.append(
                 {
                     "key": str(consumer["key"]),
@@ -392,6 +416,13 @@ def main(argv: list[str] | None = None) -> int:
         old_state = None if args.dry_run else _slurm_job_state(old_job_id)
         if old_state in _ACTIVE_SLURM_STATES:
             subprocess.run(("scancel", old_job_id), check=True)
+        superseded_job_id = superseded.get(variant)
+        if (
+            not args.dry_run
+            and superseded_job_id is not None
+            and _slurm_job_state(superseded_job_id) in _ACTIVE_SLURM_STATES
+        ):
+            subprocess.run(("scancel", superseded_job_id), check=True)
         results.append(
             {
                 "variant": variant,

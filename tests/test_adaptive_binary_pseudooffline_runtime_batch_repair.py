@@ -7,6 +7,8 @@ from scripts.repair_adaptive_binary_runtime_batch_contract import (
     _replace_dependency_if_present,
     repaired_command,
     replace_dependency_job,
+    replace_one_dependency_job,
+    update_pending_dependency,
 )
 
 
@@ -119,6 +121,53 @@ def test_contract_repair_can_replace_a_companion_failed_model_dependency() -> No
         new_job_id="19619",
     )
     assert dependency == "afterok:19700,afterok:19619"
+
+
+def test_contract_repair_replaces_a_failed_prior_repair() -> None:
+    assert replace_one_dependency_job(
+        "afterok:19617:18948",
+        old_job_ids=("18922", "19617"),
+        new_job_id="19700",
+    ) == "afterok:19700:18948"
+
+
+def test_dependency_update_thaws_dependency_never_satisfied(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class Completed:
+        def __init__(self, returncode=0, stderr="") -> None:
+            self.returncode = returncode
+            self.stderr = stderr
+            self.stdout = ""
+
+    def run(command, **kwargs):
+        command = tuple(command)
+        calls.append(command)
+        if command[:2] == ("scontrol", "update") and len(calls) == 1:
+            return Completed(1, "Job dependency problem for job 18968")
+        return Completed()
+
+    monkeypatch.setattr(
+        "scripts.repair_adaptive_binary_runtime_batch_contract.subprocess.run",
+        run,
+    )
+    assert update_pending_dependency("18968", "afterok:19700") is True
+    assert calls == [
+        (
+            "scontrol",
+            "update",
+            "JobId=18968",
+            "Dependency=afterok:19700",
+        ),
+        ("scontrol", "requeuehold", "18968"),
+        (
+            "scontrol",
+            "update",
+            "JobId=18968",
+            "Dependency=afterok:19700",
+        ),
+        ("scontrol", "release", "18968"),
+    ]
 
 
 def test_contract_repair_drops_completed_companion_dependencies() -> None:

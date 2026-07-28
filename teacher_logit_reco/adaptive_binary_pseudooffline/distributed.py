@@ -413,6 +413,21 @@ class ReconstructorTrainingModule(require_torch().nn.Module):
         self.loss_weights = loss_weights
         self.last_metadata: dict[str, Any] | None = None
 
+    def _complete_parameter_graph_anchor(self, reference: Any) -> Any:
+        """Connect every stage-active parameter to the same zero-valued graph."""
+
+        torch = require_torch()
+        anchor = torch.zeros((), dtype=reference.dtype, device=reference.device)
+        for parameter in self.model.parameters():
+            if parameter.requires_grad and parameter.numel():
+                # One scalar view is sufficient to trigger the reducer hook;
+                # it avoids scanning each full parameter tensor.
+                anchor = (
+                    anchor
+                    + parameter.reshape(-1)[0].to(dtype=reference.dtype) * 0.0
+                )
+        return anchor
+
     def forward(self, batch: Any, context: Any) -> Mapping[str, Any]:
         torch = require_torch()
         self.last_metadata = None
@@ -421,8 +436,12 @@ class ReconstructorTrainingModule(require_torch().nn.Module):
         with profile_span(getattr(context, "runtime_profiler", None), "loss_composition"):
             with torch.autocast(device_type=parameter.device.type, enabled=False):
                 composed = self.compose_function(result, context, self.loss_weights)
+        total_loss = (
+            composed.total
+            + self._complete_parameter_graph_anchor(composed.total)
+        )
         finite_tensors = (
-            composed.total,
+            total_loss,
             *tuple(composed.raw_terms.values()),
             *tuple(composed.weighted_terms.values()),
             *tuple(
@@ -438,9 +457,10 @@ class ReconstructorTrainingModule(require_torch().nn.Module):
             "effective_weights": dict(composed.effective_weights),
             "metrics": _detach_metadata(result.metrics),
             "batch_size": int(result.batch_size),
+            "complete_parameter_graph_anchored": True,
         }
         return {
-            "total_loss": composed.total,
+            "total_loss": total_loss,
             "raw_loss_terms": dict(composed.raw_terms),
             "weighted_loss_terms": dict(composed.weighted_terms),
             "finite_check_tensors": finite_tensors,

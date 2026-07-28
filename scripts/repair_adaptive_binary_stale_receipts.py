@@ -22,6 +22,7 @@ from scripts.repair_adaptive_binary_runtime_batch_contract import (
     _live_dependency,
     _rows,
     replace_dependency_job,
+    update_pending_dependency,
 )
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
     _job_environment,
@@ -208,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 print(shlex.join(command))
             else:
-                subprocess.run(command, check=True)
+                update_pending_dependency(consumer_id, repaired)
             rewired.append(
                 {
                     "key": str(consumer["key"]),

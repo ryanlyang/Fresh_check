@@ -91,7 +91,10 @@ def _actual_target_preflight(path: Path) -> Path:
             reports[f"{split}/{grouping}"] = {
                 "ok": True,
                 "compiler_failure_count": 0,
-                "class_counts": {str(index): 2 for index in range(10)},
+                "coverage": {
+                    "class_counts": {str(index): 2 for index in range(10)},
+                    "all_classes_present": True,
+                },
             }
     payload = {
         "contract": ABPH_STEP4_PREFLIGHT_CONTRACT,
@@ -522,6 +525,20 @@ def test_actual_target_preflight_fails_closed(tmp_path: Path) -> None:
     payload["reports"]["model_val/exclusive_kt"]["compiler_failure_count"] = 1
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="compiler failures"):
+        require_actual_target_preflight(path)
+
+
+def test_actual_target_preflight_reads_nested_class_coverage(tmp_path: Path) -> None:
+    path = _actual_target_preflight(tmp_path / "preflight.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    report = payload["reports"]["model_train/cambridge_aachen"]
+    assert "class_counts" not in report
+    assert require_actual_target_preflight(path)["ok"] is True
+
+    report["coverage"]["class_counts"]["3"] = 0
+    report["coverage"]["all_classes_present"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="not class-stratified"):
         require_actual_target_preflight(path)
 
 

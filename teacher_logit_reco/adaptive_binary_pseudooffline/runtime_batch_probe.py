@@ -2,11 +2,53 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Mapping, Sequence
 
 from .config import canonical_hash
 from .runtime_batch import FullStepBatchMeasurement, exact_accumulation_steps
 from .runtime_batch import ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER
+
+
+ABPH_RUNTIME_PROBE_EVIDENCE_BYTES = 8192
+
+
+def _gather_fixed_evidence(
+    local_evidence: Mapping[str, Any],
+    *,
+    measured_world: int,
+    device: Any,
+) -> tuple[dict[str, Any], ...]:
+    """Gather bounded evidence without NCCL object-size negotiation."""
+
+    import torch
+
+    encoded = json.dumps(
+        dict(local_evidence), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    maximum = int(ABPH_RUNTIME_PROBE_EVIDENCE_BYTES)
+    if len(encoded) > maximum - 4:
+        raise ValueError("runtime probe evidence exceeds its fixed control payload")
+    payload = bytearray(maximum)
+    payload[:4] = len(encoded).to_bytes(4, byteorder="little", signed=False)
+    payload[4 : 4 + len(encoded)] = encoded
+    local_tensor = torch.tensor(list(payload), dtype=torch.uint8, device=device)
+    gathered = [torch.empty_like(local_tensor) for _ in range(int(measured_world))]
+    torch.distributed.all_gather(gathered, local_tensor)
+
+    rows: list[dict[str, Any]] = []
+    for rank, tensor in enumerate(gathered):
+        raw = bytes(tensor.detach().cpu().tolist())
+        length = int.from_bytes(raw[:4], byteorder="little", signed=False)
+        if length > maximum - 4:
+            raise RuntimeError(
+                f"rank {rank} supplied an invalid runtime probe evidence length"
+            )
+        value = json.loads(raw[4 : 4 + length].decode("utf-8"))
+        if not isinstance(value, dict):
+            raise TypeError(f"rank {rank} runtime probe evidence is not a mapping")
+        rows.append(value)
+    return tuple(rows)
 
 
 def measure_full_optimizer_step(
@@ -152,9 +194,11 @@ def measure_full_optimizer_step(
     }
     local_hash = canonical_hash(local_evidence)
     if distributed:
-        gathered: list[dict[str, Any] | None] = [None for _ in range(measured_world)]
-        torch.distributed.all_gather_object(gathered, local_evidence)
-        rank_evidence = tuple(dict(value or {}) for value in gathered)
+        rank_evidence = _gather_fixed_evidence(
+            local_evidence,
+            measured_world=measured_world,
+            device=device,
+        )
         rank_hashes = tuple(canonical_hash(value) for value in rank_evidence)
         forward_completed = all(bool(value["forward_completed"]) for value in rank_evidence)
         backward_completed = all(bool(value["backward_completed"]) for value in rank_evidence)
@@ -210,4 +254,7 @@ def measure_full_optimizer_step(
     )
 
 
-__all__ = ["measure_full_optimizer_step"]
+__all__ = [
+    "ABPH_RUNTIME_PROBE_EVIDENCE_BYTES",
+    "measure_full_optimizer_step",
+]

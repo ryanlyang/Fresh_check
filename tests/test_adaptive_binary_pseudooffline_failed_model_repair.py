@@ -9,6 +9,9 @@ from scripts.repair_adaptive_binary_failed_model_wave import (
     repaired_variant_command,
 )
 from scripts.repair_adaptive_binary_runtime_batch_contract import _job_replacements
+from scripts.repair_adaptive_binary_runtime_batch_contract import (
+    replace_one_dependency_job,
+)
 
 
 def _row(variant: str) -> dict:
@@ -91,3 +94,11 @@ def test_completed_prerequisites_are_not_readded_to_pending_jobs() -> None:
 
 def test_failed_model_wave_accepts_numeric_prerequisite_replacements() -> None:
     assert _job_replacements(["18932=19619"]) == {"18932": "19619"}
+
+
+def test_failed_model_wave_can_supersede_a_failed_replacement() -> None:
+    assert replace_one_dependency_job(
+        "afterok:19618",
+        old_job_ids=("18928", "19618"),
+        new_job_id="19720",
+    ) == "afterok:19720"
