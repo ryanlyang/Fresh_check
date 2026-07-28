@@ -131,3 +131,27 @@ def test_contract_repair_replaces_stale_jobs_and_resumes_automatically() -> None
         "--job-name=fresh_abph_models_resume"
     )
     assert cancellation < probes < continuation
+
+
+def test_contract_repair_archives_selected_immutable_evidence_before_probes() -> None:
+    assert 'archive_root="${campaign_root}/archives/runtime_contract_repair_${stamp}"' in (
+        CONTRACT_REPAIR_SCRIPT
+    )
+    assert "for variant in \"$@\"; do" in CONTRACT_REPAIR_SCRIPT
+    assert (
+        "for artifact_kind in runtime_batch_measurements runtime_batch_contracts"
+        in CONTRACT_REPAIR_SCRIPT
+    )
+    assert 'source_path="${campaign_root}/${artifact_kind}/${variant}"' in (
+        CONTRACT_REPAIR_SCRIPT
+    )
+    assert '[[ -d "${source_path}" && ! -L "${source_path}" ]]' in (
+        CONTRACT_REPAIR_SCRIPT
+    )
+    assert 'mv -- "${source_path}" "${destination_path}"' in CONTRACT_REPAIR_SCRIPT
+
+    archive = CONTRACT_REPAIR_SCRIPT.index('archive_root="${campaign_root}')
+    probes = CONTRACT_REPAIR_SCRIPT.index(
+        "submit_adaptive_binary_runtime_batch_probes_tigris.sh"
+    )
+    assert archive < probes

@@ -388,20 +388,24 @@ scale_train = 3,000,000 balanced training jets
 `val_stop`, `val_design`, `stack_val`, and `final_test`.  Its manifest is built
 and sealed at campaign bootstrap, before model results.
 
-Only the accuracy and rejection graph definitions in
-`selection/locked_graph_definitions.json` may train on `scale_train`.  The
+Only graph definitions in
+`selection/locked_scale_shortlist.json` may train on `scale_train`.  The
 scale-up may select epochs on `val_stop` but may not reopen
 architecture, token-shape, loss, degradation, or predictor-family selection.
-Both 500k and 3M checkpoints are locked before the common `final_test` is
-opened.
+The 500k shortlist definitions and all shortlisted 3M checkpoints are
+immutable before `stack_val`; the selected 3M finalists and their execution
+dependencies are separately locked before the common `final_test` is opened.
 
 Architecture-search training workers may load only `model_train` and
 `val_stop`; Stage-M workers may load only `scale_train` and `val_stop`.
 Design/calibration workers may additionally load `val_design`.
-Only the Stage-L complete-graph selector may load `final_select/stack_val`.
-Final-test preparation may construct identity-bound inputs and frozen offline
-targets without checkpoints or metrics; scientific final-test inference
-requires an immutable finalist lock.
+Only the Stage-N complete-graph selector may load `final_select/stack_val`
+before finalist locking.  After that lock, Stage-N diagnostic workers may
+read it only with `selection_eligible=false`.
+Pre-lock final-test preparation may construct only identity-bound raw/degraded
+inputs and deterministic sidecars without loading checkpoints.  Offline
+targets and all other model outputs require the immutable scale-finalist lock;
+scientific final-test inference additionally requires the execution lock.
 
 All primary models use:
 
@@ -1425,9 +1429,14 @@ same-event `T0` tokens.  For any `[K,D]` bank define:
 
 ```text
 bank_vector = flatten(train-normalized bank in slot-major, then channel order)
-similarity(a,b) = cosine(bank_vector_a,bank_vector_b) / 0.1
+dot and norms accumulated in FP32
+cosine(a,b) = dot(a,b) / max(norm2(a)*norm2(b),1e-8)
+similarity(a,b) = cosine(a,b) / 0.1
 ```
 
+If either vector has exact FP32 norm zero, define its cosine similarity as
+exactly zero.  InfoNCE uses FP32 `logsumexp`.  Retrieval candidates sort by
+descending similarity, then ascending canonical identity for an exact tie.
 There is no learned retrieval projection, pooling head, or slot permutation.
 The retrieval loss is InfoNCE with the predicted HLT bank as query, the
 same-event moving offline bank as positive, and 31 fixed within-class
@@ -1444,11 +1453,34 @@ Certification uses an independent canonical per-class `val_design` ring and
 removing the query identity before choosing 31 negatives.  Training and
 certification negative rings and hashes are therefore non-interchangeable.
 
-`L_covariance` is the mean relative Frobenius error between moving and `T0`
-per-slot `D x D` channel covariance matrices over the current effective
-training batch, with both matrices computed after train-only normalization.
-Gradient accumulation combines covariance sufficient statistics over the
-complete effective batch before the loss is evaluated.
+For the global effective batch \(B\), cast train-normalized moving and `T0`
+tokens to FP32 and define centered population covariance independently for
+each slot:
+
+\[
+\mu_k=\frac{1}{B}\sum_{b=1}^{B}z_{b,k},
+\qquad
+C_k=\frac{1}{B}\sum_{b=1}^{B}
+(z_{b,k}-\mu_k)(z_{b,k}-\mu_k)^\top.
+\]
+
+Then:
+
+\[
+L_{\mathrm{covariance}}
+=
+\frac{1}{K}\sum_{k=1}^{K}
+\frac{\lVert C^{\mathrm{moving}}_k-C^{\mathrm{T0}}_k\rVert_F}
+{\max(\lVert C^{\mathrm{T0}}_k\rVert_F,10^{-8})}.
+\]
+
+`T0` statistics are detached; moving statistics retain gradients.  \(B\)
+includes every microbatch in the optimizer update and every distributed rank.
+FP32 sums, outer-product sums, and counts are combined with a differentiable
+all-reduce before centering and loss evaluation.  Accumulation steps retain
+the required graph or differentiable sufficient statistics until that update;
+they may not average independent microbatch covariance losses.  Global
+effective batch size below two is invalid.
 
 Training begins from `T0_PURE`.  The first candidate unfreezes only the offline
 summary tokenizer and expert/fusion consumers.  A confirmation-only candidate
@@ -1515,10 +1547,22 @@ within-class 32-way same-event retrieval accuracy >= 0.20
 
 For \(n\) evaluated events, the effective-rank matrix has exact shape
 `[n_events,K*D]`, with each row equal to the slot-major train-normalized bank
-vector above.  Effective rank is
-`exp(entropy(singular_values/sum(singular_values)))`, with exact zero singular
-values contributing zero to entropy and an all-zero matrix assigned rank
-zero.  Certification retrieval uses the same unlearned cosine similarity.
+vector above.  Cast the complete matrix to C-contiguous CPU float64 and compute
+the exact economy singular values with
+`numpy.linalg.svd(full_matrices=False,compute_uv=False)`.  The artifact binds
+the NumPy and linked LAPACK versions.  Let \(s_{\max}\) be the largest singular
+value.  If \(s_{\max}=0\), effective rank is zero.  Otherwise treat
+`s_i <= 1e-12*s_max` as numerical zero, normalize the remaining singular
+values to sum one, and define:
+
+\[
+\operatorname{erank}
+=
+\exp\left(-\sum_{i:p_i>0}p_i\log p_i\right).
+\]
+
+Certification retrieval uses the same unlearned FP32 cosine similarity and
+canonical-identity tie rule.
 Retrieval diagnostics also report mean reciprocal rank and nearest-target
 identity accuracy by class.
 For a dimension-changing `T2`, variance/covariance and frozen-logit
@@ -2003,8 +2047,6 @@ After `SHAPE_HIGH`, `SHAPE_COMPACT`, `HET_PHYSICS`, `HET_SELECTED`, and
 model_train
 val_stop
 val_design
-final_select (stack_val)
-final_test (sealed preparation only)
 ```
 
 Targets are stored in identity-bound, resumable shards:
@@ -2055,6 +2097,42 @@ scientific or workflow failure.
 
 Training always loads target tokens as float32.  No offline raw particles need
 remain resident while HLT predictors train.
+
+### Post-selection oracle and final-test targets
+
+Before `selection/locked_scale_finalists.json` exists, no command may produce
+model-derived tokens, logits, labels joined to model outputs, predictions, or
+metrics for `final_select/stack_val` or `final_test`.  Pre-lock preparation may
+write only:
+
+```text
+raw/offline input arrays
+deterministically degraded HLT input arrays
+relation/REGION input sidecars
+identity and source manifests
+```
+
+These are input transformations, not model outputs, and their builders cannot
+load a checkpoint.
+
+After the two 3M finalists are selected and
+`locked_scale_finalists.json` is immutable, Stage N may build:
+
+1. `final_select` offline targets for post-selection oracle/token-fidelity
+   diagnostics only;
+2. `final_test` offline targets required by locked oracle/token-fidelity
+   report rows.
+
+Every such target shard must use the exact corresponding Stage-M
+scale-trained offline expert/fusion hashes and scale target normalizer.  A
+500k teacher or pre-lock target cache is ineligible even if its shape matches.
+Post-selection `final_select` diagnostics are marked
+`selection_eligible=false` and cannot alter either finalist.
+
+The post-lock cache includes tokens, expert logits, labels, and identities
+only because the finalist selection is already frozen.  Its content hashes
+become parents of `selection/final_test_execution_lock.json`; scientific
+final-test inference cannot start before that second execution lock exists.
 
 ---
 
@@ -2969,36 +3047,41 @@ evaluation.  Separate retrained-domain controls are clearly labeled.
 All Stage-K robustness diagnostics use `val_design` or declared training
 splits, never `stack_val`.
 
-### Stage L: 500k confirmation and dual finalist selection
+### Stage L: 500k confirmation and bounded scale shortlist
 
 Confirm all primary baselines, both uniform-shape finalists, heterogeneous
 finalists, native HLT fusion, frozen reconstruction, token refiner, constrained
 adapter, and unrestricted fusion across three matched pipeline seeds.
-Every input graph definition and component choice is already immutable before
-this stage opens `stack_val`.
+Every complete graph definition and component choice is immutable.  Stage L
+cannot open `stack_val`; it ranks complete 500k graphs on `val_design`.
 
-Resolve separate `O_MONO_PARAM`, `O_MONO_FLOP`, `H_MONO_PARAM`, and
-`H_MONO_FLOP` controls for each finalist candidate whose complete inference
-graph differs.  Resolve `O_BASE_LONG` and `H_BASE_LONG` against the complete
-labeled-example presentation counts.  `H_BASE_LONG` includes every HLT-label
-presentation in selected native-expert, predictor-CE, `J4`, `J5`, refiner,
-adapter, and final-fusion training; offline-target-only updates are excluded.
-Deduplicate controls only when their target counts/graphs and hashes are
-exactly identical.  Train all controls before finalist selection.  Select two
-deployable candidate graphs using `stack_val`:
+Build a predeclared bounded scale shortlist:
 
 ```text
-ACCURACY_FINALIST
-REJECTION_FINALIST
+top 3 by three-seed mean balanced accuracy
+union
+top 3 by three-seed mean Jeffreys-smoothed mean log rejection
+remove duplicate graph IDs
+maximum shortlist size = 6
 ```
 
-The two may be the same graph.  No final-test prediction is produced here.
-Both graph definitions are emitted and Stage M proceeds even if every
-candidate is worse than `H_BASE` or its named native baseline.
+Each ranking uses its Section-25 finalist metric and tie rules, except its
+population is `val_design`.  If fewer than three graphs are eligible, include
+all eligible graphs.  The union always emits at least the best available graph
+and proceeds even if every graph loses to its baseline.  Write:
+
+```text
+selection/locked_scale_shortlist.json
+```
+
+The shortlist locks complete training and inference graph definitions but no
+3M checkpoint and no final finalist identity.  For 500k reporting, resolve
+graph-specific capacity and label-exposure controls for shortlisted graphs;
+these controls cannot change shortlist membership.
 
 ### Stage M: predeclared 3M scale-up
 
-Retrain only the two locked graph definitions on `scale_train`, across seeds
+Retrain every shortlisted graph definition on `scale_train`, across seeds
 `101,202,303`, preserving every architecture, target semantics, loss,
 degradation, replica, and inference decision.  Epoch selection may use
 `val_stop`; it cannot reopen architecture selection.  Recompute complete
@@ -3009,21 +3092,39 @@ Each locked graph definition contains both a training graph and a deployable
 inference graph.  Stage M therefore retrains its required offline experts and
 offline fusion, builds authenticated offline targets for all `scale_train`
 identities, then trains the HLT encoders, predictors/refiner, and final
-consumer.  Components shared by the two finalists are trained once per seed
-and referenced by both manifests.  Offline teachers and target generation are
-privileged training dependencies and remain excluded from deployable
-inference accounting.
+consumer.  Components shared across shortlisted graphs are trained once per
+seed and referenced by every applicable manifest.  Offline teachers and target
+generation are privileged training dependencies and remain excluded from
+deployable inference accounting.  With no duplicates, the declared maximum is
+six graph definitions times three seeds.
 
 Stage M refits all Section-7 train-derived normalizers on `scale_train`,
 refits target-token normalizers on the new scale targets, and refits the
 label-free uncertainty calibrator on `val_design`.  These refits instantiate
 the locked recipe and cannot change the graph definition.
+No Stage-M worker may open `stack_val`.
 
-### Stage N: immutable lock and final test
+### Stage N: one-time scale-finalist selection, locks, and final test
 
-Write the final lock after all 3M confirmation artifacts exist.  Evaluate
-`ACCURACY_FINALIST`, `REJECTION_FINALIST`, their named baselines, and required
-capacity controls on the common 300,000-jet `final_test` exactly once.
+After every shortlisted 3M graph and seed is immutable:
+
+1. run deployable classification inference on `final_select/stack_val`
+   without constructing or consuming any oracle offline target;
+2. select `ACCURACY_FINALIST` and `REJECTION_FINALIST` from the 3M graphs with
+   the exact Section-25 selectors;
+3. write immutable `selection/locked_scale_finalists.json`;
+4. train/resolve the required 3M graph-specific capacity and `H_BASE_LONG`
+   controls for the one or two locked finalists;
+5. generate post-selection `final_select` oracle diagnostics and required
+   `final_test` offline targets from the exact Stage-M teacher hashes;
+6. write `selection/final_test_execution_lock.json`, binding those controls,
+   targets, inputs, checkpoints, and both finalist-selection traces;
+7. evaluate the locked finalists, named baselines, and required controls on
+   the common 300,000-jet `final_test` exactly once.
+
+Step 1 is the only pre-lock access to `stack_val` and exposes only deployable
+predictions.  Steps 4-5 are selection-ineligible and cannot replace a
+finalist.  The two finalist selectors may choose the same graph.
 
 ---
 
@@ -3211,9 +3312,10 @@ Within any component/design candidate pool, use `val_design`:
 6. minimize parameter count;
 7. choose lexicographically smaller run ID.
 
-The sole exception is Stage L: it receives already locked complete graph
+The sole exception is Stage N: it receives already locked, scale-trained
+complete graph
 definitions and applies the two explicit `stack_val` finalist selectors below.
-No Stage-L result may feed back into a component choice.
+No Stage-N result may feed back into a component choice.
 
 The selector always emits a best available row, even when every row loses to
 its baseline.  It also records:
@@ -3226,10 +3328,30 @@ all_candidates_worse_than_baseline
 
 These flags affect interpretation, not DAG continuation.
 
+### Bounded 500k scale shortlist
+
+Stage L ranks only complete deployable 500k graph definitions with all three
+matched seeds.  Using `val_design`, create:
+
+```text
+ACC_SCALE_TOP3 = first three graphs under the accuracy ordering
+REJ_SCALE_TOP3 = first three graphs under the Jeffreys mean-log-rejection
+                 ordering
+SCALE_SHORTLIST = canonical graph-ID union(ACC_SCALE_TOP3,REJ_SCALE_TOP3)
+```
+
+Accuracy uses the ordinary `0.0001` window and tie rules.  Rejection uses the
+same 18-term score, `0.005` window, and tie rules as the final rejection
+selector.  Duplicate graph IDs are removed without changing either source
+ranking.  If a source list has fewer than three eligible graphs, use all of
+them.  Scientific underperformance never removes a graph; only incomplete,
+nonfinite, nondeployable, or lineage-invalid rows are ineligible.  The
+shortlist has size one through six and is immutable before Stage M.
+
 ### Dual deployable finalists
 
-Stage L runs two independent deterministic selectors over the same eligible
-deployable graphs.
+Stage N runs two independent deterministic selectors over the same eligible
+3M deployable graphs in `locked_scale_shortlist.json`.
 
 `ACCURACY_FINALIST` uses the ordinary candidate ranking above with
 `stack_val` macro balanced accuracy as its primary quantity.  Because
@@ -3253,6 +3375,9 @@ same row; no artificial second model is required.
 Only rows that are deployable without offline particles or oracle targets,
 complete at all three matched seeds, finite on all required selector metrics,
 and valid under the exact current source/cache contracts are eligible.
+Their `stack_val` prediction artifacts may have only HLT input, shortlisted
+3M checkpoint, and deployable-normalizer parents; an oracle target/cache parent
+is forbidden.
 Displayed positive-infinite zero-background rejection is permitted because
 the selector uses the declared finite Jeffreys-smoothed quantity.  Poor
 rejection relative to a baseline is recorded but never prevents selection or
@@ -3291,7 +3416,7 @@ closest to the target; break ties by larger achieved efficiency, then larger
 threshold.  Report the achieved, not nominal, signal efficiency.  Background
 efficiency is the passing-QCD count divided by all QCD jets and rejection is
 its reciprocal.  If zero QCD jets pass, displayed rejection is positive
-infinity.  The finite Stage-L selector uses the fixed Jeffreys-smoothed
+infinity.  The finite Stage-N selector uses the fixed Jeffreys-smoothed
 quantity:
 
 \[
@@ -3468,22 +3593,24 @@ No semantic perturbation is used to select a checkpoint.
 Stage L first writes:
 
 ```text
-selection/locked_graph_definitions.json
+selection/locked_scale_shortlist.json
 ```
 
-This source-bound object contains both finalist graph definitions and their
-complete deterministic selection traces but no 3M checkpoint.  Stage M must
-instantiate these definitions exactly.
+This source-bound object contains the union of the top-three 500k accuracy and
+top-three 500k rejection graph definitions, duplicate removal, both
+`val_design` ranking traces, and no 3M checkpoint or final finalist identity.
+Stage M must instantiate every listed definition exactly.
 
-Before final-test inference, Stage N writes:
+After one-time deployable `stack_val` inference, Stage N writes:
 
 ```text
-selection/locked_finalists.json
+selection/locked_scale_finalists.json
 ```
 
 It contains:
 
 - campaign-spec and source hashes;
+- shortlist hash and complete 500k/3M candidate lineage;
 - split/validation-partition, scale-pool, HLT replica/cache, and
   realization-policy hashes;
 - degradation profile/version/parameter hash;
@@ -3506,16 +3633,31 @@ It contains:
 - complete deployed-graph parameter and inference-FLOP accounting separately
   for both finalist graphs;
 - `ACCURACY_FINALIST` and `REJECTION_FINALIST` row IDs and deterministic
-  selection traces;
-- 3M scale-up checkpoint and pre-final confirmation-prediction hashes;
-- all locked scientific/control row IDs;
+  3M `stack_val` selection traces;
+- every shortlisted 3M checkpoint and pre-final confirmation-prediction hash;
 - deterministic selection reasons;
 - flags for positive/negative gains;
-- 500k and 3M confirmation metrics only.
+- 500k and 3M pre-`stack_val` confirmation metrics only.
+
+This lock authorizes, but does not yet contain, post-selection oracle target
+generation.  After required finalist controls and post-selection target caches
+exist, write:
+
+```text
+selection/final_test_execution_lock.json
+```
+
+It has `locked_scale_finalists.json` as a parent and additionally binds:
+
+- scale-trained offline teacher/fusion and target-normalizer hashes;
+- post-selection `final_select` oracle-diagnostic cache hashes;
+- final-test target/input/sidecar hashes;
+- graph-specific capacity and `H_BASE_LONG` control hashes;
+- all final-test-eligible scientific/control row IDs.
 
 Final evaluation rejects:
 
-- absent or stale lock;
+- absent or stale finalist or execution lock;
 - a new checkpoint;
 - a different source snapshot;
 - mismatched target/cache identities;
@@ -3523,7 +3665,8 @@ Final evaluation rejects:
 - unregistered final rows.
 
 All locked rows may be reported on final test.  Test performance never selects
-a replacement.
+a replacement.  No artifact created before `locked_scale_finalists.json` may
+contain final-test model outputs.
 
 ---
 
@@ -3593,6 +3736,7 @@ offline_fusions/
 hlt_experts/
 native_hlt_fusions/
 offline_targets/
+post_selection_oracle_targets/
 bridge_pilots/
 bridge_target_candidates/
 predictors/
@@ -3644,6 +3788,10 @@ Offline target caches are built only for selected token shapes and the locked
 top-four/homogeneous target-coordinate tuples.  Screening token banks may be
 streamed directly into fusion cache shards and deleted after authenticated
 aggregation.
+
+Storage projection before Stage N excludes `stack_val` and final-test model
+outputs because their caches do not yet exist.  Post-selection oracle targets
+are projected and admitted only after `locked_scale_finalists.json`.
 
 After successful training retain:
 
@@ -3731,6 +3879,7 @@ scripts/train_retb_bridge_targets.py
 scripts/certify_retb_bridge_content.py
 scripts/search_retb_target_coordinate_bundle.py
 scripts/build_retb_offline_target_cache.py
+scripts/build_retb_postlock_oracle_targets.py
 scripts/train_retb_hlt_expert.py
 scripts/train_retb_native_hlt_fusion.py
 scripts/train_retb_predictor.py
@@ -3743,7 +3892,10 @@ scripts/train_retb_final_adapter.py
 scripts/train_retb_unrestricted_fusion.py
 scripts/build_retb_capacity_controls.py
 scripts/aggregate_retb_confirmation.py
-scripts/train_retb_scale_finalists.py
+scripts/select_retb_scale_shortlist.py
+scripts/train_retb_scale_shortlist.py
+scripts/select_retb_scale_finalists.py
+scripts/write_retb_final_test_execution_lock.py
 scripts/evaluate_retb_final_test.py
 scripts/write_retb_report.py
 scripts/submit_retb_graph.py
@@ -3775,7 +3927,9 @@ sbatch/run_retb_train_adapter.sh
 sbatch/run_retb_train_unrestricted.sh
 sbatch/run_retb_capacity_controls.sh
 sbatch/run_retb_confirm.sh
-sbatch/run_retb_scale_finalists.sh
+sbatch/run_retb_scale_shortlist.sh
+sbatch/run_retb_select_scale_finalists.sh
+sbatch/run_retb_postlock_targets.sh
 sbatch/run_retb_final_test.sh
 sbatch/run_retb_report.sh
 sbatch/submit_retb_tigris_full.sh
@@ -3831,7 +3985,10 @@ sbatch/submit_retb_tigris_full.sh
   `scale_train` and rejects 500k normalizer substitution;
 - the 3M scale pool contains the 500k train identities, adds exactly 2.5M
   identities, and is disjoint from every validation/test split;
-- final-test preparation cannot emit metrics.
+- pre-lock final-test preparation cannot load a checkpoint, join labels to
+  model outputs, or emit tokens, logits, predictions, or metrics; it may emit
+  only authenticated raw/degraded inputs and deterministic identity/relation
+  sidecars.
 
 ### Expert and token architecture
 
@@ -3913,10 +4070,23 @@ sbatch/submit_retb_tigris_full.sh
   excludes the query identity, and rejects undersized negative rings;
 - effective rank uses an exact `[n_events,K*D]` matrix and the declared
   zero-singular-value convention;
+- covariance loss uses synchronized centered FP32 population covariance,
+  exact relative-Frobenius normalization, and rejects effective batch size
+  below two;
+- cosine zero norms, exact retrieval ties, SVD backend/dtype, and numerical
+  singular-value threshold match the frozen contract;
 - joint target-mode tuples own distinct fusions and a cross-mode tuple cannot
   use an unmatched frozen fusion;
 - target mode, shape, pipeline seed, slot-query, and checkpoint hashes are
   parents;
+- pre-lock target builders accept only `model_train`, `val_stop`, and
+  `val_design`;
+- no artifact created before `locked_scale_finalists.json` contains
+  `stack_val`/final-test tokens, logits, predictions, or model-output labels;
+- pre-lock final-test input preparation cannot load a checkpoint;
+- post-lock `stack_val` oracle targets are selection-ineligible;
+- final-test targets require exact Stage-M teacher/fusion/normalizer hashes and
+  reject every 500k target cache;
 - float16 round-trip audit enforces tolerances and failing banks automatically
   publish authenticated FP32 targets instead;
 - mixed target-cache dtypes load to float32 without changing values outside the
@@ -3976,7 +4146,8 @@ sbatch/submit_retb_tigris_full.sh
 - poor validation performance does not create job failure;
 - checkpoint selection matches the global window rule;
 - only `val_stop` selects epochs; `val_design` performs calibration,
-  certification, and component selection; only Stage L may read `stack_val`;
+  certification, component selection, and 500k shortlisting; only Stage N may
+  read `stack_val`;
 - the label-free uncertainty calibrator is authorized on `val_design` and no
   label tensor reaches its fitting objective;
 - Stage-B training workers cannot open `val_design` or `stack_val`; the
@@ -3987,15 +4158,21 @@ sbatch/submit_retb_tigris_full.sh
   aggregation;
 - accuracy and mean-log-rejection selectors can select different finalists
   and reproduce exact tolerance/tie rules;
+- the 500k shortlist is the duplicate-free top-three accuracy/rejection union
+  on `val_design`, contains at most six graphs, and still emits when all lose;
+- Stage M trains every and only shortlisted graph across all three seeds;
+- `stack_val` is opened once only after all shortlisted 3M graphs are
+  immutable, and finalists are selected from those 3M predictions;
 - zero-background rejection is displayed as infinity but uses the declared
   finite Jeffreys-smoothed selector quantity;
 - paired rejection bootstraps recompute thresholds and all 18 mean-log terms
   within each common identity resample;
 - finalist-specific capacity controls and `H_BASE_LONG` label-presentation
   counts include the complete declared inference/training graphs;
-- scale-up accepts only locked graph definitions and cannot reopen
+- scale-up accepts only shortlisted graph definitions and cannot reopen
   architecture selection;
-- final-test access requires the immutable lock;
+- final-test model outputs require `locked_scale_finalists.json`, and
+  scientific inference requires `final_test_execution_lock.json`;
 - bootstrap, ECE, rejection, ties, and zero-background behavior copy the
   deterministic metric contract;
 - wrong source, cache, degradation, target, or checkpoint hashes fail closed.
@@ -4137,24 +4314,30 @@ export, and complete-graph parameter/FLOP accounting separately per graph.
 Done when deployable inference proves it cannot load offline inputs or target
 caches and monolithic matching covers the exact exported graph.
 
-### Step 13 of 15: confirmation, selectors, and reporting
+### Step 13 of 15: 500k confirmation and scale shortlist
 
 Implement matched-seed 500k confirmation, bridge-aware shape selection,
-accuracy and mean-log-rejection selectors, deterministic metrics/statistics,
-complete Markdown/JSON reports, and failure interpretations.
+bounded top-three accuracy/rejection union on `val_design`, deterministic
+metrics/statistics, complete Markdown/JSON reports, and failure
+interpretations.
 
-Done when both finalists are emitted even for an all-negative campaign and no
-final-test prediction exists.
+Done when a source-bound shortlist of at most six complete graphs is emitted
+even for an all-negative campaign and no `stack_val` or final-test prediction
+exists.
 
-### Step 14 of 15: locked 3M scale-up and final seal
+### Step 14 of 15: shortlisted 3M scale-up, one-time selection, and final seal
 
-Retrain only the locked finalist graph definitions on `scale_train`, aggregate
-three-seed confirmation, refit every locked train-derived normalizer and
-label-free calibrator on its declared scale/design population, write the
-immutable final lock, and run the common sealed final test exactly once.
+Retrain every shortlisted graph on `scale_train`, aggregate three-seed
+confirmation, refit every locked train-derived normalizer and label-free
+calibrator on its declared scale/design population, open `stack_val` once for
+deployable 3M finalist selection, write `locked_scale_finalists.json`, build
+only then the scale-teacher oracle/final-test targets and finalist controls,
+write `final_test_execution_lock.json`, and run the common sealed final test
+exactly once.
 
-Done when architecture reselection, stale artifacts, and premature final-test
-access fail closed while a negative campaign completes normally.
+Done when architecture reselection, early oracle/test outputs, stale teacher
+targets, and premature final-test access fail closed while a negative campaign
+completes normally.
 
 ### Step 15 of 15: Tigris production DAG
 
@@ -4330,6 +4513,14 @@ This is not a job failure.  Report the domain severity and use predeclared
 field-isolation controls.  Do not retune the nominal profile after classifier
 results.
 
+### The 500k and 3M graph rankings differ
+
+This is an expected scale effect, not a contract failure.  Report which
+shortlisted graphs moved and select the actual finalists only from the locked
+3M `stack_val` predictions.  The bounded shortlist limits compute but can miss
+a graph ranked outside both 500k top-three lists; record that design limitation
+rather than retrospectively expanding the shortlist.
+
 ### No model improves
 
 The campaign remains successful if it produces a provenance-complete negative
@@ -4346,7 +4537,9 @@ Engineering success requires:
 - no offline input in deployable inference;
 - deterministic full campaign continuation after negative results;
 - coherent matched pipeline-seed lineage and immutable per-expert bundles;
-- no final-test access before the locked 3M scale-up completes;
+- no pre-finalist-lock final-test model output and no scientific final-test
+  inference before both `locked_scale_finalists.json` and
+  `final_test_execution_lock.json` are immutable;
 - real-Weaver and compiled-REGION parity;
 - a complete smoke and production DAG;
 - reproducible reports and paired predictions.

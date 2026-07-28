@@ -74,6 +74,33 @@ if squeue --me -h -o "%j" |
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+archive_root="${campaign_root}/archives/runtime_contract_repair_${stamp}"
+archive_created=0
+for variant in "$@"; do
+  for artifact_kind in runtime_batch_measurements runtime_batch_contracts; do
+    source_path="${campaign_root}/${artifact_kind}/${variant}"
+    [[ -e "${source_path}" ]] || continue
+    [[ -d "${source_path}" && ! -L "${source_path}" ]] || {
+      echo "Refusing to archive unexpected repair source: ${source_path}" >&2
+      exit 2
+    }
+
+    destination_parent="${archive_root}/${artifact_kind}"
+    destination_path="${destination_parent}/${variant}"
+    [[ ! -e "${destination_path}" ]] || {
+      echo "Repair archive destination already exists: ${destination_path}" >&2
+      exit 2
+    }
+    mkdir -p "${destination_parent}"
+    mv -- "${source_path}" "${destination_path}"
+    archive_created=1
+    echo "Archived stale ${artifact_kind} for ${variant}: ${destination_path}"
+  done
+done
+if ((archive_created == 0)); then
+  echo "No stale runtime measurements or contracts required archival."
+fi
+
 export ABPH_ROOT="${campaign_root}"
 export ABPH_STORAGE_PROFILE=streaming_30gb_v1
 export ABPH_TARGET_MODE_REPORT="${campaign_root}/audits/target_mode_selection.json"
@@ -129,5 +156,8 @@ continuation_job="${continuation%%;*}"
 echo "adaptive_binary_contract_repair_queued:"
 echo "  campaign_root: ${campaign_root}"
 echo "  variants: $*"
+if ((archive_created)); then
+  echo "  preserved_stale_evidence: ${archive_root}"
+fi
 echo "  contract_jobs: ${contract_jobs[*]}"
 echo "  models_resume_job: ${continuation_job}"
