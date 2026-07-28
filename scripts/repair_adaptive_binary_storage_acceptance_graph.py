@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -155,22 +156,117 @@ def _submit(
     if dry_run:
         print(shlex.join(command))
         return f"DRYRUN_{label}"
-    completed = subprocess.run(
-        command,
-        cwd=project_dir,
-        env=_job_environment(
-            row,
-            project_dir,
-            source_identity=source_identity,
-        ),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=project_dir,
+            env=_job_environment(
+                row,
+                project_dir,
+                source_identity=source_identity,
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "sbatch rejected repaired "
+            f"{label} job (exit {exc.returncode}): "
+            f"{(exc.stderr or exc.stdout or '').strip()}"
+        ) from exc
     job_id = completed.stdout.strip().split(";", 1)[0]
     if not job_id.isdigit():
         raise RuntimeError(f"sbatch returned an invalid job id: {completed.stdout!r}")
     return job_id
+
+
+_ACTIVE_SLURM_STATES = {
+    "COMPLETING",
+    "CONFIGURING",
+    "PENDING",
+    "PREEMPTED",
+    "REQUEUED",
+    "REQUEUE_FED",
+    "RESIZING",
+    "RUNNING",
+    "STAGE_OUT",
+    "SUSPENDED",
+}
+_FAILED_SLURM_STATES = {
+    "BOOT_FAIL",
+    "CANCELLED",
+    "DEADLINE",
+    "FAILED",
+    "NODE_FAIL",
+    "OUT_OF_MEMORY",
+    "REVOKED",
+    "SPECIAL_EXIT",
+    "TIMEOUT",
+}
+
+
+def _slurm_job_state(job_id: str) -> str | None:
+    live = subprocess.run(
+        ("scontrol", "show", "job", "-o", job_id),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if live.returncode == 0:
+        match = re.search(r"(?:^|\s)JobState=([A-Z_]+)", live.stdout)
+        if match is not None:
+            return match.group(1)
+
+    history = subprocess.run(
+        (
+            "sacct",
+            "-X",
+            "-n",
+            "-P",
+            "-j",
+            job_id,
+            "--format=JobIDRaw,State,ExitCode",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if history.returncode != 0:
+        return None
+    for line in history.stdout.splitlines():
+        fields = line.split("|")
+        if len(fields) >= 2 and fields[0] == job_id:
+            return fields[1].split("+", 1)[0].strip().upper()
+    return None
+
+
+def _remaining_dependencies(
+    job_ids: Sequence[str],
+    *,
+    dry_run: bool,
+) -> list[str]:
+    if dry_run:
+        return list(dict.fromkeys(str(value) for value in job_ids))
+    remaining: list[str] = []
+    for job_id in dict.fromkeys(str(value) for value in job_ids):
+        if not job_id.isdigit():
+            raise ValueError(f"invalid Slurm dependency id: {job_id!r}")
+        state = _slurm_job_state(job_id)
+        if state == "COMPLETED":
+            continue
+        if state in _ACTIVE_SLURM_STATES:
+            remaining.append(job_id)
+            continue
+        if state in _FAILED_SLURM_STATES:
+            raise RuntimeError(
+                f"cannot repair through unsuccessful prerequisite {job_id} ({state})"
+            )
+        raise RuntimeError(
+            f"cannot establish state of prerequisite {job_id}; "
+            "refusing to submit an ambiguous dependency"
+        )
+    return remaining
 
 
 def _require_pending(job_ids: Sequence[str]) -> None:
@@ -222,21 +318,19 @@ def main(argv: list[str] | None = None) -> int:
         for value in rows[COMPILE_KEY]["dependencies"]
         if str(value) not in {old_test, old_smoke}
     ]
-    test_dependencies = list(
-        dict.fromkeys(
-            [
-                *(str(value) for value in rows[TEST_KEY]["dependencies"]),
-                *compile_prerequisites,
-            ]
-        )
+    test_dependencies = _remaining_dependencies(
+        [
+            *(str(value) for value in rows[TEST_KEY]["dependencies"]),
+            *compile_prerequisites,
+        ],
+        dry_run=args.dry_run,
     )
-    smoke_dependencies = list(
-        dict.fromkeys(
-            [
-                *(str(value) for value in rows[SMOKE_KEY]["dependencies"]),
-                *compile_prerequisites,
-            ]
-        )
+    smoke_dependencies = _remaining_dependencies(
+        [
+            *(str(value) for value in rows[SMOKE_KEY]["dependencies"]),
+            *compile_prerequisites,
+        ],
+        dry_run=args.dry_run,
     )
     new_test = _submit(
         rows[TEST_KEY],
@@ -257,10 +351,13 @@ def main(argv: list[str] | None = None) -> int:
         source_identity=source_identity,
     )
     replacements = {old_test: new_test, old_smoke: new_smoke}
-    compile_dependencies = [
-        replacements.get(str(value), str(value))
-        for value in rows[COMPILE_KEY]["dependencies"]
-    ]
+    compile_dependencies = _remaining_dependencies(
+        [
+            replacements.get(str(value), str(value))
+            for value in rows[COMPILE_KEY]["dependencies"]
+        ],
+        dry_run=args.dry_run,
+    )
     new_compile = _submit(
         rows[COMPILE_KEY],
         label="storage_compile",

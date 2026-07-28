@@ -405,6 +405,7 @@ def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) 
         TIGRIS_CONDA_BASE,
         TIGRIS_CONDA_ENV,
         _job_environment,
+        _remaining_dependencies,
         _source_identity,
         repaired_sbatch_command,
     )
@@ -474,6 +475,29 @@ def test_storage_acceptance_repair_reanchors_cached_slurm_graph(tmp_path: Path) 
     assert "abph_acceptance_source_identity" in worker
     assert "ABPH_ACCEPTANCE_SOURCE_GIT_COMMIT" in worker
     assert "ABPH_ACCEPTANCE_SOURCE_STATUS_HASH" in worker
+
+    class _Result:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(command, **_kwargs):
+        job_id = command[5] if command[0] == "sacct" else command[-1]
+        if command[0] == "scontrol" and job_id == "10":
+            return _Result(1)
+        if command[0] == "sacct" and job_id == "10":
+            return _Result(0, "10|COMPLETED|0:0|\n")
+        if command[0] == "scontrol" and job_id == "20":
+            return _Result(0, "JobId=20 JobState=RUNNING Reason=None")
+        raise AssertionError(command)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "scripts.repair_adaptive_binary_storage_acceptance_graph.subprocess.run",
+            fake_run,
+        )
+        assert _remaining_dependencies(("10", "20"), dry_run=False) == ["20"]
 
 
 def test_ram_lifecycle_smoke_publishes_to_campaign_then_cleans(tmp_path: Path) -> None:

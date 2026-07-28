@@ -396,6 +396,15 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         assert value in common
     assert "PYTHONDONTWRITEBYTECODE=1" in common
     assert 'LD_LIBRARY_PATH="${CONDA_PREFIX}/lib' in common
+    region_worker = (
+        sbatch / "run_fit_relational_part_region_normalization.sh"
+    ).read_text(encoding="utf-8")
+    assert "#SBATCH --time=24:00:00" in region_worker
+    region_fitter = (
+        ROOT / "scripts" / "fit_relational_part_region_normalization.py"
+    ).read_text(encoding="utf-8")
+    assert "--progress-interval" in region_fitter
+    assert '"stage": "load_tree_shards"' in region_fitter
     top = (sbatch / "submit_relational_part_tigris_full.sh").read_text(
         encoding="utf-8"
     )

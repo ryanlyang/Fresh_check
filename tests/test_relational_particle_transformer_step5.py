@@ -13,6 +13,7 @@ from jetclass_fresh.jetclass_data import JetIdentity
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from scripts.build_relational_part_tree_backend import _canonical_smoke_parity
 from teacher_logit_reco.relational_part.normalization import (
+    _fit_records,
     _identity_key,
     _identity_sequence_hash,
     select_normalization_jet_indices,
@@ -25,7 +26,13 @@ from teacher_logit_reco.relational_part.region_normalization import (
 )
 from teacher_logit_reco.relational_part import (
     EXCLUSIVE_RESOLUTIONS,
+    REGION_AXIS_DISTANCE_NAMES,
+    REGION_ENDPOINT_DESCRIPTOR_NAMES,
+    REGION_LCA_NAMES,
+    REGION_RANK_DIFFERENCE_NAMES,
     REGION_RAW_FEATURE_NAMES,
+    REGION_ROBUST_FEATURE_NAMES,
+    REGION_WITHIN_CLUSTER_PT_NAMES,
     RegionEncoder,
     RelationalFamilyParticleTransformer,
     RelationalParticleTransformer,
@@ -252,11 +259,7 @@ def test_region_normalizer_encoder_and_masking() -> None:
 
 
 def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() -> None:
-    tokens, mask, vectors, identities = _sample(jets=4)
-    trees = [
-        build_reference_tree(vectors[row], tokens[row], mask[row])
-        for row in range(4)
-    ]
+    tokens, mask, _, identities, trees, _, _, region = _artifacts()
     selected = select_normalization_jet_indices(identities)
     progress = []
     optimized, optimized_hashes = _collect_region_domain_samples(
@@ -327,6 +330,38 @@ def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() 
         assert optimized_hashes[domain] == _identity_sequence_hash(
             legacy_keys[domain]
         )
+    domain_names = {
+        "REGION_pair": (
+            REGION_LCA_NAMES[0],
+            *REGION_RANK_DIFFERENCE_NAMES,
+        ),
+        "REGION_merge": REGION_LCA_NAMES[1:],
+        "REGION_node": (
+            *REGION_ENDPOINT_DESCRIPTOR_NAMES,
+            *REGION_WITHIN_CLUSTER_PT_NAMES,
+            *REGION_AXIS_DISTANCE_NAMES,
+        ),
+    }
+    expected_records = []
+    expected_hashes = {}
+    for name in REGION_ROBUST_FEATURE_NAMES:
+        domain = next(
+            key for key, names in domain_names.items() if name in names
+        )
+        column = domain_names[domain].index(name)
+        expected_records.extend(
+            _fit_records(
+                np.stack(legacy_rows[domain])[:, [column]],
+                family_id="REGION",
+                feature_names=(name,),
+                applicability_rule_id=domain,
+            )
+        )
+        expected_hashes[name] = _identity_sequence_hash(
+            legacy_keys[domain]
+        )
+    assert region["records"] == expected_records
+    assert region["feature_sample_identity_sha256"] == expected_hashes
     assert progress[-1]["processed_jets"] == 4
     assert progress[-1]["fraction_complete"] == 1.0
     source = inspect.getsource(_collect_region_domain_samples)
