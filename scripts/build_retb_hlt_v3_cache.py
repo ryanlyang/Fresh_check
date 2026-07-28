@@ -18,7 +18,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     bind_source,
-    load_hashed_json,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
@@ -76,11 +75,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir = args.output_dir or (
         args.campaign_root
         / "inputs"
-        / "hlt_v3"
+        / f"replica_{args.replica_id}"
         / args.logical_role
         / args.realization_policy
         / args.profile_id
-        / f"replica_{args.replica_id}"
     )
     result: dict[str, object] = {
         "dry_run": bool(args.dry_run),
@@ -123,6 +121,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         split_manifest_sha256=parent["split_manifest"],
         identity_manifest_sha256=args.identity_manifest_sha256,
         raw_input_sha256=args.raw_input_sha256,
+    )
+    metadata = bind_source(
+        metadata, source_snapshot=source_snapshot(REPO_ROOT)
     )
     profile_publication = write_immutable_json(
         args.campaign_root / "inputs" / "hlt_v3_profile.json", profile

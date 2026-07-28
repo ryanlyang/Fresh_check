@@ -35,6 +35,12 @@ esac
 fresh_require_file "${campaign_root}/submission_logs/abph_full_submission.json"
 fresh_require_file "${campaign_root}/runtime_batch_contracts/B1_semantic_query_root/runtime_batch_contract.json"
 fresh_require_file "${campaign_root}/audits/actual_target_feasibility.json"
+fresh_require_file "${campaign_root}/audits/target_mode_selection.json"
+fresh_require_file "${campaign_root}/inputs/split_manifest/split_manifest.json.gz"
+for split in model_train model_val; do
+  fresh_require_file "${campaign_root}/inputs/hlt_cache/${split}_fixed_hlt_metadata.json"
+  fresh_require_file "${campaign_root}/inputs/offline_cache/${split}_offline_metadata.json"
+done
 
 mapfile -t stale_jobs < <(
   squeue --me -h -o "%i|%j" |
@@ -57,7 +63,7 @@ fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 worker="${PROJECT_DIR}/sbatch/run_adaptive_binary_variant.sh"
-common_export="ALL,PROJECT_DIR=${PROJECT_DIR},CONDA_BASE=${CONDA_BASE},CONDA_ENV=${CONDA_ENV},PYTHONNOUSERSITE=1,ABPH_ROOT=${campaign_root},ABPH_DATA_DIR=${ABPH_DATA_DIR},DATA_DIR=${ABPH_DATA_DIR},ABPH_STORAGE_PROFILE=streaming_30gb_v1,ABPH_RECONSTRUCTOR_SCHEDULE_POLICY=accelerated_screening_v2_7day,ABPH_MAXIMUM_UPDATES=1,OVERWRITE=1,DEVICE=cuda"
+common_export="ALL,PROJECT_DIR=${PROJECT_DIR},CONDA_BASE=${CONDA_BASE},CONDA_ENV=${CONDA_ENV},PYTHONNOUSERSITE=1,ABPH_ROOT=${campaign_root},ABPH_DATA_DIR=${ABPH_DATA_DIR},DATA_DIR=${ABPH_DATA_DIR},ABPH_STORAGE_PROFILE=streaming_30gb_v1,ABPH_TARGET_MODE_REPORT=${campaign_root}/audits/target_mode_selection.json,ABPH_RECONSTRUCTOR_SCHEDULE_POLICY=accelerated_screening_v2_7day,ABPH_MAXIMUM_UPDATES=1,ABPH_MAX_VAL_BATCHES=1,OVERWRITE=1,DEVICE=cuda"
 
 b1_output="/tmp/abph_models_canary_B1_${USER}_${stamp}"
 b1_response="$(

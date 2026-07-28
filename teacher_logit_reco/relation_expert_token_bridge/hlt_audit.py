@@ -10,6 +10,7 @@ from jetclass_fresh.part_inputs import (
     PF_FEATURE_NAMES,
     build_particle_transformer_inputs_from_tokens,
 )
+from jetclass_fixed_hlt import compute_local_density_np
 
 from .contracts import require_sha256, validate_content_hash, with_content_hash
 from .hlt_cache import cache_array_content_hash
@@ -68,16 +69,6 @@ def _quantile_summary(values: np.ndarray) -> dict[str, Any]:
             for key, value in zip(QUANTILES, quantiles)
         },
     }
-
-
-def _pid_categories(tokens: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    flags = np.rint(np.asarray(tokens)[:, :, 5:10]).astype(np.int8)
-    count = flags.sum(axis=-1)
-    categories = np.full(mask.shape, 5, dtype=np.int8)
-    one = count == 1
-    categories[one] = np.argmax(flags[one], axis=-1)
-    categories[~mask] = 5
-    return categories
 
 
 def _validate_hlt_domains(
@@ -177,11 +168,121 @@ def _raw_response_audit(
             "before": _quantile_summary(before[:, index]),
             "after": _quantile_summary(after[:, index]),
             "residual": _quantile_summary(delta[:, index]),
+            "explicit_zero_missing_fraction": (
+                float(np.mean(after[:, index] == 0.0))
+                if len(delta) and index in {10, 11, 12, 13}
+                else None
+            ),
         }
     offline_counts = np.sum(offline_mask, axis=1)
     hlt_counts = np.sum(hlt_mask, axis=1)
     offline_states = measurement_validity_states(offline_tokens, offline_mask)
     hlt_states = measurement_validity_states(hlt_tokens, hlt_mask)
+    pid_before = np.full((len(before),), 5, dtype=np.int8)
+    pid_after = np.full((len(after),), 5, dtype=np.int8)
+    if len(before):
+        before_hot = np.rint(before[:, 5:10]).astype(np.int8)
+        after_hot = np.rint(after[:, 5:10]).astype(np.int8)
+        before_one = before_hot.sum(axis=1) == 1
+        after_one = after_hot.sum(axis=1) == 1
+        pid_before[before_one] = np.argmax(before_hot[before_one], axis=1)
+        pid_after[after_one] = np.argmax(after_hot[after_one], axis=1)
+    pid_transition = np.zeros((len(PID_NAMES), len(PID_NAMES)), dtype=np.int64)
+    np.add.at(pid_transition, (pid_before, pid_after), 1)
+    charge_values = (-1, 0, 1)
+    charge_transition = np.zeros((3, 3), dtype=np.int64)
+    if len(before):
+        before_charge = np.rint(before[:, 4]).astype(np.int8)
+        after_charge = np.rint(after[:, 4]).astype(np.int8)
+        before_index = np.searchsorted(charge_values, before_charge)
+        after_index = np.searchsorted(charge_values, after_charge)
+        np.add.at(charge_transition, (before_index, after_index), 1)
+
+    aligned_pt: list[float] = []
+    aligned_abs_eta: list[float] = []
+    aligned_multiplicity: list[int] = []
+    aligned_density: list[float] = []
+    for jet_index, row in enumerate(diagnostics):
+        count = int(np.sum(hlt_mask[jet_index]))
+        source_indices = row.get("canonical_output_indices")
+        if source_indices is None:
+            source_indices = list(range(count))
+        source_indices = np.asarray(source_indices, dtype=np.int64)
+        valid_indices = np.flatnonzero(offline_mask[jet_index])
+        valid_tokens = offline_tokens[jet_index, valid_indices]
+        density = compute_local_density_np(
+            valid_tokens[:, 1],
+            valid_tokens[:, 2],
+            np.arange(len(valid_tokens), dtype=np.int64),
+            radius=0.04,
+        )
+        density_by_index = {
+            int(index): float(value)
+            for index, value in zip(valid_indices, density)
+        }
+        aligned_pt.extend(offline_tokens[jet_index, source_indices, 0].tolist())
+        aligned_abs_eta.extend(
+            np.abs(offline_tokens[jet_index, source_indices, 1]).tolist()
+        )
+        aligned_multiplicity.extend(
+            [int(np.sum(offline_mask[jet_index]))] * len(source_indices)
+        )
+        aligned_density.extend(
+            [density_by_index[int(index)] for index in source_indices]
+        )
+    bin_values = {
+        "pt": (
+            np.asarray(aligned_pt),
+            (0.0, 0.5, 1.0, 5.0, 20.0, np.inf),
+        ),
+        "abs_eta": (
+            np.asarray(aligned_abs_eta),
+            (0.0, 0.8, 1.5, 2.5, np.inf),
+        ),
+        "multiplicity": (
+            np.asarray(aligned_multiplicity),
+            (0.0, 32.0, 64.0, 96.0, 129.0, np.inf),
+        ),
+        "local_density_r0p04": (
+            np.asarray(aligned_density),
+            (0.0, 1.0, 3.0, 6.0, np.inf),
+        ),
+    }
+    response_indices = (0, 1, 2, 3, 10, 12, 11, 13)
+    binned: dict[str, Any] = {}
+    for axis_name, (axis_values, edges) in bin_values.items():
+        rows = []
+        for lower, upper in zip(edges[:-1], edges[1:]):
+            selected = (axis_values >= lower) & (axis_values < upper)
+            rows.append(
+                {
+                    "lower_inclusive": float(lower),
+                    "upper_exclusive": (
+                        "infinity" if np.isinf(upper) else float(upper)
+                    ),
+                    "count": int(np.sum(selected)),
+                    "residuals": {
+                        RAW_FIELD_NAMES[index]: _quantile_summary(
+                            delta[selected, index]
+                        )
+                        for index in response_indices
+                    },
+                }
+            )
+        binned[axis_name] = rows
+    binned["pid"] = [
+        {
+            "category": name,
+            "count": int(np.sum(pid_before == index)),
+            "residuals": {
+                RAW_FIELD_NAMES[field_index]: _quantile_summary(
+                    delta[pid_before == index, field_index]
+                )
+                for field_index in response_indices
+            },
+        }
+        for index, name in enumerate(PID_NAMES)
+    ]
     return {
         "fields": field_rows,
         "constituent_count_before": _quantile_summary(offline_counts),
@@ -199,6 +300,15 @@ def _raw_response_audit(
             and np.std(delta[:, 12]) > 0.0
             else 0.0
         ),
+        "pid_transition_matrix": {
+            "category_order": list(PID_NAMES),
+            "counts": pid_transition.tolist(),
+        },
+        "charge_transition_matrix": {
+            "state_order": list(charge_values),
+            "counts": charge_transition.tolist(),
+        },
+        "response_binning": binned,
     }
 
 
@@ -207,6 +317,7 @@ def _transformed_input_audit(
     offline_mask: np.ndarray,
     hlt_tokens: np.ndarray,
     hlt_mask: np.ndarray,
+    diagnostics: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     offline = build_particle_transformer_inputs_from_tokens(
         offline_tokens,
@@ -244,13 +355,31 @@ def _transformed_input_audit(
         }
     erasure = {}
     for raw_index, transformed_name in ((11, "part_d0err"), (13, "part_dzerr")):
-        raw_before = np.asarray(offline_tokens[:, :, raw_index])
-        raw_after = np.asarray(hlt_tokens[:, :, raw_index])
-        overlap = offline_mask & hlt_mask
-        raw_changed = overlap & (raw_before != raw_after)
         transformed_index = PF_FEATURE_NAMES.index(transformed_name)
-        transformed_before = offline.pf_features[:, transformed_index, :]
-        transformed_after = hlt.pf_features[:, transformed_index, :]
+        raw_changed_rows: list[np.ndarray] = []
+        transformed_before_rows: list[np.ndarray] = []
+        transformed_after_rows: list[np.ndarray] = []
+        for jet_index, row in enumerate(diagnostics):
+            count = int(np.sum(hlt_mask[jet_index]))
+            source_indices = row.get("canonical_output_indices")
+            if source_indices is None:
+                source_indices = list(range(count))
+            indices = np.asarray(source_indices, dtype=np.int64)
+            raw_changed_rows.append(
+                offline_tokens[jet_index, indices, raw_index]
+                != hlt_tokens[jet_index, :count, raw_index]
+            )
+            transformed_before_rows.append(
+                offline.pf_features[
+                    jet_index, transformed_index, indices
+                ]
+            )
+            transformed_after_rows.append(
+                hlt.pf_features[jet_index, transformed_index, :count]
+            )
+        raw_changed = np.concatenate(raw_changed_rows)
+        transformed_before = np.concatenate(transformed_before_rows)
+        transformed_after = np.concatenate(transformed_after_rows)
         erased = raw_changed & (transformed_before == transformed_after)
         saturated = raw_changed & (
             (transformed_after == 0.0) | (transformed_after == 1.0)
@@ -531,6 +660,7 @@ def build_hlt_v3_degradation_audit(
                 offline_mask,
                 hlt_tokens,
                 hlt_mask,
+                diagnostics,
             ),
             "relation_input_audit": summarize_relation_views(relation_views),
             "monotonicity": dict(monotonicity),

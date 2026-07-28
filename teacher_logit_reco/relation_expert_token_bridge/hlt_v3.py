@@ -18,7 +18,12 @@ from jetclass_fixed_hlt import (
     wrap_phi_np,
 )
 
-from .contracts import require_sha256, validate_content_hash, with_content_hash
+from .contracts import (
+    canonical_sha256,
+    require_sha256,
+    validate_content_hash,
+    with_content_hash,
+)
 from .replicas import RANDOM_MULTIPLIERS, event_rng_seed
 
 
@@ -279,16 +284,22 @@ def degradation_profile(profile_id: str) -> DegradationProfile:
 
 
 def _pid_categories(tokens: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    flags = np.asarray(tokens[:, 5:10], dtype=np.float64)
+    values = np.asarray(tokens)
+    valid = np.asarray(mask, dtype=bool)
+    if values.ndim not in {2, 3} or values.shape[-1] != RAW_DIM:
+        raise ValueError("PID category input must end in the 14-field raw schema")
+    if valid.shape != values.shape[:-1]:
+        raise ValueError("PID category mask shape differs")
+    flags = np.asarray(values[..., 5:10], dtype=np.float64)
     if np.any(np.abs(flags - np.rint(flags)) > 1.0e-6):
         raise ValueError("PID flags must be binary within tolerance")
     binary = np.rint(flags).astype(np.int8)
-    counts = np.sum(binary, axis=1)
-    if np.any(counts[mask] > 1):
+    counts = np.sum(binary, axis=-1)
+    if np.any(counts[valid] > 1):
         raise ValueError("multi-hot PID input is invalid")
-    categories = np.full((len(tokens),), 5, dtype=np.int8)
+    categories = np.full(valid.shape, 5, dtype=np.int8)
     one_hot = counts == 1
-    categories[one_hot] = np.argmax(binary[one_hot], axis=1).astype(np.int8)
+    categories[one_hot] = np.argmax(binary[one_hot], axis=-1).astype(np.int8)
     return categories
 
 
@@ -316,13 +327,13 @@ def measurement_validity_states(tokens: np.ndarray, mask: np.ndarray) -> np.ndar
     tokens = np.asarray(tokens)
     mask = np.asarray(mask, dtype=bool)
     categories = _pid_categories(tokens, mask)
-    states = np.zeros((len(tokens),), dtype=np.int8)
+    states = np.zeros(mask.shape, dtype=np.int8)
     charged = mask & np.isin(categories, list(CHARGED_PID))
     available = (
         charged
-        & np.all(np.isfinite(tokens[:, 10:14]), axis=1)
-        & (tokens[:, 11] > 0.0)
-        & (tokens[:, 13] > 0.0)
+        & np.all(np.isfinite(tokens[..., 10:14]), axis=-1)
+        & (tokens[..., 11] > 0.0)
+        & (tokens[..., 13] > 0.0)
     )
     states[charged] = 2
     states[available] = 1
@@ -469,6 +480,66 @@ def scale_mechanism_terms(
             array("reassignment_probability") * a_reassign * s * r_kin
         )
     return output
+
+
+def track_loss_probability(
+    *,
+    pt: np.ndarray,
+    eta: np.ndarray,
+    density: np.ndarray,
+    strength: float,
+    replica_multiplier: float = 1.0,
+) -> np.ndarray:
+    pt = np.asarray(pt, dtype=np.float64)
+    eta = np.asarray(eta, dtype=np.float64)
+    density = np.asarray(density, dtype=np.float64)
+    sigmoid = 1.0 / (1.0 + np.exp(-(0.80 - pt) / 0.25))
+    base = np.clip(
+        0.030
+        + 0.030 * (np.abs(eta) >= 1.5)
+        + 0.080 * sigmoid
+        + 0.020 * np.minimum(density / 8.0, 1.0),
+        0.0,
+        0.35,
+    )
+    return _clip01(base * float(strength) * float(replica_multiplier))
+
+
+def track_tail_probability(
+    *,
+    eta: np.ndarray,
+    density: np.ndarray,
+    strength: float,
+    replica_multiplier: float = 1.0,
+) -> np.ndarray:
+    eta = np.asarray(eta, dtype=np.float64)
+    density = np.asarray(density, dtype=np.float64)
+    base = np.clip(
+        0.010
+        + 0.005 * (np.abs(eta) >= 1.5)
+        + 0.002 * np.minimum(density, 5.0),
+        0.0,
+        0.08,
+    )
+    return _clip01(base * float(strength) * float(replica_multiplier))
+
+
+def charge_flip_probability(
+    *,
+    pt: np.ndarray,
+    eta: np.ndarray,
+    strength: float,
+) -> np.ndarray:
+    pt = np.asarray(pt, dtype=np.float64)
+    eta = np.asarray(eta, dtype=np.float64)
+    base = np.clip(
+        0.002
+        + 0.002 * (np.abs(eta) >= 1.5)
+        + 0.001 * np.minimum(pt / 100.0, 1.0),
+        0.0,
+        0.01,
+    )
+    return _clip01(base * float(strength))
 
 
 def _stable_pt_order(tokens: np.ndarray, canonical_indices: np.ndarray) -> np.ndarray:
@@ -772,18 +843,12 @@ def apply_hlt_v3_single_jet(
 
     if profile.track_loss and len(rows):
         eligible = track_states == 1
-        abs_eta = np.abs(rows[:, 1])
-        sigmoid = 1.0 / (1.0 + np.exp(-(0.80 - rows[:, 0]) / 0.25))
-        p_track_loss_base = np.clip(
-            0.030
-            + 0.030 * (abs_eta >= 1.5)
-            + 0.080 * sigmoid
-            + 0.020 * np.minimum(original_density / 8.0, 1.0),
-            0.0,
-            0.35,
-        )
-        p_track_loss = _clip01(
-            p_track_loss_base * strength * r_track_loss
+        p_track_loss = track_loss_probability(
+            pt=rows[:, 0],
+            eta=rows[:, 1],
+            density=original_density,
+            strength=strength,
+            replica_multiplier=r_track_loss,
         )
         diagnostics["probability_sums"]["track_loss"] = float(
             np.sum(p_track_loss[eligible])
@@ -815,16 +880,11 @@ def apply_hlt_v3_single_jet(
             z0 = core_rng.normal(size=len(rows))
             z1 = core_rng.normal(size=len(rows))
             correlated = 0.25 * z0 + math.sqrt(1.0 - 0.25**2) * z1
-            abs_eta = np.abs(rows[:, 1])
-            p_track_tail_base = np.clip(
-                0.010
-                + 0.005 * (abs_eta >= 1.5)
-                + 0.002 * np.minimum(original_density, 5.0),
-                0.0,
-                0.08,
-            )
-            p_track_tail = _clip01(
-                p_track_tail_base * strength * r_tail
+            p_track_tail = track_tail_probability(
+                eta=rows[:, 1],
+                density=original_density,
+                strength=strength,
+                replica_multiplier=r_tail,
             )
             tail = (
                 _rng(base_seed, "track_tail").random(len(rows)) < p_track_tail
@@ -850,13 +910,10 @@ def apply_hlt_v3_single_jet(
         eligible = np.isin(row_categories, list(CHARGED_PID)) & np.isin(
             np.rint(rows[:, 4]).astype(np.int8), [-1, 1]
         )
-        p_flip = _clip01(
-            (
-                0.002
-                + 0.002 * (np.abs(rows[:, 1]) >= 1.5)
-                + 0.001 * np.minimum(rows[:, 0] / 100.0, 1.0)
-            )
-            * strength
+        p_flip = charge_flip_probability(
+            pt=rows[:, 0],
+            eta=rows[:, 1],
+            strength=strength,
         )
         flipped = (
             _rng(base_seed, "charge_flip").random(len(rows)) < p_flip
@@ -1012,14 +1069,32 @@ def validate_hlt_v3_profile_contract(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=HLT_V3_PROFILE_CONTRACT
     )
+    raw_parent = require_sha256(
+        payload.get("raw_input_schema_sha256"),
+        name="raw_input_schema_sha256",
+    )
+    replica_parent = require_sha256(
+        payload.get("hlt_replica_manifest_sha256"),
+        name="hlt_replica_manifest_sha256",
+    )
     helper_rows = payload["v2_base_term_helpers"]
-    expected = {
+    helper_hashes = {
         "efficiency": _function_sha256(fixed_hlt_v2_efficiency_base_terms),
         "kinematic": _function_sha256(fixed_hlt_v2_kinematic_base_terms),
     }
-    for name, source_hash in expected.items():
+    for name, source_hash in helper_hashes.items():
         if helper_rows[name]["source_sha256"] != source_hash:
             raise ValueError(f"v2 base-term helper source drifted for {name}")
+    semantic = dict(payload)
+    semantic.pop("content_hash", None)
+    semantic.pop("source", None)
+    expected = build_hlt_v3_profile_contract(
+        raw_input_schema_sha256=raw_parent,
+        hlt_replica_manifest_sha256=replica_parent,
+    )
+    expected.pop("content_hash")
+    if canonical_sha256(semantic) != canonical_sha256(expected):
+        raise ValueError("HLT-v3 profile differs from the locked v1 contract")
     return digest
 
 
@@ -1037,9 +1112,12 @@ __all__ = [
     "apply_hlt_v3_single_jet",
     "build_hlt_v3_profile_contract",
     "build_hlt_v3_view",
+    "charge_flip_probability",
     "degradation_profile",
     "measurement_validity_states",
     "merge_equal_neutral_tokens",
     "scale_mechanism_terms",
+    "track_loss_probability",
+    "track_tail_probability",
     "validate_hlt_v3_profile_contract",
 ]

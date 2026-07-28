@@ -17,6 +17,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     FullStepBatchMeasurement,
     calibrate_runtime_batch_contract,
     canonical_hash,
+    campaign_target_source_kwargs,
     reconstructor_runtime_provenance,
     resolve_variant_config,
     write_runtime_batch_contract,
@@ -47,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         shuffle_shards=False,
         seed=24731,
         maximum_batches=1,
+        **campaign_target_source_kwargs(root),
     )
     provenance = reconstructor_runtime_provenance(
         variant_name=args.variant,

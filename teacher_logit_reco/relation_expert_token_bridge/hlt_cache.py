@@ -21,11 +21,14 @@ from .contracts import (
     write_immutable_json,
 )
 from .hlt_v3 import (
+    DEGRADATION_PROFILES,
     HLT_V3_PROFILE_NAME,
     HLT_V3_PROFILE_VERSION,
     build_hlt_v3_view,
+    measurement_validity_states,
     validate_hlt_v3_profile_contract,
 )
+from .replicas import DOMAIN_SEEDS, REALIZATION_POLICIES
 
 
 HLT_V3_CACHE_CONTRACT = "retb_hlt_v3_cache_v1"
@@ -75,6 +78,10 @@ def build_hlt_v3_cache(
     realization_policy: str,
     profile_id: str,
 ) -> tuple[dict[str, np.ndarray], list[dict[str, Any]]]:
+    if np.asarray(tokens).dtype != np.float32:
+        raise ValueError("HLT-v3 cache source tokens must be canonical float32")
+    if np.asarray(mask).dtype != np.bool_:
+        raise ValueError("HLT-v3 cache source mask must be canonical bool")
     output, output_mask, states, diagnostics = build_hlt_v3_view(
         tokens,
         mask,
@@ -172,6 +179,31 @@ def validate_hlt_v3_cache(
         raise ValueError("cache profile is not HLT-v3 track-dominant")
     if metadata.get("profile_version") != HLT_V3_PROFILE_VERSION:
         raise ValueError("cache profile version is not HLT-v3 v1")
+    if int(metadata.get("schema_version", -1)) != 1:
+        raise ValueError("cache metadata schema version differs")
+    if metadata.get("logical_role") not in DOMAIN_SEEDS:
+        raise ValueError("cache logical role lies outside the locked roles")
+    if metadata.get("realization_policy") not in REALIZATION_POLICIES:
+        raise ValueError("cache realization policy differs")
+    profile_id = metadata.get("degradation_profile_id")
+    if (
+        profile_id not in DEGRADATION_PROFILES
+        or DEGRADATION_PROFILES[str(profile_id)].legacy_profile is not None
+    ):
+        raise ValueError("cache degradation profile is not an HLT-v3 mode")
+    replica_id = int(metadata.get("replica_id", -1))
+    if replica_id not in range(4):
+        raise ValueError("cache replica lies outside 0..3")
+    for name in (
+        "profile_contract_sha256",
+        "split_manifest_sha256",
+        "identity_manifest_sha256",
+        "raw_input_sha256",
+        "array_content_sha256",
+        "identity_order_sha256",
+        "diagnostics_sha256",
+    ):
+        require_sha256(metadata.get(name), name=f"cache.{name}")
     if expected_profile_contract_sha256 is not None and metadata.get(
         "profile_contract_sha256"
     ) != require_sha256(
@@ -188,6 +220,16 @@ def validate_hlt_v3_cache(
     ) != int(expected_replica_id):
         raise ValueError("cache replica differs")
     identities = [str(value) for value in np.asarray(arrays["identities"]).tolist()]
+    if len(identities) != len(set(identities)):
+        raise ValueError("cache identities are not unique")
+    if len(identities) != len(np.asarray(arrays["tokens"])):
+        raise ValueError("cache identity count differs from token count")
+    if np.asarray(arrays["tokens"]).dtype != np.float32:
+        raise ValueError("cache token dtype is not float32")
+    if np.asarray(arrays["mask"]).dtype != np.bool_:
+        raise ValueError("cache mask dtype is not bool")
+    if np.asarray(arrays["measurement_states"]).dtype != np.int8:
+        raise ValueError("cache measurement-state dtype is not int8")
     actual = cache_array_content_hash(
         tokens=arrays["tokens"],
         mask=arrays["mask"],
@@ -202,6 +244,11 @@ def validate_hlt_v3_cache(
         raise ValueError("cache mask shape differs from token shape")
     if not bool(np.isfinite(np.asarray(arrays["tokens"])).all()):
         raise ValueError("cache tokens contain nonfinite values")
+    expected_states = measurement_validity_states(
+        np.asarray(arrays["tokens"]), np.asarray(arrays["mask"])
+    )
+    if not np.array_equal(expected_states, arrays["measurement_states"]):
+        raise ValueError("cache measurement states differ from raw fields")
     return digest
 
 

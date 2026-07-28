@@ -23,6 +23,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.production import (
     AdaptiveBinaryTargetBatchSource,
     _concatenate_target_batches,
     _slice_target_batch,
+    campaign_target_source_kwargs,
 )
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
@@ -60,6 +61,23 @@ def _hlt_batch() -> tuple[torch.Tensor, torch.Tensor]:
         tokens[batch_index, :count, 4] = 1.0
         tokens[batch_index, :count, 5] = 1.0
     return tokens, mask
+
+
+def test_campaign_target_source_kwargs_bind_canonical_inputs(tmp_path) -> None:
+    root = tmp_path / "campaign"
+    report = root / "audits" / "target_mode_selection.json"
+    report.parent.mkdir(parents=True)
+    report.write_text("{}", encoding="utf-8")
+
+    kwargs = campaign_target_source_kwargs(root)
+
+    assert kwargs == {
+        "target_mode_report": report.resolve(),
+        "offline_cache_dir": (root / "inputs" / "offline_cache").resolve(),
+        "manifest_path": (
+            root / "inputs" / "split_manifest" / "split_manifest.json.gz"
+        ).resolve(),
+    }
 
 
 def _reconstruction_batch(grouping: str = "exclusive_kt") -> dict:

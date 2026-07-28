@@ -36,6 +36,7 @@ from .production import (
     AdaptiveBinaryReconstructorModel,
     AdaptiveBinaryTargetBatchSource,
     build_shared_root_dual_reconstructor,
+    campaign_target_source_kwargs,
     load_selected_reconstructor,
     package_trainable_pseudo_views,
     reconstructor_step,
@@ -1182,6 +1183,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
     joint_train = None
     joint_val = None
     if joint:
+        target_source_kwargs = campaign_target_source_kwargs(root)
         dual_joint = bool(resolved["model"]["fusion"].get("dual_hierarchy"))
         if dual_joint:
             reconstructor = build_shared_root_dual_reconstructor(
@@ -1205,6 +1207,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                             maximum_batches=maximum_batches,
                             rank=distributed_runtime.rank,
                             world_size=distributed_runtime.world_size,
+                            **target_source_kwargs,
                         )
                         for grouping in (
                             "exclusive_kt",
@@ -1233,6 +1236,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                 maximum_batches=maximum_batches,
                 rank=distributed_runtime.rank,
                 world_size=distributed_runtime.world_size,
+                **target_source_kwargs,
             )
             joint_val = AdaptiveBinaryTargetBatchSource(
                 hlt_cache_dir=root / "inputs" / "hlt_cache",
@@ -1245,6 +1249,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
                 maximum_batches=maximum_batches,
                 rank=distributed_runtime.rank,
                 world_size=distributed_runtime.world_size,
+                **target_source_kwargs,
             )
 
     teacher_train = _teacher_logits(root, "model_train", required=objective_config.requires_teacher_logits)

@@ -11,6 +11,18 @@ PROBE_SUBMITTER = (
 PROBE_WORKER = (
     ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
 ).read_text(encoding="utf-8")
+CONTRACT_COMPILER = (
+    ROOT / "scripts" / "compile_adaptive_binary_runtime_batch_contract.py"
+).read_text(encoding="utf-8")
+VARIANT_TRAINER = (
+    ROOT / "scripts" / "train_adaptive_binary_pseudooffline_variant.py"
+).read_text(encoding="utf-8")
+TAGGER_RUNTIME = (
+    ROOT
+    / "teacher_logit_reco"
+    / "adaptive_binary_pseudooffline"
+    / "tagger_runtime.py"
+).read_text(encoding="utf-8")
 RESUME_SCRIPT = (
     ROOT / "sbatch" / "resume_adaptive_binary_models_from_contracts_tigris.sh"
 ).read_text(encoding="utf-8")
@@ -66,9 +78,13 @@ def test_runtime_probes_consume_the_immutable_target_mode() -> None:
     assert "ABPH_TARGET_MODE_REPORT" in PROBE_SUBMITTER
     assert "export ABPH_TARGET_MODE_REPORT" in PROBE_SUBMITTER
     assert 'fresh_require_file "${ABPH_TARGET_MODE_REPORT}"' in PROBE_SUBMITTER
-    assert 'root / "audits" / "target_mode_selection.json"' in PROBE_WORKER
-    assert "target_mode_report=" in PROBE_WORKER
-    assert 'offline_cache_dir=root / "inputs" / "offline_cache"' in PROBE_WORKER
+    assert "campaign_target_source_kwargs(root)" in PROBE_WORKER
+
+
+def test_all_model_consumers_bind_to_the_campaign_target_mode() -> None:
+    assert "campaign_target_source_kwargs(root)" in CONTRACT_COMPILER
+    assert VARIANT_TRAINER.count("**target_source_kwargs") == 3
+    assert TAGGER_RUNTIME.count("**target_source_kwargs") == 3
 
 
 def test_runtime_probe_default_excludes_single_gpu_oracle_references() -> None:
@@ -120,11 +136,16 @@ def test_models_resume_reuses_prepared_campaign_evidence() -> None:
 def test_canary_resume_gates_the_full_model_wave_on_real_launches() -> None:
     assert "ABPH_CONFIRM_CANARY_MODELS_RESUME" in CANARY_RESUME_SCRIPT
     assert "ABPH_MAXIMUM_UPDATES=1" in CANARY_RESUME_SCRIPT
+    assert "ABPH_MAX_VAL_BATCHES=1" in CANARY_RESUME_SCRIPT
     assert "B1_semantic_query_root" in CANARY_RESUME_SCRIPT
     assert "B4_oracle_root_diagnostic" in CANARY_RESUME_SCRIPT
     assert "--nodes=8" in CANARY_RESUME_SCRIPT
     assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in CANARY_RESUME_SCRIPT
     assert "ABPH_RECONSTRUCTOR_PARALLELISM=single" in CANARY_RESUME_SCRIPT
+    assert "ABPH_TARGET_MODE_REPORT=" in CANARY_RESUME_SCRIPT
+    assert "inputs/split_manifest/split_manifest.json.gz" in CANARY_RESUME_SCRIPT
+    assert "${split}_fixed_hlt_metadata.json" in CANARY_RESUME_SCRIPT
+    assert "${split}_offline_metadata.json" in CANARY_RESUME_SCRIPT
     assert '--dependency="afterok:${b1_job}:${b4_job}"' in CANARY_RESUME_SCRIPT
     assert "resume_adaptive_binary_models_from_contracts_tigris.sh" in (
         CANARY_RESUME_SCRIPT

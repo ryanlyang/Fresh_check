@@ -300,6 +300,22 @@ def _target_batch_nbytes(targets: AdaptiveBinaryTargetBatch) -> int:
     return sum(int(value.nbytes) for value in targets.array_dict().values())
 
 
+def campaign_target_source_kwargs(
+    campaign_root: str | Path,
+) -> dict[str, Path | None]:
+    """Bind a target source to the campaign's immutable input selection."""
+
+    root = Path(campaign_root).resolve()
+    target_mode_report = root / "audits" / "target_mode_selection.json"
+    return {
+        "target_mode_report": (
+            target_mode_report if target_mode_report.is_file() else None
+        ),
+        "offline_cache_dir": root / "inputs" / "offline_cache",
+        "manifest_path": root / "inputs" / "split_manifest" / "split_manifest.json.gz",
+    }
+
+
 class AdaptiveBinaryTargetBatchSource:
     """Stateful target-shard reader aligned to the immutable HLT cache."""
 
@@ -2502,6 +2518,7 @@ __all__ = [
     "AdaptiveBinaryReconstructionOutput",
     "AdaptiveBinaryReconstructorModel",
     "AdaptiveBinaryTargetBatchSource",
+    "campaign_target_source_kwargs",
     "HypothesisRenderBundle",
     "reconstructor_runtime_provenance",
     "reconstructor_step",

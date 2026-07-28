@@ -63,6 +63,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline import (  # noqa: E402
     budget_for_stage_role,
     canonical_hash,
     build_variant_hierarchy_aware_tagger,
+    campaign_target_source_kwargs,
     load_selected_reconstructor,
     load_runtime_batch_contract,
     infer_campaign_schedule_profile,
@@ -634,6 +635,7 @@ def _write_oracle_reference_report(
     root = Path(args.campaign_root)
     variant = str(args.variant)
     grouping = str(resolved["model"]["hierarchy"].get("grouping", "exclusive_kt"))
+    target_source_kwargs = campaign_target_source_kwargs(root)
     source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
         target_cache_dir=root / "targets",
@@ -643,6 +645,7 @@ def _write_oracle_reference_report(
         shuffle_shards=False,
         seed=24731,
         maximum_batches=(1 if args.smoke else None),
+        **target_source_kwargs,
     )
     checkpoint = output_dir / "best_model_val.pt"
     if variant == "D6_true_offline_particles":
@@ -795,6 +798,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         requested_world_size=requested_world_size,
         device=args.device,
     )
+    target_source_kwargs = campaign_target_source_kwargs(root)
     train_source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
         target_cache_dir=root / "targets",
@@ -806,6 +810,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         maximum_batches=(1 if args.smoke else None),
         rank=requested_rank,
         world_size=requested_world_size,
+        **target_source_kwargs,
     )
     runtime_reference_validation_jets = (
         int(os.environ.get("ABPH_RUNTIME_REFERENCE_VALIDATION_JETS", "4096"))
@@ -824,6 +829,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         validation_maximum_jets=runtime_reference_validation_jets,
         rank=requested_rank,
         world_size=requested_world_size,
+        **target_source_kwargs,
     )
     target_metadata = train_source.metadata
     provenance = reconstructor_runtime_provenance(

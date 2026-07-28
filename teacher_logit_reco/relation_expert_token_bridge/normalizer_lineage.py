@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .contracts import require_sha256, validate_content_hash, with_content_hash
 
@@ -204,6 +204,22 @@ def validate_normalizer_population_recipe(
         raise ValueError("shared-HLT realization-policy reuse differs")
     if not hlt and recipe.get("replica_ids") != []:
         raise ValueError("offline normalizer unexpectedly contains replicas")
+    expected = build_normalizer_population_recipe(
+        logical_domain=domain,
+        identity_manifest_sha256=recipe.get("identity_manifest_sha256"),
+        identity_count=int(recipe.get("identity_count", -1)),
+        raw_input_schema_sha256=recipe.get("raw_input_schema_sha256"),
+        hlt_v3_profile_sha256=recipe.get("hlt_v3_profile_sha256"),
+        inherited_estimator_contract_sha256=recipe.get(
+            "inherited_estimator_contract_sha256"
+        ),
+    )
+    semantic = dict(recipe)
+    semantic.pop("content_hash", None)
+    semantic.pop("source", None)
+    expected.pop("content_hash")
+    if semantic != expected:
+        raise ValueError("normalizer population recipe differs from locked semantics")
     return digest
 
 
