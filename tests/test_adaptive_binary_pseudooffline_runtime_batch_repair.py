@@ -132,6 +132,26 @@ def test_contract_repair_replaces_a_failed_prior_repair() -> None:
     ) == "afterok:19700:18948"
 
 
+def test_contract_repair_can_reattach_a_consumed_contract_edge() -> None:
+    assert replace_one_dependency_job(
+        "afterok:18948",
+        old_job_ids=("18902",),
+        new_job_id="19705",
+        allow_missing_old=True,
+    ) == "afterok:18948,afterok:19705"
+
+
+def test_contract_repair_rejects_a_missing_edge_by_default() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="found \\[\\]"):
+        replace_one_dependency_job(
+            "afterok:18948",
+            old_job_ids=("18902",),
+            new_job_id="19705",
+        )
+
+
 def test_failed_contract_consumer_is_rebuilt_against_new_contract(
     monkeypatch,
 ) -> None:

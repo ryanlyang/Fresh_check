@@ -50,6 +50,13 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--replacement-contract-job",
+        help=(
+            "Existing active or completed replacement contract to reuse after "
+            "an interrupted repair; skips probe and contract resubmission."
+        ),
+    )
+    parser.add_argument(
         "--resubmit-failed-consumers",
         action="store_true",
         help=(
@@ -232,8 +239,9 @@ def replace_one_dependency_job(
     *,
     old_job_ids: Sequence[str],
     new_job_id: str,
+    allow_missing_old: bool = False,
 ) -> str:
-    """Replace exactly one original or superseded dependency reference."""
+    """Replace one stale dependency, or append a consumed edge when allowed."""
 
     candidates = tuple(dict.fromkeys(str(value) for value in old_job_ids))
     matches = [
@@ -247,6 +255,10 @@ def replace_one_dependency_job(
                 "dependency contains both a stale and the new contract job"
             )
         return dependency
+    if not matches and allow_missing_old:
+        if dependency in {"", "(null)"}:
+            return f"afterok:{new_job_id}"
+        return f"{dependency},afterok:{new_job_id}"
     if len(matches) != 1:
         raise ValueError(
             "expected exactly one original or superseded dependency, found "
@@ -372,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     superseded_contract = args.superseded_contract_job
     if superseded_contract is not None and not str(superseded_contract).isdigit():
         raise ValueError("--superseded-contract-job must be a numeric Slurm job ID")
+    replacement_contract = args.replacement_contract_job
+    if replacement_contract is not None and not str(replacement_contract).isdigit():
+        raise ValueError("--replacement-contract-job must be a numeric Slurm job ID")
     rows = _rows(manifest)
     variant = str(args.variant)
     contract_key = f"runtime_batch_contract:{variant}"
@@ -417,29 +432,45 @@ def main(argv: list[str] | None = None) -> int:
     acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
     if acceptance.get("ok") is not True:
         raise RuntimeError("campaign storage acceptance is not successful")
-    archive = _archive_stale_evidence(root, variant, dry_run=args.dry_run)
-
-    new_probes = [
-        _submit(
-            row,
-            label=f"{variant}_{index}",
-            dependencies=(),
+    if replacement_contract is None:
+        archive: Path | None = _archive_stale_evidence(
+            root, variant, dry_run=args.dry_run
+        )
+        new_probes = [
+            _submit(
+                row,
+                label=f"{variant}_{index}",
+                dependencies=(),
+                project_dir=project_dir,
+                log_dir=log_dir,
+                dry_run=args.dry_run,
+                source_identity=source_identity,
+            )
+            for index, row in enumerate(probes)
+        ]
+        new_contract = _submit(
+            contract_row,
+            label=f"{variant}_contract",
+            dependencies=new_probes,
             project_dir=project_dir,
             log_dir=log_dir,
             dry_run=args.dry_run,
             source_identity=source_identity,
         )
-        for index, row in enumerate(probes)
-    ]
-    new_contract = _submit(
-        contract_row,
-        label=f"{variant}_contract",
-        dependencies=new_probes,
-        project_dir=project_dir,
-        log_dir=log_dir,
-        dry_run=args.dry_run,
-        source_identity=source_identity,
-    )
+    else:
+        archive = None
+        new_probes = []
+        new_contract = str(replacement_contract)
+        if not args.dry_run:
+            replacement_state = _slurm_job_state(new_contract)
+            if (
+                replacement_state not in _ACTIVE_SLURM_STATES
+                and replacement_state != "COMPLETED"
+            ):
+                raise RuntimeError(
+                    "replacement contract is neither active nor completed: "
+                    f"{new_contract}={replacement_state}"
+                )
 
     rewired: list[dict[str, Any]] = []
     for row, job_id in zip(consumers, consumer_ids, strict=True):
@@ -552,6 +583,10 @@ def main(argv: list[str] | None = None) -> int:
                 if value is not None
             ),
             new_job_id=new_contract,
+            # Slurm may remove a satisfied/failed prerequisite from a still
+            # pending consumer's displayed dependency. Reattach the repaired
+            # contract while preserving every remaining live prerequisite.
+            allow_missing_old=True,
         )
         for old_job_id, new_job_id in companion_replacements.items():
             dependency = _replace_dependency_if_present(
@@ -592,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                 "old_contract_job_id": old_contract,
                 "new_probe_job_ids": new_probes,
                 "new_contract_job_id": new_contract,
-                "archive": str(archive),
+                "archive": None if archive is None else str(archive),
                 "rewired": rewired,
             },
             indent=2,
