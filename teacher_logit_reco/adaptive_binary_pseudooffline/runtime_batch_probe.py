@@ -13,6 +13,25 @@ from .runtime_batch import ABPH_RUNTIME_BATCH_MEASUREMENT_PRODUCER
 ABPH_RUNTIME_PROBE_EVIDENCE_BYTES = 8192
 
 
+def _distributed_success_consensus(succeeded: bool, *, device: Any) -> bool:
+    """Return true only when every rank completed the current local phase."""
+
+    import torch
+
+    if not (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    ):
+        return bool(succeeded)
+    flag = torch.tensor(
+        [1 if succeeded else 0],
+        dtype=torch.int32,
+        device=device,
+    )
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN)
+    return bool(flag.item())
+
+
 def _gather_fixed_evidence(
     local_evidence: Mapping[str, Any],
     *,
@@ -110,64 +129,115 @@ def measure_full_optimizer_step(
     stepped = False
     failure: str | None = None
     try:
+        completed_forward_steps = 0
+        completed_backward_steps = 0
         for _ in range(accumulation):
-            output = forward_loss(model, batch_factory(local))
-            if not isinstance(output, Mapping) or "total_loss" not in output:
-                raise TypeError(
-                    "full-step probe forward must return a tensor mapping with total_loss"
-                )
-            def tensor_leaves(value: Any) -> bool:
-                if isinstance(value, Mapping):
-                    return all(tensor_leaves(item) for item in value.values())
-                if isinstance(value, (tuple, list)):
-                    return all(tensor_leaves(item) for item in value)
-                return bool(torch.is_tensor(value))
+            output = None
+            local_forward_failure: str | None = None
+            try:
+                output = forward_loss(model, batch_factory(local))
+                if not isinstance(output, Mapping) or "total_loss" not in output:
+                    raise TypeError(
+                        "full-step probe forward must return a tensor mapping "
+                        "with total_loss"
+                    )
 
-            if not tensor_leaves(output):
-                raise TypeError("full-step probe output mapping may contain only tensors")
-            loss = output["total_loss"]
-            if loss.ndim != 0 or not bool(torch.isfinite(loss)):
-                raise FloatingPointError("full-step probe total_loss is not a finite scalar")
-            forward_completed = True
-            (loss / float(accumulation)).backward()
-        backward_completed = True
-        active_named = [
-            (name, parameter)
-            for name, parameter in model.named_parameters()
-            if parameter.requires_grad
-        ]
-        active = [parameter for _name, parameter in active_named]
-        gradients = [parameter.grad for parameter in active if parameter.grad is not None]
-        if not gradients:
-            raise FloatingPointError("full-step probe gradients are absent")
-        nonfinite = [
-            (name, int((~torch.isfinite(parameter.grad)).sum().item()))
-            for name, parameter in active_named
-            if parameter.grad is not None
-            and not bool(torch.isfinite(parameter.grad).all())
-        ]
-        if nonfinite:
-            preview = ", ".join(
-                f"{name}({count})" for name, count in nonfinite[:8]
+                def tensor_leaves(value: Any) -> bool:
+                    if isinstance(value, Mapping):
+                        return all(tensor_leaves(item) for item in value.values())
+                    if isinstance(value, (tuple, list)):
+                        return all(tensor_leaves(item) for item in value)
+                    return bool(torch.is_tensor(value))
+
+                if not tensor_leaves(output):
+                    raise TypeError(
+                        "full-step probe output mapping may contain only tensors"
+                    )
+                loss = output["total_loss"]
+                if loss.ndim != 0 or not bool(torch.isfinite(loss)):
+                    raise FloatingPointError(
+                        "full-step probe total_loss is not a finite scalar"
+                    )
+            except Exception as exc:
+                local_forward_failure = f"{type(exc).__name__}: {exc}"
+
+            all_forward_ok = _distributed_success_consensus(
+                local_forward_failure is None,
+                device=device,
             )
-            raise FloatingPointError(
-                "full-step probe gradients are nonfinite: " + preview
+            if not all_forward_ok:
+                failure = (
+                    local_forward_failure
+                    or "peer rank failed before synchronized backward"
+                )
+                break
+            completed_forward_steps += 1
+
+            local_backward_failure: str | None = None
+            try:
+                assert output is not None
+                (output["total_loss"] / float(accumulation)).backward()
+            except Exception as exc:
+                local_backward_failure = f"{type(exc).__name__}: {exc}"
+            all_backward_ok = _distributed_success_consensus(
+                local_backward_failure is None,
+                device=device,
             )
-        norm = torch.nn.utils.clip_grad_norm_(active, float(gradient_clip_norm))
-        if not bool(torch.isfinite(norm)):
-            raise FloatingPointError("full-step probe clipped gradient norm is nonfinite")
-        clipped = True
-        optimizer.step()
-        stepped = True
-        if hasattr(ema, "update"):
-            ema_source = model.module if is_ddp else model
-            # DDP wraps ReconstructorTrainingModule, whose child ``model`` is
-            # the reconstructor tracked by EMA. Updating from the wrapper adds
-            # a spurious ``model.`` prefix and rejects an otherwise valid step.
-            nested_model = getattr(ema_source, "model", None)
-            if isinstance(nested_model, torch.nn.Module):
-                ema_source = nested_model
-            ema.update(ema_source)
+            if not all_backward_ok:
+                failure = (
+                    local_backward_failure
+                    or "peer rank failed during synchronized backward"
+                )
+                break
+            completed_backward_steps += 1
+
+        forward_completed = completed_forward_steps == accumulation
+        backward_completed = completed_backward_steps == accumulation
+        if failure is None:
+            active_named = [
+                (name, parameter)
+                for name, parameter in model.named_parameters()
+                if parameter.requires_grad
+            ]
+            active = [parameter for _name, parameter in active_named]
+            gradients = [
+                parameter.grad
+                for parameter in active
+                if parameter.grad is not None
+            ]
+            if not gradients:
+                raise FloatingPointError("full-step probe gradients are absent")
+            nonfinite = [
+                (name, int((~torch.isfinite(parameter.grad)).sum().item()))
+                for name, parameter in active_named
+                if parameter.grad is not None
+                and not bool(torch.isfinite(parameter.grad).all())
+            ]
+            if nonfinite:
+                preview = ", ".join(
+                    f"{name}({count})" for name, count in nonfinite[:8]
+                )
+                raise FloatingPointError(
+                    "full-step probe gradients are nonfinite: " + preview
+                )
+            norm = torch.nn.utils.clip_grad_norm_(
+                active, float(gradient_clip_norm)
+            )
+            if not bool(torch.isfinite(norm)):
+                raise FloatingPointError(
+                    "full-step probe clipped gradient norm is nonfinite"
+                )
+            clipped = True
+            optimizer.step()
+            stepped = True
+            if hasattr(ema, "update"):
+                ema_source = model.module if is_ddp else model
+                # DDP wraps ReconstructorTrainingModule, whose child ``model`` is
+                # the reconstructor tracked by EMA.
+                nested_model = getattr(ema_source, "model", None)
+                if isinstance(nested_model, torch.nn.Module):
+                    ema_source = nested_model
+                ema.update(ema_source)
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}"
     finally:

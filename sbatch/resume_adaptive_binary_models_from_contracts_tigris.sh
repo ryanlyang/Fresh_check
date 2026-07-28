@@ -127,12 +127,12 @@ if ((${#missing_contract_variants[@]})); then
     active_state="${active_row%%|*}"
     active_reason="${active_row#*|}"
     if [[ -n "${active_state}" ]] &&
-       [[ "${active_reason}" != "DependencyNeverSatisfied" ]]; then
+       [[ "${active_reason}" != *DependencyNeverSatisfied* ]]; then
       echo "Waiting for ${variant} contract producer ${producer} (${active_state}; ${active_reason})."
       producer_jobs+=("${producer}")
       continue
     fi
-    if [[ "${active_reason}" == "DependencyNeverSatisfied" ]]; then
+    if [[ "${active_reason}" == *DependencyNeverSatisfied* ]]; then
       echo "Missing ${variant} contract producer ${producer} cannot run because one of its probes failed." >&2
       exit 2
     fi

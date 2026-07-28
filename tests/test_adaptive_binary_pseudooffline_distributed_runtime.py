@@ -55,6 +55,7 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.training import (
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.runtime_batch_probe import (
     _gather_fixed_evidence,
+    measure_full_optimizer_step,
 )
 
 
@@ -242,6 +243,63 @@ def _real_ddp_backward_failure_worker(
     if error is None:
         abort_distributed_runtime(runtime)
         raise AssertionError("real DDP backward failure did not reach this rank")
+
+
+def _runtime_probe_forward_failure_worker(
+    rank: int, world_size: int, port: int, root: str
+) -> None:
+    os.environ.update(
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+        LOCAL_RANK=str(rank),
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        ABPH_DDP_TIMEOUT_SECONDS="15",
+    )
+    runtime = initialize_distributed_runtime(
+        requested_world_size=world_size, device=torch.device("cpu")
+    )
+    try:
+        model = torch.nn.parallel.DistributedDataParallel(
+            torch.nn.Linear(2, 1, bias=False)
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+
+        def forward_loss(module, batch):
+            prediction = module(batch)
+            if rank == 1:
+                raise RuntimeError("injected probe forward failure")
+            loss = prediction.square().mean()
+            return {"total_loss": loss, "root_loss": loss}
+
+        measurement = measure_full_optimizer_step(
+            stage_family="root_hierarchy",
+            variant_name="B1_semantic_query_root",
+            resolved_variant_config_hash="config",
+            runtime_provenance_hash="provenance",
+            slurm_job_id="probe",
+            slurm_job_account="reu-aisocial",
+            slurm_job_partition="tigris",
+            local_batch_size=256,
+            requested_world_size=world_size,
+            model=model,
+            optimizer=optimizer,
+            ema=SimpleNamespace(shadow={}),
+            batch_factory=lambda size: torch.ones(size, 2),
+            forward_loss=forward_loss,
+            active_parameter_groups=("root",),
+            device=torch.device("cpu"),
+            gradient_clip_norm=1.0,
+            find_unused_parameters=False,
+            largest_path_exercised=True,
+            prefetch_buffers=(),
+            pinned_memory_staging=False,
+        )
+        Path(root, f"probe_failure_rank_{rank}.json").write_text(
+            json.dumps(measurement.to_dict()), encoding="utf-8"
+        )
+    finally:
+        destroy_distributed_runtime(runtime)
 
 
 def _distributed_worker(rank: int, world_size: int, port: int) -> None:
@@ -1014,6 +1072,33 @@ def test_real_ddp_backward_failure_aborts_all_ranks_within_timeout(tmp_path):
     assert all(row["caught"] for row in rows)
     assert max(row["elapsed_seconds"] for row in rows) < 15.0
     assert "injected failure before DDP reducer hooks" in rows[1]["error"]
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_available(), reason="torch.distributed is unavailable"
+)
+def test_runtime_probe_reaches_consensus_before_ddp_backward(tmp_path):
+    torch.multiprocessing.spawn(
+        _runtime_probe_forward_failure_worker,
+        args=(2, _free_port(), str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+    rows = [
+        json.loads(
+            (tmp_path / f"probe_failure_rank_{rank}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for rank in range(2)
+    ]
+    assert all(row["successful"] is False for row in rows)
+    assert all(row["backward_completed"] is False for row in rows)
+    assert any("injected probe forward failure" in row["failure"] for row in rows)
+    assert any(
+        "peer rank failed before synchronized backward" in row["failure"]
+        for row in rows
+    )
 
 
 @pytest.mark.skipif(

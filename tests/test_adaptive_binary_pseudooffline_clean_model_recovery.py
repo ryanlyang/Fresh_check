@@ -14,6 +14,11 @@ PROBE_WORKER = (
 RESUME_SCRIPT = (
     ROOT / "sbatch" / "resume_adaptive_binary_models_from_contracts_tigris.sh"
 ).read_text(encoding="utf-8")
+CONTRACT_REPAIR_SCRIPT = (
+    ROOT
+    / "sbatch"
+    / "repair_adaptive_binary_missing_contracts_and_resume_tigris.sh"
+).read_text(encoding="utf-8")
 
 
 def test_clean_model_recovery_requires_explicit_confirmation() -> None:
@@ -106,3 +111,23 @@ def test_models_resume_reuses_prepared_campaign_evidence() -> None:
     assert "storage_projection" in RESUME_SCRIPT
     assert "tagger_acceptance" in RESUME_SCRIPT
     assert "retained: inputs, baselines, targets" in RESUME_SCRIPT
+
+
+def test_contract_repair_replaces_stale_jobs_and_resumes_automatically() -> None:
+    assert "ABPH_CONFIRM_CONTRACT_REPAIR" in CONTRACT_REPAIR_SCRIPT
+    assert "ABPH_TRAINED_RECONSTRUCTOR_VARIANTS" in CONTRACT_REPAIR_SCRIPT
+    assert "submit_adaptive_binary_runtime_batch_probes_tigris.sh" in (
+        CONTRACT_REPAIR_SCRIPT
+    )
+    assert "fresh_abph_models_resume" in CONTRACT_REPAIR_SCRIPT
+    assert "resume_adaptive_binary_models_from_contracts_tigris.sh" in (
+        CONTRACT_REPAIR_SCRIPT
+    )
+    cancellation = CONTRACT_REPAIR_SCRIPT.index('scancel "${stale_jobs[@]}"')
+    probes = CONTRACT_REPAIR_SCRIPT.index(
+        "submit_adaptive_binary_runtime_batch_probes_tigris.sh"
+    )
+    continuation = CONTRACT_REPAIR_SCRIPT.index(
+        "--job-name=fresh_abph_models_resume"
+    )
+    assert cancellation < probes < continuation

@@ -345,15 +345,30 @@ The production campaign uses balanced 10-class JetClass identities:
 | Logical role | Repository split | Count | Per-class count | Permitted use |
 |---|---|---:|---:|---|
 | `train` | `model_train` | 500,000 | 50,000 | All model-weight training and train-only fitting |
-| `val_stop` | `model_val` | 100,000 | 10,000 | Epoch/checkpoint selection only |
+| `val_stop` | first deterministic half of `model_val` | 50,000 | 5,000 | Epoch/checkpoint selection only |
+| `val_design` | second deterministic half of `model_val` | 50,000 | 5,000 | Calibration, certification, component and beam selection |
 | unused | `stack_train` | 0 | 0 | Reserved by the five-split manifest |
-| `val_select` | `stack_val` | 50,000 | 5,000 | Architecture, token shape/budget, predictor, and finalist selection |
+| `final_select` | `stack_val` | 50,000 | 5,000 | Complete-graph comparison and two-finalist selection only |
 | `final_test` | `final_test` | 300,000 | 30,000 | Sealed final evaluation |
 
 The user's requested 150,000 validation jets are intentionally divided into
-100,000 checkpoint-validation jets and 50,000 architecture-selection jets.
-This prevents the same metric population from both selecting every epoch and
-ranking a large architecture campaign.
+50,000 checkpoint-selection jets, 50,000 design-selection jets, and 50,000
+complete-graph finalist-selection jets.
+
+Within each class of the repository `model_val`, sort identities by:
+
+```text
+sha256("retb_model_val_partition_v1" || canonical_jet_identity)
+then canonical_jet_identity
+```
+
+The first 5,000 identities become `val_stop` and the remaining 5,000 become
+`val_design`.  The partition manifest is immutable and source-bound.
+`val_stop` may select epochs but no architecture, threshold, calibration, or
+certification.  `val_design` may fit the explicitly label-free uncertainty
+calibrator and select/certify components, but never selects an epoch.
+`final_select` may compare only already complete, locked deployable graphs and
+choose the two finalists; it may not alter a component inside a graph.
 
 Every split is sampled without replacement.  Source files, event identities,
 and canonical jet identities are disjoint across splits.  The offline and HLT
@@ -370,19 +385,20 @@ scale_train = 3,000,000 balanced training jets
 
 `scale_train` contains the exact 500,000 `model_train` identities plus
 2,500,000 additional balanced identities.  Added identities are disjoint from
-`model_val`, `stack_val`, and `final_test`.  Its manifest is built and sealed
-at campaign bootstrap, before model results.
+`val_stop`, `val_design`, `stack_val`, and `final_test`.  Its manifest is built
+and sealed at campaign bootstrap, before model results.
 
 Only the accuracy and rejection graph definitions in
 `selection/locked_graph_definitions.json` may train on `scale_train`.  The
-scale-up may select epochs on the same `model_val` but may not reopen
+scale-up may select epochs on `val_stop` but may not reopen
 architecture, token-shape, loss, degradation, or predictor-family selection.
 Both 500k and 3M checkpoints are locked before the common `final_test` is
 opened.
 
 Architecture-search training workers may load only `model_train` and
-`model_val`; Stage-M workers may load only `scale_train` and `model_val`.
-Architecture-selection workers may additionally load `stack_val`.
+`val_stop`; Stage-M workers may load only `scale_train` and `val_stop`.
+Design/calibration workers may additionally load `val_design`.
+Only the Stage-L complete-graph selector may load `final_select/stack_val`.
 Final-test preparation may construct identity-bound inputs and frozen offline
 targets without checkpoints or metrics; scientific final-test inference
 requires an immutable finalist lock.
@@ -463,7 +479,8 @@ where \(e\) is the zero-based epoch and \(h(j)\) is the low two bits of
 cycles through all four realizations without multiplying label exposure.
 Resume at an epoch boundary reproduces the same choices exactly.
 
-`model_val`, `stack_val`, and `final_test` each use only `replica_id=0`.
+`val_stop`, `val_design`, `stack_val`, and `final_test` each use only
+`replica_id=0`.
 Checkpoint and architecture comparisons therefore remain paired to one fixed
 evaluation domain.
 
@@ -547,7 +564,8 @@ Domain seeds are:
 ```text
 model_train = 3053
 scale_train = 3053
-model_val   = 3054
+val_stop    = 3054
+val_design  = 3054
 stack_val   = 3056
 final_test  = 3057
 ```
@@ -556,6 +574,9 @@ final_test  = 3057
 namespace.  For any of the original 500,000 identities, every HLT replica
 must therefore be byte-identical in both manifests.  Scale-up changes the
 identity population, not the degradation semantics of an existing identity.
+`val_stop` and `val_design` intentionally share the validation-domain seed;
+their disjoint identities, not a changed corruption definition, distinguish
+the two roles.
 
 ### 6.3 Primitive-operation order
 
@@ -664,7 +685,7 @@ All kinematic terms scale continuously to zero with degradation strength.
 The common parameters above are reference amplitudes, not a universal
 particle response.  Apply the following immutable type multipliers:
 
-| Current PID domain | Constituent-loss amplitude | Momentum/energy response | Angular response | Local reassignment |
+| Current PID domain | Constituent-loss amplitude | Momentum response | Angular response | Local reassignment |
 |---|---:|---:|---:|---:|
 | charged hadron | 0.50 | 0.45 | 0.35 | 0.00 |
 | electron | 0.60 | 0.55 | 0.45 | 0.00 |
@@ -682,6 +703,50 @@ measurement loss remains the distinct Section-6.6 mechanism and does not
 remove the constituent.  Response diagnostics are reported separately for
 all six domains so this proxy conditioning cannot be hidden by an inclusive
 average.
+
+The multiplier mapping is exact.  Let `a_loss`, `a_p`, `a_ang`, and
+`a_reassign` be the four type-table values; let `s` be degradation strength;
+and let `r_kin`, `r_track_loss`, `r_track_core`, and `r_tail` be the selected
+`R_RANDOM` row, or one for `R_FIXED/R_MULTI`.  The inherited v2 helper first
+computes its unscaled base terms from the original current-view particle and
+pre-corruption local density.  RETB then uses:
+
+| Mechanism | Exact RETB mapping |
+|---|---|
+| Constituent-efficiency loss above identity | `p_loss = clip01(p_loss_v2 * a_loss * s * r_kin)` |
+| Core log-\(p_T\)/momentum sigma | `sigma_p = sigma_p_v2 * a_p * s * r_kin` |
+| Kinematic-tail probability | `p_kin_tail = clip01(p_kin_tail_v2 * a_p * s * r_tail)` |
+| Kinematic-tail residual magnitude | `delta_kin_tail = delta_kin_tail_v2 * a_p * s * r_kin` |
+| Core \(\eta,\phi\) sigma | `sigma_ang = sigma_ang_v2 * a_ang * s * r_kin` |
+| Reassignment probability | `p_reassign = clip01(p_reassign_v2 * a_reassign * s * r_kin)` |
+| Reassignment displacement magnitude | `delta_reassign = delta_reassign_v2 * a_reassign * s * r_kin` |
+| Section-6.6 track-measurement loss | `p_track_loss = clip01(p_track_loss_v3 * s * r_track_loss)` |
+| Section-6.7 track core residual | `delta_track_core = delta_track_core_v3 * s * r_track_core` |
+| Section-6.7 track-tail probability | `p_track_tail = clip01(p_track_tail_v3 * s * r_tail)` |
+| Section-6.7 track-tail residual magnitude | `delta_track_tail = delta_track_tail_v3 * s * r_track_core` |
+
+Here `p_loss_v2` contains exactly the inherited plateau, turn-on, endcap, and
+`density_loss_scale` inefficiency terms.  `sigma_p_v2` contains the inherited
+`jet_quality_sigma` and `kinematic_smear_scale` momentum terms.
+`p_kin_tail_v2` contains exactly `kinematic_tail_base`,
+`kinematic_tail_eta`, and `kinematic_tail_density`.  The inherited angular and
+reassignment helpers supply the remaining named base terms; no multiplier is
+applied to a mechanism not listed in the table.
+
+The campaign spec binds the source/function hash that emits each named
+`*_v2` base term.  Workers must call those exact base-term helpers and then
+apply this table; they may not independently recreate the formula.  If the
+current v2 implementation does not expose a base term separately, it is first
+refactored behind a parity-tested interface with unchanged v2 output and a new
+RETB adapter contract.
+
+Multiplication order is base term, type multiplier, strength, replica-family
+multiplier, then final clipping.  Probabilities clip to `[0,1]`; nonnegative
+sigmas/magnitudes use the inherited v2 physical cap after all multipliers.
+Random draws occur only after clipping.  Finally wrap \(\phi\), validate
+finite \(p_T,\eta,\phi\), preserve or merge mass under Section 6.4, and
+recompute energy from the degraded momentum and that mass.  There is no
+independent energy-smearing draw.
 
 ### 6.6 Track-measurement availability
 
@@ -894,6 +959,54 @@ unknown
 
 The raw schema contains five one-hot indicators.  A valid zero-hot particle
 maps explicitly to `unknown`; multi-hot input fails preflight.
+
+### Normalizer population and scale-up lineage
+
+RETB retains the inherited estimator, valid-pair masks, clipping rules,
+accumulation dtype, and channel order, but freezes the fitted populations:
+
+```text
+offline relation/REGION normalizer:
+  offline model_train identities, one offline view per identity
+
+shared HLT relation/REGION normalizer:
+  model_train identities x nominal R_MULTI replicas {0,1,2,3}
+  every identity-replica contributes with equal weight
+```
+
+The shared HLT normalizer is used unchanged by `R_FIXED`, `R_MULTI`, and
+`R_RANDOM`, and by all fixed-severity robustness inputs.  `R_RANDOM` never
+fits a severity-specific normalizer.  This makes realization-policy
+comparisons change the degraded input rather than both the input and its
+preprocessing.  Offline and HLT normalizers remain separate because their
+fitted populations are different.
+
+The pool is traversed in canonical `(jet_identity,replica_id)` order using the
+inherited deterministic streaming estimator.  REGION statistics use the
+REGION descriptors rebuilt from that exact view.  Relation statistics use
+only valid ordered pairs under the inherited pair mask.  No validation,
+`stack_val`, or final-test identity contributes to a fitted statistic.
+
+At Stage M, refit rather than reuse every train-derived statistic:
+
+```text
+offline relation/REGION = offline scale_train
+shared HLT relation/REGION = scale_train x nominal R_MULTI replicas {0,1,2,3}
+target-token normalizers = new scale_train offline targets
+any other fitted input standardizer = its corresponding locked scale_train view
+```
+
+Estimator code, clipping thresholds, dtype, masks, and replica weighting are
+identical to the 500k recipe.  The new population legitimately produces new
+content hashes.  The Stage-M uncertainty calibrator is also refitted
+label-free on `val_design` after its new predictor checkpoint is selected on
+`val_stop`.
+
+Every normalizer artifact records its logical domain, exact identity-manifest
+hash, replica IDs and weights, estimator/clip contract, valid-entry counts by
+channel, parent schema/source hashes, fitted values, and content hash.
+Checkpoint and graph reuse requires an exact normalizer parent; a 500k
+normalizer cannot masquerade as a scale-up normalizer.
 
 ### Measurement-availability embedding
 
@@ -1308,13 +1421,28 @@ L_{\mathrm{T1task}}
 \]
 
 `L_T0anchor` is normalized Huber loss between the moving tokens and the frozen
-same-event `T0` tokens.  The retrieval loss is temperature-`0.1` InfoNCE:
-the predicted HLT bank is the query, the same-event moving offline bank is the
-positive, and 31 fixed within-class wrong-event banks are negatives.  Negative
-identities are chosen without replacement by
+same-event `T0` tokens.  For any `[K,D]` bank define:
+
+```text
+bank_vector = flatten(train-normalized bank in slot-major, then channel order)
+similarity(a,b) = cosine(bank_vector_a,bank_vector_b) / 0.1
+```
+
+There is no learned retrieval projection, pooling head, or slot permutation.
+The retrieval loss is InfoNCE with the predicted HLT bank as query, the
+same-event moving offline bank as positive, and 31 fixed within-class
+wrong-event banks as negatives.  Negative identities are chosen without
+replacement by
 `sha256("retb_t1_negatives_v1" || pipeline_seed || jet_identity)` from a
-canonical per-class `model_train` identity ring.  Using within-class negatives
-ensures a class prototype cannot solve the retrieval objective.
+canonical per-class `model_train` identity ring after explicitly removing the
+query identity.  A ring with fewer than 32 distinct identities is an invalid
+training fixture.  Using within-class negatives ensures a class prototype
+cannot solve the retrieval objective.
+
+Certification uses an independent canonical per-class `val_design` ring and
+`sha256("retb_t1_cert_negatives_v1" || pipeline_seed || jet_identity)`, again
+removing the query identity before choosing 31 negatives.  Training and
+certification negative rings and hashes are therefore non-interchangeable.
 
 `L_covariance` is the mean relative Frobenius error between moving and `T0`
 per-slot `D x D` channel covariance matrices over the current effective
@@ -1374,7 +1502,7 @@ worst per-class efficiency deficit <= 0.0100
 ```
 
 Representation-preserving language additionally requires an immutable
-`bridge_content_certified=true` result on `model_val`:
+`bridge_content_certified=true` result on `val_design`:
 
 ```text
 frozen T0 expert/fusion class agreement >= 0.990
@@ -1385,9 +1513,14 @@ relative per-slot covariance error <= 0.25
 within-class 32-way same-event retrieval accuracy >= 0.20
 ```
 
-Effective rank is `exp(entropy(normalized singular values))` of the
-train-normalized flattened token matrix.  Retrieval diagnostics also report
-mean reciprocal rank and nearest-target identity accuracy by class.
+For \(n\) evaluated events, the effective-rank matrix has exact shape
+`[n_events,K*D]`, with each row equal to the slot-major train-normalized bank
+vector above.  Effective rank is
+`exp(entropy(singular_values/sum(singular_values)))`, with exact zero singular
+values contributing zero to entropy and an all-zero matrix assigned rank
+zero.  Certification retrieval uses the same unlearned cosine similarity.
+Retrieval diagnostics also report mean reciprocal rank and nearest-target
+identity accuracy by class.
 For a dimension-changing `T2`, variance/covariance and frozen-logit
 certification are computed after its training-only decoder maps back to `T0`
 coordinates; effective rank and retrieval are additionally reported in the
@@ -1400,8 +1533,8 @@ representation bridging only if it independently passes the same content
 certification.  `T2_PROJECT` is a learned bridge coordinate system and is not
 claimed to preserve the original coordinates even when certified.
 
-Candidates are selected using `stack_val` only after the certification and
-offline noninferiority flags are frozen from `model_val`.  Failure does not
+Candidates are selected using `val_design` only after the certification and
+offline noninferiority flags are frozen on that population.  Failure does not
 stop reporting or the pure-token bridge.
 
 The report keeps `T0`, both `T1` modes, `T2`, and `T3` separate.  A
@@ -1412,7 +1545,7 @@ representation.
 
 Expert loss variants interact through fusion and are not selected by seven
 independent leave-one-bank substitutions.  For every carried shape, cache the
-identity-bound `model_train`, `model_val`, and `stack_val` tokens/logits from
+identity-bound `model_train`, `val_stop`, and `val_design` tokens/logits from
 each eligible loss variant.  Then:
 
 1. choose the individually best variant for each expert as the deterministic
@@ -1422,8 +1555,8 @@ each eligible loss variant.  Then:
 3. at each depth, expand every retained tuple with every eligible variant for
    the current expert while later experts retain their defaults;
 4. train a fresh seed-`41701` `F_POOLED_MLP` readout on cached `model_train`,
-   select its epoch on `model_val`, and score the complete provisional tuple
-   on `stack_val`;
+   select its epoch on `val_stop`, and score the complete provisional tuple
+   on `val_design`;
 5. retain beam width `16` by accuracy, the global `0.0001` window, cross
    entropy, FLOPs, parameters, then lexicographic seven-variant tuple;
 6. train canonical `F_TOKEN_TRANSFORMER` fusions for the final top four tuples
@@ -1508,7 +1641,7 @@ HET_SELECTED:
 
 `HET_SELECTED` begins with one slot per expert.  Repeatedly add the next
 available slot-count increment to the expert with the largest three-seed
-incremental `F_POOLED_MLP` fusion-accuracy gain per added slot on `val_select`.
+incremental `F_POOLED_MLP` fusion-accuracy gain per added slot on `val_design`.
 For every greedy step, all candidate increments start from the identical
 current allocation and use deterministic matched readout seeds.  Break ties
 by lower fusion cross entropy, fewer added slots, then canonical expert order.
@@ -1726,7 +1859,7 @@ Offline performance alone does not determine the deployable token shape.
 ### 13.1 Offline high-capacity shape
 
 Across confirmation seeds `101,202,303`, rank every registered uniform
-\(S=(K,D)\) by frozen-expert `F_TOKEN_TRANSFORMER` on `val_select`:
+\(S=(K,D)\) by frozen-expert `F_TOKEN_TRANSFORMER` on `val_design`:
 
 The selector requires all seven uniform shape IDs at all three seeds.  A
 missing or invalid shape artifact is an incomplete campaign, not an implicit
@@ -1780,7 +1913,7 @@ assembled after per-expert predictors are selected.
 ### 13.4 Bridge-aware shape
 
 After predictor confirmation, select `SHAPE_BRIDGE` from `SHAPE_COMPACT` and
-`SHAPE_HIGH` using mean `val_select` performance through frozen offline
+`SHAPE_HIGH` using mean `val_design` performance through frozen offline
 fusion:
 
 1. higher mean paired gain over shape-matched `HF_NATIVE`;
@@ -1812,7 +1945,10 @@ no offline target
 
 `HE_OFFLINE_INIT` copies all shape-compatible particle-encoder, relation,
 tokenizer, and classifier parameters from the corresponding selected offline
-expert.  Input/target normalizers remain domain-specific.  Newly introduced
+expert.  It replaces offline fitted statistics with Section 7's one shared
+nominal-R_MULTI HLT normalizer; it does not fit an expert- or
+realization-specific normalizer.  Target-token normalizers remain bound to
+their offline target coordinate system.  Newly introduced
 availability embeddings initialize to zero.  It trains with HLT CE at:
 
 ```text
@@ -1865,8 +2001,9 @@ After `SHAPE_HIGH`, `SHAPE_COMPACT`, `HET_PHYSICS`, `HET_SELECTED`, and
 
 ```text
 model_train
-model_val
-stack_val
+val_stop
+val_design
+final_select (stack_val)
 final_test (sealed preparation only)
 ```
 
@@ -2144,9 +2281,9 @@ registered shape.
 For notation below, \(s_{k,g(d)}\) is the log variance assigned to channel
 \(d\).  Each predictor trains its uncertainty through the heteroscedastic
 token loss.  After checkpoint selection, fit one additive log-variance offset
-per expert and uncertainty group on `model_val` by minimizing held-out token
+per expert and uncertainty group on `val_design` by minimizing held-out token
 Gaussian NLL with predictor/token weights frozen.  Freeze that calibrator
-before `stack_val`.
+before any `final_select/stack_val` inference.
 
 The calibrated expected RMSE, uncertainty-head type, and group values are
 embedded into final consumers.  Calibration uses no labels.  Reports include
@@ -2281,7 +2418,7 @@ token reconstruction.
 ### 20.8 Joint predictor-bundle selector
 
 Per-expert predictor choices are interacting components.  After all eligible
-rows finish, publish identity-bound `stack_val` predicted tokens, uncertainty,
+rows finish, publish identity-bound `val_design` predicted tokens, uncertainty,
 and expert logits for every seed and candidate.  The primary bundle is chosen
 by deterministic beam search:
 
@@ -2320,6 +2457,25 @@ selection.
 ## 21. Joint all-bank prediction
 
 After individual predictors are selected, train/evaluate:
+
+### Common-view invariant
+
+Every `J1` through `J5` training example obeys:
+
+```text
+one canonical jet identity
+one R_MULTI replica chosen by the Section-5 epoch/identity cycle
+one degraded HLT particle array
+all seven HLT experts and every predictor context consume that same array
+```
+
+Expert-specific relation tensors and REGION trees are rebuilt from that one
+array.  No joint batch may combine tokens produced from different replica
+arrays under one event identity.  Per-expert `R_FIXED` or `R_RANDOM`
+pretraining remains part of checkpoint lineage, but once checkpoints enter a
+joint graph their input policy is globally `R_MULTI`.  `J0` retains the
+independent-pretraining controls; its all-bank deployment/evaluation still
+uses the one fixed evaluation array for the identity.
 
 ### `J0_INDEPENDENT`
 
@@ -2364,8 +2520,8 @@ predictor = 2e-4
 ```
 
 Train with HLT CE plus the selected token/expert/fusion objective.  The
-`N=2/4` choice is screened on `model_val/stack_val`; `N=2` remains the
-simplicity control.
+`N=2/4` choice is screened on `val_design` after each candidate's epoch was
+selected on `val_stop`; `N=2` remains the simplicity control.
 
 ### `J5_END_TO_END`
 
@@ -2550,8 +2706,9 @@ still running every important ablation.
 Run:
 
 ```text
-offline split/cache/scale-pool audit
+offline split/validation-role/cache/scale-pool audit
 four-replica HLT-v3 degradation and transformed-input audit
+offline/shared-HLT relation and REGION normalizer fit/audit
 real-Weaver explicit-uu parity
 O_BASE
 H_BASE
@@ -2563,6 +2720,8 @@ O_FULLREL
 The complete-graph monolithic capacity controls are resolved later because
 their matching targets do not exist until the final graph is selected.
 No scientific arm depends on a baseline exceeding a performance threshold.
+The access audit proves that no Stage B-K component worker can open
+`final_select/stack_val`.
 
 ### Stage B: offline expert and token-shape screen
 
@@ -2582,9 +2741,9 @@ The optimization screen uses `INIT_SCRATCH`, `INIT_OBASE_PARTICLE`, and
 dropout `0.0` and `0.1`.  The full Cartesian product is run only for `PT` and
 `TRACK`; the winner, scratch reference, and attach-after-pretrain reference
 are run for the other experts.  Training workers can read only `model_train`
-and `model_val`; they cannot load `stack_val`.  After every row and
+and `val_stop`; they cannot load `val_design` or `stack_val`.  After every row and
 model-validation checkpoint is immutable, the separate architecture selector
-may read cached `stack_val` predictions to choose the optimization candidate.
+may read cached `val_design` predictions to choose the optimization candidate.
 This screen cannot change the fixed 40-epoch budget.
 
 Every row completes its fixed training schedule unless execution is invalid.
@@ -2658,9 +2817,9 @@ For every selected uniform/heterogeneous target shape and pipeline seed:
 2. lock its HLT encoder, predictor, target, and normalizer hashes;
 3. co-design `T1_ANCHORED_BRIDGE`, `T1_TASK_BRIDGE`, and `T2_PROJECT`;
 4. compute offline noninferiority and instance-content certification on
-   `model_val`;
+   `val_design`;
 5. run Section 10.3's joint target-coordinate beam search on already eligible
-   candidates using `stack_val`;
+   candidates using `val_design`;
 6. publish distinct semantic versions/fusions for the top four mixed and
    homogeneous target tuples and rebuild their complete caches.
 
@@ -2694,7 +2853,7 @@ selected native HLT evidence mode.  This is nine rows per shape per
 representative expert.
 
 Select the best direct architecture/context and best gated
-architecture/context by frozen hybrid-fusion `val_select` accuracy, then lower
+architecture/context by frozen hybrid-fusion `val_design` accuracy, then lower
 token error, parameters, and run ID.  For those two families on `PT` and
 `TRACK`, also screen predictor learning rates `{2e-4,5e-4,1e-3}` and residual/
 attention dropout `{0.0,0.1}`.  Carry the selected optimizer configuration plus
@@ -2734,7 +2893,7 @@ T0_PURE, eligible T1_ANCHORED_BRIDGE, T1_TASK_BRIDGE, and T2_PROJECT targets
 selected HE_SCRATCH_CE, HE_OFFLINE_INIT, and HE_DUAL_OBJECTIVE evidence modes
 ```
 
-Cache every eligible candidate's identity-bound `stack_val` outputs and run
+Cache every eligible candidate's identity-bound `val_design` outputs and run
 the Section-20.8 joint predictor-bundle beam selector.  The resulting
 seven-expert configuration is selected from three-seed all-predicted utility
 and is shared by all pipeline seeds; only learned weights and seed-bound
@@ -2760,6 +2919,7 @@ expert-bank-swapped targets
 ```
 
 Wrong-event controls are evaluation-only and never enter model selection.
+They run on `val_design`; Stage I cannot open `stack_val`.
 
 ### Stage J: joint prediction and final adapters
 
@@ -2785,7 +2945,8 @@ Run these for both selected uniform shapes and eligible heterogeneous
 assignments, then choose `SHAPE_BRIDGE`.  `J0` is the faithful independently
 reconstructed reference; `J5` and `HF_UNRESTRICTED` are explicitly the
 maximum-performance candidates rather than representation-faithfulness
-claims.
+claims.  Every `J1-J5` row uses one common `R_MULTI` degraded array per
+identity for all experts, regardless of their pretraining policies.
 
 ### Stage K: degradation and robustness ablations
 
@@ -2805,12 +2966,16 @@ D_LEGACY_V2
 
 Models are not retuned per degradation profile in the primary robustness
 evaluation.  Separate retrained-domain controls are clearly labeled.
+All Stage-K robustness diagnostics use `val_design` or declared training
+splits, never `stack_val`.
 
 ### Stage L: 500k confirmation and dual finalist selection
 
 Confirm all primary baselines, both uniform-shape finalists, heterogeneous
 finalists, native HLT fusion, frozen reconstruction, token refiner, constrained
 adapter, and unrestricted fusion across three matched pipeline seeds.
+Every input graph definition and component choice is already immutable before
+this stage opens `stack_val`.
 
 Resolve separate `O_MONO_PARAM`, `O_MONO_FLOP`, `H_MONO_PARAM`, and
 `H_MONO_FLOP` controls for each finalist candidate whose complete inference
@@ -2836,7 +3001,7 @@ candidate is worse than `H_BASE` or its named native baseline.
 Retrain only the two locked graph definitions on `scale_train`, across seeds
 `101,202,303`, preserving every architecture, target semantics, loss,
 degradation, replica, and inference decision.  Epoch selection may use
-`model_val`; it cannot reopen architecture selection.  Recompute complete
+`val_stop`; it cannot reopen architecture selection.  Recompute complete
 graph capacity controls if parameter counts are unchanged only to bind the new
 training lineage, not to select a different topology.
 
@@ -2848,6 +3013,11 @@ consumer.  Components shared by the two finalists are trained once per seed
 and referenced by both manifests.  Offline teachers and target generation are
 privileged training dependencies and remain excluded from deployable
 inference accounting.
+
+Stage M refits all Section-7 train-derived normalizers on `scale_train`,
+refits target-token normalizers on the new scale targets, and refits the
+label-free uncertainty calibrator on `val_design`.  These refits instantiate
+the locked recipe and cannot change the graph definition.
 
 ### Stage N: immutable lock and final test
 
@@ -2958,12 +3128,12 @@ Execution may fail closed only for:
 Checkpoint selection copies the relational campaign's global
 maximum-accuracy-window rule:
 
-1. maximum `model_val` accuracy;
+1. maximum `val_stop` accuracy;
 2. retain epochs within `0.0001`;
 3. lower cross entropy;
 4. earliest epoch.
 
-`stack_val` never selects an epoch.
+Neither `val_design` nor `stack_val` ever selects an epoch.
 
 Training seeds are:
 
@@ -3002,7 +3172,10 @@ Each selected per-expert predictor bundle is immutable and lists its pipeline
 seed, teacher and HLT checkpoint hashes, target-cache and normalizer hashes,
 shape, target mode, architecture, context, objective weights, uncertainty
 head, normalization/clipping mode, optimizer/dropout configuration, HLT
-encoder mode, and realization policy.
+encoder mode, and pretraining realization policy.  The bundle also records
+one graph-level joint/deployment input policy, fixed to `R_MULTI`; this
+graph-level field overrides per-expert pretraining policies whenever banks are
+evaluated together.
 
 The per-expert configuration is identical at primary seeds `101,202,303`;
 each seed materializes a separate weight/hash bundle under that configuration.
@@ -3027,9 +3200,9 @@ robustness_control
 Scientific selections consider only `scientific_candidate` rows.  Controls
 are compared but cannot become the nominal scientific winner.
 
-Within any declared candidate pool:
+Within any component/design candidate pool, use `val_design`:
 
-1. maximize the primary `val_select` accuracy or paired gain named by that
+1. maximize the primary `val_design` accuracy or paired gain named by that
    stage;
 2. retain rows within `0.0001` of the global maximum;
 3. minimize cross entropy;
@@ -3037,6 +3210,10 @@ Within any declared candidate pool:
 5. minimize measured FLOPs;
 6. minimize parameter count;
 7. choose lexicographically smaller run ID.
+
+The sole exception is Stage L: it receives already locked complete graph
+definitions and applies the two explicit `stack_val` finalist selectors below.
+No Stage-L result may feed back into a component choice.
 
 The selector always emits a best available row, even when every row loses to
 its baseline.  It also records:
@@ -3077,8 +3254,9 @@ Only rows that are deployable without offline particles or oracle targets,
 complete at all three matched seeds, finite on all required selector metrics,
 and valid under the exact current source/cache contracts are eligible.
 Displayed positive-infinite zero-background rejection is permitted because
-the selector uses the declared finite Jeffreys-smoothed quantity.  Poor rejection relative to a
-baseline is recorded but never prevents selection or scale-up.
+the selector uses the declared finite Jeffreys-smoothed quantity.  Poor
+rejection relative to a baseline is recorded but never prevents selection or
+scale-up.
 
 ---
 
@@ -3306,9 +3484,11 @@ selection/locked_finalists.json
 It contains:
 
 - campaign-spec and source hashes;
-- split, scale-pool, HLT replica/cache, and realization-policy hashes;
+- split/validation-partition, scale-pool, HLT replica/cache, and
+  realization-policy hashes;
 - degradation profile/version/parameter hash;
-- relation-normalizer and REGION backend hashes;
+- offline/shared-HLT/scale relation and REGION normalizer population, recipe,
+  and content hashes;
 - offline and HLT checkpoint hashes;
 - target-token and token-normalizer hashes;
 - `SHAPE_HIGH`, `SHAPE_COMPACT`, `SHAPE_BRIDGE`, and each heterogeneous
@@ -3319,7 +3499,8 @@ It contains:
   traces;
 - complete selected predictor bundle per expert and pipeline seed;
 - selected loss, uncertainty, normalization, context, HLT encoder, and
-  realization policy per expert;
+  pretraining realization policy per expert;
+- graph-level joint/deployment realization policy fixed to `R_MULTI`;
 - selected refiner, consumer, and native-dropout mode;
 - selected token-only/logit evidence mode and its matched control;
 - complete deployed-graph parameter and inference-FLOP accounting separately
@@ -3360,6 +3541,7 @@ Required structure:
 campaign_spec.json
 inputs/
   split_manifest.json.gz
+  validation_partition_manifest.json.gz
   scale_train_manifest.json.gz
   split_audit.json
   scale_train_audit.json
@@ -3372,10 +3554,21 @@ inputs/
     replica_1/
     replica_2/
     replica_3/
-  relation_normalization.json
-  region_normalization.json
   region_tree/
-  token_normalization/
+  normalization/
+    offline_500k/
+      relation.json
+      region.json
+    hlt_shared_500k/
+      relation.json
+      region.json
+    offline_scale/
+      relation.json
+      region.json
+    hlt_shared_scale/
+      relation.json
+      region.json
+    token/
 registry/
   expert_registry.json
   expert_loss_registry.json
@@ -3391,6 +3584,7 @@ registry/
   uncertainty_registry.json
   realization_policy_registry.json
   degradation_domain_seed_registry.json
+  normalizer_population_registry.json
   deployed_graph_registry.json
   campaign_stage_registry.json
   global_determinism.json
@@ -3476,6 +3670,7 @@ teacher_logit_reco/relation_expert_bridge/
   splits.py
   hlt_v3.py
   hlt_audit.py
+  normalizer_lineage.py
   expert_registry.py
   token_shape_registry.py
   particle_tap.py
@@ -3525,6 +3720,7 @@ Create:
 scripts/build_retb_campaign.py
 scripts/build_retb_hlt_v3_cache.py
 scripts/audit_retb_hlt_v3.py
+scripts/fit_retb_normalizers.py
 scripts/train_retb_offline_expert.py
 scripts/train_retb_offline_fusion.py
 scripts/analyze_retb_complementarity.py
@@ -3564,6 +3760,7 @@ Create:
 sbatch/run_retb_build_splits.sh
 sbatch/run_retb_build_hlt_v3.sh
 sbatch/run_retb_audit_inputs.sh
+sbatch/run_retb_fit_normalizers.sh
 sbatch/run_retb_train_offline_expert.sh
 sbatch/run_retb_train_offline_fusion.sh
 sbatch/run_retb_select_shapes.sh
@@ -3592,6 +3789,8 @@ sbatch/submit_retb_tigris_full.sh
 
 - production split counts and per-class balance are exact;
 - all split identities are disjoint;
+- the hash partition assigns exactly 5,000 per class to each of `val_stop`
+  and `val_design` and is invariant to file/shard order;
 - offline/HLT identity order is exact;
 - no constituent-match field reaches a dataset sample;
 - HLT v3 strength zero is bitwise identity;
@@ -3610,6 +3809,11 @@ sbatch/submit_retb_tigris_full.sh
 - nonmerged masses are preserved under kinematic smearing;
 - charged, photon, neutral-hadron, and unknown response multipliers match the
   table, and charged particles never receive local reassignment;
+- every degradation mechanism applies base, type, strength, replica
+  multiplier, and clipping in the declared order;
+- v2 base-term extraction matches the pre-refactor helper byte-for-byte and
+  rejects a different source/function hash;
+- energy changes only through degraded momentum plus preserved/merged mass;
 - invalid track sentinels and validity masks agree;
 - measurement-validity embeddings distinguish not-applicable, available, and
   missing states;
@@ -3619,6 +3823,12 @@ sbatch/submit_retb_tigris_full.sh
 - transformed 17-channel and relation-family audits catch upstream-value
   leakage and clipping saturation;
 - cache metadata rejects v1/v2/v3 interchange;
+- offline, shared-HLT, and scale-up normalizers use exactly their registered
+  identities, replicas, masks, weighting, estimator, and clipping parents;
+- `R_FIXED`, `R_MULTI`, and `R_RANDOM` load the same shared nominal HLT
+  relation/REGION normalizer;
+- Stage M refits relation, REGION, input, and target-token statistics on
+  `scale_train` and rejects 500k normalizer substitution;
 - the 3M scale pool contains the 500k train identities, adds exactly 2.5M
   identities, and is disjoint from every validation/test split;
 - final-test preparation cannot emit metrics.
@@ -3699,6 +3909,10 @@ sbatch/submit_retb_tigris_full.sh
   covariance, or within-class retrieval certification;
 - content-certification thresholds and same-event/wrong-event identities
   reproduce exactly;
+- retrieval uses unlearned slot-major flattened normalized-bank cosine,
+  excludes the query identity, and rejects undersized negative rings;
+- effective rank uses an exact `[n_events,K*D]` matrix and the declared
+  zero-singular-value convention;
 - joint target-mode tuples own distinct fusions and a cross-mode tuple cannot
   use an unmatched frozen fusion;
 - target mode, shape, pipeline seed, slot-query, and checkpoint hashes are
@@ -3716,8 +3930,8 @@ sbatch/submit_retb_tigris_full.sh
 - every architecture emits tokens, log variance, and valid gates;
 - `U_SLOT`, `U_GROUP4`, and `U_DIAGONAL` expose exactly their registered
   uncertainty dimensions;
-- additive uncertainty calibration fits `model_val` without labels and is
-  frozen before `stack_val`;
+- additive uncertainty calibration fits `val_design` without labels and is
+  frozen before `final_select/stack_val`;
 - `C0`, `C1`, `C2`, and `C3` expose exactly their registered evidence;
 - no offline input enters predictor forward;
 - decoder target queries are fixed-index and non-autoregressive;
@@ -3734,6 +3948,8 @@ sbatch/submit_retb_tigris_full.sh
   normalization substitution;
 - joint predictor beam search scores complete all-predicted tuples and
   reproduces its selected seven-expert configuration;
+- `J1` through `J5` give all seven experts the same identity, replica, and
+  degraded HLT particle array under canonical `R_MULTI`;
 - logit-only targets cannot be reported as faithful token recovery.
 
 ### Final consumers
@@ -3759,8 +3975,12 @@ sbatch/submit_retb_tigris_full.sh
 - every scientific run has a fixed 40-epoch schedule;
 - poor validation performance does not create job failure;
 - checkpoint selection matches the global window rule;
-- Stage-B training workers cannot open `stack_val`, while the immutable
-  post-training selector can;
+- only `val_stop` selects epochs; `val_design` performs calibration,
+  certification, and component selection; only Stage L may read `stack_val`;
+- the label-free uncertainty calibrator is authorized on `val_design` and no
+  label tensor reaches its fitting objective;
+- Stage-B training workers cannot open `val_design` or `stack_val`; the
+  immutable post-training design selector can open only `val_design`;
 - seeds share data order;
 - primary confirmation artifacts obey complete matched pipeline-seed lineage;
 - fixed-teacher cross-seed rows are marked controls and cannot enter primary
@@ -3799,10 +4019,10 @@ sbatch/submit_retb_tigris_full.sh
 
 ### Step 1 of 15: campaign, split, replica, and scale contracts
 
-Implement the 500k/100k/50k/300k split binding, disjoint 3M scale pool, four
-HLT training replicas, campaign spec, registries, artifact layout,
-deterministic conventions, source provenance, storage measurements, and all
-run IDs.
+Implement the 500k/50k/50k/50k/300k role binding, disjoint 3M scale pool, four
+HLT training replicas, deterministic `val_stop`/`val_design` partition and
+access roles, campaign spec, registries, artifact layout, deterministic
+conventions, source provenance, storage measurements, and all run IDs.
 
 Done when every future run and every replica choice can be resolved without
 importing training code.
@@ -3810,13 +4030,14 @@ importing training code.
 ### Step 2 of 15: HLT v3 track-dominant proxy
 
 Implement the versioned degradation, type-conditioned response, type-aware
-merging and mass/energy rules, shared train/scale domain seed, identity-bound
-RNG, field-isolation profiles, transformed-input audits, realization policies,
-cache metadata, and backward-incompatible cache checks.
+mechanism equations and clipping order, merging and mass/energy rules, shared
+train/scale domain seed, identity-bound RNG, field-isolation profiles,
+transformed-input audits, realization policies, offline/shared-HLT normalizer
+population recipes, cache metadata, and backward-incompatible cache checks.
 
 Done when strength-zero identity, domain validity, monotonicity, replica and
 shard-layout determinism, train/scale shared-identity equality, and
-hand-calculated type/merge fixtures pass.
+hand-calculated type/merge/normalizer fixtures pass.
 
 ### Step 3 of 15: particle-state tap, layerwise relation interface, and token shapes
 
@@ -3863,7 +4084,8 @@ alignment are separately measurable before any bridge target is co-designed.
 Implement seed-matched `PILOT_T0`, `T1_ANCHORED_BRIDGE`,
 `T1_TASK_BRIDGE`, dimension-correct `T2_PROJECT`, `T3_LOGIT`, alternating
 updates, offline noninferiority, collapse/content certification, and semantic
-version separation, plus the joint target-coordinate/fusion beam selector.
+version separation, exact flattened-bank retrieval/effective rank, plus the
+joint target-coordinate/fusion beam selector.
 
 Done when missing pilot parents fail closed, class prototypes fail content
 certification, and pure/task/representation claims cannot be interchanged.
@@ -3900,7 +4122,7 @@ seven-expert tuple and the search is deterministic on an all-negative fixture.
 
 Implement `J0` through `J5`, `HE_BRIDGE_TUNED`, shared/coupled prediction, and
 end-to-end maximum-performance training from the already locked predictor
-bundle.
+bundle under the one-identity/one-`R_MULTI`-view invariant.
 
 Done when faithful, bridge-tuned, logit-distilled, and end-to-end candidates
 remain separately labeled even if every row loses.
@@ -3927,8 +4149,9 @@ final-test prediction exists.
 ### Step 14 of 15: locked 3M scale-up and final seal
 
 Retrain only the locked finalist graph definitions on `scale_train`, aggregate
-three-seed confirmation, write the immutable final lock, and run the common
-sealed final test exactly once.
+three-seed confirmation, refit every locked train-derived normalizer and
+label-free calibrator on its declared scale/design population, write the
+immutable final lock, and run the common sealed final test exactly once.
 
 Done when architecture reselection, stale artifacts, and premature final-test
 access fail closed while a negative campaign completes normally.
