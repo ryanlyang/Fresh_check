@@ -229,6 +229,28 @@ def _reconcile_dependency_job(
     )
 
 
+def _drop_completed_afterok_dependencies(
+    dependency: str,
+    *,
+    state_for_job: Any,
+) -> str:
+    retained: list[str] = []
+    for term in dependency.split(","):
+        pieces = term.split(":")
+        if len(pieces) < 2 or pieces[0] != "afterok":
+            raise ValueError(
+                f"unsupported dependency term during ABPH repair: {term}"
+            )
+        active_ids = [
+            job_id
+            for job_id in pieces[1:]
+            if state_for_job(job_id) != "COMPLETED"
+        ]
+        if active_ids:
+            retained.append("afterok:" + ":".join(active_ids))
+    return ",".join(retained)
+
+
 def _replacement_jobs(values: Sequence[str]) -> dict[str, str]:
     result: dict[str, str] = {}
     for value in values:
@@ -327,6 +349,18 @@ def main(argv: list[str] | None = None) -> int:
                 old_job_id=old_job_id,
                 new_job_id=new_job_id,
             )
+            if not args.dry_run:
+                without_completed = _drop_completed_afterok_dependencies(
+                    dependency,
+                    state_for_job=_slurm_job_state,
+                )
+                changed = changed or without_completed != dependency
+                dependency = without_completed
+            if not dependency:
+                raise RuntimeError(
+                    f"repairing {consumer['key']} removed every dependency; "
+                    "the replacement job was not retained"
+                )
             command = (
                 "scontrol",
                 "update",

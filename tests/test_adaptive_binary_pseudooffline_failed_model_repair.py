@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.repair_adaptive_binary_failed_model_wave import (
+    _drop_completed_afterok_dependencies,
     _reconcile_dependency_job,
     _replacement_jobs,
     repaired_variant_command,
@@ -73,3 +74,15 @@ def test_interrupted_repair_is_idempotent_for_already_rewired_consumers() -> Non
         old_job_id="18932",
         new_job_id="19619",
     ) == ("afterok:19416,afterok:19619", True)
+
+
+def test_completed_prerequisites_are_not_readded_to_pending_jobs() -> None:
+    states = {
+        "19416": "COMPLETED",
+        "19619": "PENDING",
+        "77": "RUNNING",
+    }
+    assert _drop_completed_afterok_dependencies(
+        "afterok:19416,afterok:19619:77",
+        state_for_job=states.__getitem__,
+    ) == "afterok:19619:77"
