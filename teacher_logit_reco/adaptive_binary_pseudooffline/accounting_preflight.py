@@ -194,6 +194,8 @@ def _renderer_target_audit(
     )
     pid_index = np.argmax(pid_columns, axis=-1)
     all_max_p4 = 0.0
+    mass_floor_incompatibility_count = 0
+    maximum_mass_floor_shortfall = 0.0
     for group_index in np.flatnonzero(final_mask):
         selected = particle_mask & (microgroup_index == int(group_index))
         ledger = final_features[group_index]
@@ -227,6 +229,16 @@ def _renderer_target_audit(
         expected_floor = float(ledger[ROOT_FEATURE_INDEX["minimum_mass_budget"]])
         if abs(observed_floor - expected_floor) > 2.0e-5:
             problems.append(f"final group {group_index}: renderer minimum-mass mismatch")
+        parent_mass_squared = (
+            expected_p4[0] ** 2 - float(np.dot(expected_p4[1:], expected_p4[1:]))
+        )
+        parent_mass = math.sqrt(max(parent_mass_squared, 0.0))
+        shortfall = expected_floor - parent_mass
+        if shortfall > 2.0e-5 * max(parent_mass, 1.0):
+            mass_floor_incompatibility_count += 1
+            maximum_mass_floor_shortfall = max(
+                maximum_mass_floor_shortfall, shortfall
+            )
     assigned = particle_mask & (microgroup_index >= 0)
     if int(assigned.sum()) != int(particle_mask.sum()):
         problems.append("valid renderer particles are not all assigned to a final group")
@@ -234,6 +246,10 @@ def _renderer_target_audit(
         "n_final_groups": int(final_mask.sum()),
         "n_rendered_particles": int(particle_mask.sum()),
         "max_renderer_four_vector_residual": all_max_p4,
+        "oracle_mass_floor_incompatibility_count": (
+            mass_floor_incompatibility_count
+        ),
+        "maximum_oracle_mass_floor_shortfall": maximum_mass_floor_shortfall,
     }
 
 
@@ -255,6 +271,8 @@ def audit_target_batch_feasibility(
     rendered_particles = 0
     max_hard_target_residual = 0.0
     max_renderer_p4 = 0.0
+    oracle_mass_floor_incompatibilities = 0
+    maximum_oracle_mass_floor_shortfall = 0.0
     near_massless_groups = 0
     boundary_geometry_examples = 0
     rare_type_examples = {name: 0 for name in ("electron", "muon", "other")}
@@ -355,6 +373,13 @@ def audit_target_batch_feasibility(
         renderer_groups += int(renderer["n_final_groups"])
         rendered_particles += int(renderer["n_rendered_particles"])
         max_renderer_p4 = max(max_renderer_p4, float(renderer["max_renderer_four_vector_residual"]))
+        oracle_mass_floor_incompatibilities += int(
+            renderer["oracle_mass_floor_incompatibility_count"]
+        )
+        maximum_oracle_mass_floor_shortfall = max(
+            maximum_oracle_mass_floor_shortfall,
+            float(renderer["maximum_oracle_mass_floor_shortfall"]),
+        )
         particle_rows = targets.particle_targets[jet_index]
         valid = targets.particle_mask[jet_index]
         phi_relative = particle_rows[:, _PARTICLE_INDEX["phi_hlt_relative"]]
@@ -378,6 +403,15 @@ def audit_target_batch_feasibility(
         "compiler_failure_count": compiler_failures,
         "max_hard_target_residual": max_hard_target_residual,
         "max_renderer_four_vector_residual": max_renderer_p4,
+        "oracle_d5_mass_floor_compatible": (
+            oracle_mass_floor_incompatibilities == 0
+        ),
+        "oracle_mass_floor_incompatibility_count": (
+            oracle_mass_floor_incompatibilities
+        ),
+        "maximum_oracle_mass_floor_shortfall": (
+            maximum_oracle_mass_floor_shortfall
+        ),
         "problems": problems[:100],
         "coverage": {
             "class_counts": class_counts,

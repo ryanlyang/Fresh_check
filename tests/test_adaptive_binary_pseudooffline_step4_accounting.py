@@ -446,6 +446,8 @@ def test_actual_target_hierarchy_and_renderer_replay_with_zero_failures():
     assert report["n_rendered_particles"] == int(targets.particle_mask.sum())
     assert report["max_hard_target_residual"] <= 5.0e-3
     assert report["max_renderer_four_vector_residual"] <= 5.0e-3
+    assert report["oracle_d5_mass_floor_compatible"] is False
+    assert report["oracle_mass_floor_incompatibility_count"] > 0
     assert report["coverage"]["all_classes_present"] is True
     assert report["coverage"]["singleton_examples"] == 1
     assert all(

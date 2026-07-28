@@ -18,6 +18,8 @@ torch = pytest.importorskip("torch")
 
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_EXPECTED_VARIANT_NAMES,
+    ABPH_NON_GATING_VARIANT_REASONS,
+    ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES,
     ABPH_ACCELERATED_SCHEDULE_CONTRACT,
     ABPH_POSTHOC_FUSION_VARIANTS,
     ABPH_TARGET_PROVENANCE_FIELDS,
@@ -442,7 +444,10 @@ def test_full_campaign_report_checks_all_tiers_roots_and_frozen_membership(tmp_p
         AdaptiveBinaryCampaignReportConfig(campaign_root=tmp_path)
     )
     assert report["ok"], report["problems"]
-    assert report["checked_variant_count"] == len(ABPH_EXPECTED_VARIANT_NAMES)
+    assert report["checked_variant_count"] == len(
+        ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+    )
+    assert report["non_gating_variants"] == dict(ABPH_NON_GATING_VARIANT_REASONS)
     assert report["all_tiers_checked"] == list("ABCDEFG")
     e7 = next(row for row in report["root_identity"] if row["variant"].startswith("E7_"))
     assert e7["ok"] is True
@@ -515,5 +520,5 @@ def test_final_metrics_require_success_and_unconditional_teacher_free_attestatio
 
 def test_report_config_requires_every_campaign_tier(tmp_path: Path) -> None:
     only_a = tuple(name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).tier == "A")
-    with pytest.raises(ValueError, match="complete frozen A0-G5 registry"):
+    with pytest.raises(ValueError, match="every required A0-G5 campaign member"):
         AdaptiveBinaryCampaignReportConfig(campaign_root=tmp_path, required_variants=only_a)

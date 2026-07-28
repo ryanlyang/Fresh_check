@@ -544,6 +544,20 @@ ABPH_VARIANT_REGISTRY: Mapping[str, AdaptiveBinaryVariantSpec] = MappingProxyTyp
     {row.name: row for row in _registry_rows()}
 )
 ABPH_EXPECTED_VARIANT_NAMES: tuple[str, ...] = tuple(ABPH_VARIANT_REGISTRY)
+ABPH_NON_GATING_VARIANT_REASONS: Mapping[str, str] = MappingProxyType(
+    {
+        "D5_oracle_groups_particles": (
+            "real JetClass L5 oracle ledgers can have fixed PID minimum-mass "
+            "budgets above their measured invariant masses, so no exact N-body "
+            "renderer can satisfy the diagnostic's simultaneous oracle constraints"
+        ),
+    }
+)
+ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES: tuple[str, ...] = tuple(
+    name
+    for name in ABPH_EXPECTED_VARIANT_NAMES
+    if name not in ABPH_NON_GATING_VARIANT_REASONS
+)
 
 
 def _validate_registry_specs() -> None:
@@ -642,6 +656,8 @@ def registry_manifest() -> dict[str, Any]:
 
 __all__ = [
     "ABPH_EXPECTED_VARIANT_NAMES",
+    "ABPH_NON_GATING_VARIANT_REASONS",
+    "ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES",
     "ABPH_VARIANT_ALIASES",
     "ABPH_VARIANT_REGISTRY",
     "ABPH_VARIANT_REGISTRY_CONTRACT",

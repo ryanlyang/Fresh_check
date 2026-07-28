@@ -370,6 +370,12 @@ calibrator and select/certify components, but never selects an epoch.
 `final_select` may compare only already complete, locked deployable graphs and
 choose the two finalists; it may not alter a component inside a graph.
 
+Campaign bootstrap also seals an identity-sorted
+`final_select_label_manifest.json.gz` containing only canonical identity and
+int64 class label, with the complete split manifest as its sole parent.
+Stage-N selection inference cannot load it; only the immutable selector may
+join it to label-free prediction shards.
+
 Every split is sampled without replacement.  Source files, event identities,
 and canonical jet identities are disjoint across splits.  The offline and HLT
 versions of one jet always have the same split and ordered identity.
@@ -399,13 +405,18 @@ dependencies are separately locked before the common `final_test` is opened.
 Architecture-search training workers may load only `model_train` and
 `val_stop`; Stage-M workers may load only `scale_train` and `val_stop`.
 Design/calibration workers may additionally load `val_design`.
-Only the Stage-N complete-graph selector may load `final_select/stack_val`
-before finalist locking.  After that lock, Stage-N diagnostic workers may
-read it only with `selection_eligible=false`.
+Only the Stage-N selection workflow may load `final_select/stack_val` before
+finalist locking: its inference worker reads features but not labels, and its
+selector reads the separately authenticated identity-to-label manifest but not
+particle features.  After that lock, Stage-N diagnostic workers may read
+`stack_val` only with `selection_eligible=false`.
 Pre-lock final-test preparation may construct only identity-bound raw/degraded
 inputs and deterministic sidecars without loading checkpoints.  Offline
-targets and all other model outputs require the immutable scale-finalist lock;
-scientific final-test inference additionally requires the execution lock.
+targets and oracle outputs require the immutable scale-finalist lock.  The
+sole pre-lock model-output exception is the label-free deployable `stack_val`
+selection inference defined in Sections 15, 23, 25, and 29.  No pre-lock
+`final_test` model output is permitted; scientific final-test inference
+additionally requires the execution lock.
 
 All primary models use:
 
@@ -2100,10 +2111,31 @@ remain resident while HLT predictors train.
 
 ### Post-selection oracle and final-test targets
 
-Before `selection/locked_scale_finalists.json` exists, no command may produce
-model-derived tokens, logits, labels joined to model outputs, predictions, or
-metrics for `final_select/stack_val` or `final_test`.  Pre-lock preparation may
-write only:
+Before `selection/locked_scale_finalists.json` exists, Stage N may emit
+identity-bound deployable `final_select/stack_val` logits and probabilities
+for every shortlisted 3M graph and seed.  These selection-prediction shards:
+
+```text
+contain canonical identities, graph/seed IDs, float32 logits, and float32 probabilities
+contain no labels, offline targets, oracle tokens, or oracle logits
+consume only HLT inputs, deployable normalizers, and shortlisted 3M checkpoints
+declare selection_eligible=true
+```
+
+Probabilities are the FP32 stable-softmax of the stored logits; shard
+validation recomputes them and requires exact predicted-class identities and
+the campaign's serialized FP32 probability tolerance.
+The immutable selector joins labels only from the authenticated
+`inputs/final_select_label_manifest.json.gz`, outside the prediction shards,
+and writes separate content-hashed metric artifacts and selection traces.  The
+label manifest is a canonical identity-sorted `(identity,int64_label)`
+projection whose sole parent is the authenticated split manifest; only the
+selector role may load it.  No other pre-lock `stack_val` model output is
+allowed.
+
+Before finalist locking, no command may produce a `final_test` model-derived
+token, logit, probability, prediction, label joined to model output, or metric.
+Pre-lock `stack_val`/`final_test` input preparation may write only:
 
 ```text
 raw/offline input arrays
@@ -2113,7 +2145,9 @@ identity and source manifests
 ```
 
 These are input transformations, not model outputs, and their builders cannot
-load a checkpoint.
+load a checkpoint.  The Stage-N selection-inference worker is a distinct
+checkpoint-loading role authorized only for the label-free `stack_val`
+selection shards above.
 
 After the two 3M finalists are selected and
 `locked_scale_finalists.json` is immutable, Stage N may build:
@@ -3109,8 +3143,11 @@ No Stage-M worker may open `stack_val`.
 After every shortlisted 3M graph and seed is immutable:
 
 1. run deployable classification inference on `final_select/stack_val`
-   without constructing or consuming any oracle offline target;
-2. select `ACCURACY_FINALIST` and `REJECTION_FINALIST` from the 3M graphs with
+   without constructing or consuming any oracle offline target, publishing
+   label-free identity-bound logits/probability shards;
+2. join labels from the authenticated identity-sorted
+   `final_select_label_manifest`, publish separate metric artifacts, and
+   select `ACCURACY_FINALIST` and `REJECTION_FINALIST` from the 3M graphs with
    the exact Section-25 selectors;
 3. write immutable `selection/locked_scale_finalists.json`;
 4. train/resolve the required 3M graph-specific capacity and `H_BASE_LONG`
@@ -3122,9 +3159,10 @@ After every shortlisted 3M graph and seed is immutable:
 7. evaluate the locked finalists, named baselines, and required controls on
    the common 300,000-jet `final_test` exactly once.
 
-Step 1 is the only pre-lock access to `stack_val` and exposes only deployable
-predictions.  Steps 4-5 are selection-ineligible and cannot replace a
-finalist.  The two finalist selectors may choose the same graph.
+Steps 1-2 are the only pre-lock access to `stack_val`.  Prediction shards are
+label-free; only the selector process may join their canonical identities to
+the locked label manifest.  Steps 4-5 are selection-ineligible and cannot
+replace a finalist.  The two finalist selectors may choose the same graph.
 
 ---
 
@@ -3377,7 +3415,11 @@ complete at all three matched seeds, finite on all required selector metrics,
 and valid under the exact current source/cache contracts are eligible.
 Their `stack_val` prediction artifacts may have only HLT input, shortlisted
 3M checkpoint, and deployable-normalizer parents; an oracle target/cache parent
-is forbidden.
+is forbidden.  Each shard contains identities, graph/seed IDs, logits, and
+probabilities but no label field.  The selector joins labels from the
+authenticated identity-sorted `final_select_label_manifest`, records that
+manifest hash as a metric parent, and emits metric artifacts separately from
+prediction shards.
 Displayed positive-infinite zero-background rejection is permitted because
 the selector uses the declared finite Jeffreys-smoothed quantity.  Poor
 rejection relative to a baseline is recorded but never prevents selection or
@@ -3634,7 +3676,12 @@ It contains:
   for both finalist graphs;
 - `ACCURACY_FINALIST` and `REJECTION_FINALIST` row IDs and deterministic
   3M `stack_val` selection traces;
-- every shortlisted 3M checkpoint and pre-final confirmation-prediction hash;
+- every shortlisted 3M checkpoint hash;
+- every label-free 3M `stack_val` prediction-shard and shard-manifest hash;
+- the authenticated `final_select` label-manifest hash;
+- every selector metric-artifact hash and both complete finalist-selection
+  trace hashes;
+- every pre-final confirmation-prediction hash;
 - deterministic selection reasons;
 - flags for positive/negative gains;
 - 500k and 3M pre-`stack_val` confirmation metrics only.
@@ -3684,6 +3731,7 @@ Required structure:
 campaign_spec.json
 inputs/
   split_manifest.json.gz
+  final_select_label_manifest.json.gz
   validation_partition_manifest.json.gz
   scale_train_manifest.json.gz
   split_audit.json
@@ -3748,7 +3796,10 @@ final_adapters/
 unrestricted_fusions/
 capacity_controls/
 scale_up/
+selection_predictions/
+  stack_val/
 evaluations/
+  stack_val_selection_metrics/
 selection/
 reports/
 job_ledgers/
@@ -3790,8 +3841,11 @@ streamed directly into fusion cache shards and deleted after authenticated
 aggregation.
 
 Storage projection before Stage N excludes `stack_val` and final-test model
-outputs because their caches do not yet exist.  Post-selection oracle targets
-are projected and admitted only after `locked_scale_finalists.json`.
+outputs because their caches do not yet exist.  Stage N admits only the
+label-free deployable `stack_val` selection shards and separate selector
+metrics before finalist locking.  Post-selection oracle targets are projected
+and admitted only after `locked_scale_finalists.json`; final-test model outputs
+remain forbidden until the execution lock.
 
 After successful training retain:
 
@@ -3894,6 +3948,7 @@ scripts/build_retb_capacity_controls.py
 scripts/aggregate_retb_confirmation.py
 scripts/select_retb_scale_shortlist.py
 scripts/train_retb_scale_shortlist.py
+scripts/infer_retb_scale_stack_val.py
 scripts/select_retb_scale_finalists.py
 scripts/write_retb_final_test_execution_lock.py
 scripts/evaluate_retb_final_test.py
@@ -3928,6 +3983,7 @@ sbatch/run_retb_train_unrestricted.sh
 sbatch/run_retb_capacity_controls.sh
 sbatch/run_retb_confirm.sh
 sbatch/run_retb_scale_shortlist.sh
+sbatch/run_retb_infer_scale_stack_val.sh
 sbatch/run_retb_select_scale_finalists.sh
 sbatch/run_retb_postlock_targets.sh
 sbatch/run_retb_final_test.sh
@@ -4081,8 +4137,18 @@ sbatch/submit_retb_tigris_full.sh
   parents;
 - pre-lock target builders accept only `model_train`, `val_stop`, and
   `val_design`;
+- before `locked_scale_finalists.json`, the only permitted `stack_val` model
+  outputs are identity-bound deployable logits/probabilities for every
+  shortlisted 3M graph/seed, with no labels or oracle parents;
+- the `stack_val` selector alone joins labels from the authenticated split
+  manifest's identity-sorted label projection and publishes separate metric
+  artifacts and selection traces; the inference worker cannot load that
+  projection;
+- the finalist lock binds every selection-prediction shard/manifest, label
+  manifest, metric artifact, and selection-trace hash;
 - no artifact created before `locked_scale_finalists.json` contains
-  `stack_val`/final-test tokens, logits, predictions, or model-output labels;
+  `stack_val` oracle tokens/logits, model-output labels, or any `final_test`
+  model output;
 - pre-lock final-test input preparation cannot load a checkpoint;
 - post-lock `stack_val` oracle targets are selection-ineligible;
 - final-test targets require exact Stage-M teacher/fusion/normalizer hashes and
@@ -4330,14 +4396,16 @@ exists.
 Retrain every shortlisted graph on `scale_train`, aggregate three-seed
 confirmation, refit every locked train-derived normalizer and label-free
 calibrator on its declared scale/design population, open `stack_val` once for
-deployable 3M finalist selection, write `locked_scale_finalists.json`, build
-only then the scale-teacher oracle/final-test targets and finalist controls,
-write `final_test_execution_lock.json`, and run the common sealed final test
-exactly once.
+label-free deployable 3M selection shards, join labels only inside the
+authenticated selector, write `locked_scale_finalists.json`, build only then
+the scale-teacher oracle/final-test targets and finalist controls, write
+`final_test_execution_lock.json`, and run the common sealed final test exactly
+once.
 
 Done when architecture reselection, early oracle/test outputs, stale teacher
-targets, and premature final-test access fail closed while a negative campaign
-completes normally.
+targets, labels embedded in selection-prediction shards, incomplete finalist
+lock lineage, and premature final-test access fail closed while a negative
+campaign completes normally.
 
 ### Step 15 of 15: Tigris production DAG
 

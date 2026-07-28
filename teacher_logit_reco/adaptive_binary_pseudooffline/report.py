@@ -34,6 +34,8 @@ from .storage_lifecycle import (
 from .storage_acceptance import require_storage_acceptance
 from .variants import (
     ABPH_EXPECTED_VARIANT_NAMES,
+    ABPH_NON_GATING_VARIANT_REASONS,
+    ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES,
     resolve_variant_config,
     variant_spec,
 )
@@ -297,7 +299,7 @@ class AdaptiveBinaryCampaignReportConfig:
     campaign_root: str | Path
     output_dir: str | Path | None = None
     logical_output_dir: str | Path | None = None
-    required_variants: tuple[str, ...] = ABPH_EXPECTED_VARIANT_NAMES
+    required_variants: tuple[str, ...] = ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
     final_claim_variants: tuple[str, ...] = _final_claim_defaults()
     confirm_final_test: bool = False
     frozen_fusion_artifacts: Mapping[str, str | Path] | None = None
@@ -308,11 +310,19 @@ class AdaptiveBinaryCampaignReportConfig:
         unknown = sorted((set(required) | set(claims)) - set(ABPH_EXPECTED_VARIANT_NAMES))
         if unknown:
             raise ValueError(f"campaign report contains unknown variants {unknown}")
-        missing = [name for name in ABPH_EXPECTED_VARIANT_NAMES if name not in required]
+        missing = [
+            name
+            for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+            if name not in required
+        ]
         duplicates = len(required) != len(set(required))
-        if missing or duplicates or len(required) != len(ABPH_EXPECTED_VARIANT_NAMES):
+        if (
+            missing
+            or duplicates
+            or len(required) != len(ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES)
+        ):
             raise ValueError(
-                "full campaign report must check the complete frozen A0-G5 registry; "
+                "full campaign report must check every required A0-G5 campaign member; "
                 f"missing={missing}, duplicates={duplicates}"
             )
         if not set(claims).issubset(required):
@@ -805,6 +815,7 @@ def write_adaptive_binary_campaign_report(
         "problems": problems,
         "campaign_root": str(root),
         "required_variants": list(config.required_variants),
+        "non_gating_variants": dict(ABPH_NON_GATING_VARIANT_REASONS),
         "checked_variant_count": len(reports),
         "all_tiers_checked": sorted({variant_spec(name).tier for name in reports}),
         "run_report_paths": report_paths,

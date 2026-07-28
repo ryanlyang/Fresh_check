@@ -1828,6 +1828,18 @@ Renderer without exact N-body four-momentum projection. Diagnostic control.
 Particle renderer receives true L5 groups on model-val. Measures renderer
 ceiling.
 
+Real-data implementation note: D5 is retained as a registered diagnostic but
+is non-gating and is not submitted by the required campaign graph. Some
+float32 JetClass target groups have a measured invariant mass below the sum of
+the fixed PID mass floors assigned to their particles. For those groups, no
+exact N-body projection can preserve the measured parent four-vector and the
+fixed daughter masses simultaneously. The accounting preflight must report
+the incompatibility count and maximum mass shortfall. The campaign must not
+silently rescale the PID mass floors, relax exact four-momentum closure, or
+allow this diagnostic to block the learned B/C/D variants. D5 may become
+gating only after a separately specified, physically consistent oracle-target
+mass convention is approved.
+
 `D6_true_offline_particles`:
 
 Oracle offline particle features are substituted into the reconstructed pseudo

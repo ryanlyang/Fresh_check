@@ -12,6 +12,7 @@ import pytest
 from teacher_logit_reco.adaptive_binary_pseudooffline import (
     ABPH_CAMPAIGN_REPORT_CONTRACT,
     ABPH_EXPECTED_VARIANT_NAMES,
+    ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES,
     ABPH_FINAL_CLAIM_CONTRACT,
     ABPH_FUSION_CANDIDATES,
     ABPH_POSTHOC_VARIANTS,
@@ -141,6 +142,11 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     )
     graph = build_submission_graph(config)
     keys = [job.key for job in graph]
+    assert "variant:D5_oracle_groups_particles" not in keys
+    assert not any(
+        key.startswith("runtime_batch_probe:D5_oracle_groups_particles:")
+        for key in keys
+    )
     reconstructor_names = (
         *orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS,
         *orchestration_module.ABPH_RENDERER_VARIANTS,
@@ -150,7 +156,7 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     ) * (
         len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1
     )
-    assert len(graph) == 81 + contract_job_count
+    assert len(graph) == 80 + contract_job_count
     assert keys[:4] == ["input:splits", "input:hlt_cache", "input:offline_cache", "input:audit"]
     preflight_index = keys.index("preflight:actual_targets")
     for index, job in enumerate(graph):
@@ -159,10 +165,10 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
             assert "preflight:actual_targets" in job.dependencies
     report = graph[-1]
     assert report.key == "report:model_selection"
-    assert len(report.dependencies) == 73
+    assert len(report.dependencies) == 72
     expected_reports = {
         f"baseline:{name}" if name.startswith("A") else f"variant:{name}"
-        for name in ABPH_EXPECTED_VARIANT_NAMES
+        for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
         if name not in ABPH_POSTHOC_VARIANTS
     }
     assert expected_reports.issubset(set(report.dependencies))
@@ -288,7 +294,7 @@ def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
     )
     graph = build_submission_graph(config)
     keys = {job.key for job in graph}
-    assert len(graph) == 67
+    assert len(graph) == 66
     assert not any(job.stage in {"splits", "hlt_cache", "offline_cache", "targets"} for job in graph)
     assert not any(job.stage in {"baseline", "teacher_logits"} for job in graph)
     assert "variant:B1_semantic_query_root" in keys
@@ -681,7 +687,7 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
     contract_job_count = len(
         orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
     ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
-    assert len(payload["jobs"]) == 81 + contract_job_count
+    assert len(payload["jobs"]) == 80 + contract_job_count
     assert payload["resource_profile"]["account"] == "reu-aisocial"
     assert all("--account=reu-aisocial" in row["command"] for row in payload["submission_commands"])
     assert all(row["environment"].get("ABPH_CONFIRM_FINAL_TEST") == "0" for row in payload["jobs"])
@@ -844,7 +850,7 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
     contract_job_count = len(
         orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
     ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
-    assert len(payload["jobs"]) == 81 + contract_job_count
+    assert len(payload["jobs"]) == 80 + contract_job_count
 
 
 def test_selection_report_hash_is_recomputed(tmp_path: Path) -> None:

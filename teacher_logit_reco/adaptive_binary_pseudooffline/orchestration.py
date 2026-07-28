@@ -41,7 +41,12 @@ from .target_mode import (
     load_target_mode_selection,
     rank_local_target_metadata,
 )
-from .variants import ABPH_EXPECTED_VARIANT_NAMES, resolve_variant_config, variant_spec
+from .variants import (
+    ABPH_EXPECTED_VARIANT_NAMES,
+    ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES,
+    resolve_variant_config,
+    variant_spec,
+)
 
 
 ABPH_SLURM_ORCHESTRATION_CONTRACT = "adaptive_binary_pseudooffline_slurm_orchestration_v1"
@@ -65,10 +70,14 @@ ABPH_STAGE_MODES: tuple[str, ...] = (
 )
 ABPH_CLUSTER_PROFILES: tuple[str, ...] = ("tigris", "tier3")
 ABPH_RECONSTRUCTOR_VARIANTS: tuple[str, ...] = tuple(
-    name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).tier in {"B", "C"}
+    name
+    for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+    if variant_spec(name).tier in {"B", "C"}
 )
 ABPH_RENDERER_VARIANTS: tuple[str, ...] = tuple(
-    name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).tier == "D"
+    name
+    for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+    if variant_spec(name).tier == "D"
 )
 ABPH_ORACLE_REFERENCE_VARIANTS: tuple[str, ...] = (
     "B4_oracle_root_diagnostic",
@@ -81,14 +90,18 @@ ABPH_TRAINED_RECONSTRUCTOR_VARIANTS: tuple[str, ...] = tuple(
 )
 ABPH_NEURAL_TAGGER_VARIANTS: tuple[str, ...] = tuple(
     name
-    for name in ABPH_EXPECTED_VARIANT_NAMES
+    for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
     if variant_spec(name).tier in {"E", "F"} or variant_spec(name).run_id in {"G0", "G1"}
 )
 ABPH_BASELINE_VARIANTS: tuple[str, ...] = tuple(
-    name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).tier == "A"
+    name
+    for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+    if variant_spec(name).tier == "A"
 )
 ABPH_POSTHOC_VARIANTS: tuple[str, ...] = tuple(
-    name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).run_id in {"G2", "G3", "G4", "G5"}
+    name
+    for name in ABPH_REQUIRED_CAMPAIGN_VARIANT_NAMES
+    if variant_spec(name).run_id in {"G2", "G3", "G4", "G5"}
 )
 ABPH_DEPLOYABLE_PSEUDO_SOURCES: tuple[str, ...] = (
     "D1_kt32_mh4_particles",
