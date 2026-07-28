@@ -91,6 +91,72 @@ for name in runtime_batch_measurements runtime_batch_contracts; do
 done
 
 export ABPH_ROOT="${campaign_root}"
+export ABPH_CAMPAIGN_MODE=pilot
+export ABPH_STORAGE_PROFILE=streaming_30gb_v1
+export ABPH_STORAGE_PROJECTION_PATH="${storage_projection}"
+export ABPH_RAM_STAGE_RESERVATION_BYTES="$(
+  "${PYTHON_BIN}" -c \
+    'import json,sys; print(int(json.load(open(sys.argv[1]))["projected_peak_persistent_bytes"]))' \
+    "${storage_projection}"
+)"
+export OVERWRITE=1
+
+target_metadata="${campaign_root}/targets/model_train_exclusive_kt_adaptive_binary_targets_metadata.json"
+export ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY=""
+if [[ ! -f "${target_metadata}" ]]; then
+  for required_dir in \
+    "${campaign_root}/inputs/hlt_cache" \
+    "${campaign_root}/inputs/offline_cache"; do
+    [[ -d "${required_dir}" ]] || {
+      echo "Cannot rebuild targets; prepared input cache is absent: ${required_dir}" >&2
+      exit 2
+    }
+  done
+
+  target_cache_submitted="$(
+    sbatch --parsable \
+      --account="${ABPH_SBATCH_ACCOUNT}" \
+      --partition="${ABPH_SBATCH_PARTITION}" \
+      --job-name=abph_clean_targets \
+      --output="${PROJECT_DIR}/fresh_check_logs/abph_clean_targets_%j.out" \
+      --error="${PROJECT_DIR}/fresh_check_logs/abph_clean_targets_%j.err" \
+      --nodes=1 \
+      --ntasks=1 \
+      --cpus-per-task=16 \
+      --mem=220G \
+      --time=2-00:00:00 \
+      "${PROJECT_DIR}/sbatch/run_adaptive_binary_targets.sh" cache
+  )"
+  target_cache_job="${target_cache_submitted%%;*}"
+  [[ "${target_cache_job}" =~ ^[0-9]+$ ]] || {
+    echo "Invalid target-cache job response: ${target_cache_submitted}" >&2
+    exit 2
+  }
+
+  target_preflight_submitted="$(
+    sbatch --parsable \
+      --account="${ABPH_SBATCH_ACCOUNT}" \
+      --partition="${ABPH_SBATCH_PARTITION}" \
+      --job-name=abph_clean_target_preflight \
+      --output="${PROJECT_DIR}/fresh_check_logs/abph_clean_target_preflight_%j.out" \
+      --error="${PROJECT_DIR}/fresh_check_logs/abph_clean_target_preflight_%j.err" \
+      --nodes=1 \
+      --ntasks=1 \
+      --cpus-per-task=16 \
+      --mem=220G \
+      --time=1-00:00:00 \
+      --dependency="afterok:${target_cache_job}" \
+      "${PROJECT_DIR}/sbatch/run_adaptive_binary_targets.sh" preflight
+  )"
+  target_preflight_job="${target_preflight_submitted%%;*}"
+  [[ "${target_preflight_job}" =~ ^[0-9]+$ ]] || {
+    echo "Invalid target-preflight response: ${target_preflight_submitted}" >&2
+    exit 2
+  }
+  export ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY="afterok:${target_preflight_job}"
+  echo "Replacement target jobs: cache=${target_cache_job} preflight=${target_preflight_job}"
+fi
+
 export ABPH_RUNTIME_BATCH_WORLD_SIZE=8
 export ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT="${campaign_root}/runtime_batch_measurements"
 export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${campaign_root}/runtime_batch_contracts"
@@ -114,12 +180,9 @@ for job_id in "${contract_jobs[@]}"; do
   }
 done
 
-export ABPH_CAMPAIGN_MODE=pilot
 export ABPH_STAGE_MODE=models
 export ABPH_RECONSTRUCTOR_PARALLELISM=ddp8
 export ABPH_RECONSTRUCTOR_SCHEDULE_POLICY=accelerated_screening_v2_7day
-export ABPH_STORAGE_PROFILE=streaming_30gb_v1
-export ABPH_STORAGE_PROJECTION_PATH="${storage_projection}"
 export ABPH_RUNTIME_ACCEPTANCE_PATH="${runtime_acceptance}"
 export ABPH_TAGGER_DDP_ACCEPTANCE_PATH="${tagger_acceptance}"
 export CONFIRM_FINAL_TEST=0
@@ -147,6 +210,7 @@ controller_job="${controller%%;*}"
 echo "adaptive_binary_clean_model_recovery_queued:"
 echo "  campaign_root: ${campaign_root}"
 echo "  archived_runtime_evidence: ${archive}"
+echo "  runtime_probe_upstream: ${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY:-already-prepared}"
 echo "  runtime_contract_jobs: ${contract_jobs[*]}"
 echo "  clean_models_submit_job: ${controller_job}"
-echo "  retained: inputs, targets, baselines, storage acceptance"
+echo "  retained: inputs, baselines, storage acceptance"

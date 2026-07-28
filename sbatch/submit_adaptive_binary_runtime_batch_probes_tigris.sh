@@ -17,10 +17,16 @@ fresh_activate_env
 : "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
 : "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST:=${ABPH_ROOT}/submission_logs/abph_runtime_batch_probes.tsv}"
 : "${ABPH_RUNTIME_BATCH_WORLD_SIZE:=4}"
+: "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY:=}"
 [[ "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "4" || "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "8" ]] || {
   echo "ABPH_RUNTIME_BATCH_WORLD_SIZE must be 4 or 8" >&2
   exit 2
 }
+if [[ -n "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}" ]] &&
+   [[ ! "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}" =~ ^afterok:[0-9]+(:[0-9]+)*$ ]]; then
+  echo "ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY must be an afterok dependency." >&2
+  exit 2
+fi
 export ABPH_DISTRIBUTED_NODES="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
 export ABPH_DISTRIBUTED_NTASKS="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
 export ABPH_DISTRIBUTED_NTASKS_PER_NODE=1
@@ -62,17 +68,25 @@ for variant in "${variants[@]}"; do
   for spec in "${specs[@]}"; do
     family="${spec%%:*}"
     batch="${spec##*:}"
+    dependency_args=()
+    if [[ -n "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}" ]]; then
+      dependency_args=(
+        "--dependency=${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}"
+      )
+    fi
     if fresh_is_dry_run; then
       submitted="dryrun_${variant}_${family}_b${batch}"
-      printf 'DRY_RUN sbatch probe: variant=%q family=%q batch=%q\n' \
-        "${variant}" "${family}" "${batch}"
+      printf 'DRY_RUN sbatch probe: variant=%q family=%q batch=%q dependency=%q\n' \
+        "${variant}" "${family}" "${batch}" \
+        "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}"
     else
       submitted="$(sbatch --parsable --account="${ABPH_SBATCH_ACCOUNT}" \
         --partition="${ABPH_SBATCH_PARTITION}" \
         --nodes="${ABPH_RUNTIME_BATCH_WORLD_SIZE}" \
         --ntasks="${ABPH_RUNTIME_BATCH_WORLD_SIZE}" \
         --ntasks-per-node=1 --cpus-per-task=16 --mem=220G \
-        --gres=gpu:gh200:1 "${probe_worker}" "${variant}" "${family}" "${batch}")"
+        --gres=gpu:gh200:1 "${dependency_args[@]}" \
+        "${probe_worker}" "${variant}" "${family}" "${batch}")"
     fi
     job_id="${submitted%%;*}"
     probe_ids+=("${job_id}")
