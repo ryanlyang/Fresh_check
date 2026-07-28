@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,9 +12,6 @@ from jetclass_fresh.jetclass_data import JetIdentity
 from scripts.train_adaptive_binary_pseudooffline_variant import (
     _load_selected_hlt_encoder,
     _selected_classifier_metrics,
-    _truncated_canary_acceptance,
-    _validate_truncated_canary_request,
-    _validation_jet_limit,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
     _combine_report_target_provenance,
@@ -82,63 +78,6 @@ def test_campaign_target_source_kwargs_bind_canonical_inputs(tmp_path) -> None:
             root / "inputs" / "split_manifest" / "split_manifest.json.gz"
         ).resolve(),
     }
-
-
-def test_truncated_canary_requires_bounded_temporary_execution(
-    tmp_path, monkeypatch
-) -> None:
-    temporary_root = tmp_path / "tmp"
-    temporary_root.mkdir()
-    monkeypatch.setattr(
-        "scripts.train_adaptive_binary_pseudooffline_variant.tempfile.gettempdir",
-        lambda: str(temporary_root),
-    )
-    monkeypatch.setenv("ABPH_EVAL_INTERVAL", "1")
-    monkeypatch.setenv("ABPH_MAX_VAL_BATCHES", "1")
-    args = SimpleNamespace(
-        accept_truncated_canary=True,
-        maximum_updates=1,
-        output_dir=str(temporary_root / "abph_models_canary_B1_test"),
-    )
-    _validate_truncated_canary_request(args, Path(args.output_dir))
-
-    args.maximum_updates = 2
-    with pytest.raises(ValueError, match="exactly one"):
-        _validate_truncated_canary_request(args, Path(args.output_dir))
-
-
-def test_truncated_canary_accepts_execution_evidence_not_training_completion() -> None:
-    report = {
-        "ok": False,
-        "status": "interrupted",
-        "curriculum": {"global_update": 1},
-        "rollout_validation_count": 1,
-        "best_by_stage": {"phase1_root": {"selection_score": 1.0}},
-        "compiler_failure_updates": 0,
-        "nonfinite_updates": 0,
-        "distributed_runtime": {"error_events": []},
-    }
-    acceptance = _truncated_canary_acceptance(report)
-    assert acceptance["ok"] is True
-    assert acceptance["permits_scientific_claim"] is False
-    assert acceptance["permits_checkpoint_reuse"] is False
-
-    report["rollout_validation_count"] = 0
-    assert _truncated_canary_acceptance(report)["ok"] is False
-
-
-def test_truncated_canary_declares_exact_one_jet_per_rank_validation() -> None:
-    canary = SimpleNamespace(
-        runtime_reference_benchmark=False,
-        accept_truncated_canary=True,
-    )
-    production = SimpleNamespace(
-        runtime_reference_benchmark=False,
-        accept_truncated_canary=False,
-    )
-
-    assert _validation_jet_limit(canary, requested_world_size=8) == 8
-    assert _validation_jet_limit(production, requested_world_size=8) is None
 
 
 def _reconstruction_batch(grouping: str = "exclusive_kt") -> dict:

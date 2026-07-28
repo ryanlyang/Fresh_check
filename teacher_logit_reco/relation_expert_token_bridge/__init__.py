@@ -48,6 +48,22 @@ from .hlt_cache import (
     load_hlt_v3_cache,
     publish_hlt_v3_cache,
 )
+from .hlt_experts import (
+    NativeHLTExpertDataset,
+    NativeHLTExpertTrainingConfig,
+    build_hlt_evidence_mode_contract,
+    copy_offline_expert_initialization,
+    infer_native_hlt_expert_replica,
+    make_native_hlt_expert_loader,
+    native_hlt_expert_objective,
+    train_native_hlt_expert,
+)
+from .hlt_controls import (
+    NativeHLTClassifierAdapter,
+    NativeHLTControlTrainingConfig,
+    build_hlt_matched_control_model,
+    train_native_hlt_control,
+)
 from .hlt_v3 import (
     HLT_V3_PROFILE_NAME,
     HLT_V3_PROFILE_VERSION,
@@ -60,6 +76,15 @@ from .normalizer_lineage import (
     build_normalizer_population_registry,
     normalizer_population_rows,
     validate_normalizer_population_registry,
+)
+from .native_fusion import (
+    NativeFusionTrainingConfig,
+    build_native_fusion_contract,
+    build_native_fusion_model,
+    evaluate_native_hlt_fusion,
+    load_native_fusion_cache,
+    publish_native_fusion_cache,
+    train_native_hlt_fusion,
 )
 from .expert_model import (
     RetbExpertModel,
@@ -107,7 +132,9 @@ from .complementarity import (
     shapley_from_subset_accuracy,
 )
 from .fusion import (
+    BestSingleFusion,
     GroupedHeadRelationBias,
+    LiveExpertFusion,
     PooledMLPFusion,
     RelationAuxiliaryHead,
     TokenTransformerFusion,
@@ -116,12 +143,15 @@ from .fusion import (
     build_fusion_model,
     configure_expert_trainability,
     cross_covariance_penalty,
+    fusion_parameter_groups,
     masked_relation_auxiliary_loss,
 )
 from .fusion_cache import load_frozen_token_cache, publish_frozen_token_cache
 from .fusion_training import (
     OfflineFusionTrainingConfig,
+    evaluate_parameter_free_fusion,
     infer_fusion_val_design,
+    select_best_single_expert,
     train_frozen_fusion,
 )
 from .selection import (
@@ -138,6 +168,18 @@ from .step5 import (
     resolve_stage_c_run,
     validate_stage_c_run_registry,
     validate_step5_bundle,
+)
+from .step6 import (
+    build_stage_d_run_registry,
+    build_step6_bundle,
+    execute_miniature_stage_d,
+    materialize_stage_d_confirmation_rows,
+    publish_step6_bundle,
+    resolve_stage_d_confirmation_run,
+    resolve_stage_d_run,
+    validate_stage_d_confirmation_registry,
+    validate_stage_d_run_registry,
+    validate_step6_bundle,
 )
 from .summary_tokens import (
     CanonicalSummaryTokenizer,
@@ -256,6 +298,8 @@ __all__ = [
     "train_offline_expert",
     "validate_teacher_logits_manifest",
     "GroupedHeadRelationBias",
+    "BestSingleFusion",
+    "LiveExpertFusion",
     "OfflineFusionTrainingConfig",
     "PooledMLPFusion",
     "RelationAuxiliaryHead",
@@ -273,8 +317,10 @@ __all__ = [
     "build_uniform_shape_metrics",
     "configure_expert_trainability",
     "cross_covariance_penalty",
+    "fusion_parameter_groups",
     "execute_miniature_stage_c",
     "execute_subset_readout_screen",
+    "evaluate_parameter_free_fusion",
     "infer_fusion_val_design",
     "load_frozen_token_cache",
     "masked_relation_auxiliary_loss",
@@ -282,6 +328,7 @@ __all__ = [
     "publish_step5_bundle",
     "resolve_stage_c_run",
     "select_heterogeneous_allocations",
+    "select_best_single_expert",
     "select_joint_expert_losses",
     "select_monolithic_capacity_controls",
     "select_offline_shapes",
@@ -289,4 +336,33 @@ __all__ = [
     "train_frozen_fusion",
     "validate_stage_c_run_registry",
     "validate_step5_bundle",
+    "NativeFusionTrainingConfig",
+    "NativeHLTExpertDataset",
+    "NativeHLTExpertTrainingConfig",
+    "NativeHLTClassifierAdapter",
+    "NativeHLTControlTrainingConfig",
+    "build_hlt_evidence_mode_contract",
+    "build_hlt_matched_control_model",
+    "build_native_fusion_contract",
+    "build_native_fusion_model",
+    "evaluate_native_hlt_fusion",
+    "build_stage_d_run_registry",
+    "build_step6_bundle",
+    "copy_offline_expert_initialization",
+    "infer_native_hlt_expert_replica",
+    "execute_miniature_stage_d",
+    "materialize_stage_d_confirmation_rows",
+    "load_native_fusion_cache",
+    "make_native_hlt_expert_loader",
+    "native_hlt_expert_objective",
+    "publish_native_fusion_cache",
+    "publish_step6_bundle",
+    "resolve_stage_d_run",
+    "resolve_stage_d_confirmation_run",
+    "train_native_hlt_expert",
+    "train_native_hlt_control",
+    "train_native_hlt_fusion",
+    "validate_stage_d_run_registry",
+    "validate_stage_d_confirmation_registry",
+    "validate_step6_bundle",
 ]

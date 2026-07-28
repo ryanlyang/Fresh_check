@@ -21,6 +21,7 @@ from .contracts import (
 from .determinism import optimizer_update_counts, scheduled_learning_rate
 from .evaluation import evaluate_classification
 from .expert_training import preferred_expert_epoch
+from .fusion import build_fusion_model
 from .fusion_cache import load_frozen_token_cache
 from .registry import EXPERT_ORDER
 
@@ -35,6 +36,10 @@ FUSION_CHECKPOINT_CONTRACT = "retb_offline_fusion_checkpoint_v1"
 FUSION_REGISTRATION_CONTRACT = "retb_offline_fusion_registration_v1"
 FUSION_CURVES_CONTRACT = "retb_offline_fusion_curves_v1"
 FUSION_DESIGN_INFERENCE_CONTRACT = "retb_offline_fusion_val_design_v1"
+BEST_SINGLE_SELECTION_CONTRACT = "retb_offline_best_single_selection_v1"
+PARAMETER_FREE_EVALUATION_CONTRACT = (
+    "retb_offline_parameter_free_fusion_evaluation_v1"
+)
 
 
 def _require_torch() -> Any:
@@ -248,6 +253,145 @@ def evaluate_fusion(
     }
 
 
+def select_best_single_expert(
+    *,
+    val_stop_manifest: str | Path,
+    accuracy_window: float = 0.0001,
+) -> dict[str, Any]:
+    """Select the best single expert using only the checkpoint-selection split."""
+    if float(accuracy_window) < 0:
+        raise ValueError("best-single accuracy window must be nonnegative")
+    cache_meta, arrays = load_frozen_token_cache(val_stop_manifest)
+    if cache_meta["split"] != "val_stop":
+        raise ValueError("best-single selection requires val_stop")
+    metrics_by_expert = {
+        name: evaluate_classification(
+            arrays["expert_logits"][name],
+            arrays["labels"],
+            split="val_stop",
+        )
+        for name in EXPERT_ORDER
+    }
+    maximum = max(
+        float(metrics["accuracy"]) for metrics in metrics_by_expert.values()
+    )
+    eligible = [
+        name
+        for name in EXPERT_ORDER
+        if maximum - float(metrics_by_expert[name]["accuracy"])
+        <= float(accuracy_window)
+    ]
+    selected = min(
+        eligible,
+        key=lambda name: (
+            float(metrics_by_expert[name]["cross_entropy"]),
+            EXPERT_ORDER.index(name),
+        ),
+    )
+    payload: dict[str, Any] = {
+        "contract": BEST_SINGLE_SELECTION_CONTRACT,
+        "schema_version": 1,
+        "split": "val_stop",
+        "cache_manifest_sha256": cache_meta["content_hash"],
+        "shape_id": cache_meta["shape_id"],
+        "pipeline_seed": cache_meta["pipeline_seed"],
+        "accuracy_window": float(accuracy_window),
+        "maximum_accuracy": maximum,
+        "eligible_experts": eligible,
+        "selected_expert": selected,
+        "expert_metric_hashes": {
+            name: metrics_by_expert[name]["content_hash"]
+            for name in EXPERT_ORDER
+        },
+        "tie_break": [
+            "maximum_accuracy_within_0p0001",
+            "lower_cross_entropy",
+            "canonical_expert_order",
+        ],
+    }
+    if "source" in cache_meta:
+        payload["source"] = cache_meta["source"]
+    return with_content_hash(payload)
+
+
+def evaluate_parameter_free_fusion(
+    *,
+    cache_manifest: str | Path,
+    output_path: str | Path,
+    run_id: str,
+    variant: str,
+    best_single_selection: Mapping[str, Any] | None = None,
+    device: str | Any = "cpu",
+) -> dict[str, Any]:
+    """Evaluate mean-logit or locked best-single controls without fake training."""
+    module = _require_torch()
+    cache_meta, arrays = load_frozen_token_cache(cache_manifest)
+    if cache_meta["split"] not in {"val_stop", "val_design"}:
+        raise ValueError("parameter-free fusion received unauthorized split")
+    selected_expert = None
+    selection_sha = None
+    if variant == "F_BEST_SINGLE":
+        if best_single_selection is None:
+            raise ValueError("best-single evaluation requires a locked selection")
+        selection_sha = validate_content_hash(
+            best_single_selection,
+            expected_contract=BEST_SINGLE_SELECTION_CONTRACT,
+        )
+        if (
+            best_single_selection.get("shape_id") != cache_meta["shape_id"]
+            or best_single_selection.get("pipeline_seed")
+            != cache_meta["pipeline_seed"]
+            or best_single_selection.get("source") != cache_meta.get("source")
+        ):
+            raise ValueError("best-single selection/cache lineage differs")
+        selected_expert = str(best_single_selection["selected_expert"])
+        if selected_expert not in EXPERT_ORDER:
+            raise ValueError("best-single selection names an unknown expert")
+    elif variant != "F_UNIFORM_LOGIT_MEAN":
+        raise ValueError("fusion control is not parameter-free")
+    dimensions = {
+        name: int(shape[1]) for name, shape in cache_meta["allocation"].items()
+    }
+    model = build_fusion_model(
+        variant,
+        bank_dimensions=dimensions,
+        best_single_expert=selected_expert,
+    )
+    resolved = module.device(device)
+    model.to(resolved)
+    loader = make_fusion_loader(
+        arrays, batch_size=512, seed=0, training=False
+    )
+    metrics, prediction = evaluate_fusion(
+        model, loader, device=resolved, split=cache_meta["split"]
+    )
+    payload: dict[str, Any] = {
+        "contract": PARAMETER_FREE_EVALUATION_CONTRACT,
+        "schema_version": 1,
+        "run_id": str(run_id),
+        "variant": variant,
+        "split": cache_meta["split"],
+        "shape_id": cache_meta["shape_id"],
+        "pipeline_seed": cache_meta["pipeline_seed"],
+        "cache_manifest_sha256": cache_meta["content_hash"],
+        "best_single_selection_sha256": selection_sha,
+        "selected_expert": selected_expert,
+        "metrics": metrics,
+        "event_count": len(prediction["labels"]),
+        "identity_order_sha256": hashlib.sha256(
+            "\n".join(map(str, prediction["identities"])).encode()
+        ).hexdigest(),
+        "optimizer_updates": 0,
+        "parameter_updates": 0,
+        "performance_based_termination": False,
+    }
+    if "source" in cache_meta:
+        payload["source"] = cache_meta["source"]
+    result = with_content_hash(payload)
+    write_immutable_json(output_path, result)
+    return result
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -317,11 +461,62 @@ def train_frozen_fusion(
             "training_contract_sha256": contract["content_hash"],
             "model_train_cache_sha256": train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
+            "run_registry_sha256": require_sha256(
+                run_registry_sha256, name="run_registry_sha256"
+            ),
+            "seed": config.seed,
+            "variant": config.variant,
+            "shape_id": train_meta["shape_id"],
+            "allocation": train_meta["allocation"],
+            "expert_checkpoint_hashes": train_meta[
+                "expert_checkpoint_hashes"
+            ],
         }
         if any(registration.get(k) != v for k, v in expected.items()):
             raise ValueError("reusable fusion registration lineage differs")
-        if _sha256(root / "best_model_val.pt") != registration["checkpoint_sha256"]:
+        checkpoint_path = root / "best_model_val.pt"
+        if (
+            not checkpoint_path.is_file()
+            or _sha256(checkpoint_path) != registration["checkpoint_sha256"]
+        ):
             raise ValueError("reusable fusion checkpoint bytes differ")
+        curves = load_hashed_json(
+            root / "training_curves.json",
+            expected_contract=FUSION_CURVES_CONTRACT,
+        )
+        metrics = load_hashed_json(root / "val_stop_metrics.json")
+        if (
+            curves["content_hash"] != registration["training_curves_sha256"]
+            or metrics["content_hash"]
+            != registration["selected_val_stop_metrics_sha256"]
+            or curves.get("run_id") != run_id
+            or curves.get("selected_epoch") != registration["selected_epoch"]
+            or not curves.get("fixed_budget_completed")
+            or curves.get("performance_based_termination")
+        ):
+            raise ValueError("reusable fusion diagnostics lineage differs")
+        checkpoint_payload = module.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
+        checkpoint_expected = {
+            "contract": FUSION_CHECKPOINT_CONTRACT,
+            "run_id": run_id,
+            "epoch": registration["selected_epoch"],
+            "training_contract_sha256": contract["content_hash"],
+            "run_registry_sha256": expected["run_registry_sha256"],
+            "model_train_cache_sha256": train_meta["content_hash"],
+            "val_stop_cache_sha256": val_meta["content_hash"],
+            "shape_id": train_meta["shape_id"],
+            "allocation": train_meta["allocation"],
+            "expert_checkpoint_hashes": train_meta[
+                "expert_checkpoint_hashes"
+            ],
+        }
+        if any(
+            checkpoint_payload.get(key) != value
+            for key, value in checkpoint_expected.items()
+        ):
+            raise ValueError("reusable fusion checkpoint lineage differs")
         return registration
     resolved = module.device(device)
     if config.campaign_profile == "production":
@@ -474,6 +669,9 @@ def train_frozen_fusion(
             "shape_id": train_meta["shape_id"],
             "allocation": train_meta["allocation"],
             "training_contract_sha256": contract["content_hash"],
+            "run_registry_sha256": require_sha256(
+                run_registry_sha256, name="run_registry_sha256"
+            ),
             "model_train_cache_sha256": train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
             "checkpoint_sha256": _sha256(checkpoint),
@@ -547,13 +745,17 @@ def infer_fusion_val_design(
 
 
 __all__ = [
+    "BEST_SINGLE_SELECTION_CONTRACT",
     "FUSION_CHECKPOINT_CONTRACT",
     "FUSION_DESIGN_INFERENCE_CONTRACT",
     "FUSION_REGISTRATION_CONTRACT",
     "FUSION_TRAINING_CONTRACT",
+    "PARAMETER_FREE_EVALUATION_CONTRACT",
     "OfflineFusionTrainingConfig",
     "evaluate_fusion",
+    "evaluate_parameter_free_fusion",
     "infer_fusion_val_design",
     "make_fusion_loader",
+    "select_best_single_expert",
     "train_frozen_fusion",
 ]

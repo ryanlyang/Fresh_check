@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Sequence
 
-from .contracts import with_content_hash
+from .contracts import require_sha256, with_content_hash
 
 
 CAPACITY_CONTROL_CONTRACT = "retb_complete_graph_capacity_controls_v1"
@@ -161,7 +161,10 @@ def build_offline_long_exposure_ledger(
                 "component_id": str(row["component_id"]),
                 "component_kind": row["component_kind"],
                 "labeled_example_presentations": presentations,
-                "parent_sha256": row["parent_sha256"],
+                "parent_sha256": require_sha256(
+                    row["parent_sha256"],
+                    name=f"component_rows.{row['component_id']}.parent_sha256",
+                ),
             }
         )
     if not rows:

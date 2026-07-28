@@ -459,8 +459,28 @@ def select_joint_expert_losses(
 def greedy_heterogeneous_allocation(
     scorer: Callable[[Mapping[str, int], int], Mapping[str, Any]],
 ) -> dict[str, Any]:
+    seeds = (101, 202, 303)
+
+    def matched_score(allocation: Mapping[str, int]) -> dict[str, Any]:
+        rows = [dict(scorer(dict(allocation), seed)) for seed in seeds]
+        return {
+            "accuracy": sum(float(row["accuracy"]) for row in rows)
+            / len(rows),
+            "cross_entropy": sum(
+                float(row["cross_entropy"]) for row in rows
+            )
+            / len(rows),
+            "readout_sha256_by_seed": {
+                str(seed): require_sha256(
+                    row["readout_sha256"],
+                    name=f"readout_sha256.seed_{seed}",
+                )
+                for seed, row in zip(seeds, rows, strict=True)
+            },
+        }
+
     allocation = {expert: 1 for expert in EXPERT_ORDER}
-    current_score = scorer(allocation, 41702)
+    current_score = matched_score(allocation)
     trace = []
     while True:
         candidates = []
@@ -475,7 +495,7 @@ def greedy_heterogeneous_allocation(
                 continue
             candidate = dict(allocation)
             candidate[expert] = proposed
-            score = scorer(candidate, 41702)
+            score = matched_score(candidate)
             gain = float(score["accuracy"]) - float(current_score["accuracy"])
             candidates.append(
                 {
@@ -486,9 +506,9 @@ def greedy_heterogeneous_allocation(
                     "gain_per_added_slot": gain / added,
                     "accuracy": float(score["accuracy"]),
                     "cross_entropy": float(score["cross_entropy"]),
-                    "readout_sha256": require_sha256(
-                        score["readout_sha256"], name="readout_sha256"
-                    ),
+                    "readout_sha256_by_seed": score[
+                        "readout_sha256_by_seed"
+                    ],
                 }
             )
         if not candidates:
@@ -510,7 +530,9 @@ def greedy_heterogeneous_allocation(
                 "allocation": allocation,
                 "total_slots": sum(allocation.values()),
                 "gain_per_added_slot": selected["gain_per_added_slot"],
-                "readout_sha256": selected["readout_sha256"],
+                "readout_sha256_by_seed": selected[
+                    "readout_sha256_by_seed"
+                ],
             }
         )
     return {
@@ -649,7 +671,10 @@ def select_heterogeneous_allocations(
             "HET_PHYSICS": HET_PHYSICS,
             "HET_SELECTED": greedy,
             "HET_BEAM": beam,
-            "greedy_readout_seed": 41702,
+            "greedy_pipeline_seeds": [101, 202, 303],
+            "greedy_score_aggregation": (
+                "arithmetic_mean_accuracy_and_cross_entropy"
+            ),
             "beam_readout_seed": 41702,
             "beam_width": 32,
             "allocations_frozen_before_final_fusion_training": True,

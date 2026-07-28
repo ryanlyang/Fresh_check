@@ -138,6 +138,7 @@ def build_uniform_control_rows(
     rows = []
     for shape_id in TOKEN_SHAPES:
         for variant in (
+            "F_BEST_SINGLE",
             "F_UNIFORM_LOGIT_MEAN",
             "F_TRAINED_LOGIT_LINEAR",
             "F_POOLED_MLP",
@@ -150,7 +151,7 @@ def build_uniform_control_rows(
                 "pipeline_seed": 101,
                 "expert_state": "frozen",
                 "fixed_epochs": 0
-                if variant == "F_UNIFORM_LOGIT_MEAN"
+                if variant in {"F_BEST_SINGLE", "F_UNIFORM_LOGIT_MEAN"}
                 else 40,
                 "whole_bank_dropout": 0.0,
                 "performance_based_termination": False,

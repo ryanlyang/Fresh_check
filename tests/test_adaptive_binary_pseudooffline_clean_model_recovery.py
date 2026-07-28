@@ -133,25 +133,13 @@ def test_models_resume_reuses_prepared_campaign_evidence() -> None:
     assert "retained: inputs, baselines, targets" in RESUME_SCRIPT
 
 
-def test_canary_resume_gates_the_full_model_wave_on_real_launches() -> None:
+def test_legacy_canary_entrypoint_delegates_to_preflighted_model_resume() -> None:
     assert "ABPH_CONFIRM_CANARY_MODELS_RESUME" in CANARY_RESUME_SCRIPT
-    assert "ABPH_MAXIMUM_UPDATES=1" in CANARY_RESUME_SCRIPT
-    assert "ABPH_MAX_VAL_BATCHES=1" in CANARY_RESUME_SCRIPT
-    assert "ABPH_ACCEPT_TRUNCATED_CANARY=1" in CANARY_RESUME_SCRIPT
-    assert "ABPH_EVAL_INTERVAL=1" in CANARY_RESUME_SCRIPT
-    assert "B1_semantic_query_root" in CANARY_RESUME_SCRIPT
-    assert "B4_oracle_root_diagnostic" in CANARY_RESUME_SCRIPT
-    assert "--nodes=8" in CANARY_RESUME_SCRIPT
-    assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in CANARY_RESUME_SCRIPT
-    assert "ABPH_RECONSTRUCTOR_PARALLELISM=single" in CANARY_RESUME_SCRIPT
-    assert "ABPH_TARGET_MODE_REPORT=" in CANARY_RESUME_SCRIPT
-    assert "inputs/split_manifest/split_manifest.json.gz" in CANARY_RESUME_SCRIPT
-    assert "${split}_fixed_hlt_metadata.json" in CANARY_RESUME_SCRIPT
-    assert "${split}_offline_metadata.json" in CANARY_RESUME_SCRIPT
-    assert '--dependency="afterok:${b1_job}:${b4_job}"' in CANARY_RESUME_SCRIPT
-    assert "resume_adaptive_binary_models_from_contracts_tigris.sh" in (
-        CANARY_RESUME_SCRIPT
-    )
+    assert "ABPH_CONFIRM_MODELS_RESUME=1" in CANARY_RESUME_SCRIPT
+    assert "resume_adaptive_binary_models_from_contracts_tigris.sh" in CANARY_RESUME_SCRIPT
+    assert "abph_canary_" not in CANARY_RESUME_SCRIPT
+    assert "ABPH_MAXIMUM_UPDATES" not in CANARY_RESUME_SCRIPT
+    assert "sbatch " not in CANARY_RESUME_SCRIPT
 
 
 def test_contract_repair_replaces_stale_jobs_and_resumes_automatically() -> None:

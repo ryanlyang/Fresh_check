@@ -42,12 +42,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if table.get("source") != campaign.get("source"):
         raise ValueError("heterogeneous score table belongs to another source")
     scores = {
-        (row["readout"], tuple(row["allocation"][name] for name in EXPERT_ORDER)): row
+        (
+            row["readout"],
+            int(row["seed"]),
+            tuple(row["allocation"][name] for name in EXPERT_ORDER),
+        ): row
         for row in table["rows"]
     }
     def score(kind, allocation, seed):
-        del seed
-        key = (kind, tuple(allocation[name] for name in EXPERT_ORDER))
+        key = (
+            kind,
+            int(seed),
+            tuple(allocation[name] for name in EXPERT_ORDER),
+        )
         if key not in scores:
             raise ValueError(f"heterogeneous score table lacks {key}")
         return scores[key]

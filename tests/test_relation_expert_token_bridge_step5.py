@@ -27,11 +27,13 @@ from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
 )
 from teacher_logit_reco.relation_expert_token_bridge.fusion import (
     GroupedHeadRelationBias,
+    LiveExpertFusion,
     RelationAuxiliaryHead,
     TokenTransformerFusion,
     build_fusion_model,
     configure_expert_trainability,
     cross_covariance_penalty,
+    fusion_parameter_groups,
     masked_relation_auxiliary_loss,
 )
 from teacher_logit_reco.relation_expert_token_bridge.fusion_cache import (
@@ -40,6 +42,8 @@ from teacher_logit_reco.relation_expert_token_bridge.fusion_cache import (
 )
 from teacher_logit_reco.relation_expert_token_bridge.fusion_training import (
     OfflineFusionTrainingConfig,
+    evaluate_parameter_free_fusion,
+    select_best_single_expert,
     train_frozen_fusion,
 )
 from teacher_logit_reco.relation_expert_token_bridge.registry import (
@@ -192,6 +196,20 @@ def test_finetune_scopes_grouped_heads_and_crosscov() -> None:
     mask = torch.tensor([[True, False, True], [False, True, True]])
     loss = masked_relation_auxiliary_loss(prediction, target, mask)
     assert loss.ndim == 0 and torch.isfinite(loss)
+    live_experts = {name: _Expert() for name in EXPERT_ORDER}
+    fusion = TokenTransformerFusion(
+        bank_dimensions={name: 64 for name in EXPERT_ORDER}
+    )
+    live = LiveExpertFusion(
+        experts=live_experts,
+        fusion=fusion,
+        variant="F_TOKEN_TRANSFORMER_LIGHT_FINETUNE",
+    )
+    groups = fusion_parameter_groups(live, fusion_learning_rate=5.0e-4)
+    assert [group["lr"] for group in groups] == [5.0e-4, 5.0e-5]
+    assert all(
+        ".tokenizer." in name for name in live.trainability["trainable"]
+    )
 
 
 def test_frozen_cache_roundtrip_and_tamper_detection(tmp_path: Path) -> None:
@@ -239,6 +257,47 @@ def test_fixed_budget_frozen_fusion_training(tmp_path: Path) -> None:
     assert registration["performance_based_termination"] is False
     assert registration["expert_parameters_updated"] is False
     assert registration["retained_checkpoints"] == ["best_model_val.pt"]
+    reused = train_frozen_fusion(
+        model=model,
+        model_train_manifest=train_root / "model_train_frozen_tokens.json",
+        val_stop_manifest=val_root / "val_stop_frozen_tokens.json",
+        output_dir=tmp_path / "run",
+        run_id="retb-test-fusion",
+        run_registry_sha256="e" * 64,
+        global_determinism_sha256="f" * 64,
+        fusion_architecture_sha256="1" * 64,
+        config=config,
+        device="cpu",
+    )
+    assert reused == registration
+
+
+def test_parameter_free_fusion_controls_are_executable(tmp_path: Path) -> None:
+    val_root = tmp_path / "val"
+    design_root = tmp_path / "design"
+    _publish_cache(val_root, "val_stop")
+    _publish_cache(design_root, "val_design")
+    selection = select_best_single_expert(
+        val_stop_manifest=val_root / "val_stop_frozen_tokens.json"
+    )
+    assert selection["selected_expert"] in EXPERT_ORDER
+    assert selection["split"] == "val_stop"
+    best = evaluate_parameter_free_fusion(
+        cache_manifest=design_root / "val_design_frozen_tokens.json",
+        output_path=tmp_path / "best.json",
+        run_id="best-control",
+        variant="F_BEST_SINGLE",
+        best_single_selection=selection,
+    )
+    mean = evaluate_parameter_free_fusion(
+        cache_manifest=design_root / "val_design_frozen_tokens.json",
+        output_path=tmp_path / "mean.json",
+        run_id="mean-control",
+        variant="F_UNIFORM_LOGIT_MEAN",
+    )
+    assert best["parameter_updates"] == mean["parameter_updates"] == 0
+    assert best["selected_expert"] == selection["selected_expert"]
+    assert mean["selected_expert"] is None
 
 
 def test_subset_registry_complementarity_and_exact_shapley() -> None:
@@ -391,7 +450,9 @@ def test_joint_loss_beam_uses_fresh_tuple_readouts() -> None:
 
 
 def test_heterogeneous_greedy_and_beam_respect_56_slots() -> None:
+    scorer_seeds = []
     def pooled(allocation, seed):
+        scorer_seeds.append(seed)
         total = sum(allocation.values())
         weighted = sum(
             (index + 1) * allocation[name]
@@ -418,6 +479,8 @@ def test_heterogeneous_greedy_and_beam_respect_56_slots() -> None:
     assert selection["HET_SELECTED"]["total_slots"] <= 56
     assert selection["HET_BEAM"]["total_slots"] <= 56
     assert selection["beam_width"] == 32
+    assert set(selection["greedy_pipeline_seeds"]) == {101, 202, 303}
+    assert {101, 202, 303, 41702}.issubset(set(scorer_seeds))
 
 
 def test_capacity_selectors_and_label_exposure_ledger() -> None:
@@ -469,6 +532,7 @@ def test_stage_c_registry_and_miniature_completion() -> None:
     assert validate_stage_c_run_registry(registry) == registry["content_hash"]
     assert registry["row_counts"]["expert_shape_seed_confirmation"] == 147
     assert registry["row_counts"]["canonical_fusion_shape_seed_confirmation"] == 21
+    assert registry["row_counts"]["uniform_seed101_control_memberships"] == 35
     run = resolve_stage_c_run(
         registry, run_id=registry["canonical_fusion_rows"][0]["run_id"]
     )
