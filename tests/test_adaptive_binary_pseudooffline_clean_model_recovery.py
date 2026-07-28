@@ -8,6 +8,9 @@ SCRIPT = (
 PROBE_SUBMITTER = (
     ROOT / "sbatch" / "submit_adaptive_binary_runtime_batch_probes_tigris.sh"
 ).read_text(encoding="utf-8")
+PROBE_WORKER = (
+    ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
+).read_text(encoding="utf-8")
 
 
 def test_clean_model_recovery_requires_explicit_confirmation() -> None:
@@ -35,6 +38,8 @@ def test_clean_model_recovery_gates_models_on_every_contract() -> None:
 
 
 def test_clean_model_recovery_rebuilds_missing_shared_targets_first() -> None:
+    assert 'target_mode}" == "rank_local_build"' in SCRIPT
+    assert "no shared target cache is required" in SCRIPT
     assert "model_train_exclusive_kt_adaptive_binary_targets_metadata.json" in SCRIPT
     assert "run_adaptive_binary_targets.sh\" cache" in SCRIPT
     assert "run_adaptive_binary_targets.sh\" preflight" in SCRIPT
@@ -44,3 +49,23 @@ def test_clean_model_recovery_rebuilds_missing_shared_targets_first() -> None:
 def test_runtime_probes_accept_the_target_rebuild_dependency() -> None:
     assert "ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY" in PROBE_SUBMITTER
     assert '"--dependency=${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}"' in PROBE_SUBMITTER
+
+
+def test_runtime_probes_consume_the_immutable_target_mode() -> None:
+    assert "ABPH_TARGET_MODE_REPORT" in PROBE_SUBMITTER
+    assert "export ABPH_TARGET_MODE_REPORT" in PROBE_SUBMITTER
+    assert 'fresh_require_file "${ABPH_TARGET_MODE_REPORT}"' in PROBE_SUBMITTER
+    assert 'root / "audits" / "target_mode_selection.json"' in PROBE_WORKER
+    assert "target_mode_report=" in PROBE_WORKER
+    assert 'offline_cache_dir=root / "inputs" / "offline_cache"' in PROBE_WORKER
+
+
+def test_full_probe_matrix_is_gated_by_one_rank_local_canary() -> None:
+    assert "abph_clean_ranklocal_canary" in SCRIPT
+    assert "B1_semantic_query_root root_hierarchy 64" in SCRIPT
+    assert 'ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY="afterok:${canary_job}"' in SCRIPT
+    canary_index = SCRIPT.index("abph_clean_ranklocal_canary")
+    matrix_index = SCRIPT.index(
+        'bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh"'
+    )
+    assert canary_index < matrix_index

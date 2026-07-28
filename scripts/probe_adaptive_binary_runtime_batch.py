@@ -132,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     grouping = str(
         resolved["model"]["hierarchy"].get("grouping", "exclusive_kt")
     )
+    target_mode_report = root / "audits" / "target_mode_selection.json"
     source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
         target_cache_dir=root / "targets",
@@ -142,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
         seed=24731,
         rank=rank,
         world_size=world_size,
+        target_mode_report=(
+            target_mode_report if target_mode_report.is_file() else None
+        ),
+        offline_cache_dir=root / "inputs" / "offline_cache",
+        manifest_path=root / "inputs" / "split_manifest" / "split_manifest.json.gz",
     )
     provenance = reconstructor_runtime_provenance(
         variant_name=args.variant,

@@ -16,6 +16,7 @@ fresh_activate_env
 : "${ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT:=${ABPH_ROOT}/runtime_batch_measurements}"
 : "${ABPH_RUNTIME_BATCH_CONTRACT_ROOT:=${ABPH_ROOT}/runtime_batch_contracts}"
 : "${ABPH_RUNTIME_BATCH_PROBE_MANIFEST:=${ABPH_ROOT}/submission_logs/abph_runtime_batch_probes.tsv}"
+: "${ABPH_TARGET_MODE_REPORT:=${ABPH_ROOT}/audits/target_mode_selection.json}"
 : "${ABPH_RUNTIME_BATCH_WORLD_SIZE:=4}"
 : "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY:=}"
 [[ "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "4" || "${ABPH_RUNTIME_BATCH_WORLD_SIZE}" == "8" ]] || {
@@ -33,9 +34,13 @@ export ABPH_DISTRIBUTED_NTASKS_PER_NODE=1
 export ABPH_DISTRIBUTED_WORLD_SIZE="${ABPH_RUNTIME_BATCH_WORLD_SIZE}"
 export ABPH_ROOT ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT
 export ABPH_RUNTIME_BATCH_CONTRACT_ROOT PYTHONNOUSERSITE=1
+export ABPH_TARGET_MODE_REPORT
 
 fresh_require_file "${ABPH_ROOT}/audits/actual_target_feasibility.json"
 fresh_require_file "${ABPH_ROOT}/runs/A0_hlt_part/best_model_val.pt"
+if [[ "${ABPH_STORAGE_PROFILE:-}" == "streaming_30gb_v1" ]]; then
+  fresh_require_file "${ABPH_TARGET_MODE_REPORT}"
+fi
 
 if (($#)); then
   variants=("$@")

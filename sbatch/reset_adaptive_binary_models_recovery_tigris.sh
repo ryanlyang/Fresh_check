@@ -101,9 +101,19 @@ export ABPH_RAM_STAGE_RESERVATION_BYTES="$(
 )"
 export OVERWRITE=1
 
+export ABPH_TARGET_MODE_REPORT="${campaign_root}/audits/target_mode_selection.json"
+fresh_require_file "${ABPH_TARGET_MODE_REPORT}"
+target_mode="$(
+  "${PYTHON_BIN}" scripts/validate_adaptive_binary_target_mode.py \
+    --selection "${ABPH_TARGET_MODE_REPORT}" \
+    --campaign-root "${campaign_root}" \
+    --print-mode
+)"
 target_metadata="${campaign_root}/targets/model_train_exclusive_kt_adaptive_binary_targets_metadata.json"
 export ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY=""
-if [[ ! -f "${target_metadata}" ]]; then
+if [[ "${target_mode}" == "rank_local_build" ]]; then
+  echo "Using immutable rank-local target construction; no shared target cache is required."
+elif [[ ! -f "${target_metadata}" ]]; then
   for required_dir in \
     "${campaign_root}/inputs/hlt_cache" \
     "${campaign_root}/inputs/offline_cache"; do
@@ -163,6 +173,38 @@ export ABPH_RUNTIME_BATCH_CONTRACT_ROOT="${campaign_root}/runtime_batch_contract
 export ABPH_RUNTIME_BATCH_PROBE_MANIFEST="${campaign_root}/submission_logs/abph_clean_model_recovery_contracts_${stamp}.tsv"
 export ABPH_SBATCH_ACCOUNT ABPH_SBATCH_PARTITION ABPH_DATA_DIR
 
+canary_dependency_args=()
+if [[ -n "${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}" ]]; then
+  canary_dependency_args=(
+    "--dependency=${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY}"
+  )
+fi
+canary_submitted="$(
+  sbatch --parsable \
+    --account="${ABPH_SBATCH_ACCOUNT}" \
+    --partition="${ABPH_SBATCH_PARTITION}" \
+    --job-name=abph_clean_ranklocal_canary \
+    --output="${PROJECT_DIR}/fresh_check_logs/abph_clean_ranklocal_canary_%j.out" \
+    --error="${PROJECT_DIR}/fresh_check_logs/abph_clean_ranklocal_canary_%j.err" \
+    --nodes=8 \
+    --ntasks=8 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=16 \
+    --mem=220G \
+    --time=02:00:00 \
+    --gres=gpu:gh200:1 \
+    --export="ALL,ABPH_RUNTIME_BATCH_MEASUREMENT_ROOT=${campaign_root}/audits/clean_model_recovery_canary_${stamp}" \
+    "${canary_dependency_args[@]}" \
+    "${PROJECT_DIR}/sbatch/run_adaptive_binary_runtime_batch_probe.sh" \
+    B1_semantic_query_root root_hierarchy 64
+)"
+canary_job="${canary_submitted%%;*}"
+[[ "${canary_job}" =~ ^[0-9]+$ ]] || {
+  echo "Invalid rank-local canary response: ${canary_submitted}" >&2
+  exit 2
+}
+export ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY="afterok:${canary_job}"
+
 bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh"
 
 mapfile -t contract_jobs < <(
@@ -210,6 +252,8 @@ controller_job="${controller%%;*}"
 echo "adaptive_binary_clean_model_recovery_queued:"
 echo "  campaign_root: ${campaign_root}"
 echo "  archived_runtime_evidence: ${archive}"
+echo "  target_mode: ${target_mode}"
+echo "  rank_local_canary_job: ${canary_job}"
 echo "  runtime_probe_upstream: ${ABPH_RUNTIME_BATCH_UPSTREAM_DEPENDENCY:-already-prepared}"
 echo "  runtime_contract_jobs: ${contract_jobs[*]}"
 echo "  clean_models_submit_job: ${controller_job}"
