@@ -822,7 +822,7 @@ def test_adaptive_binary_ddp_launcher_retries_only_quick_startup_failures() -> N
     ).read_text(encoding="utf-8")
     for required in (
         "ABPH_DDP_PORT_RETRY_ATTEMPTS:-4",
-        "ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-180",
+        "ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-60",
         "abph_ddp_master_port",
         'MASTER_PORT="$(abph_ddp_master_port',
         'if fresh_run srun "$@"; then',
@@ -831,6 +831,7 @@ def test_adaptive_binary_ddp_launcher_retries_only_quick_startup_failures() -> N
         "no further port retry",
     ):
         assert required in source
+    assert "ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-60" in source
     assert source.index("elapsed > quick_failure_seconds") < source.index(
         "retrying with a different rendezvous port"
     )

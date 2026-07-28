@@ -337,6 +337,18 @@ def _truncated_canary_acceptance(report: dict) -> dict:
     }
 
 
+def _validation_jet_limit(
+    args: argparse.Namespace,
+    *,
+    requested_world_size: int,
+) -> int | None:
+    if args.runtime_reference_benchmark:
+        return int(os.environ.get("ABPH_RUNTIME_REFERENCE_VALIDATION_JETS", "4096"))
+    if args.accept_truncated_canary:
+        return int(requested_world_size)
+    return None
+
+
 def _atomic_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -877,10 +889,9 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         world_size=requested_world_size,
         **target_source_kwargs,
     )
-    runtime_reference_validation_jets = (
-        int(os.environ.get("ABPH_RUNTIME_REFERENCE_VALIDATION_JETS", "4096"))
-        if args.runtime_reference_benchmark
-        else None
+    validation_maximum_jets = _validation_jet_limit(
+        args,
+        requested_world_size=requested_world_size,
     )
     val_source = AdaptiveBinaryTargetBatchSource(
         hlt_cache_dir=root / "inputs" / "hlt_cache",
@@ -891,7 +902,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
         shuffle_shards=False,
         seed=24732,
         maximum_batches=(1 if args.smoke else int(os.environ.get("ABPH_MAX_VAL_BATCHES", "0")) or None),
-        validation_maximum_jets=runtime_reference_validation_jets,
+        validation_maximum_jets=validation_maximum_jets,
         rank=requested_rank,
         world_size=requested_world_size,
         **target_source_kwargs,
@@ -1171,7 +1182,7 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
                 "updates": benchmark_updates,
                 "fixed_model_val_evaluations": validation_count,
                 "curriculum_transition_validations": 0,
-                "validation_jets": runtime_reference_validation_jets,
+                "validation_jets": validation_maximum_jets,
                 "runtime_profile": str(profile_path),
                 "fixed_seed": int(trainer.seed),
                 "fixed_batch_order": True,

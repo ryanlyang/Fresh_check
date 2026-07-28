@@ -36,7 +36,7 @@ abph_fresh_run_srun_with_port_retry() {
   local raw_job_id="${SLURM_JOB_ID:-}"
   local numeric_job_id="${raw_job_id%%_*}"
   local max_attempts="${ABPH_DDP_PORT_RETRY_ATTEMPTS:-4}"
-  local quick_failure_seconds="${ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-180}"
+  local quick_failure_seconds="${ABPH_DDP_PORT_RETRY_QUICK_FAILURE_SECONDS:-60}"
   local retry_delay_seconds="${ABPH_DDP_PORT_RETRY_DELAY_SECONDS:-3}"
   local attempt=0
   local status=1

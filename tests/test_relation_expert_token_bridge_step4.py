@@ -611,6 +611,7 @@ def test_step4_bundle_publication_and_cli_dry_run(
 ) -> None:
     from scripts.build_retb_step4_contracts import main
     from scripts.select_retb_expert_optimization import main as select_main
+    from scripts.train_retb_offline_expert import main as train_main
 
     snapshot = source_snapshot(Path(__file__).resolve().parents[1])
     parent_names = (
@@ -655,6 +656,21 @@ def test_step4_bundle_publication_and_cli_dry_run(
     assert (tmp_path / "registry" / "retb_stage_b_runs.json").is_file()
     assert main(["--campaign-root", str(tmp_path), "--dry-run"]) == 0
     assert "step4_bundle_sha256" in capsys.readouterr().out
+    assert (
+        train_main(
+            [
+                "--campaign-root",
+                str(tmp_path),
+                "--run-id",
+                step4["stage_b_run_registry"]["primary_shape_screen"][0][
+                    "run_id"
+                ],
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert '"performance_based_termination": false' in capsys.readouterr().out
     registry = step4["stage_b_run_registry"]
     metric_rows = [
         {

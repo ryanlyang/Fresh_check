@@ -15,6 +15,7 @@ from scripts.train_adaptive_binary_pseudooffline_variant import (
     _selected_classifier_metrics,
     _truncated_canary_acceptance,
     _validate_truncated_canary_request,
+    _validation_jet_limit,
 )
 from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
     _combine_report_target_provenance,
@@ -124,6 +125,20 @@ def test_truncated_canary_accepts_execution_evidence_not_training_completion() -
 
     report["rollout_validation_count"] = 0
     assert _truncated_canary_acceptance(report)["ok"] is False
+
+
+def test_truncated_canary_declares_exact_one_jet_per_rank_validation() -> None:
+    canary = SimpleNamespace(
+        runtime_reference_benchmark=False,
+        accept_truncated_canary=True,
+    )
+    production = SimpleNamespace(
+        runtime_reference_benchmark=False,
+        accept_truncated_canary=False,
+    )
+
+    assert _validation_jet_limit(canary, requested_world_size=8) == 8
+    assert _validation_jet_limit(production, requested_world_size=8) is None
 
 
 def _reconstruction_batch(grouping: str = "exclusive_kt") -> dict:

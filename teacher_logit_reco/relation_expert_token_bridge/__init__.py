@@ -94,6 +94,51 @@ from .step4 import (
     validate_stage_b_run_registry,
     validate_step4_bundle,
 )
+from .capacity import (
+    build_capacity_control_registry,
+    build_offline_long_exposure_ledger,
+    select_monolithic_capacity_controls,
+)
+from .complementarity import (
+    build_complementarity_report,
+    build_subset_readout,
+    build_subset_readout_registry,
+    execute_subset_readout_screen,
+    shapley_from_subset_accuracy,
+)
+from .fusion import (
+    GroupedHeadRelationBias,
+    PooledMLPFusion,
+    RelationAuxiliaryHead,
+    TokenTransformerFusion,
+    TrainedLogitLinear,
+    UniformLogitMean,
+    build_fusion_model,
+    configure_expert_trainability,
+    cross_covariance_penalty,
+    masked_relation_auxiliary_loss,
+)
+from .fusion_cache import load_frozen_token_cache, publish_frozen_token_cache
+from .fusion_training import (
+    OfflineFusionTrainingConfig,
+    infer_fusion_val_design,
+    train_frozen_fusion,
+)
+from .selection import (
+    build_uniform_shape_metrics,
+    select_heterogeneous_allocations,
+    select_joint_expert_losses,
+    select_offline_shapes,
+)
+from .step5 import (
+    build_stage_c_run_registry,
+    build_step5_bundle,
+    execute_miniature_stage_c,
+    publish_step5_bundle,
+    resolve_stage_c_run,
+    validate_stage_c_run_registry,
+    validate_step5_bundle,
+)
 from .summary_tokens import (
     CanonicalSummaryTokenizer,
     MultiDepthSummaryTokenizer,
@@ -210,4 +255,38 @@ __all__ = [
     "preferred_expert_epoch",
     "train_offline_expert",
     "validate_teacher_logits_manifest",
+    "GroupedHeadRelationBias",
+    "OfflineFusionTrainingConfig",
+    "PooledMLPFusion",
+    "RelationAuxiliaryHead",
+    "TokenTransformerFusion",
+    "TrainedLogitLinear",
+    "UniformLogitMean",
+    "build_capacity_control_registry",
+    "build_complementarity_report",
+    "build_fusion_model",
+    "build_offline_long_exposure_ledger",
+    "build_stage_c_run_registry",
+    "build_step5_bundle",
+    "build_subset_readout_registry",
+    "build_subset_readout",
+    "build_uniform_shape_metrics",
+    "configure_expert_trainability",
+    "cross_covariance_penalty",
+    "execute_miniature_stage_c",
+    "execute_subset_readout_screen",
+    "infer_fusion_val_design",
+    "load_frozen_token_cache",
+    "masked_relation_auxiliary_loss",
+    "publish_frozen_token_cache",
+    "publish_step5_bundle",
+    "resolve_stage_c_run",
+    "select_heterogeneous_allocations",
+    "select_joint_expert_losses",
+    "select_monolithic_capacity_controls",
+    "select_offline_shapes",
+    "shapley_from_subset_accuracy",
+    "train_frozen_fusion",
+    "validate_stage_c_run_registry",
+    "validate_step5_bundle",
 ]
