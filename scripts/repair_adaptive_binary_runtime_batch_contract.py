@@ -20,7 +20,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
     _ACTIVE_SLURM_STATES,
+    _FAILED_SLURM_STATES,
     _job_environment,
+    _remaining_dependencies,
     _require_pending,
     _slurm_job_state,
     _source_identity,
@@ -45,6 +47,14 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Failed replacement contract currently referenced by consumers; "
             "use this when repairing an already repaired contract."
+        ),
+    )
+    parser.add_argument(
+        "--resubmit-failed-consumers",
+        action="store_true",
+        help=(
+            "Resubmit a failed variant/renderer consumer against the repaired "
+            "contract and rewire its pending direct descendants."
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -280,6 +290,22 @@ def update_pending_dependency(job_id: str, dependency: str) -> bool:
     return True
 
 
+def _consumer_dependencies(
+    row: Mapping[str, Any],
+    *,
+    old_contract: str,
+    new_contract: str,
+    dry_run: bool,
+) -> list[str]:
+    replaced = [
+        new_contract if str(value) == old_contract else str(value)
+        for value in row.get("dependencies", ())
+    ]
+    if old_contract in replaced:
+        raise RuntimeError("failed consumer retained the obsolete runtime contract")
+    return _remaining_dependencies(replaced, dry_run=dry_run)
+
+
 def _drop_completed_afterok_dependencies(
     dependency: str,
     *,
@@ -365,9 +391,25 @@ def main(argv: list[str] | None = None) -> int:
     consumer_ids = [_job_id(row, str(row["key"])) for row in consumers]
     if not consumers:
         raise RuntimeError(f"no consumers reference failed contract {old_contract}")
+    consumer_states: dict[str, str | None] = {}
     if not args.dry_run:
         log_dir.mkdir(parents=True, exist_ok=True)
-        _require_pending(consumer_ids)
+        consumer_states = {
+            job_id: _slurm_job_state(job_id) for job_id in consumer_ids
+        }
+        if args.resubmit_failed_consumers:
+            unsupported = {
+                job_id: state
+                for job_id, state in consumer_states.items()
+                if state != "PENDING" and state not in _FAILED_SLURM_STATES
+            }
+            if unsupported:
+                raise RuntimeError(
+                    "runtime contract consumers are neither pending nor failed: "
+                    f"{unsupported}"
+                )
+        else:
+            _require_pending(consumer_ids)
     source_identity = None if args.dry_run else _source_identity(project_dir)
 
     root = manifest.parents[1]
@@ -399,8 +441,104 @@ def main(argv: list[str] | None = None) -> int:
         source_identity=source_identity,
     )
 
-    rewired: list[dict[str, str]] = []
+    rewired: list[dict[str, Any]] = []
     for row, job_id in zip(consumers, consumer_ids, strict=True):
+        state = consumer_states.get(job_id)
+        if state in _FAILED_SLURM_STATES:
+            if not args.resubmit_failed_consumers:
+                raise RuntimeError(
+                    f"consumer {job_id} failed and resubmission was not approved"
+                )
+            key = str(row.get("key", ""))
+            if not key.startswith("variant:"):
+                raise RuntimeError(
+                    f"failed runtime-contract consumer is not a variant job: {key}"
+                )
+            consumer_variant = key.split(":", 1)[1]
+            replacement_dependencies = _consumer_dependencies(
+                row,
+                old_contract=old_contract,
+                new_contract=new_contract,
+                dry_run=args.dry_run,
+            )
+            replacement_job = _submit(
+                row,
+                label=f"{consumer_variant}_consumer",
+                dependencies=replacement_dependencies,
+                project_dir=project_dir,
+                log_dir=log_dir,
+                dry_run=args.dry_run,
+                source_identity=source_identity,
+            )
+            descendants = [
+                candidate
+                for candidate in rows.values()
+                if job_id
+                in tuple(
+                    str(value)
+                    for value in candidate.get("dependencies", ())
+                )
+            ]
+            if not descendants:
+                raise RuntimeError(
+                    f"failed consumer {job_id} has no recorded descendants"
+                )
+            descendant_ids = [
+                _job_id(candidate, str(candidate["key"]))
+                for candidate in descendants
+            ]
+            if not args.dry_run:
+                _require_pending(descendant_ids)
+            descendant_repairs = []
+            for descendant, descendant_id in zip(
+                descendants, descendant_ids, strict=True
+            ):
+                current = (
+                    f"afterok:{job_id}"
+                    if args.dry_run
+                    else _live_dependency(descendant_id)
+                )
+                dependency = replace_one_dependency_job(
+                    current,
+                    old_job_ids=(job_id,),
+                    new_job_id=replacement_job,
+                )
+                if not args.dry_run:
+                    dependency = _drop_completed_afterok_dependencies(
+                        dependency,
+                        state_for_job=_slurm_job_state,
+                    )
+                    update_pending_dependency(descendant_id, dependency)
+                else:
+                    print(
+                        shlex.join(
+                            (
+                                "scontrol",
+                                "update",
+                                f"JobId={descendant_id}",
+                                f"Dependency={dependency}",
+                            )
+                        )
+                    )
+                descendant_repairs.append(
+                    {
+                        "key": str(descendant["key"]),
+                        "job_id": descendant_id,
+                        "dependency": dependency,
+                    }
+                )
+            rewired.append(
+                {
+                    "key": key,
+                    "job_id": job_id,
+                    "state": state,
+                    "replacement_job_id": replacement_job,
+                    "replacement_dependencies": replacement_dependencies,
+                    "descendants": descendant_repairs,
+                }
+            )
+            continue
+
         current = (
             "afterok:" + old_contract
             if args.dry_run

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from scripts.repair_adaptive_binary_runtime_batch_contract import (
+    _consumer_dependencies,
     _drop_completed_afterok_dependencies,
     _job_replacements,
     _live_dependency,
@@ -129,6 +130,28 @@ def test_contract_repair_replaces_a_failed_prior_repair() -> None:
         old_job_ids=("18922", "19617"),
         new_job_id="19700",
     ) == "afterok:19700:18948"
+
+
+def test_failed_contract_consumer_is_rebuilt_against_new_contract(
+    monkeypatch,
+) -> None:
+    states = {
+        "18801": "COMPLETED",
+        "18812": "COMPLETED",
+        "19700": "PENDING",
+    }
+    monkeypatch.setattr(
+        "scripts.repair_adaptive_binary_storage_acceptance_graph._slurm_job_state",
+        states.__getitem__,
+    )
+    assert _consumer_dependencies(
+        {
+            "dependencies": ["18827", "18812", "18801"],
+        },
+        old_contract="18827",
+        new_contract="19700",
+        dry_run=False,
+    ) == ["19700"]
 
 
 def test_dependency_update_thaws_dependency_never_satisfied(monkeypatch) -> None:
