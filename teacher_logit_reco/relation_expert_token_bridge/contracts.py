@@ -158,6 +158,16 @@ def write_immutable_json(
     }
 
 
+def write_immutable_bytes(path: str | Path, payload: bytes) -> dict[str, Any]:
+    if not isinstance(payload, bytes):
+        raise TypeError("immutable byte payload must be bytes")
+    return {
+        "path": str(Path(path).resolve()),
+        "file_sha256": hashlib.sha256(payload).hexdigest(),
+        "status": _publish_bytes(path, payload),
+    }
+
+
 def load_hashed_json(
     path: str | Path,
     *,
@@ -259,5 +269,6 @@ __all__ = [
     "source_record",
     "validate_content_hash",
     "with_content_hash",
+    "write_immutable_bytes",
     "write_immutable_json",
 ]

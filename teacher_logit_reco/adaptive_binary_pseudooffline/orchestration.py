@@ -587,6 +587,17 @@ class AdaptiveBinarySubmissionConfig:
     storage_projection_path: str | Path | None = None
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "pilot_report_path",
+            "selection_report_path",
+            "final_claim_contract_path",
+            "runtime_acceptance_path",
+            "tagger_ddp_acceptance_path",
+            "storage_projection_path",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, str) and not value.strip():
+                object.__setattr__(self, field_name, None)
         if self.campaign_mode not in {"pilot", "highdata"}:
             raise ValueError("campaign_mode must be pilot or highdata")
         if self.stage_mode not in ABPH_STAGE_MODES:

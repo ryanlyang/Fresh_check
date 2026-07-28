@@ -110,6 +110,7 @@ def test_models_resume_reuses_prepared_campaign_evidence() -> None:
     assert "runtime_acceptance" in RESUME_SCRIPT
     assert "storage_projection" in RESUME_SCRIPT
     assert "tagger_acceptance" in RESUME_SCRIPT
+    assert "unset ABPH_TAGGER_DDP_ACCEPTANCE_PATH" in RESUME_SCRIPT
     assert "retained: inputs, baselines, targets" in RESUME_SCRIPT
 
 

@@ -68,7 +68,11 @@ export ABPH_RECONSTRUCTOR_SCHEDULE_POLICY=accelerated_screening_v2_7day
 export ABPH_STORAGE_PROFILE=streaming_30gb_v1
 export ABPH_STORAGE_PROJECTION_PATH="${storage_projection}"
 export ABPH_RUNTIME_ACCEPTANCE_PATH="${runtime_acceptance}"
-export ABPH_TAGGER_DDP_ACCEPTANCE_PATH="${tagger_acceptance}"
+if [[ -n "${tagger_acceptance}" ]]; then
+  export ABPH_TAGGER_DDP_ACCEPTANCE_PATH="${tagger_acceptance}"
+else
+  unset ABPH_TAGGER_DDP_ACCEPTANCE_PATH
+fi
 export ABPH_SBATCH_ACCOUNT ABPH_SBATCH_PARTITION ABPH_DATA_DIR
 export OVERWRITE=1
 export CONFIRM_FINAL_TEST=0

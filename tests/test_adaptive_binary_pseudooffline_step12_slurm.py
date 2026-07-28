@@ -133,6 +133,25 @@ def _runtime_acceptance(
     return path
 
 
+def test_blank_optional_tagger_acceptance_uses_single_rank_fallback(
+    tmp_path: Path,
+) -> None:
+    config = AdaptiveBinarySubmissionConfig(
+        campaign_root=tmp_path / "campaign",
+        data_dir=tmp_path / "data",
+        reconstructor_parallelism="single",
+        allow_debug_single_reconstructor=True,
+        tagger_ddp_acceptance_path="  ",
+    )
+
+    assert config.tagger_ddp_acceptance_path is None
+    assert config.tagger_topology["mode"] == "single"
+    assert (
+        config.tagger_topology["promotion_status"]
+        == "persistent_cache_profile_not_promoted"
+    )
+
+
 def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
     acceptance = _runtime_acceptance(tmp_path / "runtime_acceptance.json")
     config = AdaptiveBinarySubmissionConfig(
