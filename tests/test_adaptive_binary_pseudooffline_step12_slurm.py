@@ -342,7 +342,7 @@ def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
         job.nodes == 1
         and job.distributed_world_size == 1
         and job.launcher == "direct"
-        and "ABPH_RECONSTRUCTOR_PARALLELISM" not in job.environment
+        and job.environment["ABPH_RECONSTRUCTOR_PARALLELISM"] == "single"
         for job in oracle
     )
 
@@ -776,6 +776,13 @@ def test_canonical_submitter_emits_four_node_reconstructor_commands(tmp_path: Pa
         f"variant:{name}"
         for name in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
     }
+    for key in oracle_keys:
+        assert (
+            commands_by_key[key]["environment"][
+                "ABPH_RECONSTRUCTOR_PARALLELISM"
+            ]
+            == "single"
+        )
     for key, job in jobs_by_key.items():
         command = commands_by_key[key]["command"]
         if key in reconstructor_keys or key in probe_keys:
@@ -803,6 +810,8 @@ def test_variant_worker_has_fail_closed_srun_contract() -> None:
         'abph_fresh_run_srun_with_port_retry',
         '--kill-on-bad-exit=1',
         '--export=ALL',
+        'ABPH_MAXIMUM_UPDATES',
+        '--maximum-updates "${ABPH_MAXIMUM_UPDATES}"',
     ):
         assert required in source
 

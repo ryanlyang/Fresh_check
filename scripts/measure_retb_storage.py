@@ -51,7 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     measurements = json.loads(args.measurements_json.read_text(encoding="utf-8"))
     if not isinstance(measurements, dict):
         raise ValueError("measurements JSON must be an object")
-    evidence_hashes: dict[str, str] = {}
+    source_evidence: dict[str, dict[str, object]] = {}
     for raw in args.evidence:
         name, separator, path_text = raw.partition("=")
         if not separator or not name:
@@ -59,15 +59,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         path = Path(path_text)
         if path.is_symlink() or not path.is_file():
             raise FileNotFoundError(f"evidence file is absent or unsafe: {path}")
-        evidence_hashes[name] = _sha256_file(path)
+        source_evidence[name] = {
+            "path": str(path.resolve()),
+            "sha256": _sha256_file(path),
+            "bytes": int(path.stat().st_size),
+            "purpose": name,
+        }
     artifact = build_storage_measurements(
         measurements=measurements,
-        evidence_hashes=evidence_hashes,
+        source_evidence=source_evidence,
         measurement_profile="production_source_evidence",
     )
     result: dict[str, object] = {
         "content_hash": artifact["content_hash"],
-        "evidence_hashes": evidence_hashes,
+        "evidence_hashes": artifact["evidence_hashes"],
         "dry_run": bool(args.dry_run),
     }
     if not args.dry_run:

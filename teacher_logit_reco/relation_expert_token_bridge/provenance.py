@@ -13,7 +13,7 @@ from .contracts import require_git_object_id, validate_content_hash, with_conten
 
 
 ARTIFACT_LAYOUT_CONTRACT = "retb_artifact_layout_v1"
-RAW_INPUT_SCHEMA_CONTRACT = "retb_raw_input_schema_v1"
+RAW_INPUT_SCHEMA_CONTRACT = "retb_raw_input_schema_v2"
 
 REQUIRED_DIRECTORIES = (
     "inputs",
@@ -108,7 +108,7 @@ def build_raw_input_schema() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": RAW_INPUT_SCHEMA_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "max_constituents": 128,
             "raw_dimension": 14,
             "derived_dimension": 17,
@@ -132,6 +132,18 @@ def build_raw_input_schema() -> dict[str, Any]:
             "derived_input_implementation": "jetclass_fresh.part_inputs",
             "pid_zero_hot_policy": "unknown_category",
             "pid_multi_hot_policy": "fail_preflight",
+            "invalid_track_measurement_sentinel": {
+                "d0": 0.0,
+                "d0err": 0.0,
+                "dz": 0.0,
+                "dzerr": 0.0,
+                "inferred_from_observed_zeros": False,
+            },
+            "measurement_validity_states": [
+                "not_track_domain",
+                "track_measurement_available",
+                "track_measurement_missing",
+            ],
             "constituent_matching_fields_allowed": False,
         }
     )

@@ -19,6 +19,9 @@ CONTRACT_REPAIR_SCRIPT = (
     / "sbatch"
     / "repair_adaptive_binary_missing_contracts_and_resume_tigris.sh"
 ).read_text(encoding="utf-8")
+CANARY_RESUME_SCRIPT = (
+    ROOT / "sbatch" / "resume_adaptive_binary_models_with_canaries_tigris.sh"
+).read_text(encoding="utf-8")
 
 
 def test_clean_model_recovery_requires_explicit_confirmation() -> None:
@@ -112,6 +115,20 @@ def test_models_resume_reuses_prepared_campaign_evidence() -> None:
     assert "tagger_acceptance" in RESUME_SCRIPT
     assert "unset ABPH_TAGGER_DDP_ACCEPTANCE_PATH" in RESUME_SCRIPT
     assert "retained: inputs, baselines, targets" in RESUME_SCRIPT
+
+
+def test_canary_resume_gates_the_full_model_wave_on_real_launches() -> None:
+    assert "ABPH_CONFIRM_CANARY_MODELS_RESUME" in CANARY_RESUME_SCRIPT
+    assert "ABPH_MAXIMUM_UPDATES=1" in CANARY_RESUME_SCRIPT
+    assert "B1_semantic_query_root" in CANARY_RESUME_SCRIPT
+    assert "B4_oracle_root_diagnostic" in CANARY_RESUME_SCRIPT
+    assert "--nodes=8" in CANARY_RESUME_SCRIPT
+    assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in CANARY_RESUME_SCRIPT
+    assert "ABPH_RECONSTRUCTOR_PARALLELISM=single" in CANARY_RESUME_SCRIPT
+    assert '--dependency="afterok:${b1_job}:${b4_job}"' in CANARY_RESUME_SCRIPT
+    assert "resume_adaptive_binary_models_from_contracts_tigris.sh" in (
+        CANARY_RESUME_SCRIPT
+    )
 
 
 def test_contract_repair_replaces_stale_jobs_and_resumes_automatically() -> None:

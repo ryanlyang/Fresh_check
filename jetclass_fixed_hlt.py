@@ -248,6 +248,125 @@ def _fixed_hlt_v2_is_identity(params: FixedHLTV2Params) -> bool:
     )
 
 
+def fixed_hlt_v2_efficiency_base_terms(
+    *,
+    pt: np.ndarray,
+    eta: np.ndarray,
+    density: np.ndarray,
+    params: FixedHLTV2Params,
+    jet_quality: float,
+) -> Dict[str, np.ndarray]:
+    """Expose the exact deterministic v2 efficiency terms for RETB adapters.
+
+    The caller owns the quality draw.  Keeping randomness outside this helper
+    lets v2 preserve its historical stream while RETB assigns an independent
+    corruption-family substream.
+    """
+
+    pt = np.maximum(np.asarray(pt), 1e-8)
+    abs_eta = np.abs(np.asarray(eta))
+    density = np.asarray(density)
+    plateau = np.where(
+        abs_eta < 1.5,
+        float(params.eff_plateau_barrel),
+        float(params.eff_plateau_endcap),
+    )
+    pt50 = np.where(
+        abs_eta < 1.5,
+        float(params.eff_turnon_pt_barrel),
+        float(params.eff_turnon_pt_endcap),
+    )
+    width = np.where(
+        abs_eta < 1.5,
+        float(params.eff_width_pt_barrel),
+        float(params.eff_width_pt_endcap),
+    )
+    positive_width = width > 0.0
+    turn_on = np.ones_like(pt, dtype=np.float64)
+    if np.any(positive_width):
+        turn_on[positive_width] = 1.0 / (
+            1.0
+            + np.exp(
+                -(pt[positive_width] - pt50[positive_width])
+                / np.maximum(width[positive_width], 1e-6)
+            )
+        )
+    if np.any(~positive_width):
+        turn_on[~positive_width] = (
+            pt[~positive_width] >= pt50[~positive_width]
+        ).astype(np.float64)
+    density_term = np.exp(
+        -float(max(0.0, params.density_loss_scale)) * density
+    )
+    q_eff = np.clip(float(jet_quality), 0.90, 1.06)
+    efficiency = np.asarray(
+        plateau * turn_on * density_term * q_eff,
+        dtype=np.float64,
+    )
+    efficiency = np.clip(efficiency, 0.0, 1.0)
+    return {
+        "plateau": np.asarray(plateau, dtype=np.float64),
+        "turn_on": turn_on,
+        "density_term": np.asarray(density_term, dtype=np.float64),
+        "efficiency": efficiency,
+        "loss_probability": 1.0 - efficiency,
+    }
+
+
+def fixed_hlt_v2_kinematic_base_terms(
+    *,
+    pt: np.ndarray,
+    eta: np.ndarray,
+    density: np.ndarray,
+    params: FixedHLTV2Params,
+    jet_quality: float,
+) -> Dict[str, np.ndarray]:
+    """Expose exact v2 core/tail/angular/reassignment base amplitudes."""
+
+    pt = np.maximum(np.asarray(pt), 1e-8)
+    abs_eta = np.abs(np.asarray(eta))
+    density = np.asarray(density)
+    smear_scale = float(max(0.0, params.smear_scale))
+    q = float(jet_quality)
+    sigma_p = np.sqrt(
+        ((0.35 * smear_scale) / np.sqrt(pt)) ** 2
+        + (0.012 * smear_scale) ** 2
+        + ((0.08 * smear_scale) / pt) ** 2
+    )
+    sigma_p = sigma_p * (1.0 + 0.08 * abs_eta) * q
+    sigma_p = np.clip(sigma_p, 0.0, 0.25)
+    tail_probability = (
+        float(max(0.0, params.tail_probability_base))
+        + float(max(0.0, params.tail_probability_eta)) * abs_eta
+        + float(max(0.0, params.tail_probability_density)) * density
+    )
+    tail_probability = np.clip(tail_probability, 0.0, 0.25)
+    sigma_ang = (
+        0.0008 * smear_scale + (0.010 * smear_scale) / np.sqrt(pt)
+    ) * (1.0 + 0.08 * abs_eta) * q
+    p_reassign = np.clip(
+        (0.01 + 0.006 * density) * float(max(0.0, params.reassign_scale)),
+        0.0,
+        0.08,
+    )
+    return {
+        "sigma_p": np.asarray(sigma_p, dtype=np.float64),
+        "tail_probability": np.asarray(tail_probability, dtype=np.float64),
+        "tail_sigma": np.asarray(
+            2.5 * sigma_p + 0.015 * min(1.0, smear_scale),
+            dtype=np.float64,
+        ),
+        "tail_mean": np.full_like(
+            sigma_p,
+            1.0 - 0.02 * min(1.0, smear_scale),
+            dtype=np.float64,
+        ),
+        "sigma_eta": np.asarray(sigma_ang, dtype=np.float64),
+        "sigma_phi": np.asarray(sigma_ang, dtype=np.float64),
+        "reassignment_probability": np.asarray(p_reassign, dtype=np.float64),
+    }
+
+
 def apply_hlt_single_jet_m2style(
     tok: np.ndarray,
     msk: np.ndarray,
@@ -514,32 +633,18 @@ def apply_hlt_single_jet_v2_realistic(
         abs_eta = np.abs(eta)
         dens = compute_local_density_np(eta=eta, phi=phi, valid_idx=np.arange(len(valid)), radius=0.04)
 
-        plateau = np.where(abs_eta < 1.5, float(params.eff_plateau_barrel), float(params.eff_plateau_endcap))
-        pt50 = np.where(abs_eta < 1.5, float(params.eff_turnon_pt_barrel), float(params.eff_turnon_pt_endcap))
-        width = np.where(abs_eta < 1.5, float(params.eff_width_pt_barrel), float(params.eff_width_pt_endcap))
-        positive_width = width > 0.0
-        turn_on = np.ones_like(pt, dtype=np.float64)
-        if np.any(positive_width):
-            turn_on[positive_width] = 1.0 / (
-                1.0
-                + np.exp(
-                    -(pt[positive_width] - pt50[positive_width])
-                    / np.maximum(width[positive_width], 1e-6)
-                )
-            )
-        if np.any(~positive_width):
-            turn_on[~positive_width] = (pt[~positive_width] >= pt50[~positive_width]).astype(np.float64)
-
-        density_term = np.exp(-float(max(0.0, params.density_loss_scale)) * dens)
         quality_sigma = float(max(0.0, params.jet_quality_sigma))
         if quality_sigma > 0.0:
             jet_quality = np.clip(rng.lognormal(mean=0.0, sigma=quality_sigma), 0.75, 1.35)
-            q_eff = np.clip(jet_quality, 0.90, 1.06)
         else:
-            q_eff = 1.0
-
-        eps = np.asarray(plateau * turn_on * density_term * q_eff, dtype=np.float64)
-        eps = np.clip(eps, 0.0, 1.0)
+            jet_quality = 1.0
+        eps = fixed_hlt_v2_efficiency_base_terms(
+            pt=pt,
+            eta=eta,
+            density=dens,
+            params=params,
+            jet_quality=float(jet_quality),
+        )["efficiency"]
         keep_eff = rng.random_sample(len(valid)) < eps
         valid = valid[keep_eff]
     n_eff = int(len(valid))
@@ -559,31 +664,28 @@ def apply_hlt_single_jet_v2_realistic(
         q = float(np.clip(rng.lognormal(mean=0.0, sigma=quality_sigma), 0.75, 1.35)) if quality_sigma > 0 else 1.0
 
         if smear_scale > 0.0:
-            sigma_rel = np.sqrt(
-                ((0.35 * smear_scale) / np.sqrt(pt)) ** 2
-                + (0.012 * smear_scale) ** 2
-                + ((0.08 * smear_scale) / pt) ** 2
+            base_terms = fixed_hlt_v2_kinematic_base_terms(
+                pt=pt,
+                eta=eta,
+                density=dens,
+                params=params,
+                jet_quality=q,
             )
-            sigma_rel = sigma_rel * (1.0 + 0.08 * abs_eta) * q
-            sigma_rel = np.clip(sigma_rel, 0.0, 0.25)
-
-            tail_prob = (
-                float(max(0.0, params.tail_probability_base))
-                + float(max(0.0, params.tail_probability_eta)) * abs_eta
-                + float(max(0.0, params.tail_probability_density)) * dens
-            )
-            tail_prob = np.clip(tail_prob, 0.0, 0.25)
+            sigma_rel = base_terms["sigma_p"]
+            tail_prob = base_terms["tail_probability"]
             is_tail = rng.random_sample(len(valid)) < tail_prob
 
             ratio = rng.normal(loc=1.0, scale=sigma_rel)
-            tail_sigma = 2.5 * sigma_rel + 0.015 * min(1.0, smear_scale)
-            ratio_tail = rng.normal(loc=1.0 - 0.02 * min(1.0, smear_scale), scale=tail_sigma)
+            ratio_tail = rng.normal(
+                loc=float(base_terms["tail_mean"][0]),
+                scale=base_terms["tail_sigma"],
+            )
             ratio[is_tail] = ratio_tail[is_tail]
             ratio = np.clip(ratio, 0.55, 1.45)
             pt_new = np.clip(pt * ratio, 1e-8, None)
 
-            sigma_eta = (0.0008 * smear_scale + (0.010 * smear_scale) / np.sqrt(pt)) * (1.0 + 0.08 * abs_eta) * q
-            sigma_phi = (0.0008 * smear_scale + (0.010 * smear_scale) / np.sqrt(pt)) * (1.0 + 0.08 * abs_eta) * q
+            sigma_eta = base_terms["sigma_eta"]
+            sigma_phi = base_terms["sigma_phi"]
             eta_new = eta + rng.normal(loc=0.0, scale=sigma_eta)
             phi_new = wrap_phi_np(phi + rng.normal(loc=0.0, scale=sigma_phi))
         else:
@@ -592,8 +694,13 @@ def apply_hlt_single_jet_v2_realistic(
             phi_new = phi
 
         if len(valid) > 1 and reassign_scale > 0.0:
-            p_reassign = (0.01 + 0.006 * dens) * reassign_scale
-            p_reassign = np.clip(p_reassign, 0.0, 0.08)
+            p_reassign = fixed_hlt_v2_kinematic_base_terms(
+                pt=pt,
+                eta=eta,
+                density=dens,
+                params=params,
+                jet_quality=q,
+            )["reassignment_probability"]
             do_reassign = rng.random_sample(len(valid)) < p_reassign
             for ii in np.where(do_reassign)[0]:
                 deta = eta_new[ii] - eta_new

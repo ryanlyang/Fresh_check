@@ -1392,6 +1392,21 @@ def _reused_model_dependencies(name: str) -> tuple[str, ...]:
     )
 
 
+def _reconstructor_variant_environment(
+    name: str,
+    *,
+    common_env: Mapping[str, str],
+    reconstructor_env: Mapping[str, str],
+) -> Mapping[str, str]:
+    if name not in ABPH_ORACLE_REFERENCE_VARIANTS:
+        return reconstructor_env
+    return {
+        **common_env,
+        # sbatch inherits the submitter's campaign-wide DDP setting.
+        "ABPH_RECONSTRUCTOR_PARALLELISM": "single",
+    }
+
+
 def _build_reused_model_graph(
     *,
     paths: AdaptiveBinaryCampaignPaths,
@@ -1411,7 +1426,11 @@ def _build_reused_model_graph(
     )
     for name in reconstructor_names:
         oracle_reference = name in ABPH_ORACLE_REFERENCE_VARIANTS
-        variant_environment = common_env if oracle_reference else reconstructor_env
+        variant_environment = _reconstructor_variant_environment(
+            name,
+            common_env=common_env,
+            reconstructor_env=reconstructor_env,
+        )
         jobs.append(
             SlurmJobSpec(
                 _variant_job_key(name),
@@ -1946,7 +1965,11 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
                     *_variant_dependencies(name),
                 )
             )
-            variant_environment = common_env if oracle_reference else reconstructor_env
+            variant_environment = _reconstructor_variant_environment(
+                name,
+                common_env=common_env,
+                reconstructor_env=reconstructor_env,
+            )
             jobs.append(
                 SlurmJobSpec(
                     _variant_job_key(name),

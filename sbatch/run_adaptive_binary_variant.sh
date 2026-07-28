@@ -39,6 +39,13 @@ cmd=("${PYTHON_BIN}" -u "${ABPH_VARIANT_EXECUTOR}" --variant "${VARIANT}" --seed
 if [[ -n "${OUTPUT_DIR_OVERRIDE}" ]]; then
   cmd+=(--output-dir "${OUTPUT_DIR_OVERRIDE}")
 fi
+if [[ -n "${ABPH_MAXIMUM_UPDATES:-}" ]]; then
+  [[ "${ABPH_MAXIMUM_UPDATES}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ABPH_MAXIMUM_UPDATES must be a positive integer" >&2
+    exit 2
+  }
+  cmd+=(--maximum-updates "${ABPH_MAXIMUM_UPDATES}")
+fi
 rank_cmd=("${cmd[@]}")
 if [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]]; then
   rank_cmd=(bash "${PROJECT_DIR}/sbatch/run_with_adaptive_binary_ram_workspace.sh" "${cmd[@]}")

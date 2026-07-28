@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+from pathlib import Path
 from typing import Any, Mapping
 
 from .contracts import require_sha256, validate_content_hash, with_content_hash
@@ -28,7 +30,8 @@ REQUIRED_MEASUREMENTS = (
 def build_storage_measurements(
     *,
     measurements: Mapping[str, float | int],
-    evidence_hashes: Mapping[str, str],
+    evidence_hashes: Mapping[str, str] | None = None,
+    source_evidence: Mapping[str, Mapping[str, Any]] | None = None,
     measurement_profile: str,
 ) -> dict[str, Any]:
     if measurement_profile not in {"production_source_evidence", "miniature_test"}:
@@ -42,19 +45,47 @@ def build_storage_measurements(
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"storage measurement {key} must be finite and nonnegative")
         normalized[key] = int(value) if value.is_integer() else value
-    evidence = {
+    evidence_hashes = evidence_hashes or {}
+    hashes = {
         str(key): require_sha256(value, name=f"evidence_hashes.{key}")
         for key, value in sorted(evidence_hashes.items())
     }
+    evidence: dict[str, dict[str, Any]] = {}
+    for key, raw in sorted((source_evidence or {}).items()):
+        path = Path(str(raw["path"])).resolve()
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(f"storage evidence is absent or unsafe: {path}")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_sha = digest.hexdigest()
+        actual_bytes = int(path.stat().st_size)
+        if "sha256" in raw and str(raw["sha256"]) != actual_sha:
+            raise ValueError(f"storage evidence hash mismatch for {key}")
+        if "bytes" in raw and int(raw["bytes"]) != actual_bytes:
+            raise ValueError(f"storage evidence byte count mismatch for {key}")
+        if key in hashes and hashes[key] != actual_sha:
+            raise ValueError(f"storage evidence hash sources disagree for {key}")
+        hashes[str(key)] = actual_sha
+        evidence[str(key)] = {
+            "path": str(path),
+            "sha256": actual_sha,
+            "bytes": actual_bytes,
+            "purpose": str(raw.get("purpose", key)),
+        }
     if measurement_profile == "production_source_evidence" and not evidence:
-        raise ValueError("production measurements require source-evidence hashes")
+        raise ValueError(
+            "production measurements require authenticated source-evidence files"
+        )
     return with_content_hash(
         {
             "contract": STORAGE_MEASUREMENTS_CONTRACT,
             "schema_version": 1,
             "measurement_profile": measurement_profile,
             "measurements": normalized,
-            "evidence_hashes": evidence,
+            "evidence_hashes": hashes,
+            "source_evidence": evidence,
             "target_projection_formula": (
                 "events*K*D*bytes_per_scalar_plus_logits_plus_identity"
             ),
@@ -74,6 +105,7 @@ def validate_storage_measurements(payload: Mapping[str, Any]) -> str:
     build_storage_measurements(
         measurements=payload["measurements"],
         evidence_hashes=payload["evidence_hashes"],
+        source_evidence=payload.get("source_evidence", {}),
         measurement_profile=str(payload["measurement_profile"]),
     )
     return digest
@@ -96,6 +128,7 @@ def miniature_storage_measurements() -> dict[str, Any]:
             "gpu_predictor_jets_per_second": 1,
         },
         evidence_hashes={},
+        source_evidence={},
         measurement_profile="miniature_test",
     )
 

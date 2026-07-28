@@ -24,7 +24,7 @@ from .provenance import (
     build_raw_input_schema,
     initialize_artifact_layout,
 )
-from .registry import build_registries, resolve_run_id
+from .registry import RUN_COMPONENTS, build_registries, resolve_run_id
 from .replicas import build_hlt_replica_manifest
 from .splits import (
     RetbSplitConfig,
@@ -129,7 +129,7 @@ def build_step1_bundle(
     run_id_examples = {
         stage: resolve_run_id(
             stage=stage,
-            component="CONTRACT_EXAMPLE",
+            component=RUN_COMPONENTS[stage][0],
             seed=101,
             configuration={"campaign_spec_sha256": campaign_spec["content_hash"]},
         )

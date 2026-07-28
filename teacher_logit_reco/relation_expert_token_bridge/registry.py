@@ -21,6 +21,27 @@ TOKEN_SHAPES = {
     "S16_64": {"K": 16, "D": 64},
 }
 PIPELINE_SEEDS = (101, 202, 303)
+RUN_COMPONENTS = {
+    "A": ("DATA_AUDIT", "HLT_V3_AUDIT", "O_BASE", "O_WIDE"),
+    "B": ("OFFLINE_EXPERT", "TOKEN_SHAPE", "OPTIMIZATION_CONTROL"),
+    "C": ("OFFLINE_FUSION", "COMPLEMENTARITY", "CAPACITY_CONTROL"),
+    "D": ("HLT_EXPERT", "NATIVE_HLT_FUSION"),
+    "E": ("BRIDGE_PILOT", "BRIDGE_TARGET", "TARGET_TUPLE"),
+    "F": ("OFFLINE_TARGET_CACHE", "TOKEN_NORMALIZER"),
+    "G": ("PREDICTOR", "UNCERTAINTY_CALIBRATOR"),
+    "H": ("PREDICTOR_BUNDLE", "ORACLE_SUBSTITUTION"),
+    "I": ("JOINT_PREDICTOR", "BRIDGE_FINETUNE"),
+    "J": ("TOKEN_REFINER", "FINAL_ADAPTER", "UNRESTRICTED_FUSION"),
+    "K": ("ROBUSTNESS", "SEMANTIC_CONTROL"),
+    "L": ("CONFIRMATION_500K", "SCALE_SHORTLIST"),
+    "M": ("SCALE_GRAPH_3M",),
+    "N": (
+        "STACK_VAL_INFERENCE",
+        "SCALE_FINALIST_SELECTOR",
+        "FINALIST_CONTROL",
+        "FINAL_TEST",
+    ),
+}
 
 
 def _registry(name: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -47,6 +68,10 @@ def resolve_run_id(
         raise ValueError("stage must be one of A through N")
     if re.fullmatch(r"[A-Z0-9][A-Z0-9_]{0,95}", component_key) is None:
         raise ValueError("component ID is unsafe")
+    if component_key not in RUN_COMPONENTS[stage_key]:
+        raise ValueError(
+            f"component {component_key!r} is not registered for Stage {stage_key}"
+        )
     if int(seed) < 0:
         raise ValueError("seed must be nonnegative")
     digest = canonical_sha256(
@@ -403,25 +428,8 @@ def build_registries() -> dict[str, dict[str, Any]]:
                 "sha256_canonical_json_of_stage_component_seed_configuration"
             ),
             "stage_component_namespaces": {
-                "A": ["DATA_AUDIT", "HLT_V3_AUDIT", "O_BASE", "O_WIDE"],
-                "B": ["OFFLINE_EXPERT", "TOKEN_SHAPE", "OPTIMIZATION_CONTROL"],
-                "C": ["OFFLINE_FUSION", "COMPLEMENTARITY", "CAPACITY_CONTROL"],
-                "D": ["HLT_EXPERT", "NATIVE_HLT_FUSION"],
-                "E": ["BRIDGE_PILOT", "BRIDGE_TARGET", "TARGET_TUPLE"],
-                "F": ["OFFLINE_TARGET_CACHE", "TOKEN_NORMALIZER"],
-                "G": ["PREDICTOR", "UNCERTAINTY_CALIBRATOR"],
-                "H": ["PREDICTOR_BUNDLE", "ORACLE_SUBSTITUTION"],
-                "I": ["JOINT_PREDICTOR", "BRIDGE_FINETUNE"],
-                "J": ["TOKEN_REFINER", "FINAL_ADAPTER", "UNRESTRICTED_FUSION"],
-                "K": ["ROBUSTNESS", "SEMANTIC_CONTROL"],
-                "L": ["CONFIRMATION_500K", "SCALE_SHORTLIST"],
-                "M": ["SCALE_GRAPH_3M"],
-                "N": [
-                    "STACK_VAL_INFERENCE",
-                    "SCALE_FINALIST_SELECTOR",
-                    "FINALIST_CONTROL",
-                    "FINAL_TEST",
-                ],
+                stage: list(components)
+                for stage, components in RUN_COMPONENTS.items()
             },
             "configuration_axes_are_registry_ids_only": True,
             "scientific_result_may_change_run_id": False,
@@ -468,6 +476,7 @@ __all__ = [
     "EXPERT_ORDER",
     "PIPELINE_SEEDS",
     "REGISTRY_CONTRACT",
+    "RUN_COMPONENTS",
     "TOKEN_SHAPES",
     "build_registries",
     "resolve_run_id",

@@ -26,6 +26,7 @@ from .storage import (
     build_storage_measurements,
     miniature_storage_measurements,
 )
+from .workflow import authorize_dataset_access, validate_campaign_source
 
 __all__ = [
     "CAMPAIGN_SPEC_CONTRACT",
@@ -38,6 +39,7 @@ __all__ = [
     "build_registries",
     "build_step1_bundle",
     "build_storage_measurements",
+    "authorize_dataset_access",
     "canonical_sha256",
     "event_rng_seed",
     "load_hashed_json",
@@ -48,5 +50,6 @@ __all__ = [
     "resolve_run_id",
     "source_snapshot",
     "validate_content_hash",
+    "validate_campaign_source",
     "validate_step1_bundle",
 ]
