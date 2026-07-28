@@ -34,9 +34,36 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.storage_quota import (
     write_quota_managed_bytes,
     write_storage_projection,
 )
+from scripts.write_adaptive_binary_job_failure import write_job_failure_report
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_streaming_job_failure_report_is_bounded_and_quota_managed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "campaign"
+    initialize_storage_accounting(root, profile=ABPH_STREAMING_STORAGE_PROFILE)
+    stderr_log = tmp_path / "rank-zero.err"
+    stderr_log.write_bytes(b"discarded-prefix\n" + b"x" * 200 + b"\nexact failure\n")
+
+    destination, payload = write_job_failure_report(
+        root,
+        variant="B1_semantic_query_root",
+        job_id="20266",
+        exit_status=143,
+        stderr_log=stderr_log,
+        maximum_bytes=64,
+    )
+
+    assert destination.is_file()
+    assert payload["stderr_retained_bytes"] == 64
+    assert payload["stderr_truncated"] is True
+    assert payload["stderr_tail"].endswith("exact failure\n")
+    ledger = json.loads(storage_paths(root)["ledger"].read_text(encoding="utf-8"))
+    assert str(destination.resolve()) in ledger["committed_artifacts"]
+    assert not ledger["active_reservations"]
 
 
 def test_quota_managed_file_publication_streams_ephemeral_artifact(

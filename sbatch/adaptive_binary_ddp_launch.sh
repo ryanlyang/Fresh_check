@@ -73,6 +73,14 @@ abph_fresh_run_srun_with_port_retry() {
     elapsed="$(( $(date +%s) - started ))"
     attempt="$((attempt + 1))"
 
+    if [[ -n "${abph_failure_log:-}" && -s "${abph_failure_log}" ]] &&
+       ! grep -Eqi \
+         'EADDRINUSE|address already in use|server socket has failed to listen' \
+         "${abph_failure_log}"; then
+      echo "ABPH DDP launch produced a non-rendezvous failure; no port retry" >&2
+      return "${status}"
+    fi
+
     if ((attempt >= max_attempts || elapsed > quick_failure_seconds)); then
       echo "ABPH DDP launch failed with status ${status} after ${elapsed}s; no further port retry" >&2
       return "${status}"

@@ -31,6 +31,32 @@ OUTPUT_DIR_OVERRIDE="${3:-}"
 export PYTHONNOUSERSITE=1
 fresh_setup
 fresh_require_file "${ABPH_VARIANT_EXECUTOR}"
+
+abph_failure_log=""
+abph_finalize_variant_job() {
+  local status="${1:-1}"
+  trap - EXIT
+  if [[ "${status}" != "0" && -n "${abph_failure_log}" && -f "${abph_failure_log}" ]]; then
+    "${PYTHON_BIN}" -u scripts/write_adaptive_binary_job_failure.py \
+      --campaign-root "${ABPH_ROOT}" \
+      --variant "${VARIANT}" \
+      --job-id "${SLURM_JOB_ID:-local}" \
+      --exit-status "${status}" \
+      --stderr-log "${abph_failure_log}" \
+      --maximum-bytes "${ABPH_FAILURE_LOG_MAX_BYTES:-262144}" || true
+  fi
+  if [[ -n "${abph_failure_log}" ]]; then
+    rm -f -- "${abph_failure_log}"
+  fi
+  exit "${status}"
+}
+
+if [[ "${ABPH_STORAGE_PROFILE:-cache_heavy_v1}" == "streaming_30gb_v1" ]]; then
+  abph_failure_log="$(mktemp "/tmp/abph_${SLURM_JOB_ID:-local}_${VARIANT}.XXXXXX.err")"
+  trap 'abph_finalize_variant_job "$?"' EXIT
+  exec 2>>"${abph_failure_log}"
+fi
+
 if [[ "${VARIANT}" =~ ^[BCD] ]]; then
   "${PYTHON_BIN}" scripts/validate_adaptive_binary_orchestration.py preflight \
     --path "${ABPH_ROOT}/audits/actual_target_feasibility.json"

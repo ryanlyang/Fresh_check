@@ -826,6 +826,8 @@ def test_adaptive_binary_ddp_launcher_retries_only_quick_startup_failures() -> N
         "abph_ddp_master_port",
         'MASTER_PORT="$(abph_ddp_master_port',
         'if fresh_run srun "$@"; then',
+        "ABPH DDP launch produced a non-rendezvous failure",
+        "EADDRINUSE|address already in use|server socket has failed to listen",
         "elapsed > quick_failure_seconds",
         "retrying with a different rendezvous port",
         "no further port retry",
@@ -1183,6 +1185,21 @@ def test_runtime_batch_contracts_have_a_real_slurm_producer() -> None:
         "measure_full_optimizer_step",
     ):
         assert required in probe
+
+
+def test_streaming_variant_worker_persists_a_bounded_failure_report() -> None:
+    worker = (
+        REPO_ROOT / "sbatch" / "run_adaptive_binary_variant.sh"
+    ).read_text(encoding="utf-8")
+    reporter = (
+        REPO_ROOT / "scripts" / "write_adaptive_binary_job_failure.py"
+    ).read_text(encoding="utf-8")
+
+    assert "abph_finalize_variant_job" in worker
+    assert "write_adaptive_binary_job_failure.py" in worker
+    assert 'ABPH_FAILURE_LOG_MAX_BYTES:-262144' in worker
+    assert "bounded_job_failure_report" in reporter
+    assert "write_quota_managed_json" in reporter
 
 
 def test_canonical_shell_forwards_step10_acceptance_artifact() -> None:
