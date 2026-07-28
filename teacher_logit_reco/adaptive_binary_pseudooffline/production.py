@@ -1983,7 +1983,9 @@ def reconstructor_step(
                 "shared deployment output does not belong to the supplied shared forward"
             )
     root_state = AccountingState.from_ledger(
-        target_tensors.root_ledger if model.oracle_root else compiled.root_ledger
+        target_tensors.root_ledger
+        if model.oracle_root or model.oracle_parent_rollout
+        else compiled.root_ledger
     )
     with profile_span(runtime_profiler, "matching_loss_construction"):
         root_targets = build_root_residual_targets(
@@ -2139,6 +2141,16 @@ def reconstructor_step(
                 supervised if model.oracle_parent_rollout else rollout,
                 depth_count,
             )
+            if model.oracle_parent_rollout:
+                active_rollout = replace(
+                    active_rollout,
+                    mode="rollout",
+                    diagnostics={
+                        **dict(active_rollout.diagnostics),
+                        "oracle_parents_supplied": True,
+                        "predicted_children_rollout_aligned": True,
+                    },
+                )
             active_targets = _truncate_targets(target_tensors, depth_count)
             if model.oracle_groups and depth_count == len(ABPH_LEVEL_CAPACITIES):
                 oracle_root_ledger = target_tensors.root_ledger
@@ -2209,7 +2221,11 @@ def reconstructor_step(
                 raise RuntimeError("renderer supervision requires an active rollout")
             if depth_count != len(ABPH_LEVEL_CAPACITIES):
                 raise RuntimeError("renderer phase requires the complete depth-32 hierarchy")
-            render_hierarchy = active_rollout if model.oracle_groups else rollout
+            render_hierarchy = (
+                active_rollout
+                if model.oracle_groups or model.oracle_parent_rollout
+                else rollout
+            )
             if model.global_particle_set:
                 render_hierarchy = _root_only_renderer_hierarchy(render_hierarchy)
             if shared_deployment is not None:

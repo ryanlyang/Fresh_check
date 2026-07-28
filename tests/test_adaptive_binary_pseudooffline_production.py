@@ -389,6 +389,22 @@ def test_d5_oracle_groups_share_the_offline_root_and_close_particle_counts():
     result = reconstructor_step(model, _reconstruction_batch(), _phase3_context())
 
     assert result.metrics["oracle_groups_supplied"] is True
+
+
+def test_c9_oracle_parents_use_rollout_alignment_for_predicted_children():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="C9_oracle_parent_rollout", smoke=True
+    ).eval()
+    model.renderer.config = replace(
+        model.renderer.config, exact_nbody_projection=False
+    )
+
+    result = reconstructor_step(model, _reconstruction_batch(), _phase3_context())
+
+    assert result.metrics["oracle_parent_rollout"] is True
+    assert result.metrics["rollout_forward_executed"] is True
+    assert "frontier" in result.loss_terms
+    assert bool(torch.isfinite(result.loss_terms["frontier"]))
     assert result.metrics["rollout_forward_executed"] is True
     assert "particle" in result.loss_terms
     assert bool(torch.isfinite(result.loss_terms["particle"]))

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from scripts.repair_adaptive_binary_runtime_batch_contract import (
+    _drop_completed_afterok_dependencies,
+    _job_replacements,
     _live_dependency,
+    _replace_dependency_if_present,
     repaired_command,
     replace_dependency_job,
 )
@@ -106,3 +109,21 @@ def test_live_dependency_strips_all_slurm_state_annotations(monkeypatch) -> None
     )
 
     assert _live_dependency("18938") == "afterok:19416,afterok:19619,afterok:77"
+
+
+def test_contract_repair_can_replace_a_companion_failed_model_dependency() -> None:
+    assert _job_replacements(["18932=19619"]) == {"18932": "19619"}
+    dependency = _replace_dependency_if_present(
+        "afterok:19700,afterok:18932",
+        old_job_id="18932",
+        new_job_id="19619",
+    )
+    assert dependency == "afterok:19700,afterok:19619"
+
+
+def test_contract_repair_drops_completed_companion_dependencies() -> None:
+    states = {"19416": "COMPLETED", "19700": "PENDING"}
+    assert _drop_completed_afterok_dependencies(
+        "afterok:19416,afterok:19700",
+        state_for_job=states.__getitem__,
+    ) == "afterok:19700"

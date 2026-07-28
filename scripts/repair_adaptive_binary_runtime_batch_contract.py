@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
     _job_environment,
     _require_pending,
+    _slurm_job_state,
     _source_identity,
 )
 
@@ -31,6 +32,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--variant", required=True)
     parser.add_argument("--project-dir", default="/home/ryreu/atlas/Fresh_check")
     parser.add_argument("--log-dir")
+    parser.add_argument(
+        "--dependency-replacement",
+        action="append",
+        default=[],
+        metavar="OLD_JOB_ID=NEW_JOB_ID",
+        help="Replace an additional failed prerequisite while rewiring consumers.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -159,6 +167,68 @@ def replace_dependency_job(
     return repaired
 
 
+def _job_replacements(values: Sequence[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        old_job_id, separator, new_job_id = str(value).partition("=")
+        if (
+            not separator
+            or not old_job_id.isdigit()
+            or not new_job_id.isdigit()
+        ):
+            raise ValueError(
+                "--dependency-replacement must use OLD_JOB_ID=NEW_JOB_ID"
+            )
+        if old_job_id in result:
+            raise ValueError(f"duplicate replacement for job {old_job_id}")
+        result[old_job_id] = new_job_id
+    return result
+
+
+def _replace_dependency_if_present(
+    dependency: str,
+    *,
+    old_job_id: str,
+    new_job_id: str,
+) -> str:
+    old_pattern = re.compile(rf"(?<!\d){re.escape(old_job_id)}(?!\d)")
+    new_pattern = re.compile(rf"(?<!\d){re.escape(new_job_id)}(?!\d)")
+    old_count = len(old_pattern.findall(dependency))
+    new_count = len(new_pattern.findall(dependency))
+    if old_count == 1 and new_count == 0:
+        return replace_dependency_job(
+            dependency,
+            old_job_id=old_job_id,
+            new_job_id=new_job_id,
+        )
+    if old_count == 0 and new_count in {0, 1}:
+        return dependency
+    raise ValueError(
+        "dependency replacement is ambiguous: "
+        f"old_count={old_count}, new_count={new_count}, dependency={dependency}"
+    )
+
+
+def _drop_completed_afterok_dependencies(
+    dependency: str,
+    *,
+    state_for_job: Any,
+) -> str:
+    retained: list[str] = []
+    for term in dependency.split(","):
+        pieces = term.split(":")
+        if len(pieces) < 2 or pieces[0] != "afterok":
+            raise ValueError(f"unsupported dependency term: {term}")
+        active_ids = [
+            job_id
+            for job_id in pieces[1:]
+            if state_for_job(job_id) != "COMPLETED"
+        ]
+        if active_ids:
+            retained.append("afterok:" + ":".join(active_ids))
+    return ",".join(retained)
+
+
 def _live_dependency(job_id: str) -> str:
     completed = subprocess.run(
         ("scontrol", "show", "job", "-o", job_id),
@@ -201,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     project_dir = Path(args.project_dir).resolve()
     log_dir = Path(args.log_dir or project_dir / "fresh_check_logs").resolve()
     manifest = Path(args.submission_manifest).resolve()
+    companion_replacements = _job_replacements(args.dependency_replacement)
     rows = _rows(manifest)
     variant = str(args.variant)
     contract_key = f"runtime_batch_contract:{variant}"
@@ -266,6 +337,21 @@ def main(argv: list[str] | None = None) -> int:
             old_job_id=old_contract,
             new_job_id=new_contract,
         )
+        for old_job_id, new_job_id in companion_replacements.items():
+            dependency = _replace_dependency_if_present(
+                dependency,
+                old_job_id=old_job_id,
+                new_job_id=new_job_id,
+            )
+        if not args.dry_run:
+            dependency = _drop_completed_afterok_dependencies(
+                dependency,
+                state_for_job=_slurm_job_state,
+            )
+        if not dependency:
+            raise RuntimeError(
+                f"repairing {row['key']} removed every dependency"
+            )
         if args.dry_run:
             print(
                 shlex.join(
