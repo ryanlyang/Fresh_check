@@ -142,7 +142,9 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
         *orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS,
         *orchestration_module.ABPH_RENDERER_VARIANTS,
     )
-    contract_job_count = len(reconstructor_names) * (
+    contract_job_count = len(
+        orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    ) * (
         len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1
     )
     assert len(graph) == 81 + contract_job_count
@@ -170,13 +172,38 @@ def test_full_graph_is_complete_and_hard_gated(tmp_path: Path) -> None:
         job for job in graph if job.stage in {"reconstructor", "renderer"}
     ]
     assert reconstructor_jobs
-    assert all(job.launcher == "srun" for job in reconstructor_jobs)
-    assert all(job.distributed_world_size == 4 for job in reconstructor_jobs)
-    assert all(job.nodes == 4 for job in reconstructor_jobs)
+    learned_jobs = [
+        job
+        for job in reconstructor_jobs
+        if job.arguments[0]
+        in orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    ]
+    oracle_jobs = [
+        job
+        for job in reconstructor_jobs
+        if job.arguments[0] in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
+    ]
+    assert all(job.launcher == "srun" for job in learned_jobs)
+    assert all(job.distributed_world_size == 4 for job in learned_jobs)
+    assert all(job.nodes == 4 for job in learned_jobs)
+    assert {job.arguments[0] for job in oracle_jobs} == set(
+        orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
+    )
+    assert all(job.launcher == "direct" for job in oracle_jobs)
+    assert all(job.distributed_world_size == 1 for job in oracle_jobs)
+    assert all(job.nodes == 1 for job in oracle_jobs)
     for name in reconstructor_names:
         contract_key = f"runtime_batch_contract:{name}"
-        assert contract_key in keys
         model_job = next(job for job in graph if job.key == f"variant:{name}")
+        if name in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS:
+            assert contract_key not in keys
+            assert contract_key not in model_job.dependencies
+            assert not any(
+                job.key.startswith(f"runtime_batch_probe:{name}:")
+                for job in graph
+            )
+            continue
+        assert contract_key in keys
         assert contract_key in model_job.dependencies
         probes = [
             job
@@ -209,8 +236,21 @@ def test_seven_day_graph_uses_eight_rank_reconstructors_and_valid_probes(
         job for job in graph if job.stage in {"reconstructor", "renderer"}
     ]
     assert reconstructors
-    assert all(job.nodes == 8 for job in reconstructors)
-    assert all(job.distributed_world_size == 8 for job in reconstructors)
+    learned = [
+        job
+        for job in reconstructors
+        if job.arguments[0]
+        in orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    ]
+    oracle = [
+        job
+        for job in reconstructors
+        if job.arguments[0] in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
+    ]
+    assert all(job.nodes == 8 for job in learned)
+    assert all(job.distributed_world_size == 8 for job in learned)
+    assert all(job.nodes == 1 for job in oracle)
+    assert all(job.distributed_world_size == 1 for job in oracle)
     probes = [job for job in graph if job.stage == "runtime_batch_probe"]
     assert probes
     assert all(job.distributed_world_size == 8 for job in probes)
@@ -225,7 +265,7 @@ def test_seven_day_graph_uses_eight_rank_reconstructors_and_valid_probes(
     assert all(
         job.environment["ABPH_RECONSTRUCTOR_SCHEDULE_POLICY"]
         == "accelerated_screening_v2_7day"
-        for job in reconstructors
+        for job in learned
     )
 
 
@@ -395,8 +435,8 @@ def test_models_reuse_is_bound_to_current_cache_and_teacher_artifacts(
     )
     assert require_partial_stage_inputs(config)["checked"]
     assert len(loaded_contracts) == len(
-        orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS
-    ) + len(orchestration_module.ABPH_RENDERER_VARIANTS)
+        orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    )
 
     hlt_metadata = root / "inputs" / "hlt_cache" / "model_val_fixed_hlt_metadata.json"
     stale = json.loads(hlt_metadata.read_text(encoding="utf-8"))
@@ -448,12 +488,17 @@ def test_ddp4_topology_is_scoped_to_reconstructors(tmp_path: Path) -> None:
     )
     graph = build_submission_graph(config)
     for job in graph:
-        if job.stage in {"reconstructor", "renderer", "runtime_batch_probe"}:
+        distributed_reconstructor = (
+            job.stage in {"reconstructor", "renderer"}
+            and job.arguments[0]
+            in orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+        )
+        if distributed_reconstructor or job.stage == "runtime_batch_probe":
             assert (job.nodes, job.ntasks, job.ntasks_per_node) == (4, 4, 1)
             assert job.resolved_gpus_per_node == 1
             assert job.distributed_world_size == 4
             assert job.launcher == "srun"
-            if job.stage in {"reconstructor", "renderer"}:
+            if distributed_reconstructor:
                 assert job.environment["ABPH_RECONSTRUCTOR_PARALLELISM"] == "ddp4"
                 assert job.environment["ABPH_DISTRIBUTED_WORLD_SIZE"] == "4"
         else:
@@ -594,9 +639,8 @@ def test_canonical_submitter_executes_full_tigris_dry_run(tmp_path: Path) -> Non
     assert result.returncode == 0
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["contract"] == ABPH_SLURM_ORCHESTRATION_CONTRACT
-    contract_job_count = (
-        len(orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS)
-        + len(orchestration_module.ABPH_RENDERER_VARIANTS)
+    contract_job_count = len(
+        orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
     ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
     assert len(payload["jobs"]) == 81 + contract_job_count
     assert payload["resource_profile"]["account"] == "reu-aisocial"
@@ -659,10 +703,15 @@ def test_canonical_submitter_emits_four_node_reconstructor_commands(tmp_path: Pa
     jobs_by_key = {row["key"]: row for row in payload["jobs"]}
     commands_by_key = {row["key"]: row for row in payload["submission_commands"]}
     reconstructor_keys = set(payload["reconstructor_parallelism"]["reconstructor_job_keys"])
+    oracle_keys = set(payload["reconstructor_parallelism"]["oracle_reference_job_keys"])
     probe_keys = {
         key for key, row in jobs_by_key.items() if row["stage"] == "runtime_batch_probe"
     }
     assert reconstructor_keys
+    assert oracle_keys == {
+        f"variant:{name}"
+        for name in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
+    }
     for key, job in jobs_by_key.items():
         command = commands_by_key[key]["command"]
         if key in reconstructor_keys or key in probe_keys:
@@ -753,9 +802,8 @@ def test_approved_highdata_cli_executes_with_quarter_independent_graph(tmp_path:
     assert payload["campaign_mode"] == "highdata"
     assert payload["split_sizes"]["model_train"] == 5_000_000
     assert payload["resource_profile"]["partition"] == "tigris"
-    contract_job_count = (
-        len(orchestration_module.ABPH_RECONSTRUCTOR_VARIANTS)
-        + len(orchestration_module.ABPH_RENDERER_VARIANTS)
+    contract_job_count = len(
+        orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
     ) * (len(orchestration_module.ABPH_RUNTIME_BATCH_PROBE_SPECS) + 1)
     assert len(payload["jobs"]) == 81 + contract_job_count
 

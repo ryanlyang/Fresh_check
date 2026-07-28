@@ -55,6 +55,7 @@ def test_runtime_batch_repair_preserves_probe_topology_and_removes_old_gate() ->
         },
         label="C0_probe",
         dependencies=(),
+        log_dir=None,
     )
     assert "--nodes=8" in command
     assert "--ntasks=8" in command
@@ -65,3 +66,26 @@ def test_runtime_batch_repair_preserves_probe_topology_and_removes_old_gate() ->
         "root_hierarchy",
         "64",
     ]
+
+
+def test_runtime_batch_repair_can_retain_small_failure_logs(tmp_path) -> None:
+    command = repaired_command(
+        {
+            "key": "runtime_batch_probe:D5_oracle_groups_particles:renderer_distribution:b32",
+            "command": [
+                "sbatch",
+                "--parsable",
+                "--output=/dev/null",
+                "--error=/dev/null",
+                "/repo/sbatch/run_adaptive_binary_runtime_batch_probe.sh",
+                "D5_oracle_groups_particles",
+                "renderer_distribution",
+                "32",
+            ],
+        },
+        label="D5_probe",
+        dependencies=(),
+        log_dir=tmp_path,
+    )
+    assert f"--output={tmp_path}/abph_repair_D5_probe_%j.out" in command
+    assert f"--error={tmp_path}/abph_repair_D5_probe_%j.err" in command

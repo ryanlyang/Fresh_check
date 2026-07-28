@@ -70,6 +70,15 @@ ABPH_RECONSTRUCTOR_VARIANTS: tuple[str, ...] = tuple(
 ABPH_RENDERER_VARIANTS: tuple[str, ...] = tuple(
     name for name in ABPH_EXPECTED_VARIANT_NAMES if variant_spec(name).tier == "D"
 )
+ABPH_ORACLE_REFERENCE_VARIANTS: tuple[str, ...] = (
+    "B4_oracle_root_diagnostic",
+    "D6_true_offline_particles",
+)
+ABPH_TRAINED_RECONSTRUCTOR_VARIANTS: tuple[str, ...] = tuple(
+    name
+    for name in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS)
+    if name not in ABPH_ORACLE_REFERENCE_VARIANTS
+)
 ABPH_NEURAL_TAGGER_VARIANTS: tuple[str, ...] = tuple(
     name
     for name in ABPH_EXPECTED_VARIANT_NAMES
@@ -984,7 +993,7 @@ def require_partial_stage_inputs(config: AdaptiveBinarySubmissionConfig) -> dict
             "ddp4": 4,
             "ddp8": 8,
         }[config.reconstructor_parallelism]
-        for member in (*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS):
+        for member in ABPH_TRAINED_RECONSTRUCTOR_VARIANTS:
             resolved = resolve_variant_config(member)
             grouping = str(
                 resolved["model"]["hierarchy"].get(
@@ -1873,31 +1882,48 @@ def build_submission_graph(config: AdaptiveBinarySubmissionConfig) -> tuple[Slur
         )
         jobs.extend(
             _runtime_batch_contract_jobs(
-                names=reconstructor_names,
+                names=ABPH_TRAINED_RECONSTRUCTOR_VARIANTS,
                 dependencies=(reconstructor_preflight,),
                 common_env=common_env,
                 topology=topology,
             )
         )
         for name in reconstructor_names:
+            oracle_reference = name in ABPH_ORACLE_REFERENCE_VARIANTS
+            variant_dependencies = (
+                _variant_dependencies(name)
+                if oracle_reference
+                else (
+                    _runtime_batch_contract_job_key(name),
+                    *_variant_dependencies(name),
+                )
+            )
+            variant_environment = common_env if oracle_reference else reconstructor_env
             jobs.append(
                 SlurmJobSpec(
                     _variant_job_key(name),
                     "renderer" if variant_spec(name).tier == "D" else "reconstructor",
                     "run_adaptive_binary_variant.sh",
                     (name,),
-                    (
-                        _runtime_batch_contract_job_key(name),
-                        *_variant_dependencies(name),
-                    ),
+                    variant_dependencies,
                     gpu=True,
-                    environment=reconstructor_env,
-                    nodes=int(topology["nodes"]),
-                    ntasks=int(topology["ntasks"]),
-                    ntasks_per_node=int(topology["ntasks_per_node"]),
-                    gpus_per_node=int(topology["gpus_per_node"]),
-                    distributed_world_size=int(topology["distributed_world_size"]),
-                    launcher=str(topology["launcher"]),
+                    environment=variant_environment,
+                    nodes=(1 if oracle_reference else int(topology["nodes"])),
+                    ntasks=(1 if oracle_reference else int(topology["ntasks"])),
+                    ntasks_per_node=(
+                        1 if oracle_reference else int(topology["ntasks_per_node"])
+                    ),
+                    gpus_per_node=(
+                        1 if oracle_reference else int(topology["gpus_per_node"])
+                    ),
+                    distributed_world_size=(
+                        1
+                        if oracle_reference
+                        else int(topology["distributed_world_size"])
+                    ),
+                    launcher=(
+                        "direct" if oracle_reference else str(topology["launcher"])
+                    ),
                 )
             )
             if streaming:
@@ -2292,7 +2318,18 @@ def submission_manifest(
 ) -> dict[str, Any]:
     topology = dict(config.reconstructor_topology)
     topology["reconstructor_job_keys"] = [
-        job.key for job in jobs if job.stage in {"reconstructor", "renderer"}
+        job.key
+        for job in jobs
+        if job.stage in {"reconstructor", "renderer"}
+        and job.arguments
+        and job.arguments[0] in ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    ]
+    topology["oracle_reference_job_keys"] = [
+        job.key
+        for job in jobs
+        if job.stage in {"reconstructor", "renderer"}
+        and job.arguments
+        and job.arguments[0] in ABPH_ORACLE_REFERENCE_VARIANTS
     ]
     topology["parallelism_hash"] = canonical_hash(topology)
     tagger_topology = dict(config.tagger_topology)

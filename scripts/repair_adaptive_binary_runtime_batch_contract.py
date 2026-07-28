@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.repair_adaptive_binary_storage_acceptance_graph import (
     _job_environment,
     _require_pending,
+    _source_identity,
 )
 
 
@@ -29,6 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--submission-manifest", required=True)
     parser.add_argument("--variant", required=True)
     parser.add_argument("--project-dir", default="/home/ryreu/atlas/Fresh_check")
+    parser.add_argument("--log-dir")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -57,6 +59,7 @@ def repaired_command(
     *,
     label: str,
     dependencies: Sequence[str],
+    log_dir: Path | None = None,
 ) -> list[str]:
     raw = row.get("command")
     if not isinstance(raw, list) or not raw:
@@ -78,11 +81,16 @@ def repaired_command(
     )
     if script_index is None:
         raise ValueError(f"{row.get('key')} lacks an sbatch worker")
-    options = [
-        f"--job-name=abph_repair_{label}",
-        "--output=/dev/null",
-        "--error=/dev/null",
-    ]
+    options = [f"--job-name=abph_repair_{label}"]
+    if log_dir is None:
+        options.extend(("--output=/dev/null", "--error=/dev/null"))
+    else:
+        options.extend(
+            (
+                f"--output={log_dir}/abph_repair_{label}_%j.out",
+                f"--error={log_dir}/abph_repair_{label}_%j.err",
+            )
+        )
     if dependencies:
         if not all(str(value).isdigit() for value in dependencies):
             raise ValueError(f"{label} has invalid dependency ids: {dependencies}")
@@ -97,9 +105,16 @@ def _submit(
     label: str,
     dependencies: Sequence[str],
     project_dir: Path,
+    log_dir: Path | None,
     dry_run: bool,
+    source_identity: tuple[str, str] | None = None,
 ) -> str:
-    command = repaired_command(row, label=label, dependencies=dependencies)
+    command = repaired_command(
+        row,
+        label=label,
+        dependencies=dependencies,
+        log_dir=log_dir,
+    )
     if dry_run:
         print(shlex.join(command))
         return f"DRYRUN_{label}"
@@ -107,7 +122,11 @@ def _submit(
         completed = subprocess.run(
             command,
             cwd=project_dir,
-            env=_job_environment(row, project_dir),
+            env=_job_environment(
+                row,
+                project_dir,
+                source_identity=source_identity,
+            ),
             check=True,
             capture_output=True,
             text=True,
@@ -177,6 +196,7 @@ def _archive_stale_evidence(root: Path, variant: str, *, dry_run: bool) -> Path:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = Path(args.project_dir).resolve()
+    log_dir = Path(args.log_dir or project_dir / "fresh_check_logs").resolve()
     manifest = Path(args.submission_manifest).resolve()
     rows = _rows(manifest)
     variant = str(args.variant)
@@ -198,7 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     if not consumers:
         raise RuntimeError(f"no consumers reference failed contract {old_contract}")
     if not args.dry_run:
+        log_dir.mkdir(parents=True, exist_ok=True)
         _require_pending(consumer_ids)
+    source_identity = None if args.dry_run else _source_identity(project_dir)
 
     root = manifest.parents[1]
     acceptance_path = root / "storage" / "storage_acceptance.json"
@@ -213,7 +235,9 @@ def main(argv: list[str] | None = None) -> int:
             label=f"{variant}_{index}",
             dependencies=(),
             project_dir=project_dir,
+            log_dir=log_dir,
             dry_run=args.dry_run,
+            source_identity=source_identity,
         )
         for index, row in enumerate(probes)
     ]
@@ -222,7 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         label=f"{variant}_contract",
         dependencies=new_probes,
         project_dir=project_dir,
+        log_dir=log_dir,
         dry_run=args.dry_run,
+        source_identity=source_identity,
     )
 
     rewired: list[dict[str, str]] = []

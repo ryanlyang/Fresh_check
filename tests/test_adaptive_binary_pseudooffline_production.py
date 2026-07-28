@@ -164,6 +164,29 @@ def _phase4_context() -> ReconstructorStepContext:
     )
 
 
+def _phase3_context() -> ReconstructorStepContext:
+    return ReconstructorStepContext(
+        curriculum=CurriculumState(
+            stage_index=6,
+            stage_key="phase3_renderer",
+            phase=3,
+            phase_name="particle_renderer",
+            global_update=1,
+            stage_update=1,
+            stage_maximum_updates=2,
+            active_capacity=32,
+            stage_progress=0.5,
+            teacher_forcing_probability=0.0,
+            distribution_weight=0.0,
+            supervised_capacities=(2, 4, 8, 16, 32),
+        ),
+        split="model_train",
+        mode="rollout",
+        validation=False,
+        teacher_forcing_probability=0.0,
+    )
+
+
 def _reference_all_at_once_deployment(
     model: AdaptiveBinaryReconstructorModel,
     shared: dict,
@@ -353,6 +376,22 @@ def test_phase4_rolls_and_renders_hypothesis_zero_exactly_once(monkeypatch):
     assert output.rendered_views["exclusive_kt"][0] is zero.rendered_views[
         "exclusive_kt"
     ][0]
+
+
+def test_d5_oracle_groups_share_the_offline_root_and_close_particle_counts():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="D5_oracle_groups_particles", smoke=True
+    ).eval()
+    model.renderer.config = replace(
+        model.renderer.config, exact_nbody_projection=False
+    )
+
+    result = reconstructor_step(model, _reconstruction_batch(), _phase3_context())
+
+    assert result.metrics["oracle_groups_supplied"] is True
+    assert result.metrics["rollout_forward_executed"] is True
+    assert "particle" in result.loss_terms
+    assert bool(torch.isfinite(result.loss_terms["particle"]))
 
 
 @pytest.mark.parametrize(

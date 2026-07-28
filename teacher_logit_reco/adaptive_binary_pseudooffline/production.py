@@ -64,6 +64,7 @@ from .hierarchy_decoder import (
     RecursiveHierarchyDecoder,
     RecursiveHierarchyDecoderConfig,
     RecursiveHierarchyOutput,
+    support_from_ledger,
 )
 from .hypothesis_distribution import (
     HierarchyHypothesis,
@@ -108,6 +109,7 @@ from .targets import (
     ABPH_TARGET_BUILDER_VERSION,
     GROUP_FEATURE_NAMES,
     PARTICLE_TARGET_NAMES,
+    TOPOLOGY_ACTIVE_SPLIT,
     TOPOLOGY_ACTIVE_TERMINAL,
     AdaptiveBinaryHierarchyLayout,
     AdaptiveBinaryTargetBatch,
@@ -2139,22 +2141,61 @@ def reconstructor_step(
             )
             active_targets = _truncate_targets(target_tensors, depth_count)
             if model.oracle_groups and depth_count == len(ABPH_LEVEL_CAPACITIES):
+                oracle_root_ledger = target_tensors.root_ledger
+                oracle_root_count = oracle_root_ledger[
+                    :, ROOT_FEATURE_NAMES.index("constituent_count")
+                ].round().long()
+                oracle_root = replace(
+                    active_rollout.root_frontier,
+                    ledger=oracle_root_ledger[:, None, :],
+                    support=support_from_ledger(oracle_root_ledger)[:, None, :],
+                    topology=torch.where(
+                        oracle_root_count[:, None] > 1,
+                        torch.full_like(
+                            active_rollout.root_frontier.topology,
+                            int(TOPOLOGY_ACTIVE_SPLIT),
+                        ),
+                        torch.full_like(
+                            active_rollout.root_frontier.topology,
+                            int(TOPOLOGY_ACTIVE_TERMINAL),
+                        ),
+                    ),
+                )
                 final = active_rollout.final_frontier
+                oracle_final_mask = target_tensors.level_masks[-1]
+                oracle_final_topology = torch.where(
+                    oracle_final_mask,
+                    torch.full_like(
+                        target_tensors.level_topology[-1],
+                        int(TOPOLOGY_ACTIVE_TERMINAL),
+                    ),
+                    target_tensors.level_topology[-1],
+                )
                 oracle_final = replace(
                     final,
                     ledger=target_tensors.level_ledgers[-1],
                     support=target_tensors.level_supports[-1],
-                    mask=target_tensors.level_masks[-1],
-                    topology=target_tensors.level_topology[-1],
+                    mask=oracle_final_mask,
+                    topology=oracle_final_topology,
                     parent_indices=target_tensors.level_parent_indices[-1],
+                )
+                oracle_levels = (
+                    *active_rollout.levels[:-1],
+                    replace(
+                        active_rollout.levels[-1],
+                        next_frontier=oracle_final,
+                    ),
                 )
                 active_rollout = replace(
                     active_rollout,
                     mode="rollout",
+                    root_frontier=oracle_root,
+                    levels=oracle_levels,
                     final_frontier=oracle_final,
                     diagnostics={
                         **dict(active_rollout.diagnostics),
                         "oracle_groups_supplied": True,
+                        "oracle_root_shared_with_groups": True,
                     },
                 )
             with profile_span(runtime_profiler, "matching_loss_construction"):
