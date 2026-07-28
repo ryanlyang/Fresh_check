@@ -49,6 +49,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-dir", default="/home/ryreu/atlas/Fresh_check")
     parser.add_argument("--log-dir")
     parser.add_argument("--variants", nargs="+", default=DEFAULT_VARIANTS)
+    parser.add_argument(
+        "--replacement-job",
+        action="append",
+        default=[],
+        metavar="VARIANT=JOB_ID",
+        help="Resume an interrupted repair using an already submitted replacement.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -195,6 +202,47 @@ def _contract_job_id(rows: Mapping[str, Mapping[str, Any]], variant: str) -> str
     return None if row is None else _numeric_job_id(row)
 
 
+def _reconcile_dependency_job(
+    dependency: str,
+    *,
+    old_job_id: str,
+    new_job_id: str,
+) -> tuple[str, bool]:
+    old_pattern = re.compile(rf"(?<!\d){re.escape(old_job_id)}(?!\d)")
+    new_pattern = re.compile(rf"(?<!\d){re.escape(new_job_id)}(?!\d)")
+    old_count = len(old_pattern.findall(dependency))
+    new_count = len(new_pattern.findall(dependency))
+    if old_count == 1 and new_count == 0:
+        return (
+            replace_dependency_job(
+                dependency,
+                old_job_id=old_job_id,
+                new_job_id=new_job_id,
+            ),
+            True,
+        )
+    if old_count == 0 and new_count == 1:
+        return dependency, False
+    raise ValueError(
+        "consumer dependency is neither cleanly old nor already repaired: "
+        f"old_count={old_count}, new_count={new_count}, dependency={dependency}"
+    )
+
+
+def _replacement_jobs(values: Sequence[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        variant, separator, job_id = str(value).partition("=")
+        if not separator or not variant or not job_id.isdigit():
+            raise ValueError(
+                "--replacement-job must use the form VARIANT=NUMERIC_JOB_ID"
+            )
+        if variant in result:
+            raise ValueError(f"duplicate replacement job for {variant}")
+        result[variant] = job_id
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = Path(args.project_dir).resolve()
@@ -202,11 +250,18 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = Path(args.log_dir or project_dir / "fresh_check_logs").resolve()
     rows = _rows(manifest)
     requested = tuple(dict.fromkeys(str(value) for value in args.variants))
+    replacements = _replacement_jobs(args.replacement_job)
     unknown = [
         variant for variant in requested if f"variant:{variant}" not in rows
     ]
     if unknown:
         raise ValueError(f"submission manifest lacks variants: {unknown}")
+    unexpected_replacements = sorted(set(replacements) - set(requested))
+    if unexpected_replacements:
+        raise ValueError(
+            "replacement jobs were supplied for unrequested variants: "
+            f"{unexpected_replacements}"
+        )
     if not args.dry_run:
         log_dir.mkdir(parents=True, exist_ok=True)
     source_identity = None if args.dry_run else _source_identity(project_dir)
@@ -240,15 +295,25 @@ def main(argv: list[str] | None = None) -> int:
         dependencies = _remaining_dependencies(
             prerequisite_ids, dry_run=args.dry_run
         )
-        new_job_id = _submit(
-            row,
-            variant=variant,
-            dependencies=dependencies,
-            project_dir=project_dir,
-            log_dir=log_dir,
-            dry_run=args.dry_run,
-            source_identity=source_identity,
-        )
+        new_job_id = replacements.get(variant)
+        resumed_replacement = new_job_id is not None
+        if new_job_id is None:
+            new_job_id = _submit(
+                row,
+                variant=variant,
+                dependencies=dependencies,
+                project_dir=project_dir,
+                log_dir=log_dir,
+                dry_run=args.dry_run,
+                source_identity=source_identity,
+            )
+        elif not args.dry_run:
+            replacement_state = _slurm_job_state(new_job_id)
+            if replacement_state not in _ACTIVE_SLURM_STATES and replacement_state != "COMPLETED":
+                raise RuntimeError(
+                    f"replacement job {new_job_id} for {variant} is "
+                    f"not reusable: state={replacement_state}"
+                )
 
         rewired = []
         for consumer, consumer_id in zip(consumers, consumer_ids, strict=True):
@@ -257,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.dry_run
                 else _live_dependency(consumer_id)
             )
-            dependency = replace_dependency_job(
+            dependency, changed = _reconcile_dependency_job(
                 current,
                 old_job_id=old_job_id,
                 new_job_id=new_job_id,
@@ -270,13 +335,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.dry_run:
                 print(shlex.join(command))
-            else:
+            elif changed:
                 subprocess.run(command, check=True)
             rewired.append(
                 {
                     "key": str(consumer["key"]),
                     "job_id": consumer_id,
                     "dependency": dependency,
+                    "changed": changed,
                 }
             )
 
@@ -289,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 "old_job_id": old_job_id,
                 "old_state": old_state,
                 "new_job_id": new_job_id,
+                "resumed_replacement": resumed_replacement,
                 "dependencies": dependencies,
                 "rewired": rewired,
             }

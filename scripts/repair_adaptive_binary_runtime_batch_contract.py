@@ -169,7 +169,10 @@ def _live_dependency(job_id: str) -> str:
     match = re.search(r"(?:^|\s)Dependency=(\S+)", completed.stdout)
     if match is None:
         raise RuntimeError(f"pending job {job_id} has no readable dependency")
-    return re.sub(r"\((?:un)?fulfilled\)", "", match.group(1))
+    dependency = match.group(1)
+    # Slurm adds display-only state annotations after dependencies freeze.
+    # Feeding those annotations back to `scontrol update` is invalid.
+    return re.sub(r"\((?:fulfilled|unfulfilled|failed)\)", "", dependency)
 
 
 def _archive_stale_evidence(root: Path, variant: str, *, dry_run: bool) -> Path:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from scripts.repair_adaptive_binary_runtime_batch_contract import (
+    _live_dependency,
     repaired_command,
     replace_dependency_job,
 )
@@ -89,3 +90,19 @@ def test_runtime_batch_repair_can_retain_small_failure_logs(tmp_path) -> None:
     )
     assert f"--output={tmp_path}/abph_repair_D5_probe_%j.out" in command
     assert f"--error={tmp_path}/abph_repair_D5_probe_%j.err" in command
+
+
+def test_live_dependency_strips_all_slurm_state_annotations(monkeypatch) -> None:
+    class Completed:
+        stdout = (
+            "JobId=18938 "
+            "Dependency=afterok:19416(failed),"
+            "afterok:19619(unfulfilled),afterok:77(fulfilled)"
+        )
+
+    monkeypatch.setattr(
+        "scripts.repair_adaptive_binary_runtime_batch_contract.subprocess.run",
+        lambda *args, **kwargs: Completed(),
+    )
+
+    assert _live_dependency("18938") == "afterok:19416,afterok:19619,afterok:77"
