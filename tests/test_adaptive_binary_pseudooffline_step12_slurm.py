@@ -298,6 +298,28 @@ def test_models_stage_reuses_preparation_and_rebuilds_every_downstream_run(
     assert "report:model_selection" in keys
     d1 = next(job for job in graph if job.key == "variant:D1_kt32_mh4_particles")
     assert d1.dependencies == ("variant:C5_kt_32",)
+    model_jobs = [
+        job for job in graph if job.stage in {"reconstructor", "renderer"}
+    ]
+    learned = [
+        job
+        for job in model_jobs
+        if job.arguments[0]
+        in orchestration_module.ABPH_TRAINED_RECONSTRUCTOR_VARIANTS
+    ]
+    oracle = [
+        job
+        for job in model_jobs
+        if job.arguments[0] in orchestration_module.ABPH_ORACLE_REFERENCE_VARIANTS
+    ]
+    assert all(job.nodes == 4 and job.launcher == "srun" for job in learned)
+    assert all(
+        job.nodes == 1
+        and job.distributed_world_size == 1
+        and job.launcher == "direct"
+        and "ABPH_RECONSTRUCTOR_PARALLELISM" not in job.environment
+        for job in oracle
+    )
 
 
 def test_models_reuse_is_bound_to_current_cache_and_teacher_artifacts(

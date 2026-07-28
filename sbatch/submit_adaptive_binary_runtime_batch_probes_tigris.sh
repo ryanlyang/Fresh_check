@@ -47,10 +47,9 @@ if (($#)); then
 else
   mapfile -t variants < <("${PYTHON_BIN}" - <<'PY'
 from teacher_logit_reco.adaptive_binary_pseudooffline.orchestration import (
-    ABPH_RECONSTRUCTOR_VARIANTS,
-    ABPH_RENDERER_VARIANTS,
+    ABPH_TRAINED_RECONSTRUCTOR_VARIANTS,
 )
-print(*ABPH_RECONSTRUCTOR_VARIANTS, *ABPH_RENDERER_VARIANTS, sep="\n")
+print(*ABPH_TRAINED_RECONSTRUCTOR_VARIANTS, sep="\n")
 PY
   )
 fi

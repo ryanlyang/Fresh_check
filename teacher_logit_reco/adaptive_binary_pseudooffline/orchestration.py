@@ -1386,6 +1386,8 @@ def _build_reused_model_graph(
         *ABPH_RENDERER_VARIANTS,
     )
     for name in reconstructor_names:
+        oracle_reference = name in ABPH_ORACLE_REFERENCE_VARIANTS
+        variant_environment = common_env if oracle_reference else reconstructor_env
         jobs.append(
             SlurmJobSpec(
                 _variant_job_key(name),
@@ -1394,13 +1396,23 @@ def _build_reused_model_graph(
                 (name,),
                 _reused_model_dependencies(name),
                 gpu=True,
-                environment=reconstructor_env,
-                nodes=int(topology["nodes"]),
-                ntasks=int(topology["ntasks"]),
-                ntasks_per_node=int(topology["ntasks_per_node"]),
-                gpus_per_node=int(topology["gpus_per_node"]),
-                distributed_world_size=int(topology["distributed_world_size"]),
-                launcher=str(topology["launcher"]),
+                environment=variant_environment,
+                nodes=(1 if oracle_reference else int(topology["nodes"])),
+                ntasks=(1 if oracle_reference else int(topology["ntasks"])),
+                ntasks_per_node=(
+                    1 if oracle_reference else int(topology["ntasks_per_node"])
+                ),
+                gpus_per_node=(
+                    1 if oracle_reference else int(topology["gpus_per_node"])
+                ),
+                distributed_world_size=(
+                    1
+                    if oracle_reference
+                    else int(topology["distributed_world_size"])
+                ),
+                launcher=(
+                    "direct" if oracle_reference else str(topology["launcher"])
+                ),
             )
         )
         if streaming:

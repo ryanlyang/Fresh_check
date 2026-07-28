@@ -11,6 +11,9 @@ PROBE_SUBMITTER = (
 PROBE_WORKER = (
     ROOT / "scripts" / "probe_adaptive_binary_runtime_batch.py"
 ).read_text(encoding="utf-8")
+RESUME_SCRIPT = (
+    ROOT / "sbatch" / "resume_adaptive_binary_models_from_contracts_tigris.sh"
+).read_text(encoding="utf-8")
 
 
 def test_clean_model_recovery_requires_explicit_confirmation() -> None:
@@ -60,6 +63,12 @@ def test_runtime_probes_consume_the_immutable_target_mode() -> None:
     assert 'offline_cache_dir=root / "inputs" / "offline_cache"' in PROBE_WORKER
 
 
+def test_runtime_probe_default_excludes_single_gpu_oracle_references() -> None:
+    assert "ABPH_TRAINED_RECONSTRUCTOR_VARIANTS" in PROBE_SUBMITTER
+    assert "ABPH_RECONSTRUCTOR_VARIANTS" not in PROBE_SUBMITTER
+    assert "ABPH_RENDERER_VARIANTS" not in PROBE_SUBMITTER
+
+
 def test_full_probe_matrix_is_gated_by_one_rank_local_canary() -> None:
     assert "abph_clean_ranklocal_canary" in SCRIPT
     assert "B1_semantic_query_root root_hierarchy 64" in SCRIPT
@@ -69,3 +78,21 @@ def test_full_probe_matrix_is_gated_by_one_rank_local_canary() -> None:
         'bash "${PROJECT_DIR}/sbatch/submit_adaptive_binary_runtime_batch_probes_tigris.sh"'
     )
     assert canary_index < matrix_index
+
+
+def test_models_resume_preflights_before_cancelling_or_submitting() -> None:
+    assert "ABPH_CONFIRM_MODELS_RESUME" in RESUME_SCRIPT
+    assert "ABPH_STAGE_MODE=models" in RESUME_SCRIPT
+    assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in RESUME_SCRIPT
+    preflight = RESUME_SCRIPT.index("DRY_RUN=1 bash")
+    cancellation = RESUME_SCRIPT.index('scancel "${stale_jobs[@]}"')
+    submission = RESUME_SCRIPT.index("DRY_RUN=0 bash")
+    assert preflight < cancellation < submission
+
+
+def test_models_resume_reuses_prepared_campaign_evidence() -> None:
+    assert "abph_full_submission.json" in RESUME_SCRIPT
+    assert "runtime_acceptance" in RESUME_SCRIPT
+    assert "storage_projection" in RESUME_SCRIPT
+    assert "tagger_acceptance" in RESUME_SCRIPT
+    assert "retained: inputs, baselines, targets" in RESUME_SCRIPT
