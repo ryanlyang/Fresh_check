@@ -137,6 +137,8 @@ def test_canary_resume_gates_the_full_model_wave_on_real_launches() -> None:
     assert "ABPH_CONFIRM_CANARY_MODELS_RESUME" in CANARY_RESUME_SCRIPT
     assert "ABPH_MAXIMUM_UPDATES=1" in CANARY_RESUME_SCRIPT
     assert "ABPH_MAX_VAL_BATCHES=1" in CANARY_RESUME_SCRIPT
+    assert "ABPH_ACCEPT_TRUNCATED_CANARY=1" in CANARY_RESUME_SCRIPT
+    assert "ABPH_EVAL_INTERVAL=1" in CANARY_RESUME_SCRIPT
     assert "B1_semantic_query_root" in CANARY_RESUME_SCRIPT
     assert "B4_oracle_root_diagnostic" in CANARY_RESUME_SCRIPT
     assert "--nodes=8" in CANARY_RESUME_SCRIPT

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 
 import numpy as np
 
@@ -260,6 +261,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=int(os.environ.get("ABPH_NUM_WORKERS", "0")))
     parser.add_argument("--smoke", action="store_true", default=os.environ.get("ABPH_SMOKE", "0") == "1")
     parser.add_argument("--maximum-updates", type=int, default=None)
+    parser.add_argument(
+        "--accept-truncated-canary",
+        action="store_true",
+        default=os.environ.get("ABPH_ACCEPT_TRUNCATED_CANARY", "0") == "1",
+        help=(
+            "Treat one explicitly bounded update plus rollout validation as a "
+            "launch canary success without claiming completed training."
+        ),
+    )
     parser.add_argument("--output-name", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
@@ -271,6 +281,60 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _validate_truncated_canary_request(
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> None:
+    if not args.accept_truncated_canary:
+        return
+    if int(args.maximum_updates or 0) != 1:
+        raise ValueError("truncated launch canary requires exactly one optimizer update")
+    if args.output_dir is None:
+        raise ValueError("truncated launch canary requires an explicit output directory")
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    resolved_output = output_dir.resolve()
+    if (
+        resolved_output.parent != temporary_root
+        or not resolved_output.name.startswith("abph_models_canary_")
+    ):
+        raise ValueError(
+            "truncated launch canary output must be a direct "
+            "abph_models_canary_* child of the system temporary directory"
+        )
+    if os.environ.get("ABPH_EVAL_INTERVAL") != "1":
+        raise ValueError("truncated launch canary requires ABPH_EVAL_INTERVAL=1")
+    if os.environ.get("ABPH_MAX_VAL_BATCHES") != "1":
+        raise ValueError("truncated launch canary requires ABPH_MAX_VAL_BATCHES=1")
+
+
+def _truncated_canary_acceptance(report: dict) -> dict:
+    distributed_errors = tuple(
+        report.get("distributed_runtime", {}).get("error_events", ())
+    )
+    checks = {
+        "scientific_training_remains_incomplete": (
+            report.get("ok") is False and report.get("status") == "interrupted"
+        ),
+        "exactly_one_optimizer_update": (
+            int(report.get("curriculum", {}).get("global_update", -1)) == 1
+        ),
+        "rollout_validation_completed": (
+            int(report.get("rollout_validation_count", 0)) == 1
+        ),
+        "stage_checkpoint_selected": bool(report.get("best_by_stage")),
+        "no_compiler_failures": int(report.get("compiler_failure_updates", -1)) == 0,
+        "no_nonfinite_updates": int(report.get("nonfinite_updates", -1)) == 0,
+        "no_distributed_errors": not distributed_errors,
+    }
+    return {
+        "contract": "adaptive_binary_pseudooffline_launch_canary_v1",
+        "ok": all(checks.values()),
+        "checks": checks,
+        "permits_scientific_claim": False,
+        "permits_checkpoint_reuse": False,
+    }
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -721,6 +785,7 @@ def _write_oracle_reference_report(
 
 def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: Path) -> dict:
     root = Path(args.campaign_root)
+    _validate_truncated_canary_request(args, output_dir)
     if args.runtime_reference_benchmark:
         # The one-rank and DDP4 acceptance trajectories must start from the
         # same parameters; trainer seeding happens after model construction.
@@ -1114,6 +1179,15 @@ def _train_reconstructor(args: argparse.Namespace, resolved: dict, output_dir: P
             "variant_name": args.variant,
             "variant": resolved["variant"],
         }
+    if args.accept_truncated_canary:
+        canary = _truncated_canary_acceptance(report)
+        return {
+            **report,
+            "launch_canary": canary,
+            "launch_canary_ok": bool(canary["ok"]),
+            "variant_name": args.variant,
+            "variant": resolved["variant"],
+        }
     if not report["ok"]:
         return {**report, "variant_name": args.variant, "variant": resolved["variant"]}
     checkpoint = output_dir / "best_model_val.pt"
@@ -1219,7 +1293,11 @@ def main(argv: list[str] | None = None) -> int:
     if is_primary:
         _atomic_json(output_dir / "run_report.json", report)
         print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report.get("ok") is True else 1
+    return (
+        0
+        if report.get("ok") is True or report.get("launch_canary_ok") is True
+        else 1
+    )
 
 
 if __name__ == "__main__":

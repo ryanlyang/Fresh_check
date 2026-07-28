@@ -176,6 +176,35 @@ def optimizer_update_counts(
     }
 
 
+def scheduled_learning_rate(
+    *,
+    update_ordinal: int,
+    total_optimizer_updates: int,
+    warmup_updates: int,
+    base_learning_rate: float,
+    minimum_learning_rate: float = 1.0e-5,
+) -> float:
+    ordinal = int(update_ordinal)
+    total = int(total_optimizer_updates)
+    warmup = int(warmup_updates)
+    base = float(base_learning_rate)
+    minimum = float(minimum_learning_rate)
+    if total <= 0 or not 1 <= ordinal <= total:
+        raise ValueError("optimizer update ordinal lies outside the schedule")
+    if not 1 <= warmup <= total:
+        raise ValueError("warm-up update count lies outside the schedule")
+    if not 0.0 <= minimum <= base:
+        raise ValueError("learning-rate endpoints are invalid")
+    if ordinal <= warmup:
+        return base * ordinal / warmup
+    if total == warmup:
+        return base
+    progress = (ordinal - warmup) / (total - warmup)
+    return minimum + 0.5 * (base - minimum) * (
+        1.0 + math.cos(math.pi * progress)
+    )
+
+
 def replica_cycle(*, epoch: int, identity_hash_low_two_bits: int) -> int:
     if int(epoch) < 0:
         raise ValueError("epoch must be nonnegative")
@@ -189,5 +218,6 @@ __all__ = [
     "build_global_determinism",
     "optimizer_update_counts",
     "replica_cycle",
+    "scheduled_learning_rate",
     "validate_global_determinism",
 ]
