@@ -350,7 +350,10 @@ def prepare_model_for_distributed_training(
     torch = require_torch()
     if int(requested_world_size) <= 1:
         return model
-    if str(getattr(device, "type", device)).split(":", 1)[0] != "cuda":
+    device_kind = str(getattr(device, "type", device)).split(":", 1)[0].lower()
+    if device_kind == "auto":
+        device_kind = "cuda" if torch.cuda.is_available() else "cpu"
+    if device_kind != "cuda":
         return model
     return torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 

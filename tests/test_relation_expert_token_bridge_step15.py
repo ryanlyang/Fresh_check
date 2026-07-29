@@ -12,7 +12,9 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 
 from teacher_logit_reco.relation_expert_token_bridge import (
     DEFAULT_CONCURRENCY,
+    TASK_MANIFEST_PRODUCER_NODES,
     build_job_ledger,
+    build_node_execution_registry,
     build_production_graph,
     build_resource_probe,
     build_resume_plan,
@@ -20,6 +22,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     build_target_shard_plan,
     build_task_manifest,
     validate_job_ledger,
+    validate_node_execution_registry,
     validate_production_graph,
     validate_production_campaign_binding,
     validate_resource_probe,
@@ -109,6 +112,97 @@ def test_complete_graph_covers_stages_selectors_scale_and_two_locks() -> None:
             assert node["array"]["maximum_tasks"] >= node["array"]["smoke_tasks"]
 
 
+def test_node_execution_registry_covers_every_worker_and_manifest_producer() -> None:
+    graph = _graph()
+    registry = graph["node_execution_registry"]
+    validate_node_execution_registry(registry, nodes=graph["nodes"])
+    entries = {
+        row["node_id"]: row for row in registry["entries"]
+    }
+    nodes = {row["node_id"]: row for row in graph["nodes"]}
+    assert set(entries) == set(nodes)
+    assert registry["node_count"] == len(nodes)
+    assert registry["missing_manifest_producers"] == []
+    for node_id, entry in entries.items():
+        node = nodes[node_id]
+        assert entry["worker"] == node["worker"]
+        assert entry["resource"] == node["resource"]
+        assert entry["required_inputs"][:2] == [
+            "campaign_spec",
+            "production_graph",
+        ]
+        if entry["manifest_required"]:
+            assert entry["task_manifest_path"]
+            assert entry["manifest_producer"]["node_id"]
+            assert entry["manifest_producer"]["entrypoint"]
+            assert entry["row_resolution"] in {"static", "dynamic"}
+        else:
+            assert entry["task_manifest_path"] is None
+            assert entry["manifest_producer"] is None
+            assert entry["row_resolution"] == "not_applicable"
+    assert entries["input_audit"]["manifest_producer"]["node_id"] == (
+        "campaign_bootstrap"
+    )
+    assert entries["offline_input_cache"]["manifest_producer"] == {
+        "node_id": "campaign_bootstrap",
+        "entrypoint": "scripts/bootstrap_retb_input_tasks.py",
+        "publication_mode": "campaign_bootstrap",
+    }
+
+
+def test_manifest_driven_node_without_producer_fails_closed() -> None:
+    graph = _graph()
+    incomplete = dict(TASK_MANIFEST_PRODUCER_NODES)
+    incomplete.pop("input_audit")
+    with pytest.raises(
+        ValueError, match="producer coverage.*input_audit"
+    ):
+        build_node_execution_registry(
+            nodes=graph["nodes"],
+            manifest_producer_nodes=incomplete,
+        )
+
+    registry = graph["node_execution_registry"]
+    entries = [dict(row) for row in registry["entries"]]
+    target = next(
+        row for row in entries if row["node_id"] == "input_audit"
+    )
+    target["manifest_producer"] = None
+    bad_registry = dict(registry)
+    bad_registry.pop("content_hash")
+    bad_registry["entries"] = entries
+    bad_registry = with_content_hash(bad_registry)
+    with pytest.raises(ValueError, match="automatic manifest producer"):
+        validate_node_execution_registry(
+            bad_registry, nodes=graph["nodes"]
+        )
+
+    bad_graph = dict(graph)
+    bad_graph.pop("content_hash")
+    bad_graph["node_execution_registry"] = bad_registry
+    bad_graph = with_content_hash(bad_graph)
+    with pytest.raises(ValueError, match="automatic manifest producer"):
+        validate_production_graph(bad_graph)
+
+
+def test_execution_registry_rejects_worker_resource_and_io_drift() -> None:
+    graph = _graph()
+    registry = graph["node_execution_registry"]
+    entries = [dict(row) for row in registry["entries"]]
+    target = next(
+        row
+        for row in entries
+        if row["node_id"] == "offline_expert_training"
+    )
+    target["worker"] = "run_unregistered_worker.sh"
+    bad = dict(registry)
+    bad.pop("content_hash")
+    bad["entries"] = entries
+    bad = with_content_hash(bad)
+    with pytest.raises(ValueError, match="registry semantics"):
+        validate_node_execution_registry(bad, nodes=graph["nodes"])
+
+
 def test_production_graph_binds_exact_campaign_source_storage_and_profile() -> None:
     graph = _graph()
     campaign = {
@@ -139,7 +233,10 @@ def test_graph_rejects_performance_gate_and_premature_final_test() -> None:
     by_id["sealed_final_test"]["dependencies"] = ["locked_scale_finalists"]
     graph.pop("content_hash")
     graph = with_content_hash(graph)
-    with pytest.raises(ValueError, match="lacks ancestors"):
+    with pytest.raises(
+        ValueError,
+        match="manifest producer is not an ancestor|lacks ancestors",
+    ):
         validate_production_graph(graph)
 
 
@@ -376,6 +473,7 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     ).read_text()
     assert "--dry-run|--smoke-simulate|--smoke-submit" in submitter
     assert "print_retb_submission_plan.py" in submitter
+    assert "dispatch_mode" in submitter
     assert "initial_submission_ledger.json" in submitter
     assert "storage projection:" in submitter
     assert "HLT-v3 cache hashes:" in submitter

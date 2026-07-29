@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     PRODUCTION_GRAPH_CONTRACT,
     load_hashed_json,
+    validate_production_graph,
 )
 
 
@@ -24,6 +25,11 @@ def main() -> int:
     graph = load_hashed_json(
         args.production_graph, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
+    validate_production_graph(graph)
+    execution = {
+        row["node_id"]: row
+        for row in graph["node_execution_registry"]["entries"]
+    }
     for node in graph["nodes"]:
         fields = (
             node["node_id"],
@@ -33,6 +39,7 @@ def main() -> int:
             node["worker"],
             "1" if node["array"] is not None else "0",
             "" if node["virtual_alias_of"] is None else node["virtual_alias_of"],
+            execution[node["node_id"]]["dispatch_mode"],
         )
         if any("|" in str(value) or "\n" in str(value) for value in fields):
             raise ValueError("production node is not shell-table safe")

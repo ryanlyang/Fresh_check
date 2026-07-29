@@ -967,8 +967,40 @@ def test_cuda_ddp_contract_rejects_unconverted_batch_norm():
         require_distributed_normalization_contract(
             model,
             DistributedRuntime(0, 4, 0, "nccl", "cuda"),
-            device="cuda",
-        )
+        device="cuda",
+    )
+
+
+def test_auto_cuda_ddp_preparation_converts_rank_local_batch_norm(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4))
+
+    converted = prepare_model_for_distributed_training(
+        model,
+        requested_world_size=8,
+        device="auto",
+    )
+
+    assert isinstance(converted[0], torch.nn.SyncBatchNorm)
+    require_distributed_normalization_contract(
+        converted,
+        DistributedRuntime(0, 8, 0, "nccl", "cuda"),
+        device="cuda",
+    )
+
+
+def test_auto_cpu_ddp_preparation_leaves_batch_norm_unchanged(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4))
+
+    converted = prepare_model_for_distributed_training(
+        model,
+        requested_world_size=8,
+        device="auto",
+    )
+
+    assert isinstance(converted[0], torch.nn.BatchNorm1d)
+    assert not isinstance(converted[0], torch.nn.SyncBatchNorm)
 
 
 @pytest.mark.skipif(

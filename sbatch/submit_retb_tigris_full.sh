@@ -122,6 +122,7 @@ submit_node() {
   local resource="$3"
   local worker="$4"
   local is_array="$5"
+  local dispatch_mode="$6"
   local dependency_arguments=()
   if [[ -n "${dependency}" ]]; then
     dependency_arguments=(--dependency="afterok:${dependency}")
@@ -140,18 +141,21 @@ submit_node() {
     )
   fi
   local executable="${SCRIPT_DIR}/${worker}"
-  if [[ "${is_array}" == "1" ]]; then
-    executable="${SCRIPT_DIR}/run_retb_array_launcher.sh"
-  elif [[ "${node_id}" == step*_contracts ]]; then
-    :
-  elif [[ "${node_id}" != "split_build" \
-       && "${node_id}" != "campaign_bootstrap" \
-       && "${node_id}" != "compiled_region_backend" \
-       && "${node_id}" != "cpu_resource_probe" \
-       && "${node_id}" != "gpu_resource_probe" \
-       && "${node_id}" != "completed_job_ledger" ]]; then
-    executable="${SCRIPT_DIR}/run_retb_production_task.sh"
-  fi
+  case "${dispatch_mode}" in
+    direct_worker)
+      ;;
+    task_manifest_worker)
+      if [[ "${is_array}" == "1" ]]; then
+        executable="${SCRIPT_DIR}/run_retb_array_launcher.sh"
+      else
+        executable="${SCRIPT_DIR}/run_retb_production_task.sh"
+      fi
+      ;;
+    *)
+      echo "Unsupported RETB dispatch mode for ${node_id}: ${dispatch_mode}" >&2
+      return 2
+      ;;
+  esac
   sbatch --parsable \
     "${resource_arguments[@]}" \
     "${dependency_arguments[@]}" \
@@ -163,7 +167,7 @@ submit_node() {
 }
 
 declare -A jobs
-while IFS='|' read -r node_id stage dependencies resource worker is_array alias; do
+while IFS='|' read -r node_id stage dependencies resource worker is_array alias dispatch_mode; do
   if [[ -n "${alias}" ]]; then
     if [[ -z "${jobs[${alias}]:-}" ]]; then
       echo "Virtual alias ${node_id} precedes ${alias}" >&2
@@ -188,7 +192,8 @@ while IFS='|' read -r node_id stage dependencies resource worker is_array alias;
     dependency_ids="$(IFS=:; printf '%s' "${parent_ids[*]}")"
   fi
   jobs["${node_id}"]="$(submit_node \
-    "${node_id}" "${dependency_ids}" "${resource}" "${worker}" "${is_array}")"
+    "${node_id}" "${dependency_ids}" "${resource}" "${worker}" "${is_array}" \
+    "${dispatch_mode}")"
   printf 'submitted Stage %s %-36s %s\n' \
     "${stage}" "${node_id}" "${jobs[${node_id}]}"
 done < <(python scripts/print_retb_submission_plan.py --production-graph "${graph}")

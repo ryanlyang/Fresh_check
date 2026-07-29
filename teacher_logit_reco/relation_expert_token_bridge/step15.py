@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v1"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v2"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
@@ -58,6 +58,8 @@ def build_step15_preflight_report(
                 "resumable_targets_present": True,
                 "dynamic_continuation_present": True,
                 "monitoring_and_ledger_present": True,
+                "node_execution_registry_present": True,
+                "automatic_manifest_producer_coverage_complete": True,
                 "performance_based_termination_disabled": True,
                 "provenance_failures_block_dependents": True,
                 "negative_campaign_reaches_final_report": True,

@@ -28,7 +28,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v1"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v2"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -834,6 +834,263 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
     ]
 
 
+def _task_manifest_path(node: Mapping[str, Any]) -> str:
+    array = node["array"]
+    if array is not None:
+        return str(array["task_manifest"])
+    return f"job_ledgers/tasks/{node['node_id']}.json"
+
+
+def build_node_execution_registry(
+    *,
+    nodes: Sequence[Mapping[str, Any]],
+    manifest_producer_nodes: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build the exhaustive production-node execution/manifest registry."""
+
+    by_id = {str(node["node_id"]): node for node in nodes}
+    if len(by_id) != len(nodes) or not by_id:
+        raise ValueError("node execution registry input identities differ")
+    producers = dict(
+        TASK_MANIFEST_PRODUCER_NODES
+        if manifest_producer_nodes is None
+        else manifest_producer_nodes
+    )
+    alias_nodes = {
+        node_id
+        for node_id, node in by_id.items()
+        if node["virtual_alias_of"] is not None
+    }
+    direct_nodes = set(DIRECT_WORKER_NODES) & set(by_id)
+    unknown_direct = set(DIRECT_WORKER_NODES) - set(by_id)
+    manifest_nodes = set(by_id) - direct_nodes - alias_nodes
+    if unknown_direct:
+        raise ValueError(
+            "direct-worker registry contains unknown nodes "
+            f"{sorted(unknown_direct)}"
+        )
+    if set(producers) != manifest_nodes:
+        missing = sorted(manifest_nodes - set(producers))
+        extra = sorted(set(producers) - manifest_nodes)
+        raise ValueError(
+            "task-manifest producer coverage differs: "
+            f"missing={missing}, extra={extra}"
+        )
+
+    entries: list[dict[str, Any]] = []
+    for node in nodes:
+        node_id = str(node["node_id"])
+        dependencies = [str(value) for value in node["dependencies"]]
+        alias = node["virtual_alias_of"]
+        if alias is not None:
+            mode = "virtual_alias"
+            row_resolution = "not_applicable"
+            manifest_path = None
+            producer = None
+            expected_outputs = [f"node_output:{alias}"]
+        elif node_id in DIRECT_WORKER_NODES:
+            mode = "direct_worker"
+            row_resolution = "not_applicable"
+            manifest_path = None
+            producer = None
+            expected_outputs = [f"node_completion:{node_id}"]
+        else:
+            mode = "task_manifest_worker"
+            row_resolution = (
+                "dynamic"
+                if bool(node["dynamic_continuation"])
+                else "static"
+            )
+            manifest_path = _task_manifest_path(node)
+            producer_node = str(producers[node_id])
+            producer = {
+                "node_id": producer_node,
+                "entrypoint": (
+                    "scripts/bootstrap_retb_input_tasks.py"
+                    if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES
+                    else "scripts/build_retb_task_manifest.py"
+                ),
+                "publication_mode": (
+                    "campaign_bootstrap"
+                    if producer_node == "campaign_bootstrap"
+                    else "upstream_dependency"
+                ),
+            }
+            expected_outputs = [f"node_completion:{node_id}"]
+        required_inputs = [
+            "campaign_spec",
+            "production_graph",
+            *(f"node_output:{dependency}" for dependency in dependencies),
+        ]
+        if manifest_path is not None:
+            required_inputs.append(f"task_manifest:{manifest_path}")
+        entries.append(
+            {
+                "node_id": node_id,
+                "worker": str(node["worker"]),
+                "dispatch_mode": mode,
+                "manifest_required": mode == "task_manifest_worker",
+                "task_manifest_path": manifest_path,
+                "manifest_producer": producer,
+                "required_inputs": required_inputs,
+                "expected_outputs": expected_outputs,
+                "resource": str(node["resource"]),
+                "row_resolution": row_resolution,
+            }
+        )
+    artifact = with_content_hash(
+        {
+            "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
+            "schema_version": 1,
+            "entries": entries,
+            "node_count": len(entries),
+            "manifest_driven_node_count": len(manifest_nodes),
+            "direct_worker_node_count": len(direct_nodes),
+            "virtual_alias_node_count": len(alias_nodes),
+            "missing_manifest_producers": [],
+        }
+    )
+    validate_node_execution_registry(artifact, nodes=nodes)
+    return artifact
+
+
+def validate_node_execution_registry(
+    payload: Mapping[str, Any],
+    *,
+    nodes: Sequence[Mapping[str, Any]],
+) -> str:
+    digest = validate_content_hash(
+        payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
+    )
+    by_id = {str(node["node_id"]): node for node in nodes}
+    entries = list(payload.get("entries", ()))
+    by_entry = {str(entry["node_id"]): entry for entry in entries}
+    if (
+        len(by_id) != len(nodes)
+        or len(by_entry) != len(entries)
+        or set(by_entry) != set(by_id)
+    ):
+        missing = sorted(set(by_id) - set(by_entry))
+        extra = sorted(set(by_entry) - set(by_id))
+        raise ValueError(
+            "node execution registry coverage differs: "
+            f"missing={missing}, extra={extra}"
+        )
+    if [entry["node_id"] for entry in entries] != [
+        node["node_id"] for node in nodes
+    ]:
+        raise ValueError("node execution registry order differs")
+    manifest_count = 0
+    direct_count = 0
+    alias_count = 0
+    for node_id, node in by_id.items():
+        entry = by_entry[node_id]
+        alias = node["virtual_alias_of"]
+        if alias is not None:
+            expected_mode = "virtual_alias"
+            alias_count += 1
+        elif node_id in DIRECT_WORKER_NODES:
+            expected_mode = "direct_worker"
+            direct_count += 1
+        else:
+            expected_mode = "task_manifest_worker"
+            manifest_count += 1
+        if (
+            entry["worker"] != node["worker"]
+            or entry["resource"] != node["resource"]
+            or entry["dispatch_mode"] != expected_mode
+            or bool(entry["manifest_required"])
+            != (expected_mode == "task_manifest_worker")
+        ):
+            raise ValueError(f"{node_id} execution registry semantics differ")
+        expected_required = [
+            "campaign_spec",
+            "production_graph",
+            *(
+                f"node_output:{dependency}"
+                for dependency in node["dependencies"]
+            ),
+        ]
+        if expected_mode == "task_manifest_worker":
+            expected_path = _task_manifest_path(node)
+            expected_required.append(f"task_manifest:{expected_path}")
+            producer = entry["manifest_producer"]
+            if (
+                entry["task_manifest_path"] != expected_path
+                or not isinstance(producer, Mapping)
+                or not str(producer.get("node_id", ""))
+                or producer.get("entrypoint")
+                not in {
+                    "scripts/bootstrap_retb_input_tasks.py",
+                    "scripts/build_retb_task_manifest.py",
+                }
+                or producer.get("publication_mode")
+                not in {"campaign_bootstrap", "upstream_dependency"}
+            ):
+                raise ValueError(
+                    f"{node_id} lacks an automatic manifest producer"
+                )
+            producer_node = str(producer["node_id"])
+            if (
+                producer_node not in by_id
+                or producer_node == node_id
+                or producer_node not in _ancestors(by_id, node_id)
+            ):
+                raise ValueError(
+                    f"{node_id} manifest producer is not an ancestor"
+                )
+            expected_producer = TASK_MANIFEST_PRODUCER_NODES.get(node_id)
+            expected_entrypoint = (
+                "scripts/bootstrap_retb_input_tasks.py"
+                if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES
+                else "scripts/build_retb_task_manifest.py"
+            )
+            if (
+                producer_node != expected_producer
+                or producer["entrypoint"] != expected_entrypoint
+            ):
+                raise ValueError(
+                    f"{node_id} automatic manifest producer differs"
+                )
+            expected_resolution = (
+                "dynamic"
+                if bool(node["dynamic_continuation"])
+                else "static"
+            )
+        else:
+            if (
+                entry["task_manifest_path"] is not None
+                or entry["manifest_producer"] is not None
+            ):
+                raise ValueError(
+                    f"{node_id} unexpectedly declares a task manifest"
+                )
+            expected_resolution = "not_applicable"
+        expected_outputs = [
+            (
+                f"node_output:{alias}"
+                if alias is not None
+                else f"node_completion:{node_id}"
+            )
+        ]
+        if (
+            entry["required_inputs"] != expected_required
+            or entry["expected_outputs"] != expected_outputs
+            or entry["row_resolution"] != expected_resolution
+        ):
+            raise ValueError(f"{node_id} execution I/O registry differs")
+    if (
+        int(payload.get("node_count", -1)) != len(nodes)
+        or int(payload.get("manifest_driven_node_count", -1))
+        != manifest_count
+        or int(payload.get("direct_worker_node_count", -1)) != direct_count
+        or int(payload.get("virtual_alias_node_count", -1)) != alias_count
+        or payload.get("missing_manifest_producers") != []
+    ):
+        raise ValueError("node execution registry coverage summary differs")
+    return digest
+
+
 def build_production_graph(
     *,
     campaign_root: str | Path,
@@ -852,6 +1109,7 @@ def build_production_graph(
     if any(value <= 0 for value in resolved.values()):
         raise ValueError("production concurrency must be positive")
     nodes = _nodes(resolved)
+    execution_registry = build_node_execution_registry(nodes=nodes)
     profile = (
         "nonproduction_miniature_test"
         if miniature
@@ -860,7 +1118,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -883,6 +1141,7 @@ def build_production_graph(
             "tigris_defaults": dict(TIGRIS_DEFAULTS),
             "bounded_concurrency": resolved,
             "nodes": nodes,
+            "node_execution_registry": execution_registry,
             "stage_order": list("ABCDEFGHIJKLMN"),
             "two_stage_n_selectors": [
                 "accuracy_finalist_selector",
@@ -931,6 +1190,8 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
+    if int(payload.get("schema_version", -1)) != 2:
+        raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
     if len(nodes) != len(by_id) or not nodes:
@@ -999,6 +1260,9 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
         missing = required - _ancestors(by_id, node_id)
         if missing:
             raise ValueError(f"{node_id} lacks ancestors {sorted(missing)}")
+    validate_node_execution_registry(
+        payload["node_execution_registry"], nodes=nodes
+    )
     if (
         payload["degradation_profile"] != "D_NOMINAL"
         or payload["degradation_profile_implicit_override_allowed"] is not False
@@ -1540,7 +1804,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -1552,6 +1816,8 @@ def build_step15_bundle(
             "smoke_submission_supported": True,
             "full_submission_supported": True,
             "monitoring_supported": True,
+            "node_execution_registry_present": True,
+            "automatic_manifest_producer_coverage_complete": True,
             "performance_based_termination": False,
         }
     )
@@ -1559,8 +1825,10 @@ def build_step15_bundle(
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
+    "DIRECT_WORKER_NODES",
     "JOB_LEDGER_CONTRACT",
     "MINIATURE_SPLIT_SIZES",
+    "NODE_EXECUTION_REGISTRY_CONTRACT",
     "PRODUCTION_GRAPH_CONTRACT",
     "PRODUCTION_SPLIT_SIZES",
     "RESOURCE_PROBE_CONTRACT",
@@ -1568,8 +1836,10 @@ __all__ = [
     "STEP15_BUNDLE_CONTRACT",
     "TASK_MANIFEST_CONTRACT",
     "TARGET_SHARD_PLAN_CONTRACT",
+    "TASK_MANIFEST_PRODUCER_NODES",
     "TIGRIS_DEFAULTS",
     "build_job_ledger",
+    "build_node_execution_registry",
     "build_production_graph",
     "build_resource_probe",
     "build_resume_plan",
@@ -1577,6 +1847,7 @@ __all__ = [
     "build_task_manifest",
     "build_target_shard_plan",
     "validate_job_ledger",
+    "validate_node_execution_registry",
     "validate_production_graph",
     "validate_production_campaign_binding",
     "validate_resource_probe",
