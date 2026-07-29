@@ -323,7 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     val_trees = (
         _load_trees(
             args.region_tree_root,
-            split="model_val",
+            split="val_stop",
             identities=val_ids,
         )
         if configuration["expert_id"] == "REGION"

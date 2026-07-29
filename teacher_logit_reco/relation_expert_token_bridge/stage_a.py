@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from teacher_logit_reco.relational_part import (
+    ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
     build_angular_tree_resource_contract,
     build_normalization_contract,
     build_raw_input_schema_contract,
@@ -17,10 +18,13 @@ from teacher_logit_reco.relational_part import (
     validate_region_normalization,
     validate_relation_family_registry,
     validate_relation_normalization_artifact,
+    unpack_tree_shard,
+    validate_existing_tree_shard,
 )
 
 from .contracts import (
     bind_source,
+    load_hashed_json,
     require_sha256,
     validate_content_hash,
     with_content_hash,
@@ -37,10 +41,10 @@ from .hlt_v3 import (
 )
 
 
-STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v1"
+STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v2"
 STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v1"
 STAGE_A_NORMALIZER_BUNDLE_CONTRACT = "retb_stage_a_normalizer_bundle_v1"
-STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v1"
+STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v2"
 
 STAGE_A_OFFLINE_TREE_ROLES = ("model_train", "val_stop", "val_design")
 STAGE_A_HLT_TREE_VIEWS = (
@@ -112,7 +116,7 @@ def build_stage_a_contract_bundle(
         with_content_hash(
             {
                 "contract": STAGE_A_CONTRACT_BUNDLE,
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_spec_sha256": campaign_spec["content_hash"],
                 "retb_raw_input_schema_sha256": parents["raw_input_schema"],
                 "artifact_hashes": {
@@ -129,6 +133,21 @@ def build_stage_a_contract_bundle(
                 ],
                 "offline_and_hlt_normalizers_separate": True,
                 "shared_hlt_replica_weighting": "equal_identity_replica_weight",
+                "normalizer_sampling": {
+                    "maximum_fitted_views": 50_000,
+                    "offline_500k": (
+                        "inherited_salted_identity_sample_up_to_50000"
+                    ),
+                    "shared_hlt_500k": (
+                        "inherited_salted_base_identity_sample_up_to_12500_"
+                        "then_all_replicas_0_1_2_3"
+                    ),
+                    "shared_hlt_sample_is_replica_balanced": True,
+                    "selected_base_identity_order": (
+                        "inherited_salted_identity_order"
+                    ),
+                    "replica_expansion_order": "identity_major_0_1_2_3",
+                },
                 "region_backend": "relational_ca_tree_v1",
             }
         ),
@@ -173,9 +192,22 @@ def validate_stage_a_contract_bundle(
     }
     if (
         artifact["campaign_spec_sha256"] != campaign_spec["content_hash"]
+        or int(artifact.get("schema_version", -1)) != 2
         or artifact["retb_raw_input_schema_sha256"]
         != campaign_spec["parent_artifact_hashes"]["raw_input_schema"]
         or artifact["artifact_hashes"] != expected_hashes
+        or artifact.get("normalizer_sampling")
+        != {
+            "maximum_fitted_views": 50_000,
+            "offline_500k": "inherited_salted_identity_sample_up_to_50000",
+            "shared_hlt_500k": (
+                "inherited_salted_base_identity_sample_up_to_12500_"
+                "then_all_replicas_0_1_2_3"
+            ),
+            "shared_hlt_sample_is_replica_balanced": True,
+            "selected_base_identity_order": "inherited_salted_identity_order",
+            "replica_expansion_order": "identity_major_0_1_2_3",
+        }
         or any(
             child.get("source") != campaign_spec.get("source")
             for child in (
@@ -515,6 +547,7 @@ def build_stage_a_input_audit(
     hlt_views: Sequence[Mapping[str, Any]],
     tree_index_sha256: str,
     normalizer_bundle_sha256: str,
+    hlt_v3_degradation_audit_sha256: str,
     source_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     offline = [dict(row) for row in offline_views]
@@ -530,6 +563,8 @@ def build_stage_a_input_audit(
             require_sha256(row.get(field), name=f"input_audit.{field}")
         if (
             int(row.get("event_count", 0)) <= 0
+            or int(row.get("particle_capacity", -1)) != 128
+            or int(row.get("raw_particle_field_count", -1)) != 14
             or row.get("tokens_dtype") != "float32"
             or row.get("mask_dtype") != "bool"
             or row.get("finite_valid_tokens") is not True
@@ -541,7 +576,7 @@ def build_stage_a_input_audit(
         with_content_hash(
             {
                 "contract": STAGE_A_INPUT_AUDIT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_spec_sha256": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
                 ),
@@ -550,6 +585,10 @@ def build_stage_a_input_audit(
                 ),
                 "normalizer_bundle_sha256": require_sha256(
                     normalizer_bundle_sha256, name="normalizer_bundle_sha256"
+                ),
+                "hlt_v3_degradation_audit_sha256": require_sha256(
+                    hlt_v3_degradation_audit_sha256,
+                    name="hlt_v3_degradation_audit_sha256",
                 ),
                 "offline_views": offline,
                 "hlt_views": hlt,
@@ -565,6 +604,8 @@ def build_stage_a_input_audit(
                     "REGION",
                 ],
                 "constituent_matching_fields_present": False,
+                "offline_labels_authenticated": True,
+                "hlt_cache_contains_labels": False,
                 "validation_or_test_statistics_used_for_normalization": False,
                 "identity_alignment_exact": True,
                 "ok": True,
@@ -584,14 +625,18 @@ def validate_stage_a_input_audit(payload: Mapping[str, Any]) -> str:
         "campaign_spec_sha256",
         "tree_index_sha256",
         "normalizer_bundle_sha256",
+        "hlt_v3_degradation_audit_sha256",
     ):
         require_sha256(payload.get(name), name=name)
     if (
-        int(payload.get("offline_view_count", -1))
+        int(payload.get("schema_version", -1)) != 2
+        or int(payload.get("offline_view_count", -1))
         != len(payload.get("offline_views", ()))
         or int(payload.get("hlt_view_count", -1))
         != len(payload.get("hlt_views", ()))
         or payload.get("constituent_matching_fields_present") is not False
+        or payload.get("offline_labels_authenticated") is not True
+        or payload.get("hlt_cache_contains_labels") is not False
         or payload.get("validation_or_test_statistics_used_for_normalization")
         is not False
         or payload.get("identity_alignment_exact") is not True
@@ -617,6 +662,77 @@ def padding_is_exact_zero(tokens: np.ndarray, mask: np.ndarray) -> bool:
     return bool(np.all(values[~valid] == 0.0))
 
 
+def load_authenticated_tree_selection(
+    tree_root: str | Path,
+    identities: Sequence[str],
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    """Load selected trees only after validating every split/shard byte hash."""
+
+    root = Path(tree_root)
+    manifest = load_hashed_json(
+        root / "manifest.json",
+        expected_contract=ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
+    )
+    requested = [str(value) for value in identities]
+    if len(requested) != len(set(requested)):
+        raise ValueError("selected REGION identities are duplicated")
+    requested_set = set(requested)
+    by_identity: dict[str, Mapping[str, Any]] = {}
+    observed_count = 0
+    for expected_index, shard_row in enumerate(manifest["shards"]):
+        shard_index = int(shard_row["shard_index"])
+        if shard_index != expected_index:
+            raise ValueError("REGION split shard ordering differs")
+        shard = root / "shards" / f"shard_{shard_index:05d}.npz"
+        with np.load(shard, allow_pickle=False) as payload:
+            shard_ids = [
+                str(value) for value in payload["identity"].tolist()
+            ]
+        metadata = validate_existing_tree_shard(
+            shard,
+            shard_ids,
+            hlt_content_sha256=manifest["parents"][
+                "hlt_content_sha256"
+            ],
+            tree_resource_sha256=manifest["parents"][
+                "tree_resource_sha256"
+            ],
+            backend_manifest_sha256=manifest["parents"][
+                "backend_manifest_sha256"
+            ],
+        )
+        if metadata is None:
+            raise FileNotFoundError("authenticated REGION shard is absent")
+        expected = {
+            "metadata_sha256": metadata["content_hash"],
+            "jet_count": int(metadata["jet_count"]),
+            "identity_sha256": metadata["identity_sha256"],
+            "npz_sha256": metadata["npz_sha256"],
+        }
+        if any(shard_row[name] != value for name, value in expected.items()):
+            raise ValueError("REGION split/shard lineage differs")
+        observed_count += len(shard_ids)
+        rows = [
+            index
+            for index, identity in enumerate(shard_ids)
+            if identity in requested_set
+        ]
+        if not rows:
+            continue
+        authenticated_ids, trees = unpack_tree_shard(shard, rows=rows)
+        for row, tree in zip(rows, trees):
+            identity = authenticated_ids[row]
+            if identity in by_identity:
+                raise ValueError("selected REGION identity is duplicated")
+            by_identity[identity] = tree
+    if observed_count != int(manifest["jet_count"]):
+        raise ValueError("REGION split identity coverage differs")
+    missing = requested_set - set(by_identity)
+    if missing:
+        raise ValueError(f"REGION cache lacks {len(missing)} selected identities")
+    return [by_identity[value] for value in requested], manifest
+
+
 __all__ = [
     "STAGE_A_CONTRACT_BUNDLE",
     "STAGE_A_HLT_TREE_VIEWS",
@@ -631,6 +747,7 @@ __all__ = [
     "build_stage_a_normalizer_bundle",
     "build_stage_a_tree_index",
     "identity_newline_sha256",
+    "load_authenticated_tree_selection",
     "padding_is_exact_zero",
     "publish_stage_a_contract_bundle",
     "validate_stage_a_contract_bundle",

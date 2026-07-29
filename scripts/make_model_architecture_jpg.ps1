@@ -11,8 +11,8 @@ if (-not (Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir | Out-Null
 }
 
-$width = 1600
-$height = 900
+$width = 900
+$height = 1360
 $bitmap = New-Object System.Drawing.Bitmap $width, $height
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -35,8 +35,8 @@ $panel = [System.Drawing.Color]::FromArgb(255, 255, 255)
 
 $graphics.Clear($bg)
 
-$fontTitle = New-Object System.Drawing.Font("Arial", 38, [System.Drawing.FontStyle]::Bold)
-$fontSubtitle = New-Object System.Drawing.Font("Arial", 19, [System.Drawing.FontStyle]::Regular)
+$fontTitle = New-Object System.Drawing.Font("Arial", 31, [System.Drawing.FontStyle]::Bold)
+$fontSubtitle = New-Object System.Drawing.Font("Arial", 16, [System.Drawing.FontStyle]::Regular)
 $fontLabel = New-Object System.Drawing.Font("Arial", 19, [System.Drawing.FontStyle]::Bold)
 $fontMid = New-Object System.Drawing.Font("Arial", 17, [System.Drawing.FontStyle]::Bold)
 $fontSmall = New-Object System.Drawing.Font("Arial", 14, [System.Drawing.FontStyle]::Regular)
@@ -123,47 +123,35 @@ function Draw-Box {
     }
 }
 
-$graphics.DrawString("m2_base reconstructor architecture", $fontTitle, $brushInk, 72, 58)
-$graphics.DrawString("HLT particles are encoded once, then candidate branches plus a budget head produce three reconstructed views", $fontSubtitle, $brushMuted, 75, 111)
+function Draw-BranchBox {
+    param($G, [float]$X, [float]$Y, [string]$Title, [string]$Sub, $Brush, $Pen)
+    Draw-RoundedRect $G $X $Y 420 170 26 $Brush $Pen
+    Center-Text $G $Title $fontLabel $brushInk ($X + 210) ($Y + 42)
+    Center-Text $G $Sub $fontSmall $brushMuted ($X + 210) ($Y + 91)
+}
 
-Draw-RoundedRect $graphics 75 305 285 250 26 $brushPanel $penOrange
-Center-Text $graphics "Pseudo-HLT" $fontLabel $brushInk 217 338
-Center-Text $graphics "particles" $fontSmall $brushMuted 217 370
-Draw-JetMini $graphics 13 217 465 $brushOrange $brushOrangeSoft $penOrange 27
+$graphics.DrawString("Reconstructor architecture", $fontTitle, $brushInk, 45, 48)
+$graphics.DrawString("Pseudo-HLT particles are encoded once.", $fontSubtitle, $brushMuted, 48, 101)
+$graphics.DrawString("Four specialized heads propose candidates and weights.", $fontSubtitle, $brushMuted, 48, 132)
 
-Draw-Box $graphics 455 270 260 115 "Token encoder" "particle context" $brushGoldSoft $penGold
-Draw-Box $graphics 455 455 260 115 "Attention pool" "jet summary" $brushGoldSoft $penGold
-Draw-Box $graphics 805 360 280 135 "Shared latent" "token + global context" $brushGoldSoft $penGold
+Draw-RoundedRect $graphics 55 245 300 260 28 $brushPanel $penOrange
+Center-Text $graphics "Pseudo-HLT" $fontLabel $brushInk 205 282
+Center-Text $graphics "particles" $fontSmall $brushMuted 205 318
+Draw-JetMini $graphics 13 205 420 $brushOrange $brushOrangeSoft $penOrange 27
 
-Draw-Box $graphics 1190 145 285 96 "Edit branch" "adjust existing particles" $brushGreenSoft $penGreen
-Draw-Box $graphics 1190 285 285 96 "Split branch" "parent to children" $brushTealSoft $penTeal
-Draw-Box $graphics 1190 425 285 96 "Generate branch" "new candidates" $brushPurpleSoft $penPurple
-Draw-Box $graphics 1190 565 285 96 "Budget head" "counts + weights" $brushGoldSoft $penGold
+Draw-Box $graphics 55 650 310 190 "Shared encoder" "particle + jet context" $brushGoldSoft $penGold
 
-Draw-RoundedRect $graphics 1220 718 250 82 22 $brushPanel $penGold
-Center-Text $graphics "Candidate bank" $fontMid $brushInk 1345 738
-Center-Text $graphics "budgeted candidates" $fontSmall $brushMuted 1345 766
+Draw-BranchBox $graphics 430 220 "Edit branch" "adjust existing particles" $brushGreenSoft $penGreen
+Draw-BranchBox $graphics 430 510 "Split branch" "parent to children" $brushTealSoft $penTeal
+Draw-BranchBox $graphics 430 800 "Generate branch" "new candidates" $brushPurpleSoft $penPurple
+Draw-BranchBox $graphics 430 1090 "Budget head" "counts + weights" $brushGoldSoft $penGold
 
-Draw-Arrow $graphics 360 430 455 330 $penMuted
-Draw-Arrow $graphics 360 450 455 510 $penMuted
-Draw-Arrow $graphics 715 328 805 402 $penMuted
-Draw-Arrow $graphics 715 512 805 448 $penMuted
+Draw-Arrow $graphics 205 505 205 650 $penMuted
 
-Draw-Arrow $graphics 1085 412 1190 193 $penMuted
-Draw-Arrow $graphics 1085 420 1190 333 $penMuted
-Draw-Arrow $graphics 1085 428 1190 473 $penMuted
-Draw-Arrow $graphics 1085 436 1190 613 $penMuted
-Draw-Arrow $graphics 1332 662 1332 718 $penMuted
-
-$graphics.DrawString("+", $fontTitle, $brushMuted, 570, 392)
-
-Draw-JetMini $graphics 41 810 735 $brushGreen $brushGreenSoft $penGreen 18
-Draw-JetMini $graphics 45 970 735 $brushTeal $brushTealSoft $penTeal 21
-Draw-JetMini $graphics 49 1130 735 $brushPurple $brushPurpleSoft $penPurple 24
-Center-Text $graphics "three reconstructed views" $fontLabel $brushInk 970 815
-Draw-Arrow $graphics 1220 758 1188 735 $penMuted
-
-$graphics.DrawString("HLT input -> shared representation -> edit / split / generate + budget -> three reconstructed views", $fontSubtitle, $brushInk, 250, 852)
+Draw-Arrow $graphics 365 700 430 305 $penMuted
+Draw-Arrow $graphics 365 745 430 595 $penMuted
+Draw-Arrow $graphics 365 790 430 885 $penMuted
+Draw-Arrow $graphics 365 825 430 1175 $penMuted
 
 $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }
 $params = New-Object System.Drawing.Imaging.EncoderParameters(1)

@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<defs>
+<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M 0 0 L 12 6 L 0 12 z" fill="#68737e" /></marker>
+<style>
+
+        .title { font: 700 52px Arial, sans-serif; fill: #18222d; }
+        .label { font: 700 28px Arial, sans-serif; fill: #18222d; }
+        .small { font: 600 21px Arial, sans-serif; fill: #68737e; }
+        .accent { font: 700 27px Arial, sans-serif; fill: #ee6b3b; }
+        .jet-area { fill: #dceafa; stroke: #4389e8; stroke-width: 2.5; }
+        .particle { fill: #4389e8; stroke: #18222d; stroke-width: 1.7; }
+        .particle-after { fill: #ee6b3b; stroke: #18222d; stroke-width: 1.7; }
+        .particle-faint { fill: #4389e8; stroke: #18222d; stroke-width: 1.3; opacity: 0.48; }
+        .particle-missing { fill: none; stroke: #68737e; stroke-width: 2.2; opacity: 0.55; }
+        .missing-x { stroke: #68737e; stroke-width: 3; opacity: 0.7; }
+        .arrow { stroke: #68737e; stroke-width: 3; }
+        .axis { stroke: #18222d; stroke-width: 2.3; }
+        .curve { fill: none; stroke: #ee6b3b; stroke-width: 6; stroke-linecap: round; }
+        .curve-point { fill: #d69b2d; }
+        .low-pt-band { fill: #d69b2d; opacity: 0.16; }
+        .density-area { fill: #f8d9cb; fill-opacity: 0.72; stroke: #d69b2d;
+            stroke-width: 2.5; stroke-dasharray: 9 8; }
+        .target-particle { fill: #ee6b3b; stroke: #18222d; stroke-width: 2.2; }
+        
+</style>
+</defs>
+<rect width="1600" height="900" fill="#f7f3ed" />
+<text x="72.0" y="92.0" text-anchor="start" class="title">Efficiency loss</text>
+<text x="275.0" y="210.0" text-anchor="middle" class="label">39 particles</text>
+<ellipse cx="275.0" cy="465.0" rx="205" ry="151" class="jet-area" />
+<circle cx="221.8" cy="484.0" r="8.1" class="particle" />
+<circle cx="231.3" cy="480.2" r="8.7" class="particle" />
+<circle cx="238.9" cy="487.8" r="8.3" class="particle" />
+<circle cx="229.4" cy="495.4" r="9.2" class="particle" />
+<circle cx="242.7" cy="478.3" r="8.1" class="particle" />
+<circle cx="349.2" cy="416.3" r="8.4" class="particle" />
+<circle cx="413.0" cy="498.5" r="13.6" class="particle" />
+<circle cx="287.1" cy="408.6" r="10.6" class="particle" />
+<circle cx="265.2" cy="529.9" r="10.7" class="particle" />
+<circle cx="252.3" cy="439.7" r="10.9" class="particle" />
+<circle cx="421.0" cy="471.5" r="10.3" class="particle" />
+<circle cx="185.1" cy="393.4" r="11.2" class="particle" />
+<circle cx="164.0" cy="520.8" r="11.0" class="particle" />
+<circle cx="285.7" cy="486.6" r="9.0" class="particle" />
+<circle cx="316.0" cy="419.8" r="15.1" class="particle" />
+<circle cx="193.0" cy="505.8" r="10.6" class="particle" />
+<circle cx="294.2" cy="487.9" r="10.4" class="particle" />
+<circle cx="196.6" cy="469.8" r="6.9" class="particle" />
+<circle cx="275.3" cy="443.9" r="9.0" class="particle" />
+<circle cx="414.4" cy="483.1" r="8.5" class="particle" />
+<circle cx="235.0" cy="518.4" r="11.0" class="particle" />
+<circle cx="249.2" cy="485.3" r="11.2" class="particle" />
+<circle cx="250.1" cy="462.4" r="14.4" class="particle" />
+<circle cx="219.7" cy="478.1" r="10.7" class="particle" />
+<circle cx="308.2" cy="466.8" r="13.0" class="particle" />
+<circle cx="275.3" cy="445.4" r="10.7" class="particle" />
+<circle cx="336.7" cy="472.8" r="11.0" class="particle" />
+<circle cx="293.1" cy="538.5" r="12.5" class="particle" />
+<circle cx="345.5" cy="484.5" r="10.7" class="particle" />
+<circle cx="231.1" cy="510.1" r="14.0" class="particle" />
+<circle cx="419.5" cy="469.9" r="19.0" class="particle" />
+<circle cx="407.0" cy="485.3" r="9.6" class="particle" />
+<circle cx="244.9" cy="459.7" r="9.7" class="particle" />
+<circle cx="275.0" cy="547.3" r="9.1" class="particle" />
+<circle cx="279.7" cy="479.5" r="10.0" class="particle" />
+<circle cx="219.8" cy="498.5" r="8.4" class="particle" />
+<circle cx="313.2" cy="511.1" r="13.8" class="particle" />
+<circle cx="258.3" cy="454.1" r="12.4" class="particle" />
+<circle cx="210.1" cy="561.6" r="12.1" class="particle" />
+<text x="275.0" y="690.0" text-anchor="middle" class="accent">2.5% base</text>
+<line x1="480.0" y1="465.0" x2="515.0" y2="465.0" class="arrow" marker-end="url(#arrow)" />
+<line x1="535.0" y1="440.0" x2="845.0" y2="440.0" class="axis" />
+<line x1="535.0" y1="255.0" x2="535.0" y2="440.0" class="axis" />
+<rect x="535.0" y="255.0" width="31.0" height="185.0" class="low-pt-band" />
+<path d="M 535.0 271.8 L 538.9 274.4 L 542.8 276.9 L 546.6 279.4 L 550.5 281.9 L 554.4 284.4 L 558.2 286.9 L 562.1 289.4 L 566.0 291.9 L 569.9 294.3 L 573.8 296.8 L 577.6 299.2 L 581.5 301.6 L 585.4 304.0 L 589.2 306.4 L 593.1 308.8 L 597.0 311.2 L 600.9 313.5 L 604.8 315.9 L 608.6 318.2 L 612.5 320.5 L 616.4 322.8 L 620.2 325.1 L 624.1 327.4 L 628.0 329.7 L 631.9 331.9 L 635.8 334.1 L 639.6 336.4 L 643.5 338.6 L 647.4 340.8 L 651.2 342.9 L 655.1 345.1 L 659.0 347.2 L 662.9 349.4 L 666.8 351.5 L 670.6 353.6 L 674.5 355.6 L 678.4 357.7 L 682.2 359.8 L 686.1 361.8 L 690.0 363.8 L 693.9 365.8 L 697.8 367.8 L 701.6 369.7 L 705.5 371.7 L 709.4 373.6 L 713.2 375.5 L 717.1 377.4 L 721.0 379.2 L 724.9 381.1 L 728.8 382.9 L 732.6 384.7 L 736.5 386.5 L 740.4 388.3 L 744.2 390.0 L 748.1 391.7 L 752.0 393.4 L 755.9 395.1 L 759.8 396.7 L 763.6 398.3 L 767.5 399.9 L 771.4 401.4 L 775.2 403.0 L 779.1 404.5 L 783.0 405.9 L 786.9 407.4 L 790.8 408.8 L 794.6 410.2 L 798.5 411.5 L 802.4 412.8 L 806.2 414.0 L 810.1 415.3 L 814.0 416.4 L 817.9 417.5 L 821.8 418.6 L 825.6 419.6 L 829.5 420.5 L 833.4 421.4 L 837.2 422.1 L 841.1 422.8 L 845.0 423.2" class="curve" />
+<circle cx="566.0" cy="291.9" r="7" class="curve-point" />
+<text x="535.0" y="474.0" text-anchor="start" class="small">low pT</text>
+<text x="845.0" y="474.0" text-anchor="end" class="small">high pT</text>
+<text x="594.0" y="269.9" text-anchor="start" class="accent">x1.9</text>
+<circle cx="690.0" cy="625.0" r="103" class="density-area" />
+<circle cx="690.0" cy="625.0" r="18" class="target-particle" />
+<circle cx="632.0" cy="650.0" r="12" class="particle" />
+<circle cx="653.0" cy="574.0" r="12" class="particle" />
+<circle cx="724.0" cy="672.0" r="12" class="particle" />
+<circle cx="749.0" cy="600.0" r="12" class="particle" />
+<circle cx="701.0" cy="558.0" r="12" class="particle" />
+<circle cx="545.0" cy="602.0" r="9" class="particle-faint" />
+<circle cx="837.0" cy="664.0" r="9" class="particle-faint" />
+<circle cx="827.0" cy="534.0" r="9" class="particle-faint" />
+<text x="690.0" y="500.0" text-anchor="middle" class="small">radius 0.04</text>
+<text x="690.0" y="772.0" text-anchor="middle" class="accent">+0.2 pp / neighbor</text>
+<line x1="865.0" y1="465.0" x2="1005.0" y2="465.0" class="arrow" marker-end="url(#arrow)" />
+<text x="1280.0" y="210.0" text-anchor="middle" class="label">After drops</text>
+<ellipse cx="1280.0" cy="465.0" rx="205" ry="151" class="jet-area" />
+<circle cx="1226.8" cy="484.0" r="8.1" class="particle-missing" />
+<line x1="1220.8" y1="478.0" x2="1232.8" y2="490.0" class="missing-x" />
+<line x1="1220.8" y1="490.0" x2="1232.8" y2="478.0" class="missing-x" />
+<circle cx="1236.3" cy="480.2" r="8.7" class="particle-after" />
+<circle cx="1243.9" cy="487.8" r="8.3" class="particle-missing" />
+<line x1="1237.9" y1="481.8" x2="1249.9" y2="493.8" class="missing-x" />
+<line x1="1237.9" y1="493.8" x2="1249.9" y2="481.8" class="missing-x" />
+<circle cx="1234.4" cy="495.4" r="9.2" class="particle-after" />
+<circle cx="1247.7" cy="478.3" r="8.1" class="particle-missing" />
+<line x1="1241.7" y1="472.3" x2="1253.7" y2="484.3" class="missing-x" />
+<line x1="1241.7" y1="484.3" x2="1253.7" y2="472.3" class="missing-x" />
+<circle cx="1354.2" cy="416.3" r="8.4" class="particle-after" />
+<circle cx="1418.0" cy="498.5" r="13.6" class="particle-after" />
+<circle cx="1292.1" cy="408.6" r="10.6" class="particle-after" />
+<circle cx="1270.2" cy="529.9" r="10.7" class="particle-after" />
+<circle cx="1257.3" cy="439.7" r="10.9" class="particle-after" />
+<circle cx="1426.0" cy="471.5" r="10.3" class="particle-after" />
+<circle cx="1190.1" cy="393.4" r="11.2" class="particle-after" />
+<circle cx="1169.0" cy="520.8" r="11.0" class="particle-after" />
+<circle cx="1290.7" cy="486.6" r="9.0" class="particle-after" />
+<circle cx="1321.0" cy="419.8" r="15.1" class="particle-after" />
+<circle cx="1198.0" cy="505.8" r="10.6" class="particle-after" />
+<circle cx="1299.2" cy="487.9" r="10.4" class="particle-after" />
+<circle cx="1201.6" cy="469.8" r="6.9" class="particle-after" />
+<circle cx="1280.3" cy="443.9" r="9.0" class="particle-after" />
+<circle cx="1419.4" cy="483.1" r="8.5" class="particle-after" />
+<circle cx="1240.0" cy="518.4" r="11.0" class="particle-after" />
+<circle cx="1254.2" cy="485.3" r="11.2" class="particle-after" />
+<circle cx="1255.1" cy="462.4" r="14.4" class="particle-after" />
+<circle cx="1224.7" cy="478.1" r="10.7" class="particle-after" />
+<circle cx="1313.2" cy="466.8" r="13.0" class="particle-after" />
+<circle cx="1280.3" cy="445.4" r="10.7" class="particle-after" />
+<circle cx="1341.7" cy="472.8" r="11.0" class="particle-after" />
+<circle cx="1298.1" cy="538.5" r="12.5" class="particle-after" />
+<circle cx="1350.5" cy="484.5" r="10.7" class="particle-after" />
+<circle cx="1236.1" cy="510.1" r="14.0" class="particle-after" />
+<circle cx="1424.5" cy="469.9" r="19.0" class="particle-after" />
+<circle cx="1412.0" cy="485.3" r="9.6" class="particle-after" />
+<circle cx="1249.9" cy="459.7" r="9.7" class="particle-after" />
+<circle cx="1280.0" cy="547.3" r="9.1" class="particle-after" />
+<circle cx="1284.7" cy="479.5" r="10.0" class="particle-after" />
+<circle cx="1224.8" cy="498.5" r="8.4" class="particle-after" />
+<circle cx="1318.2" cy="511.1" r="13.8" class="particle-after" />
+<circle cx="1263.3" cy="454.1" r="12.4" class="particle-after" />
+<circle cx="1215.1" cy="561.6" r="12.1" class="particle-after" />
+<text x="1280.0" y="690.0" text-anchor="middle" class="accent">~2.5 removed</text>
+</svg>

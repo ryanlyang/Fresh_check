@@ -256,6 +256,9 @@ def load_hlt_v3_cache(
     cache_dir: str | Path,
     *,
     expected_profile_contract_sha256: str | None = None,
+    expected_logical_role: str | None = None,
+    expected_replica_id: int | None = None,
+    expected_realization_policy: str | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     root = Path(cache_dir)
     with np.load(root / HLT_V3_ARRAY_FILENAME, allow_pickle=False) as payload:
@@ -267,7 +270,15 @@ def load_hlt_v3_cache(
         arrays,
         metadata,
         expected_profile_contract_sha256=expected_profile_contract_sha256,
+        expected_logical_role=expected_logical_role,
+        expected_replica_id=expected_replica_id,
     )
+    if (
+        expected_realization_policy is not None
+        and metadata.get("realization_policy")
+        != expected_realization_policy
+    ):
+        raise ValueError("cache realization policy differs")
     return arrays, metadata
 
 

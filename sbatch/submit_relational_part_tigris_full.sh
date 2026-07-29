@@ -79,16 +79,30 @@ python scripts/preflight_relational_part_data.py \
 
 source_commit="$(python scripts/print_relational_part_source_snapshot.py --field source_commit)"
 source_status_sha="$(python scripts/print_relational_part_source_snapshot.py --field source_status_sha256)"
+source_dirty="$(python scripts/print_relational_part_source_snapshot.py --field source_dirty)"
+if [[ "${source_dirty}" != "False" ]]; then
+  echo "Production submission requires a clean committed source checkout." >&2
+  echo "Commit or preserve unrelated work before submitting RPT." >&2
+  exit 2
+fi
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 campaign_id="rpt_attention_bias_${timestamp}_${source_commit:0:10}_${source_status_sha:0:10}"
 campaign_root="${OUTPUT_ROOT}/relational_particle_transformer/${campaign_id}"
+campaign_source_root="$(
+  dirname "${PROJECT_DIR}"
+)/.rpt_worktrees/${campaign_id}"
 if [[ -e "${campaign_root}" ]]; then
   echo "Refusing existing campaign root: ${campaign_root}" >&2
   exit 2
 fi
+if [[ -e "${campaign_source_root}" ]]; then
+  echo "Refusing existing campaign source worktree: ${campaign_source_root}" >&2
+  exit 2
+fi
 mkdir -p \
   "${campaign_root}/bootstrap" \
-  "${campaign_root}/job_ledgers/slurm"
+  "${campaign_root}/job_ledgers/slurm" \
+  "$(dirname "${campaign_source_root}")"
 export CAMPAIGN_ID="${campaign_id}"
 export CAMPAIGN_ROOT="${campaign_root}"
 export RPT_STORAGE_MEASUREMENTS
@@ -100,10 +114,27 @@ graph_args=(--write-artifacts)
 if [[ "${RPT_MINIATURE}" == "1" ]]; then
   graph_args+=(--miniature)
 fi
+git worktree add --detach "${campaign_source_root}" "${source_commit}"
+pinned_commit="$(
+  git -C "${campaign_source_root}" rev-parse HEAD
+)"
+pinned_dirty="$(
+  python "${campaign_source_root}/scripts/print_relational_part_source_snapshot.py" \
+    --field source_dirty
+)"
+if [[ "${pinned_commit}" != "${source_commit}" || "${pinned_dirty}" != "False" ]]; then
+  echo "Detached campaign source worktree failed verification." >&2
+  exit 2
+fi
+campaign_script_dir="${campaign_source_root}/sbatch"
+export PROJECT_DIR="${campaign_source_root}"
+cd "${PROJECT_DIR}"
+
 python scripts/submit_relational_part_graph.py \
   --output-root "${OUTPUT_ROOT}" \
   --campaign-id "${campaign_id}" \
   --campaign-root "${campaign_root}" \
+  --execution-source-root "${campaign_source_root}" \
   --screening-array-concurrency "${SCREENING_ARRAY_CONCURRENCY}" \
   --tree-array-concurrency "${TREE_ARRAY_CONCURRENCY}" \
   --region-array-concurrency "${REGION_ARRAY_CONCURRENCY}" \
@@ -127,9 +158,10 @@ submit_cpu() {
     --mem="${CPU_MEM}" \
     --output="${log_pattern}" \
     --error="${error_pattern}" \
+    --export="ALL,PROJECT_DIR=${PROJECT_DIR}" \
     "${dependency_args[@]}" \
     "$@" \
-    "${SCRIPT_DIR}/${script}"
+    "${campaign_script_dir}/${script}"
 }
 
 submit_gpu() {
@@ -148,9 +180,10 @@ submit_gpu() {
     --mem="${GPU_MEM}" \
     --output="${log_pattern}" \
     --error="${error_pattern}" \
+    --export="ALL,PROJECT_DIR=${PROJECT_DIR}" \
     "${dependency_args[@]}" \
     "$@" \
-    "${SCRIPT_DIR}/${script}"
+    "${campaign_script_dir}/${script}"
 }
 
 declare -A jobs
@@ -228,6 +261,7 @@ python scripts/write_relational_part_job_ledger.py \
 printf 'campaign root: %s\n' "${campaign_root}"
 printf 'source commit: %s\nsource dirty-status hash: %s\n' \
   "${source_commit}" "${source_status_sha}"
+printf 'pinned campaign source worktree: %s\n' "${campaign_source_root}"
 printf 'split job: %s\nHLT cache job: %s\nbackend manifest: %s\nthroughput probe: %s\n' \
   "${jobs[split_build]}" "${jobs[hlt_cache]}" \
   "${campaign_root}/backend/backend_manifest.json" \

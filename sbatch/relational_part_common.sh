@@ -43,6 +43,41 @@ rpt_setup() {
   conda activate "${CONDA_ENV}"
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   cd "${PROJECT_DIR}"
+  local production_graph="${CAMPAIGN_ROOT}/job_ledgers/production_graph.json"
+  if [[ ! -f "${production_graph}" ]]; then
+    echo "Production graph is absent: ${production_graph}" >&2
+    exit 2
+  fi
+  local expected_project=""
+  local expected_commit=""
+  expected_project="$(
+    python -c \
+      'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["execution_source"]["root"])' \
+      "${production_graph}"
+  )"
+  expected_commit="$(
+    python -c \
+      'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["execution_source"]["pinned_commit"])' \
+      "${production_graph}"
+  )"
+  local actual_project=""
+  local actual_commit=""
+  actual_project="$(pwd -P)"
+  actual_commit="$(git rev-parse HEAD)"
+  if [[ "${actual_project}" != "${expected_project}" ]]; then
+    echo "Worker source root differs from the pinned production graph." >&2
+    echo "Expected: ${expected_project}" >&2
+    echo "Observed: ${actual_project}" >&2
+    exit 2
+  fi
+  if [[ "${actual_commit}" != "${expected_commit}" ]]; then
+    echo "Worker source commit differs from the pinned production graph." >&2
+    exit 2
+  fi
+  if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+    echo "Pinned campaign source worktree is dirty." >&2
+    exit 2
+  fi
   python -c "import sys; print(sys.executable)"
 }
 

@@ -19,7 +19,7 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v2"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v3"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v1"
 )
@@ -103,6 +103,8 @@ DIRECT_WORKER_NODES = frozenset(
 TASK_MANIFEST_PRODUCER_NODES = {
     "offline_input_cache": "campaign_bootstrap",
     "hlt_v3_cache": "campaign_bootstrap",
+    "region_tree_cache": "campaign_bootstrap",
+    "region_tree_finalize": "campaign_bootstrap",
     "input_audit": "campaign_bootstrap",
     "normalizers_500k": "campaign_bootstrap",
     "offline_expert_training": "campaign_bootstrap",
@@ -148,7 +150,14 @@ TASK_MANIFEST_PRODUCER_NODES = {
 }
 
 BOOTSTRAP_INPUT_MANIFEST_NODES = frozenset(
-    {"offline_input_cache", "hlt_v3_cache"}
+    {
+        "offline_input_cache",
+        "hlt_v3_cache",
+        "region_tree_cache",
+        "region_tree_finalize",
+        "normalizers_500k",
+        "input_audit",
+    }
 )
 
 
@@ -1143,7 +1152,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1215,7 +1224,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 2:
+    if int(payload.get("schema_version", -1)) != 3:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1683,14 +1692,30 @@ def validate_task_manifest_for_graph(
         str(node["node_id"]): node for node in production_graph["nodes"]
     }
     node_id = str(payload["node_id"])
+    node = nodes.get(node_id)
+    execution_entries = {
+        str(row["node_id"]): row
+        for row in production_graph["node_execution_registry"]["entries"]
+    }
+    execution = execution_entries.get(node_id)
+    node_array = None if node is None else node["array"]
+    if node_array is None:
+        dimensions_differ = (
+            int(payload["task_count"]) != 1
+            or int(payload["maximum_concurrent_tasks"]) != 1
+        )
+    else:
+        dimensions_differ = (
+            int(payload["task_count"]) > int(node_array["maximum_tasks"])
+            or int(payload["maximum_concurrent_tasks"])
+            != int(node_array["maximum_concurrent_tasks"])
+        )
     if (
         payload["production_graph_sha256"] != graph_sha
-        or node_id not in nodes
-        or nodes[node_id]["array"] is None
-        or int(payload["task_count"])
-        > int(nodes[node_id]["array"]["maximum_tasks"])
-        or int(payload["maximum_concurrent_tasks"])
-        != int(nodes[node_id]["array"]["maximum_concurrent_tasks"])
+        or node is None
+        or execution is None
+        or execution["manifest_required"] is not True
+        or dimensions_differ
     ):
         raise ValueError("task manifest differs from production graph")
     root = Path(campaign_root).resolve()

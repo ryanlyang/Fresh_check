@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<defs>
+<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M 0 0 L 12 6 L 0 12 z" fill="#68737e" /></marker>
+<style>
+
+        .title { font: 700 46px Arial, sans-serif; fill: #18222d; }
+        .row-title { font: 700 28px Arial, sans-serif; fill: #18222d; }
+        .tiny { font: 600 18px Arial, sans-serif; fill: #68737e; }
+        .micro { font: 600 15px Arial, sans-serif; fill: #68737e; }
+        .neighbor-count { font: 700 21px Arial, sans-serif; fill: #18222d; }
+        .number { font: 700 35px Arial, sans-serif; fill: #18222d; }
+        .number-small { font: 700 29px Arial, sans-serif; fill: #18222d; }
+        .factor { font: 700 23px Arial, sans-serif; fill: #ee6b3b; }
+        .final-label { font: 600 20px Arial, sans-serif; fill: #ffffff; }
+        .final-number { font: 700 46px Arial, sans-serif; fill: #ffffff; }
+        .arrow { stroke: #68737e; stroke-width: 3; }
+        .axis { stroke: #18222d; stroke-width: 2; }
+        
+</style>
+</defs>
+<rect width="1600" height="900" fill="#f7f3ed" />
+<text x="58.0" y="72.0" text-anchor="start" class="title">One particle, one drop probability</text>
+<rect x="48" y="95.0" width="1504" height="340" rx="24" fill="#ffffff" stroke="#ee6b3b" stroke-width="2.0" opacity="0.98" />
+<text x="83.0" y="137.0" text-anchor="start" class="row-title">Low pT + crowded</text>
+<circle cx="220.0" cy="283.0" r="125" fill="#f8d9cb" fill-opacity="0.48" stroke="#ee6b3b" stroke-width="2.3" stroke-dasharray="10 8" />
+<circle cx="152.0" cy="305.0" r="14" fill="#4389e8" stroke="#18222d" stroke-width="1.8" />
+<circle cx="178.0" cy="217.0" r="14" fill="#4389e8" stroke="#18222d" stroke-width="1.8" />
+<circle cx="254.0" cy="341.0" r="14" fill="#4389e8" stroke="#18222d" stroke-width="1.8" />
+<circle cx="293.0" cy="252.0" r="14" fill="#4389e8" stroke="#18222d" stroke-width="1.8" />
+<circle cx="232.0" cy="195.0" r="14" fill="#4389e8" stroke="#18222d" stroke-width="1.8" />
+<circle cx="63.0" cy="231.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="380.0" cy="345.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="220.0" cy="283.0" r="23" fill="#ee6b3b" stroke="#18222d" stroke-width="2.3" />
+<circle cx="220.0" cy="283.0" r="34" fill="none" stroke="#d69b2d" stroke-width="4" />
+<text x="220.0" y="192.0" text-anchor="middle" class="tiny">R = 0.04</text>
+<text x="220.0" y="422.0" text-anchor="middle" class="neighbor-count">5 neighbors</text>
+<line x1="372.0" y1="283.0" x2="435.0" y2="283.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="448.0" y="228.0" width="150.0" height="110.0" rx="18" fill="#f8d9cb" stroke="#ee6b3b" stroke-width="2.2" />
+<text x="523.0" y="262.0" text-anchor="middle" class="tiny">base</text>
+<text x="523.0" y="306.0" text-anchor="middle" class="number">2.5%</text>
+<line x1="605.0" y1="283.0" x2="637.0" y2="283.0" class="arrow" marker-end="url(#arrow)" />
+<line x1="650.0" y1="320.0" x2="950.0" y2="320.0" class="axis" />
+<line x1="650.0" y1="170.0" x2="650.0" y2="320.0" class="axis" />
+<rect x="650.0" y="170.0" width="30.0" height="150.0" fill="#d69b2d" opacity="0.13" />
+<path d="M 650.0 183.6 L 653.8 185.7 L 657.5 187.8 L 661.2 189.8 L 665.0 191.8 L 668.8 193.9 L 672.5 195.9 L 676.2 197.9 L 680.0 199.9 L 683.8 201.9 L 687.5 203.9 L 691.2 205.9 L 695.0 207.8 L 698.8 209.8 L 702.5 211.7 L 706.2 213.6 L 710.0 215.6 L 713.8 217.5 L 717.5 219.4 L 721.2 221.3 L 725.0 223.1 L 728.8 225.0 L 732.5 226.9 L 736.2 228.7 L 740.0 230.5 L 743.8 232.4 L 747.5 234.2 L 751.2 236.0 L 755.0 237.8 L 758.8 239.5 L 762.5 241.3 L 766.2 243.0 L 770.0 244.8 L 773.8 246.5 L 777.5 248.2 L 781.2 249.9 L 785.0 251.6 L 788.8 253.3 L 792.5 254.9 L 796.2 256.6 L 800.0 258.2 L 803.8 259.8 L 807.5 261.4 L 811.2 263.0 L 815.0 264.6 L 818.8 266.2 L 822.5 267.7 L 826.2 269.2 L 830.0 270.7 L 833.8 272.2 L 837.5 273.7 L 841.2 275.2 L 845.0 276.6 L 848.8 278.0 L 852.5 279.4 L 856.2 280.8 L 860.0 282.2 L 863.8 283.6 L 867.5 284.9 L 871.2 286.2 L 875.0 287.5 L 878.8 288.7 L 882.5 290.0 L 886.2 291.2 L 890.0 292.4 L 893.8 293.6 L 897.5 294.7 L 901.2 295.8 L 905.0 296.9 L 908.8 297.9 L 912.5 299.0 L 916.2 299.9 L 920.0 300.9 L 923.8 301.8 L 927.5 302.6 L 931.2 303.5 L 935.0 304.2 L 938.8 304.9 L 942.5 305.5 L 946.2 306.0 L 950.0 306.4" fill="none" stroke="#ee6b3b" stroke-width="5.5" stroke-linecap="round" />
+<line x1="674.0" y1="196.7" x2="674.0" y2="320.0" stroke="#ee6b3b" stroke-width="2" stroke-dasharray="5 5" />
+<circle cx="674.0" cy="196.7" r="9" fill="#ee6b3b" stroke="#ffffff" stroke-width="3" />
+<text x="650.0" y="347.0" text-anchor="start" class="micro">low</text>
+<text x="950.0" y="347.0" text-anchor="end" class="micro">high</text>
+<text x="674.0" y="153.0" text-anchor="middle" class="tiny">8th percentile</text>
+<text x="674.0" y="176.7" text-anchor="middle" class="factor">x1.9</text>
+<line x1="973.0" y1="283.0" x2="1018.0" y2="283.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="1032.0" y="228.0" width="182.0" height="110.0" rx="18" fill="#f8d9cb" stroke="#ee6b3b" stroke-width="2.2" />
+<text x="1123.0" y="261.0" text-anchor="middle" class="tiny">5 x 0.2 pp</text>
+<text x="1123.0" y="306.0" text-anchor="middle" class="number-small">+1.0 pp</text>
+<line x1="1222.0" y1="283.0" x2="1261.0" y2="283.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="1275.0" y="213.0" width="225.0" height="140.0" rx="18" fill="#ee6b3b" stroke="#ee6b3b" stroke-width="2.2" />
+<text x="1387.5" y="258.0" text-anchor="middle" class="final-label">drop chance</text>
+<text x="1387.5" y="316.0" text-anchor="middle" class="final-number">5.75%</text>
+<rect x="48" y="470.0" width="1504" height="340" rx="24" fill="#ffffff" stroke="#258f8b" stroke-width="2.0" opacity="0.98" />
+<text x="83.0" y="512.0" text-anchor="start" class="row-title">Higher pT + isolated</text>
+<circle cx="220.0" cy="658.0" r="125" fill="#d9efec" fill-opacity="0.48" stroke="#258f8b" stroke-width="2.3" stroke-dasharray="10 8" />
+<circle cx="65.0" cy="693.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="369.0" cy="730.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="355.0" cy="562.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="87.0" cy="553.0" r="11" fill="#4389e8" fill-opacity="0.45" stroke="#18222d" stroke-width="1.3" />
+<circle cx="220.0" cy="658.0" r="23" fill="#258f8b" stroke="#18222d" stroke-width="2.3" />
+<circle cx="220.0" cy="658.0" r="34" fill="none" stroke="#d69b2d" stroke-width="4" />
+<text x="220.0" y="567.0" text-anchor="middle" class="tiny">R = 0.04</text>
+<text x="220.0" y="797.0" text-anchor="middle" class="neighbor-count">0 neighbors</text>
+<line x1="372.0" y1="658.0" x2="435.0" y2="658.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="448.0" y="603.0" width="150.0" height="110.0" rx="18" fill="#d9efec" stroke="#258f8b" stroke-width="2.2" />
+<text x="523.0" y="637.0" text-anchor="middle" class="tiny">base</text>
+<text x="523.0" y="681.0" text-anchor="middle" class="number">2.5%</text>
+<line x1="605.0" y1="658.0" x2="637.0" y2="658.0" class="arrow" marker-end="url(#arrow)" />
+<line x1="650.0" y1="695.0" x2="950.0" y2="695.0" class="axis" />
+<line x1="650.0" y1="545.0" x2="650.0" y2="695.0" class="axis" />
+<rect x="650.0" y="545.0" width="30.0" height="150.0" fill="#d69b2d" opacity="0.13" />
+<path d="M 650.0 558.6 L 653.8 560.7 L 657.5 562.8 L 661.2 564.8 L 665.0 566.8 L 668.8 568.9 L 672.5 570.9 L 676.2 572.9 L 680.0 574.9 L 683.8 576.9 L 687.5 578.9 L 691.2 580.9 L 695.0 582.8 L 698.8 584.8 L 702.5 586.7 L 706.2 588.6 L 710.0 590.6 L 713.8 592.5 L 717.5 594.4 L 721.2 596.3 L 725.0 598.1 L 728.8 600.0 L 732.5 601.9 L 736.2 603.7 L 740.0 605.5 L 743.8 607.4 L 747.5 609.2 L 751.2 611.0 L 755.0 612.8 L 758.8 614.5 L 762.5 616.3 L 766.2 618.0 L 770.0 619.8 L 773.8 621.5 L 777.5 623.2 L 781.2 624.9 L 785.0 626.6 L 788.8 628.3 L 792.5 629.9 L 796.2 631.6 L 800.0 633.2 L 803.8 634.8 L 807.5 636.4 L 811.2 638.0 L 815.0 639.6 L 818.8 641.2 L 822.5 642.7 L 826.2 644.2 L 830.0 645.7 L 833.8 647.2 L 837.5 648.7 L 841.2 650.2 L 845.0 651.6 L 848.8 653.0 L 852.5 654.4 L 856.2 655.8 L 860.0 657.2 L 863.8 658.6 L 867.5 659.9 L 871.2 661.2 L 875.0 662.5 L 878.8 663.7 L 882.5 665.0 L 886.2 666.2 L 890.0 667.4 L 893.8 668.6 L 897.5 669.7 L 901.2 670.8 L 905.0 671.9 L 908.8 672.9 L 912.5 674.0 L 916.2 674.9 L 920.0 675.9 L 923.8 676.8 L 927.5 677.6 L 931.2 678.5 L 935.0 679.2 L 938.8 679.9 L 942.5 680.5 L 946.2 681.0 L 950.0 681.4" fill="none" stroke="#ee6b3b" stroke-width="5.5" stroke-linecap="round" />
+<line x1="875.0" y1="662.5" x2="875.0" y2="695.0" stroke="#258f8b" stroke-width="2" stroke-dasharray="5 5" />
+<circle cx="875.0" cy="662.5" r="9" fill="#258f8b" stroke="#ffffff" stroke-width="3" />
+<text x="650.0" y="722.0" text-anchor="start" class="micro">low</text>
+<text x="950.0" y="722.0" text-anchor="end" class="micro">high</text>
+<text x="875.0" y="528.0" text-anchor="middle" class="tiny">75th percentile</text>
+<text x="875.0" y="642.5" text-anchor="middle" class="factor">x0.86</text>
+<line x1="973.0" y1="658.0" x2="1018.0" y2="658.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="1032.0" y="603.0" width="182.0" height="110.0" rx="18" fill="#d9efec" stroke="#258f8b" stroke-width="2.2" />
+<text x="1123.0" y="636.0" text-anchor="middle" class="tiny">0 x 0.2 pp</text>
+<text x="1123.0" y="681.0" text-anchor="middle" class="number-small">+0.0 pp</text>
+<line x1="1222.0" y1="658.0" x2="1261.0" y2="658.0" class="arrow" marker-end="url(#arrow)" />
+<rect x="1275.0" y="588.0" width="225.0" height="140.0" rx="18" fill="#258f8b" stroke="#258f8b" stroke-width="2.2" />
+<text x="1387.5" y="633.0" text-anchor="middle" class="final-label">drop chance</text>
+<text x="1387.5" y="691.0" text-anchor="middle" class="final-number">2.15%</text>
+</svg>

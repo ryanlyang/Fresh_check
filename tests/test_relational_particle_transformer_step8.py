@@ -39,6 +39,7 @@ from teacher_logit_reco.relational_part import (
     validate_campaign_source,
     validate_content_hash,
     validate_production_graph,
+    with_content_hash,
 )
 
 
@@ -137,13 +138,41 @@ def test_step8_production_graph_is_complete_and_final_test_is_sealed() -> None:
         campaign_id="rpt_campaign",
         source_commit="1" * 40,
         source_status_sha256="2" * 64,
+        execution_source_root="/home/ryreu/atlas/.rpt_worktrees/rpt_campaign",
         screening_array_concurrency=7,
         tree_array_concurrency=11,
         region_array_concurrency=13,
     )
     assert validate_production_graph(graph) == graph["content_hash"]
-    assert graph["contract"] == "relational_part_production_graph_v2"
-    assert graph["schema_version"] == 2
+    assert graph["contract"] == "relational_part_production_graph_v3"
+    assert graph["schema_version"] == 3
+    assert graph["execution_source"] == {
+        "mode": "detached_git_worktree",
+        "root": "/home/ryreu/atlas/.rpt_worktrees/rpt_campaign",
+        "pinned_commit": "1" * 40,
+        "main_checkout_may_advance": True,
+        "active_jobs_validate_pinned_worktree": True,
+    }
+    tampered = dict(graph)
+    tampered["execution_source"] = {
+        **graph["execution_source"],
+        "pinned_commit": "3" * 40,
+    }
+    tampered = with_content_hash(
+        {key: value for key, value in tampered.items() if key != "content_hash"}
+    )
+    with pytest.raises(
+        ValueError, match="production execution source contract differs"
+    ):
+        validate_production_graph(tampered)
+    with pytest.raises(ValueError, match="execution source root must be absolute"):
+        build_production_graph(
+            campaign_root="/tmp/rpt_campaign",
+            campaign_id="rpt_campaign",
+            source_commit="1" * 40,
+            source_status_sha256="2" * 64,
+            execution_source_root=".rpt_worktrees/rpt_campaign",
+        )
     assert graph["split_sizes"] == {
         "model_train": 1_000_000,
         "model_val": 125_000,
@@ -447,12 +476,24 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     assert "0-20%${SCREENING_ARRAY_CONCURRENCY}" in top
     assert "REGION_ARRAY_CONCURRENCY" in top
     assert "region_normalization_shards" in top
+    assert "git worktree add --detach" in top
+    assert 'export PROJECT_DIR="${campaign_source_root}"' in top
+    assert '"${campaign_script_dir}/${script}"' in top
+    assert '--export="ALL,PROJECT_DIR=${PROJECT_DIR}"' in top
+    assert "Production submission requires a clean committed source checkout" in top
     assert "preflight_relational_part_data.py" in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top
     assert "PYTHONDONTWRITEBYTECODE=1" in top
     assert 'LD_LIBRARY_PATH="${CONDA_PREFIX}/lib' in top
     assert "verify_ninja_availability" in top
+    common = (sbatch / "relational_part_common.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '["execution_source"]["root"]' in common
+    assert '["execution_source"]["pinned_commit"]' in common
+    assert "Worker source root differs from the pinned production graph" in common
+    assert "Pinned campaign source worktree is dirty" in common
     semantic_runner = (
         ROOT / "scripts" / "run_relational_part_semantic_perturbation.py"
     ).read_text(encoding="utf-8")

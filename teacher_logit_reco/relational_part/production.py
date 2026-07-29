@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from .contracts import (
@@ -13,7 +13,7 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "relational_part_production_graph_v2"
+PRODUCTION_GRAPH_CONTRACT = "relational_part_production_graph_v3"
 JOB_LEDGER_CONTRACT = "relational_part_job_ledger_v1"
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -62,6 +62,7 @@ def build_production_graph(
     campaign_id: str,
     source_commit: str,
     source_status_sha256: str,
+    execution_source_root: str | Path | None = None,
     miniature: bool = False,
     screening_array_concurrency: int = 4,
     tree_array_concurrency: int = 16,
@@ -73,6 +74,20 @@ def build_production_graph(
         raise ValueError("tree array concurrency must be positive")
     if int(region_array_concurrency) <= 0:
         raise ValueError("REGION array concurrency must be positive")
+    execution_root = str(
+        execution_source_root
+        if execution_source_root is not None
+        else (
+            PurePosixPath(TIGRIS_DEFAULTS["project_dir"]).parent
+            / ".rpt_worktrees"
+            / str(campaign_id)
+        )
+    )
+    if not (
+        Path(execution_root).is_absolute()
+        or PurePosixPath(execution_root).is_absolute()
+    ):
+        raise ValueError("execution source root must be absolute")
     split_sizes = (
         {
             "model_train": 20,
@@ -292,7 +307,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": (
@@ -307,6 +322,15 @@ def build_production_graph(
             "source_status_sha256": require_sha256(
                 source_status_sha256, name="source_status_sha256"
             ),
+            "execution_source": {
+                "mode": "detached_git_worktree",
+                "root": execution_root,
+                "pinned_commit": require_git_object_id(
+                    source_commit, name="source_commit"
+                ),
+                "main_checkout_may_advance": True,
+                "active_jobs_validate_pinned_worktree": True,
+            },
             "split_sizes": split_sizes,
             "nonempty_splits": list(nonempty),
             "tigris_defaults": dict(TIGRIS_DEFAULTS),
@@ -340,8 +364,32 @@ def validate_production_graph(graph: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         graph, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(graph.get("schema_version", -1)) != 2:
+    if int(graph.get("schema_version", -1)) != 3:
         raise ValueError("production graph schema version differs")
+    execution_source = graph.get("execution_source")
+    if (
+        not isinstance(execution_source, Mapping)
+        or set(execution_source)
+        != {
+            "mode",
+            "root",
+            "pinned_commit",
+            "main_checkout_may_advance",
+            "active_jobs_validate_pinned_worktree",
+        }
+        or execution_source.get("mode") != "detached_git_worktree"
+        or not (
+            Path(str(execution_source.get("root", ""))).is_absolute()
+            or PurePosixPath(
+                str(execution_source.get("root", ""))
+            ).is_absolute()
+        )
+        or execution_source.get("pinned_commit") != graph.get("source_commit")
+        or execution_source.get("main_checkout_may_advance") is not True
+        or execution_source.get("active_jobs_validate_pinned_worktree")
+        is not True
+    ):
+        raise ValueError("production execution source contract differs")
     nodes = list(graph.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
     if len(by_id) != len(nodes):
