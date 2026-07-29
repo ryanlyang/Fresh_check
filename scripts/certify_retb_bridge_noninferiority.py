@@ -25,6 +25,10 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.dynamic_continuation import (  # noqa: E402
+    add_dynamic_continuation_arguments,
+    resolve_selector_continuation,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
@@ -41,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-noninferiority", required=True, type=Path)
     parser.add_argument("--output-eligibility", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    add_dynamic_continuation_arguments(parser)
     args = parser.parse_args(argv)
     if len(args.candidate_registration) != 3 or len(
         args.content_certification
@@ -118,6 +123,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_eligibility, eligibility
             ),
         }
+    continuation = resolve_selector_continuation(
+        args=args,
+        campaign=campaign,
+        campaign_root=args.campaign_root,
+        selector_output=eligibility,
+        selector_output_path=args.output_eligibility,
+        load_hashed_json=load_hashed_json,
+        dry_run=bool(args.dry_run),
+    )
+    if continuation is not None:
+        result["continuation"] = continuation
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

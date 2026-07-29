@@ -49,7 +49,11 @@ retb_setup() {
 
 retb_task_manifest_path() {
   local node_id="$1"
-  printf '%s/job_ledgers/tasks/%s.json\n' "${CAMPAIGN_ROOT}" "${node_id}"
+  python -c \
+    'import json,sys; from teacher_logit_reco.relation_expert_token_bridge.production import task_manifest_path_for_graph; graph=json.load(open(sys.argv[1])); print(task_manifest_path_for_graph(graph,node_id=sys.argv[2],campaign_root=sys.argv[3]))' \
+    "${CAMPAIGN_ROOT}/job_ledgers/production_graph.json" \
+    "${node_id}" \
+    "${CAMPAIGN_ROOT}"
 }
 
 retb_run_task() {

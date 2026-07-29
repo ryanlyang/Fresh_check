@@ -24,9 +24,11 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     SCREENING_REGISTRY_CONTRACT,
     bind_source_provenance,
     build_density_relation_contract,
+    build_global_determinism_contract,
     build_pair_base_contract,
     build_pid_charge_relation_contract,
     build_pt_relation_contract,
+    build_relation_family_registry,
     build_region_relation_contract,
     build_rpt_base_model_contract,
     build_step5_model_contract,
@@ -51,6 +53,17 @@ EXPECTED_TRIMMING_DIAGNOSTIC = {
     "diagnostic_captured_width": 7,
     "trimmer_state_restored": True,
 }
+
+
+def build_prebind_pair_base_contract() -> dict[str, Any]:
+    """Rebuild the semantic pair contract recorded by parity-v3."""
+
+    relation_registry = build_relation_family_registry()
+    global_determinism = build_global_determinism_contract()
+    return build_pair_base_contract(
+        relation_registry_sha256=relation_registry["content_hash"],
+        global_determinism_sha256=global_determinism["content_hash"],
+    )
 
 
 def validate_parity_execution_binding(
@@ -137,10 +150,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     # The parity report was produced before source binding; authenticate the
     # semantic pair contract by rebuilding and checking its pre-bind identity.
-    if parity["pair_base_contract_sha256"] != build_pair_base_contract(
-        relation_registry_sha256=registry["content_hash"],
-        global_determinism_sha256=determinism["content_hash"],
-    )["content_hash"]:
+    if (
+        parity["pair_base_contract_sha256"]
+        != build_prebind_pair_base_contract()["content_hash"]
+    ):
         raise ValueError("Weaver parity used another pair-base contract")
     pt = bind(
         build_pt_relation_contract(

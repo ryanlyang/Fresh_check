@@ -441,9 +441,17 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
         "region_tree_finalize",
         "normalizers_500k",
         "input_audit",
+        "stage_b_offline_experts",
+        "stage_c_offline_fusions",
+        "stage_d_hlt_experts",
+        "stage_d_hlt_fusions",
+        "stage_e_bridge_pilots",
     }
     assert (
         campaign_root / "registry" / "retb_stage_a_contract_bundle.json"
+    ).is_file()
+    assert (
+        campaign_root / "registry" / "retb_static_experiment_bundle.json"
     ).is_file()
 
 

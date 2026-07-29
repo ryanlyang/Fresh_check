@@ -21,9 +21,15 @@ from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     load_hashed_json,
     validate_task_manifest,
     validate_task_manifest_for_graph,
+    validate_published_dynamic_continuation,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
+)
+from teacher_logit_reco.relation_expert_token_bridge.task_completion import (  # noqa: E402
+    publish_task_manifest_completion,
+    publish_task_row_completion,
+    reusable_task_row_completion,
 )
 
 
@@ -50,6 +56,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_root=args.campaign_root,
         repo_root=REPO_ROOT,
     )
+    if any(
+        "continuation_intent" in row["input_artifact_hashes"]
+        for row in manifest["rows"]
+    ):
+        validate_published_dynamic_continuation(
+            campaign=campaign,
+            production_graph=graph,
+            task_manifest=manifest,
+            campaign_root=args.campaign_root,
+        )
     if manifest["campaign_spec_sha256"] != campaign["content_hash"]:
         raise ValueError("task manifest belongs to another campaign")
     index = args.task_index
@@ -79,6 +95,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(resolved, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
+    reusable = reusable_task_row_completion(
+        campaign_root=args.campaign_root,
+        campaign=campaign,
+        task_manifest=manifest,
+        task_index=index,
+    )
+    if reusable is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "reused_authenticated_completion",
+                    "row_completion_sha256": reusable["content_hash"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     environment = dict(os.environ)
     environment.update(row["environment"])
     environment["PYTHONNOUSERSITE"] = "1"
@@ -100,6 +134,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(
             f"task completed without expected outputs: {missing}"
         )
+    completion = publish_task_row_completion(
+        campaign_root=args.campaign_root,
+        campaign=campaign,
+        task_manifest=manifest,
+        task_index=index,
+    )
+    result: dict[str, object] = {
+        "status": "completed_and_authenticated",
+        "row_completion_sha256": completion["artifact"]["content_hash"],
+        "row_completion_path": completion["path"],
+    }
+    if int(manifest["task_count"]) == 1:
+        aggregate = publish_task_manifest_completion(
+            campaign_root=args.campaign_root,
+            campaign=campaign,
+            task_manifest=manifest,
+        )
+        result["manifest_completion_sha256"] = aggregate["artifact"][
+            "content_hash"
+        ]
+        result["manifest_completion_path"] = aggregate["path"]
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

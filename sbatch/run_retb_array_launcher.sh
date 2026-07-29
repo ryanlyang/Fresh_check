@@ -20,6 +20,13 @@ readarray -t resolved < <(
     'import json,sys; from teacher_logit_reco.relation_expert_token_bridge.production import validate_task_manifest; p=json.load(open(sys.argv[1])); validate_task_manifest(p); print(p["slurm_array"]); print(p["content_hash"])' \
     "${manifest}"
 )
+if python -c \
+  'import json,sys; p=json.load(open(sys.argv[1])); raise SystemExit(0 if any("continuation_intent" in row["input_artifact_hashes"] for row in p["rows"]) else 1)' \
+  "${manifest}"; then
+  python scripts/validate_retb_dynamic_continuation.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --task-manifest "${manifest}" >/dev/null
+fi
 array_spec="${resolved[0]}"
 manifest_sha="${resolved[1]}"
 dependency="${SLURM_JOB_ID:-}"
@@ -44,5 +51,8 @@ job_id="$(sbatch --parsable --wait \
   --error="${CAMPAIGN_ROOT}/job_ledgers/slurm/%x_%A_%a.err" \
   --export="ALL,CAMPAIGN_ROOT=${CAMPAIGN_ROOT},CAMPAIGN_ID=${CAMPAIGN_ID},RETB_NODE_ID=${RETB_NODE_ID},RETB_TASK_MANIFEST=${manifest}" \
   "${PROJECT_DIR}/sbatch/run_retb_production_task.sh")"
+python scripts/attest_retb_task_manifest_completion.py \
+  --campaign-root "${CAMPAIGN_ROOT}" \
+  --task-manifest "${manifest}" >/dev/null
 retb_record_dynamic_job \
   "${RETB_NODE_ID}" "${job_id}" "${dependency}" "${manifest_sha}"

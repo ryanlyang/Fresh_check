@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from scripts.build_relational_part_model_contracts import (
     EXPECTED_TRIMMING_DIAGNOSTIC,
+    build_prebind_pair_base_contract,
     validate_parity_execution_binding,
 )
 
@@ -28,9 +29,13 @@ from teacher_logit_reco.relational_part import (
     PRECONSTRUCTION_AUDIT_CONTRACT,
     RAW_AUDIT_SALT,
     StorageMeasurements,
+    bind_source_provenance,
+    build_global_determinism_contract,
+    build_pair_base_contract,
     build_preconstruction_audit,
     build_production_graph,
     build_raw_input_schema_contract,
+    build_relation_family_registry,
     build_storage_projection,
     build_tree_probe_artifact,
     select_raw_audit_identities,
@@ -75,6 +80,33 @@ def test_parity_consumption_requires_exact_source_and_active_trim_fixture() -> N
             },
             current_source=source,
         )
+
+
+def test_parity_pair_base_identity_is_semantic_prebind_identity() -> None:
+    semantic_registry = build_relation_family_registry()
+    semantic_determinism = build_global_determinism_contract()
+    expected = build_pair_base_contract(
+        relation_registry_sha256=semantic_registry["content_hash"],
+        global_determinism_sha256=semantic_determinism["content_hash"],
+    )
+    assert build_prebind_pair_base_contract() == expected
+
+    source = {
+        "source_commit": "a" * 40,
+        "source_status_sha256": "b" * 64,
+        "source_dirty": False,
+    }
+    bound_registry = bind_source_provenance(
+        semantic_registry, source_snapshot=source
+    )
+    bound_determinism = bind_source_provenance(
+        semantic_determinism, source_snapshot=source
+    )
+    campaign_pair = build_pair_base_contract(
+        relation_registry_sha256=bound_registry["content_hash"],
+        global_determinism_sha256=bound_determinism["content_hash"],
+    )
+    assert campaign_pair["content_hash"] != expected["content_hash"]
 
 
 def _miniature_manifest() -> SplitManifest:

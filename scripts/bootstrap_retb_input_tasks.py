@@ -16,10 +16,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     PRODUCTION_GRAPH_CONTRACT,
+    build_static_experiment_bundle,
     build_task_manifest,
     load_hashed_json,
+    publish_static_experiment_bundle,
     validate_production_campaign_binding,
+    validate_static_experiment_bundle,
     validate_task_manifest_for_graph,
+    task_manifest_path_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     write_immutable_json,
@@ -513,6 +517,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         data_dir=args.data_dir,
         stage_a_contracts=stage_a_contracts,
     )
+    static_experiments = build_static_experiment_bundle(
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=args.campaign_root,
+    )
+    validate_static_experiment_bundle(
+        static_experiments,
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=args.campaign_root,
+    )
     for manifest in manifests.values():
         validate_task_manifest_for_graph(
             manifest,
@@ -533,6 +548,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             name: manifest["content_hash"]
             for name, manifest in manifests.items()
         },
+        "static_experiment_bundle_sha256": static_experiments[
+            "static_experiment_bundle"
+        ]["content_hash"],
+        "static_experiment_counts": static_experiments[
+            "static_experiment_plan"
+        ]["execution_counts"],
     }
     if not args.dry_run:
         result["contract_publication"] = publish_stage_a_contract_bundle(
@@ -540,11 +561,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle=stage_a_contracts,
             campaign_spec=campaign,
         )
-        task_root = args.campaign_root / "job_ledgers" / "tasks"
         result["task_manifest_publication"] = {
-            name: write_immutable_json(task_root / f"{name}.json", manifest)
+            name: write_immutable_json(
+                task_manifest_path_for_graph(
+                    graph,
+                    node_id=name,
+                    campaign_root=args.campaign_root,
+                ),
+                manifest,
+            )
             for name, manifest in manifests.items()
         }
+        result["static_experiment_publication"] = (
+            publish_static_experiment_bundle(
+                campaign_root=args.campaign_root,
+                bundle=static_experiments,
+                campaign=campaign,
+                production_graph=graph,
+            )
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

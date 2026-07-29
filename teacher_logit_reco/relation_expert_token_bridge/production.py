@@ -19,16 +19,16 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v3"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v4"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v1"
+    "retb_production_node_execution_registry_v2"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v1"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v2"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v3"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -110,25 +110,25 @@ TASK_MANIFEST_PRODUCER_NODES = {
     "offline_expert_training": "campaign_bootstrap",
     "offline_shape_selector": "campaign_bootstrap",
     "offline_optimization_selector": "campaign_bootstrap",
-    "offline_fusion_training": "step5_offline_fusion_contracts",
+    "offline_fusion_training": "campaign_bootstrap",
     "offline_complementarity": "campaign_bootstrap",
     "offline_capacity_controls": "campaign_bootstrap",
-    "native_hlt_expert_training": "step6_native_hlt_contracts",
-    "native_hlt_fusion_training": "native_hlt_expert_training",
-    "bridge_pilot_training": "step7_bridge_contracts",
+    "native_hlt_expert_training": "campaign_bootstrap",
+    "native_hlt_fusion_training": "campaign_bootstrap",
+    "bridge_pilot_training": "campaign_bootstrap",
     "bridge_target_training": "bridge_pilot_training",
     "bridge_content_certification": "campaign_bootstrap",
     "target_coordinate_selector": "campaign_bootstrap",
     "target_cache_build": "step8_target_cache_contracts",
-    "target_normalizers": "campaign_bootstrap",
+    "target_normalizers": "target_cache_build",
     "predictor_training": "step9_predictor_contracts",
-    "uncertainty_calibration": "campaign_bootstrap",
-    "predictor_bundle_selector": "campaign_bootstrap",
-    "oracle_substitutions": "campaign_bootstrap",
+    "uncertainty_calibration": "predictor_training",
+    "predictor_bundle_selector": "step10_predictor_bundle_contracts",
+    "oracle_substitutions": "predictor_bundle_selector",
     "joint_predictor_training": "step11_joint_bridge_contracts",
-    "joint_predictor_selector": "campaign_bootstrap",
+    "joint_predictor_selector": "joint_predictor_training",
     "final_consumer_training": "step12_final_consumer_contracts",
-    "deployable_export": "campaign_bootstrap",
+    "deployable_export": "final_consumer_training",
     "robustness_controls": "campaign_bootstrap",
     "semantic_controls": "campaign_bootstrap",
     "stage_l_graph_registration": "campaign_bootstrap",
@@ -157,6 +157,31 @@ BOOTSTRAP_INPUT_MANIFEST_NODES = frozenset(
         "region_tree_finalize",
         "normalizers_500k",
         "input_audit",
+    }
+)
+
+STATIC_EXPERIMENT_MANIFEST_NODES = frozenset(
+    {
+        "offline_expert_training",
+        "offline_fusion_training",
+        "native_hlt_expert_training",
+        "native_hlt_fusion_training",
+        "bridge_pilot_training",
+    }
+)
+
+MIDDLE_CONTINUATION_MANIFEST_NODES = frozenset(
+    {
+        "target_cache_build",
+        "target_normalizers",
+        "predictor_training",
+        "uncertainty_calibration",
+        "predictor_bundle_selector",
+        "oracle_substitutions",
+        "joint_predictor_training",
+        "joint_predictor_selector",
+        "final_consumer_training",
+        "deployable_export",
     }
 )
 
@@ -380,7 +405,6 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=expert,
                 maximum_tasks=256,
             ),
-            dynamic=True,
             resumable=True,
             access="model_train_and_val_stop",
         ),
@@ -421,7 +445,6 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=expert,
                 maximum_tasks=512,
             ),
-            dynamic=True,
             resumable=True,
             access="model_train_and_val_stop",
         ),
@@ -436,7 +459,6 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=expert,
                 maximum_tasks=128,
             ),
-            dynamic=True,
             resumable=True,
         ),
         _node(
@@ -460,7 +482,6 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=predictor,
                 maximum_tasks=128,
             ),
-            dynamic=True,
             resumable=True,
         ),
         _node(
@@ -875,6 +896,38 @@ def _task_manifest_path(node: Mapping[str, Any]) -> str:
     return f"job_ledgers/tasks/{node['node_id']}.json"
 
 
+def task_manifest_path_for_graph(
+    production_graph: Mapping[str, Any],
+    *,
+    node_id: str,
+    campaign_root: str | Path | None = None,
+) -> Path:
+    """Resolve the graph-authoritative task-manifest path for one node."""
+
+    validate_production_graph(production_graph)
+    matches = [
+        node
+        for node in production_graph["nodes"]
+        if node["node_id"] == str(node_id)
+    ]
+    if len(matches) != 1:
+        raise ValueError("task-manifest node is absent or duplicated")
+    relative = Path(_task_manifest_path(matches[0]))
+    root = Path(
+        production_graph["campaign_root"]
+        if campaign_root is None
+        else campaign_root
+    ).resolve()
+    if root != Path(production_graph["campaign_root"]).resolve():
+        raise ValueError("task-manifest campaign root differs")
+    resolved = (root / relative).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise ValueError("task-manifest path escapes campaign root") from error
+    return resolved
+
+
 def build_node_execution_registry(
     *,
     nodes: Sequence[Mapping[str, Any]],
@@ -937,13 +990,17 @@ def build_node_execution_registry(
             )
             manifest_path = _task_manifest_path(node)
             producer_node = str(producers[node_id])
+            if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES:
+                producer_entrypoint = "scripts/bootstrap_retb_input_tasks.py"
+            elif node_id in STATIC_EXPERIMENT_MANIFEST_NODES:
+                producer_entrypoint = (
+                    "scripts/compile_retb_static_experiment_manifests.py"
+                )
+            else:
+                producer_entrypoint = "scripts/build_retb_task_manifest.py"
             producer = {
                 "node_id": producer_node,
-                "entrypoint": (
-                    "scripts/bootstrap_retb_input_tasks.py"
-                    if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES
-                    else "scripts/build_retb_task_manifest.py"
-                ),
+                "entrypoint": producer_entrypoint,
                 "publication_mode": (
                     "campaign_bootstrap"
                     if producer_node == "campaign_bootstrap"
@@ -975,7 +1032,7 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 3,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
@@ -1056,6 +1113,7 @@ def validate_node_execution_registry(
                 or producer.get("entrypoint")
                 not in {
                     "scripts/bootstrap_retb_input_tasks.py",
+                    "scripts/compile_retb_static_experiment_manifests.py",
                     "scripts/build_retb_task_manifest.py",
                 }
                 or producer.get("publication_mode")
@@ -1074,11 +1132,14 @@ def validate_node_execution_registry(
                     f"{node_id} manifest producer is not an ancestor"
                 )
             expected_producer = TASK_MANIFEST_PRODUCER_NODES.get(node_id)
-            expected_entrypoint = (
-                "scripts/bootstrap_retb_input_tasks.py"
-                if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES
-                else "scripts/build_retb_task_manifest.py"
-            )
+            if node_id in BOOTSTRAP_INPUT_MANIFEST_NODES:
+                expected_entrypoint = "scripts/bootstrap_retb_input_tasks.py"
+            elif node_id in STATIC_EXPERIMENT_MANIFEST_NODES:
+                expected_entrypoint = (
+                    "scripts/compile_retb_static_experiment_manifests.py"
+                )
+            else:
+                expected_entrypoint = "scripts/build_retb_task_manifest.py"
             if (
                 producer_node != expected_producer
                 or producer["entrypoint"] != expected_entrypoint
@@ -1152,7 +1213,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1224,7 +1285,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 3:
+    if int(payload.get("schema_version", -1)) != 4:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1863,6 +1924,12 @@ def build_step15_bundle(
             "bounded_arrays_present": True,
             "resumable_target_shards_present": True,
             "dynamic_continuation_present": True,
+            "dynamic_continuation_contracts": {
+                "intent": "retb_dynamic_continuation_intent_v1",
+                "binding": "retb_dynamic_continuation_binding_v1",
+                "task_manifest": TASK_MANIFEST_CONTRACT,
+            },
+            "dynamic_manifest_execution_requires_binding_receipt": True,
             "smoke_submission_supported": True,
             "full_submission_supported": True,
             "monitoring_supported": True,
@@ -1884,6 +1951,7 @@ __all__ = [
     "RESOURCE_PROBE_CONTRACT",
     "RESUME_PLAN_CONTRACT",
     "STEP15_BUNDLE_CONTRACT",
+    "STATIC_EXPERIMENT_MANIFEST_NODES",
     "TASK_MANIFEST_CONTRACT",
     "TARGET_SHARD_PLAN_CONTRACT",
     "TASK_MANIFEST_PRODUCER_NODES",
@@ -1896,6 +1964,7 @@ __all__ = [
     "build_step15_bundle",
     "build_task_manifest",
     "build_target_shard_plan",
+    "task_manifest_path_for_graph",
     "validate_job_ledger",
     "validate_node_execution_registry",
     "validate_production_graph",

@@ -28,6 +28,10 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.dynamic_continuation import (  # noqa: E402
+    add_dynamic_continuation_arguments,
+    resolve_selector_continuation,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
@@ -53,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrays", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    add_dynamic_continuation_arguments(parser)
     args = parser.parse_args(argv)
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
@@ -179,6 +184,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     if not args.dry_run:
         result["publication"] = write_immutable_json(args.output, certification)
+    continuation = resolve_selector_continuation(
+        args=args,
+        campaign=campaign,
+        campaign_root=args.campaign_root,
+        selector_output=certification,
+        selector_output_path=args.output,
+        load_hashed_json=load_hashed_json,
+        dry_run=bool(args.dry_run),
+    )
+    if continuation is not None:
+        result["continuation"] = continuation
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

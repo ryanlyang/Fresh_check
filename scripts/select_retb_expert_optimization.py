@@ -21,6 +21,10 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.dynamic_continuation import (  # noqa: E402
+    add_dynamic_continuation_arguments,
+    resolve_selector_continuation,
+)
 from teacher_logit_reco.relation_expert_token_bridge.step4 import (  # noqa: E402
     build_locked_optimization_selection,
     validate_optimization_candidate_metrics,
@@ -45,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    add_dynamic_continuation_arguments(parser)
     return parser
 
 
@@ -103,6 +108,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     if not args.dry_run:
         result["publication"] = write_immutable_json(output, selection)
+    continuation = resolve_selector_continuation(
+        args=args,
+        campaign=campaign,
+        campaign_root=args.campaign_root,
+        selector_output=selection,
+        selector_output_path=output,
+        load_hashed_json=load_hashed_json,
+        dry_run=bool(args.dry_run),
+    )
+    if continuation is not None:
+        result["continuation"] = continuation
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
