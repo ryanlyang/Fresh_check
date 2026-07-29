@@ -14,8 +14,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
+    PRODUCTION_GRAPH_CONTRACT,
     TASK_MANIFEST_CONTRACT,
     load_hashed_json,
+    validate_published_dynamic_continuation,
+    validate_task_manifest_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.task_completion import (  # noqa: E402
     publish_task_manifest_completion,
@@ -36,6 +39,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = load_hashed_json(
         args.task_manifest, expected_contract=TASK_MANIFEST_CONTRACT
     )
+    graph = load_hashed_json(
+        args.campaign_root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
+    )
+    validate_task_manifest_for_graph(
+        manifest,
+        production_graph=graph,
+        campaign_root=args.campaign_root,
+        repo_root=REPO_ROOT,
+    )
+    graph_node = next(
+        row for row in graph["nodes"]
+        if row["node_id"] == manifest["node_id"]
+    )
+    if graph_node["dynamic_continuation"]:
+        validate_published_dynamic_continuation(
+            campaign=campaign,
+            production_graph=graph,
+            task_manifest=manifest,
+            campaign_root=args.campaign_root,
+        )
     result = publish_task_manifest_completion(
         campaign_root=args.campaign_root,
         campaign=campaign,

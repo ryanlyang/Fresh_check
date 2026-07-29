@@ -30,6 +30,12 @@ from .contracts import (
     write_immutable_json,
 )
 from .production import (
+    FINAL_CONTINUATION_GATE_CONTRACT,
+    FINAL_CONTINUATION_MANIFEST_NODES,
+    LATE_CONTINUATION_GATE_CONTRACT,
+    LATE_CONTINUATION_MANIFEST_NODES,
+    MIDDLE_CONTINUATION_GATE_CONTRACT,
+    MIDDLE_CONTINUATION_MANIFEST_NODES,
     PRODUCTION_GRAPH_CONTRACT,
     build_task_manifest,
     validate_production_graph,
@@ -215,6 +221,30 @@ def build_dynamic_continuation(
     except ValueError as error:
         raise ValueError("selector output escapes the campaign root") from error
     node = _graph_node(production_graph, downstream_node_id)
+    if (
+        downstream_node_id in MIDDLE_CONTINUATION_MANIFEST_NODES
+        and selector_output.get("contract")
+        != MIDDLE_CONTINUATION_GATE_CONTRACT
+    ):
+        raise ValueError(
+            "Stage F--J continuation requires its completeness gate"
+        )
+    if (
+        downstream_node_id in LATE_CONTINUATION_MANIFEST_NODES
+        and selector_output.get("contract")
+        != LATE_CONTINUATION_GATE_CONTRACT
+    ):
+        raise ValueError(
+            "Stage K--M continuation requires its completeness gate"
+        )
+    if (
+        downstream_node_id in FINAL_CONTINUATION_MANIFEST_NODES
+        and selector_output.get("contract")
+        != FINAL_CONTINUATION_GATE_CONTRACT
+    ):
+        raise ValueError(
+            "sealed Stage-N continuation requires its completeness gate"
+        )
     normalized = _normalize_rows(
         rows, downstream_node_id=downstream_node_id
     )

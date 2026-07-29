@@ -19,16 +19,16 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v4"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v8"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v2"
+    "retb_production_node_execution_registry_v6"
 )
-JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v1"
+JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v3"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v7"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -129,24 +129,24 @@ TASK_MANIFEST_PRODUCER_NODES = {
     "joint_predictor_selector": "joint_predictor_training",
     "final_consumer_training": "step12_final_consumer_contracts",
     "deployable_export": "final_consumer_training",
-    "robustness_controls": "campaign_bootstrap",
-    "semantic_controls": "campaign_bootstrap",
-    "stage_l_graph_registration": "campaign_bootstrap",
+    "robustness_controls": "deployable_export",
+    "semantic_controls": "deployable_export",
+    "stage_l_graph_registration": "step13_confirmation_contracts",
     "confirmation_500k": "stage_l_graph_registration",
-    "confirmation_summary": "campaign_bootstrap",
-    "bridge_shape_selector": "campaign_bootstrap",
-    "scale_shortlist_selector": "campaign_bootstrap",
+    "confirmation_summary": "confirmation_500k",
+    "bridge_shape_selector": "confirmation_summary",
+    "scale_shortlist_selector": "bridge_shape_selector",
     "scale_refits": "step14_scale_final_contracts",
     "scale_graph_training": "scale_refits",
-    "scale_completion": "campaign_bootstrap",
-    "prelock_final_inputs": "campaign_bootstrap",
+    "scale_completion": "scale_graph_training",
+    "prelock_final_inputs": "input_audit",
     "stack_val_inference": "scale_completion",
-    "accuracy_finalist_selector": "campaign_bootstrap",
+    "accuracy_finalist_selector": "stack_val_inference",
     "postlock_oracle_targets": "accuracy_finalist_selector",
     "finalist_controls": "accuracy_finalist_selector",
-    "final_test_execution_lock": "campaign_bootstrap",
+    "final_test_execution_lock": "finalist_controls",
     "sealed_final_test": "final_test_execution_lock",
-    "final_report": "campaign_bootstrap",
+    "final_report": "sealed_final_test",
 }
 
 BOOTSTRAP_INPUT_MANIFEST_NODES = frozenset(
@@ -184,6 +184,127 @@ MIDDLE_CONTINUATION_MANIFEST_NODES = frozenset(
         "deployable_export",
     }
 )
+
+LATE_CONTINUATION_MANIFEST_NODES = frozenset(
+    {
+        "robustness_controls",
+        "semantic_controls",
+        "stage_l_graph_registration",
+        "confirmation_500k",
+        "confirmation_summary",
+        "bridge_shape_selector",
+        "scale_shortlist_selector",
+        "scale_refits",
+        "scale_graph_training",
+        "scale_completion",
+    }
+)
+LATE_CONTINUATION_GATE_CONTRACT = (
+    "retb_stage_k_m_continuation_gate_v1"
+)
+LATE_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
+    "robustness_controls": (
+        "scripts/evaluate_retb_final_consumer_reference.py",
+        "scripts/evaluate_retb_final_consumer_bypass_controls.py",
+        "scripts/evaluate_retb_stage_i_substitutions.py",
+    ),
+    "semantic_controls": (
+        "scripts/evaluate_retb_final_consumer_bypass_controls.py",
+        "scripts/evaluate_retb_stage_i_substitutions.py",
+    ),
+    "stage_l_graph_registration": (
+        "scripts/register_retb_stage_l_graphs.py",
+    ),
+    "confirmation_500k": (
+        "scripts/execute_retb_500k_seed_confirmation.py",
+    ),
+    "confirmation_summary": ("scripts/aggregate_retb_confirmation.py",),
+    "bridge_shape_selector": ("scripts/select_retb_bridge_shape.py",),
+    "scale_shortlist_selector": (
+        "scripts/select_retb_scale_shortlist.py",
+    ),
+    "scale_refits": ("scripts/execute_retb_scale_refits.py",),
+    "scale_graph_training": (
+        "scripts/execute_retb_scale_graph_training.py",
+    ),
+    "scale_completion": (
+        "scripts/aggregate_retb_scale_completion.py",
+    ),
+}
+if set(LATE_NODE_ENTRYPOINTS) != set(
+    LATE_CONTINUATION_MANIFEST_NODES
+):
+    raise RuntimeError("Stage K--M entry-point coverage differs")
+
+FINAL_CONTINUATION_MANIFEST_NODES = frozenset(
+    {
+        "prelock_final_inputs",
+        "stack_val_inference",
+        "accuracy_finalist_selector",
+        "postlock_oracle_targets",
+        "finalist_controls",
+        "final_test_execution_lock",
+        "sealed_final_test",
+        "final_report",
+    }
+)
+FINAL_CONTINUATION_GATE_CONTRACT = (
+    "retb_stage_n_continuation_gate_v1"
+)
+FINAL_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
+    "prelock_final_inputs": (
+        "scripts/prepare_retb_sealed_inputs.py",
+    ),
+    "stack_val_inference": (
+        "scripts/execute_retb_stack_val_inference.py",
+    ),
+    "accuracy_finalist_selector": (
+        "scripts/select_retb_scale_finalists.py",
+    ),
+    "postlock_oracle_targets": (
+        "scripts/execute_retb_postlock_oracle_target.py",
+    ),
+    "finalist_controls": (
+        "scripts/execute_retb_finalist_controls.py",
+    ),
+    "final_test_execution_lock": (
+        "scripts/write_retb_final_test_execution_lock.py",
+    ),
+    "sealed_final_test": (
+        "scripts/execute_retb_sealed_final_test.py",
+    ),
+    "final_report": (
+        "scripts/write_retb_step14_report.py",
+    ),
+}
+if set(FINAL_NODE_ENTRYPOINTS) != set(
+    FINAL_CONTINUATION_MANIFEST_NODES
+):
+    raise RuntimeError("Stage-N entry-point coverage differs")
+
+MIDDLE_CONTINUATION_GATE_CONTRACT = (
+    "retb_stage_f_j_continuation_gate_v1"
+)
+MIDDLE_NODE_ENTRYPOINTS: dict[str, str] = {
+    "target_cache_build": "scripts/build_retb_target_cache.py",
+    "target_normalizers": "scripts/fit_retb_target_normalizers.py",
+    "predictor_training": "scripts/train_retb_predictor.py",
+    "uncertainty_calibration": "scripts/calibrate_retb_uncertainty.py",
+    "predictor_bundle_selector": (
+        "scripts/select_retb_joint_predictor_bundle.py"
+    ),
+    "oracle_substitutions": (
+        "scripts/evaluate_retb_stage_i_substitutions.py"
+    ),
+    "joint_predictor_training": "scripts/train_retb_joint_bridge.py",
+    "joint_predictor_selector": "scripts/select_retb_j4_blocks.py",
+    "final_consumer_training": "scripts/train_retb_final_consumer.py",
+    "deployable_export": "scripts/export_retb_deployable_graph.py",
+}
+if set(MIDDLE_NODE_ENTRYPOINTS) != set(
+    MIDDLE_CONTINUATION_MANIFEST_NODES
+):
+    raise RuntimeError("Stage F--J entry-point coverage differs")
 
 
 def _array(
@@ -537,6 +658,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="F",
             worker="run_retb_fit_target_normalizers.sh",
             dependencies=("target_cache_build",),
+            dynamic=True,
         ),
         _node(
             "step9_predictor_contracts",
@@ -569,6 +691,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=cpu,
                 maximum_tasks=1024,
             ),
+            dynamic=True,
             access="label_free_val_design",
         ),
         _node(
@@ -582,6 +705,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="H",
             worker="run_retb_select_predictor_bundle.sh",
             dependencies=("step10_predictor_bundle_contracts",),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -595,6 +719,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=predictor,
                 maximum_tasks=256,
             ),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -622,6 +747,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="I",
             worker="run_retb_select_joint_bundle.sh",
             dependencies=("joint_predictor_training", "oracle_substitutions"),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -655,6 +781,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=predictor,
                 maximum_tasks=512,
             ),
+            dynamic=True,
         ),
         _node(
             "robustness_controls",
@@ -667,6 +794,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=predictor,
                 maximum_tasks=2048,
             ),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -680,6 +808,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 concurrency=predictor,
                 maximum_tasks=1024,
             ),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -693,6 +822,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="L",
             worker="run_retb_register_stage_l_graphs.sh",
             dependencies=("step13_confirmation_contracts",),
+            dynamic=True,
         ),
         _node(
             "confirmation_500k",
@@ -714,6 +844,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="L",
             worker="run_retb_confirm.sh",
             dependencies=("confirmation_500k",),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -721,6 +852,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="L",
             worker="run_retb_select_bridge_shape.sh",
             dependencies=("confirmation_summary",),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -728,6 +860,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="L",
             worker="run_retb_scale_shortlist.sh",
             dependencies=("confirmation_summary", "bridge_shape_selector"),
+            dynamic=True,
             access="val_design_only",
         ),
         _node(
@@ -771,12 +904,14 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="M",
             worker="run_retb_scale_completion.sh",
             dependencies=("scale_graph_training",),
+            dynamic=True,
         ),
         _node(
             "prelock_final_inputs",
             stage="N",
             worker="run_retb_prepare_final_inputs.sh",
             dependencies=("input_audit",),
+            dynamic=True,
             access="checkpoint_free_final_input_preparation",
             resumable=True,
         ),
@@ -800,6 +935,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="N",
             worker="run_retb_select_scale_finalists.sh",
             dependencies=("stack_val_inference",),
+            dynamic=True,
             access="selector_only_stack_val_labels",
         ),
         _node(
@@ -843,7 +979,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_n_finalist_controls.json",
                 concurrency=final,
-                maximum_tasks=30,
+                maximum_tasks=1,
             ),
             dynamic=True,
             resumable=True,
@@ -857,6 +993,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 "finalist_controls",
                 "prelock_final_inputs",
             ),
+            dynamic=True,
         ),
         _node(
             "sealed_final_test",
@@ -867,7 +1004,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_n_final_test.json",
                 concurrency=final,
-                maximum_tasks=30,
+                maximum_tasks=1,
             ),
             dynamic=True,
             resumable=False,
@@ -878,6 +1015,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="N",
             worker="run_retb_step14_report.sh",
             dependencies=("sealed_final_test",),
+            dynamic=True,
             access="authenticated_final_predictions_only",
         ),
         _node(
@@ -996,6 +1134,16 @@ def build_node_execution_registry(
                 producer_entrypoint = (
                     "scripts/compile_retb_static_experiment_manifests.py"
                 )
+            elif node_id in MIDDLE_CONTINUATION_MANIFEST_NODES:
+                producer_entrypoint = (
+                    "scripts/continue_retb_stage_f_j.py"
+                )
+            elif node_id in LATE_CONTINUATION_MANIFEST_NODES:
+                producer_entrypoint = (
+                    "scripts/continue_retb_stage_k_m.py"
+                )
+            elif node_id in FINAL_CONTINUATION_MANIFEST_NODES:
+                producer_entrypoint = "scripts/continue_retb_stage_n.py"
             else:
                 producer_entrypoint = "scripts/build_retb_task_manifest.py"
             producer = {
@@ -1032,7 +1180,7 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 6,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
@@ -1053,6 +1201,8 @@ def validate_node_execution_registry(
     digest = validate_content_hash(
         payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
     )
+    if int(payload.get("schema_version", -1)) != 6:
+        raise ValueError("node execution registry schema version differs")
     by_id = {str(node["node_id"]): node for node in nodes}
     entries = list(payload.get("entries", ()))
     by_entry = {str(entry["node_id"]): entry for entry in entries}
@@ -1114,6 +1264,9 @@ def validate_node_execution_registry(
                 not in {
                     "scripts/bootstrap_retb_input_tasks.py",
                     "scripts/compile_retb_static_experiment_manifests.py",
+                    "scripts/continue_retb_stage_f_j.py",
+                    "scripts/continue_retb_stage_k_m.py",
+                    "scripts/continue_retb_stage_n.py",
                     "scripts/build_retb_task_manifest.py",
                 }
                 or producer.get("publication_mode")
@@ -1138,6 +1291,12 @@ def validate_node_execution_registry(
                 expected_entrypoint = (
                     "scripts/compile_retb_static_experiment_manifests.py"
                 )
+            elif node_id in MIDDLE_CONTINUATION_MANIFEST_NODES:
+                expected_entrypoint = "scripts/continue_retb_stage_f_j.py"
+            elif node_id in LATE_CONTINUATION_MANIFEST_NODES:
+                expected_entrypoint = "scripts/continue_retb_stage_k_m.py"
+            elif node_id in FINAL_CONTINUATION_MANIFEST_NODES:
+                expected_entrypoint = "scripts/continue_retb_stage_n.py"
             else:
                 expected_entrypoint = "scripts/build_retb_task_manifest.py"
             if (
@@ -1213,7 +1372,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 4,
+            "schema_version": 8,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1285,7 +1444,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 4:
+    if int(payload.get("schema_version", -1)) != 8:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1410,6 +1569,7 @@ def build_job_ledger(
     jobs: Mapping[str, str | None],
     submission_mode: str,
     resolved_arrays: Mapping[str, Mapping[str, Any]] | None = None,
+    completion_artifact_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     graph_sha = validate_production_graph(production_graph)
     if submission_mode not in {
@@ -1449,10 +1609,31 @@ def build_job_ledger(
             "maximum_concurrent_tasks": concurrency,
             "slurm_array": f"0-{count - 1}%{concurrency}",
         }
+    completion_keys = frozenset(
+        {
+            "locked_scale_finalists",
+            "final_test_execution_lock",
+            "sealed_final_test_evaluation",
+            "final_report",
+        }
+    )
+    completion = dict(completion_artifact_hashes or {})
+    all_nodes_bound = all(
+        value is not None for value in normalized.values()
+    )
+    if submission_mode == "completed":
+        if not all_nodes_bound or set(completion) != set(completion_keys):
+            raise ValueError(
+                "completed ledger lacks all jobs or final artifacts"
+            )
+    elif completion:
+        raise ValueError(
+            "non-completed ledger may not bind final artifacts"
+        )
     return with_content_hash(
         {
             "contract": JOB_LEDGER_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "production_graph_sha256": graph_sha,
             "campaign_id": production_graph["campaign_id"],
             "campaign_root": production_graph["campaign_root"],
@@ -1462,9 +1643,14 @@ def build_job_ledger(
             "submitted_node_count": sum(
                 value is not None for value in normalized.values()
             ),
-            "all_nodes_bound": all(
-                value is not None for value in normalized.values()
-            ),
+            "all_nodes_bound": all_nodes_bound,
+            "completion_artifact_hashes": {
+                name: require_sha256(
+                    value, name=f"completion_artifact_hashes.{name}"
+                )
+                for name, value in sorted(completion.items())
+            },
+            "completed_after_final_report": submission_mode == "completed",
             "performance_based_cancellation_allowed": False,
             "stale_job_cancellation_requires_lineage_mismatch": True,
         }
@@ -1482,6 +1668,9 @@ def validate_job_ledger(
         jobs=payload["jobs"],
         submission_mode=payload["submission_mode"],
         resolved_arrays=payload["resolved_arrays"],
+        completion_artifact_hashes=payload[
+            "completion_artifact_hashes"
+        ],
     )
     if payload != expected:
         raise ValueError("job-ledger semantics differ")
@@ -1798,6 +1987,33 @@ def validate_task_manifest_for_graph(
             raise ValueError("task entry point escapes the repository") from error
         if not entrypoint.is_file():
             raise FileNotFoundError(f"task entry point is absent: {entrypoint}")
+        if (
+            node_id in MIDDLE_NODE_ENTRYPOINTS
+            and argv[1].replace("\\", "/")
+            != MIDDLE_NODE_ENTRYPOINTS[node_id]
+        ):
+            raise ValueError(
+                f"{node_id} task entry point differs from its Stage F--J "
+                "execution contract"
+            )
+        if (
+            node_id in LATE_NODE_ENTRYPOINTS
+            and argv[1].replace("\\", "/")
+            not in LATE_NODE_ENTRYPOINTS[node_id]
+        ):
+            raise ValueError(
+                f"{node_id} task entry point differs from its Stage K--M "
+                "execution contract"
+            )
+        if (
+            node_id in FINAL_NODE_ENTRYPOINTS
+            and argv[1].replace("\\", "/")
+            not in FINAL_NODE_ENTRYPOINTS[node_id]
+        ):
+            raise ValueError(
+                f"{node_id} task entry point differs from its sealed "
+                "Stage-N execution contract"
+            )
         for output in row["expected_outputs"]:
             destination = Path(output).resolve()
             try:
@@ -1915,7 +2131,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 7,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -1930,6 +2146,81 @@ def build_step15_bundle(
                 "task_manifest": TASK_MANIFEST_CONTRACT,
             },
             "dynamic_manifest_execution_requires_binding_receipt": True,
+            "stage_f_j_completion_contracts": {
+                "row": "retb_task_row_completion_v1",
+                "manifest": "retb_task_manifest_completion_v1",
+                "continuation_gate": MIDDLE_CONTINUATION_GATE_CONTRACT,
+                "continuation_bundle": (
+                    "retb_stage_f_j_continuation_bundle_v1"
+                ),
+            },
+            "stage_f_j_dependents_require_complete_parent_attestations": True,
+            "stage_f_j_row_reuse_requires_output_revalidation": True,
+            "stage_k_m_completion_contracts": {
+                "continuation_gate": LATE_CONTINUATION_GATE_CONTRACT,
+                "continuation_bundle": (
+                    "retb_stage_k_m_continuation_bundle_v1"
+                ),
+                "confirmation_execution_plan": (
+                    "retb_500k_confirmation_execution_plan_v1"
+                ),
+                "scale_refit_execution_plan": (
+                    "retb_scale_refit_execution_plan_v1"
+                ),
+                "scale_graph_execution_plan": (
+                    "retb_scale_graph_execution_plan_v1"
+                ),
+                "task_manifest_completion": (
+                    "retb_task_manifest_completion_v1"
+                ),
+            },
+            "stage_k_m_dependents_require_complete_parent_attestations": True,
+            "stage_l_m_registration_only_rows_forbidden": True,
+            "negative_control_or_scale_results_continue": True,
+            "all_shortlisted_graph_seed_rows_required": True,
+            "stage_n_completion_contracts": {
+                "continuation_gate": FINAL_CONTINUATION_GATE_CONTRACT,
+                "continuation_bundle": (
+                    "retb_stage_n_continuation_bundle_v1"
+                ),
+                "stack_inference_execution_plan": (
+                    "retb_stack_val_inference_execution_plan_v1"
+                ),
+                "locked_scale_finalists": (
+                    "retb_locked_scale_finalists_v1"
+                ),
+                "deployable_inference_input": (
+                    "retb_deployable_inference_input_v1"
+                ),
+                "deployable_inference_entrypoint": (
+                    "scripts/run_retb_deployable_inference.py"
+                ),
+                "postlock_target_execution_plan": (
+                    "retb_postlock_target_execution_plan_v1"
+                ),
+                "finalist_controls_execution_plan": (
+                    "retb_finalist_controls_execution_plan_v1"
+                ),
+                "finalist_controls": (
+                    "retb_scale_finalist_controls_v1"
+                ),
+                "final_test_execution_lock": (
+                    "retb_final_test_execution_lock_v1"
+                ),
+                "sealed_final_test_execution_plan": (
+                    "retb_sealed_final_test_execution_plan_v1"
+                ),
+                "final_test_execution_claim": (
+                    "retb_final_test_execution_claim_v1"
+                ),
+                "sealed_final_test_evaluation": (
+                    "retb_sealed_final_test_evaluation_v2"
+                ),
+                "final_report": "retb_stage_mn_final_report_v1",
+                "completed_job_ledger": JOB_LEDGER_CONTRACT,
+            },
+            "sealed_final_test_task_count": 1,
+            "final_test_evaluation_exactly_once": True,
             "smoke_submission_supported": True,
             "full_submission_supported": True,
             "monitoring_supported": True,
@@ -1943,7 +2234,16 @@ def build_step15_bundle(
 __all__ = [
     "DEFAULT_CONCURRENCY",
     "DIRECT_WORKER_NODES",
+    "FINAL_CONTINUATION_GATE_CONTRACT",
+    "FINAL_CONTINUATION_MANIFEST_NODES",
+    "FINAL_NODE_ENTRYPOINTS",
     "JOB_LEDGER_CONTRACT",
+    "LATE_CONTINUATION_GATE_CONTRACT",
+    "LATE_CONTINUATION_MANIFEST_NODES",
+    "LATE_NODE_ENTRYPOINTS",
+    "MIDDLE_CONTINUATION_GATE_CONTRACT",
+    "MIDDLE_CONTINUATION_MANIFEST_NODES",
+    "MIDDLE_NODE_ENTRYPOINTS",
     "MINIATURE_SPLIT_SIZES",
     "NODE_EXECUTION_REGISTRY_CONTRACT",
     "PRODUCTION_GRAPH_CONTRACT",

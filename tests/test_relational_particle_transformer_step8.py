@@ -12,6 +12,9 @@ from scripts.build_relational_part_model_contracts import (
     build_prebind_pair_base_contract,
     validate_parity_execution_binding,
 )
+from scripts.train_relational_part import (
+    validate_campaign_global_determinism,
+)
 
 from jetclass_fresh.jetclass_data import (
     DEFAULT_SPLIT_SEEDS,
@@ -107,6 +110,36 @@ def test_parity_pair_base_identity_is_semantic_prebind_identity() -> None:
         global_determinism_sha256=bound_determinism["content_hash"],
     )
     assert campaign_pair["content_hash"] != expected["content_hash"]
+
+
+def test_training_uses_campaign_bound_global_determinism() -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_status_sha256": "b" * 64,
+        "source_dirty": False,
+    }
+    bound = bind_source_provenance(
+        build_global_determinism_contract(),
+        source_snapshot=source,
+    )
+    campaign = {
+        "parent_artifact_hashes": {
+            "global_determinism": bound["content_hash"],
+        }
+    }
+    assert (
+        validate_campaign_global_determinism(campaign, bound)
+        == bound["content_hash"]
+    )
+    with pytest.raises(ValueError, match="deterministic policy drifted"):
+        validate_campaign_global_determinism(
+            {
+                "parent_artifact_hashes": {
+                    "global_determinism": "c" * 64,
+                }
+            },
+            bound,
+        )
 
 
 def _miniature_manifest() -> SplitManifest:

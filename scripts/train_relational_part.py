@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.relational_part import (  # noqa: E402
+    GLOBAL_DETERMINISM_CONTRACT,
     RELATION_FAMILY_REGISTRY_CONTRACT,
     RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
     REGION_NORMALIZATION_CONTRACT,
@@ -24,17 +25,32 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     SCREENING_REGISTRY_CONTRACT,
     TrainingConfig,
     build_cached_loaders,
-    build_global_determinism_contract,
     build_runtime_model,
     load_hashed_json,
     profile_model_resources,
     train_relational_model,
     validate_content_hash,
     validate_campaign_source,
+    validate_global_determinism_contract,
     write_immutable_json,
 )
 
 import torch  # noqa: E402
+
+
+def validate_campaign_global_determinism(
+    campaign: dict,
+    determinism: dict,
+) -> str:
+    """Validate and return the campaign-bound deterministic-policy identity."""
+
+    digest = validate_global_determinism_contract(determinism)
+    expected = campaign.get("parent_artifact_hashes", {}).get(
+        "global_determinism"
+    )
+    if digest != expected:
+        raise ValueError("campaign global deterministic policy drifted")
+    return digest
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         registry_dir / "relation_family_registry.json",
         expected_contract=RELATION_FAMILY_REGISTRY_CONTRACT,
     )
+    determinism = load_hashed_json(
+        registry_dir / "global_determinism.json",
+        expected_contract=GLOBAL_DETERMINISM_CONTRACT,
+    )
     normalization = load_hashed_json(
         inputs_dir / "relation_normalization.json",
         expected_contract=RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
@@ -83,12 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     model_contract = load_hashed_json(args.model_contract)
     if model_contract.get("run_id") != args.run_id:
         raise ValueError("model contract run_id differs from --run-id")
-    determinism = build_global_determinism_contract()
-    expected_determinism = campaign["parent_artifact_hashes"][
-        "global_determinism"
-    ]
-    if determinism["content_hash"] != expected_determinism:
-        raise ValueError("campaign global deterministic policy drifted")
+    determinism_sha256 = validate_campaign_global_determinism(
+        campaign, determinism
+    )
     miniature = campaign.get("campaign_profile") == (
         "nonproduction_miniature_test"
     )
@@ -104,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         else TrainingConfig(seed=args.seed)
     )
     training_contract = config.artifact(
-        global_determinism_sha256=determinism["content_hash"]
+        global_determinism_sha256=determinism_sha256
     )
     resolved = {
         "run_id": args.run_id,

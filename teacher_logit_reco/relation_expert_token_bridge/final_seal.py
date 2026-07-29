@@ -30,7 +30,10 @@ FINALIST_CONTROLS_CONTRACT = "retb_scale_finalist_controls_v1"
 FINAL_TEST_EXECUTION_LOCK_CONTRACT = (
     "retb_final_test_execution_lock_v1"
 )
-FINAL_TEST_EVALUATION_CONTRACT = "retb_sealed_final_test_evaluation_v1"
+FINAL_TEST_EXECUTION_CLAIM_CONTRACT = (
+    "retb_final_test_execution_claim_v1"
+)
+FINAL_TEST_EVALUATION_CONTRACT = "retb_sealed_final_test_evaluation_v2"
 
 POSTLOCK_TARGET_PARENT_KEYS = frozenset(
     {
@@ -564,6 +567,51 @@ def validate_final_test_execution_lock(
     return digest
 
 
+def build_final_test_execution_claim(
+    *,
+    execution_lock: Mapping[str, Any],
+    execution_plan_sha256: str,
+) -> dict[str, Any]:
+    lock_sha = validate_content_hash(
+        execution_lock,
+        expected_contract=FINAL_TEST_EXECUTION_LOCK_CONTRACT,
+    )
+    return with_content_hash(
+        {
+            "contract": FINAL_TEST_EXECUTION_CLAIM_CONTRACT,
+            "schema_version": 1,
+            "final_test_execution_lock_sha256": lock_sha,
+            "execution_plan_sha256": require_sha256(
+                execution_plan_sha256, name="execution_plan_sha256"
+            ),
+            "claimed_before_final_test_model_access": True,
+            "retry_after_incomplete_claim_allowed": False,
+            "test_result_may_select_replacement": False,
+        }
+    )
+
+
+def validate_final_test_execution_claim(
+    payload: Mapping[str, Any],
+    *,
+    execution_lock: Mapping[str, Any],
+) -> str:
+    digest = validate_content_hash(
+        payload, expected_contract=FINAL_TEST_EXECUTION_CLAIM_CONTRACT
+    )
+    expected = build_final_test_execution_claim(
+        execution_lock=execution_lock,
+        execution_plan_sha256=payload.get("execution_plan_sha256"),
+    )
+    actual = dict(payload)
+    actual.pop("content_hash", None)
+    actual.pop("source", None)
+    expected.pop("content_hash")
+    if actual != expected:
+        raise ValueError("final-test execution claim semantics differ")
+    return digest
+
+
 def _final_prediction(
     row: Mapping[str, Any],
     *,
@@ -626,6 +674,7 @@ def _final_prediction(
 def build_sealed_final_test_evaluation(
     *,
     execution_lock: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
     identities: Sequence[str],
     labels: np.ndarray,
     final_labels_artifact_sha256: str,
@@ -636,6 +685,11 @@ def build_sealed_final_test_evaluation(
         execution_lock,
         expected_contract=FINAL_TEST_EXECUTION_LOCK_CONTRACT,
     )
+    claim_sha = validate_final_test_execution_claim(
+        execution_claim, execution_lock=execution_lock
+    )
+    if execution_claim.get("source") != execution_lock.get("source"):
+        raise ValueError("final-test execution claim source differs")
     ids = tuple(str(value) for value in identities)
     truth = np.asarray(labels, dtype=np.int64)
     expected_rows = execution_lock["eligible_evaluation_rows"]
@@ -778,6 +832,7 @@ def build_sealed_final_test_evaluation(
                 "contract": FINAL_TEST_EVALUATION_CONTRACT,
                 "schema_version": 1,
                 "final_test_execution_lock_sha256": lock_sha,
+                "final_test_execution_claim_sha256": claim_sha,
                 "identity_count": len(ids),
                 "identity_order_sha256": canonical_sha256(list(ids)),
                 "final_labels_artifact_sha256": label_artifact_sha,
@@ -822,16 +877,19 @@ __all__ = [
     "FINAL_TEST_INPUT_PREPARATION_CONTRACT",
     "FINAL_INPUT_KEYS",
     "FINAL_TEST_EVALUATION_CONTRACT",
+    "FINAL_TEST_EXECUTION_CLAIM_CONTRACT",
     "FINAL_TEST_EXECUTION_LOCK_CONTRACT",
     "POSTLOCK_ORACLE_TARGET_CONTRACT",
     "POSTLOCK_TARGET_PARENT_KEYS",
     "build_final_test_execution_lock",
+    "build_final_test_execution_claim",
     "build_prelock_final_test_inputs",
     "build_finalist_controls",
     "build_postlock_oracle_target",
     "build_sealed_final_test_evaluation",
     "publish_final_test_evaluation",
     "validate_final_test_execution_lock",
+    "validate_final_test_execution_claim",
     "validate_finalist_controls",
     "validate_postlock_oracle_target",
     "validate_prelock_final_test_inputs",

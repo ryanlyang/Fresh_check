@@ -19,6 +19,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
     load_hashed_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.final_seal import (  # noqa: E402
+    FINAL_TEST_EXECUTION_CLAIM_CONTRACT,
     FINAL_TEST_EXECUTION_LOCK_CONTRACT,
     build_sealed_final_test_evaluation,
     publish_final_test_evaluation,
@@ -36,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--execution-lock", required=True, type=Path)
+    parser.add_argument("--execution-claim", required=True, type=Path)
     parser.add_argument("--final-labels-npz", required=True, type=Path)
     parser.add_argument("--final-labels-artifact-sha256", required=True)
     parser.add_argument("--prediction-index", required=True, type=Path)
@@ -57,7 +59,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.execution_lock,
         expected_contract=FINAL_TEST_EXECUTION_LOCK_CONTRACT,
     )
-    if execution_lock.get("source") != campaign.get("source"):
+    execution_claim = load_hashed_json(
+        args.execution_claim,
+        expected_contract=FINAL_TEST_EXECUTION_CLAIM_CONTRACT,
+    )
+    if (
+        execution_lock.get("source") != campaign.get("source")
+        or execution_claim.get("source") != campaign.get("source")
+    ):
         raise ValueError("final-test execution-lock source differs")
     with np.load(args.final_labels_npz, allow_pickle=False) as payload:
         if set(payload.files) != {"identities", "labels"}:
@@ -103,6 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows.append(row)
     artifact = build_sealed_final_test_evaluation(
         execution_lock=execution_lock,
+        execution_claim=execution_claim,
         identities=identities,
         labels=labels,
         final_labels_artifact_sha256=args.final_labels_artifact_sha256,

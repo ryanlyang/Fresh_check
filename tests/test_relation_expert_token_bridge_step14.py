@@ -22,6 +22,7 @@ from teacher_logit_reco.relation_expert_token_bridge.final_seal import (
     EXECUTION_PARENT_KEYS,
     FINAL_INPUT_KEYS,
     POSTLOCK_TARGET_PARENT_KEYS,
+    build_final_test_execution_claim,
     build_final_test_execution_lock,
     build_finalist_controls,
     build_postlock_oracle_target,
@@ -736,6 +737,13 @@ def test_two_lock_sequence_and_sealed_final_evaluation(
         )
     final = build_sealed_final_test_evaluation(
         execution_lock=execution,
+        execution_claim=bind_source(
+            build_final_test_execution_claim(
+                execution_lock=execution,
+                execution_plan_sha256=_digest("final-execution-plan"),
+            ),
+            source_snapshot=SOURCE,
+        ),
         identities=identities,
         labels=labels,
         final_labels_artifact_sha256=next(
@@ -769,6 +777,15 @@ def test_two_lock_sequence_and_sealed_final_evaluation(
     with pytest.raises(ValueError, match="prediction semantics differ"):
         build_sealed_final_test_evaluation(
             execution_lock=execution,
+            execution_claim=bind_source(
+                build_final_test_execution_claim(
+                    execution_lock=execution,
+                    execution_plan_sha256=_digest(
+                        "final-execution-plan"
+                    ),
+                ),
+                source_snapshot=SOURCE,
+            ),
             identities=identities,
             labels=labels,
             final_labels_artifact_sha256=next(

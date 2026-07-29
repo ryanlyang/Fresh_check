@@ -56,10 +56,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_root=args.campaign_root,
         repo_root=REPO_ROOT,
     )
-    if any(
-        "continuation_intent" in row["input_artifact_hashes"]
-        for row in manifest["rows"]
-    ):
+    graph_node = next(
+        row for row in graph["nodes"]
+        if row["node_id"] == manifest["node_id"]
+    )
+    if graph_node["dynamic_continuation"]:
         validate_published_dynamic_continuation(
             campaign=campaign,
             production_graph=graph,
@@ -102,12 +103,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         task_index=index,
     )
     if reusable is not None:
+        aggregate = None
+        if int(manifest["task_count"]) == 1:
+            aggregate = publish_task_manifest_completion(
+                campaign_root=args.campaign_root,
+                campaign=campaign,
+                task_manifest=manifest,
+            )
+        payload = {
+            "status": "reused_authenticated_completion",
+            "row_completion_sha256": reusable["content_hash"],
+        }
+        if aggregate is not None:
+            payload["manifest_completion_sha256"] = aggregate[
+                "artifact"
+            ]["content_hash"]
+            payload["manifest_completion_path"] = aggregate["path"]
         print(
             json.dumps(
-                {
-                    "status": "reused_authenticated_completion",
-                    "row_completion_sha256": reusable["content_hash"],
-                },
+                payload,
                 indent=2,
                 sort_keys=True,
             )

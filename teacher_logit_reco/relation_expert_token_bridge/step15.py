@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v3"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v7"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 7,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
@@ -58,6 +58,15 @@ def build_step15_preflight_report(
                 "resumable_targets_present": True,
                 "dynamic_continuation_present": True,
                 "dynamic_manifest_execution_requires_binding_receipt": True,
+                "stage_f_j_parent_completeness_revalidated": True,
+                "stage_f_j_resumable_rows_revalidate_output_hashes": True,
+                "stage_k_m_parent_completeness_revalidated": True,
+                "stage_l_m_registration_only_rows_forbidden": True,
+                "negative_control_or_scale_results_continue": True,
+                "all_shortlisted_graph_seed_rows_required": True,
+                "sealed_stage_n_parent_completeness_revalidated": True,
+                "final_test_evaluation_exactly_once": True,
+                "final_test_result_cannot_replace_finalist": True,
                 "monitoring_and_ledger_present": True,
                 "node_execution_registry_present": True,
                 "automatic_manifest_producer_coverage_complete": True,
