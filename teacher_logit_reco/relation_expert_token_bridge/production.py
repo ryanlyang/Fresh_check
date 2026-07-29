@@ -19,7 +19,10 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v1"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v2"
+NODE_EXECUTION_REGISTRY_CONTRACT = (
+    "retb_production_node_execution_registry_v1"
+)
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v1"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
@@ -67,6 +70,86 @@ MINIATURE_SPLIT_SIZES = {
     "final_test": 20,
     "scale_train": 40,
 }
+
+# These nodes are submitted as their declared worker directly.  Every other
+# non-alias node is executed through an authenticated task manifest.
+DIRECT_WORKER_NODES = frozenset(
+    {
+        "split_build",
+        "campaign_bootstrap",
+        "compiled_region_backend",
+        "cpu_resource_probe",
+        "gpu_resource_probe",
+        "step3_architecture_contracts",
+        "step4_offline_training_contracts",
+        "step5_offline_fusion_contracts",
+        "step6_native_hlt_contracts",
+        "step7_bridge_contracts",
+        "step8_target_cache_contracts",
+        "step9_predictor_contracts",
+        "step10_predictor_bundle_contracts",
+        "step11_joint_bridge_contracts",
+        "step12_final_consumer_contracts",
+        "step13_confirmation_contracts",
+        "step14_scale_final_contracts",
+        "completed_job_ledger",
+    }
+)
+
+# Explicit ownership is deliberate: adding a manifest-driven graph node without
+# adding it here is a contract failure.  Task 2--7 producers may materialize
+# different row contents, but the responsible upstream invocation is frozen
+# here before any campaign is submitted.
+TASK_MANIFEST_PRODUCER_NODES = {
+    "offline_input_cache": "campaign_bootstrap",
+    "hlt_v3_cache": "campaign_bootstrap",
+    "input_audit": "campaign_bootstrap",
+    "normalizers_500k": "campaign_bootstrap",
+    "offline_expert_training": "campaign_bootstrap",
+    "offline_shape_selector": "campaign_bootstrap",
+    "offline_optimization_selector": "campaign_bootstrap",
+    "offline_fusion_training": "step5_offline_fusion_contracts",
+    "offline_complementarity": "campaign_bootstrap",
+    "offline_capacity_controls": "campaign_bootstrap",
+    "native_hlt_expert_training": "step6_native_hlt_contracts",
+    "native_hlt_fusion_training": "native_hlt_expert_training",
+    "bridge_pilot_training": "step7_bridge_contracts",
+    "bridge_target_training": "bridge_pilot_training",
+    "bridge_content_certification": "campaign_bootstrap",
+    "target_coordinate_selector": "campaign_bootstrap",
+    "target_cache_build": "step8_target_cache_contracts",
+    "target_normalizers": "campaign_bootstrap",
+    "predictor_training": "step9_predictor_contracts",
+    "uncertainty_calibration": "campaign_bootstrap",
+    "predictor_bundle_selector": "campaign_bootstrap",
+    "oracle_substitutions": "campaign_bootstrap",
+    "joint_predictor_training": "step11_joint_bridge_contracts",
+    "joint_predictor_selector": "campaign_bootstrap",
+    "final_consumer_training": "step12_final_consumer_contracts",
+    "deployable_export": "campaign_bootstrap",
+    "robustness_controls": "campaign_bootstrap",
+    "semantic_controls": "campaign_bootstrap",
+    "stage_l_graph_registration": "campaign_bootstrap",
+    "confirmation_500k": "stage_l_graph_registration",
+    "confirmation_summary": "campaign_bootstrap",
+    "bridge_shape_selector": "campaign_bootstrap",
+    "scale_shortlist_selector": "campaign_bootstrap",
+    "scale_refits": "step14_scale_final_contracts",
+    "scale_graph_training": "scale_refits",
+    "scale_completion": "campaign_bootstrap",
+    "prelock_final_inputs": "campaign_bootstrap",
+    "stack_val_inference": "scale_completion",
+    "accuracy_finalist_selector": "campaign_bootstrap",
+    "postlock_oracle_targets": "accuracy_finalist_selector",
+    "finalist_controls": "accuracy_finalist_selector",
+    "final_test_execution_lock": "campaign_bootstrap",
+    "sealed_final_test": "final_test_execution_lock",
+    "final_report": "campaign_bootstrap",
+}
+
+BOOTSTRAP_INPUT_MANIFEST_NODES = frozenset(
+    {"offline_input_cache", "hlt_v3_cache"}
+)
 
 
 def _array(

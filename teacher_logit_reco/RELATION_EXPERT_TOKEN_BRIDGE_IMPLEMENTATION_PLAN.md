@@ -4632,3 +4632,133 @@ outcome would establish all of:
 
 The campaign is also scientifically successful if it determines cleanly that
 one or more of those hypotheses is false.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Yes. I’d separate the remaining work into eight dependency-ordered tasks. This keeps each change reviewable and prevents another situation where structural DAG tests pass without an executable campaign.
+
+### Task 1 — Production-manifest coverage contract
+
+Create a central registry mapping every DAG node to:
+
+- its worker;
+- manifest producer;
+- required inputs;
+- expected outputs;
+- resource type;
+- static or dynamically generated rows.
+
+Add a regression that fails whenever a manifest-driven node has no automatic producer. This would immediately catch the current `input_audit` gap.
+
+### Task 2 — Complete Stage-A data preparation
+
+Implement and wire:
+
+- `input_audit.json`;
+- actual offline and HLT relation normalizers;
+- REGION tree caches and REGION normalizers;
+- complete input lineage and identity coverage;
+- miniature equivalents for smoke tests.
+
+This task should leave Stage A producing every artifact needed to start model training.
+
+### Task 3 — Static experiment manifest compiler
+
+Generate concrete run rows for experiments whose matrix is known at campaign creation:
+
+- offline expert training;
+- initial offline controls;
+- native HLT experts and controls;
+- predetermined fusion configurations;
+- fixed bridge pilots.
+
+Each row should contain its full command, configuration hashes, input lineage, output locations, seed, and expected artifacts.
+
+### Task 4 — Dynamic continuation through Stages B–E
+
+Make selectors publish authenticated downstream manifests automatically:
+
+- offline shape selection;
+- optimization selection;
+- offline fusion candidates;
+- bridge-target candidates;
+- bridge-content certification;
+- target-coordinate selection.
+
+The selector’s output and the generated downstream manifest should be hash-bound together.
+
+### Task 5 — Target-cache and predictor continuation, Stages F–J
+
+Wire the largest middle section:
+
+- target-cache shards;
+- target normalizers;
+- independent predictor runs;
+- uncertainty calibration;
+- predictor-bundle selection;
+- oracle substitutions;
+- joint predictors;
+- final consumers;
+- deployable exports.
+
+This should include resumable shard behavior and completeness validation before dependent jobs proceed.
+
+### Task 6 — Controls, confirmation, and scale-up, Stages K–M
+
+Implement automatic manifests and aggregation for:
+
+- robustness and semantic controls;
+- 500k seed confirmations;
+- bridge-shape and scale-shortlist selection;
+- 3M normalizer refits;
+- all shortlisted 3M graph training;
+- scale-completion attestation.
+
+Poor scientific performance must be recorded, not treated as a runtime failure. Only malformed, incomplete, or provenance-invalid artifacts should stop dependencies.
+
+### Task 7 — Stage-N sealed evaluation
+
+Finish the two-lock final workflow:
+
+- deployable `stack_val` inference;
+- finalist selection;
+- locked finalist lineage;
+- post-lock oracle-target creation;
+- finalist controls;
+- final-test execution lock;
+- exactly-once sealed final-test evaluation;
+- final report and completed-job ledger.
+
+This task should explicitly test that no performance threshold aborts the campaign.
+
+### Task 8 — End-to-end operational validation
+
+Run progressively:
+
+1. Local synthetic DAG execution without Slurm.
+2. Local miniature campaign through every Stage A–N worker.
+3. `--smoke-simulate`.
+4. Real miniature Tigris smoke.
+5. Production dry run with authenticated storage measurements.
+6. Only then, full submission.
+
+Also test restart after a failed array element, stale-job cancellation, artifact reuse, source drift, and interrupted selector continuation.
+
+I recommend implementing them in exactly this order. Tasks 1–2 are the immediate blockers; Tasks 3–7 complete the orchestration; Task 8 is the required proof that the plan is genuinely finished.
