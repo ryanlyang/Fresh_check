@@ -967,8 +967,8 @@ def test_cuda_ddp_contract_rejects_unconverted_batch_norm():
         require_distributed_normalization_contract(
             model,
             DistributedRuntime(0, 4, 0, "nccl", "cuda"),
-        device="cuda",
-    )
+            device="cuda",
+        )
 
 
 def test_auto_cuda_ddp_preparation_converts_rank_local_batch_norm(monkeypatch):
