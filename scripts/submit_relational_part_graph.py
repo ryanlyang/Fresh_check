@@ -41,6 +41,7 @@ def main() -> int:
     parser.add_argument("--campaign-root", type=Path)
     parser.add_argument("--screening-array-concurrency", type=int, default=4)
     parser.add_argument("--tree-array-concurrency", type=int, default=16)
+    parser.add_argument("--region-array-concurrency", type=int, default=16)
     parser.add_argument("--miniature", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-simulate", action="store_true")
@@ -67,6 +68,7 @@ def main() -> int:
         miniature=bool(args.miniature),
         screening_array_concurrency=args.screening_array_concurrency,
         tree_array_concurrency=args.tree_array_concurrency,
+        region_array_concurrency=args.region_array_concurrency,
     )
     jobs = {
         node["node_id"]: (

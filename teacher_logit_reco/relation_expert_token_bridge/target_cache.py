@@ -429,6 +429,12 @@ def validate_target_storage_audit(payload: Mapping[str, Any]) -> str:
         != ("float16" if passed else "float32")
         or int(payload["sample_count"]) <= 0
         or int(payload["sample_count"]) > AUDIT_SAMPLE_SIZE
+        or int(payload["sample_start"]) != 0
+        or payload["sample_rule"]
+        != "first_min_4096_canonical_identity_indices"
+        or float(payload["source_float32_logit_max_absolute_error"])
+        > 2.0e-6
+        or bool(payload["float16_failure_stops_workflow"])
     ):
         raise ValueError("target-storage audit semantics differ")
     return digest
@@ -485,14 +491,14 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_frozen_token_head_reproducer(
+def load_frozen_token_head(
     *,
     checkpoint_path: str | Path,
     expected_checkpoint_sha256: str,
     target_mode: str,
     token_dimension: int,
-) -> Callable[[np.ndarray], np.ndarray]:
-    """Load only the immutable token head needed for cache parity checks."""
+) -> Any:
+    """Load only the immutable frozen token head from a target checkpoint."""
     try:
         import torch
     except ImportError as error:  # pragma: no cover - deployment dependency
@@ -543,6 +549,26 @@ def load_frozen_token_head_reproducer(
     )
     head.load_state_dict(selected, strict=True)
     head.eval()
+    for parameter in head.parameters():
+        parameter.requires_grad_(False)
+    return head
+
+
+def load_frozen_token_head_reproducer(
+    *,
+    checkpoint_path: str | Path,
+    expected_checkpoint_sha256: str,
+    target_mode: str,
+    token_dimension: int,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Load the immutable token head as a NumPy parity callable."""
+    head = load_frozen_token_head(
+        checkpoint_path=checkpoint_path,
+        expected_checkpoint_sha256=expected_checkpoint_sha256,
+        target_mode=target_mode,
+        token_dimension=token_dimension,
+    )
+    import torch
 
     def reproduce(tokens: np.ndarray) -> np.ndarray:
         values = np.asarray(tokens, dtype=np.float32)
@@ -695,6 +721,11 @@ def publish_offline_target_cache(
                 ),
             }
             storage_dtypes[expert] = dtype
+        verify_target_batch_logits(
+            arrays,
+            logit_reproducers=logit_reproducers,
+            storage_dtype_by_expert=storage_dtypes,
+        )
         encoded = _npz_bytes(arrays)
         npz_publication = write_immutable_bytes(npz_path, encoded)
         shard_manifest = bind_source(
@@ -757,6 +788,9 @@ def publish_offline_target_cache(
                 "normalizer_set_sha256": specification[
                     "normalizer_set_sha256"
                 ],
+                "target_descriptors": dict(
+                    specification["target_descriptors"]
+                ),
                 "shard_size": int(shard_size),
                 "shard_count": len(shard_manifests),
                 "shards": [
@@ -786,6 +820,11 @@ def publish_offline_target_cache(
         source_snapshot=source_snapshot,
     )
     write_immutable_json(final_manifest, manifest)
+    validate_offline_target_cache(
+        final_manifest,
+        expected_pipeline_seed=int(specification["pipeline_seed"]),
+        expected_specification_sha256=spec_sha,
+    )
     return manifest
 
 
@@ -899,6 +938,7 @@ def validate_offline_target_cache(
             name="expected_specification_sha256",
         )
         or not manifest["complete_coverage"]
+        or set(manifest.get("target_descriptors", {})) != set(EXPERT_ORDER)
     ):
         raise ValueError("target-cache seed/specification differs")
     audit_hashes = {}
@@ -913,6 +953,10 @@ def validate_offline_target_cache(
             or int(audit.get("sample_start", -1)) != 0
             or audit["identity_order_sha256"]
             != manifest["identity_order_sha256"]
+            or audit["checkpoint_sha256"]
+            != manifest["target_descriptors"][expert]["checkpoint_sha256"]
+            or audit["slot_query_sha256"]
+            != manifest["target_descriptors"][expert]["slot_query_sha256"]
             or audit.get("source") != manifest.get("source")
         ):
             raise ValueError("target-cache storage audit lineage differs")
@@ -1315,6 +1359,7 @@ __all__ = [
     "identity_order_sha256",
     "iter_offline_target_cache",
     "load_offline_target_cache",
+    "load_frozen_token_head",
     "load_frozen_token_head_reproducer",
     "publish_offline_target_cache",
     "publish_target_normalizers",

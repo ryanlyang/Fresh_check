@@ -9,8 +9,9 @@ from .contracts import with_content_hash
 
 
 RELATIONAL_STORAGE_MEASUREMENTS_CONTRACT = "relational_part_storage_measurements_v1"
-RELATIONAL_STORAGE_PROJECTION_CONTRACT = "relational_part_storage_projection_v2"
+RELATIONAL_STORAGE_PROJECTION_CONTRACT = "relational_part_storage_projection_v3"
 GIB = 1024**3
+REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND = 3 * GIB
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,9 @@ def build_storage_projection(
             measurements.prediction_sample_events,
         ),
         "metrics_registries_logs_overhead": int(measurements.fixed_overhead_bytes),
+        "transient_region_normalization_map_reduce_upper_bound": (
+            REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND
+        ),
     }
     projected = int(sum(components.values()))
     budget_bytes = int(budget_gib) * GIB
@@ -205,7 +209,8 @@ def build_storage_projection(
         "free_reserve_preserved": available_bytes - projected >= reserve_bytes,
         "uses_measured_hlt_bytes_per_jet": True,
         "uses_measured_tree_bytes_per_jet": True,
-        "no_persistent_pair_matrices": True,
+        "no_persistent_full_pair_matrices": True,
+        "region_normalization_map_reduce_peak_is_bounded": True,
     }
     if not all(checks.values()):
         raise ValueError(
@@ -218,7 +223,7 @@ def build_storage_projection(
     return with_content_hash(
         {
             "contract": RELATIONAL_STORAGE_PROJECTION_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "measurement_source": "representative_files_and_locked_tree_probe",
             "measurement_artifact_sha256": measurement_artifact_sha256,
             "measurements": measurements.to_dict(),
@@ -250,6 +255,19 @@ def build_storage_projection(
             "minimum_free_reserve_bytes": reserve_bytes,
             "projected_free_bytes_after_campaign": available_bytes - projected,
             "checks": checks,
+            "region_normalization_transient_bound": {
+                "bytes": REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND,
+                "basis": (
+                    "50000 selected jets; at most 64 pair and merge samples "
+                    "per jet; at most 128 node samples per jet; float64 "
+                    "sample matrices, int16 coordinates, float32 selected "
+                    "HLT tokens, masks, offsets, identities, NPZ overhead"
+                ),
+                "lifetime": (
+                    "restart-safe preparation intermediates retained until "
+                    "canonical REGION reduction completes"
+                ),
+            },
             "ok": True,
         }
     )
@@ -259,6 +277,7 @@ __all__ = [
     "GIB",
     "RELATIONAL_STORAGE_MEASUREMENTS_CONTRACT",
     "RELATIONAL_STORAGE_PROJECTION_CONTRACT",
+    "REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND",
     "StorageMeasurements",
     "build_storage_measurements",
     "build_storage_projection",

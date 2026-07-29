@@ -143,8 +143,12 @@ def build_selected_target_lineage(
                 or int(content["pipeline_seed"]) != int(pipeline_seed)
                 or content["parents"]["candidate_checkpoint"]
                 != descriptor["checkpoint_sha256"]
+                or not content["bridge_content_certified"]
                 or noninferiority["target_mode"] != mode
                 or not noninferiority["offline_noninferior"]
+                or eligibility["noninferiority_sha256"] != noninferiority_sha
+                or content_sha
+                not in eligibility["content_certification_hashes"]
             ):
                 raise ValueError("bridge target certification lineage differs")
             descriptor.update(

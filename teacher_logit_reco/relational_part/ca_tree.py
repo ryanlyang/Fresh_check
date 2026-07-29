@@ -438,28 +438,81 @@ def pack_tree_shard(
     return packed
 
 
-def unpack_tree_shard(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
+def unpack_tree_shard(
+    path: Path,
+    *,
+    rows: Sequence[int] | None = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Load all shard identities and only the requested tree rows.
+
+    ``rows=None`` preserves the original full-shard behavior.  Returning the
+    complete identity vector even for selective loads lets callers authenticate
+    the contiguous shard before using a small deterministic subset of trees.
+    Requested trees are returned in exactly the supplied row order.
+    """
+
     with np.load(path, allow_pickle=False) as packed:
-        identities = [str(value) for value in packed["identity"]]
-        offsets = packed["node_offsets"]
+        field_names = (
+            "identity",
+            "n_valid",
+            "root",
+            "node_offsets",
+            "leaf_to_node",
+            "parent",
+            "left",
+            "right",
+            "depth",
+            "vectors",
+            "pt",
+            "mass",
+            "multiplicity",
+            "merge_delta_r",
+            "merge_kt",
+            "merge_z",
+            "merge_mass",
+            *tuple(
+                name
+                for resolution in EXCLUSIVE_RESOLUTIONS
+                for name in (
+                    f"assignment_K{resolution}",
+                    f"actual_count_K{resolution}",
+                )
+            ),
+        )
+        # NpzFile.__getitem__ decompresses an array on every access.  Cache
+        # each field once before the row loop; otherwise a 10k-row shard is
+        # decompressed hundreds of thousands of times.
+        arrays = {name: packed[name] for name in field_names}
+        identities = [str(value) for value in arrays["identity"]]
+        selected_rows = (
+            tuple(range(len(identities)))
+            if rows is None
+            else tuple(int(row) for row in rows)
+        )
+        if (
+            len(selected_rows) != len(set(selected_rows))
+            or any(row < 0 or row >= len(identities) for row in selected_rows)
+        ):
+            raise ValueError("requested tree shard rows are duplicate or out of range")
+        offsets = arrays["node_offsets"]
+        width = int(arrays["leaf_to_node"].shape[1])
         trees: list[dict[str, Any]] = []
-        for row in range(len(identities)):
+        for row in selected_rows:
             start, stop = map(int, offsets[row:row + 2])
-            width = int(packed["leaf_to_node"].shape[1])
-            n_valid = int(packed["n_valid"][row])
+            n_valid = int(arrays["n_valid"][row])
             tree = {
                 "contract": TREE_SCHEMA_CONTRACT,
                 "n_particles": width,
                 "n_valid": n_valid,
                 "n_nodes": stop - start,
-                "root": int(packed["root"][row]),
-                "leaf_to_node": packed["leaf_to_node"][row].copy(),
+                "root": int(arrays["root"][row]),
+                "leaf_to_node": arrays["leaf_to_node"][row].copy(),
                 "assignments": {
-                    str(k): packed[f"assignment_K{k}"][row].copy()
+                    str(k): arrays[f"assignment_K{k}"][row].copy()
                     for k in EXCLUSIVE_RESOLUTIONS
                 },
                 "actual_cluster_counts": {
-                    str(k): int(packed[f"actual_count_K{k}"][row])
+                    str(k): int(arrays[f"actual_count_K{k}"][row])
                     for k in EXCLUSIVE_RESOLUTIONS
                 },
             }
@@ -468,7 +521,7 @@ def unpack_tree_shard(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
                 "multiplicity", "merge_delta_r", "merge_kt", "merge_z",
                 "merge_mass",
             ):
-                tree[name] = packed[name][start:stop].copy()
+                tree[name] = arrays[name][start:stop].copy()
             validate_tree(tree)
             trees.append(tree)
     return identities, trees

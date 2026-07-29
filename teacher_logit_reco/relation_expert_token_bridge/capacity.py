@@ -51,7 +51,11 @@ def select_monolithic_capacity_controls(
     target_flops_batch1: float,
     target_flops_batch128: float,
     candidates: Sequence[Mapping[str, Any]],
+    domain: str = "offline",
+    target_complete_graph_sha256: str | None = None,
 ) -> dict[str, Any]:
+    if domain not in {"offline", "hlt"}:
+        raise ValueError("capacity-control domain differs")
     if min(int(target_parameters), float(target_flops_batch1), float(target_flops_batch128)) <= 0:
         raise ValueError("capacity target totals must be positive")
     checked = []
@@ -97,43 +101,64 @@ def select_monolithic_capacity_controls(
             tuple(row["configuration"]),
         ),
     )
-    return with_content_hash(
-        {
-            "contract": CAPACITY_CONTROL_CONTRACT,
-            "schema_version": 1,
-            "target": {
-                "parameter_count": int(target_parameters),
-                "inference_flops_batch1": float(target_flops_batch1),
-                "inference_flops_batch128": float(target_flops_batch128),
-                "includes": [
-                    "expert_encoders",
-                    "summary_tokenizers",
-                    "dimension_projections",
-                    "uncertainty_or_reliability_heads",
-                    "token_refiner",
-                    "final_consumer",
-                ],
-                "excludes": ["training_only_teachers", "target_caches"],
-            },
-            "O_MONO_PARAM": parameter_match,
-            "O_MONO_FLOP": flop_match,
-            "within_5_percent": {
-                "O_MONO_PARAM_parameters": (
+    prefix = "O" if domain == "offline" else "H"
+    target = {
+        "parameter_count": int(target_parameters),
+        "inference_flops_batch1": float(target_flops_batch1),
+        "inference_flops_batch128": float(target_flops_batch128),
+        "includes": [
+            "expert_encoders",
+            "summary_tokenizers",
+            "dimension_projections",
+            "uncertainty_or_reliability_heads",
+            "token_refiner",
+            "final_consumer",
+        ],
+        "excludes": ["training_only_teachers", "target_caches"],
+    }
+    if target_complete_graph_sha256 is not None:
+        target["complete_graph_sha256"] = require_sha256(
+            target_complete_graph_sha256,
+            name="target_complete_graph_sha256",
+        )
+        target["includes"].append(
+            "deployable_frozen_offline_heads_and_fusion"
+        )
+    payload = {
+        "contract": (
+            CAPACITY_CONTROL_CONTRACT
+            if domain == "offline"
+            and target_complete_graph_sha256 is None
+            else "retb_complete_graph_capacity_controls_v2"
+        ),
+        "schema_version": (
+            1
+            if domain == "offline"
+            and target_complete_graph_sha256 is None
+            else 2
+        ),
+        "target": target,
+        f"{prefix}_MONO_PARAM": parameter_match,
+        f"{prefix}_MONO_FLOP": flop_match,
+        "within_5_percent": {
+                f"{prefix}_MONO_PARAM_parameters": (
                     parameter_match["parameter_mismatch"] / target_parameters <= 0.05
                 ),
-                "O_MONO_PARAM_batch1_flops": (
+                f"{prefix}_MONO_PARAM_batch1_flops": (
                     parameter_match["flops_batch1_mismatch"] / target_flops_batch1 <= 0.05
                 ),
-                "O_MONO_FLOP_parameters": (
+                f"{prefix}_MONO_FLOP_parameters": (
                     flop_match["parameter_mismatch"] / target_parameters <= 0.05
                 ),
-                "O_MONO_FLOP_batch1_flops": (
+                f"{prefix}_MONO_FLOP_batch1_flops": (
                     flop_match["flops_batch1_mismatch"] / target_flops_batch1 <= 0.05
                 ),
-            },
-            "measured_latency_used_for_selection": False,
-        }
-    )
+        },
+        "measured_latency_used_for_selection": False,
+    }
+    if payload["schema_version"] == 2:
+        payload["domain"] = domain
+    return with_content_hash(payload)
 
 
 def build_offline_long_exposure_ledger(

@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/relational_part_common.sh"
 
 : "${SCREENING_ARRAY_CONCURRENCY:=4}"
 : "${TREE_ARRAY_CONCURRENCY:=16}"
+: "${REGION_ARRAY_CONCURRENCY:=16}"
 : "${RPT_CONFIRMATION_CONCURRENCY:=4}"
 : "${RPT_FINAL_CONCURRENCY:=3}"
 : "${RPT_MINIATURE:=0}"
@@ -40,6 +41,7 @@ if [[ "${mode}" != "submit" ]]; then
     --output-root "${OUTPUT_ROOT}" \
     --screening-array-concurrency "${SCREENING_ARRAY_CONCURRENCY}" \
     --tree-array-concurrency "${TREE_ARRAY_CONCURRENCY}" \
+    --region-array-concurrency "${REGION_ARRAY_CONCURRENCY}" \
     "${args[@]}"
   exit 0
 fi
@@ -104,6 +106,7 @@ python scripts/submit_relational_part_graph.py \
   --campaign-root "${campaign_root}" \
   --screening-array-concurrency "${SCREENING_ARRAY_CONCURRENCY}" \
   --tree-array-concurrency "${TREE_ARRAY_CONCURRENCY}" \
+  --region-array-concurrency "${REGION_ARRAY_CONCURRENCY}" \
   "${graph_args[@]}"
 
 log_pattern="${campaign_root}/job_ledgers/slurm/%x_%A_%a.out"
@@ -185,9 +188,19 @@ for split in model_train model_val stack_val final_test; do
   jobs["tree_finalize_${split}"]="${final_id}"
   tree_final_ids+=("${final_id}")
 done
-jobs[region_normalization]="$(submit_cpu \
+region_shard_count="$(((split_sizes[model_train] + RPT_TREE_SHARD_SIZE - 1) / RPT_TREE_SHARD_SIZE))"
+jobs[region_normalization_plan]="$(submit_cpu \
   "${jobs[relation_normalization]}:${jobs[tree_finalize_model_train]}" \
-  run_fit_relational_part_region_normalization.sh)"
+  run_prepare_relational_part_region_normalization_map.sh)"
+jobs[region_normalization_shards]="$(submit_cpu \
+  "${jobs[region_normalization_plan]}" \
+  run_fit_relational_part_region_normalization_shard.sh \
+  --array="0-$((region_shard_count - 1))%${REGION_ARRAY_CONCURRENCY}" \
+  --cpus-per-task=2 \
+  --mem=24G)"
+jobs[region_normalization]="$(submit_cpu \
+  "${jobs[region_normalization_shards]}" \
+  run_finalize_relational_part_region_normalization.sh)"
 post_dependency="${jobs[hlt_cache]}:${jobs[relation_normalization]}:${jobs[region_normalization]}:${jobs[tree_backend]}:${jobs[tree_probe]}"
 for value in "${tree_final_ids[@]}"; do
   post_dependency="${post_dependency}:${value}"
@@ -227,6 +240,10 @@ printf 'screening array: %s\nselector: %s\ncontinuation: %s\nledger: %s\n' \
   "${jobs[screening]}" "${jobs[screening_selection]}" \
   "${jobs[confirmation_submit]}" \
   "${campaign_root}/job_ledgers/initial_submission_ledger.json"
+printf 'REGION plan / shard array / reducer: %s / %s / %s\n' \
+  "${jobs[region_normalization_plan]}" \
+  "${jobs[region_normalization_shards]}" \
+  "${jobs[region_normalization]}"
 printf 'monitor: squeue -u "$USER" -o "%%i %%j %%T %%R"\n'
 printf 'accounting: sacct -X --starttime today --name rpt_ --format=JobID,JobName,State,Elapsed,ExitCode\n'
 printf 'download: rsync -av tigris:%s/reports/ ./relational_part_reports/\n' "${campaign_root}"

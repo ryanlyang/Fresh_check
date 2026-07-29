@@ -44,6 +44,9 @@ from teacher_logit_reco.relational_part import (
     build_normalization_contract,
     build_raw_input_schema_contract,
     build_reference_tree,
+    build_region_normalization_from_samples,
+    build_region_normalization_partial,
+    build_region_normalization_plan,
     build_region_raw_features,
     build_relation_family_registry,
     build_screening_registry,
@@ -61,8 +64,10 @@ from teacher_logit_reco.relational_part import (
     select_wide_widths,
     tree_content_sha256,
     unpack_tree_shard,
+    assemble_region_normalization_partials,
     validate_backend_manifest,
     validate_region_normalization,
+    validate_region_normalization_partial_arrays,
     write_tree_shard,
     with_content_hash,
 )
@@ -379,6 +384,131 @@ def test_region_normalization_optimized_domains_exactly_match_legacy_sampling() 
     assert "sample_keys" not in source
 
 
+def test_parallel_region_map_reduce_exactly_matches_serial_salted_order() -> None:
+    tokens, mask, _, identities, trees, _, relation, serial = _artifacts()
+    selected = select_normalization_jet_indices(identities)
+    rank_by_global = {
+        int(global_index): rank
+        for rank, global_index in enumerate(selected.tolist())
+    }
+    plan_rows = []
+    partial_payloads = []
+    for shard_index, global_rows in enumerate(((0, 1), (2, 3))):
+        ranks = [rank_by_global[index] for index in global_rows]
+        local_identities = [identities[index] for index in global_rows]
+        samples, hashes, layout = _collect_region_domain_samples(
+            tokens[list(global_rows)],
+            mask[list(global_rows)],
+            local_identities,
+            [trees[index] for index in global_rows],
+            np.arange(len(global_rows), dtype=np.int64),
+            include_layout=True,
+            allow_empty_domains=True,
+        )
+        arrays = {
+            "identity": np.asarray(
+                [_identity_key(identity) for identity in local_identities]
+            ),
+            "selection_rank": np.asarray(ranks, dtype=np.int64),
+            **{
+                f"{domain}_samples": values
+                for domain, values in samples.items()
+            },
+            **layout,
+        }
+        plan_rows.append(
+            {
+                "shard_index": shard_index,
+                "shard_jet_count": len(global_rows),
+                "global_start": global_rows[0],
+                "global_stop": global_rows[-1] + 1,
+                "selected_count": len(global_rows),
+                "selected_local_indices": list(range(len(global_rows))),
+                "selection_ranks": ranks,
+                "selected_identity_sha256": _identity_sequence_hash(
+                    [_identity_key(value) for value in local_identities]
+                ),
+                "selected_input_filename": f"shard_{shard_index:05d}.npz",
+                "selected_input_npz_sha256": f"{shard_index + 1:064x}",
+                "tree_shard_metadata_sha256": f"{shard_index + 11:064x}",
+            }
+        )
+        partial_payloads.append((samples, hashes, arrays))
+    plan = build_region_normalization_plan(
+        tree_manifest_sha256="a" * 64,
+        tree_resource_sha256="b" * 64,
+        relation_normalization_sha256=relation["content_hash"],
+        hlt_content_sha256="c" * 64,
+        selected_identities=[identities[int(index)] for index in selected],
+        shard_rows=plan_rows,
+    )
+    partials = []
+    for shard_index, (samples, hashes, arrays) in enumerate(partial_payloads):
+        metadata = build_region_normalization_partial(
+            plan=plan,
+            shard_index=shard_index,
+            tree_shard_metadata_sha256=plan_rows[shard_index][
+                "tree_shard_metadata_sha256"
+            ],
+            sample_npz_sha256=f"{shard_index + 21:064x}",
+            selected_count=len(arrays["identity"]),
+            sample_counts={
+                domain: values.shape[0]
+                for domain, values in samples.items()
+            },
+            sample_identity_sha256=hashes,
+        )
+        validate_region_normalization_partial_arrays(arrays, metadata)
+        partials.append((metadata, arrays))
+
+    assembled, assembled_hashes, assembled_identities = (
+        assemble_region_normalization_partials(plan, partials)
+    )
+    expected, expected_hashes = _collect_region_domain_samples(
+        tokens, mask, identities, trees, selected
+    )
+    for domain in expected:
+        np.testing.assert_array_equal(assembled[domain], expected[domain])
+    assert assembled_hashes == expected_hashes
+    reduced = build_region_normalization_from_samples(
+        assembled,
+        assembled_hashes,
+        assembled_identities,
+        relation_normalization_artifact=relation,
+        angular_tree_resource_sha256=serial[
+            "angular_tree_resource_sha256"
+        ],
+    )
+    assert reduced == serial
+    corrupted = dict(partials[0][1])
+    corrupted["REGION_pair_query"] = corrupted[
+        "REGION_pair_query"
+    ].copy()
+    corrupted["REGION_pair_query"][0] += 1
+    with pytest.raises(ValueError, match="identity hashes"):
+        validate_region_normalization_partial_arrays(
+            corrupted, partials[0][0]
+        )
+    duplicate_rank_rows = [dict(row) for row in plan_rows]
+    duplicate_rank_rows[1] = duplicate_rank_rows[1] | {
+        "selection_ranks": [
+            duplicate_rank_rows[0]["selection_ranks"][0],
+            duplicate_rank_rows[1]["selection_ranks"][1],
+        ]
+    }
+    with pytest.raises(ValueError, match="selection ranks"):
+        build_region_normalization_plan(
+            tree_manifest_sha256="a" * 64,
+            tree_resource_sha256="b" * 64,
+            relation_normalization_sha256=relation["content_hash"],
+            hlt_content_sha256="c" * 64,
+            selected_identities=[
+                identities[int(index)] for index in selected
+            ],
+            shard_rows=duplicate_rank_rows,
+        )
+
+
 def test_compact_sidecar_atomic_resume_and_runtime_round_trip(tmp_path: Path) -> None:
     _, _, _, identities, trees, *_ = _artifacts()
     path = tmp_path / "shards" / "shard_00000.npz"
@@ -405,6 +535,14 @@ def test_compact_sidecar_atomic_resume_and_runtime_round_trip(tmp_path: Path) ->
     assert [tree_content_sha256(tree) for tree in restored] == [
         tree_content_sha256(tree) for tree in trees
     ]
+    selective_ids, selective = unpack_tree_shard(path, rows=(3, 1))
+    assert selective_ids == restored_ids
+    assert [tree_content_sha256(tree) for tree in selective] == [
+        tree_content_sha256(trees[3]),
+        tree_content_sha256(trees[1]),
+    ]
+    with pytest.raises(ValueError, match="duplicate or out of range"):
+        unpack_tree_shard(path, rows=(1, 1))
     with pytest.raises(FileExistsError, match="stale"):
         write_tree_shard(
             path,

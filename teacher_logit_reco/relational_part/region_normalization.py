@@ -391,7 +391,12 @@ def _collect_region_domain_samples(
     *,
     progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     progress_interval: int = 500,
-) -> tuple[dict[str, np.ndarray], dict[str, str]]:
+    include_layout: bool = False,
+    allow_empty_domains: bool = False,
+) -> (
+    tuple[dict[str, np.ndarray], dict[str, str]]
+    | tuple[dict[str, np.ndarray], dict[str, str], dict[str, np.ndarray]]
+):
     if int(progress_interval) <= 0:
         raise ValueError("REGION progress interval must be positive")
     chunks: dict[str, list[np.ndarray]] = {
@@ -402,6 +407,14 @@ def _collect_region_domain_samples(
         for domain in _REGION_DOMAIN_FEATURE_NAMES
     }
     counts = {domain: 0 for domain in _REGION_DOMAIN_FEATURE_NAMES}
+    offsets = {
+        domain: [0] for domain in _REGION_DOMAIN_FEATURE_NAMES
+    }
+    pair_queries: list[np.ndarray] = []
+    pair_contexts: list[np.ndarray] = []
+    merge_queries: list[np.ndarray] = []
+    merge_contexts: list[np.ndarray] = []
+    node_indices: list[np.ndarray] = []
     total = int(selected.size)
     for position, row_value in enumerate(selected, start=1):
         row = int(row_value)
@@ -434,10 +447,31 @@ def _collect_region_domain_samples(
             pair_chunk = np.stack(pair_rows)
             chunks["REGION_pair"].append(pair_chunk)
             counts["REGION_pair"] += int(pair_chunk.shape[0])
+            if include_layout:
+                pair_queries.append(
+                    np.asarray([pair[0] for pair in pairs], dtype=np.int16)
+                )
+                pair_contexts.append(
+                    np.asarray([pair[1] for pair in pairs], dtype=np.int16)
+                )
         if merge_rows:
             merge_chunk = np.stack(merge_rows)
             chunks["REGION_merge"].append(merge_chunk)
             counts["REGION_merge"] += int(merge_chunk.shape[0])
+            if include_layout:
+                merge_pairs = [
+                    pair for pair in pairs if pair[0] != pair[1]
+                ]
+                merge_queries.append(
+                    np.asarray(
+                        [pair[0] for pair in merge_pairs], dtype=np.int16
+                    )
+                )
+                merge_contexts.append(
+                    np.asarray(
+                        [pair[1] for pair in merge_pairs], dtype=np.int16
+                    )
+                )
 
         if valid_indices:
             node_chunk = np.stack(
@@ -445,11 +479,17 @@ def _collect_region_domain_samples(
             )
             chunks["REGION_node"].append(node_chunk)
             counts["REGION_node"] += int(node_chunk.shape[0])
+            if include_layout:
+                node_indices.append(
+                    np.asarray(valid_indices, dtype=np.int16)
+                )
             for index in valid_indices:
                 _update_identity_digest(
                     digests["REGION_node"],
                     f"{identity}#REGION_node:{index}>{index}",
                 )
+        for domain in _REGION_DOMAIN_FEATURE_NAMES:
+            offsets[domain].append(counts[domain])
 
         if (
             progress_callback is not None
@@ -474,50 +514,90 @@ def _collect_region_domain_samples(
     hashes = {}
     for domain, names in _REGION_DOMAIN_FEATURE_NAMES.items():
         if not chunks[domain]:
-            raise ValueError(f"{domain} has no fit samples")
-        samples[domain] = np.concatenate(chunks[domain], axis=0)
+            if not allow_empty_domains:
+                raise ValueError(f"{domain} has no fit samples")
+            samples[domain] = np.empty((0, len(names)), dtype=np.float64)
+        else:
+            samples[domain] = np.concatenate(chunks[domain], axis=0)
         if samples[domain].shape != (counts[domain], len(names)):
             raise AssertionError(f"{domain} sample matrix shape drifted")
         hashes[domain] = digests[domain].hexdigest()
-    return samples, hashes
+    if not include_layout:
+        return samples, hashes
+    layout = {
+        "REGION_pair_offsets": np.asarray(
+            offsets["REGION_pair"], dtype=np.int64
+        ),
+        "REGION_merge_offsets": np.asarray(
+            offsets["REGION_merge"], dtype=np.int64
+        ),
+        "REGION_node_offsets": np.asarray(
+            offsets["REGION_node"], dtype=np.int64
+        ),
+        "REGION_pair_query": (
+            np.concatenate(pair_queries)
+            if pair_queries
+            else np.empty(0, dtype=np.int16)
+        ),
+        "REGION_pair_context": (
+            np.concatenate(pair_contexts)
+            if pair_contexts
+            else np.empty(0, dtype=np.int16)
+        ),
+        "REGION_merge_query": (
+            np.concatenate(merge_queries)
+            if merge_queries
+            else np.empty(0, dtype=np.int16)
+        ),
+        "REGION_merge_context": (
+            np.concatenate(merge_contexts)
+            if merge_contexts
+            else np.empty(0, dtype=np.int16)
+        ),
+        "REGION_node_index": (
+            np.concatenate(node_indices)
+            if node_indices
+            else np.empty(0, dtype=np.int16)
+        ),
+    }
+    return samples, hashes, layout
 
 
-def fit_region_normalization(
-    raw_tokens: np.ndarray,
-    mask: np.ndarray,
-    identities: Sequence[Any],
-    trees: Sequence[Mapping[str, Any]],
+def build_region_normalization_from_samples(
+    domain_samples: Mapping[str, np.ndarray],
+    domain_hashes: Mapping[str, str],
+    selected_identities: Sequence[Any],
     *,
     relation_normalization_artifact: Mapping[str, Any],
     angular_tree_resource_sha256: str,
-    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
-    progress_interval: int = 500,
 ) -> dict[str, Any]:
+    """Build the canonical REGION artifact from an ordered sample stream."""
+
     parent_sha = validate_relation_normalization_artifact(
         relation_normalization_artifact
     )
-    array = np.asarray(raw_tokens)
-    valid = np.asarray(mask)
-    if array.dtype != np.float32 or valid.dtype != np.bool_:
-        raise TypeError("REGION fit requires float32 tokens and bool masks")
-    if array.ndim != 3 or array.shape[2] != 14 or valid.shape != array.shape[:2]:
-        raise ValueError("REGION fit input shapes differ")
-    if len(identities) != len(trees) or len(trees) != int(array.shape[0]):
-        raise ValueError("REGION tree/identity counts differ")
-    selected = select_normalization_jet_indices(identities)
-    domain_samples, domain_hashes = _collect_region_domain_samples(
-        array,
-        valid,
-        identities,
-        trees,
-        selected,
-        progress_callback=progress_callback,
-        progress_interval=progress_interval,
-    )
+    if set(domain_samples) != set(_REGION_DOMAIN_FEATURE_NAMES):
+        raise ValueError("REGION normalization sample domains differ")
+    if set(domain_hashes) != set(_REGION_DOMAIN_FEATURE_NAMES):
+        raise ValueError("REGION normalization sample hash domains differ")
+    normalized_samples: dict[str, np.ndarray] = {}
+    for domain, names in _REGION_DOMAIN_FEATURE_NAMES.items():
+        values = np.asarray(domain_samples[domain])
+        if (
+            values.dtype != np.float64
+            or values.ndim != 2
+            or values.shape[1] != len(names)
+            or values.shape[0] <= 0
+            or not np.isfinite(values).all()
+        ):
+            raise ValueError(f"{domain} sample matrix differs")
+        normalized_samples[domain] = values
+        require_sha256(domain_hashes[domain], name=f"{domain}.identity_sha256")
+
     records_by_name = {}
     for domain, names in _REGION_DOMAIN_FEATURE_NAMES.items():
         for record in _fit_records(
-            domain_samples[domain],
+            normalized_samples[domain],
             family_id="REGION",
             feature_names=names,
             applicability_rule_id=domain,
@@ -541,9 +621,9 @@ def fit_region_normalization(
                 angular_tree_resource_sha256,
                 name="angular_tree_resource_sha256",
             ),
-            "selected_jet_count": int(selected.size),
+            "selected_jet_count": len(selected_identities),
             "selected_jet_identity_sha256": _identity_sequence_hash(
-                [_identity_key(identities[int(index)]) for index in selected]
+                [_identity_key(identity) for identity in selected_identities]
             ),
             "quantile_method": NORMALIZATION_QUANTILE_METHOD,
             "float_accumulation_dtype": "float64",
@@ -556,6 +636,45 @@ def fit_region_normalization(
     )
     validate_region_normalization(artifact)
     return artifact
+
+
+def fit_region_normalization(
+    raw_tokens: np.ndarray,
+    mask: np.ndarray,
+    identities: Sequence[Any],
+    trees: Sequence[Mapping[str, Any]],
+    *,
+    relation_normalization_artifact: Mapping[str, Any],
+    angular_tree_resource_sha256: str,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    progress_interval: int = 500,
+) -> dict[str, Any]:
+    validate_relation_normalization_artifact(relation_normalization_artifact)
+    array = np.asarray(raw_tokens)
+    valid = np.asarray(mask)
+    if array.dtype != np.float32 or valid.dtype != np.bool_:
+        raise TypeError("REGION fit requires float32 tokens and bool masks")
+    if array.ndim != 3 or array.shape[2] != 14 or valid.shape != array.shape[:2]:
+        raise ValueError("REGION fit input shapes differ")
+    if len(identities) != len(trees) or len(trees) != int(array.shape[0]):
+        raise ValueError("REGION tree/identity counts differ")
+    selected = select_normalization_jet_indices(identities)
+    domain_samples, domain_hashes = _collect_region_domain_samples(
+        array,
+        valid,
+        identities,
+        trees,
+        selected,
+        progress_callback=progress_callback,
+        progress_interval=progress_interval,
+    )
+    return build_region_normalization_from_samples(
+        domain_samples,
+        domain_hashes,
+        [identities[int(index)] for index in selected],
+        relation_normalization_artifact=relation_normalization_artifact,
+        angular_tree_resource_sha256=angular_tree_resource_sha256,
+    )
 
 
 def validate_region_normalization(
@@ -620,6 +739,7 @@ def validate_region_normalization(
 
 
 __all__ = [
+    "build_region_normalization_from_samples",
     "fit_region_normalization",
     "validate_region_normalization",
 ]

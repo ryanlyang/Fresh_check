@@ -139,8 +139,11 @@ def test_step8_production_graph_is_complete_and_final_test_is_sealed() -> None:
         source_status_sha256="2" * 64,
         screening_array_concurrency=7,
         tree_array_concurrency=11,
+        region_array_concurrency=13,
     )
     assert validate_production_graph(graph) == graph["content_hash"]
+    assert graph["contract"] == "relational_part_production_graph_v2"
+    assert graph["schema_version"] == 2
     assert graph["split_sizes"] == {
         "model_train": 1_000_000,
         "model_val": 125_000,
@@ -152,6 +155,14 @@ def test_step8_production_graph_is_complete_and_final_test_is_sealed() -> None:
     assert nodes["screening"]["array"] == "0-20%7"
     assert nodes["tree_shards_model_train"]["array"] == "0-99%11"
     assert nodes["tree_shards_final_test"]["array"] == "0-49%11"
+    assert nodes["region_normalization_shards"]["array"] == "0-99%13"
+    assert nodes["region_normalization_plan"]["dependencies"] == [
+        "relation_normalization",
+        "tree_finalize_model_train",
+    ]
+    assert nodes["region_normalization"]["dependencies"] == [
+        "region_normalization_shards"
+    ]
     assert nodes["screening"]["dependencies"] == [
         "screening_model_contracts"
     ]
@@ -355,6 +366,9 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
         "run_audit_relational_part_inputs.sh",
         "run_fit_relational_part_normalization.sh",
         "run_fit_relational_part_region_normalization.sh",
+        "run_prepare_relational_part_region_normalization_map.sh",
+        "run_fit_relational_part_region_normalization_shard.sh",
+        "run_finalize_relational_part_region_normalization.sh",
         "run_build_relational_part_tree_backend.sh",
         "run_probe_relational_part_tree_backend.sh",
         "run_build_relational_part_angular_tree_shard.sh",
@@ -405,12 +419,34 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     ).read_text(encoding="utf-8")
     assert "--progress-interval" in region_fitter
     assert '"stage": "load_tree_shards"' in region_fitter
+    region_plan = (
+        ROOT
+        / "scripts"
+        / "prepare_relational_part_region_normalization_map.py"
+    ).read_text(encoding="utf-8")
+    region_shard = (
+        ROOT
+        / "scripts"
+        / "fit_relational_part_region_normalization_shard.py"
+    ).read_text(encoding="utf-8")
+    region_reduce = (
+        ROOT
+        / "scripts"
+        / "finalize_relational_part_region_normalization.py"
+    ).read_text(encoding="utf-8")
+    assert "validate_campaign_source" in region_plan
+    assert "selected_input_npz_sha256" in region_plan
+    assert "unpack_tree_shard" in region_shard
+    assert "rows=local_indices.tolist()" in region_shard
+    assert "assemble_region_normalization_partials" in region_reduce
     top = (sbatch / "submit_relational_part_tigris_full.sh").read_text(
         encoding="utf-8"
     )
     assert "--dry-run" in top
     assert "--smoke-submit" in top
     assert "0-20%${SCREENING_ARRAY_CONCURRENCY}" in top
+    assert "REGION_ARRAY_CONCURRENCY" in top
+    assert "region_normalization_shards" in top
     assert "preflight_relational_part_data.py" in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top

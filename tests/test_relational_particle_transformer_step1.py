@@ -546,7 +546,15 @@ def test_storage_projection_is_measured_and_fails_closed() -> None:
         final_test_events=100,
     )
     assert projection["ok"] is True
+    assert projection["contract"] == "relational_part_storage_projection_v3"
+    assert projection["schema_version"] == 3
     assert projection["checks"]["uses_measured_tree_bytes_per_jet"] is True
+    assert projection["component_bytes"][
+        "transient_region_normalization_map_reduce_upper_bound"
+    ] == 3 * GIB
+    assert projection["checks"][
+        "region_normalization_map_reduce_peak_is_bounded"
+    ] is True
     with pytest.raises(ValueError, match="storage preflight failed"):
         build_storage_projection(
             _measurements(),

@@ -61,6 +61,7 @@ from .contracts import (
     sha256_file,
     validate_content_hash,
     with_content_hash,
+    write_immutable_bytes,
     write_immutable_json,
 )
 from .determinism import (
@@ -260,8 +261,20 @@ from .relation_region import (
     build_region_relation_contract,
 )
 from .region_normalization import (
+    build_region_normalization_from_samples,
     fit_region_normalization,
     validate_region_normalization,
+)
+from .region_normalization_parallel import (
+    REGION_NORMALIZATION_PARTIAL_CONTRACT,
+    REGION_NORMALIZATION_PLAN_CONTRACT,
+    REGION_SAMPLE_DOMAINS,
+    assemble_region_normalization_partials,
+    build_region_normalization_partial,
+    build_region_normalization_plan,
+    validate_region_normalization_partial,
+    validate_region_normalization_partial_arrays,
+    validate_region_normalization_plan,
 )
 from .relation_pid_charge import (
     CHARGE_ENCODED_DIMENSION,
@@ -358,6 +371,7 @@ from .splits import (
 )
 from .storage import (
     GIB,
+    REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND,
     RELATIONAL_STORAGE_MEASUREMENTS_CONTRACT,
     RELATIONAL_STORAGE_PROJECTION_CONTRACT,
     StorageMeasurements,
@@ -444,6 +458,7 @@ __all__ = [
     "STEP1_REPORT_CONTRACT",
     "RELATIONAL_STORAGE_PROJECTION_CONTRACT",
     "RELATIONAL_STORAGE_MEASUREMENTS_CONTRACT",
+    "REGION_MAP_REDUCE_TRANSIENT_BYTES_UPPER_BOUND",
     "RELATION_FAMILY_REGISTRY_CONTRACT",
     "SCREENING_REGISTRY_CONTRACT",
     "SEMANTIC_CONTROL_REGISTRY_CONTRACT",
@@ -508,6 +523,7 @@ __all__ = [
     "validate_relational_split_manifest",
     "validate_screening_registry",
     "with_content_hash",
+    "write_immutable_bytes",
     "write_immutable_json",
     "CHARGE_ENCODED_DIMENSION",
     "CHARGE_INTEGER_TOLERANCE",
@@ -677,6 +693,8 @@ __all__ = [
     "REGION_ENDPOINT_DESCRIPTOR_NAMES",
     "REGION_LCA_NAMES",
     "REGION_NORMALIZATION_CONTRACT",
+    "REGION_NORMALIZATION_PARTIAL_CONTRACT",
+    "REGION_NORMALIZATION_PLAN_CONTRACT",
     "REGION_RANK_DIFFERENCE_NAMES",
     "REGION_RAW_DIMENSION",
     "REGION_RAW_FEATURE_NAMES",
@@ -686,6 +704,7 @@ __all__ = [
     "REGION_WITHIN_CLUSTER_PT_NAMES",
     "RegionEncoder",
     "RegionNormalizer",
+    "REGION_SAMPLE_DOMAINS",
     "TREE_PROBE_STRATA",
     "TREE_SCHEMA_CONTRACT",
     "TREE_SHARD_MAX_JETS",
@@ -699,6 +718,9 @@ __all__ = [
     "build_batched_region_leaf_ranks",
     "build_batched_region_raw_features",
     "build_region_relation_contract",
+    "build_region_normalization_from_samples",
+    "build_region_normalization_partial",
+    "build_region_normalization_plan",
     "build_registered_screening_model",
     "build_registered_wide_model",
     "canonical_leaf_key",
@@ -715,9 +737,13 @@ __all__ = [
     "select_raw_audit_identities",
     "tree_content_sha256",
     "unpack_tree_shard",
+    "assemble_region_normalization_partials",
     "validate_existing_tree_shard",
     "validate_backend_manifest",
     "validate_region_normalization",
+    "validate_region_normalization_partial",
+    "validate_region_normalization_partial_arrays",
+    "validate_region_normalization_plan",
     "validate_tree",
     "write_tree_shard",
 ]

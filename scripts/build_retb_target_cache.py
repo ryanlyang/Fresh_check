@@ -58,16 +58,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     checkpoint_map = json.loads(args.checkpoint_map.read_text("utf-8"))
     if set(checkpoint_map) != set(EXPERT_ORDER):
         raise ValueError("checkpoint map expert coverage differs")
-    payload = np.load(args.generated_targets, allow_pickle=False)
-    required = {"identities", "labels"} | {
-        f"{kind}_{expert}"
-        for expert in EXPERT_ORDER
-        for kind in ("tokens", "logits")
-    }
-    if set(payload.files) != required:
-        raise ValueError("generated-target NPZ fields differ")
-    identities = tuple(str(value) for value in payload["identities"].tolist())
-    labels = np.asarray(payload["labels"], dtype=np.int64)
+    with np.load(args.generated_targets, allow_pickle=False) as payload:
+        required = {"identities", "labels"} | {
+            f"{kind}_{expert}"
+            for expert in EXPERT_ORDER
+            for kind in ("tokens", "logits")
+        }
+        if set(payload.files) != required:
+            raise ValueError("generated-target NPZ fields differ")
+        identities = tuple(
+            str(value) for value in payload["identities"].tolist()
+        )
+        labels = np.asarray(payload["labels"], dtype=np.int64)
+        # Materialize each compressed member once. Re-indexing an NpzFile would
+        # decompress the complete bank again for every output shard.
+        generated_arrays = {
+            name: np.asarray(payload[name]) for name in required - {"identities"}
+        }
     reproducers = {}
     for index, expert in enumerate(EXPERT_ORDER):
         descriptor = specification["target_descriptors"][expert]
@@ -81,11 +88,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     def generate(start: int, stop: int):
         return {
             "tokens": {
-                expert: payload[f"tokens_{expert}"][start:stop]
+                expert: generated_arrays[f"tokens_{expert}"][start:stop]
                 for expert in EXPERT_ORDER
             },
             "expert_logits": {
-                expert: payload[f"logits_{expert}"][start:stop]
+                expert: generated_arrays[f"logits_{expert}"][start:stop]
                 for expert in EXPERT_ORDER
             },
         }

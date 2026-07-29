@@ -13,7 +13,7 @@ from .contracts import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "relational_part_production_graph_v1"
+PRODUCTION_GRAPH_CONTRACT = "relational_part_production_graph_v2"
 JOB_LEDGER_CONTRACT = "relational_part_job_ledger_v1"
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -65,11 +65,14 @@ def build_production_graph(
     miniature: bool = False,
     screening_array_concurrency: int = 4,
     tree_array_concurrency: int = 16,
+    region_array_concurrency: int = 16,
 ) -> dict[str, Any]:
     if int(screening_array_concurrency) <= 0:
         raise ValueError("screening array concurrency must be positive")
     if int(tree_array_concurrency) <= 0:
         raise ValueError("tree array concurrency must be positive")
+    if int(region_array_concurrency) <= 0:
+        raise ValueError("REGION array concurrency must be positive")
     split_sizes = (
         {
             "model_train": 20,
@@ -162,12 +165,35 @@ def build_production_graph(
     nodes.extend(
         [
             _node(
-                "region_normalization",
-                worker="run_fit_relational_part_region_normalization.sh",
+                "region_normalization_plan",
+                worker=(
+                    "run_prepare_relational_part_"
+                    "region_normalization_map.sh"
+                ),
                 dependencies=(
                     "relation_normalization",
                     "tree_finalize_model_train",
                 ),
+            ),
+            _node(
+                "region_normalization_shards",
+                worker=(
+                    "run_fit_relational_part_"
+                    "region_normalization_shard.sh"
+                ),
+                dependencies=("region_normalization_plan",),
+                array=(
+                    f"0-{(split_sizes['model_train'] + 9_999) // 10_000 - 1}"
+                    f"%{int(region_array_concurrency)}"
+                ),
+            ),
+            _node(
+                "region_normalization",
+                worker=(
+                    "run_finalize_relational_part_"
+                    "region_normalization.sh"
+                ),
+                dependencies=("region_normalization_shards",),
             ),
             _node(
                 "postconstruction_input_audit",
@@ -266,7 +292,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": (
@@ -289,6 +315,7 @@ def build_production_graph(
             "screening_array_concurrency": int(screening_array_concurrency),
             "tree_shard_size": 10_000,
             "tree_array_concurrency": int(tree_array_concurrency),
+            "region_array_concurrency": int(region_array_concurrency),
             "final_test_metrics_before_lock_allowed": False,
             "production_submission_performed": False,
         }
@@ -313,6 +340,8 @@ def validate_production_graph(graph: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         graph, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
+    if int(graph.get("schema_version", -1)) != 2:
+        raise ValueError("production graph schema version differs")
     nodes = list(graph.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
     if len(by_id) != len(nodes):
@@ -343,6 +372,8 @@ def validate_production_graph(graph: Mapping[str, Any]) -> str:
             "tree_finalize_model_val",
             "tree_finalize_stack_val",
             "tree_finalize_final_test",
+            "region_normalization_plan",
+            "region_normalization_shards",
         },
         "screening": {
             "postconstruction_input_audit",
