@@ -72,25 +72,45 @@ required_per_class=175000
 if [[ "${RPT_MINIATURE}" == "1" ]]; then
   required_per_class=6
 fi
-python scripts/preflight_relational_part_data.py \
+source_commit="$(git rev-parse HEAD)"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+campaign_source_parent="$(
+  dirname "${PROJECT_DIR}"
+)/.rpt_worktrees"
+staging_source_root="${campaign_source_parent}/.staging_rpt_${timestamp}_${source_commit:0:10}_$$"
+if [[ -e "${staging_source_root}" ]]; then
+  echo "Refusing existing staging worktree: ${staging_source_root}" >&2
+  exit 2
+fi
+mkdir -p "${campaign_source_parent}"
+if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+  echo "Main-checkout changes are present and will be ignored by RPT." >&2
+  echo "The campaign will execute committed HEAD ${source_commit}." >&2
+fi
+git worktree add --detach "${staging_source_root}" "${source_commit}"
+pinned_commit="$(
+  git -C "${staging_source_root}" rev-parse HEAD
+)"
+pinned_dirty="$(
+  python "${staging_source_root}/scripts/print_relational_part_source_snapshot.py" \
+    --field source_dirty
+)"
+source_status_sha="$(
+  python "${staging_source_root}/scripts/print_relational_part_source_snapshot.py" \
+    --field source_status_sha256
+)"
+if [[ "${pinned_commit}" != "${source_commit}" || "${pinned_dirty}" != "False" ]]; then
+  echo "Detached campaign source worktree failed verification." >&2
+  exit 2
+fi
+python "${staging_source_root}/scripts/preflight_relational_part_data.py" \
   --data-dir "${DATA_DIR}" \
   --tree-name tree \
   --required-per-class "${required_per_class}"
 
-source_commit="$(python scripts/print_relational_part_source_snapshot.py --field source_commit)"
-source_status_sha="$(python scripts/print_relational_part_source_snapshot.py --field source_status_sha256)"
-source_dirty="$(python scripts/print_relational_part_source_snapshot.py --field source_dirty)"
-if [[ "${source_dirty}" != "False" ]]; then
-  echo "Production submission requires a clean committed source checkout." >&2
-  echo "Commit or preserve unrelated work before submitting RPT." >&2
-  exit 2
-fi
-timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 campaign_id="rpt_attention_bias_${timestamp}_${source_commit:0:10}_${source_status_sha:0:10}"
 campaign_root="${OUTPUT_ROOT}/relational_particle_transformer/${campaign_id}"
-campaign_source_root="$(
-  dirname "${PROJECT_DIR}"
-)/.rpt_worktrees/${campaign_id}"
+campaign_source_root="${campaign_source_parent}/${campaign_id}"
 if [[ -e "${campaign_root}" ]]; then
   echo "Refusing existing campaign root: ${campaign_root}" >&2
   exit 2
@@ -99,10 +119,10 @@ if [[ -e "${campaign_source_root}" ]]; then
   echo "Refusing existing campaign source worktree: ${campaign_source_root}" >&2
   exit 2
 fi
+git worktree move "${staging_source_root}" "${campaign_source_root}"
 mkdir -p \
   "${campaign_root}/bootstrap" \
-  "${campaign_root}/job_ledgers/slurm" \
-  "$(dirname "${campaign_source_root}")"
+  "${campaign_root}/job_ledgers/slurm"
 export CAMPAIGN_ID="${campaign_id}"
 export CAMPAIGN_ROOT="${campaign_root}"
 export RPT_STORAGE_MEASUREMENTS
@@ -114,7 +134,6 @@ graph_args=(--write-artifacts)
 if [[ "${RPT_MINIATURE}" == "1" ]]; then
   graph_args+=(--miniature)
 fi
-git worktree add --detach "${campaign_source_root}" "${source_commit}"
 pinned_commit="$(
   git -C "${campaign_source_root}" rev-parse HEAD
 )"

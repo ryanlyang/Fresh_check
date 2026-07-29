@@ -477,11 +477,12 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
     assert "REGION_ARRAY_CONCURRENCY" in top
     assert "region_normalization_shards" in top
     assert "git worktree add --detach" in top
+    assert "git worktree move" in top
     assert 'export PROJECT_DIR="${campaign_source_root}"' in top
     assert '"${campaign_script_dir}/${script}"' in top
     assert '--export="ALL,PROJECT_DIR=${PROJECT_DIR}"' in top
-    assert "Production submission requires a clean committed source checkout" in top
-    assert "preflight_relational_part_data.py" in top
+    assert "Main-checkout changes are present and will be ignored by RPT" in top
+    assert '"${staging_source_root}/scripts/preflight_relational_part_data.py"' in top
     assert "afterok:" in top
     assert "RPT_STORAGE_MEASUREMENTS" in top
     assert "PYTHONDONTWRITEBYTECODE=1" in top
