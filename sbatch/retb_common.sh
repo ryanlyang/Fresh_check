@@ -18,6 +18,26 @@ IFS=$'\n\t'
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 
+retb_validate_frozen_source() {
+  if [[ "${RETB_FROZEN_REENTRY:-0}" != "1" ]]; then
+    return 0
+  fi
+  : "${RETB_FROZEN_SOURCE_COMMIT:?RETB_FROZEN_SOURCE_COMMIT is required}"
+  local actual_commit
+  local source_status
+  actual_commit="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
+  source_status="$(git -C "${PROJECT_DIR}" status --porcelain=v1 --untracked-files=all)"
+  if [[ "${actual_commit}" != "${RETB_FROZEN_SOURCE_COMMIT}" ]]; then
+    echo "Frozen RETB source commit differs: ${actual_commit}" >&2
+    exit 2
+  fi
+  if [[ -n "${source_status}" ]]; then
+    echo "Frozen RETB source checkout became dirty:" >&2
+    printf '%s\n' "${source_status}" >&2
+    exit 2
+  fi
+}
+
 retb_activate() {
   local conda_hook="${CONDA_BASE}/etc/profile.d/conda.sh"
   if [[ ! -f "${conda_hook}" ]]; then
@@ -29,6 +49,7 @@ retb_activate() {
   conda activate "${CONDA_ENV}"
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   cd "${PROJECT_DIR}"
+  retb_validate_frozen_source
   python -c 'import sys; assert sys.version_info[:2] == (3, 10); print(sys.executable)'
 }
 

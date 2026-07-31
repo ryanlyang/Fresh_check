@@ -137,8 +137,9 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
     )
     layout_ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v4",
+            "contract": "hosd_scale_resident_layout_ledger_v5",
             "source_sha256": canonical_sha256(SOURCE),
+            "scale_execution_plan_sha256": "0" * 64,
             "production_tree_shard_events": production_tree_unit,
             "production_target_shard_events": production_target_unit,
             "production_tree_shard_decoded_bytes_upper_bound": 1,
@@ -308,8 +309,9 @@ def test_production_walltime_is_measured_projected_and_policy_bounded():
 def test_resource_authorization_requires_every_stage_j_memory_projection():
     ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v4",
+            "contract": "hosd_scale_resident_layout_ledger_v5",
             "source_sha256": canonical_sha256(SOURCE),
+            "scale_execution_plan_sha256": "0" * 64,
             "production_tree_shard_events": 10_000,
             "production_target_shard_events": 2_048,
             "production_tree_shard_decoded_bytes_upper_bound": 1,

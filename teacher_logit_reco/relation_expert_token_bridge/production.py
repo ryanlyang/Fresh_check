@@ -24,7 +24,7 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v29"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v30"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v14"
 )
@@ -33,10 +33,11 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v24"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v25"
 
 TIGRIS_DEFAULTS = {
-    "project_dir": "/home/ryreu/atlas/Fresh_check",
+    "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
+    "source_worktree_root": "/home/ryreu/atlas/retb_source_worktrees",
     "data_dir": "/home/ryreu/atlas/PracticeTagging/data",
     "output_root": "/home/ryreu/atlas/Fresh_check/checkpoints",
     "conda_base": "/home/ryreu/miniforge3-aarch64",
@@ -1561,7 +1562,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 27,
+            "schema_version": 28,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1572,6 +1573,16 @@ def build_production_graph(
             "source_status_sha256": require_sha256(
                 source_status_sha256, name="source_status_sha256"
             ),
+            "source_execution_policy": {
+                "submission_checkout_role": "mutable_control_plane_only",
+                "campaign_checkout": (
+                    "detached_git_worktree_at_bound_source_commit"
+                ),
+                "campaign_checkout_must_remain_clean": True,
+                "main_checkout_changes_after_submission_allowed": True,
+                "all_slurm_jobs_export_frozen_project_dir": True,
+                "uncommitted_submission_checkout_changes_executed": False,
+            },
             "storage_measurements_sha256": require_sha256(
                 storage_measurements_sha256,
                 name="storage_measurements_sha256",
@@ -1646,7 +1657,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 27:
+    if int(payload.get("schema_version", -1)) != 28:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1730,6 +1741,17 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     )
     if (
         payload["degradation_profile"] != "D_NOMINAL"
+        or payload.get("source_execution_policy")
+        != {
+            "submission_checkout_role": "mutable_control_plane_only",
+            "campaign_checkout": (
+                "detached_git_worktree_at_bound_source_commit"
+            ),
+            "campaign_checkout_must_remain_clean": True,
+            "main_checkout_changes_after_submission_allowed": True,
+            "all_slurm_jobs_export_frozen_project_dir": True,
+            "uncommitted_submission_checkout_changes_executed": False,
+        }
         or payload["degradation_profile_implicit_override_allowed"] is not False
         or payload["performance_based_termination"] is not False
         or payload["negative_campaign_continues_to_final_report"] is not True
@@ -2353,7 +2375,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 23,
+            "schema_version": 24,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2499,7 +2521,20 @@ def build_step15_bundle(
                 "real_miniature_execution_required_for_readiness": True,
                 "scientific_performance_used_as_gate": False,
             },
+            "source_execution_policy": {
+                "submission_checkout_role": "mutable_control_plane_only",
+                "campaign_checkout": (
+                    "detached_git_worktree_at_bound_source_commit"
+                ),
+                "campaign_checkout_must_remain_clean": True,
+                "main_checkout_changes_after_submission_allowed": True,
+                "all_slurm_jobs_export_frozen_project_dir": True,
+                "uncommitted_submission_checkout_changes_executed": False,
+            },
             "full_submission_requires_current_source_authorization": True,
+            "current_source_authorization_scope": (
+                "frozen_campaign_checkout_not_mutable_submission_checkout"
+            ),
             "smoke_submission_supported": True,
             "full_submission_supported": True,
             "monitoring_supported": True,

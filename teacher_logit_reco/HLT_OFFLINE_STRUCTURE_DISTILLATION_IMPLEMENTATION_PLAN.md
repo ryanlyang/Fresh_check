@@ -3378,11 +3378,19 @@ loads only tree rows intersecting its 2,048-event output batch. Every target,
 normalizer, teacher, and graph tree consumer requires exact active input-byte,
 tree-resource, and backend-manifest parents. Graph workers bind REGION trees and
 native-relation targets only when their locked graph definition requires
-them. Production resource derivation requires completed representative tasks
+them. Shard publication authenticates the canonical identity population once
+and reuses that attestation for every new or reusable shard. Scale graph
+identity alignment is positional only after count and order-hash equality;
+the retained identity sequence, target arrays, and positional indices are
+lazy or memory-mapped rather than population-sized Python containers. KD
+teacher logits are streamed from authenticated target shards into an
+authenticated NPY memory map, never eagerly concatenated. Production resource derivation requires completed representative tasks
 for `scale_input_prepare`, `scale_tree_build`, `scale_target_build`,
 `scale_teacher_target_inference`, and the worst-case `scale_graph_train`.
 Target layout evidence authenticates each shard manifest and NPZ hash before
-reading array headers. Each source-bound projection is derived from
+reading array headers. It enumerates only the active scale input, tree,
+target, and teacher-output completion lineages, checks every exact tree parent
+and target-manifest hash, and binds all four completion hashes. Each source-bound projection is derived from
 authenticated NPY/NPZ layout byte accounting, records its coordinate type and
 resident shard size, and must remain within the registered Tigris limit.
 

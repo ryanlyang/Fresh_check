@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v13"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v14"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 13,
+            "schema_version": 14,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
@@ -95,6 +95,8 @@ def build_step15_preflight_report(
                 "real_tigris_smoke_evidence_required": True,
                 "authenticated_production_dry_run_required": True,
                 "full_submission_authorization_source_bound": True,
+                "campaign_executes_from_clean_detached_worktree": True,
+                "mutable_submission_checkout_may_change_after_launch": True,
             },
             "authoritative_tigris_smoke_required_before_production": True,
         }),
@@ -156,8 +158,20 @@ def validate_step15_contract_bundle(bundle: Mapping[str, Any]) -> str:
     validate_content_hash(
         report, expected_contract=STEP15_PREFLIGHT_REPORT_CONTRACT
     )
+    report_source = report["source"]
+    expected_report = build_step15_preflight_report(
+        production_graph=graph,
+        dry_run_ledger=ledger,
+        step15_bundle=step15,
+        source_snapshot={
+            "source_commit": report_source["commit"],
+            "source_status_sha256": report_source["status_sha256"],
+            "source_dirty": report_source["dirty"],
+        },
+    )
     if (
-        report["production_graph_sha256"] != graph_sha
+        dict(report) != expected_report
+        or report["production_graph_sha256"] != graph_sha
         or report["dry_run_job_ledger_sha256"] != ledger_sha
         or report["step15_bundle_sha256"] != step15["content_hash"]
     ):

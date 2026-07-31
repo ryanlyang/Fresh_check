@@ -44,6 +44,52 @@ case "${1:-}" in
     ;;
 esac
 
+# A submitted campaign never executes from the mutable checkout.  Re-enter the
+# committed launcher from a detached worktree before any campaign artifact or
+# Slurm job is created.  The user's main checkout may then change freely.
+if [[ "${mode}" == "submit" && "${RETB_FROZEN_REENTRY:-0}" != "1" ]]; then
+  submission_project_dir="$(git -C "${PROJECT_DIR}" rev-parse --show-toplevel)"
+  frozen_source_commit="$(git -C "${submission_project_dir}" rev-parse HEAD)"
+  : "${RETB_SOURCE_WORKTREE_ROOT:=${submission_project_dir%/*}/retb_source_worktrees}"
+  worktree_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  frozen_project_dir="${RETB_SOURCE_WORKTREE_ROOT}/retb_${worktree_stamp}_${frozen_source_commit:0:10}_$$"
+  case "${frozen_project_dir}/" in
+    "${submission_project_dir}/"*)
+      echo "RETB source worktrees must be outside the mutable checkout: ${frozen_project_dir}" >&2
+      exit 2
+      ;;
+  esac
+  if [[ -e "${frozen_project_dir}" ]]; then
+    echo "Refusing existing frozen source worktree: ${frozen_project_dir}" >&2
+    exit 2
+  fi
+  mkdir -p "${RETB_SOURCE_WORKTREE_ROOT}"
+  git -C "${submission_project_dir}" worktree add --detach \
+    "${frozen_project_dir}" "${frozen_source_commit}" >/dev/null
+  exec env \
+    PROJECT_DIR="${frozen_project_dir}" \
+    DATA_DIR="${DATA_DIR}" \
+    OUTPUT_ROOT="${OUTPUT_ROOT}" \
+    CONDA_BASE="${CONDA_BASE}" \
+    CONDA_ENV="${CONDA_ENV}" \
+    SBATCH_ACCOUNT="${SBATCH_ACCOUNT}" \
+    SBATCH_PARTITION="${SBATCH_PARTITION}" \
+    GPU_GRES="${GPU_GRES}" \
+    GPU_CPUS_PER_TASK="${GPU_CPUS_PER_TASK}" \
+    GPU_MEM="${GPU_MEM}" \
+    CPU_CPUS_PER_TASK="${CPU_CPUS_PER_TASK}" \
+    CPU_MEM="${CPU_MEM}" \
+    RETB_DEVICE="${RETB_DEVICE}" \
+    RETB_MINIATURE="${RETB_MINIATURE}" \
+    RETB_STORAGE_MEASUREMENTS="${RETB_STORAGE_MEASUREMENTS}" \
+    RETB_OPERATIONAL_AUTHORIZATION="${RETB_OPERATIONAL_AUTHORIZATION}" \
+    RETB_SUBMISSION_PROJECT_DIR="${submission_project_dir}" \
+    RETB_FROZEN_SOURCE_COMMIT="${frozen_source_commit}" \
+    RETB_FROZEN_REENTRY=1 \
+    RETB_SOURCE_WORKTREE_ROOT="${RETB_SOURCE_WORKTREE_ROOT}" \
+    bash "${frozen_project_dir}/sbatch/submit_retb_tigris_full.sh" "$@"
+fi
+
 retb_activate
 graph_arguments=(
   --output-root "${OUTPUT_ROOT}"
@@ -102,10 +148,15 @@ python -c \
 
 readarray -t source_fields < <(
   python -c \
-    'from teacher_logit_reco.relation_expert_token_bridge.provenance import source_snapshot; from pathlib import Path; s=source_snapshot(Path(".")); print(s["source_commit"]); print(s["source_status_sha256"])'
+    'from teacher_logit_reco.relation_expert_token_bridge.provenance import source_snapshot; from pathlib import Path; s=source_snapshot(Path(".")); print(s["source_commit"]); print(s["source_status_sha256"]); print("1" if s["source_dirty"] else "0")'
 )
 source_commit="${source_fields[0]}"
 source_status_sha="${source_fields[1]}"
+source_dirty="${source_fields[2]}"
+if [[ "${source_commit}" != "${RETB_FROZEN_SOURCE_COMMIT}" || "${source_dirty}" != "0" ]]; then
+  echo "Frozen RETB source checkout is not the clean bound commit" >&2
+  exit 2
+fi
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 campaign_id="retb_relation_expert_bridge_${timestamp}_${source_commit:0:10}_${source_status_sha:0:10}"
 campaign_root="${OUTPUT_ROOT}/relation_expert_token_bridge/${campaign_id}"
@@ -122,6 +173,10 @@ export CAMPAIGN_ROOT="${campaign_root}"
 export RETB_MINIATURE
 export RETB_STORAGE_MEASUREMENTS
 export RETB_OPERATIONAL_AUTHORIZATION
+export RETB_FROZEN_REENTRY
+export RETB_FROZEN_SOURCE_COMMIT
+export RETB_SUBMISSION_PROJECT_DIR
+export RETB_SOURCE_WORKTREE_ROOT
 
 python scripts/submit_retb_graph.py \
   "${graph_arguments[@]}" \
@@ -179,7 +234,7 @@ submit_node() {
     --job-name="${campaign_id}_${node_id}" \
     --output="${log_pattern}" \
     --error="${error_pattern}" \
-    --export="ALL,CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_NODE_ID=${node_id},RETB_NODE_RESOURCE=${resource},RETB_RESOURCE_KIND=${resource},RETB_MINIATURE=${RETB_MINIATURE},RETB_STORAGE_MEASUREMENTS=${RETB_STORAGE_MEASUREMENTS}" \
+    --export="ALL,PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_NODE_ID=${node_id},RETB_NODE_RESOURCE=${resource},RETB_RESOURCE_KIND=${resource},RETB_MINIATURE=${RETB_MINIATURE},RETB_STORAGE_MEASUREMENTS=${RETB_STORAGE_MEASUREMENTS},RETB_FROZEN_REENTRY=1,RETB_FROZEN_SOURCE_COMMIT=${RETB_FROZEN_SOURCE_COMMIT},RETB_SUBMISSION_PROJECT_DIR=${RETB_SUBMISSION_PROJECT_DIR},RETB_SOURCE_WORKTREE_ROOT=${RETB_SOURCE_WORKTREE_ROOT}" \
     "${executable}"
 }
 
@@ -234,6 +289,8 @@ python scripts/write_retb_job_ledger.py \
 printf 'campaign root: %s\n' "${campaign_root}"
 printf 'source commit: %s\nsource dirty-status hash: %s\n' \
   "${source_commit}" "${source_status_sha}"
+printf 'frozen source checkout: %s\nmutable submission checkout: %s\n' \
+  "${PROJECT_DIR}" "${RETB_SUBMISSION_PROJECT_DIR}"
 printf 'degradation profile: D_NOMINAL\n'
 if [[ -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   readarray -t storage_fields < <(

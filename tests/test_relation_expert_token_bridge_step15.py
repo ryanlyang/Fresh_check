@@ -21,6 +21,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     build_step15_contract_bundle,
     build_target_shard_plan,
     build_task_manifest,
+    source_snapshot,
     validate_job_ledger,
     validate_node_execution_registry,
     validate_production_graph,
@@ -34,6 +35,16 @@ from teacher_logit_reco.relation_expert_token_bridge import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _source() -> dict[str, object]:
@@ -52,6 +63,41 @@ def _graph(*, miniature: bool = False) -> dict:
         source_status_sha256="b" * 64,
         storage_measurements_sha256="c" * 64,
         miniature=miniature,
+    )
+
+
+def test_detached_campaign_source_is_independent_of_mutable_checkout(
+    tmp_path: Path,
+) -> None:
+    mutable = tmp_path / "mutable"
+    frozen = tmp_path / "frozen"
+    mutable.mkdir()
+    _git(mutable, "init")
+    _git(mutable, "config", "user.name", "RETB Test")
+    _git(mutable, "config", "user.email", "retb@example.invalid")
+    tracked = mutable / "worker.py"
+    tracked.write_text("VERSION = 1\n", encoding="utf-8")
+    _git(mutable, "add", "worker.py")
+    _git(mutable, "commit", "-m", "campaign source")
+    campaign_commit = _git(mutable, "rev-parse", "HEAD")
+    _git(
+        mutable,
+        "worktree",
+        "add",
+        "--detach",
+        str(frozen),
+        campaign_commit,
+    )
+    before = source_snapshot(frozen)
+    tracked.write_text("VERSION = 2\n", encoding="utf-8")
+    _git(mutable, "add", "worker.py")
+    _git(mutable, "commit", "-m", "unrelated later checkout change")
+    after = source_snapshot(frozen)
+    assert after == before
+    assert after["source_commit"] == campaign_commit
+    assert after["source_dirty"] is False
+    assert (frozen / "worker.py").read_text(encoding="utf-8") == (
+        "VERSION = 1\n"
     )
 
 
@@ -481,12 +527,27 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert checks["complete_section_28_semantic_control_matrix_required"]
     assert checks["stage_M_training_split_into_bounded_component_continuations"]
     assert checks["sealed_final_test_rows_resume_under_one_immutable_claim"]
+    assert checks["campaign_executes_from_clean_detached_worktree"]
+    assert checks["mutable_submission_checkout_may_change_after_launch"]
     assert step15["stage_k_m_completion_contracts"][
         "shortlisted_500k_controls"
     ] == "retb_shortlisted_500k_controls_v3"
     assert step15["stage_n_completion_contracts"][
         "final_test_execution_claim"
     ] == "retb_final_test_execution_claim_v3"
+    assert step15["source_execution_policy"] == {
+        "submission_checkout_role": "mutable_control_plane_only",
+        "campaign_checkout": (
+            "detached_git_worktree_at_bound_source_commit"
+        ),
+        "campaign_checkout_must_remain_clean": True,
+        "main_checkout_changes_after_submission_allowed": True,
+        "all_slurm_jobs_export_frozen_project_dir": True,
+        "uncommitted_submission_checkout_changes_executed": False,
+    }
+    assert step15["current_source_authorization_scope"] == (
+        "frozen_campaign_checkout_not_mutable_submission_checkout"
+    )
 
     submitter = (ROOT / "sbatch" / "submit_retb_tigris_full.sh").read_text()
     common = (ROOT / "sbatch" / "retb_common.sh").read_text()
@@ -501,6 +562,14 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert "HLT-v3 cache hashes:" in submitter
     assert "monitor_retb_campaign.py" in submitter
     assert "D_NOMINAL" in submitter
+    assert "git -C \"${submission_project_dir}\" worktree add --detach" in submitter
+    assert "RETB_FROZEN_REENTRY=1" in submitter
+    assert "RETB_FROZEN_SOURCE_COMMIT" in submitter
+    assert "RETB_SUBMISSION_PROJECT_DIR" in submitter
+    assert "PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=" in submitter
+    assert submitter.index("worktree add --detach") < submitter.index(
+        "scripts/submit_retb_graph.py \"${graph_arguments[@]}\""
+    )
     assert submitter.count("CONCURRENCY:=64") == 5
     assert submitter.count("export RETB_") >= 5
     assert DEFAULT_CONCURRENCY == {
@@ -515,6 +584,8 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert "sbatch --parsable --wait" in array_launcher
     assert "PYTHONNOUSERSITE=1" in common
     assert 'cd "${PROJECT_DIR}"' in common
+    assert "retb_validate_frozen_source" in common
+    assert "Frozen RETB source checkout became dirty" in common
     assert "/var/spool" not in common + submitter + array_launcher
 
     workers = {row["worker"] for row in graph["nodes"]}

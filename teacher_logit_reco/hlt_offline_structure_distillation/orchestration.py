@@ -114,11 +114,13 @@ def build_resource_measurements(
         raise ValueError("resource projections must be positive and complete")
     layout_ledger = dict(scale_resident_layout_ledger)
     validate_content_hash(
-        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v4"
+        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v5"
     )
     source_sha256 = canonical_sha256(source)
     if (
         layout_ledger.get("source_sha256") != source_sha256
+        or not isinstance(layout_ledger.get("scale_execution_plan_sha256"), str)
+        or len(layout_ledger["scale_execution_plan_sha256"]) != 64
         or set(layout_ledger.get("active_completion_hashes", {}))
         != {"scale_inputs", "scale_trees", "scale_targets", "scale_teacher_outputs"}
         or any(

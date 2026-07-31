@@ -124,6 +124,10 @@ def _maximum_tree_layout_128_255() -> dict[str, int]:
 def _scale_layout_ledger(root: Path, source: dict) -> dict:
     """Authenticate resident-unit byte accounting for every risky scale node."""
 
+    execution_plan = load_hashed_json(
+        root / "scale_up" / "execution_plan.json",
+        expected_contract="hosd_scale_execution_plan_v1",
+    )
     input_completion = load_hashed_json(
         root / "scale_up" / "inputs" / "completion.json",
         expected_contract="hosd_scale_input_completion_v4",
@@ -148,6 +152,11 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
     ):
         if artifact.get("source") != source:
             raise ValueError(f"scale memory {name} completion source differs")
+        if name != "tree" and (
+            artifact.get("scale_execution_plan_sha256")
+            != execution_plan["content_hash"]
+        ):
+            raise ValueError(f"scale memory {name} completion plan differs")
     if tree_completion.get("scale_input_completion_sha256") != input_completion[
         "content_hash"
     ]:
@@ -273,6 +282,8 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         if (
             coordinate_completion["content_hash"] != completion_hash
             or coordinate_completion.get("source") != source
+            or coordinate_completion.get("scale_execution_plan_sha256")
+            != execution_plan["content_hash"]
         ):
             raise ValueError("scale memory target completion lineage differs")
         for artifact_name, expected_hash in coordinate_completion[
@@ -398,7 +409,7 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         ),
     }
     ledger = {
-        "contract": "hosd_scale_resident_layout_ledger_v4",
+        "contract": "hosd_scale_resident_layout_ledger_v5",
         "source_sha256": canonical_sha256(source),
         "input_rows": input_rows,
         "tree_manifest_hashes": sorted(
@@ -407,6 +418,7 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         "target_manifest_hashes": sorted(
             {row["manifest_sha256"] for row in target_rows}
         ),
+        "scale_execution_plan_sha256": execution_plan["content_hash"],
         "active_completion_hashes": {
             "scale_inputs": input_completion["content_hash"],
             "scale_trees": tree_completion["content_hash"],

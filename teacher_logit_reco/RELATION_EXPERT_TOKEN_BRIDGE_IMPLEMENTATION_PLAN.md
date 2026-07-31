@@ -5191,3 +5191,27 @@ Scientific underperformance in the miniature or full campaign must be
 reported, but it does not block later rows or revoke execution authorization.
 Only integrity, missing-artifact, source-drift, runtime, or scheduler failures
 may stop dependent work.
+
+## Frozen campaign source execution amendment (2026-07-31)
+
+The mutable submission checkout is a control plane only. For every real smoke
+or production submission, the launcher must:
+
+1. resolve the committed `HEAD` of the submission checkout;
+2. create a clean detached Git worktree outside that checkout;
+3. re-enter the committed launcher from the detached worktree before creating
+   campaign artifacts or submitting jobs;
+4. bind the campaign and production graph to the detached worktree's commit
+   and clean source-status hash;
+5. export the detached worktree as `PROJECT_DIR` to every initial and dynamic
+   Slurm job;
+6. verify before each worker import that the detached worktree remains clean
+   and at the bound commit.
+
+Uncommitted changes in the mutable submission checkout are never campaign
+inputs. After the detached worktree is created, the user may edit, commit,
+push, pull, or create logs in the mutable checkout without changing or
+invalidating the running campaign. Source-drift failures apply to the frozen
+campaign checkout itself, not to the mutable submission checkout. The frozen
+worktree is retained with the campaign evidence until deliberate archival or
+cleanup.
