@@ -130,11 +130,15 @@ def _completion_pair(
                 "task_id": f"{node}:0",
                 "argv": [
                     sys.executable,
-                    (
-                        "scripts/aggregate_retb_scale_completion.py"
-                        if node == "scale_completion"
-                        else FINAL_NODE_ENTRYPOINTS[node][0]
-                    ),
+                        (
+                            "scripts/aggregate_retb_scale_completion.py"
+                            if node == "scale_completion"
+                            else (
+                                "scripts/audit_retb_stage_a_inputs.py"
+                                if node == "input_audit"
+                                else FINAL_NODE_ENTRYPOINTS[node][0]
+                            )
+                        ),
                     "--campaign-root",
                     str(root),
                 ],
@@ -246,6 +250,58 @@ def test_negative_science_does_not_block_stage_n_continuation(
     assert payload["final_continuation_bundle"][
         "performance_threshold_abort_allowed"
     ] is False
+
+
+def test_prelock_continuation_accepts_registered_checkpoint_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = (tmp_path / "checkpoints" / "retb-stage-n").resolve()
+    root.mkdir(parents=True)
+    campaign, graph = _campaign_graph(root)
+    parent = _completion_pair(root, campaign, graph, "input_audit")
+    monkeypatch.setattr(
+        final,
+        "_load_prerequisites",
+        lambda **_: {"input_audit": parent},
+    )
+    shared = root / "inputs" / "stage_n" / "shared"
+    row = {
+        "task_id": "prelock_final_inputs:0",
+        "argv": [
+            sys.executable,
+            FINAL_NODE_ENTRYPOINTS["prelock_final_inputs"][0],
+            "--campaign-root",
+            str(root),
+            "--configuration",
+            str(
+                root
+                / "inputs"
+                / "stage_n"
+                / "prelock_input_configuration.json"
+            ),
+            "--output",
+            str(root / "inputs" / "stage_n" / "prelock_final_inputs.json"),
+        ],
+        "environment": {"RETB_PRELOCK_MODEL_OUTPUTS_EMITTED": "0"},
+        "expected_outputs": [
+            str(root / "inputs" / "stage_n" / "prelock_final_inputs.json"),
+            *[
+                str(shared / f"retb_{split}_shared_HLT_inputs{suffix}")
+                for split in ("stack_val", "final_test")
+                for suffix in (".json", ".pt")
+            ],
+        ],
+        "input_artifact_hashes": {"configuration": "8" * 64},
+    }
+    payload = build_final_continuation(
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=root,
+        node_id="prelock_final_inputs",
+        trigger_artifact=parent["completion"],
+        rows=[row],
+    )
+    assert payload["final_continuation_bundle"]["task_count"] == 1
 
 
 def test_stage_n_execution_plans_forbid_registration_only_paths(

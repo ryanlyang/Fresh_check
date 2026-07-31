@@ -5248,3 +5248,13 @@ main process. This amendment changes only runtime isolation; tree topology,
 floating-point rules, shard ordering, publication, scientific meaning, and
 all artifact lineage remain unchanged. A repeated genuine miniature REGION
 run is required to close the operational acceptance check.
+
+The Stage-N prelock access guard must validate the exact worker interface and
+campaign-relative input/output paths; it must not infer model access from
+substrings in absolute path values. In particular, the repository-standard
+`checkpoints/` directory name is not evidence that a row consumes a model
+checkpoint. The permitted prelock command has only `--campaign-root`,
+`--configuration`, and `--output`, with the configuration, attestation, and
+four shared HLT payload artifacts fixed to their registered Stage-N paths.
+Any additional checkpoint, logit, prediction, probability, or metric option
+remains forbidden by this exact command-surface contract.

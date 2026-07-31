@@ -638,6 +638,40 @@ def _rows(
             "--campaign-root",
             str(root),
         ]
+        expected_outputs = [str(output)]
+        if node_id == "prelock_final_inputs":
+            output = (
+                root
+                / "inputs"
+                / "stage_n"
+                / "prelock_final_inputs.json"
+            )
+            configuration = (
+                root
+                / "inputs"
+                / "stage_n"
+                / "prelock_input_configuration.json"
+            )
+            argv.extend(
+                [
+                    "--configuration",
+                    str(configuration),
+                    "--output",
+                    str(output),
+                ]
+            )
+            shared = root / "inputs" / "stage_n" / "shared"
+            expected_outputs = [
+                str(output),
+                *[
+                    str(
+                        shared
+                        / f"retb_{split}_shared_HLT_inputs{suffix}"
+                    )
+                    for split in ("stack_val", "final_test")
+                    for suffix in (".json", ".pt")
+                ],
+            ]
         if entrypoint == "scripts/write_retb_synthetic_output.py":
             argv.extend(
                 [
@@ -656,7 +690,7 @@ def _rows(
                 "task_id": f"{node_id}:{index}",
                 "argv": argv,
                 "environment": {"RETB_SYNTHETIC_CONTROL_PLANE": "1"},
-                "expected_outputs": [str(output)],
+                "expected_outputs": expected_outputs,
                 "input_artifact_hashes": {
                     "synthetic_configuration": f"{index + 1:064x}"
                 },
@@ -907,13 +941,17 @@ def run_local_synthetic_dag(
                     raise AssertionError(
                         "incomplete array unexpectedly aggregated"
                     )
-            output = _synthetic_output(
-                root=root,
-                campaign=campaign,
-                node_id=node_id,
-                task_index=index,
-                output=row["expected_outputs"][0],
-            )
+            row_outputs = [
+                _synthetic_output(
+                    root=root,
+                    campaign=campaign,
+                    node_id=node_id,
+                    task_index=index,
+                    output=path,
+                )
+                for path in row["expected_outputs"]
+            ]
+            output = row_outputs[0]
             publish_task_row_completion(
                 campaign_root=root,
                 campaign=campaign,

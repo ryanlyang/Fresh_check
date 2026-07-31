@@ -37,6 +37,7 @@ from .stage_n_execution import (
     validate_control_evidence,
     validate_shared_deployable_inference_payload,
 )
+from .stage_n_access import validate_prelock_input_row_access
 
 
 FINAL_PLAN_FACTORY_INPUT_CONTRACT = "retb_stage_n_factory_input_v2"
@@ -120,22 +121,17 @@ def _checked_row(
         != "0"
     ):
         raise ValueError("Stage-N factory-input row semantics differ")
-    if target == "prelock_final_inputs" and (
-        scripts != {"scripts/prepare_retb_final_test_inputs.py"}
-        or any(
-            term in lowered
-            for term in (
-                "checkpoint",
-                "model-output",
-                "logit",
-                "probabilit",
-                "prediction",
-                "metric",
+    if target == "prelock_final_inputs":
+        try:
+            validate_prelock_input_row_access(
+                argv, raw["expected_outputs"]
             )
-        )
-        or environment.get("RETB_PRELOCK_MODEL_OUTPUTS_EMITTED") != "0"
-    ):
-        raise ValueError("prelock final-input access semantics differ")
+        except ValueError as exc:
+            raise ValueError(
+                "prelock final-input access semantics differ"
+            ) from exc
+        if environment.get("RETB_PRELOCK_MODEL_OUTPUTS_EMITTED") != "0":
+            raise ValueError("prelock final-input access semantics differ")
     if target == "stack_val_inference" and (
         any(
             term in lowered

@@ -17,6 +17,9 @@ from .contracts import (
 )
 
 
+HLT_CACHE_SET_CONTRACT = "hosd_hlt_v3_cache_set_v1"
+
+
 @dataclass(frozen=True)
 class ParentRequirement:
     parent_id: str
@@ -94,7 +97,7 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
     ),
     ParentRequirement(
         "hlt_v3_cache",
-        "retb_hlt_v3_cache_v1",
+        HLT_CACHE_SET_CONTRACT,
         "A",
         "inputs/hlt_replicas/hlt_v3_cache_manifest.json",
         "scripts/build_hosd_shared_hlt_parents.py",
@@ -106,7 +109,7 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
         "A",
         "inputs/hlt_v3_degradation_audit.json",
         "scripts/build_hosd_shared_hlt_parents.py",
-        "hlt",
+        "normalization",
     ),
     ParentRequirement(
         "angular_tree_backend",
@@ -128,7 +131,7 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
         "relation_500k_normalizer",
         "relational_part_relation_normalization_v2",
         "B",
-        "normalization/relation_500k/normalization.json",
+        "inputs/normalization/offline_500k/relation.json",
         "scripts/fit_hosd_relation_normalizers.py",
         "normalization",
     ),
@@ -136,7 +139,7 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
         "region_500k_normalizer",
         "relational_part_region_normalization_v1",
         "B",
-        "normalization/region_500k/normalization.json",
+        "inputs/normalization/offline_500k/region.json",
         "scripts/fit_hosd_relation_normalizers.py",
         "normalization",
     ),
@@ -144,7 +147,7 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
         "hlt_shared_500k_normalizer",
         "relational_part_relation_normalization_v2",
         "B",
-        "normalization/hlt_shared_500k/normalization.json",
+        "inputs/normalization/hlt_shared_500k/relation.json",
         "scripts/fit_hosd_relation_normalizers.py",
         "normalization",
     ),
@@ -234,6 +237,39 @@ def _validate_parent_semantics(
         )
 
         validate_hlt_v3_degradation_audit(artifact)
+    elif parent_id == "hlt_v3_cache":
+        if artifact.get("contract") != HLT_CACHE_SET_CONTRACT:
+            raise ValueError("HLT-v3 cache-set contract differs")
+        rows = artifact.get("caches")
+        if (
+            not isinstance(rows, list)
+            or not rows
+            or int(artifact.get("cache_count", -1)) != len(rows)
+        ):
+            raise ValueError("HLT-v3 cache-set coverage differs")
+        coordinates = set()
+        from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
+            load_hlt_v3_cache,
+        )
+
+        for row in rows:
+            coordinate = (
+                str(row.get("logical_role")),
+                int(row.get("replica_id", -1)),
+                str(row.get("realization_policy")),
+            )
+            if coordinate in coordinates:
+                raise ValueError("HLT-v3 cache-set coordinate is duplicated")
+            coordinates.add(coordinate)
+            path = Path(str(row.get("path", "")))
+            if not path.is_dir() or path.is_symlink():
+                raise FileNotFoundError(f"HLT-v3 cache is absent: {path}")
+            _, metadata = load_hlt_v3_cache(path)
+            if (
+                metadata.get("content_hash") != row.get("metadata_sha256")
+                or metadata.get("source") != artifact.get("source")
+            ):
+                raise ValueError("HLT-v3 cache-set nested lineage differs")
     elif parent_id == "angular_tree_backend":
         from teacher_logit_reco.relational_part.ca_tree import (
             validate_backend_manifest,
@@ -421,6 +457,7 @@ def require_parents_ready(
 
 
 __all__ = [
+    "HLT_CACHE_SET_CONTRACT",
     "PARENT_REQUIREMENTS",
     "ParentRequirement",
     "build_parent_rebuild_plan",

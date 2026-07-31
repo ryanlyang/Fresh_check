@@ -71,6 +71,26 @@ def _row(
     environment: dict[str, str] | None = None,
     extra_argv: list[str] | None = None,
 ) -> dict:
+    target_argv = (
+        [
+            "--configuration",
+            "/campaign/inputs/stage_n/prelock_input_configuration.json",
+        ]
+        if target == "prelock_final_inputs" and extra_argv is None
+        else list(extra_argv or [])
+    )
+    expected_outputs = (
+        [
+            "/campaign/inputs/stage_n/prelock_final_inputs.json",
+            *[
+                f"/campaign/inputs/stage_n/shared/retb_{split}_shared_HLT_inputs{suffix}"
+                for split in ("stack_val", "final_test")
+                for suffix in (".json", ".pt")
+            ],
+        ]
+        if target == "prelock_final_inputs"
+        else [f"/campaign/outputs/{target}/{index}.json"]
+    )
     return {
         "task_id": f"{target}:{index}",
         "argv": [
@@ -78,13 +98,11 @@ def _row(
             FINAL_NODE_ENTRYPOINTS[target][0],
             "--campaign-root",
             "/campaign",
-            *(extra_argv or []),
+            *target_argv,
             "--output",
-            f"/campaign/outputs/{target}/{index}.json",
+            str(expected_outputs[0]),
         ],
-        "expected_outputs": [
-            f"/campaign/outputs/{target}/{index}.json"
-        ],
+        "expected_outputs": expected_outputs,
         "input_artifact_hashes": {
             "campaign_spec": SHA_A,
             "production_graph": SHA_B,
@@ -140,6 +158,20 @@ def test_prelock_input_factory_forbids_model_derived_outputs() -> None:
     )
     with pytest.raises(ValueError, match="prelock final-input"):
         _build("prelock_final_inputs", [bad], _coverage())
+
+
+def test_prelock_input_factory_allows_authenticated_checkpoint_root() -> None:
+    row = _row("prelock_final_inputs", 0)
+    row["argv"] = [
+        value.replace("/campaign", "/srv/checkpoints/retb_campaign")
+        for value in row["argv"]
+    ]
+    row["expected_outputs"] = [
+        value.replace("/campaign", "/srv/checkpoints/retb_campaign")
+        for value in row["expected_outputs"]
+    ]
+    artifact = _build("prelock_final_inputs", [row], _coverage())
+    assert artifact["row_count"] == 1
 
 
 def test_stack_val_factory_requires_every_shortlisted_graph_seed() -> None:

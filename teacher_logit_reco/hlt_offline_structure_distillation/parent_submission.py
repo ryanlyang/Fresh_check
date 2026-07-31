@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any, Mapping
 
 from .contracts import (
@@ -15,13 +17,33 @@ from .contracts import (
     with_content_hash,
     write_immutable_json,
 )
-from .parents import PARENT_REQUIREMENTS
+from .parents import HLT_CACHE_SET_CONTRACT, PARENT_REQUIREMENTS
 from .workflow import load_and_validate_campaign
+from teacher_logit_reco.relation_expert_token_bridge import (
+    TASK_MANIFEST_COMPLETION_CONTRACT,
+    TASK_MANIFEST_CONTRACT,
+    load_hashed_json as load_retb_hashed_json,
+    validate_task_manifest_completion,
+)
+from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    bind_source,
+)
+from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
+    load_hlt_v3_cache,
+)
+from teacher_logit_reco.relation_expert_token_bridge.provenance import (
+    source_snapshot,
+)
+from teacher_logit_reco.relational_part.ca_tree import validate_backend_manifest
 
 
 GROUP_WRAPPERS = {
-    "hlt": ("sbatch/run_retb_build_hlt_v3.sh",),
+    "hlt": (
+        "sbatch/run_retb_build_offline_inputs.sh",
+        "sbatch/run_retb_build_hlt_v3.sh",
+    ),
     "tree": (
+        "sbatch/run_retb_compiled_region_backend.sh",
         "sbatch/run_retb_build_region_trees.sh",
         "sbatch/run_retb_finalize_region_trees.sh",
     ),
@@ -30,6 +52,111 @@ GROUP_WRAPPERS = {
         "sbatch/run_retb_audit_inputs.sh",
     ),
 }
+
+WRAPPER_TASK_NODES = {
+    "sbatch/run_retb_build_offline_inputs.sh": "offline_input_cache",
+    "sbatch/run_retb_build_hlt_v3.sh": "hlt_v3_cache",
+    "sbatch/run_retb_build_region_trees.sh": "region_tree_cache",
+    "sbatch/run_retb_finalize_region_trees.sh": "region_tree_finalize",
+    "sbatch/run_retb_fit_normalizers.sh": "normalizers_500k",
+    "sbatch/run_retb_audit_inputs.sh": "input_audit",
+}
+
+
+def _run_controller_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(argv, capture_output=True, text=True)
+    if completed.returncode:
+        raise RuntimeError(
+            "shared RETB runtime preparation failed: "
+            + " ".join(argv)
+            + f"\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+    return completed
+
+
+def shared_parent_runtime_commands(
+    *,
+    campaign_root: str | Path,
+    repo_root: str | Path,
+    data_dir: str | Path,
+) -> list[list[str]]:
+    """Return the deterministic commands that make the RETB child executable."""
+
+    root = Path(campaign_root).resolve()
+    repo = Path(repo_root).resolve()
+    campaign = load_and_validate_campaign(root, repo_root=repo)
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    shared_campaign = load_hashed_json(shared / "campaign_spec.json")
+    if shared_campaign.get("source") != campaign.get("source"):
+        raise ValueError("shared RETB parent source differs from HOSD campaign")
+    profile = str(shared_campaign.get("campaign_profile"))
+    if profile not in {"miniature_test", "production_500k_scale3m"}:
+        raise ValueError("shared RETB parent campaign profile differs")
+    graph = [
+        sys.executable,
+        "-s",
+        str((repo / "scripts" / "submit_retb_graph.py").resolve()),
+        "--campaign-id",
+        str(shared_campaign["campaign_id"]),
+        "--campaign-root",
+        str(shared),
+        "--storage-measurements",
+        str(shared / "storage_measurements.json"),
+        "--write-artifacts",
+    ]
+    if profile == "miniature_test":
+        graph.append("--miniature")
+    bootstrap = [
+        sys.executable,
+        "-s",
+        str((repo / "scripts" / "bootstrap_retb_input_tasks.py").resolve()),
+        "--campaign-root",
+        str(shared),
+        "--production-graph",
+        str(shared / "job_ledgers" / "production_graph.json"),
+        "--data-dir",
+        str(Path(data_dir).resolve()),
+    ]
+    return [graph, bootstrap]
+
+
+def prepare_shared_parent_runtime(
+    *,
+    campaign_root: str | Path,
+    repo_root: str | Path,
+    data_dir: str | Path | None = None,
+) -> list[list[str]]:
+    """Publish the shared RETB graph and genuine Stage-A task manifests."""
+
+    resolved_data = data_dir or os.environ.get(
+        "DATA_DIR", "/home/ryreu/atlas/PracticeTagging/data"
+    )
+    commands = shared_parent_runtime_commands(
+        campaign_root=campaign_root,
+        repo_root=repo_root,
+        data_dir=resolved_data,
+    )
+    for command in commands:
+        _run_controller_command(command)
+    shared = (
+        Path(campaign_root).resolve()
+        / "inputs"
+        / "shared_retb_parent_campaign"
+    )
+    required = [
+        shared / "job_ledgers" / "production_graph.json",
+        *(
+            shared / "job_ledgers" / "tasks" / f"{node}.json"
+            for node in sorted(set(WRAPPER_TASK_NODES.values()))
+        ),
+    ]
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "shared RETB runtime preparation omitted required artifacts: "
+            + repr(missing)
+        )
+    return commands
 
 
 def build_parent_submission_plan(

@@ -26,6 +26,7 @@ from .task_completion import (
     task_manifest_completion_path,
     validate_task_manifest_completion,
 )
+from .stage_n_access import validate_prelock_input_row_access
 
 
 FINAL_CONTINUATION_BUNDLE_CONTRACT = (
@@ -77,20 +78,15 @@ def _validate_rows(
             or "--dry-run" in argv
         ):
             raise ValueError(f"{node_id} Stage-N entry point differs")
-        if node_id == "prelock_final_inputs" and any(
-            term in lowered
-            for term in (
-                "checkpoint",
-                "model-output",
-                "logit",
-                "probabilit",
-                "prediction",
-                "metric",
-            )
-        ):
-            raise ValueError(
-                "prelock final-input row may not access model-derived data"
-            )
+        if node_id == "prelock_final_inputs":
+            try:
+                validate_prelock_input_row_access(
+                    argv, row.get("expected_outputs", ())
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "prelock final-input row may not access model-derived data"
+                ) from exc
         if node_id == "stack_val_inference" and any(
             term in lowered
             for term in (
