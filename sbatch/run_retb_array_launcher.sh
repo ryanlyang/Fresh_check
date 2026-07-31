@@ -46,13 +46,14 @@ fi
 job_id="$(sbatch --parsable --wait \
   "${resource_arguments[@]}" \
   --array="${array_spec}" \
-  --job-name="${CAMPAIGN_ID}_${RETB_NODE_ID}_rows" \
+    --job-name="${CAMPAIGN_ID}_${RETB_NODE_ID}_rows" \
   --output="${CAMPAIGN_ROOT}/job_ledgers/slurm/%x_%A_%a.out" \
   --error="${CAMPAIGN_ROOT}/job_ledgers/slurm/%x_%A_%a.err" \
-  --export="ALL,CAMPAIGN_ROOT=${CAMPAIGN_ROOT},CAMPAIGN_ID=${CAMPAIGN_ID},RETB_NODE_ID=${RETB_NODE_ID},RETB_TASK_MANIFEST=${manifest}" \
+    --export="ALL,CAMPAIGN_ROOT=${CAMPAIGN_ROOT},CAMPAIGN_ID=${CAMPAIGN_ID},RETB_NODE_ID=${RETB_NODE_ID},RETB_TASK_MANIFEST=${manifest},RETB_DEFER_MANIFEST_MATERIALIZATION=1" \
   "${PROJECT_DIR}/sbatch/run_retb_production_task.sh")"
 python scripts/attest_retb_task_manifest_completion.py \
   --campaign-root "${CAMPAIGN_ROOT}" \
   --task-manifest "${manifest}" >/dev/null
+retb_materialize_downstream "${RETB_NODE_ID}"
 retb_record_dynamic_job \
   "${RETB_NODE_ID}" "${job_id}" "${dependency}" "${manifest_sha}"

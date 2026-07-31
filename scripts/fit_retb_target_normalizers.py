@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit and publish RETB target-token normalizers from model_train only."""
+"""Fit RETB target-token normalizers from the locked training population."""
 
 from __future__ import annotations
 
@@ -30,6 +30,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--target-cache-manifest", required=True, type=Path)
     parser.add_argument("--pipeline-seed", required=True, type=int)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--specification-sha256", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args(argv)
@@ -41,6 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_pipeline_seed=args.pipeline_seed,
         expected_specification_sha256=args.specification_sha256,
         source_snapshot=source_snapshot(REPO_ROOT),
+        training_split=args.training_role,
     )
     result = publish_target_normalizers(
         output_dir=args.output_dir, artifacts=artifacts

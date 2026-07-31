@@ -33,13 +33,19 @@ from teacher_logit_reco.relation_expert_token_bridge.final_seal import (  # noqa
     FINAL_TEST_EXECUTION_LOCK_CONTRACT,
     validate_final_test_execution_claim,
 )
+from teacher_logit_reco.relation_expert_token_bridge.hlt_capacity_controls import (  # noqa: E402
+    HLT_CAPACITY_CONTROL_EXPORT_CONTRACT,
+    load_hlt_capacity_control_export,
+)
 from teacher_logit_reco.relation_expert_token_bridge.scale_up import (  # noqa: E402
     SCALE_COMPLETION_CONTRACT,
 )
 from teacher_logit_reco.relation_expert_token_bridge.stage_n_execution import (  # noqa: E402
+    DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT,
     DEPLOYABLE_INFERENCE_INPUT_CONTRACT,
     SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
     validate_deployable_inference_input,
+    validate_deployable_inference_input_binding,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
@@ -98,6 +104,7 @@ def run_deployable_inference(
     identities: list[str],
     batch_size: int,
     device: Any,
+    call_interface: str = "retb_hlt_inputs",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Numerically score one canonical identity sequence."""
 
@@ -111,7 +118,18 @@ def run_deployable_inference(
             batch = _batch_value(
                 hlt_inputs, start, stop, len(identities), device
             )
-            logits = graph(hlt_inputs=batch)["logits"].float()
+            if call_interface == "retb_hlt_inputs":
+                result = graph(hlt_inputs=batch)
+            elif call_interface == "particle_batch":
+                result = graph(**batch)
+            else:
+                raise ValueError("deployable inference call interface differs")
+            if isinstance(result, Mapping):
+                logits = result["logits"].float()
+            else:
+                # Token-free HLT capacity controls use the ordinary batch
+                # interface and return logits directly.
+                logits = result.float()
             if (
                 logits.shape != (stop - start, 10)
                 or not bool(torch.isfinite(logits).all())
@@ -198,13 +216,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             raise ValueError("final-test execution claim lineage differs")
 
-    manifest = load_hashed_json(
-        args.input_manifest,
-        expected_contract=DEPLOYABLE_INFERENCE_INPUT_CONTRACT,
-    )
-    validate_deployable_inference_input(
-        manifest, manifest_path=args.input_manifest
-    )
+    manifest = load_hashed_json(args.input_manifest)
+    if manifest["contract"] == DEPLOYABLE_INFERENCE_INPUT_CONTRACT:
+        validate_deployable_inference_input(
+            manifest, manifest_path=args.input_manifest
+        )
+    elif manifest["contract"] == DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT:
+        validate_deployable_inference_input_binding(
+            manifest, manifest_path=args.input_manifest
+        )
+    else:
+        raise ValueError("deployable inference-input contract differs")
     if (
         manifest["source"] != campaign["source"]
         or manifest["split"] != args.split
@@ -212,14 +234,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         or int(manifest["pipeline_seed"]) != args.pipeline_seed
     ):
         raise ValueError("deployable inference-input lineage differs")
-    export = load_hashed_json(
-        args.deployable_export, expected_contract=DEPLOYABLE_EXPORT_CONTRACT
-    )
+    export = load_hashed_json(args.deployable_export)
     if export.get("source") != campaign["source"]:
         raise ValueError("deployable export source differs")
-    graph = load_deployable_retb_graph(
-        args.deployable_export, expected_source=campaign["source"]
-    )
+    if export["contract"] == DEPLOYABLE_EXPORT_CONTRACT:
+        graph = load_deployable_retb_graph(
+            args.deployable_export, expected_source=campaign["source"]
+        )
+        call_interface = "retb_hlt_inputs"
+    elif export["contract"] == HLT_CAPACITY_CONTROL_EXPORT_CONTRACT:
+        graph = load_hlt_capacity_control_export(
+            args.deployable_export, expected_source=campaign["source"]
+        )
+        call_interface = "particle_batch"
+    else:
+        raise ValueError("deployable inference export contract differs")
     payload_path = args.input_manifest.parent / manifest["payload_filename"]
     if _file_sha256(payload_path) != manifest["payload_sha256"]:
         raise ValueError("deployable inference payload changed")
@@ -246,6 +275,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         identities=identities,
         batch_size=args.batch_size,
         device=device,
+        call_interface=call_interface,
     )
     stream = io.BytesIO()
     np.savez_compressed(

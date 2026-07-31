@@ -20,6 +20,7 @@ from teacher_logit_reco.relation_expert_token_bridge.fusion import build_fusion_
 from teacher_logit_reco.relation_expert_token_bridge.fusion_cache import load_frozen_token_cache
 from teacher_logit_reco.relation_expert_token_bridge.fusion_training import (
     OfflineFusionTrainingConfig,
+    infer_fusion_val_design,
     train_frozen_fusion,
 )
 from teacher_logit_reco.relation_expert_token_bridge.step5 import (
@@ -36,8 +37,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--model-train-cache", type=Path)
     parser.add_argument("--val-stop-cache", type=Path)
+    parser.add_argument("--val-design-cache", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", default="auto")
@@ -89,7 +96,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.model_train_cache is None or args.val_stop_cache is None:
         raise ValueError("fusion training requires both cache manifests")
-    authorize_dataset_access(worker_role="training_worker", requested_resource="model_train")
+    authorize_dataset_access(
+        worker_role=(
+            "scale_training_worker"
+            if args.training_role == "scale_train"
+            else "training_worker"
+        ),
+        requested_resource=args.training_role,
+    )
     authorize_dataset_access(worker_role="training_worker", requested_resource="val_stop")
     train_meta, _ = load_frozen_token_cache(args.model_train_cache)
     val_meta, _ = load_frozen_token_cache(args.val_stop_cache)
@@ -119,9 +133,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.campaign_root / "registry" / "retb_offline_fusion.json"
         )["content_hash"],
         config=config,
+        training_split=args.training_role,
         device=device,
     )
-    print(json.dumps(registration, indent=2, sort_keys=True))
+    if args.val_design_cache is None:
+        raise ValueError(
+            "fusion training requires --val-design-cache for locked "
+            "post-checkpoint design inference"
+        )
+    authorize_dataset_access(
+        worker_role="design_worker", requested_resource="val_design"
+    )
+    val_design_meta, _ = load_frozen_token_cache(args.val_design_cache)
+    if val_design_meta.get("source") != campaign.get("source"):
+        raise ValueError("val_design fusion cache belongs to another source")
+    inference = infer_fusion_val_design(
+        model=model,
+        checkpoint_path=output / "best_model_val.pt",
+        val_design_manifest=args.val_design_cache,
+        output_path=output / "val_design_inference.json",
+        device=device,
+    )
+    print(
+        json.dumps(
+            {"registration": registration, "val_design": inference},
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

@@ -28,7 +28,7 @@ STAGE_G_REGISTRY_CONTRACT = "retb_stage_g_predictor_loss_screen_registry_v1"
 STAGE_H_POLICY_CONTRACT = "retb_stage_h_predictor_confirmation_policy_v1"
 STEP9_BUNDLE_CONTRACT = "retb_step9_predictor_bundle_v1"
 STEP9_REPORT_CONTRACT = "retb_step9_report_v1"
-PREDICTOR_RUN_CONTRACT = "retb_materialized_predictor_run_v1"
+PREDICTOR_RUN_CONTRACT = "retb_materialized_predictor_run_v2"
 
 REPRESENTATIVE_EXPERTS = ("BASE4", "PT", "TRACK", "REGION")
 SCREEN_SHAPES = ("SHAPE_COMPACT", "SHAPE_HIGH")
@@ -278,6 +278,8 @@ def materialize_predictor_run(
     dropout: float,
     role: str,
     parent_hashes: Mapping[str, str],
+    control_variant: str = "STANDARD",
+    residual_hidden_width: int | None = None,
 ) -> dict[str, Any]:
     from .predictor_losses import FIXED_WEIGHTS
     from .predictors import (
@@ -332,6 +334,8 @@ def materialize_predictor_run(
             "capacity_control",
         }
         or set(parent_hashes) != required
+        or control_variant
+        not in {"STANDARD", "MATCHED_WIDENED_RESMLP", "ZERO_EVIDENCE"}
     ):
         raise ValueError("materialized predictor run semantics differ")
     if architecture in {"A0_AFFINE", "A1_RESMLP", "A2_TOKEN_ENCODER"} and (
@@ -396,12 +400,40 @@ def materialize_predictor_run(
             )
         )
         or (objective_id == "W_LOGIT_ONLY" and role != "semantic_control")
+        or (
+            control_variant == "MATCHED_WIDENED_RESMLP"
+            and (
+                stage != "H"
+                or architecture != "A1_RESMLP"
+                or context != "C0_SELF"
+                or role != "capacity_control"
+                or residual_hidden_width is None
+                or int(residual_hidden_width) <= 2 * int(token_dimension)
+            )
+        )
+        or (
+            control_variant == "ZERO_EVIDENCE"
+            and (
+                stage != "H"
+                or architecture
+                not in {
+                    "A3_SLOT_DECODER_DIRECT",
+                    "A4_SLOT_DECODER_GATED",
+                }
+                or role != "semantic_control"
+                or residual_hidden_width is not None
+            )
+        )
+        or (
+            control_variant == "STANDARD"
+            and residual_hidden_width is not None
+        )
     ):
         raise ValueError("materialized predictor stage restrictions differ")
     return with_content_hash(
         {
             "contract": PREDICTOR_RUN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": str(run_id),
             "stage": stage,
             "pipeline_seed": int(pipeline_seed),
@@ -419,6 +451,12 @@ def materialize_predictor_run(
             "learning_rate": float(learning_rate),
             "dropout": float(dropout),
             "role": role,
+            "control_variant": control_variant,
+            "residual_hidden_width": (
+                None
+                if residual_hidden_width is None
+                else int(residual_hidden_width)
+            ),
             "parent_hashes": {
                 name: require_sha256(
                     parent_hashes[name], name=f"parent_hashes.{name}"
@@ -454,6 +492,8 @@ def validate_materialized_predictor_run(payload: Mapping[str, Any]) -> str:
         dropout=float(payload.get("dropout", -1.0)),
         role=payload.get("role"),
         parent_hashes=payload.get("parent_hashes", {}),
+        control_variant=payload.get("control_variant", "STANDARD"),
+        residual_hidden_width=payload.get("residual_hidden_width"),
     )
     actual = dict(payload)
     actual.pop("content_hash", None)

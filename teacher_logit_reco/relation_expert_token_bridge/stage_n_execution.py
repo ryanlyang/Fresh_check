@@ -14,6 +14,7 @@ import numpy as np
 from .contracts import (
     bind_source,
     canonical_sha256,
+    load_hashed_json,
     require_sha256,
     validate_content_hash,
     with_content_hash,
@@ -41,6 +42,12 @@ FINAL_TEST_PREDICTION_CONTRACT = "retb_final_test_prediction_v1"
 FINAL_TEST_LABEL_MANIFEST_CONTRACT = "retb_final_test_label_manifest_v1"
 DEPLOYABLE_INFERENCE_INPUT_CONTRACT = (
     "retb_deployable_inference_input_v1"
+)
+DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT = (
+    "retb_deployable_inference_input_v2"
+)
+SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT = (
+    "retb_shared_deployable_inference_payload_v1"
 )
 DEPLOYABLE_INFERENCE_ENTRYPOINT = (
     "scripts/run_retb_deployable_inference.py"
@@ -404,6 +411,54 @@ def validate_deployable_inference_input(
     return digest
 
 
+def validate_shared_deployable_inference_payload(
+    payload: Mapping[str, Any], *, manifest_path: str | Path
+) -> str:
+    """Validate one graph-independent, label-free HLT inference payload."""
+
+    digest = validate_content_hash(
+        payload,
+        expected_contract=SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT,
+    )
+    required = {
+        "contract",
+        "schema_version",
+        "split",
+        "identity_count",
+        "identity_order_sha256",
+        "payload_filename",
+        "payload_sha256",
+        "contains_HLT_inputs_only",
+        "contains_labels",
+        "contains_offline_or_oracle_values",
+        "graph_independent_payload",
+        "source",
+        "content_hash",
+    }
+    if (
+        set(payload) != required
+        or int(payload["schema_version"]) != 1
+        or payload["split"] not in {"stack_val", "final_test"}
+        or int(payload["identity_count"]) <= 0
+        or Path(payload["payload_filename"]).name
+        != payload["payload_filename"]
+        or payload["contains_HLT_inputs_only"] is not True
+        or payload["contains_labels"] is not False
+        or payload["contains_offline_or_oracle_values"] is not False
+        or payload["graph_independent_payload"] is not True
+    ):
+        raise ValueError("shared deployable inference payload semantics differ")
+    path = Path(manifest_path).resolve().parent / payload["payload_filename"]
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or hashlib.sha256(path.read_bytes()).hexdigest()
+        != payload["payload_sha256"]
+    ):
+        raise ValueError("shared deployable inference payload differs")
+    return digest
+
+
 def _reject_privileged_inference_keys(
     value: Any, *, prefix: str = ""
 ) -> None:
@@ -451,7 +506,7 @@ def publish_deployable_inference_input(
     if (
         split not in {"stack_val", "final_test"}
         or int(pipeline_seed) not in PIPELINE_SEEDS
-        or re.fullmatch(r"[A-Za-z0-9_.-]+", str(graph_id)) is None
+        or re.fullmatch(r"[A-Za-z0-9_.:-]+", str(graph_id)) is None
         or not ids
         or ids != sorted(ids)
         or len(ids) != len(set(ids))
@@ -464,7 +519,10 @@ def publish_deployable_inference_input(
         {"identities": ids, "hlt_inputs": dict(hlt_inputs)}, stream
     )
     root = Path(output_dir)
-    filename = f"{split}_{graph_id}_seed{int(pipeline_seed)}_HLT_inputs.pt"
+    safe_graph_id = str(graph_id).replace(":", "__")
+    filename = (
+        f"{split}_{safe_graph_id}_seed{int(pipeline_seed)}_HLT_inputs.pt"
+    )
     payload_publication = write_immutable_bytes(
         root / filename, stream.getvalue()
     )
@@ -487,7 +545,9 @@ def publish_deployable_inference_input(
         ),
         source_snapshot=source_snapshot,
     )
-    manifest_path = root / f"{split}_{graph_id}_seed{int(pipeline_seed)}.json"
+    manifest_path = (
+        root / f"{split}_{safe_graph_id}_seed{int(pipeline_seed)}.json"
+    )
     manifest_publication = write_immutable_json(manifest_path, manifest)
     validate_deployable_inference_input(
         manifest, manifest_path=manifest_path
@@ -497,6 +557,209 @@ def publish_deployable_inference_input(
         "payload_publication": payload_publication,
         "manifest_publication": manifest_publication,
     }
+
+
+def publish_shared_deployable_inference_payload(
+    *,
+    output_dir: str | Path,
+    split: str,
+    identities: list[str],
+    hlt_inputs: Mapping[str, Any],
+    source_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Publish the split payload once, independently of graph and seed."""
+
+    import torch
+
+    ids = [str(value) for value in identities]
+    if (
+        split not in {"stack_val", "final_test"}
+        or not ids
+        or ids != sorted(ids)
+        or len(ids) != len(set(ids))
+        or not isinstance(hlt_inputs, Mapping)
+    ):
+        raise ValueError("shared deployable inference identity differs")
+    _reject_privileged_inference_keys(hlt_inputs)
+    stream = io.BytesIO()
+    torch.save(
+        {"identities": ids, "hlt_inputs": dict(hlt_inputs)}, stream
+    )
+    root = Path(output_dir)
+    filename = f"retb_{split}_shared_HLT_inputs.pt"
+    payload_publication = write_immutable_bytes(
+        root / filename, stream.getvalue()
+    )
+    manifest = bind_source(
+        with_content_hash(
+            {
+                "contract": SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT,
+                "schema_version": 1,
+                "split": split,
+                "identity_count": len(ids),
+                "identity_order_sha256": canonical_sha256(ids),
+                "payload_filename": filename,
+                "payload_sha256": payload_publication["file_sha256"],
+                "contains_HLT_inputs_only": True,
+                "contains_labels": False,
+                "contains_offline_or_oracle_values": False,
+                "graph_independent_payload": True,
+            }
+        ),
+        source_snapshot=source_snapshot,
+    )
+    manifest_path = root / f"retb_{split}_shared_HLT_inputs.json"
+    manifest_publication = write_immutable_json(manifest_path, manifest)
+    validate_shared_deployable_inference_payload(
+        manifest, manifest_path=manifest_path
+    )
+    return {
+        "manifest": manifest,
+        "payload_publication": payload_publication,
+        "manifest_publication": manifest_publication,
+    }
+
+
+def publish_deployable_inference_input_binding(
+    *,
+    output_dir: str | Path,
+    shared_payload_manifest: Mapping[str, Any],
+    shared_payload_manifest_path: str | Path,
+    graph_id: str,
+    pipeline_seed: int,
+) -> dict[str, Any]:
+    """Bind one graph/seed identity to an existing shared split payload."""
+
+    shared_sha = validate_shared_deployable_inference_payload(
+        shared_payload_manifest,
+        manifest_path=shared_payload_manifest_path,
+    )
+    split = str(shared_payload_manifest["split"])
+    if (
+        int(pipeline_seed) not in PIPELINE_SEEDS
+        or re.fullmatch(r"[A-Za-z0-9_.:-]+", str(graph_id)) is None
+        or Path(output_dir).resolve()
+        != Path(shared_payload_manifest_path).resolve().parent
+    ):
+        raise ValueError("deployable inference binding identity differs")
+    safe_graph_id = str(graph_id).replace(":", "__")
+    # v1 graph manifests owned a distinct payload. The v2 binding records the
+    # graph identity while reusing one explicitly authenticated split payload.
+    manifest = with_content_hash(
+        {
+            "contract": DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT,
+            "schema_version": 2,
+            "split": split,
+            "graph_id": str(graph_id),
+            "pipeline_seed": int(pipeline_seed),
+            "identity_count": int(
+                shared_payload_manifest["identity_count"]
+            ),
+            "identity_order_sha256": shared_payload_manifest[
+                "identity_order_sha256"
+            ],
+            "payload_filename": shared_payload_manifest[
+                "payload_filename"
+            ],
+            "payload_sha256": shared_payload_manifest["payload_sha256"],
+            "contains_HLT_inputs_only": True,
+            "contains_labels": False,
+            "contains_offline_or_oracle_values": False,
+            "shared_payload_manifest_filename": Path(
+                shared_payload_manifest_path
+            ).name,
+            "shared_payload_manifest_sha256": shared_sha,
+            "source": dict(shared_payload_manifest["source"]),
+        }
+    )
+    manifest_path = (
+        Path(output_dir)
+        / f"{split}_{safe_graph_id}_seed{int(pipeline_seed)}.json"
+    )
+    publication = write_immutable_json(manifest_path, manifest)
+    validate_deployable_inference_input_binding(
+        manifest, manifest_path=manifest_path
+    )
+    return {
+        "manifest": manifest,
+        "manifest_publication": publication,
+        "shared_payload_manifest": dict(shared_payload_manifest),
+    }
+
+
+def validate_deployable_inference_input_binding(
+    payload: Mapping[str, Any], *, manifest_path: str | Path
+) -> str:
+    digest = validate_content_hash(
+        payload,
+        expected_contract=DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT,
+    )
+    required = {
+        "contract",
+        "schema_version",
+        "split",
+        "graph_id",
+        "pipeline_seed",
+        "identity_count",
+        "identity_order_sha256",
+        "payload_filename",
+        "payload_sha256",
+        "contains_HLT_inputs_only",
+        "contains_labels",
+        "contains_offline_or_oracle_values",
+        "shared_payload_manifest_filename",
+        "shared_payload_manifest_sha256",
+        "source",
+        "content_hash",
+    }
+    if (
+        set(payload) != required
+        or int(payload["schema_version"]) != 2
+        or payload["split"] not in {"stack_val", "final_test"}
+        or int(payload["pipeline_seed"]) not in PIPELINE_SEEDS
+        or int(payload["identity_count"]) <= 0
+        or Path(payload["payload_filename"]).name
+        != payload["payload_filename"]
+        or payload["contains_HLT_inputs_only"] is not True
+        or payload["contains_labels"] is not False
+        or payload["contains_offline_or_oracle_values"] is not False
+        or Path(payload["shared_payload_manifest_filename"]).name
+        != payload["shared_payload_manifest_filename"]
+    ):
+        raise ValueError("deployable inference-input binding semantics differ")
+    require_sha256(
+        payload["shared_payload_manifest_sha256"],
+        name="shared_payload_manifest_sha256",
+    )
+    parent = Path(manifest_path).resolve().parent
+    shared_path = parent / payload["shared_payload_manifest_filename"]
+    shared = load_hashed_json(
+        shared_path,
+        expected_contract=SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT,
+    )
+    validate_shared_deployable_inference_payload(
+        shared, manifest_path=shared_path
+    )
+    if (
+        shared["content_hash"] != payload["shared_payload_manifest_sha256"]
+        or shared["split"] != payload["split"]
+        or shared["identity_count"] != payload["identity_count"]
+        or shared["identity_order_sha256"]
+        != payload["identity_order_sha256"]
+        or shared["payload_filename"] != payload["payload_filename"]
+        or shared["payload_sha256"] != payload["payload_sha256"]
+        or shared["source"] != payload["source"]
+    ):
+        raise ValueError("deployable inference shared-payload lineage differs")
+    path = parent / payload["payload_filename"]
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or hashlib.sha256(path.read_bytes()).hexdigest()
+        != payload["payload_sha256"]
+    ):
+        raise ValueError("deployable inference-input binding payload differs")
+    return digest
 
 
 def validate_final_labels_manifest(
@@ -698,6 +961,7 @@ def validate_control_evidence(
 
 __all__ = [
     "DEPLOYABLE_INFERENCE_ENTRYPOINT",
+    "DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT",
     "DEPLOYABLE_INFERENCE_INPUT_CONTRACT",
     "FINALIST_CONTROLS_EXECUTION_PLAN_CONTRACT",
     "FINAL_TEST_LABEL_MANIFEST_CONTRACT",
@@ -705,14 +969,19 @@ __all__ = [
     "POSTLOCK_TARGET_EXECUTION_PLAN_CONTRACT",
     "SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT",
     "STACK_INFERENCE_EXECUTION_PLAN_CONTRACT",
+    "SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT",
     "build_final_test_prediction",
     "publish_final_labels_manifest",
     "publish_deployable_inference_input",
+    "publish_deployable_inference_input_binding",
+    "publish_shared_deployable_inference_payload",
     "validate_control_evidence",
     "validate_deployable_inference_input",
+    "validate_deployable_inference_input_binding",
     "validate_final_labels_manifest",
     "validate_finalist_controls_execution_plan",
     "validate_postlock_target_execution_plan",
     "validate_sealed_final_test_execution_plan",
     "validate_stack_inference_execution_plan",
+    "validate_shared_deployable_inference_payload",
 ]

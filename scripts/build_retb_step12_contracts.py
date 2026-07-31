@@ -50,21 +50,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.predictor_bundle_lock,
         expected_contract=PREDICTOR_BUNDLE_LOCK_CONTRACT,
     )
+    joint_lock = load_hashed_json(
+        args.campaign_root
+        / "selection"
+        / "joint"
+        / "joint_campaign_lock.json"
+    )
+    carried_locks = {}
+    for role, row in joint_lock.get("carried_by_shape_role", {}).items():
+        carried = load_hashed_json(
+            args.campaign_root
+            / "selection"
+            / "predictor_bundle"
+            / "carried"
+            / f"{role}.json",
+            expected_contract=PREDICTOR_BUNDLE_LOCK_CONTRACT,
+        )
+        if (
+            carried["content_hash"]
+            != row["predictor_bundle_lock_sha256"]
+            or carried.get("source") != campaign.get("source")
+        ):
+            raise ValueError("Step-12 carried bundle lineage differs")
+        carried_locks[str(role)] = carried["content_hash"]
     if (
         step11.get("source") != campaign.get("source")
         or lock.get("source") != campaign.get("source")
         or step11["parents"]["predictor_bundle_lock"]
         != lock["content_hash"]
+        or joint_lock.get("source") != campaign.get("source")
     ):
         raise ValueError("Step-12 parent lineage differs")
     bundle = build_step12_bundle(
         campaign_spec_sha256=campaign["content_hash"],
         step11_bundle_sha256=step11["content_hash"],
         predictor_bundle_lock_sha256=lock["content_hash"],
+        joint_campaign_lock_sha256=joint_lock["content_hash"],
         global_determinism_sha256=campaign["parent_artifact_hashes"][
             "global_determinism"
         ],
         source_snapshot=source_snapshot(REPO_ROOT),
+        carried_predictor_bundle_locks=carried_locks,
     )
     digest = validate_step12_bundle(bundle)
     result = {"dry_run": args.dry_run, "step12_bundle_sha256": digest}

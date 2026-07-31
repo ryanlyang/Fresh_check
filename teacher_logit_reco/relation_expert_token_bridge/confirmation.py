@@ -22,10 +22,10 @@ from .paired_statistics import (
 
 
 BRIDGE_SHAPE_SELECTION_CONTRACT = "retb_bridge_shape_selection_v1"
-STAGE_L_GRAPH_REGISTRY_CONTRACT = "retb_stage_l_graph_registry_v1"
+STAGE_L_GRAPH_REGISTRY_CONTRACT = "retb_stage_l_graph_registry_v2"
 SEED_CONFIRMATION_CONTRACT = "retb_500k_seed_confirmation_v1"
-CONFIRMATION_SUMMARY_CONTRACT = "retb_500k_confirmation_summary_v1"
-SCALE_SHORTLIST_CONTRACT = "retb_locked_scale_shortlist_v1"
+CONFIRMATION_SUMMARY_CONTRACT = "retb_500k_confirmation_summary_v2"
+SCALE_SHORTLIST_CONTRACT = "retb_locked_scale_shortlist_v2"
 SHORTLISTED_CONTROLS_CONTRACT = "retb_shortlisted_500k_controls_v1"
 
 GRAPH_ROLES = (
@@ -351,14 +351,19 @@ def build_stage_l_graph_registry(
     *,
     definitions: Sequence[Mapping[str, Any]],
     step12_bundle_sha256: str,
-    bridge_shape_selection: Mapping[str, Any],
+    candidate_shape_ids: Sequence[str],
+    robustness_controls_completion_sha256: str,
+    semantic_controls_completion_sha256: str,
 ) -> dict[str, Any]:
-    bridge_shape_sha = validate_bridge_shape_selection(
-        bridge_shape_selection
-    )
-    uniform_candidate_count = len(
-        bridge_shape_selection["candidate_shape_ids"]
-    )
+    candidates = [str(value) for value in candidate_shape_ids]
+    if (
+        not candidates
+        or len(candidates) > 2
+        or len(set(candidates)) != len(candidates)
+        or any(not value for value in candidates)
+    ):
+        raise ValueError("Stage-L candidate-shape coverage differs")
+    uniform_candidate_count = len(candidates)
     expected_uniform_roles = (
         {"SHAPE_COMPACT", "SHAPE_HIGH"}
         if uniform_candidate_count == 2
@@ -464,13 +469,24 @@ def build_stage_l_graph_registry(
     return with_content_hash(
         {
             "contract": STAGE_L_GRAPH_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "step12_bundle_sha256": require_sha256(
                 step12_bundle_sha256,
                 name="step12_bundle_sha256",
             ),
-            "bridge_shape_selection_sha256": bridge_shape_sha,
-            "bridge_shape_selection": dict(bridge_shape_selection),
+            "candidate_shape_ids": candidates,
+            "control_completion_hashes": {
+                "robustness_controls": require_sha256(
+                    robustness_controls_completion_sha256,
+                    name="robustness_controls_completion_sha256",
+                ),
+                "semantic_controls": require_sha256(
+                    semantic_controls_completion_sha256,
+                    name="semantic_controls_completion_sha256",
+                ),
+            },
+            "all_predeclared_candidate_shapes_registered_before_selection": True,
+            "bridge_shape_selected_after_confirmation": True,
             "pipeline_seeds": list(PIPELINE_SEEDS),
             "definition_count": len(checked),
             "definitions": sorted(
@@ -493,7 +509,13 @@ def validate_stage_l_graph_registry(payload: Mapping[str, Any]) -> str:
     expected = build_stage_l_graph_registry(
         definitions=payload.get("definitions", []),
         step12_bundle_sha256=payload.get("step12_bundle_sha256"),
-        bridge_shape_selection=payload.get("bridge_shape_selection", {}),
+        candidate_shape_ids=payload.get("candidate_shape_ids", []),
+        robustness_controls_completion_sha256=payload.get(
+            "control_completion_hashes", {}
+        ).get("robustness_controls"),
+        semantic_controls_completion_sha256=payload.get(
+            "control_completion_hashes", {}
+        ).get("semantic_controls"),
     )
     actual = dict(payload)
     actual.pop("content_hash", None)
@@ -695,7 +717,7 @@ def aggregate_500k_confirmation(
         ):
             raise ValueError("confirmation source/label lineage differs")
         by_graph[graph_id][seed] = row
-    aggregates, incomplete = [], []
+    aggregates = []
     for graph_id, definition in definitions.items():
         seed_map = by_graph[graph_id]
         baseline_id = definition["named_baseline_graph_id"]
@@ -705,14 +727,10 @@ def aggregate_500k_confirmation(
             | (set(PIPELINE_SEEDS) - set(baseline_seed_map))
         )
         if missing:
-            incomplete.append(
-                {
-                    "graph_id": graph_id,
-                    "reason": "incomplete_matched_seed_coverage",
-                    "missing_pipeline_seeds": missing,
-                }
+            raise ValueError(
+                "500k confirmation lacks complete matched-seed coverage "
+                f"for {graph_id}: {missing}"
             )
-            continue
         rows = [seed_map[seed] for seed in PIPELINE_SEEDS]
         for row in rows:
             seed = row["pipeline_seed"]
@@ -890,7 +908,7 @@ def aggregate_500k_confirmation(
     return with_content_hash(
         {
             "contract": CONFIRMATION_SUMMARY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "graph_registry_sha256": registry_sha,
             "val_design_label_manifest_sha256": label_sha,
             "pipeline_seeds": list(PIPELINE_SEEDS),
@@ -898,7 +916,7 @@ def aggregate_500k_confirmation(
             "complete_graph_count": len(resolved),
             "registered_graph_count": len(definitions),
             "rows": sorted(resolved, key=lambda row: row["graph_id"]),
-            "ineligible_incomplete_graphs": incomplete,
+            "complete_matched_seed_coverage": True,
             "all_candidates_worse_than_baseline": all_worse,
             "scientific_underperformance_blocked_execution": False,
             "performance_based_termination": False,
@@ -977,8 +995,8 @@ def select_scale_shortlist(
         or parent_hashes.get("confirmation_summary")
         != confirmation_summary.get("content_hash")
         or parent_hashes.get("bridge_shape_selection") != shape_sha
-        or graph_registry.get("bridge_shape_selection_sha256")
-        != shape_sha
+        or graph_registry.get("candidate_shape_ids")
+        != bridge_shape_selection.get("candidate_shape_ids")
         or parent_hashes.get("step12_bundle")
         != graph_registry.get("step12_bundle_sha256")
         or confirmation_summary.get("graph_registry_sha256") != registry_sha
@@ -1038,10 +1056,19 @@ def select_scale_shortlist(
     definitions = {
         row["graph_id"]: row for row in graph_registry["definitions"]
     }
+    required_baseline_ids = sorted(
+        {
+            str(definitions[graph_id]["named_baseline_graph_id"])
+            for graph_id in shortlist_ids
+        }
+    )
+    scale_training_graph_ids = sorted(
+        set(shortlist_ids) | set(required_baseline_ids)
+    )
     return with_content_hash(
         {
             "contract": SCALE_SHORTLIST_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "parent_hashes": {
                 name: require_sha256(value, name=f"parent_hashes.{name}")
                 for name, value in sorted(parent_hashes.items())
@@ -1052,6 +1079,8 @@ def select_scale_shortlist(
             "ACC_SCALE_TOP3": accuracy_top,
             "REJ_SCALE_TOP3": rejection_top,
             "SCALE_SHORTLIST": shortlist_ids,
+            "REQUIRED_SCALE_BASELINES": required_baseline_ids,
+            "SCALE_TRAINING_GRAPHS": scale_training_graph_ids,
             "shortlist_size": len(shortlist_ids),
             "maximum_shortlist_size": 6,
             "accuracy_ranking_trace": [
@@ -1088,7 +1117,7 @@ def select_scale_shortlist(
             ],
             "locked_graph_definitions": {
                 graph_id: definitions[graph_id]
-                for graph_id in shortlist_ids
+                for graph_id in scale_training_graph_ids
             },
             "SHAPE_BRIDGE": bridge_shape_selection["SHAPE_BRIDGE"],
             "all_candidates_worse_than_baseline": confirmation_summary[
@@ -1097,7 +1126,8 @@ def select_scale_shortlist(
             "selection_emitted_despite_scientific_result": True,
             "contains_3M_checkpoint": False,
             "contains_finalist_identity": False,
-            "stage_M_must_train_every_and_only_locked_definition": True,
+            "stage_M_must_train_every_shortlisted_and_named_baseline_definition": True,
+            "named_baselines_are_selection_ineligible": True,
             "shortlist_membership_affected_by_capacity_controls": False,
             "performance_based_termination": False,
             "stack_val_consumed": False,

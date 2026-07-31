@@ -28,3 +28,4 @@ python scripts/bootstrap_retb_input_tasks.py \
   --campaign-root "${CAMPAIGN_ROOT}" \
   --production-graph "${CAMPAIGN_ROOT}/job_ledgers/production_graph.json" \
   --data-dir "${DATA_DIR}"
+retb_materialize_downstream "campaign_bootstrap"

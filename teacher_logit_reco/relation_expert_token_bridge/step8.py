@@ -29,7 +29,7 @@ from .target_cache import (
 
 STEP8_BUNDLE_CONTRACT = "retb_step8_target_cache_bundle_v1"
 STEP8_REPORT_CONTRACT = "retb_step8_report_v1"
-TARGET_LINEAGE_CONTRACT = "retb_selected_target_lineage_v1"
+TARGET_LINEAGE_CONTRACT = "retb_selected_target_lineage_v2"
 POSTLOCK_TARGET_POLICY_CONTRACT = "retb_postlock_target_policy_v1"
 
 
@@ -143,7 +143,6 @@ def build_selected_target_lineage(
                 or int(content["pipeline_seed"]) != int(pipeline_seed)
                 or content["parents"]["candidate_checkpoint"]
                 != descriptor["checkpoint_sha256"]
-                or not content["bridge_content_certified"]
                 or noninferiority["target_mode"] != mode
                 or not noninferiority["offline_noninferior"]
                 or eligibility["noninferiority_sha256"] != noninferiority_sha
@@ -163,6 +162,14 @@ def build_selected_target_lineage(
                         ),
                     ),
                     "content_certification_sha256": content_sha,
+                    "bridge_content_certified": bool(
+                        content["bridge_content_certified"]
+                    ),
+                    "representation_preserving_claim_eligible": bool(
+                        eligibility[
+                            "representation_preserving_claim_eligible"
+                        ]
+                    ),
                     "noninferiority_sha256": noninferiority_sha,
                 }
             )
@@ -170,7 +177,7 @@ def build_selected_target_lineage(
     return with_content_hash(
         {
             "contract": TARGET_LINEAGE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "pipeline_seed": int(pipeline_seed),
             "shape_id": str(shape_id),
             "expert_order": list(EXPERT_ORDER),
@@ -217,9 +224,17 @@ def build_locked_target_cache_specification(
         int(target_lineage["pipeline_seed"]) != int(pipeline_seed)
         or target_lineage["shape_id"] != str(shape_id)
         or list(target_lineage["target_tuple"]) != list(row["target_tuple"])
-        or fusion_registration.get("checkpoint_sha256")
+        or fusion_registration.get("selector_parent_fusion_sha256")
         != row["fusion_sha256"]
-        or normalizer_sha != row["normalizer_set_sha256"]
+        or fusion_registration.get(
+            "selector_parent_normalizer_set_sha256"
+        )
+        != row["normalizer_set_sha256"]
+        or fusion_registration.get("shape_id") != str(shape_id)
+        or int(fusion_registration.get("pipeline_seed", -1))
+        != int(pipeline_seed)
+        or fusion_registration.get("target_tuple")
+        != list(row["target_tuple"])
     ):
         raise ValueError("locked coordinate fusion/normalizer lineage differs")
     specification = build_target_cache_specification(

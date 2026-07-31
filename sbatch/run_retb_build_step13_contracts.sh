@@ -20,3 +20,18 @@ cd "${PROJECT_DIR}"
 arguments=(--campaign-root "${CAMPAIGN_ROOT}")
 if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then arguments+=(--dry-run); fi
 python scripts/build_retb_step13_contracts.py "${arguments[@]}"
+if [[ "${RETB_DRY_RUN:-0}" != "1" ]]; then
+  python scripts/emit_retb_stage_l_registration_factory_input.py \
+    --campaign-root "${CAMPAIGN_ROOT}"
+  python scripts/attest_retb_direct_node_completion.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --node-id step13_confirmation_contracts \
+    --output-artifact "${CAMPAIGN_ROOT}/registry/retb_step13_confirmation_shortlist_bundle.json" \
+    --output-artifact "${CAMPAIGN_ROOT}/job_ledgers/factory_inputs/stage_l_graph_registration.json" >/dev/null
+  python scripts/produce_retb_downstream_manifest_plans.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step13_confirmation_contracts >/dev/null
+  python scripts/materialize_retb_downstream_manifests.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step13_confirmation_contracts >/dev/null
+fi

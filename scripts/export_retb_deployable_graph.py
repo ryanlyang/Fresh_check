@@ -122,7 +122,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             map_location="cpu",
             weights_only=False,
         )
-        graph_state = payload["graph"].final_consumer.state_dict()
+        graph_state = (
+            payload["graph"].token_refiner.state_dict()
+            if run["consumer_kind"] == "TR_REFINE"
+            else payload["graph"].final_consumer.state_dict()
+        )
         selected_state = checkpoint.get("model_state_dict")
         if (
             checkpoint.get("contract")

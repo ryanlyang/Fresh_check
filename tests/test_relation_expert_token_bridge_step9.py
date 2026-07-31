@@ -36,6 +36,12 @@ from teacher_logit_reco.relation_expert_token_bridge.predictor_training import (
     make_predictor_loader,
     train_predictor,
 )
+from teacher_logit_reco.relation_expert_token_bridge.target_coordinates import (
+    target_slot_queries,
+)
+from teacher_logit_reco.relation_expert_token_bridge.bridge_targets import (
+    BridgeProjection,
+)
 from teacher_logit_reco.relation_expert_token_bridge.predictors import (
     RetbTokenPredictor,
     TypedHLTEvidence,
@@ -621,6 +627,91 @@ def _training_fixture(split: str, events: int = 20):
         lineage_hashes={"split": SHA_A if split == "model_train" else SHA_B},
     )
     return dataset, head, fusion
+
+
+def test_predictor_dataset_uses_identity_epoch_bound_common_r_multi_replica():
+    events, k, d = 8, 2, 64
+    ids = [f"identity-{index}" for index in range(events)]
+    replicas = np.stack(
+        [
+            np.full((events, k, d), replica, dtype=np.float32)
+            for replica in range(4)
+        ]
+    )
+    states = np.stack(
+        [
+            np.full((events, 3, d), replica, dtype=np.float32)
+            for replica in range(4)
+        ]
+    )
+    masks = np.ones((4, events, 3), dtype=bool)
+    dataset = PredictorDataset(
+        identities=ids,
+        labels=np.arange(events, dtype=np.int64) % 10,
+        hlt_token_banks={expert: replicas for expert in EXPERT_ORDER},
+        unbiased_particle_states=states,
+        particle_mask=masks,
+        target_tokens=np.zeros((events, k, d), dtype=np.float32),
+        target_expert_logits=np.zeros((events, 10), dtype=np.float32),
+        target_hybrid_logits=np.zeros((events, 10), dtype=np.float32),
+        other_oracle_banks={
+            expert: np.zeros((events, k, d), dtype=np.float32)
+            for expert in EXPERT_ORDER
+            if expert != "PT"
+        },
+        target_expert_id="PT",
+        token_mean=np.zeros((k, d), dtype=np.float32),
+        token_standard_deviation=np.ones((k, d), dtype=np.float32),
+        normalization_mode="N_UNCLIPPED",
+        split="model_train",
+        lineage_hashes={"split": SHA_A},
+        relation_particle_states={
+            name: states for name in ("PT", "TRACK", "REGION")
+        },
+        relation_particle_masks={
+            name: masks for name in ("PT", "TRACK", "REGION")
+        },
+        realization_policy="R_MULTI",
+    )
+    first = [dataset[index]["replica_id"] for index in range(events)]
+    for index, replica in enumerate(first):
+        row = dataset[index]
+        assert set(
+            float(values[0, 0])
+            for values in row["hlt_token_banks"].values()
+        ) == {float(replica)}
+        assert float(row["unbiased_particle_states"][0, 0]) == replica
+        assert set(
+            float(values[0, 0])
+            for values in row["relation_particle_states"].values()
+        ) == {float(replica)}
+    dataset.set_epoch(2)
+    second = [dataset[index]["replica_id"] for index in range(events)]
+    assert second == [(value + 1) % 4 for value in first]
+
+
+def test_t2_predictor_queries_are_projected_into_target_coordinates(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(41)
+    queries = torch.randn(4, 128)
+    projection = BridgeProjection(128, 64)
+    state = {
+        "expert_model.tokenizer.slot_queries": queries,
+        **{
+            f"projection.{name}": value
+            for name, value in projection.state_dict().items()
+        },
+    }
+    checkpoint = tmp_path / "t2.pt"
+    torch.save({"offline_target_state_dict": state}, checkpoint)
+    with torch.no_grad():
+        expected = projection(queries).numpy()
+    actual = target_slot_queries(
+        checkpoint, target_mode="T2_PROJECT"
+    )
+    assert actual.shape == (4, 64)
+    np.testing.assert_array_equal(actual, expected)
 
 
 def test_miniature_predictor_trains_fixed_budget_and_reuses(

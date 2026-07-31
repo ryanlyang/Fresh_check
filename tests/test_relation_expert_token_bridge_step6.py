@@ -437,6 +437,7 @@ def test_stage_d_registry_bundle_and_all_negative_miniature(
     assert registry["row_counts"] == {
         "scratch_expert_memberships": 42,
         "encoder_screen_memberships": 420,
+        "bridge_parent_expert_memberships": 105,
         "native_fusion_memberships": 30,
         "matched_baselines": 4,
     }
@@ -515,7 +516,7 @@ def test_step6_production_workers_are_wired() -> None:
     assert "--train-cache" in expert and "--val-stop-cache" in expert
     assert "--model-train-cache" in fusion and "--val-stop-cache" in fusion
     assert "--expert-output-manifest" in cache
-    assert "--wide-capacity-artifact" in control
+    assert "--wide-capacity-artifact" not in control
     for worker in (expert, fusion, cache, control):
         assert "PYTHONNOUSERSITE=1" in worker
         assert "PYTHONDONTWRITEBYTECODE=1" in worker

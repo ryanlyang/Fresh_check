@@ -20,3 +20,15 @@ cd "${PROJECT_DIR}"
 arguments=(--campaign-root "${CAMPAIGN_ROOT}" --locked-scale-shortlist "${RETB_LOCKED_SCALE_SHORTLIST}")
 if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then arguments+=(--dry-run); fi
 python scripts/build_retb_step14_contracts.py "${arguments[@]}"
+if [[ "${RETB_DRY_RUN:-0}" != "1" ]]; then
+  python scripts/attest_retb_direct_node_completion.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --node-id step14_scale_final_contracts \
+    --output-artifact "${CAMPAIGN_ROOT}/registry/retb_step14_scale_final_seal_bundle.json" >/dev/null
+  python scripts/produce_retb_downstream_manifest_plans.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step14_scale_final_contracts >/dev/null
+  python scripts/materialize_retb_downstream_manifests.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step14_scale_final_contracts >/dev/null
+fi

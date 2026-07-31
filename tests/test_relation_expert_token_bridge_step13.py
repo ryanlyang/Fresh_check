@@ -369,7 +369,13 @@ def _bound_stage_l_inputs():
         build_stage_l_graph_registry(
             definitions=_definitions(),
             step12_bundle_sha256=SHA_B,
-            bridge_shape_selection=shape,
+            candidate_shape_ids=shape["candidate_shape_ids"],
+            robustness_controls_completion_sha256=_digest(
+                "robustness-controls-completion"
+            ),
+            semantic_controls_completion_sha256=_digest(
+                "semantic-controls-completion"
+            ),
         ),
         source_snapshot=SOURCE,
     )
@@ -558,11 +564,23 @@ def test_bridge_shape_deduplicates_equal_compact_and_high() -> None:
     registry = build_stage_l_graph_registry(
         definitions=definitions,
         step12_bundle_sha256=SHA_B,
-        bridge_shape_selection=shape,
+        candidate_shape_ids=shape["candidate_shape_ids"],
+        robustness_controls_completion_sha256=_digest(
+            "robustness-controls-completion"
+        ),
+        semantic_controls_completion_sha256=_digest(
+            "semantic-controls-completion"
+        ),
     )
     assert validate_stage_l_graph_registry(registry) == registry[
         "content_hash"
     ]
+    assert "bridge_shape_selection" not in registry
+    assert "bridge_shape_selection_sha256" not in registry
+    assert registry[
+        "all_predeclared_candidate_shapes_registered_before_selection"
+    ]
+    assert registry["bridge_shape_selected_after_confirmation"]
 
 
 def test_graph_registry_requires_every_confirmation_category() -> None:
@@ -587,34 +605,27 @@ def test_graph_registry_requires_every_confirmation_category() -> None:
         build_stage_l_graph_registry(
             definitions=_definitions()[:-1],
             step12_bundle_sha256=SHA_B,
-            bridge_shape_selection=shape,
+            candidate_shape_ids=shape["candidate_shape_ids"],
+            robustness_controls_completion_sha256=_digest(
+                "robustness-controls-completion"
+            ),
+            semantic_controls_completion_sha256=_digest(
+                "semantic-controls-completion"
+            ),
         )
 
 
-def test_confirmation_is_matched_seed_and_incomplete_rows_are_ineligible() -> None:
+def test_confirmation_rejects_incomplete_matched_seed_coverage() -> None:
     _, registry = _bound_stage_l_inputs()
     rows = _seed_rows(registry, omit=("g_frozen", 303))
-    summary = bind_source(
+    with pytest.raises(
+        ValueError, match="complete matched-seed coverage"
+    ):
         aggregate_500k_confirmation(
             graph_registry=registry,
             seed_confirmations=rows,
             val_design_label_manifest_sha256=SHA_A,
-        ),
-        source_snapshot=SOURCE,
-    )
-    assert summary["complete_graph_count"] == 10
-    assert summary["ineligible_incomplete_graphs"] == [
-        {
-            "graph_id": "g_frozen",
-            "reason": "incomplete_matched_seed_coverage",
-            "missing_pipeline_seeds": [303],
-        }
-    ]
-    assert validate_500k_confirmation(
-        summary,
-        graph_registry=registry,
-        seed_confirmations=rows,
-    ) == summary["content_hash"]
+        )
 
 
 def test_confirmation_rejects_paired_metric_or_baseline_drift() -> None:

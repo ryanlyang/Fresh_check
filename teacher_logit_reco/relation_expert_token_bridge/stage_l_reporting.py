@@ -23,7 +23,7 @@ from .contracts import (
 from .step13 import FAILURE_INTERPRETATIONS
 
 
-STAGE_L_REPORT_CONTRACT = "retb_stage_l_confirmation_report_v1"
+STAGE_L_REPORT_CONTRACT = "retb_stage_l_confirmation_report_v2"
 
 
 def _interpretations(
@@ -209,19 +209,6 @@ def render_stage_l_markdown(
             f"- `{row['id']}` ({row['status']}): "
             f"{row['interpretation']}"
         )
-    if confirmation["ineligible_incomplete_graphs"]:
-        lines.extend(
-            [
-                "",
-                "## Incomplete graphs",
-                "",
-            ]
-        )
-        for row in confirmation["ineligible_incomplete_graphs"]:
-            lines.append(
-                f"- `{row['graph_id']}`: missing seeds "
-                f"`{row['missing_pipeline_seeds']}`."
-            )
     return "\n".join(lines) + "\n"
 
 
@@ -265,7 +252,7 @@ def build_stage_l_report(
         with_content_hash(
             {
                 "contract": STAGE_L_REPORT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "parents": {
                     "step13_bundle": require_sha256(
                         step13_bundle_sha256,
@@ -276,8 +263,8 @@ def build_stage_l_report(
                     "shortlisted_500k_controls": controls_sha,
                 },
                 "complete_graph_rows": confirmation["rows"],
-                "ineligible_incomplete_graphs": confirmation[
-                    "ineligible_incomplete_graphs"
+                "complete_matched_seed_coverage": confirmation[
+                    "complete_matched_seed_coverage"
                 ],
                 "ACC_SCALE_TOP3": shortlist["ACC_SCALE_TOP3"],
                 "REJ_SCALE_TOP3": shortlist["REJ_SCALE_TOP3"],

@@ -35,7 +35,7 @@ FUSION_TRAINING_CONTRACT = "retb_offline_fusion_training_v1"
 FUSION_CHECKPOINT_CONTRACT = "retb_offline_fusion_checkpoint_v1"
 FUSION_REGISTRATION_CONTRACT = "retb_offline_fusion_registration_v1"
 FUSION_CURVES_CONTRACT = "retb_offline_fusion_curves_v1"
-FUSION_DESIGN_INFERENCE_CONTRACT = "retb_offline_fusion_val_design_v1"
+FUSION_DESIGN_INFERENCE_CONTRACT = "retb_offline_fusion_val_design_v2"
 BEST_SINGLE_SELECTION_CONTRACT = "retb_offline_best_single_selection_v1"
 PARAMETER_FREE_EVALUATION_CONTRACT = (
     "retb_offline_parameter_free_fusion_evaluation_v1"
@@ -426,14 +426,40 @@ def train_frozen_fusion(
     global_determinism_sha256: str,
     fusion_architecture_sha256: str,
     config: OfflineFusionTrainingConfig,
+    training_split: str = "model_train",
     device: str | Any = "cpu",
 ) -> dict[str, Any]:
     module = _require_torch()
     config.validate()
     train_meta, train_arrays = load_frozen_token_cache(model_train_manifest)
     val_meta, val_arrays = load_frozen_token_cache(val_stop_manifest)
-    if train_meta["split"] != "model_train" or val_meta["split"] != "val_stop":
+    if (
+        training_split not in {"model_train", "scale_train"}
+        or train_meta["split"] != training_split
+        or val_meta["split"] != "val_stop"
+    ):
         raise ValueError("fusion trainer received unauthorized cache splits")
+    scale_training = training_split == "scale_train"
+    registration_contract = (
+        "retb_scale_offline_fusion_registration_v1"
+        if scale_training
+        else FUSION_REGISTRATION_CONTRACT
+    )
+    checkpoint_contract = (
+        "retb_scale_offline_fusion_checkpoint_v1"
+        if scale_training
+        else FUSION_CHECKPOINT_CONTRACT
+    )
+    curves_contract = (
+        "retb_scale_offline_fusion_training_curves_v1"
+        if scale_training
+        else FUSION_CURVES_CONTRACT
+    )
+    training_cache_key = (
+        "scale_train_cache_sha256"
+        if scale_training
+        else "model_train_cache_sha256"
+    )
     lineage_keys = (
         "pipeline_seed",
         "shape_id",
@@ -454,12 +480,12 @@ def train_frozen_fusion(
     registration_path = root / "fusion_registration.json"
     if registration_path.exists():
         registration = load_hashed_json(
-            registration_path, expected_contract=FUSION_REGISTRATION_CONTRACT
+            registration_path, expected_contract=registration_contract
         )
         expected = {
             "run_id": run_id,
             "training_contract_sha256": contract["content_hash"],
-            "model_train_cache_sha256": train_meta["content_hash"],
+            training_cache_key: train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
             "run_registry_sha256": require_sha256(
                 run_registry_sha256, name="run_registry_sha256"
@@ -482,7 +508,7 @@ def train_frozen_fusion(
             raise ValueError("reusable fusion checkpoint bytes differ")
         curves = load_hashed_json(
             root / "training_curves.json",
-            expected_contract=FUSION_CURVES_CONTRACT,
+            expected_contract=curves_contract,
         )
         metrics = load_hashed_json(root / "val_stop_metrics.json")
         if (
@@ -499,12 +525,12 @@ def train_frozen_fusion(
             checkpoint_path, map_location="cpu", weights_only=False
         )
         checkpoint_expected = {
-            "contract": FUSION_CHECKPOINT_CONTRACT,
+            "contract": checkpoint_contract,
             "run_id": run_id,
             "epoch": registration["selected_epoch"],
             "training_contract_sha256": contract["content_hash"],
             "run_registry_sha256": expected["run_registry_sha256"],
-            "model_train_cache_sha256": train_meta["content_hash"],
+            training_cache_key: train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
             "shape_id": train_meta["shape_id"],
             "allocation": train_meta["allocation"],
@@ -624,7 +650,7 @@ def train_frozen_fusion(
     checkpoint = root / "best_model_val.pt"
     _atomic_save(
         {
-            "contract": FUSION_CHECKPOINT_CONTRACT,
+            "contract": checkpoint_contract,
             "schema_version": 1,
             "run_id": run_id,
             "epoch": int(selected["epoch"]),
@@ -632,7 +658,7 @@ def train_frozen_fusion(
             "run_registry_sha256": require_sha256(
                 run_registry_sha256, name="run_registry_sha256"
             ),
-            "model_train_cache_sha256": train_meta["content_hash"],
+            training_cache_key: train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
             "shape_id": train_meta["shape_id"],
             "allocation": train_meta["allocation"],
@@ -645,7 +671,7 @@ def train_frozen_fusion(
     )
     curves = with_content_hash(
         {
-            "contract": FUSION_CURVES_CONTRACT,
+            "contract": curves_contract,
             "schema_version": 1,
             "run_id": run_id,
             "rows": rows,
@@ -655,13 +681,18 @@ def train_frozen_fusion(
             "stopped_early": False,
             "performance_based_termination": False,
             "optimizer_update_counts": counts,
+            **(
+                {"source": dict(train_meta["source"])}
+                if scale_training and "source" in train_meta
+                else {}
+            ),
         }
     )
     write_immutable_json(root / "training_curves.json", curves)
     write_immutable_json(root / "val_stop_metrics.json", final_metrics)
     registration = with_content_hash(
         {
-            "contract": FUSION_REGISTRATION_CONTRACT,
+            "contract": registration_contract,
             "schema_version": 1,
             "run_id": run_id,
             "seed": config.seed,
@@ -672,7 +703,7 @@ def train_frozen_fusion(
             "run_registry_sha256": require_sha256(
                 run_registry_sha256, name="run_registry_sha256"
             ),
-            "model_train_cache_sha256": train_meta["content_hash"],
+            training_cache_key: train_meta["content_hash"],
             "val_stop_cache_sha256": val_meta["content_hash"],
             "checkpoint_sha256": _sha256(checkpoint),
             "selected_epoch": int(selected["epoch"]),
@@ -686,6 +717,11 @@ def train_frozen_fusion(
             "expert_parameters_updated": False,
             "whole_bank_dropout": 0.0,
             "retained_checkpoints": ["best_model_val.pt"],
+            **(
+                {"source": dict(train_meta["source"])}
+                if scale_training and "source" in train_meta
+                else {}
+            ),
         }
     )
     write_immutable_json(registration_path, registration)
@@ -704,7 +740,10 @@ def infer_fusion_val_design(
     checkpoint = module.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
-    if checkpoint.get("contract") != FUSION_CHECKPOINT_CONTRACT:
+    if checkpoint.get("contract") not in {
+        FUSION_CHECKPOINT_CONTRACT,
+        "retb_scale_offline_fusion_checkpoint_v1",
+    }:
         raise ValueError("fusion design inference checkpoint contract differs")
     cache_meta, arrays = load_frozen_token_cache(val_design_manifest)
     if cache_meta["split"] != "val_design":
@@ -725,22 +764,57 @@ def infer_fusion_val_design(
     metrics, prediction = evaluate_fusion(
         model, loader, device=resolved, split="val_design"
     )
+    output = Path(output_path)
+    prediction_path = output.with_name("val_design_predictions.npz")
+    prediction_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{prediction_path.name}.",
+        suffix=".tmp.npz",
+        dir=prediction_path.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        np.savez_compressed(
+            temporary,
+            identities=np.asarray(prediction["identities"]),
+            labels=np.asarray(prediction["labels"], dtype=np.int64),
+            logits=np.asarray(prediction["logits"], dtype=np.float32),
+        )
+        if prediction_path.exists():
+            if (
+                prediction_path.is_symlink()
+                or prediction_path.read_bytes() != temporary.read_bytes()
+            ):
+                raise FileExistsError(
+                    "refusing to overwrite different fusion design predictions"
+                )
+        else:
+            os.link(temporary, prediction_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     result = with_content_hash(
         {
             "contract": FUSION_DESIGN_INFERENCE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "split": "val_design",
             "checkpoint_sha256": _sha256(Path(checkpoint_path)),
             "cache_manifest_sha256": cache_meta["content_hash"],
+            "label_manifest_sha256": cache_meta[
+                "label_manifest_sha256"
+            ],
             "metrics": metrics,
             "event_count": len(prediction["labels"]),
+            "prediction_filename": prediction_path.name,
+            "prediction_file_sha256": _sha256(prediction_path),
             "identity_order_sha256": hashlib.sha256(
                 "\n".join(map(str, prediction["identities"])).encode()
             ).hexdigest(),
             "checkpoint_selection_affected": False,
         }
     )
-    write_immutable_json(output_path, result)
+    write_immutable_json(output, result)
     return result
 
 

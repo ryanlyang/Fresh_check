@@ -82,6 +82,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_root=args.campaign_root,
         repo_root=REPO_ROOT,
     )
+    expected_epochs = (
+        2 if campaign["campaign_profile"] == "miniature_test" else 40
+    )
     if (
         registry.get("source") != campaign["source"]
         or plan["stage_l_graph_registry_sha256"]
@@ -136,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         or summary["graph_id"] != plan["graph_id"]
         or int(summary["pipeline_seed"]) != int(plan["pipeline_seed"])
         or summary["training_population"] != "model_train_500k"
-        or int(summary["training_epochs"]) != 40
+        or int(summary["training_epochs"]) != expected_epochs
         or int(summary["optimizer_update_count"]) <= 0
         or summary["actual_training_executed"] is not True
     ):

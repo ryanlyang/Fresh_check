@@ -68,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     table = load_hashed_json(args.score_table)
     if (
-        table.get("contract") != "retb_joint_bridge_coordinate_score_table_v1"
+        table.get("contract") != "retb_joint_bridge_coordinate_score_table_v3"
         or table.get("source") != campaign.get("source")
     ):
         raise ValueError("bridge coordinate score table lineage differs")

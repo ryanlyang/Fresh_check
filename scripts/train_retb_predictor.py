@@ -36,7 +36,6 @@ from teacher_logit_reco.relation_expert_token_bridge.predictor_training import (
     train_predictor,
 )
 from teacher_logit_reco.relation_expert_token_bridge.predictor_cache import (  # noqa: E402
-    calibrate_predictor_inference_cache,
     publish_predictor_inference_cache,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
@@ -61,10 +60,14 @@ from teacher_logit_reco.relation_expert_token_bridge.target_cache import (  # no
     load_frozen_token_head,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
+    authorize_dataset_access,
     load_and_validate_campaign_source,
 )
 
 import torch  # noqa: E402
+
+
+SCALE_PREDICTOR_RUN_CONTRACT = "retb_scale_predictor_run_v1"
 
 
 def _sha256(path: Path) -> str:
@@ -108,7 +111,8 @@ def _validate_normalizer(
         or int(normalizer.get("pipeline_seed", -1))
         != int(run["pipeline_seed"])
         or normalizer.get("shape_id") != run["shape_id"]
-        or normalizer.get("fit_split") != "model_train"
+        or normalizer.get("fit_split")
+        != run.get("training_population", "model_train")
         or float(normalizer.get("standard_deviation_floor", -1.0)) != 1.0e-4
         or mean.shape
         != (int(run["token_count"]), int(run["token_dimension"]))
@@ -128,7 +132,11 @@ def _validate_fusion_checkpoint(
 ) -> Mapping[str, Any]:
     allocation = payload.get("allocation")
     if (
-        payload.get("contract") != FUSION_CHECKPOINT_CONTRACT
+        payload.get("contract")
+        not in {
+            FUSION_CHECKPOINT_CONTRACT,
+            "retb_scale_offline_fusion_checkpoint_v1",
+        }
         or int(payload.get("schema_version", -1)) != 1
         or not isinstance(payload.get("model_state_dict"), Mapping)
         or not isinstance(allocation, Mapping)
@@ -220,6 +228,13 @@ def _dataset(
         normalization_mode=run["normalization_mode"],
         split=split,
         lineage_hashes=lineage_hashes,
+        realization_policy=(
+            (
+                "R_MULTI"
+                if split in {"model_train", "scale_train"}
+                else "R_FIXED"
+            )
+        ),
     )
 
 
@@ -227,6 +242,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--run", required=True, type=Path)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--model-train", required=True, type=Path)
     parser.add_argument("--val-stop", required=True, type=Path)
     parser.add_argument("--val-design", type=Path)
@@ -236,7 +256,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fusion-variant", default="F_TOKEN_TRANSFORMER")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--val-design-output", type=Path)
-    parser.add_argument("--calibration-output", type=Path)
     parser.add_argument("--microbatch-size", type=int, default=256)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--device", default="auto")
@@ -249,10 +268,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
     )
-    run = load_hashed_json(
-        args.run, expected_contract=PREDICTOR_RUN_CONTRACT
-    )
-    validate_materialized_predictor_run(run)
+    run = load_hashed_json(args.run)
+    if run.get("contract") == PREDICTOR_RUN_CONTRACT:
+        validate_materialized_predictor_run(run)
+    elif (
+        run.get("contract") != SCALE_PREDICTOR_RUN_CONTRACT
+        or run.get("training_population") != "scale_train"
+        or args.training_role != "scale_train"
+        or not isinstance(run.get("base_run_sha256"), str)
+    ):
+        raise ValueError("scale predictor run contract differs")
     if run.get("source") != campaign.get("source"):
         raise ValueError("predictor run source lineage differs")
     if (
@@ -271,11 +296,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     design_flags = (
         args.val_design is not None,
         args.val_design_output is not None,
-        args.calibration_output is not None,
     )
     if any(design_flags) and not all(design_flags):
         raise ValueError(
-            "val-design data, output, and calibration output are all required together"
+            "val-design data and inference output are required together"
         )
     queries = np.asarray(train_arrays["offline_slot_queries"], dtype=np.float32)
     if not np.array_equal(queries, val_arrays["offline_slot_queries"]):
@@ -295,14 +319,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(resolved, indent=2, sort_keys=True))
     if args.dry_run:
         return 0
+    authorize_dataset_access(
+        worker_role=(
+            "scale_training_worker"
+            if args.training_role == "scale_train"
+            else "training_worker"
+        ),
+        requested_resource=args.training_role,
+    )
+    authorize_dataset_access(
+        worker_role="scale_training_worker"
+        if args.training_role == "scale_train"
+        else "training_worker",
+        requested_resource="val_stop",
+    )
     lineage = {
         **run["parent_hashes"],
-        "prepared_model_train": resolved["model_train_sha256"],
+        f"prepared_{args.training_role}": resolved["model_train_sha256"],
         "prepared_val_stop": resolved["val_stop_sha256"],
     }
     train_dataset = _dataset(
         train_arrays,
-        split="model_train",
+        split=args.training_role,
         run=run,
         mean=mean,
         standard_deviation=standard_deviation,
@@ -347,6 +385,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         offline_slot_queries=torch.from_numpy(queries),
         uncertainty_head=run["uncertainty_head"],
         dropout=float(run["dropout"]),
+        residual_hidden_width=run.get("residual_hidden_width"),
+        zero_evidence_control=(
+            run.get("control_variant") == "ZERO_EVIDENCE"
+        ),
     )
     head = load_frozen_token_head(
         checkpoint_path=args.target_checkpoint,
@@ -605,7 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else selected["gradnorm_state"]["current"]
             ),
         )
-        inference_manifest = publish_predictor_inference_cache(
+        publish_predictor_inference_cache(
             output_dir=args.val_design_output,
             split="val_design",
             pipeline_seed=config.seed,
@@ -630,19 +672,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             ],
             source_snapshot=source_snapshot(REPO_ROOT),
         )
-        calibration = calibrate_predictor_inference_cache(
-            manifest_path=(
-                args.val_design_output / "predictor_outputs_manifest.json"
+        design_metrics = bind_source(
+            with_content_hash(
+                {
+                    "contract": "retb_predictor_val_design_metrics_v1",
+                    "schema_version": 1,
+                    "run_id": run["run_id"],
+                    "run_sha256": run["content_hash"],
+                    "pipeline_seed": int(run["pipeline_seed"]),
+                    "expert_id": run["expert_id"],
+                    "val_design_accuracy": float(
+                        inference["metrics"]["accuracy"]
+                    ),
+                    "cross_entropy": float(
+                        inference["metrics"]["cross_entropy"]
+                    ),
+                    "normalized_token_error": float(
+                        inference["metrics"]["normalized_token_rmse"]
+                    ),
+                    "objective": float(
+                        inference["metrics"]["objective"]
+                    ),
+                    "parameter_count": int(
+                        capacity["selected_predictor"]["parameter_count"]
+                    ),
+                    "capacity_report_sha256": capacity["content_hash"],
+                    "predictor_registration_sha256": registration[
+                        "content_hash"
+                    ],
+                    "scientific_underperformance_blocks_continuation": False,
+                }
             ),
-            expected_pipeline_seed=config.seed,
-            expected_registration_sha256=registration["content_hash"],
-            target_tokens=design_dataset.target_tokens,
-            identity_order_sha256=inference_manifest[
-                "identity_order_sha256"
-            ],
             source_snapshot=source_snapshot(REPO_ROOT),
         )
-        write_immutable_json(args.calibration_output, calibration)
+        write_immutable_json(
+            args.val_design_output / "val_design_metrics.json",
+            design_metrics,
+        )
     print(json.dumps(registration, indent=2, sort_keys=True))
     return 0
 

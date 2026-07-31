@@ -40,7 +40,10 @@ def validate_campaign_source(
         "status_hash_policy": expected["status_hash_policy"],
     }
     if actual != expected:
-        raise ValueError("active repository source snapshot differs from campaign spec")
+        raise ValueError(
+            "active repository source snapshot differs from campaign spec: "
+            f"expected={expected!r}, actual={actual!r}"
+        )
     return actual
 
 

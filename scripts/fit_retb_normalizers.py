@@ -17,8 +17,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
+    bind_source,
     canonical_sha256,
     load_hashed_json,
+    with_content_hash,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
@@ -80,8 +82,13 @@ def _stage_a_contracts(root: Path) -> dict[str, dict[str, Any]]:
     return {name: load_hashed_json(path) for name, path in names.items()}
 
 
-def _offline_selected(root: Path, campaign: Mapping[str, Any]):
-    cache = root / "inputs" / "offline" / "model_train"
+def _offline_selected(
+    root: Path,
+    campaign: Mapping[str, Any],
+    *,
+    logical_role: str,
+):
+    cache = root / "inputs" / "offline" / logical_role
     metadata = load_hashed_json(
         cache / "offline_input_manifest.json",
         expected_contract="retb_offline_input_cache_v1",
@@ -111,13 +118,14 @@ def _hlt_selected(
     *,
     campaign: Mapping[str, Any],
     profile_sha256: str,
+    logical_role: str,
 ):
     cache_roots = [
         (
             root
             / "inputs"
             / "hlt_v3"
-            / "model_train"
+            / logical_role
             / f"replica_{replica}"
             / "R_MULTI"
             / "D_NOMINAL"
@@ -133,7 +141,7 @@ def _hlt_selected(
         arrays, metadata = load_hlt_v3_cache(
             cache,
             expected_profile_contract_sha256=profile_sha256,
-            expected_logical_role="model_train",
+            expected_logical_role=logical_role,
             expected_replica_id=replica,
             expected_realization_policy="R_MULTI",
         )
@@ -253,6 +261,23 @@ def _parser() -> argparse.ArgumentParser:
         help="Compatibility assertion; must equal the published inherited contract.",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        help=(
+            "Optional immutable normalization root. Stage M uses a "
+            "seed-scoped root so concurrent seed rows cannot race."
+        ),
+    )
+    parser.add_argument(
+        "--population",
+        choices=("500k", "scale"),
+        default="500k",
+        help=(
+            "500k fits the Stage-A model_train statistics; scale fits the "
+            "locked Stage-M scale_train statistics."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -264,7 +289,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     result: dict[str, Any] = {
         "dry_run": bool(args.dry_run),
-        "fit_domains": ["offline_500k", "shared_hlt_500k"],
+        "fit_domains": (
+            ["offline_500k", "shared_hlt_500k"]
+            if args.population == "500k"
+            else ["offline_scale", "shared_hlt_scale"]
+        ),
         "fit_execution": "inherited_deterministic_numeric_estimator",
     }
     if args.dry_run and not (
@@ -288,17 +317,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     snapshot = source_snapshot(REPO_ROOT)
+    training_role = (
+        "model_train" if args.population == "500k" else "scale_train"
+    )
+    offline_domain = (
+        "offline_500k" if args.population == "500k" else "offline_scale"
+    )
+    hlt_domain = (
+        "shared_hlt_500k"
+        if args.population == "500k"
+        else "shared_hlt_scale"
+    )
     offline_tokens, offline_mask, offline_ids, offline_meta = (
-        _offline_selected(args.campaign_root, campaign)
+        _offline_selected(
+            args.campaign_root,
+            campaign,
+            logical_role=training_role,
+        )
     )
     offline_relation = _fit_relation(
         offline_tokens,
         offline_mask,
         offline_ids,
         contracts=contracts,
-        identity_manifest_sha=offline_meta["identity_manifest_sha256"],
+        identity_manifest_sha=contracts["normalizer_population_registry"][
+            "recipes"
+        ][offline_domain]["identity_manifest_sha256"],
         view_hashes=[offline_meta["npz_sha256"]],
-        logical_domain="offline_500k",
+        logical_domain=offline_domain,
         campaign=campaign,
         snapshot=snapshot,
     )
@@ -307,7 +353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         / "inputs"
         / "region_tree"
         / "offline"
-        / "model_train_exclusive_ca_v1",
+        / f"{training_role}_exclusive_ca_v1",
         offline_ids,
     )
     offline_region_raw = fit_region_normalization(
@@ -324,10 +370,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     offline_region = bind_fitted_region_normalizer(
         offline_region_raw,
         relation_normalizer=offline_relation,
-        logical_domain="offline_500k",
+        logical_domain=offline_domain,
         population_recipe=contracts["normalizer_population_registry"][
             "recipes"
-        ]["offline_500k"],
+        ][offline_domain],
         tree_manifest_sha256s=[offline_tree_manifest],
         campaign_spec_sha256=campaign["content_hash"],
         source_snapshot=snapshot,
@@ -343,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.campaign_root,
         campaign=campaign,
         profile_sha256=contracts["hlt_v3_profile"]["content_hash"],
+        logical_role=training_role,
     )
     hlt_view_hashes = [
         row["array_content_sha256"] for row in hlt_metadata
@@ -352,9 +399,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         hlt_mask,
         hlt_ids,
         contracts=contracts,
-        identity_manifest_sha=hlt_metadata[0]["identity_manifest_sha256"],
+        identity_manifest_sha=contracts["normalizer_population_registry"][
+            "recipes"
+        ][hlt_domain]["identity_manifest_sha256"],
         view_hashes=hlt_view_hashes,
-        logical_domain="shared_hlt_500k",
+        logical_domain=hlt_domain,
         campaign=campaign,
         snapshot=snapshot,
     )
@@ -366,7 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             / "inputs"
             / "region_tree"
             / "hlt"
-            / f"model_train_r{replica}_exclusive_ca_v1",
+            / f"{training_role}_r{replica}_exclusive_ca_v1",
             selected_base_ids,
         )
         trees_by_replica.append(trees)
@@ -390,50 +439,109 @@ def main(argv: Sequence[str] | None = None) -> int:
     hlt_region = bind_fitted_region_normalizer(
         hlt_region_raw,
         relation_normalizer=hlt_relation,
-        logical_domain="shared_hlt_500k",
+        logical_domain=hlt_domain,
         population_recipe=contracts["normalizer_population_registry"][
             "recipes"
-        ]["shared_hlt_500k"],
+        ][hlt_domain],
         tree_manifest_sha256s=tree_manifest_hashes,
         campaign_spec_sha256=campaign["content_hash"],
         source_snapshot=snapshot,
     )
-    output_root = args.campaign_root / "inputs" / "normalization"
+    output_root = (
+        args.campaign_root / "inputs" / "normalization"
+        if args.output_root is None
+        else args.output_root
+    )
     artifacts = {
-        "offline_500k_relation": offline_relation,
-        "offline_500k_region": offline_region,
-        "shared_hlt_500k_relation": hlt_relation,
-        "shared_hlt_500k_region": hlt_region,
+        f"{offline_domain}_relation": offline_relation,
+        f"{offline_domain}_region": offline_region,
+        f"{hlt_domain}_relation": hlt_relation,
+        f"{hlt_domain}_region": hlt_region,
     }
+    offline_directory = (
+        "offline_500k" if args.population == "500k" else "offline_scale"
+    )
+    hlt_directory = (
+        "hlt_shared_500k"
+        if args.population == "500k"
+        else "hlt_shared_scale"
+    )
     paths = {
-        "offline_500k_relation": output_root / "offline_500k" / "relation.json",
-        "offline_500k_region": output_root / "offline_500k" / "region.json",
-        "shared_hlt_500k_relation": (
-            output_root / "hlt_shared_500k" / "relation.json"
+        f"{offline_domain}_relation": (
+            output_root / offline_directory / "relation.json"
         ),
-        "shared_hlt_500k_region": (
-            output_root / "hlt_shared_500k" / "region.json"
+        f"{offline_domain}_region": (
+            output_root / offline_directory / "region.json"
+        ),
+        f"{hlt_domain}_relation": (
+            output_root / hlt_directory / "relation.json"
+        ),
+        f"{hlt_domain}_region": (
+            output_root / hlt_directory / "region.json"
         ),
     }
     publications = {
         name: _publish_or_validate(paths[name], artifact)
         for name, artifact in artifacts.items()
     }
-    bundle = build_stage_a_normalizer_bundle(
-        campaign_spec_sha256=campaign["content_hash"],
-        stage_a_contract_bundle_sha256=contracts[
-            "stage_a_contract_bundle"
-        ]["content_hash"],
-        population_registry=contracts["normalizer_population_registry"],
-        offline_relation=offline_relation,
-        offline_region=offline_region,
-        shared_hlt_relation=hlt_relation,
-        shared_hlt_region=hlt_region,
-        source_snapshot=snapshot,
-    )
-    bundle_path = args.output or (
-        output_root / "stage_a_normalizer_bundle.json"
-    )
+    if args.population == "500k":
+        bundle = build_stage_a_normalizer_bundle(
+            campaign_spec_sha256=campaign["content_hash"],
+            stage_a_contract_bundle_sha256=contracts[
+                "stage_a_contract_bundle"
+            ]["content_hash"],
+            population_registry=contracts[
+                "normalizer_population_registry"
+            ],
+            offline_relation=offline_relation,
+            offline_region=offline_region,
+            shared_hlt_relation=hlt_relation,
+            shared_hlt_region=hlt_region,
+            source_snapshot=snapshot,
+        )
+        bundle_path = args.output or (
+            output_root / "stage_a_normalizer_bundle.json"
+        )
+    else:
+        bundle = bind_source(
+            with_content_hash(
+                {
+                    "contract": "retb_scale_normalizer_bundle_v1",
+                    "schema_version": 1,
+                    "training_population": "scale_train",
+                    "campaign_spec_sha256": campaign["content_hash"],
+                    "stage_a_contract_bundle_sha256": contracts[
+                        "stage_a_contract_bundle"
+                    ]["content_hash"],
+                    "population_registry_sha256": contracts[
+                        "normalizer_population_registry"
+                    ]["content_hash"],
+                    "scale_train_manifest_sha256": campaign[
+                        "parent_artifact_hashes"
+                    ]["scale_train_manifest"],
+                    "offline_cache_identity_parent_sha256": offline_meta[
+                        "identity_manifest_sha256"
+                    ],
+                    "artifact_hashes": {
+                        "offline_relation": offline_relation[
+                            "content_hash"
+                        ],
+                        "offline_region": offline_region["content_hash"],
+                        "shared_hlt_relation": hlt_relation[
+                            "content_hash"
+                        ],
+                        "shared_hlt_region": hlt_region["content_hash"],
+                    },
+                    "replica_ids": [0, 1, 2, 3],
+                    "labels_consumed": False,
+                    "model_train_statistics_reused": False,
+                }
+            ),
+            source_snapshot=snapshot,
+        )
+        bundle_path = args.output or (
+            output_root / "scale_normalizer_bundle.json"
+        )
     publications["normalizer_bundle"] = write_immutable_json(
         bundle_path, bundle
     )

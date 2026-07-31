@@ -25,3 +25,15 @@ if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then
   arguments+=(--dry-run)
 fi
 python scripts/build_retb_step8_contracts.py "${arguments[@]}"
+if [[ "${RETB_DRY_RUN:-0}" != "1" ]]; then
+  python scripts/attest_retb_direct_node_completion.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --node-id step8_target_cache_contracts \
+    --output-artifact "${CAMPAIGN_ROOT}/registry/retb_step8_target_cache_bundle.json" >/dev/null
+  python scripts/produce_retb_downstream_manifest_plans.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step8_target_cache_contracts >/dev/null
+  python scripts/materialize_retb_downstream_manifests.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step8_target_cache_contracts >/dev/null
+fi

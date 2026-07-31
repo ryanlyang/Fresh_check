@@ -379,7 +379,8 @@ def infer_native_hlt_expert_replica(
     precision = _precision(resolved)
     model.to(resolved)
     model.eval()
-    token_rows, logit_rows, labels, identities = [], [], [], []
+    token_rows, logit_rows, particle_rows = [], [], []
+    mask_rows, labels, identities = [], [], []
     with module.no_grad():
         for start in range(0, len(dataset), int(batch_size)):
             rows = [
@@ -393,13 +394,40 @@ def infer_native_hlt_expert_replica(
                 enabled=precision["enabled"],
             ):
                 output = model(return_details=True, **_model_inputs(batch))
+            particle_states = output.get("particle_states")
+            if particle_states is None:
+                # Lightweight test doubles may expose only tokens/logits.  The
+                # production RETB expert always exposes its block-8 particle
+                # tap; retain a deterministic feature-derived fallback solely
+                # for miniature interface validation.
+                if getattr(
+                    getattr(model, "particle_encoder", None),
+                    "expert_id",
+                    None,
+                ) is not None:
+                    raise RuntimeError(
+                        "native RETB expert omitted block-8 particle states"
+                    )
+                particle_states = batch["features"].transpose(1, 2).float()
+                width = int(particle_states.shape[-1])
+                particle_states = module.nn.functional.pad(
+                    particle_states,
+                    (0, max(0, 128 - width)),
+                )[..., :128]
             if not bool(
                 module.isfinite(output["tokens"]).all()
                 and module.isfinite(output["logits"]).all()
+                and module.isfinite(particle_states).all()
             ):
                 raise FloatingPointError("native HLT inference is nonfinite")
             token_rows.append(output["tokens"].float().cpu().numpy())
             logit_rows.append(output["logits"].float().cpu().numpy())
+            particle_rows.append(
+                particle_states.float().cpu().numpy()
+            )
+            mask_rows.append(
+                batch["mask"][:, 0].bool().cpu().numpy()
+            )
             labels.append(batch["labels"].cpu().numpy())
             identities.extend(batch["event_identities"])
     if tuple(identities) != dataset.identities:
@@ -410,6 +438,10 @@ def infer_native_hlt_expert_replica(
         "labels": np.concatenate(labels).astype(np.int64, copy=False),
         "tokens": np.concatenate(token_rows).astype(np.float32, copy=False),
         "logits": np.concatenate(logit_rows).astype(np.float32, copy=False),
+        "particle_states": np.concatenate(particle_rows).astype(
+            np.float32, copy=False
+        ),
+        "particle_mask": np.concatenate(mask_rows).astype(bool, copy=False),
     }
 
 
@@ -727,7 +759,8 @@ def train_native_hlt_expert(
     train_dataset = getattr(train_loader, "dataset", None)
     val_dataset = getattr(val_stop_loader, "dataset", None)
     if (
-        getattr(train_dataset, "logical_role", None) != "model_train"
+        getattr(train_dataset, "logical_role", None)
+        not in {"model_train", "scale_train"}
         or getattr(val_dataset, "logical_role", None) != "val_stop"
         or getattr(train_dataset, "realization_policy", None)
         != config.realization_policy

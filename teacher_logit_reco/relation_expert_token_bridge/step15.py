@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v7"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v12"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 12,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
@@ -65,14 +65,28 @@ def build_step15_preflight_report(
                 "negative_control_or_scale_results_continue": True,
                 "all_shortlisted_graph_seed_rows_required": True,
                 "sealed_stage_n_parent_completeness_revalidated": True,
+                "stage_n_parallel_evidence_join_revalidated": True,
                 "final_test_evaluation_exactly_once": True,
                 "final_test_result_cannot_replace_finalist": True,
                 "monitoring_and_ledger_present": True,
                 "node_execution_registry_present": True,
-                "automatic_manifest_producer_coverage_complete": True,
+                "manifest_producer_registration_coverage_complete": True,
+                "automatic_manifest_producer_invocation_audit_required": True,
+                "execution_complete_plan_producer_audit_required": True,
+                "shared_hook_is_not_plan_factory_evidence": True,
+                "synthetic_dag_is_not_production_readiness_evidence": True,
+                "all_48_manifest_targets_require_genuine_execution": True,
+                "all_35_nonbootstrap_targets_require_plan_factories": True,
+                "post_completion_manifest_materialization_required": True,
+                "missing_manifest_plan_fails_closed": True,
+                "negative_scientific_results_do_not_gate_continuation": True,
                 "performance_based_termination_disabled": True,
                 "provenance_failures_block_dependents": True,
                 "negative_campaign_reaches_final_report": True,
+                "local_A_through_N_operational_validation_required": True,
+                "real_tigris_smoke_evidence_required": True,
+                "authenticated_production_dry_run_required": True,
+                "full_submission_authorization_source_bound": True,
             },
             "authoritative_tigris_smoke_required_before_production": True,
         }),

@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.train_retb_native_hlt_expert import _labels, _mapping  # noqa: E402
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     load_hashed_json,
+    write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
     load_hlt_v3_cache,
@@ -39,6 +40,9 @@ from teacher_logit_reco.relation_expert_token_bridge.step6 import (  # noqa: E40
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
+)
+from teacher_logit_reco.relational_part.capacity import (  # noqa: E402
+    select_wide_widths,
 )
 
 import torch  # noqa: E402
@@ -159,7 +163,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         else None
     )
     if control == "H_WIDE" and capacity is None:
-        raise ValueError("H_WIDE requires --wide-capacity-artifact")
+        capacity = select_wide_widths()
+    if control == "H_WIDE":
+        write_immutable_json(output / "locked_wide_capacity.json", capacity)
     torch.manual_seed(int(run["seed"]))
     model = build_hlt_matched_control_model(
         control,
@@ -187,6 +193,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_registry_sha256=registry_sha,
         lineage_hashes={
             "campaign_spec": campaign["content_hash"],
+            **(
+                {"wide_capacity": capacity["content_hash"]}
+                if control == "H_WIDE"
+                else {}
+            ),
             **{
                 f"model_train_hlt_replica_{key}": value["content_hash"]
                 for key, value in train_metadata.items()

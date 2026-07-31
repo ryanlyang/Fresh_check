@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     bind_source,
+    canonical_sha256,
     load_hashed_json,
     write_immutable_json,
 )
@@ -51,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     required = {
         "metric_artifact_paths",
         "predictor_bundle_lock_sha256",
-        "label_manifest_sha256",
+        "label_manifest_hashes_by_seed",
     }
     if set(configuration) != required:
         raise ValueError("J4 selector configuration fields differ")
@@ -70,7 +71,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact.get("source") != campaign.get("source")
             or artifact.get("split") != "val_design"
             or artifact.get("label_manifest_sha256")
-            != configuration["label_manifest_sha256"]
+            != configuration["label_manifest_hashes_by_seed"].get(
+                str(artifact.get("pipeline_seed")),
+                configuration["label_manifest_hashes_by_seed"].get(
+                    artifact.get("pipeline_seed")
+                ),
+            )
         ):
             raise ValueError("J4 selector metric lineage differs")
         rows.append(
@@ -96,9 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             predictor_bundle_lock_sha256=configuration[
                 "predictor_bundle_lock_sha256"
             ],
-            label_manifest_sha256=configuration[
-                "label_manifest_sha256"
-            ],
+            label_manifest_sha256=canonical_sha256(
+                configuration["label_manifest_hashes_by_seed"]
+            ),
         ),
         source_snapshot=source_snapshot(REPO_ROOT),
     )

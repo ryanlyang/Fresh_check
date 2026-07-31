@@ -200,6 +200,10 @@ class RetbParticleEncoder(torch.nn.Module if torch is not None else object):
         self.dual_base4_capacity_control = bool(dual_base4_capacity_control)
         self.activation_checkpointing = bool(activation_checkpointing)
         self.particle_dropout = float(particle_dropout)
+        # Evaluation-only semantic controls are intentionally excluded from
+        # the state dictionary.  They can be enabled only after a checkpoint
+        # has been loaded and never alter learned parameters.
+        self._semantic_relation_transform = "active"
         if self.particle_dropout not in {0.0, 0.1}:
             raise ValueError("particle dropout must be a registered 0.0 or 0.1")
         if self.dual_base4_capacity_control and self.relation_family is not None:
@@ -354,7 +358,40 @@ class RetbParticleEncoder(torch.nn.Module if torch is not None else object):
             region_trees,
             return_details=True,
         )
-        return details["base4"], details["encoded"][self.relation_family]
+        relation = details["encoded"][self.relation_family]
+        if self._semantic_relation_transform == "zero":
+            relation = _require_torch().zeros_like(relation)
+        elif self._semantic_relation_transform == "within_jet_cyclic":
+            transformed = relation.clone()
+            valid = mask[:, 0].bool()
+            for batch_index in range(int(relation.shape[0])):
+                indices = valid[batch_index].nonzero(
+                    as_tuple=False
+                ).flatten()
+                if int(indices.numel()) < 2:
+                    continue
+                # Independent endpoint cycles preserve the valid-pair support
+                # while breaking the event's learned relation assignment.
+                source = indices.roll(1)
+                destination = indices.roll(-1)
+                transformed[batch_index][
+                    :, indices[:, None], indices[None, :]
+                ] = relation[batch_index][
+                    :, source[:, None], destination[None, :]
+                ]
+            relation = transformed
+        elif self._semantic_relation_transform != "active":
+            raise RuntimeError("unknown evaluation relation transform")
+        return details["base4"], relation
+
+    def set_semantic_relation_transform(self, mode: str) -> None:
+        """Set a parameter-free evaluation-only relation perturbation."""
+
+        if mode not in {"active", "zero", "within_jet_cyclic"}:
+            raise ValueError("semantic relation transform is unregistered")
+        if self.relation_family is None and mode != "active":
+            raise ValueError("BASE4 has no relation family to perturb")
+        self._semantic_relation_transform = str(mode)
 
     def _trim(
         self,

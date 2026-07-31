@@ -18,9 +18,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
+    bind_source,
     load_hashed_json,
     with_content_hash,
     write_immutable_json,
+)
+from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
+    source_snapshot,
 )
 from teacher_logit_reco.relation_expert_token_bridge.expert_model import (  # noqa: E402
     RetbExpertModel,
@@ -48,6 +52,9 @@ from teacher_logit_reco.relation_expert_token_bridge.token_shape_registry import
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
+)
+from scripts.materialize_retb_stage_d_offline_targets import (  # noqa: E402
+    TARGET_INDEX_CONTRACT,
 )
 from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard  # noqa: E402
 
@@ -78,7 +85,14 @@ def _sha256(path: Path) -> str:
 def _publish_output(path: Path, payload: Mapping[str, Any]) -> str:
     arrays = {
         name: np.asarray(payload[name])
-        for name in ("identities", "labels", "tokens", "logits")
+        for name in (
+            "identities",
+            "labels",
+            "tokens",
+            "logits",
+            "particle_states",
+            "particle_mask",
+        )
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -95,8 +109,8 @@ def _publish_output(path: Path, payload: Mapping[str, Any]) -> str:
 
 def _labels(path: Path) -> tuple[np.ndarray, tuple[str, ...]]:
     with np.load(path, allow_pickle=False) as payload:
-        if set(payload.files) != {"identities", "labels"}:
-            raise ValueError("native HLT labels NPZ fields differ")
+        if not {"identities", "labels"}.issubset(payload.files):
+            raise ValueError("native HLT labels NPZ lacks identity/label fields")
         identities = tuple(str(value) for value in payload["identities"].tolist())
         labels = np.asarray(payload["labels"], dtype=np.int64)
     if (
@@ -196,11 +210,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--confirmation-registry", type=Path)
     parser.add_argument("--train-cache", action="append", default=[])
     parser.add_argument("--val-stop-cache", action="append", default=[])
+    parser.add_argument("--val-design-cache", action="append", default=[])
     parser.add_argument("--train-labels", required=True, type=Path)
     parser.add_argument("--val-stop-labels", required=True, type=Path)
+    parser.add_argument("--val-design-labels", type=Path)
     parser.add_argument("--uniform-shapes", type=Path)
     parser.add_argument("--heterogeneous-shapes", type=Path)
     parser.add_argument("--offline-registration", required=True, type=Path)
@@ -280,32 +301,75 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("offline/native expert token shapes differ")
     train_paths = _mapping(args.train_cache, argument="--train-cache")
     val_paths = _mapping(args.val_stop_cache, argument="--val-stop-cache")
+    design_paths = _mapping(
+        args.val_design_cache, argument="--val-design-cache"
+    )
     train_arrays, train_metadata = {}, {}
     val_arrays, val_metadata = {}, {}
+    design_arrays, design_metadata = {}, {}
     for replica, path in train_paths.items():
         train_arrays[replica], train_metadata[replica] = load_hlt_v3_cache(path)
     for replica, path in val_paths.items():
         val_arrays[replica], val_metadata[replica] = load_hlt_v3_cache(path)
+    for replica, path in design_paths.items():
+        design_arrays[replica], design_metadata[replica] = load_hlt_v3_cache(
+            path
+        )
     train_labels, train_ids = _labels(args.train_labels)
     val_labels, val_ids = _labels(args.val_stop_labels)
+    if (args.val_design_labels is None) != (not design_paths):
+        raise ValueError(
+            "val_design labels and cache must be provided together"
+        )
+    design_labels, design_ids = (
+        (None, None)
+        if args.val_design_labels is None
+        else _labels(args.val_design_labels)
+    )
     target_tokens, target_logits = _targets(
         args.offline_train_targets, train_ids
     )
     mode = configuration["mode"]
     if (mode == "HE_DUAL_OBJECTIVE") != (target_tokens is not None):
         raise ValueError("native HLT target availability differs from evidence mode")
+    if args.offline_train_targets is not None:
+        target_index = load_hashed_json(
+            args.campaign_root
+            / "inputs"
+            / "stage_d_offline_targets"
+            / "index.json",
+            expected_contract=TARGET_INDEX_CONTRACT,
+        )
+        relative = args.offline_train_targets.resolve().relative_to(
+            args.campaign_root.resolve()
+        ).as_posix()
+        matching = [
+            row
+            for row in target_index["records"]
+            if row["relative_path"] == relative
+        ]
+        if (
+            target_index.get("source") != campaign.get("source")
+            or len(matching) != 1
+            or matching[0]["file_sha256"]
+            != _sha256(args.offline_train_targets)
+            or matching[0]["shape_alias"] != configuration["shape_id"]
+            or matching[0]["expert_id"] != configuration["expert_id"]
+            or int(matching[0]["pipeline_seed"]) != int(run["seed"])
+        ):
+            raise ValueError("native HLT offline-target index lineage differs")
     train_dataset = NativeHLTExpertDataset(
         replica_arrays=train_arrays,
         replica_metadata=train_metadata,
         labels=train_labels,
         identities=train_ids,
-        logical_role="model_train",
+        logical_role=args.training_role,
         realization_policy=configuration["realization_policy"],
         offline_target_tokens=target_tokens,
         offline_target_logits=target_logits,
         region_trees_by_replica=_trees(
             args.region_tree_root,
-            logical_role="model_train",
+            logical_role=args.training_role,
             replicas=sorted(train_paths),
             identities=train_ids,
         ),
@@ -323,6 +387,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             replicas=sorted(val_paths),
             identities=val_ids,
         ),
+    )
+    design_dataset = (
+        None
+        if design_labels is None
+        else NativeHLTExpertDataset(
+            replica_arrays=design_arrays,
+            replica_metadata=design_metadata,
+            labels=design_labels,
+            identities=design_ids,
+            logical_role="val_design",
+            realization_policy="R_FIXED",
+            region_trees_by_replica=_trees(
+                args.region_tree_root,
+                logical_role="val_design",
+                replicas=sorted(design_paths),
+                identities=design_ids,
+            ),
+        )
     )
     relation_normalization = (
         load_hashed_json(args.relation_normalization)
@@ -380,11 +462,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         return 0
     authorize_dataset_access(
-        worker_role="training_worker", requested_resource="model_train"
+        worker_role=(
+            "scale_training_worker"
+            if args.training_role == "scale_train"
+            else "training_worker"
+        ),
+        requested_resource=args.training_role,
     )
     authorize_dataset_access(
         worker_role="training_worker", requested_resource="val_stop"
     )
+    if design_dataset is not None:
+        authorize_dataset_access(
+            worker_role="design_worker", requested_resource="val_design"
+        )
     torch.manual_seed(int(run["seed"]))
     weaver = importlib.import_module("weaver.nn.model.ParticleTransformer")
     encoder = RetbParticleEncoder(
@@ -424,15 +515,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run_registry": registry_sha,
         "offline_expert_checkpoint": offline_registration["checkpoint_sha256"],
         "offline_expert_registration": offline_registration["content_hash"],
-        "model_train_labels": _sha256(args.train_labels),
+        f"{args.training_role}_labels": _sha256(args.train_labels),
         "val_stop_labels": _sha256(args.val_stop_labels),
         **{
-            f"model_train_hlt_replica_{replica}": metadata["content_hash"]
+            f"{args.training_role}_hlt_replica_{replica}": metadata[
+                "content_hash"
+            ]
             for replica, metadata in train_metadata.items()
         },
         **{
             f"val_stop_hlt_replica_{replica}": metadata["content_hash"]
             for replica, metadata in val_metadata.items()
+        },
+        **{
+            f"val_design_hlt_replica_{replica}": metadata["content_hash"]
+            for replica, metadata in design_metadata.items()
         },
     }
     if relation_normalization is not None:
@@ -479,8 +576,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     output_files = {}
     for split, dataset in (
-        ("model_train", train_dataset),
+        (args.training_role, train_dataset),
         ("val_stop", val_dataset),
+        *(()
+          if design_dataset is None
+          else (("val_design", design_dataset),)),
     ):
         for replica in sorted(dataset.replicas):
             prediction = infer_native_hlt_expert_replica(
@@ -498,10 +598,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "token_shape": list(prediction["tokens"].shape),
                 "logit_shape": list(prediction["logits"].shape),
             }
-    output_manifest = with_content_hash(
-        {
-            "contract": "retb_native_hlt_expert_outputs_v1",
-            "schema_version": 1,
+    output_manifest = bind_source(
+        with_content_hash(
+            {
+            "contract": (
+                "retb_native_hlt_expert_outputs_v4"
+                if args.training_role == "scale_train"
+                else "retb_native_hlt_expert_outputs_v3"
+            ),
+            "schema_version": 4 if args.training_role == "scale_train" else 3,
             "run_id": args.run_id,
             "expert_id": expert,
             "expert_registration_sha256": registration["content_hash"],
@@ -509,9 +614,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "shape_alias": configuration["shape_id"],
             "resolved_token_shape": [token_count, token_dimension],
             "realization_policy": configuration["realization_policy"],
+            **(
+                {"training_population": "scale_train"}
+                if args.training_role == "scale_train"
+                else {}
+            ),
             "files": output_files,
             "offline_targets_persisted": False,
-        }
+            "val_design_inference_after_checkpoint_lock": (
+                design_dataset is not None
+            ),
+            }
+        ),
+        source_snapshot=source_snapshot(REPO_ROOT),
     )
     write_immutable_json(output / "native_output_manifest.json", output_manifest)
     print(json.dumps(registration, indent=2, sort_keys=True))

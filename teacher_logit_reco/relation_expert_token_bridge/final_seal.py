@@ -24,7 +24,7 @@ from .stage_n_selection import LOCKED_SCALE_FINALISTS_CONTRACT
 
 POSTLOCK_ORACLE_TARGET_CONTRACT = "retb_postlock_oracle_target_v1"
 FINAL_TEST_INPUT_PREPARATION_CONTRACT = (
-    "retb_prelock_final_test_input_preparation_v1"
+    "retb_prelock_final_test_input_preparation_v2"
 )
 FINALIST_CONTROLS_CONTRACT = "retb_scale_finalist_controls_v1"
 FINAL_TEST_EXECUTION_LOCK_CONTRACT = (
@@ -33,7 +33,7 @@ FINAL_TEST_EXECUTION_LOCK_CONTRACT = (
 FINAL_TEST_EXECUTION_CLAIM_CONTRACT = (
     "retb_final_test_execution_claim_v1"
 )
-FINAL_TEST_EVALUATION_CONTRACT = "retb_sealed_final_test_evaluation_v2"
+FINAL_TEST_EVALUATION_CONTRACT = "retb_sealed_final_test_evaluation_v3"
 
 POSTLOCK_TARGET_PARENT_KEYS = frozenset(
     {
@@ -85,7 +85,7 @@ def build_prelock_final_test_inputs(
     return with_content_hash(
         {
             "contract": FINAL_TEST_INPUT_PREPARATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "parents": {
                 "campaign_spec": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
@@ -109,6 +109,7 @@ def build_prelock_final_test_inputs(
                 "deterministically_degraded_HLT_input_arrays",
                 "relation_and_REGION_input_sidecars",
                 "identity_and_source_manifests",
+                "shared_label_free_HLT_inference_payloads",
             ],
             "checkpoint_loading_allowed": False,
             "labels_joined_to_model_output": False,
@@ -712,11 +713,6 @@ def build_sealed_final_test_evaluation(
         or len(prediction_rows) != len(expected_rows)
         or {row["target_identity_order_sha256"] for row in final_targets}
         != {final_identity_hash}
-        or label_artifact_sha
-        not in {
-            row["target_cache_manifest_sha256"]
-            for row in final_targets
-        }
     ):
         raise ValueError("final-test identity/label population differs")
     checked, logits_by_row, metrics = {}, {}, {}
@@ -830,12 +826,13 @@ def build_sealed_final_test_evaluation(
         with_content_hash(
             {
                 "contract": FINAL_TEST_EVALUATION_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 3,
                 "final_test_execution_lock_sha256": lock_sha,
                 "final_test_execution_claim_sha256": claim_sha,
                 "identity_count": len(ids),
                 "identity_order_sha256": canonical_sha256(list(ids)),
                 "final_labels_artifact_sha256": label_artifact_sha,
+                "final_labels_joined_only_after_execution_claim": True,
                 "balanced_count_per_class": int(
                     np.bincount(truth, minlength=10)[0]
                 ),

@@ -9,4 +9,9 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/retb_common.sh"
 retb_setup
-python scripts/build_retb_step6_contracts.py --campaign-root "${CAMPAIGN_ROOT}"
+python scripts/build_retb_step6_contracts.py \
+  --campaign-root "${CAMPAIGN_ROOT}" \
+  --shared-hlt-normalizer \
+  "${CAMPAIGN_ROOT}/inputs/normalization/hlt_shared_500k/relation.json"
+python scripts/materialize_retb_stage_d_offline_targets.py \
+  --campaign-root "${CAMPAIGN_ROOT}"

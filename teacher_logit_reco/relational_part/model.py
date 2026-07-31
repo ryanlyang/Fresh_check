@@ -254,11 +254,12 @@ class RelationalParticleTransformer(_ModuleBase):
         *,
         config: Mapping[str, Any] | None = None,
         weaver_module: Any | None = None,
+        allow_registered_capacity_config: bool = False,
     ) -> None:
         torch = require_torch()
         super().__init__()
         resolved = exact_rpt_base_config() if config is None else dict(config)
-        if resolved != RPT_BASE_CONFIG:
+        if resolved != RPT_BASE_CONFIG and not bool(allow_registered_capacity_config):
             raise ValueError("Step-2 RPT_BASE config must equal the locked base config")
         module = _import_weaver_module() if weaver_module is None else weaver_module
         transformer = getattr(module, "ParticleTransformer", None)

@@ -111,6 +111,10 @@ def _validate_cache_lineage(
             "val_design_identity_manifest",
             "val_design_fixed_view_cache",
         ),
+        "scale_train": (
+            "scale_train_identity_manifest",
+            "scale_train_R_MULTI_view_cache",
+        ),
     }
     identity_key, view_key = split_keys[split]
     expected = {
@@ -157,6 +161,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--run", required=True, type=Path)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--predictor-bundle-lock", required=True, type=Path)
     parser.add_argument("--graph-template", required=True, type=Path)
     parser.add_argument("--model-train-cache", required=True, type=Path)
@@ -171,10 +180,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
     )
-    run = load_hashed_json(
-        args.run, expected_contract=STAGE_J_RUN_CONTRACT
-    )
-    validate_materialized_stage_j_run(run)
+    run = load_hashed_json(args.run)
+    if run.get("contract") == STAGE_J_RUN_CONTRACT:
+        validate_materialized_stage_j_run(run)
+    elif (
+        run.get("contract") != "retb_scale_stage_j_run_v1"
+        or run.get("training_population") != "scale_train"
+        or args.training_role != "scale_train"
+    ):
+        raise ValueError("scale Stage-J run contract differs")
     lock = load_hashed_json(
         args.predictor_bundle_lock,
         expected_contract=PREDICTOR_BUNDLE_LOCK_CONTRACT,
@@ -202,7 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     train_manifest, train = load_joint_dataset_cache(
         args.model_train_cache,
-        expected_split="model_train",
+        expected_split=args.training_role,
         expected_source=campaign["source"],
     )
     stop_manifest, stop = load_joint_dataset_cache(
@@ -217,7 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _validate_graph_lineage(template=template, run=run)
     for split, manifest in (
-        ("model_train", train_manifest),
+        (args.training_role, train_manifest),
         ("val_stop", stop_manifest),
         ("val_design", design_manifest),
     ):
@@ -267,7 +281,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
     authorize_dataset_access(
-        worker_role="training_worker", requested_resource="model_train"
+        worker_role=(
+            "scale_training_worker"
+            if args.training_role == "scale_train"
+            else "training_worker"
+        ),
+        requested_resource=args.training_role,
     )
     authorize_dataset_access(
         worker_role="training_worker", requested_resource="val_stop"
@@ -302,7 +321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     lineage = {
         "graph_template": template["content_hash"],
-        "model_train_cache": train_manifest["content_hash"],
+        f"{args.training_role}_cache": train_manifest["content_hash"],
         "val_stop_cache": stop_manifest["content_hash"],
         "val_design_cache": design_manifest["content_hash"],
     }

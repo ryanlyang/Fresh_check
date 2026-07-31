@@ -33,6 +33,7 @@ from .step4 import (
 )
 from .step5 import (
     build_stage_c_run_registry,
+    resolve_expert_confirmation_training_run,
     resolve_stage_c_run,
     validate_stage_c_run_registry,
 )
@@ -47,11 +48,13 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v1"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v1"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v5"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v5"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
+    "offline_expert_confirmation",
+    "offline_fusion_cache",
     "offline_fusion_training",
     "native_hlt_expert_training",
     "native_hlt_fusion_training",
@@ -73,6 +76,7 @@ _STAGE_C_FUSION_SECTIONS = (
 _STAGE_D_EXPERT_SECTIONS = (
     "scratch_expert_rows",
     "encoder_screen_rows",
+    "bridge_parent_expert_rows",
 )
 
 
@@ -364,6 +368,11 @@ def _stage_b_records(
 
 
 def _fusion_cache(root: Path, *, domain: str, shape: str, seed: int, split: str) -> str:
+    filename = (
+        f"{split}_frozen_tokens.json"
+        if domain == "offline"
+        else f"{split}_native_hlt_tokens.json"
+    )
     return _path(
         root,
         "inputs",
@@ -372,8 +381,301 @@ def _fusion_cache(root: Path, *, domain: str, shape: str, seed: int, split: str)
         shape,
         f"seed_{seed}",
         split,
-        "manifest.json",
+        filename,
     )
+
+
+def _stage_c_expert_records(
+    *,
+    root: Path,
+    python: str,
+    registry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    output = []
+    for member in registry["expert_confirmation_rows"]:
+        run = resolve_expert_confirmation_training_run(
+            registry,
+            run_id=str(member["run_id"]),
+            _registry_validated=True,
+        )
+        run_id = str(run["run_id"])
+        seed = int(run["seed"])
+        config = run["configuration"]
+        run_root = (
+            root
+            / "runs"
+            / "stage_c"
+            / "offline_experts"
+            / run_id
+            / f"seed_{seed}"
+        )
+        argv = [
+            python,
+            "scripts/train_retb_offline_expert.py",
+            "--campaign-root",
+            str(root),
+            "--registry-stage",
+            "C",
+            "--run-id",
+            run_id,
+            "--train-npz",
+            _path(
+                root,
+                "inputs",
+                "offline",
+                "model_train",
+                "offline_inputs.npz",
+            ),
+            "--val-stop-npz",
+            _path(
+                root,
+                "inputs",
+                "offline",
+                "val_stop",
+                "offline_inputs.npz",
+            ),
+            "--relation-normalization",
+            _path(
+                root,
+                "inputs",
+                "normalization",
+                "offline_500k",
+                "relation.json",
+            ),
+            "--region-normalization",
+            _path(
+                root,
+                "inputs",
+                "normalization",
+                "offline_500k",
+                "region.json",
+            ),
+            "--region-tree-root",
+            _path(root, "inputs", "region_tree", "offline"),
+            "--resource-profile",
+            _path(root, "job_ledgers", "resource_probes", "gpu.json"),
+            "--output-dir",
+            str(run_root),
+        ]
+        output.append(
+            _record(
+                node_id="offline_expert_confirmation",
+                static_id=run_id,
+                stage="C",
+                component="OFFLINE_EXPERT_CONFIRMATION",
+                seed=seed,
+                run_id=run_id,
+                configuration=config,
+                registry_sha256=registry["content_hash"],
+                argv=argv,
+                expected_artifacts=[
+                    str(run_root / "checkpoint_registration.json"),
+                    str(run_root / "best_model_val.pt"),
+                ],
+                deferred_inputs=[
+                    _deferred(
+                        _path(
+                            root,
+                            "inputs",
+                            "offline",
+                            "model_train",
+                            "offline_input_manifest.json",
+                        ),
+                        contract="retb_offline_input_cache_v1",
+                        producer="offline_input_cache",
+                        role="model_train_features_and_labels",
+                    ),
+                    _deferred(
+                        _path(
+                            root,
+                            "inputs",
+                            "normalization",
+                            "stage_a_normalizer_bundle.json",
+                        ),
+                        contract="retb_stage_a_normalizer_bundle_v1",
+                        producer="normalizers_500k",
+                        role="offline_relation_and_REGION_normalizers",
+                    ),
+                ],
+                registry_memberships=run["registry_memberships"],
+            )
+        )
+    if len(output) != 147:
+        raise RuntimeError(
+            "Stage-C expert confirmation execution rows differ"
+        )
+    return output
+
+
+def _stage_c_cache_records(
+    *,
+    root: Path,
+    python: str,
+    registry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    lookup = {
+        (
+            str(row["configuration"]["shape_id"]),
+            int(row["seed"]),
+            str(row["configuration"]["expert_id"]),
+        ): str(row["run_id"])
+        for row in registry["expert_confirmation_rows"]
+    }
+    output = []
+    for shape_id in registry["uniform_shape_order"]:
+        for seed in registry["pipeline_seeds"]:
+            for split in ("model_train", "val_stop", "val_design"):
+                output_dir = (
+                    root
+                    / "inputs"
+                    / "fusion_cache"
+                    / "offline"
+                    / shape_id
+                    / f"seed_{seed}"
+                    / split
+                )
+                argv = [
+                    python,
+                    "scripts/build_retb_frozen_token_cache.py",
+                    "--campaign-root",
+                    str(root),
+                    "--split",
+                    split,
+                    "--pipeline-seed",
+                    str(seed),
+                    "--shape-id",
+                    shape_id,
+                    "--input-npz",
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        split,
+                        "offline_inputs.npz",
+                    ),
+                    "--input-manifest",
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        split,
+                        "offline_input_manifest.json",
+                    ),
+                    "--relation-normalization",
+                    _path(
+                        root,
+                        "inputs",
+                        "normalization",
+                        "offline_500k",
+                        "relation.json",
+                    ),
+                    "--region-normalization",
+                    _path(
+                        root,
+                        "inputs",
+                        "normalization",
+                        "offline_500k",
+                        "region.json",
+                    ),
+                    "--region-tree-root",
+                    _path(root, "inputs", "region_tree", "offline"),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+                parent_paths = []
+                for expert in registry["expert_order"]:
+                    run_id = lookup[(shape_id, int(seed), expert)]
+                    parent = (
+                        root
+                        / "runs"
+                        / "stage_c"
+                        / "offline_experts"
+                        / run_id
+                        / f"seed_{seed}"
+                    )
+                    registration = parent / "checkpoint_registration.json"
+                    checkpoint = parent / "best_model_val.pt"
+                    argv.extend(
+                        [
+                            "--expert-registration",
+                            f"{expert}={registration}",
+                            "--expert-checkpoint",
+                            f"{expert}={checkpoint}",
+                        ]
+                    )
+                    parent_paths.extend(
+                        [str(registration), str(checkpoint)]
+                    )
+                identity = f"offline_cache:{shape_id}:seed_{seed}:{split}"
+                output.append(
+                    _record(
+                        node_id="offline_fusion_cache",
+                        static_id=identity,
+                        stage="C",
+                        component="OFFLINE_FROZEN_TOKEN_CACHE",
+                        seed=int(seed),
+                        run_id=None,
+                        configuration={
+                            "shape_id": shape_id,
+                            "pipeline_seed": int(seed),
+                            "split": split,
+                            "expert_order": list(registry["expert_order"]),
+                            "expert_parent_paths": parent_paths,
+                        },
+                        registry_sha256=registry["content_hash"],
+                        argv=argv,
+                        expected_artifacts=[
+                            str(
+                                output_dir
+                                / f"{split}_frozen_tokens.json"
+                            ),
+                            str(
+                                output_dir
+                                / f"{split}_frozen_tokens.npz"
+                            ),
+                            *(
+                                [
+                                    str(
+                                        output_dir
+                                        / "val_design_relation_sensitivity.npz"
+                                    )
+                                ]
+                                if split == "val_design"
+                                else []
+                            ),
+                        ],
+                        deferred_inputs=[
+                            _deferred(
+                                _path(
+                                    root,
+                                    "inputs",
+                                    "offline",
+                                    split,
+                                    "offline_input_manifest.json",
+                                ),
+                                contract="retb_offline_input_cache_v1",
+                                producer="offline_input_cache",
+                                role=f"{split}_features_labels_identities",
+                            ),
+                            *[
+                                _deferred(
+                                    path,
+                                    contract=(
+                                        "retb_offline_expert_registration_v1"
+                                        if path.endswith(".json")
+                                        else "retb_expert_checkpoint_v1"
+                                    ),
+                                    producer="offline_expert_confirmation",
+                                    role="frozen_expert_parent",
+                                )
+                                for path in parent_paths
+                            ],
+                        ],
+                    )
+                )
+    if len(output) != 63:
+        raise RuntimeError("offline frozen-token cache matrix differs")
+    return output
 
 
 def _stage_c_records(
@@ -409,6 +711,14 @@ def _stage_c_records(
                 _fusion_cache(
                     root, domain="offline", shape=shape, seed=seed, split="val_stop"
                 ),
+                "--val-design-cache",
+                _fusion_cache(
+                    root,
+                    domain="offline",
+                    shape=shape,
+                    seed=seed,
+                    split="val_design",
+                ),
                 "--output-dir",
                 str(run_root),
             ]
@@ -435,12 +745,22 @@ def _stage_c_records(
                 _fusion_cache(
                     root, domain="offline", shape=shape, seed=seed, split="val_stop"
                 ),
+                "--val-design-cache",
+                _fusion_cache(
+                    root,
+                    domain="offline",
+                    shape=shape,
+                    seed=seed,
+                    split="val_design",
+                ),
                 "--output-dir",
                 str(run_root),
             ]
             expected = [
                 str(run_root / "fusion_registration.json"),
                 str(run_root / "best_model_val.pt"),
+                str(run_root / "val_design_inference.json"),
+                str(run_root / "val_design_predictions.npz"),
             ]
         output.append(
             _record(
@@ -556,10 +876,32 @@ def _stage_d_expert_records(
                 [
                     "--val-stop-cache",
                     f"0={_hlt_cache(root, 'val_stop', 0)}",
+                    "--val-design-cache",
+                    f"0={_hlt_cache(root, 'val_design', 0)}",
                     "--train-labels",
-                    _path(root, "inputs", "labels", "model_train.npz"),
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        "model_train",
+                        "offline_inputs.npz",
+                    ),
                     "--val-stop-labels",
-                    _path(root, "inputs", "labels", "val_stop.npz"),
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        "val_stop",
+                        "offline_inputs.npz",
+                    ),
+                    "--val-design-labels",
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        "val_design",
+                        "offline_inputs.npz",
+                    ),
                     "--offline-registration",
                     _path(
                         root,
@@ -653,23 +995,33 @@ def _stage_d_expert_records(
                     "--val-stop-cache",
                     f"0={_hlt_cache(root, 'val_stop', 0)}",
                     "--train-labels",
-                    _path(root, "inputs", "labels", "model_train.npz"),
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        "model_train",
+                        "offline_inputs.npz",
+                    ),
                     "--val-stop-labels",
-                    _path(root, "inputs", "labels", "val_stop.npz"),
+                    _path(
+                        root,
+                        "inputs",
+                        "offline",
+                        "val_stop",
+                        "offline_inputs.npz",
+                    ),
                     "--output-dir",
                     str(run_root),
                 ]
             )
-            if control == "H_WIDE":
-                argv.extend(
-                    [
-                        "--wide-capacity-artifact",
-                        _path(root, "registry", "retb_h_wide_capacity.json"),
-                    ]
-                )
             expected = [
                 str(run_root / "checkpoint_registration.json"),
                 str(run_root / "best_model_val.pt"),
+                *(
+                    [str(run_root / "locked_wide_capacity.json")]
+                    if control == "H_WIDE"
+                    else []
+                ),
             ]
         output.append(
             _record(
@@ -773,7 +1125,7 @@ def _stage_d_fusion_records(
                             seed=seed,
                             split="model_train",
                         ),
-                        contract="retb_native_hlt_fusion_cache_v1",
+                        contract="retb_native_hlt_fusion_cache_v2",
                         producer="native_hlt_expert_training",
                         role="seven_native_HLT_expert_banks",
                     )
@@ -838,6 +1190,9 @@ def _stage_e_pilot_records(
                         "val_stop_pilot_dataset": str(
                             parent_root / "val_stop_pilot_dataset.npz"
                         ),
+                        "val_design_pilot_dataset": str(
+                            parent_root / "val_design_pilot_dataset.npz"
+                        ),
                     },
                 }
                 argv = [
@@ -851,8 +1206,6 @@ def _stage_e_pilot_records(
                     expert,
                     "--shape-id",
                     shape,
-                    "--target-mode",
-                    "T0_PURE",
                     "--t0-registration",
                     str(parent_root / "t0_registration.json"),
                     "--t0-checkpoint",
@@ -878,6 +1231,8 @@ def _stage_e_pilot_records(
                     str(parent_root / "model_train_pilot_dataset.npz"),
                     "--val-stop-dataset",
                     str(parent_root / "val_stop_pilot_dataset.npz"),
+                    "--val-design-dataset",
+                    str(parent_root / "val_design_pilot_dataset.npz"),
                     "--output-dir",
                     str(output_path),
                 ]
@@ -895,6 +1250,9 @@ def _stage_e_pilot_records(
                         expected_artifacts=[
                             str(output_path / "checkpoint_registration.json"),
                             str(output_path / "best_model_val.pt"),
+                            str(output_path / "model_train_coordinate_arrays.npz"),
+                            str(output_path / "val_stop_coordinate_arrays.npz"),
+                            str(output_path / "val_design_coordinate_arrays.npz"),
                         ],
                         deferred_inputs=[
                             _deferred(
@@ -985,6 +1343,12 @@ def build_static_experiment_bundle(
         "offline_expert_training": _stage_b_records(
             root=root, python=python, registry=registries["stage_b"]
         ),
+        "offline_expert_confirmation": _stage_c_expert_records(
+            root=root, python=python, registry=registries["stage_c"]
+        ),
+        "offline_fusion_cache": _stage_c_cache_records(
+            root=root, python=python, registry=registries["stage_c"]
+        ),
         "offline_fusion_training": _stage_c_records(
             root=root, python=python, registry=registries["stage_c"]
         ),
@@ -1003,8 +1367,10 @@ def build_static_experiment_bundle(
     full_counts = {name: len(rows) for name, rows in groups.items()}
     expected_counts = {
         "offline_expert_training": 147,
+        "offline_expert_confirmation": 147,
+        "offline_fusion_cache": 63,
         "offline_fusion_training": 49,
-        "native_hlt_expert_training": 450,
+            "native_hlt_expert_training": 541,
         "native_hlt_fusion_training": 30,
         "bridge_pilot_training": 105,
     }
@@ -1018,18 +1384,14 @@ def build_static_experiment_bundle(
     }
     execution_groups = {}
     for node_id, rows in groups.items():
-        if miniature:
-            count = int(nodes[node_id]["array"]["smoke_tasks"])
-            execution_groups[node_id] = rows[:count]
-        else:
-            execution_groups[node_id] = rows
+        execution_groups[node_id] = rows
         if not execution_groups[node_id]:
             raise RuntimeError("static experiment execution group is empty")
 
     plan = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_PLAN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 5,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "campaign_profile": campaign["campaign_profile"],
@@ -1045,7 +1407,7 @@ def build_static_experiment_bundle(
             "groups": groups,
             "physical_run_deduplication": "first_registry_membership_order",
             "miniature_policy": (
-                "declared_graph_smoke_task_prefix"
+                "complete_scientific_matrix_on_miniature_populations"
                 if miniature
                 else "complete_static_matrix"
             ),
@@ -1081,7 +1443,7 @@ def build_static_experiment_bundle(
     bundle = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_BUNDLE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 5,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "static_experiment_plan_sha256": plan["content_hash"],

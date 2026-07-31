@@ -38,6 +38,7 @@ from .predictors import (
     UNCERTAINTY_HEADS,
 )
 from .registry import EXPERT_ORDER
+from .replicas import replica_for
 
 try:
     import torch
@@ -80,6 +81,7 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
         lineage_hashes: Mapping[str, str],
         relation_particle_states: Mapping[str, np.ndarray] | None = None,
         relation_particle_masks: Mapping[str, np.ndarray] | None = None,
+        realization_policy: str = "R_FIXED",
     ) -> None:
         _require_torch()
         ids = tuple(str(value) for value in identities)
@@ -91,24 +93,72 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
             or bool(((truth < 0) | (truth >= 10)).any())
             or target_expert_id not in EXPERT_ORDER
             or normalization_mode not in NORMALIZATION_MODES
-            or split not in {"model_train", "val_stop", "val_design"}
+            or split
+            not in {"model_train", "scale_train", "val_stop", "val_design"}
             or set(hlt_token_banks) != set(EXPERT_ORDER)
             or set(other_oracle_banks)
             != set(EXPERT_ORDER) - {target_expert_id}
         ):
             raise ValueError("predictor dataset identity/coverage differs")
+        if realization_policy not in {"R_FIXED", "R_MULTI"}:
+            raise ValueError("predictor evidence realization policy differs")
+        if (
+            split not in {"model_train", "scale_train"}
+            and realization_policy != "R_FIXED"
+        ):
+            raise ValueError(
+                "predictor validation evidence must use fixed replica zero"
+            )
         self.identities, self.labels = ids, truth
         self.target_expert_id = target_expert_id
         self.split = split
         self.normalization_mode = normalization_mode
+        self.realization_policy = realization_policy
+        self.zero_based_epoch = 0
+        self.replica_set = (
+            (0, 1, 2, 3)
+            if split in {"model_train", "scale_train"}
+            and realization_policy == "R_MULTI"
+            else (0,)
+        )
+
+        def evidence_replicas(
+            value: Any, *, dtype: Any, name: str
+        ) -> dict[int, np.ndarray]:
+            array = np.asarray(value, dtype=dtype)
+            if self.replica_set == (0,):
+                if array.ndim >= 2 and tuple(array.shape[:2]) == (
+                    1,
+                    len(ids),
+                ):
+                    array = array[0]
+                if len(array) != len(ids):
+                    raise ValueError(
+                        f"predictor {name} identity coverage differs"
+                    )
+                return {0: array}
+            if array.ndim < 2 or tuple(array.shape[:2]) != (4, len(ids)):
+                raise ValueError(
+                    f"predictor {name} lacks four R_MULTI replicas"
+                )
+            return {replica: array[replica] for replica in self.replica_set}
+
         self.hlt_token_banks = {
-            expert: np.asarray(hlt_token_banks[expert], dtype=np.float32)
+            expert: evidence_replicas(
+                hlt_token_banks[expert],
+                dtype=np.float32,
+                name=f"hlt_token_banks.{expert}",
+            )
             for expert in EXPERT_ORDER
         }
-        self.unbiased_particle_states = np.asarray(
-            unbiased_particle_states, dtype=np.float32
+        self.unbiased_particle_states = evidence_replicas(
+            unbiased_particle_states,
+            dtype=np.float32,
+            name="unbiased_particle_states",
         )
-        self.particle_mask = np.asarray(particle_mask, dtype=bool)
+        self.particle_mask = evidence_replicas(
+            particle_mask, dtype=bool, name="particle_mask"
+        )
         self.target_tokens_original = np.asarray(
             target_tokens, dtype=np.float32
         )
@@ -150,7 +200,11 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
             None
             if relation_particle_states is None
             else {
-                name: np.asarray(value, dtype=np.float32)
+                name: evidence_replicas(
+                    value,
+                    dtype=np.float32,
+                    name=f"relation_particle_states.{name}",
+                )
                 for name, value in relation_particle_states.items()
             }
         )
@@ -158,7 +212,11 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
             None
             if relation_particle_masks is None
             else {
-                name: np.asarray(value, dtype=bool)
+                name: evidence_replicas(
+                    value,
+                    dtype=bool,
+                    name=f"relation_particle_masks.{name}",
+                )
                 for name, value in relation_particle_masks.items()
             }
         )
@@ -178,9 +236,13 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
         }
         count = len(ids)
         arrays = [
-            *self.hlt_token_banks.values(),
-            self.unbiased_particle_states,
-            self.particle_mask,
+            *[
+                row
+                for replicas in self.hlt_token_banks.values()
+                for row in replicas.values()
+            ],
+            *self.unbiased_particle_states.values(),
+            *self.particle_mask.values(),
             self.target_tokens,
             self.target_tokens_unclipped,
             self.target_tokens_original,
@@ -189,12 +251,23 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
             *self.other_oracle_banks.values(),
         ]
         if self.relation_particle_states is not None:
-            arrays.extend(self.relation_particle_states.values())
-            arrays.extend(self.relation_particle_masks.values())
+            arrays.extend(
+                row
+                for replicas in self.relation_particle_states.values()
+                for row in replicas.values()
+            )
+            arrays.extend(
+                row
+                for replicas in self.relation_particle_masks.values()
+                for row in replicas.values()
+            )
         if (
             any(len(value) != count for value in arrays)
-            or self.particle_mask.shape
-            != self.unbiased_particle_states.shape[:2]
+            or any(
+                self.particle_mask[replica].shape
+                != self.unbiased_particle_states[replica].shape[:2]
+                for replica in self.replica_set
+            )
             or self.target_expert_logits.shape != (count, 10)
             or self.target_hybrid_logits.shape != (count, 10)
             or any(
@@ -206,29 +279,46 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
             raise ValueError("predictor dataset arrays differ")
         if self.relation_particle_states is not None:
             for name in RELATION_PARTICLE_ORDER:
-                if self.relation_particle_masks[name].shape != (
-                    self.relation_particle_states[name].shape[:2]
-                ):
-                    raise ValueError("predictor relation-particle mask differs")
+                for replica in self.replica_set:
+                    if self.relation_particle_masks[name][replica].shape != (
+                        self.relation_particle_states[name][replica].shape[:2]
+                    ):
+                        raise ValueError(
+                            "predictor relation-particle mask differs"
+                        )
+
+    def set_epoch(self, one_based_epoch: int) -> None:
+        if int(one_based_epoch) <= 0:
+            raise ValueError("predictor dataset epoch is one-based")
+        self.zero_based_epoch = int(one_based_epoch) - 1
 
     def __len__(self) -> int:
         return len(self.identities)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        replica = replica_for(
+            policy=self.realization_policy,
+            logical_role=self.split,
+            epoch=self.zero_based_epoch,
+            canonical_identity=self.identities[index],
+        )
         return {
             "identity": self.identities[index],
             "label": self.labels[index],
+            "replica_id": replica,
             "hlt_token_banks": {
-                expert: values[index]
+                expert: values[replica][index]
                 for expert, values in self.hlt_token_banks.items()
             },
-            "unbiased_particle_states": self.unbiased_particle_states[index],
-            "particle_mask": self.particle_mask[index],
+            "unbiased_particle_states": self.unbiased_particle_states[
+                replica
+            ][index],
+            "particle_mask": self.particle_mask[replica][index],
             "relation_particle_states": (
                 None
                 if self.relation_particle_states is None
                 else {
-                    name: values[index]
+                    name: values[replica][index]
                     for name, values in self.relation_particle_states.items()
                 }
             ),
@@ -236,7 +326,7 @@ class PredictorDataset(torch.utils.data.Dataset if torch is not None else object
                 None
                 if self.relation_particle_masks is None
                 else {
-                    name: values[index]
+                    name: values[replica][index]
                     for name, values in self.relation_particle_masks.items()
                 }
             ),
@@ -265,6 +355,9 @@ def collate_predictor_batch(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     return {
         "identities": [row["identity"] for row in rows],
         "labels": module.as_tensor([row["label"] for row in rows]).long(),
+        "replica_ids": module.as_tensor(
+            [row["replica_id"] for row in rows]
+        ).long(),
         "hlt_token_banks": {
             expert: module.from_numpy(
                 np.stack([row["hlt_token_banks"][expert] for row in rows])
@@ -793,25 +886,28 @@ def train_predictor(
         != int(run_record.get("token_dimension", -1))
     ):
         raise ValueError("predictor run/configuration lineage differs")
-    if train_loader.dataset.split != "model_train":
-        raise ValueError("predictor training loader must be model_train")
+    if train_loader.dataset.split not in {"model_train", "scale_train"}:
+        raise ValueError(
+            "predictor training loader must use a locked training population"
+        )
     if val_stop_loader.dataset.split != "val_stop":
         raise ValueError("predictor checkpoint selection must be val_stop")
     parents = {
         name: require_sha256(value, name=f"lineage_hashes.{name}")
         for name, value in sorted(lineage_hashes.items())
     }
+    training_prefix = train_loader.dataset.split
     required_parents = {
-        "model_train_target_cache",
+        f"{training_prefix}_target_cache",
         "val_stop_target_cache",
         "target_normalizer",
         "slot_queries",
         "offline_target_checkpoint",
         "offline_fusion",
         "native_hlt_expert",
-        "model_train_hlt_evidence_cache",
+        f"{training_prefix}_hlt_evidence_cache",
         "val_stop_hlt_evidence_cache",
-        "model_train_identity_manifest",
+        f"{training_prefix}_identity_manifest",
         "val_stop_identity_manifest",
     }
     if not required_parents.issubset(parents):
@@ -944,6 +1040,8 @@ def train_predictor(
     autocast_dtype = module.bfloat16
     for epoch in range(start_epoch, config.maximum_epochs + 1):
         model.train()
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         optimizer.zero_grad(set_to_none=True)

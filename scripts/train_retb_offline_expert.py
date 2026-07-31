@@ -37,6 +37,10 @@ from teacher_logit_reco.relation_expert_token_bridge.step4 import (  # noqa: E40
     resolve_stage_b_run,
     validate_stage_b_run_registry,
 )
+from teacher_logit_reco.relation_expert_token_bridge.step5 import (  # noqa: E402
+    resolve_expert_confirmation_training_run,
+    validate_stage_c_run_registry,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
@@ -52,7 +56,18 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--registry-stage",
+        choices=("B", "C"),
+        default="B",
+        help="C is reserved for immutable Stage-C expert confirmations.",
+    )
     parser.add_argument("--train-npz", type=Path)
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     parser.add_argument("--val-stop-npz", type=Path)
     parser.add_argument("--relation-normalization", type=Path)
     parser.add_argument("--region-normalization", type=Path)
@@ -160,10 +175,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.campaign_root, repo_root=REPO_ROOT
     )
     registry = load_hashed_json(
-        args.campaign_root / "registry" / "retb_stage_b_runs.json"
+        args.campaign_root
+        / "registry"
+        / (
+            "retb_stage_b_runs.json"
+            if args.registry_stage == "B"
+            else "retb_stage_c_runs.json"
+        )
     )
-    registry_sha = validate_stage_b_run_registry(registry)
-    run = resolve_stage_b_run(registry, run_id=args.run_id)
+    if args.registry_stage == "B":
+        registry_sha = validate_stage_b_run_registry(registry)
+        run = resolve_stage_b_run(registry, run_id=args.run_id)
+    else:
+        registry_sha = validate_stage_c_run_registry(registry)
+        run = resolve_expert_confirmation_training_run(
+            registry, run_id=args.run_id
+        )
     configuration = run["configuration"]
     if configuration["tokenizer_mode"] == "TOK_WEAVER_CLASS":
         raise ValueError(
@@ -198,7 +225,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = args.output_dir or (
         args.campaign_root
         / "runs"
-        / "stage_b"
+        / (
+            "stage_b"
+            if args.registry_stage == "B"
+            else "stage_c/offline_experts"
+        )
         / args.run_id
         / f"seed_{run['seed']}"
     )
@@ -206,6 +237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dry_run": bool(args.dry_run),
         "campaign_root": str(args.campaign_root.resolve()),
         "run_id": args.run_id,
+        "registry_stage": args.registry_stage,
         "run_registry_sha256": registry_sha,
         "step3_bundle_sha256": step3_manifest["content_hash"],
         "configuration": configuration,
@@ -230,8 +262,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.train_npz is None or args.val_stop_npz is None:
         raise ValueError("training requires --train-npz and --val-stop-npz")
     authorize_dataset_access(
-        worker_role="training_worker",
-        requested_resource="model_train",
+        worker_role=(
+            "scale_training_worker"
+            if args.training_role == "scale_train"
+            else "training_worker"
+        ),
+        requested_resource=args.training_role,
     )
     authorize_dataset_access(
         worker_role="training_worker",
@@ -314,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_trees = (
         _load_trees(
             args.region_tree_root,
-            split="model_train",
+            split=args.training_role,
             identities=train_ids,
         )
         if configuration["expert_id"] == "REGION"
@@ -386,7 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "campaign_spec": campaign["content_hash"],
         "step3_bundle": step3_manifest["content_hash"],
         "run_registry": registry_sha,
-        "model_train_inputs": train_npz_sha,
+        f"{args.training_role}_inputs": train_npz_sha,
         "val_stop_inputs": val_stop_npz_sha,
     }
     if relation_normalization is not None:

@@ -14,6 +14,7 @@ import numpy as np
 
 from .bridge_targets import pilot_t0_objective
 from .contracts import (
+    bind_source,
     load_hashed_json,
     require_sha256,
     validate_content_hash,
@@ -24,6 +25,7 @@ from .determinism import optimizer_update_counts, scheduled_learning_rate
 from .expert_training import DeterministicExpertSampler, preferred_expert_epoch
 from .evaluation import evaluate_classification
 from .registry import EXPERT_ORDER
+from .replicas import replica_for
 
 try:
     import torch
@@ -74,20 +76,35 @@ class BridgePilotDataset(
             or truth.shape != (len(ids),)
             or bool(((truth < 0) | (truth >= 10)).any())
             or target_expert_id not in EXPERT_ORDER
-            or split not in {"model_train", "val_stop"}
+            or split not in {"model_train", "val_stop", "val_design"}
         ):
             raise ValueError("PILOT_T0 dataset population differs")
         if set(hlt_token_banks) != set(EXPERT_ORDER):
             raise ValueError("PILOT_T0 HLT expert coverage differs")
         self.identities, self.labels = ids, truth
-        self.hlt_token_banks = {
+        raw_banks = {
             name: np.asarray(hlt_token_banks[name], dtype=np.float32)
             for name in EXPERT_ORDER
         }
-        self.unbiased_particle_states = np.asarray(
-            unbiased_particle_states, dtype=np.float32
-        )
-        self.particle_mask = np.asarray(particle_mask, dtype=bool)
+        raw_states = np.asarray(unbiased_particle_states, dtype=np.float32)
+        raw_mask = np.asarray(particle_mask, dtype=bool)
+        replica_counts = {
+            int(value.shape[0]) if value.ndim == 4 else 1
+            for value in raw_banks.values()
+        }
+        replica_counts.add(int(raw_states.shape[0]) if raw_states.ndim == 4 else 1)
+        replica_counts.add(int(raw_mask.shape[0]) if raw_mask.ndim == 3 else 1)
+        if len(replica_counts) != 1:
+            raise ValueError("PILOT_T0 HLT replica coverage differs")
+        self.replica_count = replica_counts.pop()
+        if self.replica_count not in {1, 4}:
+            raise ValueError("PILOT_T0 requires one fixed or four R_MULTI replicas")
+        if split != "model_train" and self.replica_count != 1:
+            raise ValueError("PILOT_T0 validation must use one fixed replica")
+        self.hlt_token_banks = raw_banks
+        self.unbiased_particle_states = raw_states
+        self.particle_mask = raw_mask
+        self.zero_based_epoch = 0
         original_target_tokens = np.asarray(target_tokens, dtype=np.float32)
         self.token_mean = np.asarray(token_mean, dtype=np.float32)
         self.token_standard_deviation = np.asarray(
@@ -126,25 +143,54 @@ class BridgePilotDataset(
             for name, value in sorted(lineage_hashes.items())
         }
         n = len(ids)
-        arrays = [
-            *self.hlt_token_banks.values(),
-            self.unbiased_particle_states,
-            self.particle_mask,
+        population_arrays = [
             self.target_tokens,
             self.target_tokens_original,
             self.target_expert_logits,
             self.target_hybrid_logits,
             *self.other_t0_banks.values(),
         ]
+        replica_population = [
+            value.shape[1] if value.ndim == 4 else value.shape[0]
+            for value in self.hlt_token_banks.values()
+        ]
+        replica_population.extend(
+            [
+                (
+                    self.unbiased_particle_states.shape[1]
+                    if self.unbiased_particle_states.ndim == 4
+                    else self.unbiased_particle_states.shape[0]
+                ),
+                (
+                    self.particle_mask.shape[1]
+                    if self.particle_mask.ndim == 3
+                    else self.particle_mask.shape[0]
+                ),
+            ]
+        )
+        state_shape = (
+            self.unbiased_particle_states.shape[1:3]
+            if self.unbiased_particle_states.ndim == 4
+            else self.unbiased_particle_states.shape[:2]
+        )
+        mask_shape = (
+            self.particle_mask.shape[1:]
+            if self.particle_mask.ndim == 3
+            else self.particle_mask.shape
+        )
         if (
-            any(len(value) != n for value in arrays)
+            any(len(value) != n for value in population_arrays)
+            or any(value != n for value in replica_population)
             or self.target_expert_logits.shape != (n, 10)
             or self.target_hybrid_logits.shape != (n, 10)
-            or self.particle_mask.shape
-            != self.unbiased_particle_states.shape[:2]
+            or tuple(mask_shape) != tuple(state_shape)
             or not all(
                 np.isfinite(value).all()
-                for value in arrays
+                for value in [
+                    *self.hlt_token_banks.values(),
+                    self.unbiased_particle_states,
+                    *population_arrays,
+                ]
                 if value.dtype != np.bool_
             )
         ):
@@ -153,16 +199,47 @@ class BridgePilotDataset(
     def __len__(self) -> int:
         return len(self.identities)
 
+    def set_epoch(self, epoch: int) -> None:
+        if int(epoch) <= 0:
+            raise ValueError("PILOT_T0 epoch is one-based")
+        self.zero_based_epoch = int(epoch) - 1
+
+    @staticmethod
+    def _replica_value(values: np.ndarray, replica: int, index: int) -> np.ndarray:
+        return values[replica, index] if values.ndim >= 3 and values.shape[0] in {1, 4} else values[index]
+
     def __getitem__(self, index: int) -> dict[str, Any]:
+        replica = (
+            replica_for(
+                policy="R_MULTI",
+                logical_role=self.split,
+                epoch=self.zero_based_epoch,
+                canonical_identity=self.identities[index],
+            )
+            if self.replica_count == 4
+            else 0
+        )
         return {
             "identity": self.identities[index],
             "label": self.labels[index],
             "hlt_token_banks": {
-                name: self.hlt_token_banks[name][index]
+                name: (
+                    self.hlt_token_banks[name][replica, index]
+                    if self.hlt_token_banks[name].ndim == 4
+                    else self.hlt_token_banks[name][index]
+                )
                 for name in EXPERT_ORDER
             },
-            "unbiased_particle_states": self.unbiased_particle_states[index],
-            "particle_mask": self.particle_mask[index],
+            "unbiased_particle_states": (
+                self.unbiased_particle_states[replica, index]
+                if self.unbiased_particle_states.ndim == 4
+                else self.unbiased_particle_states[index]
+            ),
+            "particle_mask": (
+                self.particle_mask[replica, index]
+                if self.particle_mask.ndim == 3
+                else self.particle_mask[index]
+            ),
             "target_tokens": self.target_tokens[index],
             "target_tokens_original": self.target_tokens_original[index],
             "token_mean": self.token_mean,
@@ -569,6 +646,8 @@ def train_pilot_t0(
 
     rows, best_state, update = [], None, 0
     for epoch in range(1, config.maximum_epochs + 1):
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         model.train()
@@ -677,6 +756,7 @@ def train_bridge_candidate(
     global_determinism_sha256: str,
     config: BridgeCandidateTrainingConfig,
     device: str | Any = "cpu",
+    source_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Train a candidate with exact two-phase alternation and joint checkpoints.
 
@@ -760,6 +840,16 @@ def train_bridge_candidate(
             or _sha256(checkpoint) != registration["checkpoint_sha256"]
         ):
             raise ValueError("reusable bridge candidate differs")
+        checkpoint_payload = module.load(
+            checkpoint, map_location="cpu", weights_only=False
+        )
+        predictor.load_state_dict(
+            checkpoint_payload["predictor_state_dict"], strict=True
+        )
+        if offline_target is not None:
+            offline_target.load_state_dict(
+                checkpoint_payload["offline_target_state_dict"], strict=True
+            )
         return registration
     resolved = module.device(device)
     if config.campaign_profile == "production" and (
@@ -853,6 +943,8 @@ def train_bridge_candidate(
         else [float(group["lr"]) for group in target_optimizer.param_groups]
     )
     for epoch in range(1, config.maximum_epochs + 1):
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         predictor.train()
@@ -966,6 +1058,11 @@ def train_bridge_candidate(
     ):
         raise RuntimeError("bridge candidate alternating budget drifted")
     selected = preferred_expert_epoch(rows)
+    predictor.load_state_dict(best_state["predictor"], strict=True)
+    if not predictor_only:
+        offline_target.load_state_dict(
+            best_state["offline_target"], strict=True
+        )
     checkpoint = root / "best_model_val.pt"
     fd, temporary_name = tempfile.mkstemp(
         prefix=".best_model_val.", suffix=".tmp", dir=root
@@ -1031,6 +1128,10 @@ def train_bridge_candidate(
             "precision_mode": "bf16" if use_bf16 else "fp32",
         }
     )
+    if source_snapshot is not None:
+        registration = bind_source(
+            registration, source_snapshot=source_snapshot
+        )
     write_immutable_json(registration_path, registration)
     return registration
 

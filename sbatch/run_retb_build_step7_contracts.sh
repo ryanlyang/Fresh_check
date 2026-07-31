@@ -2,9 +2,10 @@
 #SBATCH --job-name=retb_step7_contracts
 #SBATCH --account=reu-aisocial
 #SBATCH --partition=tigris
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --time=00:30:00
+#SBATCH --gres=gpu:gh200:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=220G
+#SBATCH --time=2-00:00:00
 
 set -euo pipefail
 IFS=$'\n\t'

@@ -14,9 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.relation_expert_token_bridge.confirmation import (  # noqa: E402
-    BRIDGE_SHAPE_SELECTION_CONTRACT,
     build_stage_l_graph_registry,
-    validate_bridge_shape_selection,
     validate_stage_l_graph_registry,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
@@ -38,7 +36,15 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
-    parser.add_argument("--bridge-shape-selection", required=True, type=Path)
+    parser.add_argument(
+        "--candidate-shape-id", action="append", required=True
+    )
+    parser.add_argument(
+        "--robustness-controls-completion-sha256", required=True
+    )
+    parser.add_argument(
+        "--semantic-controls-completion-sha256", required=True
+    )
     parser.add_argument("--definitions", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -52,15 +58,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         / "retb_step12_final_consumers_bundle.json",
         expected_contract=STEP12_BUNDLE_CONTRACT,
     )
-    shape = load_hashed_json(
-        args.bridge_shape_selection,
-        expected_contract=BRIDGE_SHAPE_SELECTION_CONTRACT,
-    )
-    validate_bridge_shape_selection(shape)
     definitions = json.loads(args.definitions.read_text("utf-8"))
     if (
         step12.get("source") != campaign.get("source")
-        or shape.get("source") != campaign.get("source")
         or not isinstance(definitions, list)
     ):
         raise ValueError("Stage-L graph registry parent lineage differs")
@@ -68,7 +68,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_stage_l_graph_registry(
             definitions=definitions,
             step12_bundle_sha256=step12["content_hash"],
-            bridge_shape_selection=shape,
+            candidate_shape_ids=args.candidate_shape_id,
+            robustness_controls_completion_sha256=(
+                args.robustness_controls_completion_sha256
+            ),
+            semantic_controls_completion_sha256=(
+                args.semantic_controls_completion_sha256
+            ),
         ),
         source_snapshot=source_snapshot(REPO_ROOT),
     )

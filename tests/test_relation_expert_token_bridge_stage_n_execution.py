@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sys
 
@@ -27,11 +28,21 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_n_execution import (
     SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
     STACK_INFERENCE_EXECUTION_PLAN_CONTRACT,
     publish_deployable_inference_input,
+    publish_deployable_inference_input_binding,
+    publish_shared_deployable_inference_payload,
     validate_deployable_inference_input,
+    validate_deployable_inference_input_binding,
+    validate_shared_deployable_inference_payload,
     validate_sealed_final_test_execution_plan,
     validate_stack_inference_execution_plan,
 )
+from teacher_logit_reco.relation_expert_token_bridge.hlt_capacity_controls import (
+    build_hlt_capacity_control_row,
+    publish_hlt_capacity_control_export,
+    validate_hlt_capacity_control_row,
+)
 from scripts.run_retb_deployable_inference import run_deployable_inference
+from scripts.train_retb_scale_finalist_control import _long_exposure_ledger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -194,7 +205,7 @@ def test_stage_n_registry_is_dynamic_automatic_and_single_shot() -> None:
             (ROOT / path).is_file() for path in FINAL_NODE_ENTRYPOINTS[node]
         )
     assert nodes["sealed_final_test"]["array"]["maximum_tasks"] == 1
-    assert nodes["finalist_controls"]["array"]["maximum_tasks"] == 1
+    assert nodes["finalist_controls"]["array"]["maximum_tasks"] == 18
 
 
 def test_negative_science_does_not_block_stage_n_continuation(
@@ -432,6 +443,11 @@ class _NumericalDeployable(torch.nn.Module):
         return {"logits": values[:, :1].repeat(1, 10)}
 
 
+class _DirectLogitControl(torch.nn.Module):
+    def forward(self, *, features, **_):
+        return features[:, :1].float().repeat(1, 10)
+
+
 def test_deployable_worker_runs_real_batched_hlt_only_inference() -> None:
     identities = ["a", "b", "c"]
     logits, probabilities = run_deployable_inference(
@@ -452,6 +468,15 @@ def test_deployable_worker_runs_real_batched_hlt_only_inference() -> None:
         torch.from_numpy(probabilities.sum(axis=1)),
         torch.ones(3),
     )
+    direct, _ = run_deployable_inference(
+        graph=_DirectLogitControl(),
+        hlt_inputs={"features": torch.tensor([[4.0], [5.0]])},
+        identities=["a", "b"],
+        batch_size=1,
+        device=torch.device("cpu"),
+        call_interface="particle_batch",
+    )
+    assert direct[:, 0].tolist() == [4.0, 5.0]
 
 
 def test_deployable_input_publication_is_label_free_and_authenticated(
@@ -477,6 +502,23 @@ def test_deployable_input_publication_is_label_free_and_authenticated(
         manifest,
         manifest_path=tmp_path / "stack_val_GRAPH_A_seed101.json",
     )
+    control = publish_deployable_inference_input(
+        output_dir=tmp_path / "control",
+        split="final_test",
+        graph_id="H_MONO_PARAM::GRAPH_A",
+        pipeline_seed=101,
+        identities=["a", "b"],
+        hlt_inputs={"features": torch.ones(2, 3)},
+        source_snapshot=source,
+    )
+    validate_deployable_inference_input(
+        control["manifest"],
+        manifest_path=(
+            tmp_path
+            / "control"
+            / "final_test_H_MONO_PARAM__GRAPH_A_seed101.json"
+        ),
+    )
     with pytest.raises(ValueError, match="privileged field"):
         publish_deployable_inference_input(
             output_dir=tmp_path / "bad",
@@ -487,3 +529,205 @@ def test_deployable_input_publication_is_label_free_and_authenticated(
             hlt_inputs={"offline_targets": torch.ones(2, 3)},
             source_snapshot=source,
         )
+
+
+def test_shared_deployable_payload_is_written_once_and_bound_per_graph(
+    tmp_path: Path,
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_status_sha256": "b" * 64,
+        "source_dirty": False,
+    }
+    shared = publish_shared_deployable_inference_payload(
+        output_dir=tmp_path,
+        split="final_test",
+        identities=["a", "b"],
+        hlt_inputs={"features": torch.ones(2, 3)},
+        source_snapshot=source,
+    )
+    shared_path = tmp_path / "retb_final_test_shared_HLT_inputs.json"
+    validate_shared_deployable_inference_payload(
+        shared["manifest"], manifest_path=shared_path
+    )
+    first = publish_deployable_inference_input_binding(
+        output_dir=tmp_path,
+        shared_payload_manifest=shared["manifest"],
+        shared_payload_manifest_path=shared_path,
+        graph_id="GRAPH_A",
+        pipeline_seed=101,
+    )
+    second = publish_deployable_inference_input_binding(
+        output_dir=tmp_path,
+        shared_payload_manifest=shared["manifest"],
+        shared_payload_manifest_path=shared_path,
+        graph_id="H_MONO_PARAM::GRAPH_A",
+        pipeline_seed=202,
+    )
+    assert first["manifest"]["payload_filename"] == second["manifest"][
+        "payload_filename"
+    ]
+    assert len(list(tmp_path.glob("*.pt"))) == 1
+    validate_deployable_inference_input_binding(
+        first["manifest"],
+        manifest_path=tmp_path / "final_test_GRAPH_A_seed101.json",
+    )
+    tampered = dict(first["manifest"])
+    tampered["shared_payload_manifest_sha256"] = "0" * 64
+    tampered.pop("content_hash")
+    tampered = with_content_hash(tampered)
+    with pytest.raises(ValueError, match="shared-payload lineage"):
+        validate_deployable_inference_input_binding(
+            tampered,
+            manifest_path=tmp_path / "final_test_GRAPH_A_seed101.json",
+        )
+
+
+def test_hlt_capacity_control_row_attests_actual_fixed_budget() -> None:
+    row = build_hlt_capacity_control_row(
+        owner_finalist_graph_id="GRAPH_A",
+        control_kind="H_MONO_PARAM",
+        pipeline_seed=101,
+        checkpoint_sha256="1" * 64,
+        deployable_export_sha256="2" * 64,
+        training_registration_sha256="3" * 64,
+        optimizer_updates_completed=8,
+        labeled_example_presentations=1024,
+        capacity_selection_sha256="4" * 64,
+    )
+    assert validate_hlt_capacity_control_row(row) == row["content_hash"]
+    with pytest.raises(ValueError, match="incomplete"):
+        build_hlt_capacity_control_row(
+            owner_finalist_graph_id="GRAPH_A",
+            control_kind="H_BASE_LONG",
+            pipeline_seed=101,
+            checkpoint_sha256="1" * 64,
+            deployable_export_sha256="2" * 64,
+            training_registration_sha256="3" * 64,
+            optimizer_updates_completed=0,
+            labeled_example_presentations=1024,
+            capacity_selection_sha256="4" * 64,
+        )
+
+
+def test_hlt_capacity_export_uses_relative_checkpoint_path(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "training" / "best_model_val.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    export = publish_hlt_capacity_control_export(
+        output=tmp_path / "deployable_control.json",
+        owner_finalist_graph_id="GRAPH_A",
+        control_kind="H_MONO_PARAM",
+        pipeline_seed=101,
+        configuration=(128, 4, 8, 8, 2),
+        checkpoint_path=checkpoint,
+        checkpoint_sha256=hashlib.sha256(b"checkpoint").hexdigest(),
+        training_registration_sha256="1" * 64,
+        capacity_selection_sha256="2" * 64,
+        source_snapshot={
+            "source_commit": "a" * 40,
+            "source_status_sha256": "b" * 64,
+            "source_dirty": False,
+        },
+    )
+    assert export["checkpoint_path"].replace("\\", "/") == (
+        "training/best_model_val.pt"
+    )
+    assert not Path(export["checkpoint_path"]).is_absolute()
+
+
+def test_h_base_long_ledger_excludes_zero_ce_predictor(
+    tmp_path: Path,
+) -> None:
+    def publish(path: Path, payload: dict) -> None:
+        write_immutable_json(path, with_content_hash(payload))
+
+    role = (
+        tmp_path
+        / "runs"
+        / "scale"
+        / "refits"
+        / "seed_101"
+        / "roles"
+        / "ROLE"
+    )
+    graph = (
+        tmp_path
+        / "runs"
+        / "scale"
+        / "graphs"
+        / "GRAPH_A"
+        / "seed_101"
+    )
+    for expert, objective, updates in (
+        ("PT", "W_TOKEN_ONLY", 2),
+        ("TRACK", "W_CANONICAL", 3),
+    ):
+        phase = role / "predictors" / expert
+        publish(
+            phase / "training_curves.json",
+            {
+                "contract": "test_predictor_curves_v1",
+                "schema_version": 1,
+                "rows": [{"optimizer_update_ordinal": updates}],
+                "planned_update_counts": {
+                    "total_optimizer_updates": updates
+                },
+                "fixed_budget_completed": True,
+            },
+        )
+        publish(
+            phase / "registration.json",
+            {
+                "contract": "test_predictor_registration_v1",
+                "schema_version": 1,
+                "objective_id": objective,
+            },
+        )
+    publish(
+        role / "native_hlt" / "BASE4" / "training_curves.json",
+        {
+            "contract": "test_native_curves_v1",
+            "schema_version": 1,
+            "rows": [{"epoch": 1}],
+            "optimizer_update_counts": {
+                "total_optimizer_updates": 4
+            },
+            "fixed_budget_completed": True,
+        },
+    )
+    publish(
+        graph / "joint" / "training_curves.json",
+        {
+            "contract": "test_joint_curves_v1",
+            "schema_version": 1,
+            "rows": [{"optimizer_update_ordinal": 5}],
+            "planned_update_counts": {"total_optimizer_updates": 5},
+            "fixed_budget_completed": True,
+        },
+    )
+    publish(
+        graph / "joint" / "registration.json",
+        {
+            "contract": "test_joint_registration_v1",
+            "schema_version": 1,
+            "variant": "J5_END_TO_END",
+        },
+    )
+    ledger = _long_exposure_ledger(
+        root=tmp_path,
+        owner_graph_id="GRAPH_A",
+        seed=101,
+        scale_train_events=100,
+    )
+    assert ledger["total_labeled_example_presentations"] == 1200
+    assert len(ledger["component_rows"]) == 3
+    assert len(ledger["excluded_zero_CE_component_rows"]) == 1
+    assert (
+        ledger["excluded_zero_CE_component_rows"][0][
+            "ground_truth_CE_evidence"
+        ]["objective_id"]
+        == "W_TOKEN_ONLY"
+    )

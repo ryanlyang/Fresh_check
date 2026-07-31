@@ -17,18 +17,23 @@ from .contracts import (
     validate_content_hash,
     with_content_hash,
 )
+from .plan_factory_registry import (
+    MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT,
+    build_manifest_plan_factory_registry,
+    validate_manifest_plan_factory_registry,
+)
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v8"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v23"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v6"
+    "retb_production_node_execution_registry_v12"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v7"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v17"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -63,12 +68,12 @@ PRODUCTION_SPLIT_SIZES = {
     "scale_train": 3_000_000,
 }
 MINIATURE_SPLIT_SIZES = {
-    "model_train": 20,
-    "model_val": 20,
+    "model_train": 400,
+    "model_val": 640,
     "stack_train": 0,
-    "stack_val": 10,
-    "final_test": 20,
-    "scale_train": 40,
+    "stack_val": 100,
+    "final_test": 320,
+    "scale_train": 400,
 }
 
 # These nodes are submitted as their declared worker directly.  Every other
@@ -92,6 +97,7 @@ DIRECT_WORKER_NODES = frozenset(
         "step12_final_consumer_contracts",
         "step13_confirmation_contracts",
         "step14_scale_final_contracts",
+        "stage_n_evidence_join",
         "completed_job_ledger",
     }
 )
@@ -108,17 +114,19 @@ TASK_MANIFEST_PRODUCER_NODES = {
     "input_audit": "campaign_bootstrap",
     "normalizers_500k": "campaign_bootstrap",
     "offline_expert_training": "campaign_bootstrap",
-    "offline_shape_selector": "campaign_bootstrap",
-    "offline_optimization_selector": "campaign_bootstrap",
+    "offline_expert_confirmation": "campaign_bootstrap",
+    "offline_fusion_cache": "campaign_bootstrap",
+    "offline_shape_selector": "offline_fusion_training",
+    "offline_optimization_selector": "offline_expert_training",
     "offline_fusion_training": "campaign_bootstrap",
-    "offline_complementarity": "campaign_bootstrap",
-    "offline_capacity_controls": "campaign_bootstrap",
+    "offline_complementarity": "offline_fusion_training",
+    "offline_capacity_controls": "offline_shape_selector",
     "native_hlt_expert_training": "campaign_bootstrap",
     "native_hlt_fusion_training": "campaign_bootstrap",
     "bridge_pilot_training": "campaign_bootstrap",
     "bridge_target_training": "bridge_pilot_training",
-    "bridge_content_certification": "campaign_bootstrap",
-    "target_coordinate_selector": "campaign_bootstrap",
+    "bridge_content_certification": "bridge_target_training",
+    "target_coordinate_selector": "bridge_content_certification",
     "target_cache_build": "step8_target_cache_contracts",
     "target_normalizers": "target_cache_build",
     "predictor_training": "step9_predictor_contracts",
@@ -144,7 +152,7 @@ TASK_MANIFEST_PRODUCER_NODES = {
     "accuracy_finalist_selector": "stack_val_inference",
     "postlock_oracle_targets": "accuracy_finalist_selector",
     "finalist_controls": "accuracy_finalist_selector",
-    "final_test_execution_lock": "finalist_controls",
+    "final_test_execution_lock": "stage_n_evidence_join",
     "sealed_final_test": "final_test_execution_lock",
     "final_report": "sealed_final_test",
 }
@@ -163,6 +171,8 @@ BOOTSTRAP_INPUT_MANIFEST_NODES = frozenset(
 STATIC_EXPERIMENT_MANIFEST_NODES = frozenset(
     {
         "offline_expert_training",
+        "offline_expert_confirmation",
+        "offline_fusion_cache",
         "offline_fusion_training",
         "native_hlt_expert_training",
         "native_hlt_fusion_training",
@@ -204,15 +214,18 @@ LATE_CONTINUATION_GATE_CONTRACT = (
 )
 LATE_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     "robustness_controls": (
+        "scripts/execute_retb_robustness_campaign.py",
         "scripts/evaluate_retb_final_consumer_reference.py",
         "scripts/evaluate_retb_final_consumer_bypass_controls.py",
         "scripts/evaluate_retb_stage_i_substitutions.py",
     ),
     "semantic_controls": (
+        "scripts/execute_retb_semantic_control_campaign.py",
         "scripts/evaluate_retb_final_consumer_bypass_controls.py",
         "scripts/evaluate_retb_stage_i_substitutions.py",
     ),
     "stage_l_graph_registration": (
+        "scripts/execute_retb_stage_l_registration.py",
         "scripts/register_retb_stage_l_graphs.py",
     ),
     "confirmation_500k": (
@@ -223,9 +236,9 @@ LATE_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     "scale_shortlist_selector": (
         "scripts/select_retb_scale_shortlist.py",
     ),
-    "scale_refits": ("scripts/execute_retb_scale_refits.py",),
+    "scale_refits": ("scripts/execute_retb_scale_seed_refit.py",),
     "scale_graph_training": (
-        "scripts/execute_retb_scale_graph_training.py",
+        "scripts/execute_retb_scale_graph_pipeline.py",
     ),
     "scale_completion": (
         "scripts/aggregate_retb_scale_completion.py",
@@ -253,7 +266,7 @@ FINAL_CONTINUATION_GATE_CONTRACT = (
 )
 FINAL_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     "prelock_final_inputs": (
-        "scripts/prepare_retb_sealed_inputs.py",
+        "scripts/prepare_retb_final_test_inputs.py",
     ),
     "stack_val_inference": (
         "scripts/execute_retb_stack_val_inference.py",
@@ -265,7 +278,7 @@ FINAL_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
         "scripts/execute_retb_postlock_oracle_target.py",
     ),
     "finalist_controls": (
-        "scripts/execute_retb_finalist_controls.py",
+        "scripts/train_retb_scale_finalist_control.py",
     ),
     "final_test_execution_lock": (
         "scripts/write_retb_final_test_execution_lock.py",
@@ -286,20 +299,24 @@ MIDDLE_CONTINUATION_GATE_CONTRACT = (
     "retb_stage_f_j_continuation_gate_v1"
 )
 MIDDLE_NODE_ENTRYPOINTS: dict[str, str] = {
-    "target_cache_build": "scripts/build_retb_target_cache.py",
+    "target_cache_build": "scripts/execute_retb_target_cache_row.py",
     "target_normalizers": "scripts/fit_retb_target_normalizers.py",
-    "predictor_training": "scripts/train_retb_predictor.py",
+    "predictor_training": "scripts/execute_retb_predictor_campaign.py",
     "uncertainty_calibration": "scripts/calibrate_retb_uncertainty.py",
     "predictor_bundle_selector": (
-        "scripts/select_retb_joint_predictor_bundle.py"
+        "scripts/execute_retb_predictor_bundle_selection.py"
     ),
     "oracle_substitutions": (
-        "scripts/evaluate_retb_stage_i_substitutions.py"
+        "scripts/execute_retb_stage_i_oracle_wave.py"
     ),
-    "joint_predictor_training": "scripts/train_retb_joint_bridge.py",
-    "joint_predictor_selector": "scripts/select_retb_j4_blocks.py",
-    "final_consumer_training": "scripts/train_retb_final_consumer.py",
-    "deployable_export": "scripts/export_retb_deployable_graph.py",
+    "joint_predictor_training": "scripts/execute_retb_joint_campaign.py",
+    "joint_predictor_selector": "scripts/finalize_retb_joint_campaign.py",
+    "final_consumer_training": (
+        "scripts/execute_retb_final_consumer_campaign.py"
+    ),
+    "deployable_export": (
+        "scripts/execute_retb_deployable_export_campaign.py"
+    ),
 }
 if set(MIDDLE_NODE_ENTRYPOINTS) != set(
     MIDDLE_CONTINUATION_MANIFEST_NODES
@@ -489,29 +506,57 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             access="model_train_and_val_stop",
         ),
         _node(
-            "offline_shape_selector",
-            stage="B",
-            worker="run_retb_select_shapes.sh",
-            dependencies=("offline_expert_training",),
-            dynamic=True,
-            access="val_design_only",
-        ),
-        _node(
             "offline_optimization_selector",
             stage="B",
             worker="run_retb_select_optimization.sh",
             dependencies=("offline_expert_training",),
             dynamic=True,
+            resource="gpu",
             access="val_design_only",
         ),
         _node(
             "step5_offline_fusion_contracts",
             stage="C",
             worker="run_retb_build_step5_contracts.sh",
+            dependencies=("step4_offline_training_contracts",),
+        ),
+        _node(
+            "offline_expert_confirmation",
+            stage="C",
+            worker="run_retb_train_offline_expert_confirmation.sh",
             dependencies=(
-                "offline_shape_selector",
-                "offline_optimization_selector",
+                "step5_offline_fusion_contracts",
+                "offline_expert_training",
             ),
+            resource="gpu",
+            array=_array(
+                task_manifest=(
+                    "job_ledgers/tasks/"
+                    "stage_c_offline_expert_confirmations.json"
+                ),
+                concurrency=expert,
+                maximum_tasks=256,
+                smoke_tasks=7,
+            ),
+            resumable=True,
+            access="model_train_and_val_stop",
+        ),
+        _node(
+            "offline_fusion_cache",
+            stage="C",
+            worker="run_retb_build_offline_fusion_cache.sh",
+            dependencies=("offline_expert_confirmation",),
+            resource="gpu",
+            array=_array(
+                task_manifest=(
+                    "job_ledgers/tasks/stage_c_offline_fusion_cache.json"
+                ),
+                concurrency=expert,
+                maximum_tasks=128,
+                smoke_tasks=3,
+            ),
+            resumable=True,
+            access="model_train_val_stop_and_val_design_inference",
         ),
         _node(
             "offline_fusion_training",
@@ -519,6 +564,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             worker="run_retb_train_offline_fusion.sh",
             dependencies=(
                 "step5_offline_fusion_contracts",
+                "offline_fusion_cache",
             ),
             resource="gpu",
             array=_array(
@@ -530,17 +576,27 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             access="model_train_and_val_stop",
         ),
         _node(
+            "offline_shape_selector",
+            stage="C",
+            worker="run_retb_select_shapes.sh",
+            dependencies=("offline_fusion_training",),
+            dynamic=True,
+            resource="gpu",
+            access="val_design_only",
+        ),
+        _node(
             "offline_complementarity",
             stage="C",
             worker="run_retb_analyze_complementarity.sh",
             dependencies=("offline_fusion_training",),
+            resource="gpu",
             access="val_design_only",
         ),
         _node(
             "offline_capacity_controls",
             stage="C",
             worker="run_retb_capacity_controls.sh",
-            dependencies=("offline_fusion_training",),
+            dependencies=("offline_shape_selector",),
             resource="gpu",
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_c_capacity_controls.json",
@@ -553,7 +609,13 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             "step6_native_hlt_contracts",
             stage="D",
             worker="run_retb_build_step6_contracts.sh",
-            dependencies=("step5_offline_fusion_contracts", "input_audit"),
+            dependencies=(
+                "offline_shape_selector",
+                "offline_optimization_selector",
+                "offline_complementarity",
+                "offline_capacity_controls",
+                "input_audit",
+            ),
         ),
         _node(
             "native_hlt_expert_training",
@@ -564,7 +626,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_d_hlt_experts.json",
                 concurrency=expert,
-                maximum_tasks=512,
+                maximum_tasks=1024,
             ),
             resumable=True,
             access="model_train_and_val_stop",
@@ -591,6 +653,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 "native_hlt_expert_training",
                 "step6_native_hlt_contracts",
             ),
+            resource="gpu",
         ),
         _node(
             "bridge_pilot_training",
@@ -614,7 +677,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_e_bridge_targets.json",
                 concurrency=predictor,
-                maximum_tasks=512,
+                maximum_tasks=2048,
             ),
             dynamic=True,
             resumable=True,
@@ -624,6 +687,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="E",
             worker="run_retb_certify_bridge_content.sh",
             dependencies=("bridge_target_training",),
+            resource="gpu",
             access="val_design_only",
         ),
         _node(
@@ -874,10 +938,12 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             stage="M",
             worker="run_retb_register_scale_refits.sh",
             dependencies=("step14_scale_final_contracts",),
+            resource="gpu",
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_m_scale_refits.json",
-                concurrency=cpu,
-                maximum_tasks=64,
+                concurrency=3,
+                maximum_tasks=3,
+                smoke_tasks=1,
             ),
             dynamic=True,
             resumable=True,
@@ -892,19 +958,12 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_m_scale_graphs.json",
                 concurrency=scale,
-                maximum_tasks=18,
+                maximum_tasks=21,
                 smoke_tasks=1,
             ),
             dynamic=True,
             resumable=True,
             access="scale_train_and_val_stop",
-        ),
-        _node(
-            "scale_completion",
-            stage="M",
-            worker="run_retb_scale_completion.sh",
-            dependencies=("scale_graph_training",),
-            dynamic=True,
         ),
         _node(
             "prelock_final_inputs",
@@ -914,6 +973,13 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             dynamic=True,
             access="checkpoint_free_final_input_preparation",
             resumable=True,
+        ),
+        _node(
+            "scale_completion",
+            stage="M",
+            worker="run_retb_scale_completion.sh",
+            dependencies=("scale_graph_training", "prelock_final_inputs"),
+            dynamic=True,
         ),
         _node(
             "stack_val_inference",
@@ -979,20 +1045,26 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_n_finalist_controls.json",
                 concurrency=final,
-                maximum_tasks=1,
+                maximum_tasks=18,
             ),
             dynamic=True,
             resumable=True,
         ),
         _node(
-            "final_test_execution_lock",
+            "stage_n_evidence_join",
             stage="N",
-            worker="run_retb_final_execution_lock.sh",
+            worker="run_retb_stage_n_evidence_join.sh",
             dependencies=(
                 "postlock_oracle_targets",
                 "finalist_controls",
                 "prelock_final_inputs",
             ),
+        ),
+        _node(
+            "final_test_execution_lock",
+            stage="N",
+            worker="run_retb_final_execution_lock.sh",
+            dependencies=("stage_n_evidence_join",),
             dynamic=True,
         ),
         _node(
@@ -1180,7 +1252,7 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 6,
+            "schema_version": 12,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
@@ -1201,7 +1273,7 @@ def validate_node_execution_registry(
     digest = validate_content_hash(
         payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 6:
+    if int(payload.get("schema_version", -1)) != 12:
         raise ValueError("node execution registry schema version differs")
     by_id = {str(node["node_id"]): node for node in nodes}
     entries = list(payload.get("entries", ()))
@@ -1364,6 +1436,15 @@ def build_production_graph(
         raise ValueError("production concurrency must be positive")
     nodes = _nodes(resolved)
     execution_registry = build_node_execution_registry(nodes=nodes)
+    bootstrap_manifest_targets = (
+        set(BOOTSTRAP_INPUT_MANIFEST_NODES)
+        | set(STATIC_EXPERIMENT_MANIFEST_NODES)
+    )
+    plan_factory_registry = build_manifest_plan_factory_registry(
+        nodes=nodes,
+        manifest_producer_nodes=TASK_MANIFEST_PRODUCER_NODES,
+        bootstrap_targets=bootstrap_manifest_targets,
+    )
     profile = (
         "nonproduction_miniature_test"
         if miniature
@@ -1372,7 +1453,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 8,
+            "schema_version": 23,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1396,6 +1477,7 @@ def build_production_graph(
             "bounded_concurrency": resolved,
             "nodes": nodes,
             "node_execution_registry": execution_registry,
+            "manifest_plan_factory_registry": plan_factory_registry,
             "stage_order": list("ABCDEFGHIJKLMN"),
             "two_stage_n_selectors": [
                 "accuracy_finalist_selector",
@@ -1404,6 +1486,15 @@ def build_production_graph(
             "performance_based_termination": False,
             "negative_campaign_continues_to_final_report": True,
             "final_test_before_both_locks_allowed": False,
+            "preproduction_validation_order": [
+                "local_synthetic_DAG",
+                "local_miniature_worker_interfaces",
+                "smoke_simulate",
+                "execution_complete_manifest_plan_audit",
+                "real_miniature_Tigris_smoke",
+                "production_dry_run_authenticated_storage",
+            ],
+            "full_submission_requires_operational_authorization": True,
             "production_submission_performed": False,
             "monitoring": {
                 "queue": 'squeue -u "$USER" -o "%i %j %T %R"',
@@ -1444,7 +1535,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 8:
+    if int(payload.get("schema_version", -1)) != 23:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1517,12 +1608,32 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     validate_node_execution_registry(
         payload["node_execution_registry"], nodes=nodes
     )
+    validate_manifest_plan_factory_registry(
+        payload["manifest_plan_factory_registry"],
+        nodes=nodes,
+        manifest_producer_nodes=TASK_MANIFEST_PRODUCER_NODES,
+        bootstrap_targets=(
+            set(BOOTSTRAP_INPUT_MANIFEST_NODES)
+            | set(STATIC_EXPERIMENT_MANIFEST_NODES)
+        ),
+    )
     if (
         payload["degradation_profile"] != "D_NOMINAL"
         or payload["degradation_profile_implicit_override_allowed"] is not False
         or payload["performance_based_termination"] is not False
         or payload["negative_campaign_continues_to_final_report"] is not True
         or payload["final_test_before_both_locks_allowed"] is not False
+        or payload["preproduction_validation_order"]
+        != [
+            "local_synthetic_DAG",
+            "local_miniature_worker_interfaces",
+            "smoke_simulate",
+            "execution_complete_manifest_plan_audit",
+            "real_miniature_Tigris_smoke",
+            "production_dry_run_authenticated_storage",
+        ]
+        or payload["full_submission_requires_operational_authorization"]
+        is not True
         or payload["two_stage_n_selectors"]
         != ["accuracy_finalist_selector", "rejection_finalist_selector"]
     ):
@@ -2131,7 +2242,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 14,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2173,11 +2284,12 @@ def build_step15_bundle(
                 "task_manifest_completion": (
                     "retb_task_manifest_completion_v1"
                 ),
+                "scale_completion": "retb_scale_completion_v2",
             },
             "stage_k_m_dependents_require_complete_parent_attestations": True,
             "stage_l_m_registration_only_rows_forbidden": True,
             "negative_control_or_scale_results_continue": True,
-            "all_shortlisted_graph_seed_rows_required": True,
+            "all_shortlisted_and_named_baseline_graph_seed_rows_required": True,
             "stage_n_completion_contracts": {
                 "continuation_gate": FINAL_CONTINUATION_GATE_CONTRACT,
                 "continuation_bundle": (
@@ -2192,6 +2304,12 @@ def build_step15_bundle(
                 "deployable_inference_input": (
                     "retb_deployable_inference_input_v1"
                 ),
+                "deployable_inference_input_binding": (
+                    "retb_deployable_inference_input_v2"
+                ),
+                "shared_deployable_inference_payload": (
+                    "retb_shared_deployable_inference_payload_v1"
+                ),
                 "deployable_inference_entrypoint": (
                     "scripts/run_retb_deployable_inference.py"
                 ),
@@ -2204,6 +2322,7 @@ def build_step15_bundle(
                 "finalist_controls": (
                     "retb_scale_finalist_controls_v1"
                 ),
+                "evidence_join": "retb_stage_n_evidence_join_v1",
                 "final_test_execution_lock": (
                     "retb_final_test_execution_lock_v1"
                 ),
@@ -2214,18 +2333,49 @@ def build_step15_bundle(
                     "retb_final_test_execution_claim_v1"
                 ),
                 "sealed_final_test_evaluation": (
-                    "retb_sealed_final_test_evaluation_v2"
+                    "retb_sealed_final_test_evaluation_v3"
                 ),
                 "final_report": "retb_stage_mn_final_report_v1",
                 "completed_job_ledger": JOB_LEDGER_CONTRACT,
             },
             "sealed_final_test_task_count": 1,
             "final_test_evaluation_exactly_once": True,
+            "task8_operational_validation_contracts": {
+                "local_report": "retb_local_operational_report_v3",
+                "tigris_smoke_evidence": (
+                    "retb_tigris_smoke_evidence_v1"
+                ),
+                "production_dry_run_evidence": (
+                    "retb_production_dry_run_evidence_v1"
+                ),
+                "full_submission_authorization": (
+                    "retb_full_submission_authorization_v2"
+                ),
+            },
+            "manifest_orchestration_contracts": {
+                "materialization_plan": (
+                    "retb_manifest_materialization_plan_v2"
+                ),
+                "producer_receipt": "retb_manifest_producer_receipt_v2",
+                "plan_factory_registry": (
+                    MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT
+                ),
+                "plan_producer_audit": (
+                    "retb_manifest_plan_producer_audit_v1"
+                ),
+                "post_completion_hook_required": True,
+                "missing_or_drifted_plan_fails_closed": True,
+                "hook_presence_is_not_plan_factory_evidence": True,
+                "real_miniature_execution_required_for_readiness": True,
+                "scientific_performance_used_as_gate": False,
+            },
+            "full_submission_requires_current_source_authorization": True,
             "smoke_submission_supported": True,
             "full_submission_supported": True,
             "monitoring_supported": True,
             "node_execution_registry_present": True,
-            "automatic_manifest_producer_coverage_complete": True,
+            "manifest_producer_registration_coverage_complete": True,
+            "automatic_manifest_producer_invocation_requires_task8_audit": True,
             "performance_based_termination": False,
         }
     )
@@ -2241,6 +2391,7 @@ __all__ = [
     "LATE_CONTINUATION_GATE_CONTRACT",
     "LATE_CONTINUATION_MANIFEST_NODES",
     "LATE_NODE_ENTRYPOINTS",
+    "MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT",
     "MIDDLE_CONTINUATION_GATE_CONTRACT",
     "MIDDLE_CONTINUATION_MANIFEST_NODES",
     "MIDDLE_NODE_ENTRYPOINTS",

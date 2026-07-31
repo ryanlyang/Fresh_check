@@ -20,7 +20,7 @@ from .predictor_bundle import PIPELINE_SEEDS
 
 SCALE_REFIT_BUNDLE_CONTRACT = "retb_scale_refit_bundle_v1"
 SCALE_GRAPH_RUN_CONTRACT = "retb_scale_graph_run_v1"
-SCALE_COMPLETION_CONTRACT = "retb_scale_completion_v1"
+SCALE_COMPLETION_CONTRACT = "retb_scale_completion_v2"
 
 SCALE_REFIT_KEYS = frozenset(
     {
@@ -229,7 +229,10 @@ def build_scale_graph_run(
         "locked_graph_definitions", {}
     )
     if (
-        graph not in locked_scale_shortlist.get("SCALE_SHORTLIST", [])
+        graph not in locked_scale_shortlist.get(
+            "SCALE_TRAINING_GRAPHS",
+            locked_scale_shortlist.get("SCALE_SHORTLIST", []),
+        )
         or graph not in definitions
         or int(pipeline_seed) not in PIPELINE_SEEDS
         or set(component_hashes) != set(SCALE_COMPONENT_KEYS)
@@ -387,7 +390,10 @@ def aggregate_scale_completion(
     )
     expected = {
         (graph_id, seed)
-        for graph_id in locked_scale_shortlist["SCALE_SHORTLIST"]
+        for graph_id in locked_scale_shortlist.get(
+            "SCALE_TRAINING_GRAPHS",
+            locked_scale_shortlist["SCALE_SHORTLIST"],
+        )
         for seed in PIPELINE_SEEDS
     }
     if len(scale_graph_runs) != len(expected):
@@ -445,7 +451,7 @@ def aggregate_scale_completion(
     return with_content_hash(
         {
             "contract": SCALE_COMPLETION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "parents": {
                 "locked_scale_shortlist": shortlist_sha,
                 "step14_bundle": require_sha256(
@@ -458,7 +464,10 @@ def aggregate_scale_completion(
             },
             "pipeline_seeds": list(PIPELINE_SEEDS),
             "shortlisted_graph_ids": list(
-                locked_scale_shortlist["SCALE_SHORTLIST"]
+                locked_scale_shortlist.get(
+                    "SCALE_TRAINING_GRAPHS",
+                    locked_scale_shortlist["SCALE_SHORTLIST"],
+                )
             ),
             "expected_run_count": len(expected),
             "runs": sorted(

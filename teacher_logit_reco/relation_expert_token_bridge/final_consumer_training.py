@@ -121,7 +121,12 @@ class FinalConsumerDataset(
         lineage_hashes: Mapping[str, str],
     ) -> None:
         _require_torch()
-        if split not in {"model_train", "val_stop", "val_design"}:
+        if split not in {
+            "model_train",
+            "scale_train",
+            "val_stop",
+            "val_design",
+        }:
             raise ValueError("final-consumer dataset split differs")
         ids = tuple(str(value) for value in identities)
         labels = _array(labels, dtype=np.int64)
@@ -139,7 +144,9 @@ class FinalConsumerDataset(
         self.split = split
         self.zero_based_epoch = 0
         self.replica_set = (
-            (0, 1, 2, 3) if split == "model_train" else (0,)
+            (0, 1, 2, 3)
+            if split in {"model_train", "scale_train"}
+            else (0,)
         )
         expected = np.asarray(
             [
@@ -982,7 +989,8 @@ def train_final_consumer(
         run_record.get("consumer_kind") != config.consumer_kind
         or run_record.get("model_variant") != config.model_variant
         or int(run_record.get("pipeline_seed", -1)) != config.seed
-        or train_loader.dataset.split != "model_train"
+        or train_loader.dataset.split
+        not in {"model_train", "scale_train"}
         or val_stop_loader.dataset.split != "val_stop"
     ):
         raise ValueError("final-consumer run/configuration lineage differs")

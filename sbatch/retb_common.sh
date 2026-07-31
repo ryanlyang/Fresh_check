@@ -78,6 +78,19 @@ retb_run_task() {
   python scripts/run_retb_task.py "${arguments[@]}"
 }
 
+retb_materialize_downstream() {
+  local producer_node_id="$1"
+  if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
+  python scripts/produce_retb_downstream_manifest_plans.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id "${producer_node_id}" >/dev/null
+  python scripts/materialize_retb_downstream_manifests.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id "${producer_node_id}" >/dev/null
+}
+
 retb_record_dynamic_job() {
   local logical_name="$1"
   local job_id="$2"

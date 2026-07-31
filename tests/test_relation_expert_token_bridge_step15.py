@@ -78,6 +78,14 @@ def test_complete_graph_covers_stages_selectors_scale_and_two_locks() -> None:
     assert nodes["sealed_final_test"]["dependencies"] == [
         "final_test_execution_lock"
     ]
+    assert set(nodes["stage_n_evidence_join"]["dependencies"]) == {
+        "postlock_oracle_targets",
+        "finalist_controls",
+        "prelock_final_inputs",
+    }
+    assert nodes["final_test_execution_lock"]["dependencies"] == [
+        "stage_n_evidence_join"
+    ]
     assert nodes["prelock_final_inputs"]["dataset_access"] == (
         "checkpoint_free_final_input_preparation"
     )

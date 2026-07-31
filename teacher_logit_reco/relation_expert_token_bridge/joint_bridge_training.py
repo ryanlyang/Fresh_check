@@ -147,7 +147,12 @@ class JointBridgeDataset(
         lineage_hashes: Mapping[str, str],
     ) -> None:
         _require_torch()
-        if split not in {"model_train", "val_stop", "val_design"}:
+        if split not in {
+            "model_train",
+            "scale_train",
+            "val_stop",
+            "val_design",
+        }:
             raise ValueError("joint bridge dataset split differs")
         ids = tuple(str(value) for value in identities)
         truth = _array(labels, dtype=np.int64)
@@ -169,7 +174,9 @@ class JointBridgeDataset(
         self.realization_policy = JOINT_INPUT_POLICY
         self.zero_based_epoch = 0
         self.replica_set = (
-            (0, 1, 2, 3) if split == "model_train" else (0,)
+            (0, 1, 2, 3)
+            if split in {"model_train", "scale_train"}
+            else (0,)
         )
         expected_at_epoch_zero = np.asarray(
             [
@@ -1321,7 +1328,8 @@ def train_joint_bridge(
         graph.variant != config.variant
         or run_record.get("variant") != config.variant
         or int(run_record.get("pipeline_seed", -1)) != config.seed
-        or train_loader.dataset.split != "model_train"
+        or train_loader.dataset.split
+        not in {"model_train", "scale_train"}
         or val_stop_loader.dataset.split != "val_stop"
     ):
         raise ValueError("joint bridge run/configuration lineage differs")

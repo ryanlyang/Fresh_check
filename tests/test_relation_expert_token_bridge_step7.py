@@ -48,6 +48,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     with_content_hash,
 )
 from teacher_logit_reco.relation_expert_token_bridge.registry import EXPERT_ORDER
+from teacher_logit_reco.relation_expert_token_bridge.replicas import replica_for
 from teacher_logit_reco.relation_expert_token_bridge.step7 import (
     build_stage_e_template_registry,
     build_step7_bundle,
@@ -517,6 +518,69 @@ def _pilot_dataset(split: str):
             "T0_fusion": SHA_A,
         },
     )
+
+
+def test_pilot_r_multi_uses_identity_dependent_epoch_cycle() -> None:
+    n, k, d = 8, 2, 64
+    identities = [f"pilot-cycle-{index}" for index in range(n)]
+    replicas = np.stack(
+        [
+            np.full((n, k, d), replica, dtype=np.float32)
+            for replica in range(4)
+        ]
+    )
+    states = np.stack(
+        [
+            np.full((n, 3, d), replica, dtype=np.float32)
+            for replica in range(4)
+        ]
+    )
+    masks = np.ones((4, n, 3), dtype=bool)
+    dataset = BridgePilotDataset(
+        identities=identities,
+        labels=np.arange(n) % 10,
+        hlt_token_banks={name: replicas.copy() for name in EXPERT_ORDER},
+        unbiased_particle_states=states,
+        particle_mask=masks,
+        target_tokens=np.zeros((n, k, d), dtype=np.float32),
+        token_mean=np.zeros((k, d), dtype=np.float32),
+        token_standard_deviation=np.ones((k, d), dtype=np.float32),
+        target_expert_logits=np.zeros((n, 10), dtype=np.float32),
+        target_hybrid_logits=np.zeros((n, 10), dtype=np.float32),
+        other_t0_banks={
+            name: np.zeros((n, k, d), dtype=np.float32)
+            for name in EXPERT_ORDER
+            if name != "TRACK"
+        },
+        target_expert_id="TRACK",
+        split="model_train",
+        lineage_hashes={
+            "T0_checkpoint": SHA_A,
+            "HLT_encoder_checkpoint": SHA_B,
+            "unbiased_HLT_particle_encoder_checkpoint": SHA_B,
+            "target_normalizer": SHA_C,
+            "T0_fusion": SHA_A,
+        },
+    )
+    for one_based_epoch in (1, 2, 3, 4):
+        dataset.set_epoch(one_based_epoch)
+        selected = [
+            int(dataset[index]["hlt_token_banks"]["BASE4"][0, 0])
+            for index in range(n)
+        ]
+        assert selected == [
+            replica_for(
+                policy="R_MULTI",
+                logical_role="model_train",
+                epoch=one_based_epoch - 1,
+                canonical_identity=identity,
+            )
+            for identity in identities
+        ]
+    assert {
+        int(dataset[index]["hlt_token_banks"]["BASE4"][0, 0])
+        for index in range(n)
+    } != {0}
 
 
 def test_stage_e_registry_pilot_training_bundle_and_miniature(tmp_path: Path) -> None:

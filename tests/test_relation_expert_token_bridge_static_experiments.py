@@ -86,8 +86,10 @@ def test_full_static_matrix_is_exact_deduplicated_and_fully_bound(
     assert tuple(plan["groups"]) == STATIC_MANIFEST_NODES
     assert plan["full_matrix_counts"] == {
         "offline_expert_training": 147,
+        "offline_expert_confirmation": 147,
+        "offline_fusion_cache": 63,
         "offline_fusion_training": 49,
-        "native_hlt_expert_training": 450,
+        "native_hlt_expert_training": 541,
         "native_hlt_fusion_training": 30,
         "bridge_pilot_training": 105,
     }
@@ -161,6 +163,31 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
         row["argv"][1] == "scripts/train_retb_offline_fusion.py"
         for row in stage_c
     )
+    confirmations = plan["groups"]["offline_expert_confirmation"]
+    assert len(confirmations) == 147
+    assert {
+        int(row["seed"]) for row in confirmations
+    } == {101, 202, 303}
+    assert all(
+        row["argv"][1] == "scripts/train_retb_offline_expert.py"
+        and row["argv"][row["argv"].index("--registry-stage") + 1] == "C"
+        for row in confirmations
+    )
+    caches = plan["groups"]["offline_fusion_cache"]
+    assert len(caches) == 63
+    assert {
+        row["configuration"]["split"] for row in caches
+    } == {"model_train", "val_stop", "val_design"}
+    assert all(
+        row["argv"][1] == "scripts/build_retb_frozen_token_cache.py"
+        and sum(
+            value == "--expert-registration" for value in row["argv"]
+        )
+        == 7
+        and sum(value == "--expert-checkpoint" for value in row["argv"])
+        == 7
+        for row in caches
+    )
 
     stage_d = plan["groups"]["native_hlt_expert_training"]
     assert sum(
@@ -183,10 +210,14 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
         {
             "checkpoint_registration.json",
             "best_model_val.pt",
+            "model_train_coordinate_arrays.npz",
+            "val_stop_coordinate_arrays.npz",
+            "val_design_coordinate_arrays.npz",
         }
         == {Path(path).name for path in row["expected_artifacts"]}
         for row in pilots
     )
+    assert all("--val-design-dataset" in row["argv"] for row in pilots)
     assert all(
         row["run_id_resolution"]
         == "materialize_after_parent_checkpoint_hashes_are_immutable"
@@ -195,7 +226,7 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
     assert all(row["deferred_inputs"] for row in pilots)
 
 
-def test_miniature_uses_declared_smoke_prefix_and_graph_marks_static(
+def test_miniature_uses_complete_matrix_and_graph_marks_static(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "retb_static_miniature"
@@ -207,14 +238,17 @@ def test_miniature_uses_declared_smoke_prefix_and_graph_marks_static(
         python_executable=sys.executable,
     )
     plan = bundle["static_experiment_plan"]
-    assert plan["miniature_policy"] == "declared_graph_smoke_task_prefix"
+    assert (
+        plan["miniature_policy"]
+        == "complete_scientific_matrix_on_miniature_populations"
+    )
     nodes = {row["node_id"]: row for row in graph["nodes"]}
     entries = {
         row["node_id"]: row
         for row in graph["node_execution_registry"]["entries"]
     }
     for node_id in STATIC_MANIFEST_NODES:
-        expected = nodes[node_id]["array"]["smoke_tasks"]
+        expected = plan["full_matrix_counts"][node_id]
         assert plan["execution_counts"][node_id] == expected
         assert bundle["task_manifests"][node_id]["task_count"] == expected
         assert nodes[node_id]["dynamic_continuation"] is False

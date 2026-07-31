@@ -56,7 +56,10 @@ class TrainingConfig:
     campaign_profile: str = "production"
 
     def validate(self) -> None:
-        if self.seed not in (101, 202, 303) and self.campaign_profile == "production":
+        if self.seed not in (101, 202, 303) and self.campaign_profile in {
+            "production",
+            "hosd_teacher",
+        }:
             raise ValueError("production seed must be 101, 202, or 303")
         if self.maximum_epochs <= 0:
             raise ValueError("maximum_epochs must be positive")
@@ -64,7 +67,11 @@ class TrainingConfig:
             raise ValueError("minimum_epochs lies outside the epoch budget")
         if self.early_stop_patience <= 0:
             raise ValueError("early-stop patience must be positive")
-        if self.campaign_profile not in {"production", "miniature_test"}:
+        if self.campaign_profile not in {
+            "production",
+            "miniature_test",
+            "hosd_teacher",
+        }:
             raise ValueError("unknown training campaign profile")
         locked = {
             "maximum_epochs": 40,
@@ -89,6 +96,19 @@ class TrainingConfig:
             }
             if drift:
                 raise ValueError(f"production training protocol drifted: {drift}")
+        if self.campaign_profile == "hosd_teacher":
+            hosd_locked = {
+                **locked,
+                "minimum_epochs": 40,
+                "accuracy_window": 0.0,
+            }
+            drift = {
+                name: (getattr(self, name), expected)
+                for name, expected in hosd_locked.items()
+                if getattr(self, name) != expected
+            }
+            if drift:
+                raise ValueError(f"HOSD teacher training protocol drifted: {drift}")
         if self.microbatch_size != 64 or self.gradient_accumulation_steps != 2:
             raise ValueError(
                 "the globally frozen update schedule requires microbatch 64, "
@@ -118,7 +138,9 @@ class TrainingConfig:
                     "same_for_every_configuration_at_seed": True,
                 },
                 "checkpoint_selector": (
-                    "global_max_accuracy_0p0001_window_then_min_CE_then_earliest"
+                    "exact_max_balanced_accuracy_then_min_CE_then_earliest"
+                    if self.accuracy_window == 0
+                    else "global_max_accuracy_0p0001_window_then_min_CE_then_earliest"
                 ),
                 "val_select_checkpoint_selection_allowed": False,
                 "resume_granularity": "completed_epoch_boundary",
@@ -622,12 +644,15 @@ def train_relational_model(
     resource_profile: Mapping[str, Any] | None = None,
     resume: bool = True,
     evaluator: Callable[..., Mapping[str, Any]] = evaluate_model,
+    inference_input_role: str = "hlt_only",
 ) -> dict[str, Any]:
     """Train, globally select on val_stop, then evaluate val_select exactly once."""
 
     if torch is None:
         raise RuntimeError("PyTorch is required for training")
     config.validate()
+    if inference_input_role not in {"hlt_only", "offline_teacher"}:
+        raise ValueError("unknown relational training inference_input_role")
     if resource_profile is None and config.campaign_profile == "production":
         raise ValueError("production training requires a parameter/FLOP profile")
     resource_profile_sha256 = (
@@ -1008,8 +1033,9 @@ def train_relational_model(
             "relation_diagnostics": diagnostics,
             "retained_checkpoints": ["best_model_val.pt"],
             "optimizer_state_retained": False,
-            "hlt_only_inference": True,
-            "offline_or_teacher_required": False,
+            "inference_input_role": inference_input_role,
+            "hlt_only_inference": inference_input_role == "hlt_only",
+            "offline_or_teacher_required": inference_input_role != "hlt_only",
         }
     )
     write_immutable_json(registration_path, registration)

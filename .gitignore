@@ -5,3 +5,5 @@ fresh_check_diagnostics/
 .codex_queue_outputs/
 __pycache__/
 *.pyc
+.tmp/
+.pytest_cache/

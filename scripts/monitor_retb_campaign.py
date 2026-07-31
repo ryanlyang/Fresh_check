@@ -18,6 +18,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     JOB_LEDGER_CONTRACT,
     PRODUCTION_GRAPH_CONTRACT,
     load_hashed_json,
+    validate_stale_cancellation_request,
     validate_job_ledger,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
@@ -84,22 +85,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     job_ids = [value for value in ledger["jobs"].values() if value is not None]
     states = {} if args.offline else _slurm_state(job_ids)
     stale = []
-    for value in args.stale_job_id:
-        if not value.isdigit() or value not in job_ids:
-            raise ValueError("stale job ID is not bound by this campaign ledger")
-        stale.append(value)
     if args.cancel_stale:
-        if not stale:
-            raise ValueError(
-                "--cancel-stale requires at least one authenticated "
-                "--stale-job-id"
-            )
-        if source_validated:
-            raise ValueError(
-                "current source still matches the campaign; no source-lineage "
-                "mismatch proves these jobs stale"
-            )
-        subprocess.run(["scancel", *sorted(set(stale))], check=True)
+        stale = validate_stale_cancellation_request(
+            job_ledger=ledger,
+            stale_job_ids=list(args.stale_job_id),
+            source_validated=source_validated,
+        )
+        subprocess.run(["scancel", *stale], check=True)
+    elif args.stale_job_id:
+        raise ValueError("--stale-job-id requires --cancel-stale")
     rows = []
     for node in graph["nodes"]:
         job_id = ledger["jobs"].get(node["node_id"])

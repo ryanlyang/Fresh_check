@@ -109,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     hlt_paths = _replica_manifests(args.hlt_cache_manifest)
     expected_replicas = (
         {0}
-        if args.split != "model_train"
+        if args.split not in {"model_train", "scale_train"}
         or args.realization_policy == "R_FIXED"
         else {0, 1, 2, 3}
     )
@@ -145,7 +145,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     for expert in EXPERT_ORDER:
         manifest = output_manifests[expert]
         if (
-            manifest.get("contract") != "retb_native_hlt_expert_outputs_v1"
+            manifest.get("contract")
+            not in {
+                "retb_native_hlt_expert_outputs_v3",
+                "retb_native_hlt_expert_outputs_v4",
+            }
             or manifest.get("expert_id") != expert
             or manifest.get("expert_registration_sha256")
             != registrations[expert]["content_hash"]
@@ -157,6 +161,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels = None
     token_banks = {replica: {} for replica in expected_replicas}
     expert_logits = {replica: {} for replica in expected_replicas}
+    unbiased_states = {}
+    particle_masks = {}
     for (expert, replica), path in sorted(requested.items()):
         output_manifest_path = output_manifest_paths[expert]
         output_row = output_manifests[expert]["files"].get(
@@ -174,12 +180,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             raise ValueError("native expert output bytes/manifest differ")
         with np.load(path, allow_pickle=False) as payload:
-            if set(payload.files) != {"identities", "labels", "tokens", "logits"}:
+            if set(payload.files) != {
+                "identities",
+                "labels",
+                "tokens",
+                "logits",
+                "particle_states",
+                "particle_mask",
+            }:
                 raise ValueError("native expert output NPZ fields differ")
             current_ids = np.asarray(payload["identities"])
             current_labels = np.asarray(payload["labels"], dtype=np.int64)
             current_tokens = np.asarray(payload["tokens"], dtype=np.float32)
             current_logits = np.asarray(payload["logits"], dtype=np.float32)
+            if expert == "BASE4":
+                unbiased_states[replica] = np.asarray(
+                    payload["particle_states"], dtype=np.float32
+                )
+                particle_masks[replica] = np.asarray(
+                    payload["particle_mask"], dtype=bool
+                )
         if identities is None:
             identities, labels = current_ids, current_labels
         elif not np.array_equal(identities, current_ids) or not np.array_equal(
@@ -197,7 +217,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     if not args.dry_run:
         authorize_dataset_access(
-            worker_role="training_worker", requested_resource=args.split
+            worker_role=(
+                "scale_training_worker"
+                if args.split == "scale_train"
+                else "training_worker"
+            ),
+            requested_resource=args.split,
         )
         result["manifest"] = publish_native_fusion_cache(
             output_dir=args.output_dir,
@@ -209,6 +234,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             labels=labels,
             token_banks_by_replica=token_banks,
             expert_logits_by_replica=expert_logits,
+            unbiased_particle_states_by_replica=unbiased_states,
+            particle_masks_by_replica=particle_masks,
             expert_registration_hashes={
                 expert: registration["content_hash"]
                 for expert, registration in registrations.items()

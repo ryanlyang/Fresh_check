@@ -66,7 +66,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.bridge_shape_selection,
         expected_contract=BRIDGE_SHAPE_SELECTION_CONTRACT,
     )
-    parents = json.loads(args.parent_hashes.read_text("utf-8"))
+    parent_artifact = load_hashed_json(
+        args.parent_hashes,
+        expected_contract="retb_scale_shortlist_parent_input_v1",
+    )
+    if parent_artifact.get("source") != campaign.get("source"):
+        raise ValueError("scale-shortlist parent input source differs")
+    parents = parent_artifact["parent_hashes"]
     step13 = load_hashed_json(
         args.campaign_root
         / "registry"

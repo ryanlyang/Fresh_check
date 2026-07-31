@@ -56,7 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.target_cache_manifest,
         expected_pipeline_seed=int(registration["pipeline_seed"]),
         expected_specification_sha256=target_header[
-            "specification_sha256"
+            "target_cache_specification_sha256"
         ],
     )
     expert = str(inference["expert_id"])
@@ -68,9 +68,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         or target_manifest["content_hash"]
         != inference["parents"]["target_cache_manifest"]
         or target_manifest["identity_order_sha256"]
-        != inference["identity_order_sha256"]
-        or target_arrays["identities"].tolist()
-        != inference_arrays["identities"].tolist()
+        != target_header["identity_order_sha256"]
+        or target_manifest["identity_manifest_sha256"]
+        != inference["parents"]["identity_manifest"]
+        or len(target_arrays["canonical_identity_indices"])
+        != len(inference_arrays["identities"])
+        or not (
+            target_arrays["canonical_identity_indices"]
+            == range(len(inference_arrays["identities"]))
+        ).all()
     ):
         raise ValueError("uncertainty-calibration lineage differs")
     result: dict[str, object] = {

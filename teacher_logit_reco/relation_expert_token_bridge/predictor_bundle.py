@@ -35,6 +35,9 @@ PREDICTOR_CACHE_INDEX_CONTRACT = "retb_predictor_cache_index_v1"
 BUNDLE_SEARCH_POLICY_CONTRACT = "retb_predictor_bundle_search_policy_v1"
 BUNDLE_SEARCH_CONTRACT = "retb_predictor_bundle_search_v1"
 PREDICTOR_BUNDLE_LOCK_CONTRACT = "retb_predictor_bundle_lock_v1"
+CARRIED_PREDICTOR_BUNDLE_INDEX_CONTRACT = (
+    "retb_carried_predictor_bundle_index_v1"
+)
 PIPELINE_SEEDS = (101, 202, 303)
 BEAM_WIDTH = 32
 ACCURACY_WINDOW = 1.0e-4
@@ -979,6 +982,173 @@ def select_joint_predictor_bundle(
     }
 
 
+def build_predictor_bundle_lock_from_scored_tuple(
+    *,
+    search: Mapping[str, Any],
+    scored_tuple: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    coordinates: Sequence[Mapping[str, Any]],
+    source_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Materialize a non-primary, pre-scored coordinate lock.
+
+    Stage L carries both selected uniform shapes and all three heterogeneous
+    allocations.  Those locks must be selected from the already-complete
+    Stage-H search; this helper deliberately cannot score a new tuple or
+    inspect a later split.
+    """
+
+    validate_content_hash(search, expected_contract=BUNDLE_SEARCH_CONTRACT)
+    candidate_map = {}
+    for row in candidates:
+        validate_predictor_candidate(row)
+        candidate_map[str(row["candidate_id"])] = row
+    coordinate_map = {}
+    for row in coordinates:
+        validate_locked_target_coordinate(row)
+        coordinate_map[str(row["coordinate_id"])] = row
+    names = tuple(str(value) for value in scored_tuple["candidate_tuple"])
+    matching_scores = [
+        row
+        for row in search["scored_tuples"]
+        if tuple(row["candidate_tuple"]) == names
+        and row["coordinate_id"] == scored_tuple["coordinate_id"]
+    ]
+    if len(matching_scores) != 1 or dict(matching_scores[0]) != dict(
+        scored_tuple
+    ):
+        raise ValueError("carried bundle tuple was not pre-scored")
+    coordinate = coordinate_map.get(str(scored_tuple["coordinate_id"]))
+    if coordinate is None or len(names) != len(EXPERT_ORDER):
+        raise ValueError("carried bundle coordinate differs")
+    selected_rows = []
+    for expert, name in zip(EXPERT_ORDER, names, strict=True):
+        candidate = candidate_map.get(name)
+        if (
+            candidate is None
+            or candidate["expert_id"] != expert
+            or candidate["coordinate_id"] != coordinate["coordinate_id"]
+        ):
+            raise ValueError("carried bundle candidate lineage differs")
+        selected_rows.append(candidate)
+    lock = with_content_hash(
+        {
+            "contract": PREDICTOR_BUNDLE_LOCK_CONTRACT,
+            "schema_version": 1,
+            "search_sha256": search["content_hash"],
+            "predictor_cache_index_sha256": search[
+                "predictor_cache_index_sha256"
+            ],
+            "coordinate_id": coordinate["coordinate_id"],
+            "coordinate_sha256": coordinate["content_hash"],
+            "target_modes": coordinate["target_modes"],
+            "allocation": coordinate["allocation"],
+            "expert_order": list(EXPERT_ORDER),
+            "candidate_tuple": list(names),
+            "candidate_hashes": {
+                expert: selected_rows[index]["content_hash"]
+                for index, expert in enumerate(EXPERT_ORDER)
+            },
+            "seed_specific_artifacts": {
+                str(seed): {
+                    expert: selected_rows[index]["seed_artifacts"][str(seed)]
+                    for index, expert in enumerate(EXPERT_ORDER)
+                }
+                for seed in PIPELINE_SEEDS
+            },
+            "selected_candidate_descriptors": {
+                expert: {
+                    "candidate_id": selected_rows[index]["candidate_id"],
+                    "target_mode": selected_rows[index]["target_mode"],
+                    "configuration": dict(
+                        selected_rows[index]["configuration"]
+                    ),
+                }
+                for index, expert in enumerate(EXPERT_ORDER)
+            },
+            "fusion_checkpoint_hashes": coordinate[
+                "fusion_checkpoint_hashes"
+            ],
+            "selection_data_hashes": {
+                "label_manifests": search[
+                    "label_manifest_hashes_by_seed"
+                ],
+                "label_payloads": search[
+                    "label_payload_hashes_by_seed"
+                ],
+            },
+            "configuration_shared_across_pipeline_seeds": True,
+            "per_seed_selection_permitted": False,
+            "locked_before_joint_training": True,
+            "performance_based_termination": False,
+        }
+    )
+    if source_snapshot is not None:
+        lock = bind_source(lock, source_snapshot=source_snapshot)
+    return lock
+
+
+def select_carried_predictor_bundles(
+    *,
+    search: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    coordinates: Sequence[Mapping[str, Any]],
+    carried_shape_roles: Sequence[str],
+    source_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Lock the best already-scored tuple independently for each carried shape."""
+
+    validate_content_hash(search, expected_contract=BUNDLE_SEARCH_CONTRACT)
+    roles = [str(value) for value in carried_shape_roles]
+    if not roles or len(roles) != len(set(roles)):
+        raise ValueError("carried predictor shape roles differ")
+    locks = {}
+    selection_rows = []
+    for role in roles:
+        eligible = [
+            row
+            for row in search["scored_tuples"]
+            if str(row["coordinate_id"]).endswith(f":{role}")
+        ]
+        if not eligible:
+            raise ValueError(f"carried predictor shape lacks scores: {role}")
+        selected = _rank(eligible, width=1)[0]
+        lock = build_predictor_bundle_lock_from_scored_tuple(
+            search=search,
+            scored_tuple=selected,
+            candidates=candidates,
+            coordinates=coordinates,
+            source_snapshot=source_snapshot,
+        )
+        locks[role] = lock
+        selection_rows.append(
+            {
+                "carried_shape_role": role,
+                "coordinate_id": selected["coordinate_id"],
+                "candidate_tuple": list(selected["candidate_tuple"]),
+                "score": dict(selected),
+                "predictor_bundle_lock_sha256": lock["content_hash"],
+            }
+        )
+    artifact = with_content_hash(
+        {
+            "contract": CARRIED_PREDICTOR_BUNDLE_INDEX_CONTRACT,
+            "schema_version": 1,
+            "predictor_bundle_search_sha256": search["content_hash"],
+            "carried_shape_roles": roles,
+            "selection_rows": selection_rows,
+            "selection_rule": list(build_bundle_search_policy()["ranking"]),
+            "new_tuple_scoring_permitted": False,
+            "stack_val_consumed": False,
+            "final_test_consumed": False,
+            "scientific_underperformance_blocks_continuation": False,
+        }
+    )
+    if source_snapshot is not None:
+        artifact = bind_source(artifact, source_snapshot=source_snapshot)
+    return {"index": artifact, "locks": locks}
+
+
 def validate_predictor_bundle_selection(
     result: Mapping[str, Mapping[str, Any]],
 ) -> str:
@@ -1045,6 +1215,7 @@ __all__ = [
     "BEAM_WIDTH",
     "BUNDLE_SEARCH_CONTRACT",
     "BUNDLE_SEARCH_POLICY_CONTRACT",
+    "CARRIED_PREDICTOR_BUNDLE_INDEX_CONTRACT",
     "PIPELINE_SEEDS",
     "PREDICTOR_BUNDLE_LOCK_CONTRACT",
     "PREDICTOR_CACHE_INDEX_CONTRACT",
@@ -1054,8 +1225,10 @@ __all__ = [
     "build_locked_target_coordinate",
     "build_predictor_cache_index",
     "build_predictor_candidate",
+    "build_predictor_bundle_lock_from_scored_tuple",
     "score_frozen_bundle",
     "select_joint_predictor_bundle",
+    "select_carried_predictor_bundles",
     "shared_predictor_configuration_id",
     "validate_locked_target_coordinate",
     "validate_bundle_search_policy",

@@ -43,8 +43,5 @@ for replica in 0 1 2 3; do
     arguments+=(--val-stop-cache "${replica}=${!val_variable}")
   fi
 done
-if [[ -n "${RETB_WIDE_CAPACITY_ARTIFACT:-}" ]]; then
-  arguments+=(--wide-capacity-artifact "${RETB_WIDE_CAPACITY_ARTIFACT}")
-fi
 if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then arguments+=(--dry-run); fi
 python scripts/train_retb_native_hlt_control.py "${arguments[@]}"

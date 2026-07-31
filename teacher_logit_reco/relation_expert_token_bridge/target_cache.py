@@ -22,16 +22,21 @@ from .contracts import (
 from .registry import EXPERT_ORDER
 
 
-TARGET_CACHE_POLICY_CONTRACT = "retb_offline_target_cache_policy_v1"
-TARGET_CACHE_SPEC_CONTRACT = "retb_offline_target_cache_specification_v1"
+TARGET_CACHE_POLICY_CONTRACT = "retb_offline_target_cache_policy_v2"
+TARGET_CACHE_SPEC_CONTRACT = "retb_offline_target_cache_specification_v2"
 TARGET_STORAGE_AUDIT_CONTRACT = "retb_target_storage_audit_v1"
-TARGET_SHARD_CONTRACT = "retb_offline_target_shard_v1"
-TARGET_CACHE_MANIFEST_CONTRACT = "retb_offline_target_cache_manifest_v1"
-TARGET_NORMALIZER_CONTRACT = "retb_target_token_normalizer_v1"
-TARGET_NORMALIZER_SET_CONTRACT = "retb_target_normalizer_set_v1"
+TARGET_SHARD_CONTRACT = "retb_offline_target_shard_v2"
+TARGET_CACHE_MANIFEST_CONTRACT = "retb_offline_target_cache_manifest_v2"
+TARGET_NORMALIZER_CONTRACT = "retb_target_token_normalizer_v2"
+TARGET_NORMALIZER_SET_CONTRACT = "retb_target_normalizer_set_v2"
 SEALED_INPUT_PREPARATION_CONTRACT = "retb_sealed_input_preparation_v1"
 
-PRELOCK_TARGET_SPLITS = ("model_train", "val_stop", "val_design")
+PRELOCK_TARGET_SPLITS = (
+    "model_train",
+    "scale_train",
+    "val_stop",
+    "val_design",
+)
 TARGET_MODES = (
     "T0_PURE",
     "T1_ANCHORED_BRIDGE",
@@ -104,7 +109,11 @@ def build_target_cache_policy() -> dict[str, Any]:
                 "consumer_token_dtype": "float32",
             },
             "normalization": {
-                "fit_split": "model_train_only",
+                "fit_split": "training_population_only",
+                "allowed_training_populations": [
+                    "model_train",
+                    "scale_train",
+                ],
                 "granularity": "expert_slot_channel",
                 "statistics_dtype": "float32",
                 "accumulator_dtype": "float64",
@@ -1126,13 +1135,19 @@ def fit_target_normalizers(
     expected_pipeline_seed: int,
     expected_specification_sha256: str,
     source_snapshot: Mapping[str, Any],
+    training_split: str = "model_train",
 ) -> dict[str, Any]:
     path = Path(model_train_manifest_path)
     manifest = load_hashed_json(
         path, expected_contract=TARGET_CACHE_MANIFEST_CONTRACT
     )
-    if manifest["split"] != "model_train":
-        raise ValueError("target normalizers fit model_train only")
+    if (
+        training_split not in {"model_train", "scale_train"}
+        or manifest["split"] != training_split
+    ):
+        raise ValueError(
+            "target normalizer training population differs"
+        )
     validate_offline_target_cache(
         path,
         expected_pipeline_seed=expected_pipeline_seed,
@@ -1173,7 +1188,7 @@ def fit_target_normalizers(
                     ],
                     "pipeline_seed": int(expected_pipeline_seed),
                     "shape_id": manifest["shape_id"],
-                    "fit_split": "model_train",
+                    "fit_split": training_split,
                     "fit_event_count": count,
                     "target_cache_manifest_sha256": manifest["content_hash"],
                     "target_cache_specification_sha256": (
@@ -1198,9 +1213,10 @@ def fit_target_normalizers(
                 "pipeline_seed": int(expected_pipeline_seed),
                 "shape_id": manifest["shape_id"],
                 "target_tuple": list(manifest["target_tuple"]),
-                "model_train_target_cache_manifest_sha256": manifest[
+                "training_target_cache_manifest_sha256": manifest[
                     "content_hash"
                 ],
+                "fit_split": training_split,
                 "normalizer_hashes": {
                     expert: normalizers[expert]["content_hash"]
                     for expert in EXPERT_ORDER
@@ -1234,7 +1250,9 @@ def validate_target_normalizer_set(
         )
         if (
             artifact["expert_id"] != expert
-            or artifact["fit_split"] != "model_train"
+            or artifact["fit_split"]
+            not in {"model_train", "scale_train"}
+            or artifact["fit_split"] != normalizer_set["fit_split"]
             or artifact["pipeline_seed"] != normalizer_set["pipeline_seed"]
             or artifact["shape_id"] != normalizer_set["shape_id"]
             or mean.ndim != 2

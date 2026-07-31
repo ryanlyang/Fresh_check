@@ -9,7 +9,11 @@ from .complementarity import (
     COMPLEMENTARITY_CONTRACT,
     SUBSET_READOUT_CONTRACT,
 )
-from .capacity import build_capacity_control_registry
+from .capacity import (
+    OFFLINE_CAPACITY_EXECUTION_CONTRACT,
+    build_capacity_control_registry,
+    build_offline_capacity_execution_registry,
+)
 from .contracts import (
     bind_source,
     require_sha256,
@@ -35,9 +39,9 @@ from .selection import (
 )
 
 
-STAGE_C_RUN_REGISTRY_CONTRACT = "retb_stage_c_run_registry_v1"
-STEP5_BUNDLE_CONTRACT = "retb_step5_offline_fusion_bundle_v1"
-STEP5_REPORT_CONTRACT = "retb_step5_report_v1"
+STAGE_C_RUN_REGISTRY_CONTRACT = "retb_stage_c_run_registry_v2"
+STEP5_BUNDLE_CONTRACT = "retb_step5_offline_fusion_bundle_v3"
+STEP5_REPORT_CONTRACT = "retb_step5_report_v3"
 STEP5_MINIATURE_COMPLETION_CONTRACT = "retb_step5_miniature_completion_v1"
 PIPELINE_SEEDS = (101, 202, 303)
 
@@ -93,6 +97,73 @@ def build_expert_confirmation_rows() -> list[dict[str, Any]]:
     if len(rows) != 147 or len({row["run_id"] for row in rows}) != 147:
         raise RuntimeError("Stage-C expert confirmation must contain 147 rows")
     return rows
+
+
+def resolve_expert_confirmation_training_run(
+    registry: Mapping[str, Any],
+    *,
+    run_id: str,
+    _registry_validated: bool = False,
+) -> dict[str, Any]:
+    """Resolve one Stage-C confirmation into the expert trainer schema."""
+
+    if not _registry_validated:
+        validate_stage_c_run_registry(registry)
+    matches = [
+        dict(row)
+        for row in registry["expert_confirmation_rows"]
+        if row["run_id"] == str(run_id)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "Stage-C expert confirmation run ID is absent or duplicated"
+        )
+    row = matches[0]
+    confirmation = dict(row["configuration"])
+    if (
+        confirmation.get("kind") != "PURE_OFFLINE_EXPERT_CONFIRMATION"
+        or confirmation.get("loss_id") != "ELOSS_CE"
+        or confirmation.get("topology") != "B_CONCAT"
+        or int(confirmation.get("fixed_epochs", -1)) != 40
+    ):
+        raise ValueError("Stage-C expert confirmation semantics differ")
+    expert = str(confirmation["expert_id"])
+    shape_id = str(confirmation["shape_id"])
+    shape = TOKEN_SHAPES[shape_id]
+    configuration = {
+        "screen_name": "STAGE_C_THREE_SEED_EXPERT_CONFIRMATION",
+        "expert_id": expert,
+        "relation_family": None if expert == "BASE4" else expert,
+        "all_particle_fields": True,
+        "base4_present": True,
+        "shape_id": shape_id,
+        "token_count": int(shape["K"]),
+        "token_dimension": int(shape["D"]),
+        "topology": "B_CONCAT",
+        "tokenizer_mode": "TOK_CANONICAL",
+        "loss_id": "ELOSS_CE",
+        "initialization": "INIT_SCRATCH",
+        "learning_rate": 1.0e-3,
+        "particle_dropout": 0.0,
+        "measurement_embedding": False,
+        "epochs": 40,
+        "checkpoint_selection": "val_stop_only",
+        "architecture_selection": (
+            "val_design_only_after_all_147_expert_and_21_fusion_rows"
+        ),
+        "performance_based_termination": False,
+    }
+    return {
+        **row,
+        "configuration": configuration,
+        "confirmation_configuration": confirmation,
+        "registry_memberships": [
+            {
+                "role": row["role"],
+                "selection_eligible": row["selection_eligible"],
+            }
+        ],
+    }
 
 
 def build_canonical_fusion_rows() -> list[dict[str, Any]]:
@@ -187,7 +258,7 @@ def build_stage_c_run_registry() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": STAGE_C_RUN_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "stage": "C",
             "pipeline_seeds": list(PIPELINE_SEEDS),
             "expert_order": list(EXPERT_ORDER),
@@ -197,12 +268,14 @@ def build_stage_c_run_registry() -> dict[str, Any]:
             "forbidden_access": ["stack_val", "final_test"],
             "row_counts": {
                 "expert_shape_seed_confirmation": len(experts),
+                "expert_confirmation_physical_training_rows": len(experts),
                 "canonical_fusion_shape_seed_confirmation": len(canonical),
                 "uniform_seed101_control_memberships": len(uniform_controls),
                 "required_complete_shape_seed_metrics": 21,
                 "subset_readouts_per_shape_seed": 128,
             },
             "expert_confirmation_rows": experts,
+            "stage_b_screen_checkpoints_reused_as_confirmation": False,
             "canonical_fusion_rows": canonical,
             "uniform_control_rows": uniform_controls,
             "dynamic_control_templates": {
@@ -357,6 +430,10 @@ def build_step5_bundle(
         build_capacity_control_registry(),
         source_snapshot=source_snapshot,
     )
+    capacity_execution = bind_source(
+        build_offline_capacity_execution_registry(),
+        source_snapshot=source_snapshot,
+    )
     runs = bind_source(
         build_stage_c_run_registry(),
         source_snapshot=source_snapshot,
@@ -371,6 +448,7 @@ def build_step5_bundle(
     artifacts = {
         "fusion_architecture": fusion,
         "capacity_controls": capacity,
+        "capacity_execution": capacity_execution,
         "grouped_head_relation": grouped,
         "relation_specialization": specialization,
         "stage_c_run_registry": runs,
@@ -380,7 +458,7 @@ def build_step5_bundle(
         with_content_hash(
             {
                 "contract": STEP5_BUNDLE_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 3,
                 "campaign_spec_sha256": campaign_sha,
                 "step4_bundle_sha256": step4_sha,
                 "global_determinism_sha256": determinism_sha,
@@ -393,6 +471,7 @@ def build_step5_bundle(
                 "subset_readout_contract": SUBSET_READOUT_CONTRACT,
                 "fusion_variants": list(FUSION_VARIANTS),
                 "expert_confirmation_rows": 147,
+                "expert_confirmation_rows_scheduled_for_training": 147,
                 "canonical_fusion_rows": 21,
                 "performance_based_termination": False,
             }
@@ -403,7 +482,7 @@ def build_step5_bundle(
         with_content_hash(
             {
                 "contract": STEP5_REPORT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 3,
                 "campaign_spec_sha256": campaign_sha,
                 "step5_bundle_sha256": manifest["content_hash"],
                 "checks": {
@@ -417,6 +496,8 @@ def build_step5_bundle(
                     "heterogeneous_greedy_and_beam_locked": True,
                     "slot_budget_56": True,
                     "complete_seven_shapes_three_seeds_required": True,
+                    "all_147_expert_confirmations_are_physical_rows": True,
+                    "all_capacity_controls_have_executable_recipes": True,
                     "negative_campaign_still_selects": True,
                 },
                 "scientific_results_inspected": False,
@@ -431,6 +512,7 @@ def validate_step5_bundle(bundle: Mapping[str, Any]) -> str:
     names = {
         "fusion_architecture",
         "capacity_controls",
+        "capacity_execution",
         "grouped_head_relation",
         "relation_specialization",
         "stage_c_run_registry",
@@ -447,6 +529,10 @@ def validate_step5_bundle(bundle: Mapping[str, Any]) -> str:
         "capacity_controls": validate_content_hash(
             bundle["capacity_controls"],
             expected_contract="retb_capacity_control_registry_v1",
+        ),
+        "capacity_execution": validate_content_hash(
+            bundle["capacity_execution"],
+            expected_contract=OFFLINE_CAPACITY_EXECUTION_CONTRACT,
         ),
         "grouped_head_relation": validate_content_hash(
             bundle["grouped_head_relation"],
@@ -504,6 +590,9 @@ def publish_step5_bundle(
     paths = {
         "fusion_architecture": root / "registry" / "retb_offline_fusion.json",
         "capacity_controls": root / "registry" / "retb_capacity_controls.json",
+        "capacity_execution": root
+        / "registry"
+        / "retb_offline_capacity_execution.json",
         "grouped_head_relation": root
         / "registry"
         / "retb_grouped_head_relation.json",
@@ -542,6 +631,7 @@ __all__ = [
     "build_uniform_control_rows",
     "execute_miniature_stage_c",
     "publish_step5_bundle",
+    "resolve_expert_confirmation_training_run",
     "resolve_stage_c_run",
     "validate_stage_c_run_registry",
     "validate_step5_bundle",

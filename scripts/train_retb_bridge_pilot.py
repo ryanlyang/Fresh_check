@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -58,6 +60,28 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _publish_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp.npz", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        np.savez_compressed(temporary, **arrays)
+        if path.exists():
+            if path.is_symlink() or path.read_bytes() != temporary.read_bytes():
+                raise FileExistsError(
+                    f"bridge-pilot array reuse differs: {path}"
+                )
+        else:
+            os.link(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return _sha256(path)
 
 
 def _checkpoint_state(path: Path) -> Mapping[str, Any]:
@@ -176,6 +200,98 @@ def _slot_queries(checkpoint: Path, *, token_count: int, dimension: int) -> Any:
     return matches[0]
 
 
+def _move(value: Any, device: torch.device) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, Mapping):
+        return {name: _move(item, device) for name, item in value.items()}
+    return value
+
+
+@torch.no_grad()
+def _infer_pilot(
+    *,
+    model: PilotSlotDecoderDirect,
+    loader: Any,
+    expert_head: TokenOnlyExpertHead,
+    fusion: Any,
+    target_expert_id: str,
+    device: torch.device,
+) -> dict[str, np.ndarray]:
+    model.eval()
+    expert_head.eval()
+    fusion.eval()
+    use_bf16 = device.type == "cuda"
+    output: dict[str, list[np.ndarray]] = {
+        name: []
+        for name in (
+            "labels",
+            "moving_tokens",
+            "t0_tokens",
+            "predicted_hlt_tokens",
+            "moving_expert_logits",
+            "moving_fusion_logits",
+            "predicted_expert_logits",
+            "predicted_fusion_logits",
+            "t0_expert_logits",
+            "t0_fusion_logits",
+        )
+    }
+    identities: list[str] = []
+    for raw in loader:
+        batch = _move(raw, device)
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.bfloat16 if use_bf16 else None,
+            enabled=use_bf16,
+        ):
+            prediction = model(
+                hlt_token_banks=batch["hlt_token_banks"],
+                unbiased_particle_states=batch["unbiased_particle_states"],
+                particle_mask=batch["particle_mask"],
+            )
+            predicted_tokens = (
+                prediction["predicted_tokens"]
+                * batch["token_standard_deviation"].clamp_min(1.0e-4)
+                + batch["token_mean"]
+            )
+            predicted_expert_logits = expert_head(predicted_tokens)
+            predicted_banks = dict(batch["other_t0_banks"])
+            predicted_banks[target_expert_id] = predicted_tokens
+            predicted_fusion_logits = fusion(token_banks=predicted_banks)
+        values = {
+            "labels": batch["labels"],
+            "moving_tokens": batch["target_tokens_original"],
+            "t0_tokens": batch["target_tokens_original"],
+            "predicted_hlt_tokens": predicted_tokens,
+            "moving_expert_logits": batch["target_expert_logits"],
+            "moving_fusion_logits": batch["target_hybrid_logits"],
+            "predicted_expert_logits": predicted_expert_logits,
+            "predicted_fusion_logits": predicted_fusion_logits,
+            "t0_expert_logits": batch["target_expert_logits"],
+            "t0_fusion_logits": batch["target_hybrid_logits"],
+        }
+        for name, value in values.items():
+            output[name].append(value.float().cpu().numpy())
+        identities.extend(raw["identities"])
+    if not identities or len(identities) != len(set(identities)):
+        raise ValueError("bridge-pilot inference identity coverage differs")
+    result = {
+        "identities": np.asarray(identities, dtype="U"),
+        **{
+            name: np.concatenate(values)
+            for name, values in output.items()
+        },
+    }
+    if not all(
+        np.isfinite(value).all()
+        for name, value in result.items()
+        if name != "identities"
+    ):
+        raise FloatingPointError("bridge-pilot inference output is nonfinite")
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
@@ -201,6 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--target-normalizer", required=True, type=Path)
     parser.add_argument("--train-dataset", required=True, type=Path)
     parser.add_argument("--val-stop-dataset", required=True, type=Path)
+    parser.add_argument("--val-design-dataset", required=True, type=Path)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -250,10 +367,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     train_arrays = _arrays(args.train_dataset)
     val_arrays = _arrays(args.val_stop_dataset)
+    design_arrays = _arrays(args.val_design_dataset)
     target_shape = tuple(train_arrays["target_tokens"].shape[1:])
     if (
         len(target_shape) != 2
         or tuple(val_arrays["target_tokens"].shape[1:]) != target_shape
+        or tuple(design_arrays["target_tokens"].shape[1:]) != target_shape
     ):
         raise ValueError("bridge-pilot train/validation target shapes differ")
     token_count, token_dimension = map(int, target_shape)
@@ -286,6 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output_dir": str(args.output_dir.resolve()),
         "train_dataset_sha256": _sha256(args.train_dataset),
         "val_stop_dataset_sha256": _sha256(args.val_stop_dataset),
+        "val_design_dataset_sha256": _sha256(args.val_design_dataset),
     }
     if args.dry_run:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -296,6 +416,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     authorize_dataset_access(
         worker_role="training_worker", requested_resource="val_stop"
+    )
+    authorize_dataset_access(
+        worker_role="design_worker", requested_resource="val_design"
     )
     lineage = {
         "T0_checkpoint": parents["t0"]["checkpoint_sha256"],
@@ -316,6 +439,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     val_dataset = _dataset(
         val_arrays,
         split="val_stop",
+        expert=args.expert_id,
+        normalizer=normalizer,
+        lineage=lineage,
+    )
+    design_dataset = _dataset(
+        design_arrays,
+        split="val_design",
         expert=args.expert_id,
         normalizer=normalizer,
         lineage=lineage,
@@ -358,20 +488,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.device == "auto"
         else torch.device(args.device)
     )
+    train_loader = make_bridge_pilot_loader(
+        train_dataset,
+        batch_size=args.batch_size,
+        seed=args.pipeline_seed,
+        training=True,
+    )
+    val_stop_loader = make_bridge_pilot_loader(
+        val_dataset,
+        batch_size=args.batch_size,
+        seed=0,
+        training=False,
+    )
     registration = train_pilot_t0(
         model=model,
-        train_loader=make_bridge_pilot_loader(
-            train_dataset,
-            batch_size=args.batch_size,
-            seed=args.pipeline_seed,
-            training=True,
-        ),
-        val_stop_loader=make_bridge_pilot_loader(
-            val_dataset,
-            batch_size=args.batch_size,
-            seed=0,
-            training=False,
-        ),
+        train_loader=train_loader,
+        val_stop_loader=val_stop_loader,
         expert_head=expert_head,
         hybrid_fusion=fusion,
         target_expert_id=args.expert_id,
@@ -388,7 +520,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=config,
         device=device,
     )
-    print(json.dumps(registration, indent=2, sort_keys=True))
+    model.to(device)
+    model.load_state_dict(
+        _checkpoint_state(args.output_dir / "best_model_val.pt"),
+        strict=True,
+    )
+    expert_head.to(device).eval()
+    fusion.to(device).eval()
+    # The persisted model-train utility population is the canonical first
+    # identity-dependent R_MULTI epoch; evaluation splits are replica zero.
+    train_dataset.set_epoch(1)
+    loaders = {
+        "model_train": make_bridge_pilot_loader(
+            train_dataset,
+            batch_size=args.batch_size,
+            seed=0,
+            training=False,
+        ),
+        "val_stop": val_stop_loader,
+        "val_design": make_bridge_pilot_loader(
+            design_dataset,
+            batch_size=args.batch_size,
+            seed=0,
+            training=False,
+        ),
+    }
+    coordinate_array_hashes = {}
+    for split, loader in loaders.items():
+        arrays = _infer_pilot(
+            model=model,
+            loader=loader,
+            expert_head=expert_head,
+            fusion=fusion,
+            target_expert_id=args.expert_id,
+            device=device,
+        )
+        coordinate_array_hashes[split] = _publish_npz(
+            args.output_dir / f"{split}_coordinate_arrays.npz",
+            arrays,
+        )
+    result = {
+        **registration,
+        "coordinate_array_sha256": coordinate_array_hashes,
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

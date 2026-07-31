@@ -4762,3 +4762,410 @@ Run progressively:
 Also test restart after a failed array element, stale-job cancellation, artifact reuse, source drift, and interrupted selector continuation.
 
 I recommend implementing them in exactly this order. Tasks 1–2 are the immediate blockers; Tasks 3–7 complete the orchestration; Task 8 is the required proof that the plan is genuinely finished.
+
+
+
+
+
+
+
+
+## Remaining production-execution closure blocks
+
+The original implementation tasks produced the scientific contracts, model
+components, worker CLIs, static experiment compiler, and production DAG, but
+they did not fully connect every selector-dependent worker to concrete
+production task rows.
+
+There are currently:
+
+- 48 manifest-driven production targets;
+- 13 targets with genuine campaign-bootstrap manifests;
+- 35 targets whose concrete row plans still require production wiring;
+- 31 producer-to-consumer transitions across those 35 targets.
+
+The following five blocks are mandatory and dependency ordered. A block is not
+complete merely because its contracts, worker CLI, or synthetic rows exist.
+Completion requires real, source-bound task rows that invoke the intended
+scientific worker with complete inputs and expected outputs.
+
+### Closure Block 1 — Correct the readiness gate and plan-producer audit
+
+Replace the current hook-presence audit with an execution-complete
+plan-producer audit.
+
+For every manifest-driven node, the audit must distinguish:
+
+1. a manifest prepublished by the authenticated campaign bootstrap;
+2. a downstream manifest plan emitted by the registered producer;
+3. materialization of that plan into the graph-declared task-manifest path;
+4. successful execution and authentication of every row;
+5. complete-manifest attestation after all rows finish.
+
+Merely registering a producer, calling the shared materialization hook, or
+creating synthetic rows is not evidence of automatic production readiness.
+
+Add a central plan-factory registry containing, for every non-bootstrap target:
+
+- target node ID;
+- producer node ID;
+- plan-factory entry point;
+- required producer artifacts and contracts;
+- trigger artifact and trigger hash;
+- row-count or deterministic row-count rule;
+- allowed worker entry points;
+- expected output contracts;
+- static or dynamic resolution;
+- dataset-access role;
+- resource type;
+- performance-independent continuation policy.
+
+The local operational report must fail full-submission eligibility unless all
+48 manifest targets have genuine producer coverage. Synthetic DAG execution
+remains useful for control-plane testing but cannot satisfy this requirement.
+
+Version the affected operational-report, authorization, Step-15, graph, and
+plan-producer contracts.
+
+Done when:
+
+- deleting any one real plan-factory registration fails readiness;
+- a registered hook without an emitted plan fails readiness;
+- a plan with missing rows, incorrect lineage, or synthetic worker outputs
+  fails readiness;
+- all 13 bootstrap manifests and all 35 dynamic/producer-generated manifests
+  are accounted for separately;
+- full-submission authorization cannot be created until all five closure
+  blocks pass a real miniature campaign.
+
+Implementation status (2026-07-29): implemented. The production graph now
+embeds the exhaustive 35-entry non-bootstrap plan-factory registry, and the
+versioned operational audit distinguishes bootstrap publication, plan
+emission, manifest materialization, row/output authentication, and complete
+manifest attestation. The shared hook and the synthetic DAG are explicitly
+ineligible as producer evidence. Consequently the corrected local report
+currently fails full-submission eligibility, as intended, until Closure
+Blocks 2--5 provide and execute the real factories.
+
+### Closure Block 2 — Complete real continuation through Stages B–E
+
+Implement the seven remaining Stage-B–E manifest targets:
+
+1. `offline_optimization_selector`;
+2. `offline_shape_selector`;
+3. `offline_complementarity`;
+4. `offline_capacity_controls`;
+5. `bridge_target_training`;
+6. `bridge_content_certification`;
+7. `target_coordinate_selector`.
+
+Required Stage-B behavior:
+
+- perform deployable expert inference on `val_design` for the complete locked
+  PT/TRACK optimization grid;
+- publish identity-bound prediction and metric artifacts;
+- include parameter and FLOP evidence required by the locked optimizer
+  selector;
+- aggregate all required candidate rows before selection;
+- always select the best available candidate, including when every candidate
+  is worse than the baseline;
+- publish the optimization selection and any predeclared follow-up rows without
+  performance-based cancellation.
+
+Required Stage-C behavior:
+
+- require all 147 expert-confirmation checkpoints;
+- require all 63 frozen-token caches;
+- require all 21 canonical uniform-fusion confirmations;
+- run canonical fusion inference on `val_design`;
+- publish the complete 21-row uniform-shape metric artifact;
+- select `SHAPE_HIGH` and `SHAPE_COMPACT` only after complete aggregation;
+- train and aggregate all 128 subset readouts required for complementarity;
+- produce pairwise, leave-one-out, Shapley, redundancy, and sensitivity
+  diagnostics;
+- execute all declared capacity controls with complete-graph parameter, FLOP,
+  and label-exposure evidence.
+
+Required Stage-E behavior:
+
+- transform complete bridge-pilot outputs into concrete target-training rows;
+- execute every predeclared target mode and negative/control row;
+- publish content-certification inputs and certification rows;
+- run noninferiority and instance-content certification without treating
+  scientific failure as a runtime failure;
+- publish the complete target-coordinate selector inputs;
+- always select the best eligible target tuple or the locked fallback.
+
+Every selector output must be hash-bound to the exact downstream manifest it
+creates.
+
+Done when a real miniature campaign progresses automatically from completed
+Stage-B expert training through immutable target-coordinate selection without
+manual row JSON, environment-variable injection, or path repair.
+
+Implementation status (2026-07-30): the source implementation is complete.
+The seven downstream factories now emit executable, source-bound manifests;
+Stages B and C perform the complete optimization, shape, complementarity, and
+capacity-control work; and Stage E executes every pilot/target row, emits
+separate oracle and deployable predicted-coordinate artifacts, certifies
+scientific outcomes without stopping on negative results, and selects from
+fresh all-predicted readouts with an immutable T0 fallback. The pilot
+`R_MULTI` path uses the global identity-dependent replica cycle. Coordinate
+readout scores bind every consumed array, normalizer, predictor profile, and
+fresh fusion checkpoint. Local contract/unit verification is complete; the
+literal done criterion above remains an execution acceptance test until the
+real miniature is run on research compute.
+
+### Closure Block 3 — Complete Stages F–J target and predictor continuation
+
+Implement the ten Stage-F–J manifest targets:
+
+1. `target_cache_build`;
+2. `target_normalizers`;
+3. `predictor_training`;
+4. `uncertainty_calibration`;
+5. `predictor_bundle_selector`;
+6. `oracle_substitutions`;
+7. `joint_predictor_training`;
+8. `joint_predictor_selector`;
+9. `final_consumer_training`;
+10. `deployable_export`.
+
+Required behavior:
+
+- build only selector-approved offline target coordinates;
+- generate deterministic, resumable, identity-bound target-cache shards;
+- authenticate complete shard coverage before normalizer fitting;
+- fit target normalizers only from the globally locked training population;
+- generate every independent predictor architecture/context/control row;
+- preserve matched seeds, shapes, target modes, degradation replicas, and
+  checkpoint lineage;
+- perform uncertainty calibration only after complete predictor inference;
+- select predictor bundles from complete frozen-consumer evidence;
+- generate all oracle-substitution rows;
+- generate and train all joint-predictor candidates;
+- publish joint-selector inputs only after complete joint-candidate coverage;
+- train every locked final-consumer variant;
+- export deployable graphs with no offline inputs or targets;
+- validate exported inference against the corresponding research graph.
+
+Resumable cache or training rows may be reused only after revalidating all
+expected output hashes. Negative predictor or consumer performance must never
+suppress later rows.
+
+Done when a real miniature campaign proceeds automatically from the locked
+target-coordinate tuple through authenticated deployable exports.
+
+Implementation status (2026-07-30): source implementation complete. The
+public `predictor_training` and `joint_predictor_training` identities remain
+unchanged, while their required internal topologies are frozen as:
+
+```text
+F architecture screen
+  -> F architecture selection
+  -> F optimizer screen
+  -> F optimizer selection
+  -> G objective/uncertainty/normalization screen
+  -> G configuration selection
+  -> H confirmation
+
+J0--J4 candidate wave
+  -> J4 block selector
+  -> J5 end-to-end wave
+```
+
+The shared internal-phase executor publishes source-bound plans, per-row
+byte-hash receipts, complete-phase attestations, and a final controller
+attestation. Every later plan binds all earlier phase-completion hashes;
+restarts revalidate every expected output; and the sign of a scientific
+metric cannot suppress a later phase. Predictor training consumes the
+identity/epoch-bound common `R_MULTI` replica correctly, T2 decoder queries
+are projected into the actual bridge coordinate, and uncertainty fitting is
+separated from predictor training. All ten F--J targets now have automatic
+scientific-row producers and executable public-controller wiring. Local
+contract and operational verification is complete. The literal miniature
+done criterion remains an execution acceptance test until the real Tigris
+smoke runs.
+
+### Closure Block 4 — Complete Stages K–M controls, confirmation, and scale-up
+
+Implement the ten Stage-K–M manifest targets:
+
+1. `robustness_controls`;
+2. `semantic_controls`;
+3. `stage_l_graph_registration`;
+4. `confirmation_500k`;
+5. `confirmation_summary`;
+6. `bridge_shape_selector`;
+7. `scale_shortlist_selector`;
+8. `scale_refits`;
+9. `scale_graph_training`;
+10. `scale_completion`.
+
+Required behavior:
+
+- execute every robustness profile and replica declared by the campaign;
+- execute semantic bypass, substitution, and reconstruction controls;
+- authenticate complete control coverage before Stage-L registration;
+- register only complete deployable graphs;
+- execute all required matched-seed 500k confirmations;
+- aggregate confirmation metrics without performance gating;
+- select the locked bridge shape from the complete confirmation artifact;
+- construct the bounded scale shortlist exactly as predeclared;
+- refit all required 3M normalizers from `scale_train`;
+- train every shortlisted 3M graph and every required seed;
+- reject incomplete scale waves but continue after scientifically negative
+  results;
+- publish scale completion only after every shortlisted graph, seed,
+  checkpoint, capacity artifact, and required metric is present.
+
+No 500k or 3M candidate may be omitted because it performed poorly.
+
+Done when a real miniature scale analogue traverses all Stage-K–M nodes and
+produces an immutable scale-completion artifact without manual intervention.
+
+Implementation status (2026-07-30): the fail-closed Stage-K--M factory and
+scientific-contract layer is implemented. All ten late targets are registered
+with executable factory symbols; their source-bound producer inputs require
+complete robustness-profile/replica, semantic-control, graph/seed, refit, and
+scale-training coverage, and a scientific metric cannot remove a row. Stage-L
+graph registration is now correctly pre-selection: it binds both completed
+control waves and all compact/high candidate shapes, while `SHAPE_BRIDGE` is
+selected only from the later complete confirmation artifact. The corrected
+graph registry, confirmation summary, and Stage-L report use new contract
+versions. Incomplete 500k or 3M waves fail closed, while wholly negative
+scientific outcomes continue.
+
+The concrete K--M execution layer is also complete: shared per-seed scale
+refits feed every shortlisted graph plus the required named baseline; all
+HLT capacity controls are trained as real models; `H_BASE_LONG` derives its
+exact exposure ceiling only from authenticated nonzero ground-truth-CE
+phases; and scale completion uses the versioned corrected contracts. Factory
+inputs are emitted only from authenticated upstream completions, so a
+manually placed factory-input JSON remains invalid. The literal miniature
+done criterion remains an execution acceptance test until the real Tigris
+smoke runs.
+
+### Closure Block 5 — Complete sealed Stage-N evaluation
+
+Implement the eight Stage-N manifest targets:
+
+1. `prelock_final_inputs`;
+2. `stack_val_inference`;
+3. `accuracy_finalist_selector`;
+4. `postlock_oracle_targets`;
+5. `finalist_controls`;
+6. `final_test_execution_lock`;
+7. `sealed_final_test`;
+8. `final_report`.
+
+Required behavior:
+
+- prelock preparation may construct only identity-bound raw/degraded inputs;
+- no prelock `final_test` model-derived output is permitted;
+- deployable `stack_val` inference must be label-free and must cover every
+  shortlisted 3M graph;
+- prediction shards must not contain labels or offline targets;
+- selectors must join labels only from the authenticated label manifest;
+- both accuracy and rejection selection traces must be complete and
+  deterministic;
+- `locked_scale_finalists.json` must bind all prediction, label-manifest,
+  metric, capacity, checkpoint, and selection-trace hashes;
+- post-lock oracle targets must be explicitly selection-ineligible;
+- every finalist control must complete before the execution lock;
+- `final_test_execution_lock.json` must bind the finalist lock, post-lock
+  diagnostics, control coverage, sealed input preparation, and exactly-once
+  execution claim;
+- sealed final-test inference may run exactly once and only after both locks;
+- the final report must include positive or negative scientific outcomes
+  without changing the locked selections;
+- the completed job ledger must be published only after the final report.
+
+Done when a real miniature Stage-N run proves:
+
+- no prelock final-test leakage;
+- label-free prelock `stack_val` inference;
+- deterministic two-selector finalist locking;
+- correct post-lock oracle/control ordering;
+- exactly-once sealed final-test execution;
+- completion even when every scientific comparison is negative.
+
+Implementation status (2026-07-30): the fail-closed Stage-N factory and
+continuation-contract layer is implemented. All eight final targets have
+registered executable factories, authenticated producer-input requirements,
+exact shortlist/finalist graph-by-seed coverage checks, label-free `stack_val`
+access rules, post-lock target/control ordering, complete execution-lock
+coverage, and exactly-once sealed-evaluation assertions. The pre-lock input
+node now invokes `prepare_retb_final_test_inputs.py`, whose artifact contract
+matches the final execution lock; the former registry entry pointed to the
+generic sealed-target-cache worker and would have produced an incompatible
+artifact. Contract/schema versions were advanced so the corrected registry
+and graph cannot be confused with earlier artifacts. Scientific
+underperformance is explicitly non-blocking throughout.
+
+The concrete Stage-N execution layer is complete. A single shared,
+label-free HLT payload is published for each of `stack_val` and `final_test`;
+per-graph inference bindings authenticate that payload without duplicating
+it. The three independent pre-lock/oracle/control branches are joined by an
+explicit authenticated evidence node before the execution lock, eliminating
+the former multi-parent publication race. Direct HLT capacity-control
+inference uses an explicit particle-batch interface, while RETB graphs use
+the RETB HLT-input interface; internal model `TypeError`s cannot be hidden by
+fallback dispatch. Hand-authored factory-input JSON remains invalid. The
+literal miniature done criterion remains an execution acceptance test until
+the real Tigris smoke runs.
+
+## Final definition of production readiness
+
+The campaign is production-ready only when all of the following are true:
+
+1. all 48 manifest-driven nodes have genuine automatic producers;
+2. all 35 non-bootstrap manifests are emitted without manual row JSON;
+3. every manifest is source-, campaign-, graph-, trigger-, and parent-bound;
+4. a real miniature campaign executes Stages A–N using the same workers and
+   continuation mechanisms as production;
+5. restart, partial-array failure, reuse, source drift, and interrupted
+   continuation tests pass;
+6. negative scientific performance never terminates the campaign;
+7. the corrected readiness gate reports zero missing plan producers;
+8. the authenticated production dry run passes;
+9. full-submission authorization is generated only after the real Tigris smoke
+   completes.
+
+No remaining task may be declared complete based only on unit contracts,
+synthetic outputs, registered entry points, or a structurally valid DAG.
+
+## Submission-readiness closure (2026-07-30)
+
+The source implementation is ready to submit for the required real Tigris
+miniature smoke:
+
+- the production graph has 69 nodes: 48 manifest-driven workers, 19 direct
+  workers, and 2 virtual aliases;
+- all 35 non-bootstrap manifests have genuine automatic producers;
+- the local operational traversal resolves every Stage A--N node, verifies
+  authenticated reuse and restart behavior, rejects source drift and
+  incomplete arrays, and observes no performance-threshold abort;
+- scale refits, scale graph training, named baselines, HLT capacity controls,
+  shared inference payloads, the Stage-N evidence join, and sealed final
+  inference are concrete executable work rather than placeholder rows;
+- all scientific underperformance flags remain non-blocking: every
+  predeclared row continues even if all available models are worse than their
+  controls;
+- the source-lock error now reports both expected and actual source records,
+  which makes concurrent working-tree drift diagnosable without weakening
+  the fail-closed comparison.
+
+This is smoke-submission readiness, not production authorization. The next
+required acceptance steps are:
+
+1. commit and transfer one stable source snapshot to Tigris;
+2. run the real miniature with `submit_retb_tigris_full.sh --smoke-submit`;
+3. run the authenticated production dry run against its completed evidence;
+4. generate full-submission authorization only if those operational checks
+   pass.
+
+Scientific underperformance in the miniature or full campaign must be
+reported, but it does not block later rows or revoke execution authorization.
+Only integrity, missing-artifact, source-drift, runtime, or scheduler failures
+may stop dependent work.

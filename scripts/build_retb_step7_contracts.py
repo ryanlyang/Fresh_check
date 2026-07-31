@@ -67,6 +67,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result["publication"] = publish_step7_bundle(
             campaign_root=args.campaign_root, bundle=bundle
         )
+        from scripts.materialize_retb_stage_e_parents import (
+            main as materialize_stage_e_parents,
+        )
+
+        materialize_stage_e_parents(
+            ["--campaign-root", str(args.campaign_root)]
+        )
+        result["stage_e_parent_bundle_count"] = 105
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/retb_common.sh"
 
 : "${RETB_MINIATURE:=0}"
 : "${RETB_STORAGE_MEASUREMENTS:=${OUTPUT_ROOT}/relation_expert_token_bridge/bootstrap/storage_measurements.json}"
+: "${RETB_OPERATIONAL_AUTHORIZATION:=${OUTPUT_ROOT}/relation_expert_token_bridge/bootstrap/full_submission_authorization.json}"
 : "${RETB_CPU_CACHE_CONCURRENCY:=12}"
 : "${RETB_GPU_EXPERT_CONCURRENCY:=4}"
 : "${RETB_GPU_PREDICTOR_CONCURRENCY:=4}"
@@ -73,6 +74,16 @@ if [[ "${RETB_MINIATURE}" != "1" && ! -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   echo "Authenticated RETB storage measurements are absent: ${RETB_STORAGE_MEASUREMENTS}" >&2
   exit 2
 fi
+if [[ "${RETB_MINIATURE}" != "1" ]]; then
+  if [[ ! -f "${RETB_OPERATIONAL_AUTHORIZATION}" ]]; then
+    echo "Authenticated RETB operational authorization is absent: ${RETB_OPERATIONAL_AUTHORIZATION}" >&2
+    echo "Complete local validation, a real miniature Tigris smoke, and the authenticated production dry run first." >&2
+    exit 2
+  fi
+  python scripts/validate_retb_operational_readiness.py \
+    verify-authorization \
+    --authorization "${RETB_OPERATIONAL_AUTHORIZATION}" >/dev/null
+fi
 required_per_class=345000
 if [[ "${RETB_MINIATURE}" == "1" ]]; then
   required_per_class=9
@@ -105,6 +116,7 @@ export CAMPAIGN_ID="${campaign_id}"
 export CAMPAIGN_ROOT="${campaign_root}"
 export RETB_MINIATURE
 export RETB_STORAGE_MEASUREMENTS
+export RETB_OPERATIONAL_AUTHORIZATION
 
 python scripts/submit_retb_graph.py \
   "${graph_arguments[@]}" \

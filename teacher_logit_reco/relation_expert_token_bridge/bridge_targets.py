@@ -363,6 +363,75 @@ class PilotSlotDecoderDirect(
         }
 
 
+class BridgeCandidatePredictor(
+    torch.nn.Module if torch is not None else object
+):
+    """PILOT_T0-initialized token or logit predictor used by Stage-E targets."""
+
+    def __init__(
+        self,
+        *,
+        pilot: PilotSlotDecoderDirect,
+        target_mode: str,
+        bridge_dimension: int | None = None,
+    ) -> None:
+        module = _require_torch()
+        super().__init__()
+        if target_mode not in {
+            "T1_ANCHORED_BRIDGE",
+            "T1_TASK_BRIDGE",
+            "T2_PROJECT",
+            "T3_LOGIT",
+        }:
+            raise ValueError("bridge candidate predictor mode differs")
+        self.pilot = pilot
+        self.target_mode = str(target_mode)
+        source_dimension = int(pilot.token_dimension)
+        if target_mode == "T2_PROJECT":
+            if bridge_dimension not in {64, 128}:
+                raise ValueError("T2 predictor bridge dimension differs")
+            self.output_projection = (
+                module.nn.Identity()
+                if int(bridge_dimension) == source_dimension
+                else module.nn.Linear(source_dimension, int(bridge_dimension))
+            )
+            output_dimension = int(bridge_dimension)
+        else:
+            if bridge_dimension is not None:
+                raise ValueError("only T2 predictor owns a bridge dimension")
+            self.output_projection = module.nn.Identity()
+            output_dimension = source_dimension
+        self.logit_head = (
+            module.nn.Linear(output_dimension, 10)
+            if target_mode == "T3_LOGIT"
+            else None
+        )
+
+    def forward(
+        self,
+        *,
+        hlt_token_banks: Mapping[str, Any],
+        unbiased_particle_states: Any,
+        particle_mask: Any,
+    ) -> dict[str, Any]:
+        output = self.pilot(
+            hlt_token_banks=hlt_token_banks,
+            unbiased_particle_states=unbiased_particle_states,
+            particle_mask=particle_mask,
+        )
+        tokens = self.output_projection(output["predicted_tokens"])
+        logits = (
+            None
+            if self.logit_head is None
+            else self.logit_head(tokens.mean(dim=1))
+        )
+        return {
+            "predicted_tokens": tokens,
+            "log_variance": output["log_variance"],
+            "logits": logits,
+        }
+
+
 class BridgeProjection(torch.nn.Module if torch is not None else object):
     def __init__(self, input_dimension: int, bridge_dimension: int) -> None:
         module = _require_torch()
@@ -878,6 +947,7 @@ def build_bridge_candidate_contract(
 
 __all__ = [
     "BridgeOfflineTarget",
+    "BridgeCandidatePredictor",
     "BridgeProjection",
     "PilotSlotDecoderDirect",
     "TARGET_MODES",

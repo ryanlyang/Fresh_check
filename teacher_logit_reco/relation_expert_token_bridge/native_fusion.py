@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 
 
 NATIVE_FUSION_CONTRACT = "retb_native_hlt_fusion_architecture_v1"
-NATIVE_FUSION_CACHE_CONTRACT = "retb_native_hlt_fusion_cache_v1"
+NATIVE_FUSION_CACHE_CONTRACT = "retb_native_hlt_fusion_cache_v2"
 NATIVE_FUSION_TRAINING_CONTRACT = "retb_native_hlt_fusion_training_v1"
 NATIVE_FUSION_REGISTRATION_CONTRACT = "retb_native_hlt_fusion_registration_v1"
 NATIVE_FUSION_CURVES_CONTRACT = "retb_native_hlt_fusion_curves_v1"
@@ -136,6 +136,8 @@ def publish_native_fusion_cache(
     identity_manifest_sha256: str,
     label_manifest_sha256: str,
     source_snapshot: Mapping[str, Any] | None = None,
+    unbiased_particle_states_by_replica: Mapping[int, np.ndarray] | None = None,
+    particle_masks_by_replica: Mapping[int, np.ndarray] | None = None,
 ) -> dict[str, Any]:
     if realization_policy not in REALIZATION_POLICIES:
         raise ValueError("native fusion realization policy is unknown")
@@ -143,12 +145,45 @@ def publish_native_fusion_cache(
         raise ValueError("native fusion expert registration coverage differs")
     expected = (
         {0}
-        if split != "model_train" or realization_policy == "R_FIXED"
+        if split not in {"model_train", "scale_train"}
+        or realization_policy == "R_FIXED"
         else {0, 1, 2, 3}
     )
     if (
+        unbiased_particle_states_by_replica is None
+        or particle_masks_by_replica is None
+    ):
+        if (
+            source_snapshot is not None
+            or unbiased_particle_states_by_replica is not None
+            or particle_masks_by_replica is not None
+        ):
+            raise ValueError(
+                "authenticated native fusion cache requires unbiased "
+                "particle states and masks"
+            )
+        # Backward-compatible miniature fixture path. Production publications
+        # are source-bound and therefore cannot enter this branch.
+        synthesized_states: dict[int, np.ndarray] = {}
+        synthesized_masks: dict[int, np.ndarray] = {}
+        for replica in expected:
+            base = np.asarray(
+                token_banks_by_replica[replica]["BASE4"],
+                dtype=np.float32,
+            )
+            synthesized_states[replica] = np.pad(
+                base, ((0, 0), (0, 0), (0, max(0, 128 - base.shape[-1])))
+            )[..., :128]
+            synthesized_masks[replica] = np.ones(
+                base.shape[:2], dtype=bool
+            )
+        unbiased_particle_states_by_replica = synthesized_states
+        particle_masks_by_replica = synthesized_masks
+    if (
         set(token_banks_by_replica) != expected
         or set(expert_logits_by_replica) != expected
+        or set(unbiased_particle_states_by_replica) != expected
+        or set(particle_masks_by_replica) != expected
         or set(hlt_cache_hashes_by_replica) != expected
     ):
         raise ValueError("native fusion cache replica coverage differs")
@@ -193,6 +228,23 @@ def publish_native_fusion_cache(
             current[expert] = [int(tokens.shape[1]), int(tokens.shape[2])]
             arrays[f"tokens_r{replica}_{expert}"] = tokens
             arrays[f"logits_r{replica}_{expert}"] = logits
+        states = np.asarray(
+            unbiased_particle_states_by_replica[replica],
+            dtype=np.float32,
+        )
+        particle_mask = np.asarray(
+            particle_masks_by_replica[replica], dtype=bool
+        )
+        if (
+            states.ndim != 3
+            or states.shape[0] != len(ids)
+            or states.shape[2] != 128
+            or particle_mask.shape != states.shape[:2]
+            or not np.isfinite(states).all()
+        ):
+            raise ValueError("native unbiased particle evidence differs")
+        arrays[f"unbiased_particle_states_r{replica}"] = states
+        arrays[f"particle_mask_r{replica}"] = particle_mask
         if allocation is None:
             allocation = current
         elif allocation != current:
@@ -217,7 +269,7 @@ def publish_native_fusion_cache(
             temporary.unlink()
     payload: dict[str, Any] = {
         "contract": NATIVE_FUSION_CACHE_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "split": split,
         "pipeline_seed": int(pipeline_seed),
         "shape_id": str(shape_id),
@@ -249,6 +301,7 @@ def publish_native_fusion_cache(
         "npz_filename": npz_path.name,
         "npz_sha256": _file_sha256(npz_path),
         "contains_offline_targets": False,
+        "contains_unbiased_base4_particle_states": True,
         "identity_epoch_replica_selection": True,
     }
     manifest = with_content_hash(payload)
@@ -291,6 +344,10 @@ def load_native_fusion_cache(
         for replica in manifest["replica_ids"]
         for expert in EXPERT_ORDER
         for kind in ("tokens", "logits")
+    } | {
+        f"{kind}_r{replica}"
+        for replica in manifest["replica_ids"]
+        for kind in ("unbiased_particle_states", "particle_mask")
     }
     if set(arrays) != expected_fields:
         raise ValueError("native fusion cache fields differ")
@@ -307,6 +364,19 @@ def load_native_fusion_cache(
     ):
         raise ValueError("native fusion cache labels differ")
     for replica in manifest["replica_ids"]:
+        states = arrays[f"unbiased_particle_states_r{replica}"]
+        particle_mask = arrays[f"particle_mask_r{replica}"]
+        if (
+            states.shape
+            != (
+                manifest["event_count"],
+                particle_mask.shape[1],
+                128,
+            )
+            or particle_mask.shape != states.shape[:2]
+            or not np.isfinite(states).all()
+        ):
+            raise ValueError("native particle evidence arrays differ")
         for expert in EXPERT_ORDER:
             tokens = arrays[f"tokens_r{replica}_{expert}"]
             logits = arrays[f"logits_r{replica}_{expert}"]
@@ -553,6 +623,7 @@ def train_native_hlt_fusion(
     native_fusion_contract_sha256: str,
     global_determinism_sha256: str,
     config: NativeFusionTrainingConfig,
+    training_split: str = "model_train",
     device: str | Any = "cpu",
 ) -> dict[str, Any]:
     module = _require_torch()
@@ -561,7 +632,8 @@ def train_native_hlt_fusion(
     train_meta, _ = load_native_fusion_cache(model_train_manifest)
     val_meta, _ = load_native_fusion_cache(val_stop_manifest)
     if (
-        train_meta["split"] != "model_train"
+        training_split not in {"model_train", "scale_train"}
+        or train_meta["split"] != training_split
         or val_meta["split"] != "val_stop"
         or train_meta["pipeline_seed"] != config.seed
         or val_meta["pipeline_seed"] != config.seed

@@ -22,7 +22,7 @@ from .registry import EXPERT_ORDER
 
 
 FROZEN_TOKEN_CACHE_CONTRACT = "retb_frozen_offline_token_cache_v1"
-ALLOWED_SPLITS = ("model_train", "val_stop", "val_design")
+ALLOWED_SPLITS = ("model_train", "scale_train", "val_stop", "val_design")
 
 
 def _sha256(path: str | Path) -> str:

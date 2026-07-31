@@ -16,6 +16,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 from teacher_logit_reco.relation_expert_token_bridge.deployment import (
     CAPACITY_COMPONENTS,
     DeployableRetbGraph,
+    JointBridgeDeployableFrontend,
     build_complete_graph_capacity,
     export_deployable_retb_graph,
     load_deployable_retb_graph,
@@ -141,6 +142,7 @@ def test_step12_policy_registry_and_bundle_are_complete() -> None:
         campaign_spec_sha256=SHA_A,
         step11_bundle_sha256=SHA_B,
         predictor_bundle_lock_sha256=SHA_C,
+        joint_campaign_lock_sha256=_digest("joint-campaign-lock"),
         global_determinism_sha256=_digest("determinism"),
         source_snapshot=SOURCE,
     )
@@ -540,6 +542,71 @@ class _Frontend(torch.nn.Module):
         }
 
 
+class _J5FrontendStub(torch.nn.Module):
+    variant = "J5_END_TO_END"
+
+    def _live_evidence(self, shared):
+        return {
+            "hlt_token_banks": shared["banks"],
+            "native_hlt_logits": shared["native_logits"],
+        }
+
+    def forward(self, *, evidence):
+        return {
+            "predicted_tokens": {
+                expert: values + 1.0
+                for expert, values in evidence["hlt_token_banks"].items()
+            },
+            "log_variance": {
+                expert: values.new_zeros(
+                    values.shape[0], values.shape[1], 1
+                )
+                for expert, values in evidence["hlt_token_banks"].items()
+            },
+        }
+
+
+def test_joint_bridge_deployable_frontend_applies_frozen_calibration() -> None:
+    banks = {
+        expert: torch.zeros(2, 2, 64) for expert in EXPERT_ORDER
+    }
+    logits = {
+        expert: torch.zeros(2, 10) for expert in EXPERT_ORDER
+    }
+    frontend = JointBridgeDeployableFrontend(
+        joint_graph=_J5FrontendStub(),
+        calibration_offsets={
+            expert: [index * 0.25]
+            for index, expert in enumerate(EXPERT_ORDER)
+        },
+    )
+    output = frontend(
+        hlt_inputs={"banks": banks, "native_logits": logits}
+    )
+    assert set(output) == {
+        "predicted_banks",
+        "calibrated_log_variance",
+        "native_banks",
+        "native_expert_logits",
+    }
+    for index, expert in enumerate(EXPERT_ORDER):
+        assert torch.equal(
+            output["predicted_banks"][expert], banks[expert] + 1.0
+        )
+        assert torch.equal(
+            output["calibrated_log_variance"][expert],
+            torch.full((2, 2, 1), index * 0.25),
+        )
+    with pytest.raises(ValueError, match="forbids input"):
+        frontend(
+            hlt_inputs={
+                "banks": banks,
+                "native_logits": logits,
+                "labels": torch.zeros(2),
+            }
+        )
+
+
 def test_deployable_export_rejects_offline_or_target_inputs(tmp_path) -> None:
     predicted, native, uncertainty, logits = _evidence(batch=2)
     heads = {expert: _Head() for expert in EXPERT_ORDER}
@@ -720,6 +787,13 @@ def test_step12_entrypoint_files_are_reserved() -> None:
         "scripts/evaluate_retb_final_consumer_reference.py",
         "scripts/evaluate_retb_final_consumer_bypass_controls.py",
         "scripts/export_retb_deployable_graph.py",
+        "scripts/prepare_retb_final_consumer_seed.py",
+        "scripts/execute_retb_final_consumer_row.py",
+        "scripts/select_retb_token_refiner.py",
+        "scripts/execute_retb_final_consumer_campaign.py",
+        "scripts/execute_retb_deployable_export_row.py",
+        "scripts/finalize_retb_deployable_exports.py",
+        "scripts/execute_retb_deployable_export_campaign.py",
         "scripts/attest_retb_complete_graph_capacity.py",
         "scripts/select_retb_complete_graph_capacity_controls.py",
         "sbatch/run_retb_build_step12_contracts.sh",

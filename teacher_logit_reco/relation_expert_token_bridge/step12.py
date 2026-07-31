@@ -24,10 +24,10 @@ from .predictor_bundle import PIPELINE_SEEDS
 
 FINAL_CONSUMER_POLICY_CONTRACT = "retb_final_consumer_policy_v1"
 STAGE_J_CONSUMER_REGISTRY_CONTRACT = (
-    "retb_stage_j_final_consumer_registry_v1"
+    "retb_stage_j_final_consumer_registry_v2"
 )
-FINAL_CONSUMER_RUN_CONTRACT = "retb_materialized_final_consumer_run_v1"
-STEP12_BUNDLE_CONTRACT = "retb_step12_final_consumers_bundle_v1"
+FINAL_CONSUMER_RUN_CONTRACT = "retb_materialized_final_consumer_run_v2"
+STEP12_BUNDLE_CONTRACT = "retb_step12_final_consumers_bundle_v2"
 STEP12_REPORT_CONTRACT = "retb_step12_report_v1"
 
 TOKEN_INPUTS = ("TOKEN_PREDICTED", "TOKEN_REFINED_SELECTED")
@@ -146,8 +146,22 @@ def build_final_consumer_registry(
     step11_bundle_sha256: str,
     predictor_bundle_lock_sha256: str,
     policy_sha256: str | None = None,
+    carried_predictor_bundle_locks: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     rows = []
+    carried = (
+        {"PRIMARY": predictor_bundle_lock_sha256}
+        if carried_predictor_bundle_locks is None
+        else {
+            str(role): require_sha256(
+                digest,
+                name=f"carried_predictor_bundle_locks.{role}",
+            )
+            for role, digest in carried_predictor_bundle_locks.items()
+        }
+    )
+    if not carried:
+        raise ValueError("final-consumer carried bundle coverage is empty")
 
     def add(
         *,
@@ -159,14 +173,17 @@ def build_final_consumer_registry(
         trainable: bool,
         role: str,
         semantic_label: str,
+        carried_shape_role: str,
+        carried_lock_sha256: str,
     ) -> None:
         rows.append(
             {
                 "run_id": (
-                    f"RETB_{consumer_kind}_{model_variant}_"
+                    f"RETB_{carried_shape_role}_{consumer_kind}_{model_variant}_"
                     f"{native_dropout_mode}_{token_input}_S{seed}"
                 ),
                 "stage": "J_FINAL_CONSUMERS",
+                "carried_shape_role": carried_shape_role,
                 "consumer_kind": consumer_kind,
                 "model_variant": model_variant,
                 "native_dropout_mode": native_dropout_mode,
@@ -179,13 +196,17 @@ def build_final_consumer_registry(
                     step11_bundle_sha256, name="step11_bundle_sha256"
                 ),
                 "predictor_bundle_lock_sha256": require_sha256(
-                    predictor_bundle_lock_sha256,
+                    carried_lock_sha256,
                     name="predictor_bundle_lock_sha256",
                 ),
             }
         )
 
-    for seed in PIPELINE_SEEDS:
+    for carried_shape_role, carried_lock_sha256, seed in (
+        (role, digest, seed)
+        for role, digest in sorted(carried.items())
+        for seed in PIPELINE_SEEDS
+    ):
         add(
             consumer_kind="PF_FROZEN",
             model_variant="PF_FROZEN",
@@ -193,6 +214,8 @@ def build_final_consumer_registry(
             trainable=False,
             role="reference_baseline",
             semantic_label="FAITHFUL_FROZEN_OFFLINE_FUSION",
+            carried_shape_role=carried_shape_role,
+            carried_lock_sha256=carried_lock_sha256,
         )
         add(
             consumer_kind="OF_ROBUST",
@@ -201,6 +224,8 @@ def build_final_consumer_registry(
             trainable=True,
             role="robustness_control",
             semantic_label="ROBUST_RETRAINED_OFFLINE_FUSION",
+            carried_shape_role=carried_shape_role,
+            carried_lock_sha256=carried_lock_sha256,
         )
         for variant in REFINER_VARIANTS:
             add(
@@ -214,6 +239,8 @@ def build_final_consumer_registry(
                     else "scientific_candidate"
                 ),
                 semantic_label="TOKEN_REFINEMENT_CONTROL",
+                carried_shape_role=carried_shape_role,
+                carried_lock_sha256=carried_lock_sha256,
             )
         for variant in ADAPTER_VARIANTS:
             for dropout in NATIVE_DROPOUT_MODES:
@@ -229,6 +256,8 @@ def build_final_consumer_registry(
                         else "robustness_control"
                     ),
                     semantic_label="CONSTRAINED_RESIDUAL_ADAPTER",
+                    carried_shape_role=carried_shape_role,
+                    carried_lock_sha256=carried_lock_sha256,
                 )
         for evidence in UNRESTRICTED_EVIDENCE_VARIANTS:
             for dropout in NATIVE_DROPOUT_MODES:
@@ -246,11 +275,13 @@ def build_final_consumer_registry(
                             else "robustness_control"
                         ),
                         semantic_label="MAXIMUM_PERFORMANCE_UNRESTRICTED",
+                        carried_shape_role=carried_shape_role,
+                        carried_lock_sha256=carried_lock_sha256,
                     )
     return with_content_hash(
         {
             "contract": STAGE_J_CONSUMER_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "policy_sha256": (
                 build_final_consumer_policy()["content_hash"]
                 if policy_sha256 is None
@@ -263,6 +294,7 @@ def build_final_consumer_registry(
                 predictor_bundle_lock_sha256,
                 name="predictor_bundle_lock_sha256",
             ),
+            "carried_predictor_bundle_locks": dict(sorted(carried.items())),
             "membership_count": len(rows),
             "rows": rows,
             "all_negative_campaign_completed": True,
@@ -283,6 +315,9 @@ def validate_final_consumer_registry(
             "predictor_bundle_lock_sha256"
         ),
         policy_sha256=payload.get("policy_sha256"),
+        carried_predictor_bundle_locks=payload.get(
+            "carried_predictor_bundle_locks"
+        ),
     )
     actual = dict(payload)
     actual.pop("content_hash", None)
@@ -324,6 +359,7 @@ def materialize_final_consumer_run(
     required_row = {
         "run_id",
         "stage",
+        "carried_shape_role",
         "consumer_kind",
         "model_variant",
         "native_dropout_mode",
@@ -345,7 +381,7 @@ def materialize_final_consumer_run(
     return with_content_hash(
         {
             "contract": FINAL_CONSUMER_RUN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             **dict(registry_row),
             "step12_bundle_sha256": require_sha256(
                 step12_bundle_sha256, name="step12_bundle_sha256"
@@ -373,6 +409,7 @@ def validate_materialized_final_consumer_run(
     row_names = {
         "run_id",
         "stage",
+        "carried_shape_role",
         "consumer_kind",
         "model_variant",
         "native_dropout_mode",
@@ -403,8 +440,10 @@ def build_step12_bundle(
     campaign_spec_sha256: str,
     step11_bundle_sha256: str,
     predictor_bundle_lock_sha256: str,
+    joint_campaign_lock_sha256: str,
     global_determinism_sha256: str,
     source_snapshot: Mapping[str, Any],
+    carried_predictor_bundle_locks: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     policy = bind_source(
         build_final_consumer_policy(), source_snapshot=source_snapshot
@@ -414,6 +453,7 @@ def build_step12_bundle(
             step11_bundle_sha256=step11_bundle_sha256,
             predictor_bundle_lock_sha256=predictor_bundle_lock_sha256,
             policy_sha256=policy["content_hash"],
+            carried_predictor_bundle_locks=carried_predictor_bundle_locks,
         ),
         source_snapshot=source_snapshot,
     )
@@ -421,7 +461,7 @@ def build_step12_bundle(
         with_content_hash(
             {
                 "contract": STEP12_BUNDLE_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "parents": {
                     "campaign_spec": require_sha256(
                         campaign_spec_sha256, name="campaign_spec_sha256"
@@ -433,6 +473,10 @@ def build_step12_bundle(
                     "predictor_bundle_lock": require_sha256(
                         predictor_bundle_lock_sha256,
                         name="predictor_bundle_lock_sha256",
+                    ),
+                    "joint_campaign_lock": require_sha256(
+                        joint_campaign_lock_sha256,
+                        name="joint_campaign_lock_sha256",
                     ),
                     "global_determinism": require_sha256(
                         global_determinism_sha256,

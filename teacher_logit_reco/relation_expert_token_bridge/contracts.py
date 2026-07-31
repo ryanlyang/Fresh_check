@@ -131,9 +131,20 @@ def _publish_bytes(path: str | Path, encoded: bytes) -> str:
         try:
             os.link(temporary, destination)
         except FileExistsError as exc:
-            raise FileExistsError(
-                f"immutable destination appeared during publication: {destination}"
-            ) from exc
+            # Array coordinates can discover complete coverage at the same
+            # instant and race to close one immutable wave.  Identical bytes
+            # are a successful idempotent publication; only a different or
+            # unsafe winner is an integrity failure.
+            if (
+                destination.is_symlink()
+                or not destination.is_file()
+                or destination.read_bytes() != encoded
+            ):
+                raise FileExistsError(
+                    "immutable destination appeared with different bytes: "
+                    f"{destination}"
+                ) from exc
+            return "already_present"
     finally:
         if temporary.exists():
             temporary.unlink()

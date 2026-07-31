@@ -27,7 +27,7 @@ from .registry import EXPERT_ORDER, resolve_run_id
 from .replicas import REALIZATION_POLICIES
 
 
-STAGE_D_RUN_REGISTRY_CONTRACT = "retb_stage_d_run_registry_v1"
+STAGE_D_RUN_REGISTRY_CONTRACT = "retb_stage_d_run_registry_v2"
 HLT_MATCHED_CONTROL_CONTRACT = "retb_native_hlt_matched_controls_v1"
 STEP6_BUNDLE_CONTRACT = "retb_step6_native_hlt_bundle_v1"
 STEP6_REPORT_CONTRACT = "retb_step6_report_v1"
@@ -192,6 +192,37 @@ def build_encoder_screen_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def build_bridge_parent_expert_rows() -> list[dict[str, Any]]:
+    """Predeclare the seed-matched HE_OFFLINE_INIT banks Stage E consumes."""
+
+    rows = [
+        _run(
+            component="HLT_EXPERT",
+            seed=seed,
+            role="bridge_parent",
+            configuration=_expert_configuration(
+                expert=expert,
+                shape_id=shape_id,
+                mode="HE_OFFLINE_INIT",
+                measurement_embedding=False,
+                realization_policy="R_MULTI",
+            ),
+        )
+        for shape_id in (
+            "SHAPE_COMPACT",
+            "SHAPE_HIGH",
+            "HET_PHYSICS",
+            "HET_SELECTED",
+            "HET_BEAM",
+        )
+        for expert in EXPERT_ORDER
+        for seed in (101, 202, 303)
+    ]
+    if len(rows) != 105:
+        raise RuntimeError("Stage-E HLT parent bank must contain 105 memberships")
+    return rows
+
+
 def build_native_fusion_rows() -> list[dict[str, Any]]:
     rows = []
     roles = {
@@ -263,12 +294,13 @@ def build_baseline_rows() -> list[dict[str, Any]]:
 def build_stage_d_run_registry() -> dict[str, Any]:
     scratch = build_scratch_expert_rows()
     screen = build_encoder_screen_rows()
+    bridge_parents = build_bridge_parent_expert_rows()
     fusion = build_native_fusion_rows()
     baselines = build_baseline_rows()
     return with_content_hash(
         {
             "contract": STAGE_D_RUN_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "stage": "D",
             "screen_seed": 101,
             "confirmation_seeds": [101, 202, 303],
@@ -279,11 +311,13 @@ def build_stage_d_run_registry() -> dict[str, Any]:
             "forbidden_access": ["stack_val", "final_test"],
             "scratch_expert_rows": scratch,
             "encoder_screen_rows": screen,
+            "bridge_parent_expert_rows": bridge_parents,
             "native_fusion_rows": fusion,
             "baseline_rows": baselines,
             "row_counts": {
                 "scratch_expert_memberships": len(scratch),
                 "encoder_screen_memberships": len(screen),
+                "bridge_parent_expert_memberships": len(bridge_parents),
                 "native_fusion_memberships": len(fusion),
                 "matched_baselines": len(baselines),
             },
@@ -334,6 +368,7 @@ def resolve_stage_d_run(
         for section in (
             "scratch_expert_rows",
             "encoder_screen_rows",
+            "bridge_parent_expert_rows",
             "native_fusion_rows",
             "baseline_rows",
         )
@@ -464,6 +499,7 @@ def execute_miniature_stage_d(
     for section, executor, kind in (
         ("scratch_expert_rows", expert_executor, "expert"),
         ("encoder_screen_rows", expert_executor, "expert"),
+        ("bridge_parent_expert_rows", expert_executor, "expert"),
         ("native_fusion_rows", fusion_executor, "fusion"),
         ("baseline_rows", baseline_executor, "baseline"),
     ):

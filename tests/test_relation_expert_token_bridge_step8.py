@@ -308,7 +308,7 @@ def test_resumable_cache_roundtrip_normalizers_and_seed_rejection(
     import json
 
     val_path.write_text(json.dumps(val_only), encoding="utf-8")
-    with pytest.raises(ValueError, match="model_train only"):
+    with pytest.raises(ValueError, match="training population"):
         fit_target_normalizers(
             model_train_manifest_path=val_path,
             expected_pipeline_seed=101,
@@ -479,8 +479,8 @@ def test_target_lineage_is_seed_matched_and_complete() -> None:
 def test_locked_coordinate_is_bound_into_canonical_cache_spec() -> None:
     target_lineage = with_content_hash(
         {
-            "contract": "retb_selected_target_lineage_v1",
-            "schema_version": 1,
+            "contract": "retb_selected_target_lineage_v2",
+            "schema_version": 2,
             "pipeline_seed": 101,
             "shape_id": "SHAPE_COMPACT",
             "expert_order": list(EXPERT_ORDER),
@@ -489,15 +489,22 @@ def test_locked_coordinate_is_bound_into_canonical_cache_spec() -> None:
             "cross_seed_substitution_permitted": False,
         }
     )
+    normalizer = with_content_hash(
+        {"contract": "test_normalizer_set_v1", "schema_version": 1}
+    )
     fusion = with_content_hash(
         {
             "contract": "test_fusion_registration_v1",
             "schema_version": 1,
             "checkpoint_sha256": SHA_A,
+            "selector_parent_fusion_sha256": SHA_A,
+            "selector_parent_normalizer_set_sha256": normalizer[
+                "content_hash"
+            ],
+            "shape_id": "SHAPE_COMPACT",
+            "pipeline_seed": 101,
+            "target_tuple": ["T0_PURE"] * len(EXPERT_ORDER),
         }
-    )
-    normalizer = with_content_hash(
-        {"contract": "test_normalizer_set_v1", "schema_version": 1}
     )
     coordinate_sha = SHA_B
     selection = with_content_hash(

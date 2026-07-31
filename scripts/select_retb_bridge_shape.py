@@ -20,6 +20,7 @@ from teacher_logit_reco.relation_expert_token_bridge.confirmation import (  # no
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     bind_source,
     load_hashed_json,
+    validate_content_hash,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
@@ -53,14 +54,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         / "retb_step12_final_consumers_bundle.json",
         expected_contract=STEP12_BUNDLE_CONTRACT,
     )
-    configuration = json.loads(args.configuration.read_text("utf-8"))
+    configuration = load_hashed_json(
+        args.configuration,
+        expected_contract="retb_bridge_shape_selector_input_v1",
+    )
     if set(configuration) != {
+        "contract",
+        "schema_version",
         "compact_shape_id",
         "high_shape_id",
         "val_design_label_manifest_sha256",
         "rows",
+        "source",
+        "content_hash",
     }:
         raise ValueError("bridge-shape configuration fields differ")
+    validate_content_hash(configuration)
+    if configuration["source"] != campaign["source"]:
+        raise ValueError("bridge-shape configuration source differs")
     artifact = bind_source(
         select_bridge_shape(
             rows=configuration["rows"],

@@ -37,6 +37,10 @@ from teacher_logit_reco.relation_expert_token_bridge.step12 import (  # noqa: E4
     FINAL_CONSUMER_RUN_CONTRACT,
     validate_materialized_final_consumer_run,
 )
+from teacher_logit_reco.relation_expert_token_bridge.scale_execution import (  # noqa: E402
+    SCALE_FINAL_CONSUMER_RUN_CONTRACT,
+    validate_scale_final_consumer_run,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
@@ -53,6 +57,10 @@ def _validate_dataset(
         "model_train": (
             "model_train_identity_manifest",
             "model_train_R_MULTI_view_cache",
+        ),
+        "scale_train": (
+            "scale_train_identity_manifest",
+            "scale_train_R_MULTI_view_cache",
         ),
         "val_stop": (
             "val_stop_identity_manifest",
@@ -100,14 +108,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--training-role",
+        choices=("model_train", "scale_train"),
+        default="model_train",
+    )
     args = parser.parse_args(argv)
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
     )
-    run = load_hashed_json(
-        args.run, expected_contract=FINAL_CONSUMER_RUN_CONTRACT
-    )
-    validate_materialized_final_consumer_run(run)
+    run = load_hashed_json(args.run)
+    if run.get("contract") == FINAL_CONSUMER_RUN_CONTRACT:
+        validate_materialized_final_consumer_run(run)
+    elif run.get("contract") == SCALE_FINAL_CONSUMER_RUN_CONTRACT:
+        validate_scale_final_consumer_run(run)
+    else:
+        raise ValueError("final-consumer run contract differs")
+    scale_training = args.training_role == "scale_train"
+    if scale_training != (
+        run.get("contract") == SCALE_FINAL_CONSUMER_RUN_CONTRACT
+    ):
+        raise ValueError("final-consumer training population differs")
     step12 = load_hashed_json(
         args.campaign_root
         / "registry"
@@ -140,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         name: run["parent_hashes"][name] for name in component_names
     }:
         raise ValueError("final-consumer template component lineage differs")
+    training_role = args.training_role
     loaded = {
         split: load_final_consumer_dataset(
             path,
@@ -147,7 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_source=campaign["source"],
         )
         for split, path in (
-            ("model_train", args.model_train_cache),
+            (training_role, args.model_train_cache),
             ("val_stop", args.val_stop_cache),
             ("val_design", args.val_design_cache),
         )
@@ -156,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _validate_dataset(manifest, run=run, split=split)
     identity_sets = [
         set(loaded[split][1].identities)
-        for split in ("model_train", "val_stop", "val_design")
+        for split in (training_role, "val_stop", "val_design")
     ]
     if any(
         identity_sets[left] & identity_sets[right]
@@ -193,9 +215,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
-    for split in ("model_train", "val_stop", "val_design"):
+    for split in (training_role, "val_stop", "val_design"):
         authorize_dataset_access(
-            worker_role="training_worker", requested_resource=split
+            worker_role=(
+                "scale_training_worker"
+                if split == "scale_train"
+                else "training_worker"
+                if split == "val_stop"
+                else "design_worker"
+            ),
+            requested_resource=split,
         )
     device = torch.device(
         "cuda"
@@ -209,7 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             loaded[split][1],
             batch_size=microbatch,
             seed=config.seed,
-            training=split == "model_train",
+            training=split == training_role,
         )
         for split in loaded
     }
@@ -223,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     snapshot = source_snapshot(REPO_ROOT)
     registration = train_final_consumer(
         model=model,
-        train_loader=loaders["model_train"],
+        train_loader=loaders[training_role],
         val_stop_loader=loaders["val_stop"],
         frozen_expert_heads=heads,
         frozen_offline_fusion=fusion,

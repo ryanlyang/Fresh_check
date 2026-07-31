@@ -127,6 +127,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             if "probabilities" not in payload.files
             else np.asarray(payload["probabilities"])
         )
+    actual_parents = dict(parents)
+    inference_steps = [
+        step
+        for step in plan["steps"]
+        if "scripts/run_retb_deployable_inference.py"
+        in [str(value).replace("\\", "/") for value in step["argv"]]
+    ]
+    if len(inference_steps) != 1:
+        raise ValueError("stack-val deployable inference step differs")
+    argv_values = [str(value) for value in inference_steps[0]["argv"]]
+    manifest_values = [
+        Path(argv_values[index + 1])
+        for index, value in enumerate(argv_values[:-1])
+        if value == "--input-manifest"
+    ]
+    if len(manifest_values) != 1:
+        raise ValueError("stack-val HLT input manifest argument differs")
+    input_manifest = load_hashed_json(manifest_values[0])
+    if (
+        input_manifest.get("source") != campaign["source"]
+        or input_manifest.get("split") != "stack_val"
+        or input_manifest.get("graph_id") != key[0]
+        or int(input_manifest.get("pipeline_seed", -1)) != key[1]
+        or input_manifest.get("contains_labels") is not False
+        or input_manifest.get("contains_offline_or_oracle_values") is not False
+    ):
+        raise ValueError("stack-val generated HLT input lineage differs")
+    actual_parents["stack_val_HLT_input_manifest"] = input_manifest[
+        "content_hash"
+    ]
     publication = publish_stack_selection_prediction(
         output_dir=args.output_dir,
         identities=identities,
@@ -134,7 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pipeline_seed=key[1],
         logits=logits,
         probabilities=probabilities,
-        parent_hashes=parents,
+        parent_hashes=actual_parents,
         source_snapshot=source_snapshot(REPO_ROOT),
     )
     print(

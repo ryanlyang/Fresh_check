@@ -14,8 +14,16 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.capacity import (
+    OFFLINE_CAPACITY_CONTROL_ORDER,
+    build_offline_capacity_control_registration,
+    build_offline_capacity_execution_registry,
     build_offline_long_exposure_ledger,
     select_monolithic_capacity_controls,
+    validate_offline_capacity_control_registration,
+)
+from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_models import (
+    analytical_particle_transformer_flops,
+    build_monolithic_grid,
 )
 from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
     build_complementarity_report,
@@ -68,6 +76,7 @@ from teacher_logit_reco.relation_expert_token_bridge.step5 import (
     build_step5_bundle,
     execute_miniature_stage_c,
     publish_step5_bundle,
+    resolve_expert_confirmation_training_run,
     resolve_stage_c_run,
     validate_stage_c_run_registry,
     validate_step5_bundle,
@@ -527,10 +536,57 @@ def test_capacity_selectors_and_label_exposure_ledger() -> None:
     assert ledger["early_stopping"] is False
 
 
+def test_offline_capacity_execution_registry_and_registration_are_complete() -> None:
+    execution = build_offline_capacity_execution_registry()
+    assert tuple(execution["control_order"]) == OFFLINE_CAPACITY_CONTROL_ORDER
+    assert set(execution["recipes"]) == set(OFFLINE_CAPACITY_CONTROL_ORDER)
+    assert len(build_monolithic_grid()) > 100
+    assert (
+        analytical_particle_transformer_flops(
+            configuration=(128, 4, 8, 8, 2)
+        )
+        > 0
+    )
+    registration = build_offline_capacity_control_registration(
+        control_id="O_7X_UNBIASED_ENSEMBLE",
+        execution_registry_sha256=execution["content_hash"],
+        checkpoint_hashes=[f"{value:064x}" for value in range(1, 8)],
+        parameter_count=1_000,
+        inference_flops_batch1=2_000,
+        inference_flops_batch128=256_000,
+        profile_sha256="8" * 64,
+        labeled_example_presentations=28_000,
+        label_exposure_ledger_sha256="9" * 64,
+        training_artifact_hashes=[f"{value:064x}" for value in range(11, 18)],
+        val_design_prediction_sha256="a" * 64,
+        val_design_metrics_sha256="b" * 64,
+        fixed_budget_completed=True,
+    )
+    assert (
+        validate_offline_capacity_control_registration(registration)
+        == registration["content_hash"]
+    )
+    assert registration["checkpoint_sha256"] is None
+    assert registration["performance_based_termination"] is False
+
+
 def test_stage_c_registry_and_miniature_completion() -> None:
     registry = build_stage_c_run_registry()
     assert validate_stage_c_run_registry(registry) == registry["content_hash"]
     assert registry["row_counts"]["expert_shape_seed_confirmation"] == 147
+    assert (
+        registry["row_counts"]["expert_confirmation_physical_training_rows"]
+        == 147
+    )
+    confirmation = resolve_expert_confirmation_training_run(
+        registry,
+        run_id=registry["expert_confirmation_rows"][0]["run_id"],
+    )
+    assert confirmation["configuration"]["tokenizer_mode"] == "TOK_CANONICAL"
+    assert confirmation["configuration"]["initialization"] == "INIT_SCRATCH"
+    assert confirmation["confirmation_configuration"]["kind"] == (
+        "PURE_OFFLINE_EXPERT_CONFIRMATION"
+    )
     assert registry["row_counts"]["canonical_fusion_shape_seed_confirmation"] == 21
     assert registry["row_counts"]["uniform_seed101_control_memberships"] == 35
     run = resolve_stage_c_run(

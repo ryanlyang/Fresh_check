@@ -21,3 +21,15 @@ cd "${PROJECT_DIR}"
 arguments=(--campaign-root "${CAMPAIGN_ROOT}" --predictor-bundle-lock "${RETB_PREDICTOR_BUNDLE_LOCK}")
 if [[ "${RETB_DRY_RUN:-0}" == "1" ]]; then arguments+=(--dry-run); fi
 python scripts/build_retb_step12_contracts.py "${arguments[@]}"
+if [[ "${RETB_DRY_RUN:-0}" != "1" ]]; then
+  python scripts/attest_retb_direct_node_completion.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --node-id step12_final_consumer_contracts \
+    --output-artifact "${CAMPAIGN_ROOT}/registry/retb_step12_final_consumers_bundle.json" >/dev/null
+  python scripts/produce_retb_downstream_manifest_plans.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step12_final_consumer_contracts >/dev/null
+  python scripts/materialize_retb_downstream_manifests.py \
+    --campaign-root "${CAMPAIGN_ROOT}" \
+    --producer-node-id step12_final_consumer_contracts >/dev/null
+fi

@@ -70,12 +70,47 @@ def _validate_rows(
     allowed = FINAL_NODE_ENTRYPOINTS[node_id]
     for row in rows:
         argv = [str(value) for value in row.get("argv", ())]
+        lowered = " ".join(argv).lower()
         if (
             len(argv) < 2
             or argv[1].replace("\\", "/") not in allowed
             or "--dry-run" in argv
         ):
             raise ValueError(f"{node_id} Stage-N entry point differs")
+        if node_id == "prelock_final_inputs" and any(
+            term in lowered
+            for term in (
+                "checkpoint",
+                "model-output",
+                "logit",
+                "probabilit",
+                "prediction",
+                "metric",
+            )
+        ):
+            raise ValueError(
+                "prelock final-input row may not access model-derived data"
+            )
+        if node_id == "stack_val_inference" and any(
+            term in lowered
+            for term in (
+                "final_test",
+                "label",
+                "offline",
+                "oracle",
+                "target",
+            )
+        ):
+            raise ValueError(
+                "stack-val inference row violates label-free access"
+            )
+        if (
+            node_id == "accuracy_finalist_selector"
+            and "final_test" in lowered
+        ):
+            raise ValueError(
+                "finalist-selector row may not access final_test"
+            )
 
 
 def _load_prerequisites(
