@@ -49,6 +49,9 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_d_training import (
     train_stage_d_auxiliary,
 )
+from teacher_logit_reco.hlt_offline_structure_distillation.auxiliary_data import (
+    HLTArrayDataset,
+)
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (
     evaluate_classification,
 )
@@ -60,6 +63,34 @@ SOURCE = {
     "dirty": True,
     "status_hash_policy": "test",
 }
+
+
+def test_scale_dataset_retains_mmap_like_identities_and_lazy_positions() -> None:
+    count = 50_000
+    identities = np.asarray([f"jet-{index:06d}" for index in range(count)])
+    tokens = np.zeros((count, 1, 4), dtype=np.float32)
+    mask = np.ones((count, 1), dtype=bool)
+    states = np.zeros((count, 1, 4), dtype=np.int8)
+    replicas = {
+        replica: {
+            "tokens": tokens,
+            "mask": mask,
+            "measurement_states": states,
+        }
+        for replica in range(4)
+    }
+    dataset = HLTArrayDataset(
+        replica_arrays=replicas,
+        labels=np.arange(count, dtype=np.int64) % 10,
+        identities=identities,
+        logical_role="scale_train",
+        realization_policy="R_MULTI",
+    )
+    assert dataset.identities is identities
+    assert all(
+        isinstance(indices, range)
+        for indices in dataset.source_indices_by_replica.values()
+    )
 
 
 class _PairEmbed(torch.nn.Module):

@@ -137,12 +137,18 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
     )
     layout_ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v3",
+            "contract": "hosd_scale_resident_layout_ledger_v4",
             "source_sha256": canonical_sha256(SOURCE),
             "production_tree_shard_events": production_tree_unit,
             "production_target_shard_events": production_target_unit,
             "production_tree_shard_decoded_bytes_upper_bound": 1,
             "production_target_shard_decoded_bytes_upper_bound": 1,
+            "active_completion_hashes": {
+                "scale_inputs": "1" * 64,
+                "scale_trees": "2" * 64,
+                "scale_targets": "3" * 64,
+                "scale_teacher_outputs": "4" * 64,
+            },
             "test_layout": True,
         }
     )
@@ -164,7 +170,7 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
         projected = fixed + unit_bytes * (3_000_000 if population_model else 1)
         projections[node_id] = with_content_hash(
             {
-                "contract": "hosd_scale_resident_memory_projection_v4",
+                "contract": "hosd_scale_resident_memory_projection_v5",
                 "pilot_node_id": node_id,
                 "pilot_job_id": "123",
                 "coordinate_type": f"test_{node_id}",
@@ -302,12 +308,18 @@ def test_production_walltime_is_measured_projected_and_policy_bounded():
 def test_resource_authorization_requires_every_stage_j_memory_projection():
     ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v3",
+            "contract": "hosd_scale_resident_layout_ledger_v4",
             "source_sha256": canonical_sha256(SOURCE),
             "production_tree_shard_events": 10_000,
             "production_target_shard_events": 2_048,
             "production_tree_shard_decoded_bytes_upper_bound": 1,
             "production_target_shard_decoded_bytes_upper_bound": 1,
+            "active_completion_hashes": {
+                "scale_inputs": "1" * 64,
+                "scale_trees": "2" * 64,
+                "scale_targets": "3" * 64,
+                "scale_teacher_outputs": "4" * 64,
+            },
             "test_layout": True,
         }
     )
@@ -495,8 +507,8 @@ def test_real_miniature_is_required_before_full_authorization():
     production = _plan("production_500k_scale3m")
     preflight = with_content_hash(
         {
-                "contract": "hosd_resource_preflight_v7",
-                "schema_version": 7,
+                "contract": "hosd_resource_preflight_v8",
+                "schema_version": 8,
             "source": SOURCE,
             "profile": "production_500k_scale3m",
             "storage_measurements_sha256": "4" * 64,
@@ -743,6 +755,18 @@ def test_all_tree_consumers_use_shared_fail_closed_split_authentication(
     assert "AuthenticatedTreeSplit(" in target_source
     assert "AuthenticatedTreeSplit(" in graph_source
     assert "AuthenticatedTreeSplit(" in measurement_source
+    assert "expected_parents={" in measurement_source
+    assert '"scale_inputs": input_completion["content_hash"]' in measurement_source
+    assert '"scale_trees": tree_completion["content_hash"]' in measurement_source
+    assert '"scale_targets": target_completion["content_hash"]' in measurement_source
+    assert (
+        '"scale_teacher_outputs": teacher_completion["content_hash"]'
+        in measurement_source
+    )
+    scale_layout_source = measurement_source.split(
+        "def _scale_layout_ledger", 1
+    )[1].split("def _latest_jobs", 1)[0]
+    assert ".rglob(" not in scale_layout_source
 
 
 def test_stage_j_normalizer_consumes_lazy_shards_without_population_coercion(tmp_path):

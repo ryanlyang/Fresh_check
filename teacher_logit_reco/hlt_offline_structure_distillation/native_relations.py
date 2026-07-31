@@ -289,7 +289,9 @@ def materialize_native_relation_target_from_family_caches(
         loaded[target_id] = (cache, coordinate)
     first = loaded[ids[0]][0]
     if any(
-        cache.identities != first.identities
+        len(cache.identities) != len(first.identities)
+        or cache.manifest["canonical_identity_order_sha256"]
+        != first.manifest["canonical_identity_order_sha256"]
         or cache.manifest["split"] != first.manifest["split"]
         or cache.manifest["hlt_replica_id"]
         != first.manifest["hlt_replica_id"]

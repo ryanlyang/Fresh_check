@@ -397,10 +397,21 @@ def _labels(path: Path) -> tuple[tuple[str, ...], np.ndarray, str]:
 
 
 def _subset_indices(
-    source_identities: tuple[str, ...], requested: tuple[str, ...]
-) -> np.ndarray:
-    if source_identities == requested:
-        return np.arange(len(requested), dtype=np.int64)
+    source_identities: Sequence[str],
+    requested: Sequence[str],
+    *,
+    require_positional: bool = False,
+) -> Sequence[int]:
+    source_hash = getattr(source_identities, "identity_order_sha256", None)
+    if source_hash is None:
+        source_hash = identity_order_sha256(source_identities)
+    requested_hash = getattr(requested, "identity_order_sha256", None)
+    if requested_hash is None:
+        requested_hash = identity_order_sha256(requested)
+    if len(source_identities) == len(requested) and source_hash == requested_hash:
+        return range(len(requested))
+    if require_positional:
+        raise ValueError("scale identity populations are not positionally identical")
     lookup = {value: index for index, value in enumerate(source_identities)}
     if len(lookup) != len(source_identities) or not set(requested).issubset(lookup):
         raise ValueError("Stage-D identity join lacks exact source coverage")
@@ -430,11 +441,15 @@ def _load_hlt(
             if path.is_file()
             else load_hlt_v3_cache(path)
         )
-        source_ids = tuple(str(value) for value in arrays["identities"].tolist())
-        order = _subset_indices(source_ids, identities)
+        source_ids = arrays["identities"]
+        order = _subset_indices(
+            source_ids,
+            identities,
+            require_positional=str(metadata["logical_role"]) == "scale_train",
+        )
         arrays_by_replica[replica] = {
             name: arrays[name]
-            for name in ("tokens", "mask", "measurement_states")
+            for name in ("tokens", "mask", "measurement_states", "identities")
         }
         source_indices_by_replica[replica] = order
         lineage[f"hlt_replica_{replica}"] = metadata["content_hash"]
@@ -615,7 +630,11 @@ def _static_targets(
             ):
                 raise ValueError("Stage-D control-cache lineage differs")
             lineage[f"control_manifest_{key}"] = control["content_hash"]
-        order = _subset_indices(cache.identities, identities)
+        order = _subset_indices(
+            cache.identities,
+            identities,
+            require_positional=cache.manifest.get("split") == "scale_train",
+        )
         coordinate_id = definition.get("coordinate_id")
         if coordinate_id is None:
             if row["parameterization"] == "RES":
@@ -711,7 +730,8 @@ def load_stage_d_loaders_from_manifest(
         definition = manifest["roles"][role]
         identities, labels, label_sha = _labels(Path(definition["labels"]))
         loaded_hlt = _load_hlt(definition["hlt_caches"], identities)
-        if len(loaded_hlt) == 5:
+        compatibility_loader = len(loaded_hlt) == 5
+        if compatibility_loader:
             # Compatibility for injected non-tree test loaders; real loaders
             # always return authenticated content hashes.
             (
@@ -731,6 +751,13 @@ def load_stage_d_loaders_from_manifest(
                 realization_policy,
                 hlt_content_hashes,
             ) = loaded_hlt
+        if role == "scale_train" and not compatibility_loader:
+            mmap_identities = hlt_arrays[min(hlt_arrays)]["identities"]
+            if identity_order_sha256(mmap_identities) != identity_order_sha256(
+                identities
+            ):
+                raise ValueError("scale labels and authenticated HLT identities differ")
+            identities = mmap_identities
         expected_hlt_roles = {
             "model_train": {"model_train"},
             "scale_train": {"scale_train"},

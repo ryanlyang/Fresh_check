@@ -11,8 +11,13 @@ from scripts.bootstrap_retb_input_tasks import (
     build_stage_a_task_manifests,
     main as bootstrap_main,
 )
+from scripts.produce_retb_downstream_manifest_plans import (
+    main as produce_downstream_plans_main,
+)
 from teacher_logit_reco.relation_expert_token_bridge import (
     build_production_graph,
+    materialize_downstream_manifests,
+    task_manifest_path_for_graph,
     validate_task_manifest_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
@@ -41,6 +46,7 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
     validate_stage_a_input_audit,
     validate_stage_a_normalizer_bundle,
 )
+from teacher_logit_reco.relation_expert_token_bridge import workflow
 from teacher_logit_reco.relational_part import (
     build_reference_tree,
     finalize_tree_split,
@@ -411,8 +417,12 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
 def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = source_snapshot(ROOT)
+    monkeypatch.setattr(
+        workflow, "source_snapshot", lambda _repo_root: dict(source)
+    )
     campaign_root = tmp_path / "retb_stage_a_cli"
     campaign_root.mkdir()
     parent_names = (
@@ -450,6 +460,9 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
     )
     graph_path = campaign_root / "production_graph.json"
     write_immutable_json(graph_path, graph)
+    write_immutable_json(
+        campaign_root / "job_ledgers" / "production_graph.json", graph
+    )
     arguments = [
         "--campaign-root",
         str(campaign_root),
@@ -488,6 +501,64 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
     assert (
         campaign_root / "registry" / "retb_static_experiment_bundle.json"
     ).is_file()
+    assert produce_downstream_plans_main(
+        [
+            "--campaign-root",
+            str(campaign_root),
+            "--producer-node-id",
+            "campaign_bootstrap",
+        ]
+    ) == 0
+    missing_path = task_manifest_path_for_graph(
+        graph, node_id="input_audit", campaign_root=campaign_root
+    )
+    missing_manifest = load_hashed_json(missing_path)
+    missing_path.unlink()
+    with pytest.raises(
+        FileNotFoundError,
+        match="campaign bootstrap did not prepublish required manifest",
+    ):
+        materialize_downstream_manifests(
+            campaign_root=campaign_root,
+            repo_root=ROOT,
+            producer_node_id="campaign_bootstrap",
+            campaign=campaign,
+            production_graph=graph,
+        )
+    write_immutable_json(missing_path, missing_manifest)
+    materialized = materialize_downstream_manifests(
+        campaign_root=campaign_root,
+        repo_root=ROOT,
+        producer_node_id="campaign_bootstrap",
+        campaign=campaign,
+        production_graph=graph,
+    )
+    assert materialized["target_count"] == 13
+    assert set(materialized["manifest_hashes"]) == {
+        "offline_input_cache",
+        "hlt_v3_cache",
+        "region_tree_cache",
+        "region_tree_finalize",
+        "normalizers_500k",
+        "input_audit",
+        "offline_expert_training",
+        "offline_expert_confirmation",
+        "offline_fusion_cache",
+        "offline_fusion_training",
+        "native_hlt_expert_training",
+        "native_hlt_fusion_training",
+        "bridge_pilot_training",
+    }
+    assert set(
+        materialized["receipt"]["materialization_plan_hashes"].values()
+    ) == {None}
+    assert all(
+        record["status"] == "bootstrap_prepublished_authenticated"
+        for record in materialized["publications"].values()
+    )
+    assert materialized["receipt"]["contract"] == (
+        "retb_manifest_producer_receipt_v4"
+    )
 
 
 def test_nonarray_manifest_requires_manifest_driven_graph_node(

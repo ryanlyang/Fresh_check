@@ -230,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
                 canonical_to_source=None,
                 shard_index=shard_index,
                 generator=generate,
+                identity_population_attestation=spec[
+                    "canonical_identity_order_sha256"
+                ],
             )
         manifest = validate_target_cache(args.output_dir, cache_spec=spec)
         write_immutable_json(args.output_dir / "target_manifest.json", manifest)

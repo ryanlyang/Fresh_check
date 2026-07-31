@@ -30,9 +30,11 @@ from .middle_continuation import (
     publish_middle_continuation,
 )
 from .production import (
+    BOOTSTRAP_INPUT_MANIFEST_NODES,
     FINAL_CONTINUATION_MANIFEST_NODES,
     LATE_CONTINUATION_MANIFEST_NODES,
     MIDDLE_CONTINUATION_MANIFEST_NODES,
+    STATIC_EXPERIMENT_MANIFEST_NODES,
     TASK_MANIFEST_PRODUCER_NODES,
     build_task_manifest,
     task_manifest_path_for_graph,
@@ -45,7 +47,7 @@ from .production import (
 MANIFEST_MATERIALIZATION_PLAN_CONTRACT = (
     "retb_manifest_materialization_plan_v2"
 )
-MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v3"
+MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v4"
 
 
 def manifest_plan_path(
@@ -284,6 +286,15 @@ def materialize_downstream_manifests(
     source_root = Path(repo_root).resolve()
     validate_production_campaign_binding(production_graph, campaign)
     targets = producer_targets(producer_node_id)
+    bootstrap_targets = set(BOOTSTRAP_INPUT_MANIFEST_NODES) | set(
+        STATIC_EXPERIMENT_MANIFEST_NODES
+    )
+    bootstrap_prepublication = producer_node_id == "campaign_bootstrap"
+    if bootstrap_prepublication and set(targets) != bootstrap_targets:
+        raise ValueError(
+            "campaign bootstrap manifest ownership differs from the frozen "
+            "prepublished target set"
+        )
     publications: dict[str, Any] = {}
     manifest_hashes: dict[str, str] = {}
     plan_hashes: dict[str, str | None] = {}
@@ -296,6 +307,21 @@ def materialize_downstream_manifests(
             target_node_id=target,
         )
         if existing is not None:
+            if bootstrap_prepublication:
+                if target not in bootstrap_targets:
+                    raise ValueError(
+                        "campaign bootstrap attempted an unregistered "
+                        "prepublished manifest"
+                    )
+                publications[target] = {
+                    "status": "bootstrap_prepublished_authenticated",
+                    "campaign_source_revalidated": True,
+                    "production_graph_revalidated": True,
+                    "producer_plan_required": False,
+                }
+                manifest_hashes[target] = existing["content_hash"]
+                plan_hashes[target] = None
+                continue
             existing_plan_path = manifest_plan_path(
                 root, target_node_id=target
             )
@@ -354,6 +380,16 @@ def materialize_downstream_manifests(
             continue
         plan_path = manifest_plan_path(root, target_node_id=target)
         if not plan_path.is_file():
+            if bootstrap_prepublication:
+                missing_path = task_manifest_path_for_graph(
+                    production_graph,
+                    node_id=target,
+                    campaign_root=root,
+                )
+                raise FileNotFoundError(
+                    f"campaign bootstrap did not prepublish required manifest "
+                    f"{target}: {missing_path}"
+                )
             raise FileNotFoundError(
                 f"completed producer {producer_node_id} did not publish "
                 f"the required manifest plan for {target}: {plan_path}"
@@ -477,7 +513,7 @@ def materialize_downstream_manifests(
     receipt = with_content_hash(
         {
             "contract": MANIFEST_PRODUCER_RECEIPT_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": production_graph["content_hash"],
             "producer_node_id": str(producer_node_id),
@@ -485,7 +521,13 @@ def materialize_downstream_manifests(
             "manifest_hashes": manifest_hashes,
             "materialization_plan_hashes": plan_hashes,
             "all_owned_manifests_present_and_valid": True,
-            "all_reused_manifests_require_authenticated_producer_plans": True,
+            "bootstrap_prepublished_targets_without_factory_plans": (
+                list(targets) if bootstrap_prepublication else []
+            ),
+            (
+                "all_factory_materialized_reused_manifests_require_"
+                "authenticated_producer_plans"
+            ): True,
             "row_execution_attestation_pending": True,
             "receipt_is_not_execution_completion_evidence": True,
             "scientific_performance_used_as_gate": False,

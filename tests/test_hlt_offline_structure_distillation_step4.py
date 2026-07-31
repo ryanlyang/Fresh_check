@@ -32,6 +32,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     infer_teacher_batch,
     iter_authenticated_target_shard_layouts,
     load_target_cache,
+    load_target_cache_sharded,
     normalize_target,
     publish_target_cache,
     publish_target_cache_shard,
@@ -55,6 +56,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation.teachers import (
     training_protocol,
 )
 from teacher_logit_reco.relational_part import TrainingConfig
+from scripts.execute_hosd_scale_graph import _teacher_logits_npz
+from scripts.train_hosd_baseline import _privileged
 
 
 H = "a" * 64
@@ -270,6 +273,154 @@ def test_canonical_mmap_shards_publish_without_population_sort_or_index_copy(
             parent_hashes={"campaign": H},
             source=SOURCE,
         )
+
+
+def test_shard_publication_identity_work_is_linear_and_reuse_is_constant(
+    tmp_path: Path,
+) -> None:
+    class CountingSequence:
+        def __init__(self, values):
+            self.values = tuple(values)
+            self.accesses = 0
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                selected = self.values[index]
+                self.accesses += len(selected)
+                return selected
+            if index >= len(self.values):
+                raise IndexError(index)
+            self.accesses += 1
+            return self.values[index]
+
+    count, shard_size = 10_001, 257
+    identities = CountingSequence(f"jet-{index:05d}" for index in range(count))
+    source_values = np.arange(count, dtype=np.float32)
+    spec = build_target_cache_spec(
+        cache_id="linear-identities",
+        split="scale_train",
+        artifact_kind="teacher_output",
+        identities=identities,
+        target_components={"T_OFFLINE_TEST": ("a", "b")},
+        parent_hashes={"campaign": H},
+        source=SOURCE,
+        shard_size=shard_size,
+        identities_are_canonical=True,
+    )
+    identities.accesses = 0
+    for shard_index in range(int(spec["shard_count"])):
+        publish_target_cache_shard(
+            tmp_path / "linear",
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=_generator(source_values),
+            identity_population_attestation=spec[
+                "canonical_identity_order_sha256"
+            ],
+        )
+    assert identities.accesses <= 3 * count
+    identities.accesses = 0
+    for shard_index in range(int(spec["shard_count"])):
+        publish_target_cache_shard(
+            tmp_path / "linear",
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=_generator(source_values),
+            identity_population_attestation=spec[
+                "canonical_identity_order_sha256"
+            ],
+        )
+    assert identities.accesses == 0
+
+
+def test_sharded_cache_keeps_only_one_identity_shard_resident(tmp_path: Path) -> None:
+    spec, _ = _cache(tmp_path, "lazy-identities")
+    loaded = load_target_cache_sharded(tmp_path / "lazy-identities", cache_spec=spec)
+    assert not isinstance(loaded.identities, tuple)
+    assert not hasattr(loaded.identities.store, "identities")
+    assert loaded.identities[:2] == ("jet-a", "jet-b")
+    assert len(loaded.identities.store._cached_identities) <= int(spec["shard_size"])
+    assert loaded.identities[-1] == "jet-e"
+    assert len(loaded.identities.store._cached_identities) <= int(spec["shard_size"])
+    target_array_names = set(
+        loaded.identities.store.records[
+            loaded.identities.store._cached_index
+        ]["arrays"].values()
+    )
+    assert all(
+        loaded.identities.store._cached_arrays[name].shape[0]
+        <= int(spec["shard_size"])
+        for name in target_array_names
+    )
+
+
+def test_scale_kd_logits_stream_to_authenticated_mmap(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    teacher_id = "O_BASE"
+    cache_root = root / "scale_up" / "teacher_outputs" / teacher_id
+    identities = tuple(f"jet-{index:05d}" for index in range(25))
+    expected = np.arange(250, dtype=np.float32).reshape(25, 10)
+    coordinate = f"T_OFFLINE_LOGITS_{teacher_id}"
+    spec = build_target_cache_spec(
+        cache_id="scale-teacher-logits",
+        split="scale_train",
+        artifact_kind="teacher_output",
+        identities=identities,
+        target_components={coordinate: tuple(f"class_{index}" for index in range(10))},
+        parent_hashes={"campaign": H},
+        source=SOURCE,
+        shard_size=4,
+        identities_are_canonical=True,
+    )
+
+    def generate(indices):
+        values = expected[indices]
+        return {
+            coordinate: TargetBatch(
+                target_id=coordinate,
+                component_names=tuple(f"class_{index}" for index in range(10)),
+                availability_groups=("teacher_logits_available",),
+                values=torch.from_numpy(values),
+                loss_mask=torch.ones_like(torch.from_numpy(values), dtype=torch.bool),
+                diagnostics={},
+            )
+        }
+
+    for shard_index in range(int(spec["shard_count"])):
+        publish_target_cache_shard(
+            cache_root,
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=generate,
+            identity_population_attestation=spec["canonical_identity_order_sha256"],
+        )
+    manifest = validate_target_cache(cache_root, cache_spec=spec)
+    from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+        write_immutable_json,
+    )
+
+    write_immutable_json(cache_root / "cache_spec.json", spec)
+    write_immutable_json(cache_root / "target_manifest.json", manifest)
+    labels_path = root / "scale_labels.npz"
+    np.savez_compressed(
+        labels_path,
+        identities=np.asarray(identities),
+        labels=np.arange(25, dtype=np.int64) % 10,
+    )
+    output = _teacher_logits_npz(root, teacher_id, labels_path)
+    loaded = _privileged(output, identities, "logits")
+    assert isinstance(loaded, np.memmap)
+    assert np.array_equal(loaded, expected)
+    assert _teacher_logits_npz(root, teacher_id, labels_path) == output
 
 
 def test_real_physical_extractor_miniature_cache_passes_lineage_and_resume(

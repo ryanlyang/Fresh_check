@@ -134,7 +134,7 @@ def run_resource_preflight(
     return with_content_hash(
         {
             "contract": RESOURCE_PREFLIGHT_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 8,
             "source": dict(source),
             "profile": profile,
             "storage_measurements_sha256": storage_measurements[

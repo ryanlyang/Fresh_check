@@ -49,6 +49,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     load_combination_loaders,
     NATIVE_RELATION_TARGET_CONTRACT,
     SCALE_NATIVE_RELATION_WAVE_CONTRACT,
+    identity_order_sha256,
+    load_target_cache_sharded,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.combination_runtime import (  # noqa: E402
     train_combination,
@@ -62,6 +64,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  #
     SCALE_TRAINING_COMPLETION_CONTRACT,
     SCALE_TRAINING_PREDICTION_CONTRACT,
     load_hashed_json,
+    with_content_hash,
+    write_immutable_bytes,
     write_immutable_json,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.deployment_runtime import (  # noqa: E402
@@ -69,6 +73,9 @@ from teacher_logit_reco.hlt_offline_structure_distillation.deployment_runtime im
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.scale_runtime import (  # noqa: E402
     build_scale_graph_wave_completion,
+)
+from teacher_logit_reco.hlt_offline_structure_distillation.target_cache import (  # noqa: E402
+    deterministic_npz_bytes,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_c_training import (  # noqa: E402
     train_stage_c_baseline,
@@ -150,54 +157,102 @@ def _required_scale_resources(definition):
 
 
 def _teacher_logits_npz(root: Path, teacher_id: str, labels_path: Path) -> Path:
-    from teacher_logit_reco.hlt_offline_structure_distillation import load_target_cache
-
     cache_root = root / "scale_up" / "teacher_outputs" / teacher_id
     spec = load_hashed_json(cache_root / "cache_spec.json")
-    cache = load_target_cache(cache_root, cache_spec=spec)
+    cache = load_target_cache_sharded(cache_root, cache_spec=spec)
     coordinate = f"T_OFFLINE_LOGITS_{teacher_id}"
-    identities, _ = _labels(labels_path)
-    lookup = {identity: index for index, identity in enumerate(cache.identities)}
-    if set(identities) != set(lookup):
+    with np.load(labels_path, allow_pickle=False) as label_payload:
+        if not {"identities", "labels"}.issubset(label_payload.files):
+            raise ValueError("scale graph labels lack identities/labels")
+        label_identities = label_payload["identities"]
+        identity_count = int(len(label_identities))
+        identity_hash = identity_order_sha256(label_identities)
+        if label_payload["labels"].shape != (identity_count,):
+            raise ValueError("scale graph label population differs")
+    if (
+        identity_count != int(spec["event_count"])
+        or identity_hash != spec["canonical_identity_order_sha256"]
+        or coordinate not in cache.values
+    ):
         raise ValueError("scale teacher logits and scale labels differ")
-    logits = cache.values[coordinate][
-        np.asarray([lookup[value] for value in identities], dtype=np.int64)
-    ]
     output = root / "scale_up" / "teacher_outputs" / f"{teacher_id}_training_logits.npz"
     output.parent.mkdir(parents=True, exist_ok=True)
-
-    def validate_existing() -> None:
-        if output.is_symlink() or not output.is_file():
-            raise FileExistsError("scale teacher-logit destination is unsafe")
-        with np.load(output, allow_pickle=False) as existing:
-            if (
-                tuple(str(value) for value in existing["identities"].tolist())
-                != identities
-                or not np.array_equal(existing["logits"], logits)
-            ):
-                raise FileExistsError("reusable scale teacher logits differ")
-
-    if output.exists():
-        validate_existing()
+    manifest_path = output.with_suffix(output.suffix + ".manifest.json")
+    store = output.parent / f"{output.name}.mmap_v1"
+    member = store / "logits.npy"
+    labels_sha256 = _sha256_file(labels_path)
+    parent = {
+        "teacher_cache_manifest_sha256": cache.manifest["content_hash"],
+        "teacher_cache_spec_sha256": spec["content_hash"],
+        "label_npz_sha256": labels_sha256,
+        "identity_order_sha256": identity_hash,
+    }
+    if manifest_path.exists():
+        artifact = load_hashed_json(
+            manifest_path, expected_contract="hosd_scale_teacher_logits_mmap_v1"
+        )
+        if (
+            artifact.get("parents") != parent
+            or artifact.get("source") != spec["source"]
+            or _sha256_file(output) != artifact.get("npz_sha256")
+            or _sha256_file(member) != artifact.get("member", {}).get("sha256")
+        ):
+            raise FileExistsError("reusable scale teacher logits differ")
         return output
+    store.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{output.name}.", suffix=".npz", dir=output.parent
+        prefix=".logits.", suffix=".npy", dir=store
     )
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        np.savez_compressed(
+        logits = np.lib.format.open_memmap(
             temporary,
-            identities=np.asarray(identities, dtype="U"),
-            logits=np.asarray(logits, dtype=np.float32),
+            mode="w+",
+            dtype=np.float32,
+            shape=cache.values[coordinate].shape,
         )
+        for start in range(0, identity_count, 2048):
+            stop = min(start + 2048, identity_count)
+            logits[start:stop] = cache.values[coordinate][start:stop]
+        logits.flush()
+        del logits
         try:
-            os.link(temporary, output)
+            os.link(temporary, member)
         except FileExistsError:
-            validate_existing()
+            if _sha256_file(temporary) != _sha256_file(member):
+                raise FileExistsError("teacher-logit mmap member differs")
     finally:
         if temporary.exists():
             temporary.unlink()
+    descriptor_bytes = deterministic_npz_bytes(
+        {
+            "event_count": np.asarray([identity_count], dtype=np.int64),
+            "logit_dimension": np.asarray(
+                [cache.values[coordinate].shape[1]], dtype=np.int64
+            ),
+        }
+    )
+    descriptor_result = write_immutable_bytes(output, descriptor_bytes)
+    artifact = with_content_hash(
+        {
+            "contract": "hosd_scale_teacher_logits_mmap_v1",
+            "schema_version": 1,
+            "source": spec["source"],
+            "parents": parent,
+            "npz_sha256": descriptor_result["file_sha256"],
+            "storage_layout": "descriptor_npz_plus_authenticated_npy_mmap_v1",
+            "member": {
+                "path": str(member.resolve()),
+                "sha256": _sha256_file(member),
+                "shape": list(cache.values[coordinate].shape),
+                "dtype": "float32",
+            },
+            "identity_values_stored": False,
+            "shard_read_size": 2048,
+        }
+    )
+    write_immutable_json(manifest_path, artifact)
     return output
 
 

@@ -35,7 +35,9 @@ from teacher_logit_reco.relation_expert_token_bridge.middle_dynamic_plan_factori
     MIDDLE_DYNAMIC_PLAN_FACTORIES,
 )
 from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
+    BOOTSTRAP_INPUT_MANIFEST_NODES,
     PRODUCTION_GRAPH_CONTRACT,
+    STATIC_EXPERIMENT_MANIFEST_NODES,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
@@ -121,6 +123,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     selected = [target for target in targets if target in factories]
     unsupported = [target for target in targets if target not in factories]
+    bootstrap_prepublished = set(BOOTSTRAP_INPUT_MANIFEST_NODES) | set(
+        STATIC_EXPERIMENT_MANIFEST_NODES
+    )
+    if args.producer_node_id == "campaign_bootstrap":
+        if set(targets) != bootstrap_prepublished or selected:
+            raise RuntimeError(
+                "campaign bootstrap manifest ownership differs from the "
+                "frozen prepublished target set"
+            )
+        print(
+            json.dumps(
+                {
+                    "producer_node_id": args.producer_node_id,
+                    "targets": list(targets),
+                    "factory_symbols": [],
+                    "publication_symbol": None,
+                    "manifest_production_mode": (
+                        "authenticated_campaign_bootstrap_prepublication"
+                    ),
+                    "dry_run": bool(args.dry_run),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     if unsupported and selected:
         raise RuntimeError(
             "one producer mixes implemented and unimplemented plan factories: "

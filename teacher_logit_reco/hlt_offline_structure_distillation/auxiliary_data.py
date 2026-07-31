@@ -128,7 +128,12 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
         source_indices_by_replica: Mapping[int, Sequence[int]] | None = None,
         region_trees_by_replica: Mapping[int, Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
-        self.identities = tuple(str(value) for value in identities)
+        scale_identity_sequence = logical_role == "scale_train"
+        self.identities = (
+            identities
+            if scale_identity_sequence
+            else tuple(str(value) for value in identities)
+        )
         self.labels = np.asarray(labels, dtype=np.int64)
         self.logical_role = str(logical_role)
         self.realization_policy = str(realization_policy)
@@ -142,9 +147,9 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
         }
         self.source_indices_by_replica = {
             replica: (
-                np.arange(len(self.identities), dtype=np.int64)
+                range(len(self.identities))
                 if source_indices_by_replica is None
-                else np.asarray(source_indices_by_replica[replica], dtype=np.int64)
+                else source_indices_by_replica[replica]
             )
             for replica in self.replicas
         }
@@ -154,17 +159,34 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
             else {0, 1, 2, 3}
         )
         if (
-            not self.identities
-            or len(set(self.identities)) != len(self.identities)
+            len(self.identities) == 0
             or self.labels.shape != (len(self.identities),)
+            or (
+                not scale_identity_sequence
+                and len(set(self.identities)) != len(self.identities)
+            )
             or set(self.replicas) != expected_replicas
             or set(self.source_indices_by_replica) != set(self.replicas)
             or any(
-                indices.shape != (len(self.identities),)
-                or bool((indices < 0).any())
+                len(indices) != len(self.identities)
                 or (
-                    len(indices) > 0
-                    and int(indices.max()) >= len(self.replicas[replica]["tokens"])
+                    isinstance(indices, range)
+                    and (
+                        indices.start != 0
+                        or indices.step != 1
+                        or indices.stop != len(self.identities)
+                    )
+                )
+                or (
+                    not isinstance(indices, range)
+                    and (
+                        bool((np.asarray(indices) < 0).any())
+                        or (
+                            len(indices) > 0
+                            and int(np.asarray(indices).max())
+                            >= len(self.replicas[replica]["tokens"])
+                        )
+                    )
                 )
                 for replica, indices in self.source_indices_by_replica.items()
             )

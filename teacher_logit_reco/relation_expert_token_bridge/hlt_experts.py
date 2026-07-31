@@ -23,7 +23,7 @@ from .contracts import (
 from .determinism import optimizer_update_counts, scheduled_learning_rate
 from .evaluation import evaluate_classification
 from .expert_training import DeterministicExpertSampler, preferred_expert_epoch
-from .hlt_cache import validate_hlt_v3_cache
+from .hlt_cache import identity_order_hash, validate_hlt_v3_cache
 from .replicas import REALIZATION_POLICIES, replica_for
 
 try:
@@ -239,12 +239,20 @@ class NativeHLTExpertDataset(
             replica_metadata
         ) != expected_replicas:
             raise ValueError("HLT dataset replica coverage differs")
-        self.identities = tuple(str(value) for value in identities)
+        scale_identity_sequence = logical_role == "scale_train"
+        self.identities = (
+            identities
+            if scale_identity_sequence
+            else tuple(str(value) for value in identities)
+        )
         self.labels = np.asarray(labels, dtype=np.int64)
         if (
             len(self.identities) == 0
-            or len(self.identities) != len(set(self.identities))
             or self.labels.shape != (len(self.identities),)
+            or (
+                not scale_identity_sequence
+                and len(self.identities) != len(set(self.identities))
+            )
         ):
             raise ValueError("HLT dataset identity/label population differs")
         if bool(((self.labels < 0) | (self.labels >= 10)).any()):
@@ -263,8 +271,10 @@ class NativeHLTExpertDataset(
                 expected_logical_role=logical_role,
                 expected_replica_id=replica,
             )
-            cache_ids = tuple(str(value) for value in arrays["identities"].tolist())
-            if cache_ids != self.identities:
+            if (
+                metadata.get("identity_order_sha256")
+                != identity_order_hash(self.identities)
+            ):
                 raise ValueError("HLT replica identities differ")
             if metadata["realization_policy"] != realization_policy:
                 raise ValueError("HLT cache realization policy differs")

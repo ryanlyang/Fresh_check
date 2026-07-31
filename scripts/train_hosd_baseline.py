@@ -9,6 +9,7 @@ import importlib
 import json
 from pathlib import Path
 import sys
+from typing import Sequence
 
 import numpy as np
 
@@ -79,23 +80,41 @@ def _mapping(
     return output
 
 
-def _labels(path: Path) -> tuple[np.ndarray, tuple[str, ...]]:
+def _labels(
+    path: Path,
+    *,
+    canonical_identities: Sequence[str] | None = None,
+) -> tuple[np.ndarray, Sequence[str]]:
+    from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
+        identity_order_hash,
+    )
+
     with np.load(path, allow_pickle=False) as payload:
         if not {"identities", "labels"}.issubset(payload.files):
             raise ValueError("labels NPZ lacks identities/labels")
-        identities = tuple(str(value) for value in payload["identities"].tolist())
+        raw_identities = payload["identities"]
+        observed_identity_hash = identity_order_hash(raw_identities)
         labels = np.asarray(payload["labels"], dtype=np.int64)
+    identities = (
+        tuple(str(value) for value in raw_identities.tolist())
+        if canonical_identities is None
+        else canonical_identities
+    )
     if (
-        not identities
-        or len(identities) != len(set(identities))
+        len(identities) == 0
         or labels.shape != (len(identities),)
         or bool(((labels < 0) | (labels >= 10)).any())
+        or observed_identity_hash != identity_order_hash(identities)
+        or (
+            canonical_identities is None
+            and len(identities) != len(set(identities))
+        )
     ):
         raise ValueError("label population differs")
     return labels, identities
 
 
-def _privileged(path: Path | None, identities: tuple[str, ...], field: str):
+def _privileged(path: Path | None, identities: Sequence[str], field: str):
     if path is None:
         return None
     if path.is_dir():
@@ -118,6 +137,36 @@ def _privileged(path: Path | None, identities: tuple[str, ...], field: str):
         if cache.identities != identities:
             raise ValueError("privileged target-cache identities differ")
         return np.asarray(cache.values[target_ids[0]], dtype=np.float32)
+    mmap_manifest_path = path.with_suffix(path.suffix + ".manifest.json")
+    if mmap_manifest_path.is_file():
+        from teacher_logit_reco.hlt_offline_structure_distillation import (
+            identity_order_sha256,
+        )
+
+        artifact = load_hashed_json(
+            mmap_manifest_path,
+            expected_contract="hosd_scale_teacher_logits_mmap_v1",
+        )
+        member = artifact.get("member", {})
+        member_path = Path(str(member.get("path", "")))
+        if (
+            field != "logits"
+            or artifact.get("parents", {}).get("identity_order_sha256")
+            != identity_order_sha256(identities)
+            or _sha256_file(path) != artifact.get("npz_sha256")
+            or member_path.is_symlink()
+            or not member_path.is_file()
+            or _sha256_file(member_path) != member.get("sha256")
+        ):
+            raise ValueError("privileged mmap target lineage differs")
+        value = np.load(member_path, mmap_mode="r", allow_pickle=False)
+        if (
+            list(value.shape) != member.get("shape")
+            or str(value.dtype) != member.get("dtype")
+            or value.shape[0] != len(identities)
+        ):
+            raise ValueError("privileged mmap target shape differs")
+        return value
     with np.load(path, allow_pickle=False) as payload:
         if not {"identities", field}.issubset(payload.files):
             raise ValueError(f"privileged NPZ lacks identities/{field}")
@@ -128,7 +177,7 @@ def _privileged(path: Path | None, identities: tuple[str, ...], field: str):
     return value
 
 
-def _native_targets(path: Path | None, identities: tuple[str, ...]):
+def _native_targets(path: Path | None, identities: Sequence[str]):
     if path is None:
         return None
     from teacher_logit_reco.hlt_offline_structure_distillation.native_relations import (
@@ -162,12 +211,16 @@ def _native_targets(path: Path | None, identities: tuple[str, ...]):
         ):
             raise ValueError("native relation memory-map member differs")
         mapped[name] = np.load(member_path, mmap_mode="r", allow_pickle=False)
-    observed = tuple(str(value) for value in mapped["identities"].tolist())
+    from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
+        identity_order_hash,
+    )
+
     target = mapped["targets"]
     mask = mapped["target_mask"]
     availability = mapped["availability"]
     if (
-        observed != identities
+        identity_order_hash(mapped["identities"])
+        != identity_order_hash(identities)
         or target.shape != (len(identities), 545)
         or mask.shape != target.shape
         or availability.shape != (len(identities), 7)
@@ -243,7 +296,12 @@ def _dataset(
             if path.is_file()
             else load_hlt_v3_cache(path)
         )
-    labels, identities = _labels(labels_path)
+    canonical_identities = (
+        arrays[min(arrays)]["identities"] if role == "scale_train" else None
+    )
+    labels, identities = _labels(
+        labels_path, canonical_identities=canonical_identities
+    )
     logits = _privileged(teacher_logits, identities, "logits")
     native = (
         None
@@ -258,7 +316,10 @@ def _dataset(
     tokens = None
     paired_logits = None
     if logits is not None:
-        tokens = np.zeros((len(identities), 1, 1), dtype=np.float32)
+        tokens = np.broadcast_to(
+            np.zeros((1, 1, 1), dtype=np.float32),
+            (len(identities), 1, 1),
+        )
         paired_logits = logits
     dataset = NativeHLTExpertDataset(
         replica_arrays=arrays,

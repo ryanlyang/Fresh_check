@@ -124,20 +124,68 @@ def _maximum_tree_layout_128_255() -> dict[str, int]:
 def _scale_layout_ledger(root: Path, source: dict) -> dict:
     """Authenticate resident-unit byte accounting for every risky scale node."""
 
-    input_paths = [
-        root / "scale_up" / "inputs" / "offline" / "scale_train.npz",
-        *[
-            root / "scale_up" / "inputs" / "hlt" / f"replica_{index}.npz"
-            for index in range(4)
-        ],
-    ]
+    input_completion = load_hashed_json(
+        root / "scale_up" / "inputs" / "completion.json",
+        expected_contract="hosd_scale_input_completion_v4",
+    )
+    tree_completion = load_hashed_json(
+        root / "scale_up" / "trees" / "completion.json",
+        expected_contract="hosd_scale_tree_wave_completion_v1",
+    )
+    target_completion = load_hashed_json(
+        root / "scale_up" / "target_completion.json",
+        expected_contract="hosd_scale_target_wave_completion_v1",
+    )
+    teacher_completion = load_hashed_json(
+        root / "scale_up" / "teacher_outputs" / "completion.json",
+        expected_contract="hosd_scale_teacher_output_completion_v1",
+    )
+    for name, artifact in (
+        ("input", input_completion),
+        ("tree", tree_completion),
+        ("target", target_completion),
+        ("teacher output", teacher_completion),
+    ):
+        if artifact.get("source") != source:
+            raise ValueError(f"scale memory {name} completion source differs")
+    if tree_completion.get("scale_input_completion_sha256") != input_completion[
+        "content_hash"
+    ]:
+        raise ValueError("scale memory tree/input completion lineage differs")
+    active_tree_resource = load_hashed_json(tree_completion["tree_resource_path"])
+    active_tree_backend = load_hashed_json(tree_completion["backend_manifest_path"])
+    if (
+        active_tree_resource["content_hash"] != tree_completion["tree_resource_sha256"]
+        or active_tree_backend["content_hash"]
+        != tree_completion["backend_manifest_sha256"]
+    ):
+        raise ValueError("scale memory active tree parents differ")
+    input_paths = [Path(row["npz_path"]) for row in input_completion["rows"]]
+    input_completion_rows = {
+        str(row["view_id"]): row for row in input_completion["rows"]
+    }
+    if len(input_paths) != 5 or len(input_completion_rows) != 5:
+        raise ValueError("scale memory input completion coverage differs")
     input_rows = []
     for path in input_paths:
         manifest = load_hashed_json(
             path.with_suffix(path.suffix + ".json"),
             expected_contract="hosd_label_blind_input_view_v4",
         )
-        if manifest.get("source") != source:
+        completion_row = next(
+            (
+                row
+                for row in input_completion["rows"]
+                if Path(row["npz_path"]).resolve() == path.resolve()
+            ),
+            None,
+        )
+        if (
+            manifest.get("source") != source
+            or completion_row is None
+            or manifest["content_hash"] != completion_row["view_manifest_sha256"]
+            or manifest["npz_sha256"] != completion_row["npz_sha256"]
+        ):
             raise ValueError("scale memory input-view source differs")
         store = manifest.get("mmap_store", {})
         if store.get("contract") != "hosd_npy_mmap_store_v2":
@@ -166,8 +214,27 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
     )
 
     tree_rows = []
-    for path in sorted((root / "scale_up" / "trees").rglob("manifest.json")):
-        split = AuthenticatedTreeSplit(path.parent)
+    for row in tree_completion["rows"]:
+        coordinate = str(row["coordinate"])
+        input_key = "offline:scale_train" if coordinate == "offline" else (
+            f"hlt:scale_train:r{int(coordinate)}"
+        )
+        input_row = input_completion_rows.get(input_key)
+        path = Path(row["tree_manifest_path"])
+        if input_row is None:
+            raise ValueError("scale memory tree coordinate lacks its active input")
+        split = AuthenticatedTreeSplit(
+            path.parent,
+            expected_parents={
+                "hlt_content_sha256": input_row["npz_sha256"],
+                "tree_resource_sha256": tree_completion["tree_resource_sha256"],
+                "backend_manifest_sha256": tree_completion[
+                    "backend_manifest_sha256"
+                ],
+            },
+        )
+        if split.manifest["content_hash"] != row["tree_manifest_sha256"]:
+            raise ValueError("scale memory tree completion manifest differs")
         for record in split.records:
             verified_path = split.verified_shard_path(record.shard_index)
             tree_rows.append(
@@ -194,10 +261,69 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         raise ValueError("observed tree layout exceeds analytical 128/255 bound")
 
     target_rows = []
-    for path in sorted((root / "scale_up" / "targets").rglob("target_manifest.json")):
+    active_target_manifests: dict[str, Path] = {}
+    for target_id, completion_hash in target_completion[
+        "target_completion_hashes"
+    ].items():
+        coordinate_root = root / "scale_up" / "targets" / target_id
+        coordinate_completion = load_hashed_json(
+            coordinate_root / "completion.json",
+            expected_contract="hosd_scale_target_completion_v1",
+        )
+        if (
+            coordinate_completion["content_hash"] != completion_hash
+            or coordinate_completion.get("source") != source
+        ):
+            raise ValueError("scale memory target completion lineage differs")
+        for artifact_name, expected_hash in coordinate_completion[
+            "artifact_hashes"
+        ].items():
+            path = None
+            if artifact_name == "canonical_cache":
+                path = coordinate_root / "canonical" / "target_manifest.json"
+            elif artifact_name.startswith("hlt_cache_"):
+                replica = int(artifact_name.removeprefix("hlt_cache_"))
+                path = coordinate_root / "hlt" / f"replica_{replica}" / "target_manifest.json"
+            elif artifact_name.startswith("hlt_analogue_cache_"):
+                replica = int(artifact_name.removeprefix("hlt_analogue_cache_"))
+                path = coordinate_root / "hlt" / f"replica_{replica}" / "target_manifest.json"
+            elif artifact_name.startswith("residual_cache_"):
+                replica = int(artifact_name.removeprefix("residual_cache_"))
+                path = coordinate_root / "residual" / f"replica_{replica}" / "target_manifest.json"
+            elif artifact_name == "teacher_target_cache":
+                teacher_id = (
+                    "O_FULLREL"
+                    if target_id == "T_OFFLINE_LOGITS_O_FULLREL"
+                    else "O_BASE"
+                )
+                path = root / "scale_up" / "teacher_outputs" / teacher_id / "target_manifest.json"
+            if path is None:
+                continue
+            candidate = load_hashed_json(
+                path, expected_contract="hosd_target_cache_manifest_v1"
+            )
+            if (
+                candidate["content_hash"] != expected_hash
+                or candidate.get("source") != source
+            ):
+                raise ValueError("scale memory declared target artifact differs")
+            active_target_manifests[candidate["content_hash"]] = path
+    for teacher_id, expected_hash in teacher_completion[
+        "teacher_output_manifest_hashes"
+    ].items():
+        path = root / "scale_up" / "teacher_outputs" / teacher_id / "target_manifest.json"
+        manifest = load_hashed_json(
+            path, expected_contract="hosd_target_cache_manifest_v1"
+        )
+        if manifest["content_hash"] != expected_hash or manifest.get("source") != source:
+            raise ValueError("scale memory teacher-output completion differs")
+        active_target_manifests[manifest["content_hash"]] = path
+    for expected_hash, path in sorted(active_target_manifests.items()):
         for manifest, record, shard in iter_authenticated_target_shard_layouts(
             path.parent
         ):
+            if manifest["content_hash"] != expected_hash or manifest.get("source") != source:
+                raise ValueError("scale memory target layout lineage differs")
             target_rows.append(
                 {
                     "manifest_sha256": manifest["content_hash"],
@@ -272,7 +398,7 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         ),
     }
     ledger = {
-        "contract": "hosd_scale_resident_layout_ledger_v3",
+        "contract": "hosd_scale_resident_layout_ledger_v4",
         "source_sha256": canonical_sha256(source),
         "input_rows": input_rows,
         "tree_manifest_hashes": sorted(
@@ -281,6 +407,12 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         "target_manifest_hashes": sorted(
             {row["manifest_sha256"] for row in target_rows}
         ),
+        "active_completion_hashes": {
+            "scale_inputs": input_completion["content_hash"],
+            "scale_trees": tree_completion["content_hash"],
+            "scale_targets": target_completion["content_hash"],
+            "scale_teacher_outputs": teacher_completion["content_hash"],
+        },
         "maximum_input_decoded_bytes_per_event": max_input_per_event,
         "maximum_tree_shard_events": max_tree_shard_events,
         "maximum_tree_shard_decoded_bytes": max_tree_shard_bytes,
@@ -674,7 +806,7 @@ def main(argv=None):
                 ),
             }[node_id]
             scale_memory_projections[node_id] = with_content_hash({
-                "contract": "hosd_scale_resident_memory_projection_v4",
+                "contract": "hosd_scale_resident_memory_projection_v5",
                 "pilot_node_id": node_id,
                 "pilot_job_id": job_id,
                 "coordinate_type": coordinate_type,
@@ -754,7 +886,7 @@ def main(argv=None):
     artifact = with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENT_EVIDENCE_CONTRACT,
-            "schema_version": 6,
+            "schema_version": 7,
             "source": dict(campaign["source"]),
             "miniature_execution_plan_sha256": plan["content_hash"],
             "scheduler_evidence_sha256": scheduler["content_hash"],

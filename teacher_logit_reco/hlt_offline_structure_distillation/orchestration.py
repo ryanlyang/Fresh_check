@@ -114,11 +114,17 @@ def build_resource_measurements(
         raise ValueError("resource projections must be positive and complete")
     layout_ledger = dict(scale_resident_layout_ledger)
     validate_content_hash(
-        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v3"
+        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v4"
     )
     source_sha256 = canonical_sha256(source)
     if (
         layout_ledger.get("source_sha256") != source_sha256
+        or set(layout_ledger.get("active_completion_hashes", {}))
+        != {"scale_inputs", "scale_trees", "scale_targets", "scale_teacher_outputs"}
+        or any(
+            not isinstance(value, str) or len(value) != 64
+            for value in layout_ledger.get("active_completion_hashes", {}).values()
+        )
         or int(layout_ledger.get("production_tree_shard_events", 0))
         != 10_000
         or int(layout_ledger.get("production_target_shard_events", 0))
@@ -146,7 +152,7 @@ def build_resource_measurements(
     for node_id, projection in projections.items():
         validate_content_hash(
             projection,
-            expected_contract="hosd_scale_resident_memory_projection_v4",
+            expected_contract="hosd_scale_resident_memory_projection_v5",
         )
         model = projection.get("projection_model")
         fixed = int(projection.get("fixed_resident_bytes", -1))
@@ -207,7 +213,7 @@ def build_resource_measurements(
     return with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENTS_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 8,
             "source": dict(source),
             "miniature_execution_plan_sha256": require_sha256(
                 miniature_execution_plan_sha256,
@@ -666,7 +672,7 @@ def build_full_authorization(
     return with_content_hash(
         {
             "contract": FULL_AUTHORIZATION_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 8,
             "source": dict(source),
             "production_execution_plan_sha256": production_plan["content_hash"],
             "miniature_acceptance_sha256": miniature_acceptance["content_hash"],

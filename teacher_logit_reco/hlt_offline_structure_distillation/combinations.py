@@ -335,10 +335,11 @@ def expand_combination_beam(
         existing = [dict(row) for row in root.get("members", ())]
         if any(row["family"] == family for row in existing):
             continue
+        candidate_hash = canonical_sha256(
+            [root["graph_id"], family, member["target_id"]]
+        )
         candidate = _combination(
-            f"BEAM_W{expected_ordinal}_{canonical_sha256([
-                root['graph_id'], family, member['target_id']
-            ])[:12]}",
+            f"BEAM_W{expected_ordinal}_{candidate_hash[:12]}",
             [*existing, member],
             budget="BEAM_5_EPOCH",
         )

@@ -33,7 +33,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v23"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v24"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -2485,7 +2485,7 @@ def build_step15_bundle(
                 "materialization_plan": (
                     "retb_manifest_materialization_plan_v2"
                 ),
-                "producer_receipt": "retb_manifest_producer_receipt_v3",
+                "producer_receipt": "retb_manifest_producer_receipt_v4",
                 "plan_factory_registry": (
                     MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT
                 ),
