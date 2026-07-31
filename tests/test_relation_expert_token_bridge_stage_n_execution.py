@@ -20,18 +20,22 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     publish_task_row_completion,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    bind_source,
     build_campaign_spec,
     with_content_hash,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.stage_n_execution import (
+    FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
     SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
     STACK_INFERENCE_EXECUTION_PLAN_CONTRACT,
+    build_deployable_inference_input_binding,
     publish_deployable_inference_input,
     publish_deployable_inference_input_binding,
     publish_shared_deployable_inference_payload,
     validate_deployable_inference_input,
     validate_deployable_inference_input_binding,
+    validate_final_test_inference_attestation,
     validate_shared_deployable_inference_payload,
     validate_sealed_final_test_execution_plan,
     validate_stack_inference_execution_plan,
@@ -312,11 +316,17 @@ def test_sealed_final_plan_requires_every_locked_row_once(
     tmp_path: Path,
 ) -> None:
     root = tmp_path.resolve()
-    source = {
+    raw_source = {
         "source_commit": "a" * 40,
         "source_status_sha256": "b" * 64,
         "source_dirty": False,
     }
+    source = bind_source(
+        with_content_hash(
+            {"contract": "fixture_source_v1", "schema_version": 1}
+        ),
+        source_snapshot=raw_source,
+    )["source"]
     expected = {
         "row": {
             "row_id": "row",
@@ -325,18 +335,48 @@ def test_sealed_final_plan_requires_every_locked_row_once(
             "checkpoint_sha256": "3" * 64,
         }
     }
+    shared_publication = publish_shared_deployable_inference_payload(
+        output_dir=root,
+        split="final_test",
+        identities=["jet"],
+        hlt_inputs={"features": torch.zeros((1, 2))},
+        source_snapshot=raw_source,
+    )
+    shared_manifest = shared_publication["manifest"]
+    shared_manifest_path = Path(
+        shared_publication["manifest_publication"]["path"]
+    )
+    input_manifest = root / "final_test_graph_seed101.json"
+    input_binding = build_deployable_inference_input_binding(
+        output_dir=root,
+        shared_payload_manifest=shared_manifest,
+        shared_payload_manifest_path=shared_manifest_path,
+        graph_id="graph",
+        pipeline_seed=101,
+    )
     lock = with_content_hash(
         {
             "contract": "retb_final_test_execution_lock_v1",
             "schema_version": 1,
             "eligible_evaluation_rows": expected,
+            "final_input_hashes": {
+                "final_test_HLT_inputs": shared_manifest["content_hash"]
+            },
             "source": source,
         }
     )
+    export = with_content_hash(
+        {
+            "contract": "fixture_deployable_export_v1",
+            "schema_version": 1,
+            "source": source,
+        }
+    )
+    write_immutable_json(root / "export.json", export)
     plan = with_content_hash(
         {
             "contract": SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 3,
             "final_test_execution_lock_sha256": lock["content_hash"],
             "steps": [
                 {
@@ -352,6 +392,14 @@ def test_sealed_final_plan_requires_every_locked_row_once(
                         "graph",
                         "--pipeline-seed",
                         "101",
+                        "--row-id",
+                        "row",
+                        "--checkpoint-sha256",
+                        "3" * 64,
+                        "--deployable-export",
+                        str(root / "export.json"),
+                        "--input-manifest",
+                        str(input_manifest),
                         "--execution-lock",
                         str(root / "lock.json"),
                         "--execution-claim",
@@ -360,9 +408,12 @@ def test_sealed_final_plan_requires_every_locked_row_once(
                         str(root / "plan.json"),
                         "--output",
                         str(root / "prediction.npz"),
+                        "--attestation-output",
+                        str(root / "inference_attestation.json"),
                     ],
                     "expected_outputs": [
-                        str(root / "prediction.npz")
+                        str(root / "prediction.npz"),
+                        str(root / "inference_attestation.json"),
                     ],
                 }
             ],
@@ -370,10 +421,27 @@ def test_sealed_final_plan_requires_every_locked_row_once(
             "prediction_rows": [
                 {
                     **expected["row"],
+                    "deployable_export": str(root / "export.json"),
+                    "deployable_export_sha256": export["content_hash"],
                     "inference_output_npz": str(root / "prediction.npz"),
+                    "inference_attestation_output": str(
+                        root / "inference_attestation.json"
+                    ),
                     "prediction_manifest_output": str(
                         root / "prediction.json"
                     ),
+                    "input_manifest": str(input_manifest),
+                    "input_manifest_sha256": input_binding["content_hash"],
+                    "shared_payload_manifest": str(shared_manifest_path),
+                    "shared_payload_manifest_sha256": shared_manifest[
+                        "content_hash"
+                    ],
+                    "shared_payload_sha256": shared_manifest[
+                        "payload_sha256"
+                    ],
+                    "locked_final_test_HLT_inputs_sha256": shared_manifest[
+                        "content_hash"
+                    ],
                 }
             ],
             "source": source,
@@ -386,6 +454,22 @@ def test_sealed_final_plan_requires_every_locked_row_once(
         campaign_root=root,
         repo_root=ROOT,
     )
+    drifted_input = dict(plan)
+    drifted_input.pop("content_hash")
+    drifted_input["prediction_rows"] = [
+        {
+            **plan["prediction_rows"][0],
+            "locked_final_test_HLT_inputs_sha256": "0" * 64,
+        }
+    ]
+    with pytest.raises(ValueError, match="input lock binding differs"):
+        validate_sealed_final_test_execution_plan(
+            with_content_hash(drifted_input),
+            execution_lock=lock,
+            campaign_source=source,
+            campaign_root=root,
+            repo_root=ROOT,
+        )
     missing = dict(plan)
     missing.pop("content_hash")
     missing["prediction_rows"] = []
@@ -433,8 +517,95 @@ def test_execution_claim_precedes_final_inference_and_no_threshold_abort() -> No
     assert source.index("claim_publication =") < source.index(
         "receipts = execute_plan_steps("
     )
-    assert "refusing repeat access" in source
+    assert "existing final-test execution claim differs" in source
+    assert "completed final-test row cannot be reexecuted after drift" in source
+    assert '"incomplete_other_rows_may_resume": True' in source
     assert "performance" not in source.lower()
+
+
+def test_final_test_npz_reuse_requires_claim_plan_checkpoint_sidecar(
+    tmp_path: Path,
+) -> None:
+    npz = tmp_path / "prediction.npz"
+    npz.write_bytes(b"locked prediction bytes")
+    row = {
+        "row_id": "row",
+        "graph_id": "graph",
+        "pipeline_seed": 101,
+        "checkpoint_sha256": "3" * 64,
+        "deployable_export": str(tmp_path / "export.json"),
+        "deployable_export_sha256": "7" * 64,
+        "input_manifest": str(tmp_path / "input.json"),
+        "input_manifest_sha256": "8" * 64,
+        "shared_payload_manifest_sha256": "9" * 64,
+        "shared_payload_sha256": "a" * 64,
+        "locked_final_test_HLT_inputs_sha256": "b" * 64,
+    }
+    source = {
+        "source_commit": "a" * 40,
+        "source_status_sha256": "b" * 64,
+        "source_dirty": False,
+    }
+    attestation = bind_source(
+        with_content_hash(
+            {
+                "contract": FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
+                "schema_version": 2,
+                "row_id": row["row_id"],
+                "graph_id": row["graph_id"],
+                "pipeline_seed": row["pipeline_seed"],
+                "checkpoint_sha256": row["checkpoint_sha256"],
+                "final_test_execution_lock_sha256": "4" * 64,
+                "execution_claim_sha256": "5" * 64,
+                "execution_plan_sha256": "6" * 64,
+                "deployable_export_sha256": "7" * 64,
+                "input_manifest_path": str(
+                    (tmp_path / "input.json").resolve()
+                ),
+                "input_manifest_sha256": "8" * 64,
+                "shared_payload_manifest_sha256": "9" * 64,
+                "shared_payload_sha256": "a" * 64,
+                "locked_final_test_HLT_inputs_sha256": "b" * 64,
+                "inference_output_npz": str(npz.resolve()),
+                "inference_output_npz_sha256": hashlib.sha256(
+                    npz.read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        source_snapshot=source,
+    )
+    assert validate_final_test_inference_attestation(
+        attestation,
+        row=row,
+        execution_lock_sha256="4" * 64,
+        execution_claim_sha256="5" * 64,
+        execution_plan_sha256="6" * 64,
+        locked_final_test_hlt_inputs_sha256="b" * 64,
+        npz_path=npz,
+        expected_source=attestation["source"],
+    ) == attestation["content_hash"]
+    with pytest.raises(ValueError, match="attestation differs"):
+        validate_final_test_inference_attestation(
+            attestation,
+            row=row,
+            execution_lock_sha256="4" * 64,
+            execution_claim_sha256="0" * 64,
+            execution_plan_sha256="6" * 64,
+            locked_final_test_hlt_inputs_sha256="b" * 64,
+            npz_path=npz,
+            expected_source=attestation["source"],
+        )
+    with pytest.raises(ValueError, match="attestation differs"):
+        validate_final_test_inference_attestation(
+            attestation,
+            row=row,
+            execution_lock_sha256="4" * 64,
+            execution_claim_sha256="5" * 64,
+            execution_plan_sha256="6" * 64,
+            locked_final_test_hlt_inputs_sha256="c" * 64,
+            npz_path=npz,
+            expected_source=attestation["source"],
+        )
 
 
 class _NumericalDeployable(torch.nn.Module):
@@ -661,11 +832,29 @@ def test_h_base_long_ledger_excludes_zero_ce_predictor(
         / "GRAPH_A"
         / "seed_101"
     )
+    source = {"commit": "a" * 40, "diff_sha256": "b" * 64}
+    publish(
+        tmp_path / "selection" / "locked_scale_shortlist.json",
+        {
+            "contract": "retb_locked_scale_shortlist_v2",
+            "schema_version": 2,
+            "locked_graph_definitions": {
+                "GRAPH_A": {
+                    "complete_graph_definition_sha256": "c" * 64,
+                    "configuration": {
+                        "source_carried_shape_role": "ROLE",
+                        "token_input": "TOKEN_PREDICTED",
+                    },
+                }
+            },
+            "source": source,
+        },
+    )
     for expert, objective, updates in (
         ("PT", "W_TOKEN_ONLY", 2),
         ("TRACK", "W_CANONICAL", 3),
     ):
-        phase = role / "predictors" / expert
+        phase = role / "predictors" / expert / "training"
         publish(
             phase / "training_curves.json",
             {
@@ -687,6 +876,24 @@ def test_h_base_long_ledger_excludes_zero_ce_predictor(
             },
         )
     publish(
+        role / "native_fusion" / "training_curves.json",
+        {
+            "contract": "test_native_fusion_curves_v1",
+            "schema_version": 1,
+            "rows": [{"optimizer_update_ordinal": 6}],
+            "planned_update_counts": {"total_optimizer_updates": 6},
+            "fixed_budget_completed": True,
+        },
+    )
+    publish(
+        role / "native_fusion" / "fusion_registration.json",
+        {
+            "contract": "test_native_fusion_registration_v1",
+            "schema_version": 1,
+            "variant": "HF_NATIVE",
+        },
+    )
+    publish(
         role / "native_hlt" / "BASE4" / "training_curves.json",
         {
             "contract": "test_native_curves_v1",
@@ -696,6 +903,14 @@ def test_h_base_long_ledger_excludes_zero_ce_predictor(
                 "total_optimizer_updates": 4
             },
             "fixed_budget_completed": True,
+        },
+    )
+    publish(
+        role / "native_hlt" / "BASE4" / "checkpoint_registration.json",
+        {
+            "contract": "test_native_registration_v1",
+            "schema_version": 1,
+            "mode": "HE_SCRATCH_CE",
         },
     )
     publish(
@@ -709,11 +924,78 @@ def test_h_base_long_ledger_excludes_zero_ce_predictor(
         },
     )
     publish(
+        tmp_path
+        / "selection"
+        / "joint"
+        / "ROLE"
+        / "j4_blocks.json",
+        {
+            "contract": "test_j4_selection_v1",
+            "schema_version": 1,
+            "selected_final_particle_blocks": 2,
+        },
+    )
+    j4 = (
+        tmp_path
+        / "runs"
+        / "joint"
+        / "ROLE"
+        / "RETB_J4_BRIDGE_FINETUNE_S101_N2"
+    )
+    publish(
+        j4 / "training_curves.json",
+        {
+            "contract": "test_j4_curves_v1",
+            "schema_version": 1,
+            "rows": [{"optimizer_update_ordinal": 2}],
+            "planned_update_counts": {"total_optimizer_updates": 2},
+            "fixed_budget_completed": True,
+        },
+    )
+    publish(
+        j4 / "registration.json",
+        {
+            "contract": "test_j4_registration_v1",
+            "schema_version": 1,
+            "variant": "J4_BRIDGE_FINETUNE",
+        },
+    )
+    publish(
         graph / "joint" / "registration.json",
         {
             "contract": "test_joint_registration_v1",
             "schema_version": 1,
             "variant": "J5_END_TO_END",
+        },
+    )
+    publish(
+        graph / "final_consumer" / "reference_registration.json",
+        {
+            "contract": "test_reference_registration_v1",
+            "schema_version": 1,
+        },
+    )
+    publish(
+        tmp_path
+        / "runs"
+        / "scale"
+        / "refits"
+        / "seed_101"
+        / "component_indexes"
+        / "GRAPH_A.json",
+        {
+            "contract": "retb_scale_component_index_v1",
+            "schema_version": 1,
+            "graph_id": "GRAPH_A",
+            "pipeline_seed": 101,
+            "native_hlt_experts": {
+                "BASE4": {"output_root": str(role / "native_hlt" / "BASE4")}
+            },
+            "predictors": {
+                expert: {"output_root": str(role / "predictors" / expert)}
+                for expert in ("PT", "TRACK")
+            },
+            "source": source,
         },
     )
     ledger = _long_exposure_ledger(
@@ -722,11 +1004,14 @@ def test_h_base_long_ledger_excludes_zero_ce_predictor(
         seed=101,
         scale_train_events=100,
     )
-    assert ledger["total_labeled_example_presentations"] == 1200
-    assert len(ledger["component_rows"]) == 3
-    assert len(ledger["excluded_zero_CE_component_rows"]) == 1
+    assert ledger["total_labeled_example_presentations"] == 2000
+    assert len(ledger["component_rows"]) == 5
+    assert len(ledger["excluded_zero_CE_component_rows"]) == 2
     assert (
-        ledger["excluded_zero_CE_component_rows"][0][
+        next(
+            row for row in ledger["excluded_zero_CE_component_rows"]
+            if row["phase_id"] == "predictor:PT"
+        )[
             "ground_truth_CE_evidence"
         ]["objective_id"]
         == "W_TOKEN_ONLY"

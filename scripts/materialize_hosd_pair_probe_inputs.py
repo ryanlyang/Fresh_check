@@ -141,7 +141,14 @@ def main(argv=None):
         raise ValueError("row is not a current HLT pair probe")
     inputs = _role_mapping(args.hlt_input, "--hlt-input", replicated=True)
     labels = _simple_mapping(args.labels, "--labels")
-    taps = _simple_mapping(args.tap_cache, "--tap-cache")
+    learned_tap_probe = row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}
+    taps = (
+        _simple_mapping(args.tap_cache, "--tap-cache")
+        if learned_tap_probe
+        else {}
+    )
+    if not learned_tap_probe and args.tap_cache:
+        raise ValueError("target-only pair probes must not receive tap caches")
     requires_tree = row["target_id"] == "T_HLT_REGION_PAIR_8"
     trees = (
         _role_mapping(args.tree_cache, "--tree-cache", replicated=True)
@@ -223,10 +230,14 @@ def main(argv=None):
     write_immutable_json(output / "input_lineage.json", lineage)
     files = {}
     for role in ROLES:
-        tap = _npz(taps[role])
-        tap_ids = tuple(str(value) for value in tap["identities"].tolist())
-        if tap_ids != canonical_ids[role] or str(tap["tap"].item()) != row["tap"]:
-            raise ValueError(f"{role} pair tap lineage differs")
+        tap = _npz(taps[role]) if learned_tap_probe else None
+        if learned_tap_probe:
+            tap_ids = tuple(str(value) for value in tap["identities"].tolist())
+            if (
+                tap_ids != canonical_ids[role]
+                or str(tap["tap"].item()) != row["tap"]
+            ):
+                raise ValueError(f"{role} pair tap lineage differs")
         values = (
             np.stack([item[0] for item in extracted[role]])
             if role == "model_train" else extracted[role][0][0]
@@ -240,12 +251,19 @@ def main(argv=None):
             "labels": label_values[role],
             "target": values,
             "target_mask": masks,
-            "states": tap["states"].astype(np.float32),
-            "particle_mask": tap["particle_mask"].astype(bool),
-            "probe_encoder_lock_sha256": tap["probe_encoder_lock_sha256"],
-            "tap": tap["tap"],
             "target_cache_manifest_sha256": np.asarray(lineage["content_hash"]),
         }
+        if learned_tap_probe:
+            arrays.update(
+                {
+                    "states": tap["states"].astype(np.float32),
+                    "particle_mask": tap["particle_mask"].astype(bool),
+                    "probe_encoder_lock_sha256": tap[
+                        "probe_encoder_lock_sha256"
+                    ],
+                    "tap": tap["tap"],
+                }
+            )
         path = output / f"{role}.npz"
         files[role] = {"path": str(path.resolve()), "sha256": _publish(path, arrays)}
     completion = with_content_hash({

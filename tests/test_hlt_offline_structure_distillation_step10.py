@@ -62,6 +62,8 @@ def _plan():
         "F_BEST",
         "C_BEST",
         "C_PHYSICAL_KD",
+        "REFERENCE_EXACT_TRACK_GRAPH",
+        "REFERENCE_EXACT_REGION_GRAPH",
     )
     return build_confirmation_plan(
         h_base_graph_id="H_BASE",
@@ -74,6 +76,10 @@ def _plan():
         retb_comparators={"H_RETB_BRIDGE": None},
         parent_lock_hashes={"robustness": "a" * 64},
         source=SOURCE,
+        additional_required_graphs={
+            "REFERENCE_EXACT_TRACK": "REFERENCE_EXACT_TRACK_GRAPH",
+            "REFERENCE_EXACT_REGION": "REFERENCE_EXACT_REGION_GRAPH",
+        },
         graph_definitions_by_id={
             graph_id: {
                 "graph_id": graph_id,
@@ -81,7 +87,11 @@ def _plan():
                     "AUXILIARY"
                     if graph_id == "A_PHYSICAL"
                     else "FEEDBACK"
-                    if graph_id == "F_BEST"
+                    if graph_id in {
+                        "F_BEST",
+                        "REFERENCE_EXACT_TRACK_GRAPH",
+                        "REFERENCE_EXACT_REGION_GRAPH",
+                    }
                     else "COMBINATION"
                     if graph_id in {"C_BEST", "C_PHYSICAL_KD"}
                     else "BASELINE"
@@ -89,6 +99,17 @@ def _plan():
                 **(
                     {"row": {"target_id": "T_OFFLINE_JET_10"}}
                     if graph_id in {"A_PHYSICAL", "F_BEST"}
+                    else {
+                        "row": {
+                            "target_id": (
+                                "T_HLT_TRACK_PAIR_13"
+                                if graph_id == "REFERENCE_EXACT_TRACK_GRAPH"
+                                else "T_HLT_REGION_PAIR_8"
+                            ),
+                            "control": "EXACT_HLT",
+                        }
+                    }
+                    if graph_id.startswith("REFERENCE_EXACT_")
                     else {
                         "graph": {
                             "members": [
@@ -235,6 +256,8 @@ def test_all_negative_shortlist_still_scales_duplicate_free_then_exports():
         "BEST_FEEDBACK": "F_BEST",
         "BEST_COMBINATION": "C_BEST",
         "H_PARTICLENET": "H_PARTICLENET",
+        "REFERENCE_EXACT_TRACK": "REFERENCE_EXACT_TRACK_GRAPH",
+        "REFERENCE_EXACT_REGION": "REFERENCE_EXACT_REGION_GRAPH",
     }
     shortlist = build_scale_shortlist(
         confirmation_summary=summary,
@@ -243,7 +266,7 @@ def test_all_negative_shortlist_still_scales_duplicate_free_then_exports():
     )
     assert shortlist["all_negative_campaign_still_shortlisted"]
     assert shortlist["duplicate_free"]
-    assert shortlist["graph_count"] <= 7
+    assert shortlist["graph_count"] <= 9
     scale = build_scale_execution_plan(
         shortlist=shortlist,
         scale_train_manifest_sha256="b" * 64,
@@ -342,6 +365,8 @@ def test_scale_target_mapping_and_wave_require_exact_coverage():
             "BEST_FEEDBACK": "F_BEST",
             "BEST_COMBINATION": "C_BEST",
             "H_PARTICLENET": "H_PARTICLENET",
+            "REFERENCE_EXACT_TRACK": "REFERENCE_EXACT_TRACK_GRAPH",
+            "REFERENCE_EXACT_REGION": "REFERENCE_EXACT_REGION_GRAPH",
         },
         source=SOURCE,
     )
@@ -382,8 +407,8 @@ def test_scale_target_mapping_and_wave_require_exact_coverage():
 def test_native_relation_scale_graph_refits_all_seven_same_view_families():
     shortlist = with_content_hash(
         {
-            "contract": "hosd_scale_shortlist_v1",
-            "schema_version": 1,
+                "contract": "hosd_scale_shortlist_v2",
+                "schema_version": 2,
             "source": SOURCE,
             "confirmation_summary_sha256": "1" * 64,
             "graphs": [

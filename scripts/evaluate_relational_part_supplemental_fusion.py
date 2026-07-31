@@ -272,6 +272,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=101)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--allow-source-status-drift",
+        action="store_true",
+        help=(
+            "For this post-hoc diagnostic only, require the campaign commit "
+            "but permit working-tree status drift such as Python caches."
+        ),
+    )
     args = parser.parse_args(argv)
 
     source_root = args.source_root.resolve()
@@ -303,9 +311,21 @@ def main(argv: list[str] | None = None) -> int:
         write_immutable_json,
     )
     from teacher_logit_reco.relational_part.evaluation import model_forward
+    from teacher_logit_reco.relational_part.provenance import source_snapshot
 
     campaign = load_hashed_json(campaign_root / "campaign_spec.json")
-    validate_campaign_source(campaign, repo_root=source_root)
+    if args.allow_source_status_drift:
+        observed_source = source_snapshot(source_root)
+        if observed_source["source_commit"] != campaign["source"]["commit"]:
+            raise ValueError(
+                "supplemental fusion source commit differs from campaign"
+            )
+        source_validation_mode = "commit_exact_status_drift_allowed"
+    else:
+        observed_source = validate_campaign_source(
+            campaign, repo_root=source_root
+        )
+        source_validation_mode = "commit_and_status_exact"
     determinism = load_hashed_json(
         campaign_root / "registry" / "global_determinism.json",
         expected_contract=GLOBAL_DETERMINISM_CONTRACT,
@@ -650,6 +670,19 @@ def main(argv: list[str] | None = None) -> int:
                 for run_id in run_ids
             },
             "campaign_source": model_contracts[run_ids[0]].get("source"),
+            "source_validation": {
+                "mode": source_validation_mode,
+                "status_drift_allowed_for_supplemental_diagnostic": bool(
+                    args.allow_source_status_drift
+                ),
+                "expected_commit": campaign["source"]["commit"],
+                "observed_commit": observed_source["source_commit"],
+                "observed_status_sha256": observed_source[
+                    "source_status_sha256"
+                ],
+                "observed_dirty": bool(observed_source["source_dirty"]),
+                "official_campaign_workers_affected": False,
+            },
             "diagnostic_script_sha256": sha256_file(Path(__file__)),
             "calculation_dtype": "float64",
         }

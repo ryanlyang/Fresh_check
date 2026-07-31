@@ -32,6 +32,7 @@ from .contracts import (
     AUXILIARY_COMPLETION_CONTRACT,
     AUXILIARY_PREDICTION_CONTRACT,
     require_sha256,
+    validate_content_hash,
     with_content_hash,
     write_immutable_json,
 )
@@ -124,7 +125,14 @@ def _loss_for_batch(
     if hasattr(model, "forward_with_feedback"):
         logits, prediction = model.forward_with_feedback(
             *_forward_inputs(batch),
-            direct_pair_features=batch.get("direct_pair_features"),
+            direct_pair_features=(
+                batch.get("direct_pair_features")
+                if batch.get("direct_pair_features") is not None
+                else None
+            ),
+            direct_pair_mask=batch.get("direct_pair_mask"),
+            raw_tokens=batch.get("raw_tokens"),
+            region_trees=batch.get("region_trees"),
             oracle_feedback=batch.get("oracle_feedback"),
             predicted_feedback_override=batch.get("predicted_feedback_override"),
         )
@@ -139,18 +147,32 @@ def _loss_for_batch(
         logits, prediction = model.forward_with_aux(
             *_forward_inputs(batch), sampled_pair_indices=sampled_indices
         )
-    total, pieces = auxiliary_objective(
-        logits=logits,
-        labels=batch["labels"],
-        prediction=prediction,
-        target=sampled.target if sampled is not None else target,
-        target_mask=sampled.mask if sampled is not None else target_mask,
-        target_id=row["target_id"],
-        parameterization=row["parameterization"],
-        auxiliary_weight=float(row["auxiliary_weight"]),
-        component_group_ids=component_group_ids,
-        sampled_pair_batch=sampled,
-    )
+    if not bool(row.get("semantic_loss_enabled", True)):
+        classification = torch.nn.functional.cross_entropy(
+            logits, batch["labels"].long()
+        )
+        auxiliary = classification * 0.0
+        total = classification
+        pieces = {
+            "classification_loss": classification,
+            "auxiliary_loss": auxiliary,
+            "weighted_auxiliary_loss": auxiliary,
+            "total_loss": total,
+            "semantic_loss_omitted": True,
+        }
+    else:
+        total, pieces = auxiliary_objective(
+            logits=logits,
+            labels=batch["labels"],
+            prediction=prediction,
+            target=sampled.target if sampled is not None else target,
+            target_mask=sampled.mask if sampled is not None else target_mask,
+            target_id=row["target_id"],
+            parameterization=row["parameterization"],
+            auxiliary_weight=float(row["auxiliary_weight"]),
+            component_group_ids=component_group_ids,
+            sampled_pair_batch=sampled,
+        )
     return total, pieces, logits
 
 
@@ -224,6 +246,7 @@ def train_stage_d_auxiliary(
     source: Mapping[str, Any],
     deployed_analytical_flops: float,
     deployed_parameter_count: int | None = None,
+    deployed_operation_profile: Mapping[str, Any] | None = None,
     device: str | Any = "cpu",
     resume: bool = True,
     training_gpu_hours_override: float | None = None,
@@ -254,6 +277,17 @@ def train_stage_d_auxiliary(
         or float(deployed_analytical_flops) <= 0
     ):
         raise ValueError("Stage-D deployed analytical FLOPs must be finite and positive")
+    operation_profile = (
+        None
+        if deployed_operation_profile is None
+        else dict(deployed_operation_profile)
+    )
+    operation_profile_sha256 = None
+    if operation_profile is not None:
+        validate_content_hash(operation_profile)
+        operation_profile_sha256 = require_sha256(
+            operation_profile["content_hash"], name="deployed_operation_profile"
+        )
     if row["row_kind"] in {"TARGET_MEAN", "GLOBAL_SHUFFLE", "WITHIN_CLASS_SHUFFLE"}:
         expected_control = {
             "TARGET_MEAN": "target_mean",
@@ -275,6 +309,18 @@ def train_stage_d_auxiliary(
     )
     if task_component_seed < 0:
         raise ValueError(f"{stage_label} row lacks its task component seed")
+    dataset = train_loader.dataset
+    while not hasattr(dataset, "logical_role") and hasattr(dataset, "base_dataset"):
+        dataset = dataset.base_dataset
+    training_role = str(getattr(dataset, "logical_role", "model_train"))
+    from .stage_d_data_factory import data_order_seed
+
+    training_sampler_seed = data_order_seed(int(row["pipeline_seed"]), training_role)
+    observed_sampler_seed = int(
+        getattr(train_loader.sampler, "seed", training_sampler_seed)
+    )
+    if observed_sampler_seed != training_sampler_seed:
+        raise ValueError(f"{stage_label} sampler order differs from pipeline contract")
     if not checked_lineage:
         raise ValueError("Stage-D training lineage must not be empty")
     root = Path(output_dir)
@@ -299,6 +345,11 @@ def train_stage_d_auxiliary(
             != int(row["encoder_component_seed"])
             or int(completion.get("task_component_seed", -1))
             != task_component_seed
+            or completion.get("data_order_contract") != "hosd_data_order_v1"
+            or int(completion.get("training_sampler_seed", -1))
+            != training_sampler_seed
+            or completion.get("deployed_operation_profile_sha256")
+            != operation_profile_sha256
         ):
             raise ValueError("reusable Stage-D completion lineage differs")
         checkpoint = root / completion["checkpoint_file"]
@@ -326,15 +377,16 @@ def train_stage_d_auxiliary(
                 and float(result["training_gpu_hours"])
                 != float(training_gpu_hours_override)
             )
+            or result.get("deployed_operation_profile") != operation_profile
         ):
             raise ValueError("reusable Stage-D result/capacity semantics differ")
         return completion
 
     resolved = torch.device(device)
     model.to(resolved)
-    random.seed(int(row["head_component_seed"]))
-    np.random.seed(int(row["head_component_seed"]) % (2**32))
-    torch.manual_seed(int(row["head_component_seed"]))
+    random.seed(task_component_seed)
+    np.random.seed(task_component_seed % (2**32))
+    torch.manual_seed(task_component_seed)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=protocol.base_learning_rate,
@@ -364,6 +416,9 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
+            "data_order_contract": "hosd_data_order_v1",
+            "training_sampler_seed": training_sampler_seed,
+            "deployed_operation_profile_sha256": operation_profile_sha256,
         }
         if any(state.get(key) != value for key, value in expected.items()):
             raise ValueError(f"{stage_label} resume lineage differs")
@@ -514,6 +569,9 @@ def train_stage_d_auxiliary(
                 "pipeline_seed": int(row["pipeline_seed"]),
                 "encoder_component_seed": int(row["encoder_component_seed"]),
                 "task_component_seed": task_component_seed,
+                "data_order_contract": "hosd_data_order_v1",
+                "training_sampler_seed": training_sampler_seed,
+                "deployed_operation_profile_sha256": operation_profile_sha256,
                 "epoch": selected_epoch,
                 "model_state_dict": candidate_states[selected_epoch],
                 "selection_metrics": selected["val_stop"],
@@ -533,6 +591,9 @@ def train_stage_d_auxiliary(
                 "pipeline_seed": int(row["pipeline_seed"]),
                 "encoder_component_seed": int(row["encoder_component_seed"]),
                 "task_component_seed": task_component_seed,
+                "data_order_contract": "hosd_data_order_v1",
+                "training_sampler_seed": training_sampler_seed,
+                "deployed_operation_profile_sha256": operation_profile_sha256,
                 "epoch_completed": epoch,
                 "model_state_dict": state,
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -590,6 +651,9 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
+            "data_order_contract": "hosd_data_order_v1",
+            "training_sampler_seed": training_sampler_seed,
+            "deployed_operation_profile": operation_profile,
             "target_error_cross_family_tie_breaker": False,
             **{
                 key: row[key]
@@ -622,6 +686,9 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
+            "data_order_contract": "hosd_data_order_v1",
+            "training_sampler_seed": training_sampler_seed,
+            "deployed_operation_profile_sha256": operation_profile_sha256,
             "checkpoint_file": best_path.name,
             "checkpoint_sha256": checkpoint_sha,
             "selected_epoch": int(selected["epoch"]),

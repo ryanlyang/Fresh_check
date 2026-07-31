@@ -9,9 +9,6 @@ import json
 from pathlib import Path
 import sys
 
-import numpy as np
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -61,7 +58,7 @@ def _mapping(values: list[str], *, name: str, exact_replicas: bool = True) -> di
 
 
 def _load_cache(path: Path):
-    from teacher_logit_reco.hlt_offline_structure_distillation import load_target_cache
+    from teacher_logit_reco.hlt_offline_structure_distillation import load_target_cache_sharded
     from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
         TARGET_CACHE_SPEC_CONTRACT,
     )
@@ -69,7 +66,7 @@ def _load_cache(path: Path):
     spec = load_hashed_json(
         path / "cache_spec.json", expected_contract=TARGET_CACHE_SPEC_CONTRACT
     )
-    return load_target_cache(path, cache_spec=spec)
+    return load_target_cache_sharded(path, cache_spec=spec)
 
 
 def _component_kinds(registry, target_id: str) -> tuple[str, ...]:
@@ -95,19 +92,19 @@ def _fit_cache_normalizer(
     normalization_role: str,
 ):
     from teacher_logit_reco.hlt_offline_structure_distillation import (
-        fit_target_normalizer,
+        fit_sharded_target_normalizer,
     )
 
     cache = _load_cache(cache_path)
     kinds = _component_kinds(registry, target_id_for_kinds)
-    return fit_target_normalizer(
-        cache,
+    return fit_sharded_target_normalizer(
+        [cache],
+        target_id=target_id_for_kinds,
         fitting_population="target_scale",
         source=source,
-        component_kinds={
-            coordinate: kinds for coordinate in cache.manifest["persisted_target_ids"]
-        },
+        component_kinds=kinds,
         normalization_role=normalization_role,
+        workspace=cache_path.parent / ".normalizer_workspace",
     )
 
 
@@ -204,7 +201,7 @@ def _build_residual_cache(
 def _target(args, root: Path, campaign, plan) -> int:
     from teacher_logit_reco.hlt_offline_structure_distillation import (
         build_heteroscedastic_metadata,
-        fit_latent_whitening,
+        fit_sharded_latent_whitening,
     )
 
     if args.target_id is None:
@@ -252,6 +249,11 @@ def _target(args, root: Path, campaign, plan) -> int:
             if args.target_id == "T_HLT_REGION_PAIR_8"
             else None
         )
+        tree_completion = (
+            load_hashed_json(root / "scale_up" / "trees" / "completion.json")
+            if trees is not None
+            else None
+        )
         normalizer = fit_pair_normalizer_from_views(
             target_id=args.target_id,
             view_paths_by_replica=views,
@@ -260,6 +262,12 @@ def _target(args, root: Path, campaign, plan) -> int:
             fitting_population="target_scale",
             split="scale_train",
             source=campaign["source"],
+            tree_resource_sha256=(
+                None if tree_completion is None else tree_completion["tree_resource_sha256"]
+            ),
+            tree_backend_sha256=(
+                None if tree_completion is None else tree_completion["backend_manifest_sha256"]
+            ),
         )
         write_immutable_json(normalizer_path, normalizer)
         artifact_hashes["target_normalizer"] = normalizer["content_hash"]
@@ -304,7 +312,7 @@ def _target(args, root: Path, campaign, plan) -> int:
             lock = load_hashed_json(
                 root / "scale_up" / "teachers" / "teacher_lock.json"
             )
-            whitening = fit_latent_whitening(
+            whitening = fit_sharded_latent_whitening(
                 cache.values[args.target_id],
                 teacher_lock_sha256=lock["content_hash"],
                 fitting_population="target_scale",
@@ -348,55 +356,21 @@ def _target(args, root: Path, campaign, plan) -> int:
             cache = _load_cache(cache_path)
             artifact_hashes[f"hlt_cache_{replica}"] = cache.manifest["content_hash"]
             caches[str(replica)] = str(cache_path.resolve())
-        joint_parent_hash = hashlib.sha256(
-            "".join(
-                artifact_hashes[f"hlt_cache_{replica}"]
-                for replica in range(4)
-            ).encode("ascii")
-        ).hexdigest()
         # Identical coordinate IDs appear in each replica normalizer. A
         # same-view target requires one shared R_MULTI statistic, so fit from
         # the concatenated caches instead of retaining per-replica rows.
         # Rebuild the shared row directly over exact concatenated samples.
         from teacher_logit_reco.hlt_offline_structure_distillation import (
-            LoadedTargetCache,
-            fit_target_normalizer,
+            fit_sharded_target_normalizer,
         )
         loaded = [_load_cache(Path(caches[str(index)])) for index in range(4)]
-        joint = LoadedTargetCache(
-            identities=tuple(
-                f"replica={replica}:{identity}"
-                for replica, cache in enumerate(loaded)
-                for identity in cache.identities
-            ),
-            values={
-                args.target_id: np.concatenate(
-                    [cache.values[args.target_id] for cache in loaded], axis=0
-                )
-            },
-            masks={
-                args.target_id: np.concatenate(
-                    [cache.masks[args.target_id] for cache in loaded], axis=0
-                )
-            },
-            manifest={
-                **loaded[0].manifest,
-                "split": "scale_train",
-                "persisted_target_ids": [args.target_id],
-                "content_hash": joint_parent_hash,
-                "canonical_identity_order_sha256": hashlib.sha256(
-                    b"hosd_scale_joint_hlt_normalizer_v1"
-                ).hexdigest(),
-                "event_count": sum(len(cache.identities) for cache in loaded),
-            },
-        )
-        normalizer = fit_target_normalizer(
-            joint,
+        normalizer = fit_sharded_target_normalizer(
+            loaded,
+            target_id=args.target_id,
             fitting_population="target_scale",
             source=campaign["source"],
-            component_kinds={
-                args.target_id: _component_kinds(registry, args.target_id)
-            },
+            component_kinds=_component_kinds(registry, args.target_id),
+            workspace=output / ".normalizer_workspace",
         )
         write_immutable_json(normalizer_path, normalizer)
         artifact_hashes["target_normalizer"] = normalizer["content_hash"]

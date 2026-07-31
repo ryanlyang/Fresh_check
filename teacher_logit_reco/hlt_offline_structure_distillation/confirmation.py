@@ -36,6 +36,8 @@ ROLE_ORDER = (
     "BEST_REJECTION",
     "BEST_PHYSICAL_AUX",
     "BEST_FEEDBACK",
+    "REFERENCE_EXACT_TRACK",
+    "REFERENCE_EXACT_REGION",
     "BEST_COMBINATION",
     "H_PARTICLENET",
 )
@@ -198,7 +200,7 @@ def build_confirmation_plan(
     return with_content_hash(
         {
             "contract": CONFIRMATION_PLAN_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(source),
             "parent_lock_hashes": {
                 key: require_sha256(value, name=f"parent.{key}")
@@ -256,6 +258,12 @@ def build_confirmation_plan_from_registry(
         physical_kd_graph_id=definitions["C_PHYSICAL_KD"]["graph_id"],
         additional_required_graphs={
             "H_BASE_LONG": definitions["H_BASE_LONG"]["graph_id"],
+            "REFERENCE_EXACT_TRACK": definitions["REFERENCE_EXACT_TRACK"][
+                "graph_id"
+            ],
+            "REFERENCE_EXACT_REGION": definitions["REFERENCE_EXACT_REGION"][
+                "graph_id"
+            ],
         },
         retb_comparators=retb_ids,
         parent_lock_hashes=locks,
@@ -424,6 +432,8 @@ def build_scale_shortlist(
             "BEST_COMBINATION": "BEST_COMBINATION",
             "H_BASE": "H_BASE",
             "H_PARTICLENET": "H_PARTICLENET",
+            "REFERENCE_EXACT_TRACK": "REFERENCE_EXACT_TRACK",
+            "REFERENCE_EXACT_REGION": "REFERENCE_EXACT_REGION",
         }
         for summary in summaries.values():
             for role in summary.get("roles", ()):
@@ -436,6 +446,8 @@ def build_scale_shortlist(
         "BEST_FEEDBACK",
         "BEST_COMBINATION",
         "H_PARTICLENET",
+        "REFERENCE_EXACT_TRACK",
+        "REFERENCE_EXACT_REGION",
     }
     if not required_roles.issubset(role_graph_ids):
         raise ValueError("scale role registry is incomplete")
@@ -463,6 +475,8 @@ def build_scale_shortlist(
         ("BEST_FEEDBACK", role_graph_ids["BEST_FEEDBACK"]),
         ("BEST_COMBINATION", role_graph_ids["BEST_COMBINATION"]),
         ("H_PARTICLENET", role_graph_ids["H_PARTICLENET"]),
+        ("REFERENCE_EXACT_TRACK", role_graph_ids["REFERENCE_EXACT_TRACK"]),
+        ("REFERENCE_EXACT_REGION", role_graph_ids["REFERENCE_EXACT_REGION"]),
     ]
     first_role, roles_by_graph = {}, {}
     for role, graph in ordered_roles:
@@ -476,11 +490,11 @@ def build_scale_shortlist(
             ROLE_ORDER.index(first_role[graph]),
             graph,
         ),
-    )[:7]
+    )[:9]
     return with_content_hash(
         {
             "contract": SCALE_SHORTLIST_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
             "confirmation_summary_sha256": confirmation_summary["content_hash"],
             "graphs": [
@@ -493,7 +507,7 @@ def build_scale_shortlist(
                 for graph in ranked
             ],
             "graph_count": len(ranked),
-            "hard_maximum": 7,
+            "hard_maximum": 9,
             "duplicate_free": True,
             "all_negative_campaign_still_shortlisted": True,
             "performance_can_disable_scale": False,
@@ -621,7 +635,7 @@ def build_scale_execution_plan(
     return with_content_hash(
         {
             "contract": SCALE_EXECUTION_PLAN_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "source": dict(source),
             "scale_shortlist_sha256": shortlist["content_hash"],
             "scale_train_manifest_sha256": require_sha256(
@@ -664,6 +678,7 @@ def build_scale_row_result(
     deployable_export_sha256: str,
     classification_metrics: Mapping[str, Any],
     analytical_forward_flops_by_role: Mapping[str, int],
+    deployed_operation_profile: Mapping[str, Any] | None = None,
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Authenticate one 3M student fit and its HLT-only export."""
@@ -691,10 +706,17 @@ def build_scale_row_result(
         )
     ):
         raise ValueError("scale row analytical forward FLOP roles differ")
+    operation_profile = (
+        None
+        if deployed_operation_profile is None
+        else dict(deployed_operation_profile)
+    )
+    if operation_profile is not None:
+        validate_content_hash(operation_profile)
     return with_content_hash(
         {
             "contract": SCALE_ROW_RESULT_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(source),
             "scale_execution_plan_sha256": scale_plan["content_hash"],
             **dict(matches[0]),
@@ -714,6 +736,7 @@ def build_scale_row_result(
                     "design_confirm",
                 )
             },
+            "deployed_operation_profile": operation_profile,
             "completed": True,
         }
     )

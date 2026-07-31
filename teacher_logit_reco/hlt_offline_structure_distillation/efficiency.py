@@ -48,6 +48,17 @@ def _forward(model: Any, batch: Mapping[str, Any]) -> Any:
     points = batch.get("points")
     if points is None:
         points = batch["features"][:, 15:17]
+    from .feedback import FeedbackHBaseClassifier
+
+    if isinstance(model, FeedbackHBaseClassifier):
+        return model(
+            points,
+            batch["features"],
+            vectors,
+            batch["mask"],
+            raw_tokens=batch.get("raw_tokens"),
+            region_trees=batch.get("region_trees"),
+        )
     return model(points, batch["features"], vectors, batch["mask"])
 
 
@@ -98,6 +109,7 @@ def measure_deployable_efficiency(
         raise ValueError("efficiency training evidence differs")
     torch.cuda.reset_peak_memory_stats(resolved)
     measurements = {}
+    builder_timing = None
     with torch.no_grad():
         for batch_size in sorted(expected_batches):
             batch = _move_batch(representative_batches[batch_size], resolved)
@@ -126,12 +138,60 @@ def measure_deployable_efficiency(
                     batch_size / (statistics.median(elapsed) / 1000.0)
                 ),
             }
+        exact_builder = getattr(model, "exact_pair_builder", None)
+        if exact_builder is not None:
+            from .capacity import feedback_model_flop_ledger
+
+            operation_profile = feedback_model_flop_ledger(model)[
+                "exact_hlt_builder_profile"
+            ]
+            batch = _move_batch(representative_batches[1], resolved)
+            vectors = batch.get("lorentz_vectors", batch.get("vectors"))
+            for _ in range(5):
+                exact_builder(
+                    batch["raw_tokens"],
+                    batch["mask"],
+                    vectors,
+                    batch.get("region_trees"),
+                )
+            torch.cuda.synchronize(resolved)
+            elapsed = []
+            for _ in range(20):
+                started = time.perf_counter_ns()
+                exact_builder(
+                    batch["raw_tokens"],
+                    batch["mask"],
+                    vectors,
+                    batch.get("region_trees"),
+                )
+                torch.cuda.synchronize(resolved)
+                elapsed.append((time.perf_counter_ns() - started) / 1e6)
+            builder_timing = with_content_hash(
+                {
+                    "contract": "hosd_exact_hlt_builder_timing_v1",
+                    "schema_version": 1,
+                    "operation_profile_sha256": operation_profile[
+                        "content_hash"
+                    ],
+                    "target_id": operation_profile["target_id"],
+                    "tree_reuse_policy": operation_profile[
+                        "tree_reuse_policy"
+                    ],
+                    "batch_size": 1,
+                    "warmup_repetitions": 5,
+                    "measured_repetitions": 20,
+                    "median_milliseconds": statistics.median(elapsed),
+                    "p95_milliseconds": _percentile(elapsed, 0.95),
+                    "normalization_included": True,
+                    "same_runtime_builder_as_deployable_forward": True,
+                }
+            )
     properties = torch.cuda.get_device_properties(resolved)
     device_uuid = getattr(properties, "uuid", None)
     return with_content_hash(
         {
             "contract": EFFICIENCY_PROFILE_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(source),
             "graph_id": str(graph_id),
             "seed": int(seed),
@@ -160,6 +220,7 @@ def measure_deployable_efficiency(
             ),
             "peak_gpu_memory_bytes": int(torch.cuda.max_memory_allocated(resolved)),
             "latency": measurements,
+            "exact_hlt_builder_timing": builder_timing,
             "single_jet_latency_key": "1",
             "production_batch_size": int(production_batch_size),
             "hardware_software": {

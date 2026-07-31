@@ -116,6 +116,7 @@ def _model(
     *,
     configuration: Mapping[str, Any],
     relation_normalization: Mapping[str, Any],
+    region_normalization: Mapping[str, Any] | None = None,
 ) -> RetbExpertModel:
     weaver = importlib.import_module("weaver.nn.model.ParticleTransformer")
     encoder = RetbParticleEncoder(
@@ -123,9 +124,11 @@ def _model(
         topology=configuration["topology"],
         weaver_module=weaver,
         normalization_artifact=relation_normalization,
-        region_normalization_artifact=None,
+        region_normalization_artifact=region_normalization,
         measurement_embedding=configuration["measurement_embedding"],
-        dual_base4_capacity_control=False,
+        dual_base4_capacity_control=bool(
+            configuration.get("dual_base4_capacity_control", False)
+        ),
         activation_checkpointing=False,
         particle_dropout=0.0,
     )

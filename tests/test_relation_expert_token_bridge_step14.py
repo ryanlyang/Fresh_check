@@ -10,9 +10,14 @@ from teacher_logit_reco.relation_expert_token_bridge.confirmation import (
     SCALE_SHORTLIST_CONTRACT,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    SEMANTIC_CONTROL_POLICY,
     bind_source,
     canonical_sha256,
+    source_record,
     with_content_hash,
+)
+from teacher_logit_reco.relation_expert_token_bridge.late_plan_factories import (
+    SEMANTIC_CONTROL_KINDS,
 )
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (
     evaluate_classification,
@@ -64,6 +69,8 @@ from teacher_logit_reco.relation_expert_token_bridge.step14 import (
     build_step14_bundle,
     validate_step14_bundle,
 )
+from teacher_logit_reco.relation_expert_token_bridge.step7 import STAGE_E_SHAPES
+from tests.retb_semantic_test_support import build_valid_semantic_controls
 
 
 SOURCE = {
@@ -78,6 +85,10 @@ SHA_C = "c" * 64
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _semantic_controls() -> dict:
+    return build_valid_semantic_controls(source_record(SOURCE))
 
 
 def _shortlist() -> dict:
@@ -385,6 +396,7 @@ def test_step14_policy_and_scale_completion_are_exact() -> None:
         campaign_spec_sha256=SHA_A,
         step13_bundle_sha256=SHA_B,
         locked_scale_shortlist_sha256=SHA_C,
+        shortlisted_500k_controls_sha256=_digest("shortlisted-controls"),
         global_determinism_sha256=_digest("determinism"),
         source_snapshot=SOURCE,
     )
@@ -765,9 +777,25 @@ def test_two_lock_sequence_and_sealed_final_evaluation(
         locked_scale_finalists=finalists,
         execution_lock=execution,
         final_evaluation=final,
+        semantic_controls=_semantic_controls(),
         source_snapshot=SOURCE,
     )
     assert "Accuracy finalist" in markdown
+    assert "Semantic and causal controls" in markdown
+    assert "RELATION_ZERO" in markdown
+    assert len(report["reconstruction_metric_records"]) == 15
+    incomplete_semantics = dict(_semantic_controls())
+    incomplete_semantics.pop("content_hash")
+    incomplete_semantics["reconstruction_metric_records"] = []
+    with pytest.raises(ValueError, match="reconstruction coordinate coverage"):
+        build_stage_mn_report(
+            scale_completion=completion,
+            locked_scale_finalists=finalists,
+            execution_lock=execution,
+            final_evaluation=final,
+            semantic_controls=with_content_hash(incomplete_semantics),
+            source_snapshot=SOURCE,
+        )
     publications = publish_stage_mn_report(
         output_dir=tmp_path, artifact=report, markdown=markdown
     )

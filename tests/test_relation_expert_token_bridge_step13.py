@@ -759,6 +759,22 @@ def test_all_negative_campaign_still_locks_and_reports(tmp_path) -> None:
                         f"controls-{graph_id}"
                     ),
                     "capacity_control_reproduces_gain": False,
+                    "training_row_hashes_by_kind": {
+                        kind: [
+                            _digest(f"{kind}-{graph_id}-{seed}")
+                            for seed in (101, 202, 303)
+                        ]
+                        for kind in (
+                            "H_MONO_PARAM",
+                            "H_MONO_FLOP",
+                            "H_BASE_LONG",
+                        )
+                    },
+                    "mean_accuracy_by_control": {
+                        "H_MONO_PARAM": 0.71,
+                        "H_MONO_FLOP": 0.72,
+                        "H_BASE_LONG": 0.73,
+                    },
                 }
                 for graph_id in shortlist["SCALE_SHORTLIST"]
             ],

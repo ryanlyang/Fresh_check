@@ -33,6 +33,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     validate_step1_bundle,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    SEMANTIC_CONTROL_POLICY,
     load_hashed_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.registry import (
@@ -329,6 +330,8 @@ def test_campaign_parents_source_and_tamper_detection() -> None:
     assert spec["parent_artifact_hashes"]["split_manifest"] == manifest_hash(manifest)
     assert spec["source"]["commit"] == "a" * 40
     assert spec["access_policy"]["performance_based_run_termination"] is False
+    assert spec["contract"] == "retb_campaign_spec_v2"
+    assert spec["semantic_control_policy"] == SEMANTIC_CONTROL_POLICY
     assert set(spec["registry_hashes"]) == set(bundle["registries"])
 
     changed = dict(bundle["global_determinism"])

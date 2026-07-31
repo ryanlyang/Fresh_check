@@ -29,6 +29,7 @@ from .combinations import pcgrad_project
 from .contracts import (
     COMBINATION_RESULT_CONTRACT,
     canonical_sha256,
+    load_hashed_json,
     require_sha256,
     with_content_hash,
     write_immutable_json,
@@ -284,9 +285,21 @@ def build_combination_loader_manifest(
             role, raw_replica = role_replica.rsplit(":", 1)
             replica = int(raw_replica)
             path = Path(raw_path).resolve()
+            from .native_relations import NATIVE_RELATION_TARGET_CONTRACT
+
+            artifact = load_hashed_json(
+                path.with_suffix(".manifest.json"),
+                expected_contract=NATIVE_RELATION_TARGET_CONTRACT,
+            )
+            if (
+                artifact.get("source") != dict(source)
+                or artifact.get("npz_sha256") != _sha256_file(path)
+            ):
+                raise ValueError("native relation artifact lineage differs")
             native_rows.setdefault(role, {})[str(replica)] = {
                 "path": str(path),
-                "sha256": _sha256_file(path),
+                "sha256": artifact["npz_sha256"],
+                "artifact_sha256": artifact["content_hash"],
             }
     elif native_relation_target_files:
         raise ValueError("ordinary combinations cannot bind native relation targets")
@@ -417,35 +430,62 @@ def load_combination_loaders(
                     != definition["sha256"]
                 ):
                     raise ValueError("native relation target bytes differ")
-                with np.load(native_path, allow_pickle=False) as payload:
-                    required = {
-                        "identities",
-                        "targets",
-                        "target_mask",
-                        "availability",
-                    }
-                    if not required.issubset(payload.files):
-                        raise ValueError(
-                            "native relation target NPZ fields differ"
-                        )
-                    native_ids = tuple(
-                        str(value)
-                        for value in payload["identities"].tolist()
-                    )
-                    if native_ids != tuple(
-                        next(iter(datasets.values())).identities
+                from .native_relations import NATIVE_RELATION_TARGET_CONTRACT
+
+                artifact = load_hashed_json(
+                    native_path.with_suffix(".manifest.json"),
+                    expected_contract=NATIVE_RELATION_TARGET_CONTRACT,
+                )
+                if artifact.get("content_hash") != definition.get(
+                    "artifact_sha256"
+                ):
+                    raise ValueError("native relation target artifact differs")
+                store_definition = artifact.get("mmap_store")
+                if (
+                    artifact.get("storage_layout")
+                    != "compressed_npz_plus_authenticated_npy_mmap_v1"
+                    or not isinstance(store_definition, Mapping)
+                ):
+                    raise ValueError("native relation memory-map contract differs")
+                store = native_path.parent / str(
+                    store_definition.get("directory", "")
+                )
+                if store.is_symlink() or not store.is_dir():
+                    raise ValueError("native relation memory-map store is unsafe")
+                mapped = {}
+                for name in (
+                    "identities",
+                    "targets",
+                    "target_mask",
+                    "availability",
+                ):
+                    member = store_definition.get("members", {}).get(name)
+                    path = store / str(member.get("filename", ""))
+                    if (
+                        not isinstance(member, Mapping)
+                        or path.parent != store
+                        or path.is_symlink()
+                        or not path.is_file()
+                        or _sha256_file(path) != member.get("sha256")
                     ):
-                        raise ValueError(
-                            "native relation target identities differ"
-                        )
-                    native_targets[replica] = {
-                        name: np.asarray(payload[name])
-                        for name in (
-                            "targets",
-                            "target_mask",
-                            "availability",
-                        )
-                    }
+                        raise ValueError("native relation memory-map member differs")
+                    value = np.load(path, mmap_mode="r", allow_pickle=False)
+                    if (
+                        list(value.shape) != member.get("shape")
+                        or str(value.dtype) != member.get("dtype")
+                    ):
+                        raise ValueError("native relation memory-map metadata differs")
+                    mapped[name] = value
+                expected_ids = next(iter(datasets.values())).identities
+                if mapped["identities"].shape != (len(expected_ids),) or any(
+                    str(value) != expected
+                    for value, expected in zip(mapped["identities"], expected_ids)
+                ):
+                    raise ValueError("native relation target identities differ")
+                native_targets[replica] = {
+                    name: mapped[name]
+                    for name in ("targets", "target_mask", "availability")
+                }
                 lineage[
                     f"native_relation_targets_{role}_{replica}"
                 ] = definition["sha256"]

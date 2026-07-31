@@ -3154,7 +3154,9 @@ exact masks and numerical semantics.
 Done when independent fixtures and real miniature jets validate every
 component.
 
-Implementation status: complete on 2026-07-30. The label-blind numerical
+Implementation status: source-complete and locally validated on 2026-07-30;
+the real-miniature portion of this acceptance criterion remains pending on
+Tigris. The label-blind numerical
 implementation is in
 `teacher_logit_reco/hlt_offline_structure_distillation/extractors.py`.
 It covers all 28 current physical target IDs, reuses one implementation for
@@ -3175,7 +3177,9 @@ teacher inference.
 Done when complete 500k projections and a real miniature cache pass lineage
 and resume tests.
 
-Implementation status: complete on 2026-07-30. Step 4 is implemented in
+Implementation status: source-complete and locally validated on 2026-07-30;
+the authenticated real miniature, measured 500k projection, and filesystem
+resume acceptance remain pending on Tigris. Step 4 is implemented in
 `teacher_logit_reco/hlt_offline_structure_distillation/target_cache.py`,
 `normalization.py`, `controls.py`, `storage.py`, and `teachers.py`, with
 source-validating producers under `scripts/`. Cache shards are label-blind,
@@ -3200,7 +3204,9 @@ ParticleNet and KD controls, and every frozen probe.
 Done when disabled code paths preserve Weaver parity and Stage C runs
 automatically.
 
-Implementation status: complete on 2026-07-30. The parity-safe opt-in Weaver
+Implementation status: source-complete and locally validated on 2026-07-30;
+authoritative real-Weaver parity and automatic real-miniature Stage-C
+completion remain pending on Tigris. The parity-safe opt-in Weaver
 adapter and exact `H_BASE` wrapper are in
 `teacher_logit_reco/hlt_offline_structure_distillation/taps.py`; it executes
 Weaver's unmodified forward under temporary block hooks, so the disabled path
@@ -3256,7 +3262,8 @@ diagnostics, and HLT-only exports.
 
 Done when Stage E passes parity, causal-control, and deployability tests.
 
-Implementation status: complete on 2026-07-31. Token, FiLM, predicted-pair,
+Implementation status: source-complete and locally validated on 2026-07-31,
+pending the required real Weaver/Tigris miniature. Token, FiLM, predicted-pair,
 and direct-computed-pair feedback execute at the locked post-block-4 split;
 zero gates are exact no-ops, detached/end-to-end gradients are explicit, and
 warm-up is an integer optimizer-update rule. The unrestricted control uses a
@@ -3266,6 +3273,15 @@ and HLT-only export contracts are in `feedback.py`, `stage_e_data_factory.py`,
 and `stage_e_training.py`, with CLI and regression coverage in
 `scripts/train_hosd_feedback.py`, `scripts/select_hosd_feedback.py`, and
 `tests/test_hlt_offline_structure_distillation_step7.py`.
+The production loader uses the graph-independent `hosd_data_order_v1` sampler
+seed for discovery, confirmation, and scale manifests. Exact-HLT TRACK and
+REGION rows are reference baselines, are ineligible to become
+`BEST_FEEDBACK`, and remain separately eligible for later overall finalist
+selection. `MEAN_ONLY` is exactly HET-parameter-matched with inert trainable
+padding and a hashed capacity ledger. Exact builders publish separate hashed
+non-multiply operation profiles; authoritative scale efficiency must add the
+measured `hosd_exact_hlt_builder_timing_v1` evidence before production
+selection lineage is complete.
 
 ### Step 8 of 12: combinations and mechanism controls
 
@@ -3342,6 +3358,24 @@ scale input views and five tree populations run as bounded array coordinates.
 The four same-view native-relation targets are produced once in their own
 exact-coverage wave before any scale graph starts; graph/seed workers cannot
 race to create or overwrite them.
+Scale offline, HLT, and native-relation arrays use authenticated NPY memory
+maps. Tree construction reads those maps and retains only its current output
+shard; physical-target construction publishes canonical target shards
+directly and resolves only the tree shard or boundary-adjacent shards
+intersecting the current identity range. A single shared authenticated
+tree-split index verifies exact shard filenames/count, metadata and NPZ
+hashes, parents, and canonical identity coverage before target, graph, or
+resource consumers can obtain a lazy shard path; it revalidates shard bytes
+again immediately before loading. Cache validation streams identity coverage instead of constructing a
+population-wide identity list, set, dictionary, or ordered tree tuple.
+Persisted target consumers and REGION-tree consumers likewise retain at most
+one shard per bound family/replica. Graph workers bind REGION trees and
+native-relation targets only when their locked graph definition requires
+them. Production resource derivation requires completed representative tasks
+for `scale_input_prepare`, `scale_tree_build`, `scale_target_build`, and the
+worst-case `scale_graph_train`. Each source-bound projection is derived from
+authenticated NPY/NPZ layout byte accounting, records its coordinate type and
+resident shard size, and must remain within the registered Tigris limit.
 
 ### Step 11 of 12: stack selection and final seal
 
@@ -3382,6 +3416,18 @@ same-source miniature are implemented. The exact operator workflow is
 `teacher_logit_reco/HOSD_RESEARCH_COMPUTE_RUNBOOK.md`. Production readiness
 remains intentionally false until that real miniature traverses Sections
 25.9 and 29; no local or synthetic test can set the acceptance artifact.
+In particular, the full authorization contract is version 6 and fails closed
+unless the resource preflight binds all four representative Stage-J memory
+projections. Population-resident input preparation is projected to 3M from
+authenticated per-event layout bytes. Bounded tree workers are projected at
+the exact 10,000-event production shard, target workers at the exact
+2,048-event production shard, and worst-case graph workers at the simultaneous
+production tree/input/target resident combination. Tree bytes use the
+analytical 128-leaf/255-node maximum and are checked against observed
+miniature layouts, so a miniature final shard smaller than production cannot
+reduce the authorized request. A missing coordinate, stale source or layout
+hash, incorrect production resident-unit size, or projection above its
+registered Tigris limit prevents authorization.
 Runtime path values must be exact authenticated file/directory bindings;
 literal paths, unresolved placeholders, incomplete replica keys, invalid
 resource scalars, and bound-file drift are rejected before worker execution.

@@ -20,9 +20,13 @@ import numpy as np
 import torch
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
+    bind_source,
     canonical_sha256,
     load_hashed_json,
+    require_sha256,
+    with_content_hash,
     write_immutable_bytes,
+    write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.deployment import (  # noqa: E402
     DEPLOYABLE_EXPORT_CONTRACT,
@@ -43,9 +47,13 @@ from teacher_logit_reco.relation_expert_token_bridge.scale_up import (  # noqa: 
 from teacher_logit_reco.relation_expert_token_bridge.stage_n_execution import (  # noqa: E402
     DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT,
     DEPLOYABLE_INFERENCE_INPUT_CONTRACT,
+    FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
     SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
     validate_deployable_inference_input,
     validate_deployable_inference_input_binding,
+)
+from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
+    source_snapshot,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
@@ -156,6 +164,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--execution-lock", type=Path)
     parser.add_argument("--execution-claim", type=Path)
     parser.add_argument("--execution-plan", type=Path)
+    parser.add_argument("--row-id")
+    parser.add_argument("--checkpoint-sha256")
+    parser.add_argument("--attestation-output", type=Path)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output", required=True, type=Path)
@@ -170,6 +181,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.execution_lock is not None
             or args.execution_claim is not None
             or args.execution_plan is not None
+            or args.row_id is not None
+            or args.checkpoint_sha256 is not None
+            or args.attestation_output is not None
         ):
             raise ValueError("stack-val deployable inference authorization differs")
         authorize_dataset_access(
@@ -187,6 +201,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.execution_lock is None
             or args.execution_claim is None
             or args.execution_plan is None
+            or args.row_id is None
+            or args.checkpoint_sha256 is None
+            or args.attestation_output is None
         ):
             raise ValueError("final-test deployable inference authorization differs")
         authorize_dataset_access(
@@ -215,6 +232,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             != lock["content_hash"]
         ):
             raise ValueError("final-test execution claim lineage differs")
+        expected_row = lock["eligible_evaluation_rows"].get(args.row_id)
+        plan_rows = {
+            str(row["row_id"]): row for row in plan["prediction_rows"]
+        }
+        plan_row = plan_rows.get(args.row_id)
+        if (
+            expected_row is None
+            or plan_row is None
+            or expected_row["graph_id"] != args.graph_id
+            or int(expected_row["pipeline_seed"]) != args.pipeline_seed
+            or expected_row["checkpoint_sha256"]
+            != args.checkpoint_sha256
+            or plan_row["checkpoint_sha256"] != args.checkpoint_sha256
+            or Path(plan_row["deployable_export"]).resolve()
+            != args.deployable_export.resolve()
+            or Path(plan_row["inference_output_npz"]).resolve()
+            != args.output.resolve()
+            or Path(plan_row["inference_attestation_output"]).resolve()
+            != args.attestation_output.resolve()
+        ):
+            raise ValueError("final-test inference row lineage differs")
 
     manifest = load_hashed_json(args.input_manifest)
     if manifest["contract"] == DEPLOYABLE_INFERENCE_INPUT_CONTRACT:
@@ -234,9 +272,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         or int(manifest["pipeline_seed"]) != args.pipeline_seed
     ):
         raise ValueError("deployable inference-input lineage differs")
+    if args.split == "final_test":
+        if manifest["contract"] != DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT:
+            raise ValueError("final-test input must use the locked shared binding")
+        locked_input_sha = lock["final_input_hashes"][
+            "final_test_HLT_inputs"
+        ]
+        if (
+            Path(plan_row["input_manifest"]).resolve()
+            != args.input_manifest.resolve()
+            or manifest["content_hash"]
+            != plan_row["input_manifest_sha256"]
+            or manifest["shared_payload_manifest_sha256"]
+            != plan_row["shared_payload_manifest_sha256"]
+            or manifest["shared_payload_manifest_sha256"]
+            != locked_input_sha
+            or plan_row["locked_final_test_HLT_inputs_sha256"]
+            != locked_input_sha
+            or manifest["payload_sha256"]
+            != plan_row["shared_payload_sha256"]
+        ):
+            raise ValueError("final-test input does not match the execution lock")
     export = load_hashed_json(args.deployable_export)
     if export.get("source") != campaign["source"]:
         raise ValueError("deployable export source differs")
+    if (
+        args.split == "final_test"
+        and plan_row["deployable_export_sha256"] != export["content_hash"]
+    ):
+        raise ValueError("final-test deployable export lineage differs")
     if export["contract"] == DEPLOYABLE_EXPORT_CONTRACT:
         graph = load_deployable_retb_graph(
             args.deployable_export, expected_source=campaign["source"]
@@ -285,6 +349,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         probabilities=probabilities,
     )
     publication = write_immutable_bytes(args.output, stream.getvalue())
+    attestation_publication = None
+    if args.split == "final_test":
+        attestation = bind_source(
+            with_content_hash(
+                {
+                    "contract": FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
+                    "schema_version": 2,
+                    "row_id": str(args.row_id),
+                    "graph_id": args.graph_id,
+                    "pipeline_seed": int(args.pipeline_seed),
+                    "checkpoint_sha256": require_sha256(
+                        args.checkpoint_sha256,
+                        name="checkpoint_sha256",
+                    ),
+                    "final_test_execution_lock_sha256": lock["content_hash"],
+                    "execution_claim_sha256": claim["content_hash"],
+                    "execution_plan_sha256": plan["content_hash"],
+                    "deployable_export_sha256": export["content_hash"],
+                    "input_manifest_path": str(
+                        args.input_manifest.resolve()
+                    ),
+                    "input_manifest_sha256": manifest["content_hash"],
+                    "shared_payload_manifest_sha256": manifest[
+                        "shared_payload_manifest_sha256"
+                    ],
+                    "shared_payload_sha256": manifest["payload_sha256"],
+                    "locked_final_test_HLT_inputs_sha256": lock[
+                        "final_input_hashes"
+                    ]["final_test_HLT_inputs"],
+                    "inference_output_npz": str(args.output.resolve()),
+                    "inference_output_npz_sha256": publication["file_sha256"],
+                }
+            ),
+            source_snapshot=source_snapshot(REPO_ROOT),
+        )
+        attestation_publication = write_immutable_json(
+            args.attestation_output, attestation
+        )
     print(
         json.dumps(
             {
@@ -296,6 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "input_manifest_sha256": manifest["content_hash"],
                 "output_sha256": publication["file_sha256"],
                 "publication": publication,
+                "inference_attestation_publication": attestation_publication,
             },
             indent=2,
             sort_keys=True,

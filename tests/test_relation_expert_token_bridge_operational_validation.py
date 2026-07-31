@@ -10,16 +10,22 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     audit_manifest_producer_invocations,
     build_full_submission_authorization,
     build_job_ledger,
+    build_task_manifest,
     build_manifest_materialization_plan,
     build_production_dry_run_evidence,
     build_production_graph,
     build_tigris_smoke_evidence,
     materialize_downstream_manifests,
     publish_manifest_materialization_plan,
+    publish_task_row_completion,
     run_local_synthetic_dag,
     source_snapshot,
     validate_full_submission_authorization,
     validate_stale_cancellation_request,
+)
+from teacher_logit_reco.relation_expert_token_bridge.task_completion import (
+    build_task_manifest_completion,
+    task_manifest_completion_path,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     bind_source,
@@ -30,6 +36,9 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 from teacher_logit_reco.relation_expert_token_bridge.storage import (
     REQUIRED_MEASUREMENTS,
     build_storage_measurements,
+)
+from teacher_logit_reco.relation_expert_token_bridge.manifest_orchestration import (
+    manifest_plan_path,
 )
 
 
@@ -95,8 +104,8 @@ def test_local_synthetic_dag_traverses_every_stage_and_recovery_path(
     report = run_local_synthetic_dag(
         campaign_root=tmp_path / "local-retb", repo_root=ROOT
     )
-    assert report["node_count"] == 69
-    assert report["worker_interfaces"]["wrapper_count"] == 69
+    assert report["node_count"] == 84
+    assert report["worker_interfaces"]["wrapper_count"] == 84
     assert report["worker_interfaces"]["python_cli_help_probed"] is True
     assert report["worker_interfaces"]["python_cli_help_probe_count"] > 50
     assert report["checks"] == {
@@ -123,17 +132,17 @@ def test_local_synthetic_dag_traverses_every_stage_and_recovery_path(
     assert invocation_audit[
         "synthetic_dag_counted_as_execution_evidence"
     ] is False
-    assert invocation_audit["manifest_target_count"] == 48
+    assert invocation_audit["manifest_target_count"] == 63
     assert invocation_audit["bootstrap_prepublished_target_count"] == 13
-    assert invocation_audit["downstream_plan_factory_target_count"] == 35
-    assert invocation_audit["registered_plan_factory_count"] == 35
+    assert invocation_audit["downstream_plan_factory_target_count"] == 50
+    assert invocation_audit["registered_plan_factory_count"] == 50
     # Closure Blocks 1/2, the first two Stage-F factories, all ten
     # Stage-K--M factories, and all eight Stage-N factories are wired.
-    assert invocation_audit["implemented_producer_count"] == 48
+    assert invocation_audit["implemented_producer_count"] == 63
     assert invocation_audit["execution_complete_producer_count"] == 0
     assert invocation_audit[
         "missing_execution_complete_producer_count"
-    ] == 48
+    ] == 63
     assert invocation_audit[
         "full_submission_producer_gate_passed"
     ] is False
@@ -152,10 +161,10 @@ def test_plan_factory_registry_is_exhaustive_and_missing_factory_fails_gate(
     )
     registry = graph["manifest_plan_factory_registry"]
     assert registry["contract"] == MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT
-    assert registry["entry_count"] == 35
+    assert registry["entry_count"] == 50
     assert len({
         entry["target_node_id"] for entry in registry["entries"]
-    }) == 35
+    }) == 50
     assert all(
         entry["performance_independent_continuation_required"] is True
         and entry[
@@ -303,6 +312,41 @@ def test_post_completion_materializer_is_fail_closed_idempotent_and_negative_saf
     )
     trigger_path = root / "selection" / "negative_optimization.json"
     write_immutable_json(trigger_path, trigger)
+    producer_manifest = build_task_manifest(
+        campaign_spec_sha256=campaign["content_hash"],
+        production_graph_sha256=graph["content_hash"],
+        node_id="offline_expert_training",
+        rows=[
+            {
+                "task_id": "offline_expert_training:0",
+                "argv": [sys.executable, "scripts/write_retb_synthetic_output.py"],
+                "environment": {},
+                "expected_outputs": [str(trigger_path.resolve())],
+                "input_artifact_hashes": {
+                    "campaign_spec": campaign["content_hash"],
+                    "production_graph": graph["content_hash"],
+                },
+            }
+        ],
+        maximum_concurrent_tasks=1,
+    )
+    publish_task_row_completion(
+        campaign_root=root,
+        campaign=campaign,
+        task_manifest=producer_manifest,
+        task_index=0,
+    )
+    producer_completion = build_task_manifest_completion(
+        campaign_root=root,
+        campaign=campaign,
+        task_manifest=producer_manifest,
+    )
+    write_immutable_json(
+        task_manifest_completion_path(
+            root, node_id="offline_expert_training"
+        ),
+        producer_completion,
+    )
     output = root / "selection" / "optimization_selector_done.json"
     plan = build_manifest_materialization_plan(
         campaign=campaign,
@@ -329,7 +373,8 @@ def test_post_completion_materializer_is_fail_closed_idempotent_and_negative_saf
                 "environment": {},
                 "expected_outputs": [str(output)],
                 "input_artifact_hashes": {
-                    "negative_selection": trigger["content_hash"]
+                    "negative_selection": trigger["content_hash"],
+                    "producer_completion": producer_completion["content_hash"],
                 },
             }
         ],
@@ -347,6 +392,19 @@ def test_post_completion_materializer_is_fail_closed_idempotent_and_negative_saf
         campaign=campaign,
         production_graph=graph,
     )
+    authenticated_plan_path = manifest_plan_path(
+        root, target_node_id="offline_optimization_selector"
+    )
+    authenticated_plan_path.unlink()
+    with pytest.raises(FileNotFoundError, match="authenticated producer plan"):
+        materialize_downstream_manifests(
+            campaign_root=root,
+            repo_root=ROOT,
+            producer_node_id="offline_expert_training",
+            campaign=campaign,
+            production_graph=graph,
+        )
+    write_immutable_json(authenticated_plan_path, plan)
     second = materialize_downstream_manifests(
         campaign_root=root,
         repo_root=ROOT,
@@ -357,7 +415,9 @@ def test_post_completion_materializer_is_fail_closed_idempotent_and_negative_saf
     assert first["target_count"] == 1
     assert first["manifest_hashes"] == second["manifest_hashes"]
     assert second["publications"]["offline_optimization_selector"] == {
-        "status": "already_present"
+        "status": "already_present",
+        "producer_plan_revalidated": True,
+        "producer_completion_revalidated": True,
     }
 
 

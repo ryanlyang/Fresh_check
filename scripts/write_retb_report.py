@@ -64,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     controls = load_hashed_json(
         args.shortlisted_controls,
         expected_contract=(
-            "retb_shortlisted_500k_controls_v1"
+            "retb_shortlisted_500k_controls_v3"
         ),
     )
     if any(

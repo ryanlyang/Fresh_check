@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+import copy
 import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from scripts.evaluate_retb_relation_predictor_semantics import _groups
+from scripts.execute_retb_semantic_control_campaign import (
+    PHASES,
+    Planner,
+    semantic_controls_bundle_path,
+)
+from scripts.execute_retb_stage_l_registration import _load_semantic_controls
+from scripts import finalize_retb_semantic_control_campaign as semantic_finalizer
+
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    SEMANTIC_CONTROL_POLICY,
     bind_source,
+    with_content_hash,
+    write_immutable_json,
+)
+from teacher_logit_reco.relation_expert_token_bridge.late_plan_factories import (
+    SEMANTIC_CONTROL_KINDS,
+)
+from teacher_logit_reco.relation_expert_token_bridge.joint_bridge import (
+    JointBridgeGraph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.oracle_substitutions import (
     build_stage_i_policy,
@@ -35,6 +56,11 @@ from teacher_logit_reco.relation_expert_token_bridge.step10 import (
     build_step10_bundle,
     validate_step10_bundle,
 )
+from teacher_logit_reco.relation_expert_token_bridge.semantic_evidence import (
+    validate_stage_k_semantic_controls,
+)
+from teacher_logit_reco.relation_expert_token_bridge.step7 import STAGE_E_SHAPES
+from tests.retb_semantic_test_support import build_valid_semantic_controls
 
 
 SHA_A = "a" * 64
@@ -336,7 +362,15 @@ def test_stage_i_oracle_substitutions_and_negatives_are_complete() -> None:
         batch_size=7,
     )
     assert validate_stage_i_evaluation(artifact) == artifact["content_hash"]
-    assert artifact["condition_count"] == 37
+    # The v2 semantic-control contract adds one global- and one same-class
+    # wrong-event replacement for each of the seven expert banks.
+    assert artifact["condition_count"] == 51
+    for expert in EXPERT_ORDER:
+        assert f"WRONG_EVENT_BANK__{expert}" in artifact["conditions"]
+        assert (
+            f"WITHIN_CLASS_WRONG_EVENT_BANK__{expert}"
+            in artifact["conditions"]
+        )
     assert not artifact["wrong_event_controls_entered_selection"]
     assert not artifact["stack_val_consumed"]
     assert (
@@ -353,6 +387,268 @@ def test_negative_event_permutations_are_exact_and_nonself() -> None:
     indices = within_class_wrong_event_indices(labels)
     assert np.array_equal(labels[indices], labels)
     assert not np.any(indices == np.arange(len(labels)))
+
+
+def test_semantic_shuffle_batches_preserve_population_and_multiplicity() -> None:
+    mask = np.zeros((8, 1, 4), dtype=bool)
+    mask[:3, 0, :1] = True
+    mask[3:, 0, :2] = True
+    groups = _groups(mask, matched=True, batch_size=4)
+    assert sorted(np.concatenate(groups).tolist()) == list(range(8))
+    assert all(len(group) >= 2 for group in groups)
+    assert all(
+        len(set(mask[group, 0].sum(axis=1).tolist())) == 1
+        for group in groups
+    )
+    assert [len(group) for group in _groups(mask[:5], matched=False, batch_size=4)] == [5]
+
+    singleton = mask[:4].copy()
+    singleton[3, 0, :] = True
+    eligible = _groups(singleton, matched=True, batch_size=4)
+    assert np.concatenate(eligible).tolist() == [0, 1, 2]
+    assert 3 not in np.concatenate(eligible).tolist()
+
+
+def test_relation_zero_can_target_each_biased_expert_independently() -> None:
+    calls = {expert: [] for expert in EXPERT_ORDER}
+
+    class Encoder:
+        def __init__(self, expert: str) -> None:
+            self.expert = expert
+
+        def set_semantic_relation_transform(self, mode: str) -> None:
+            calls[self.expert].append(mode)
+
+    graph = object.__new__(JointBridgeGraph)
+    object.__setattr__(
+        graph,
+        "hlt_experts",
+        {
+            expert: SimpleNamespace(particle_encoder=Encoder(expert))
+            for expert in EXPERT_ORDER
+        },
+    )
+    graph.set_semantic_relation_transform("zero", expert_id="TRACK")
+    assert calls["TRACK"] == ["zero"]
+    assert all(
+        calls[expert] == ["active"]
+        for expert in EXPERT_ORDER
+        if expert != "TRACK"
+    )
+
+
+def test_real_stage_k_output_path_is_the_stage_l_input(tmp_path: Path) -> None:
+    source = dict(SOURCE)
+    campaign = with_content_hash(
+        {"contract": "fixture_campaign_v1", "schema_version": 1,
+         "source": source,
+         "semantic_control_policy": dict(SEMANTIC_CONTROL_POLICY)}
+    )
+    graph = with_content_hash(
+        {"contract": "fixture_graph_v1", "schema_version": 1,
+         "source": source}
+    )
+    planner = Planner(root=tmp_path, campaign=campaign, graph=graph)
+    plan = planner.phase_plan(PHASES[-1], len(PHASES) - 1, {})
+    canonical = semantic_controls_bundle_path(tmp_path)
+    assert plan["rows"][0]["expected_outputs"] == [str(canonical)]
+    artifact = build_valid_semantic_controls(SOURCE)
+    write_immutable_json(canonical, artifact)
+    assert _load_semantic_controls(tmp_path, campaign=campaign) == artifact
+    arbitrary_root = tmp_path / "arbitrary"
+    write_immutable_json(
+        semantic_controls_bundle_path(arbitrary_root),
+        with_content_hash({
+            "contract": "fixture_semantics_v1",
+            "schema_version": 1,
+            "source": source,
+        }),
+    )
+    with pytest.raises(ValueError, match="contract"):
+        _load_semantic_controls(arbitrary_root, campaign=campaign)
+
+
+def _rehash_semantic(payload: dict) -> dict:
+    unhashed = copy.deepcopy(payload)
+    unhashed.pop("content_hash", None)
+    return with_content_hash(unhashed)
+
+
+def test_stage_k_rejects_placeholder_metric_records() -> None:
+    artifact = build_valid_semantic_controls(SOURCE)
+    artifact["rows"][0]["metric_records"] = [{"condition_id": "fixture"}]
+    artifact["rows"][0]["metric_record_count"] = 1
+    with pytest.raises(ValueError, match="schema differs"):
+        validate_stage_k_semantic_controls(
+            _rehash_semantic(artifact), expected_source=SOURCE
+        )
+
+
+@pytest.mark.parametrize("tamper", ("nonfinite", "delta", "hash", "coverage"))
+def test_stage_k_rejects_tampered_semantic_evidence(tamper: str) -> None:
+    artifact = build_valid_semantic_controls(SOURCE)
+    row = artifact["rows"][0]
+    if tamper == "nonfinite":
+        row["metric_records"][0]["metrics"]["accuracy"] = float("inf")
+    elif tamper == "delta":
+        row["metric_records"][0]["metric_deltas"][
+            "accuracy_control_minus_reference"
+        ] = 0.0
+    elif tamper == "hash":
+        row["metric_records"][0]["source_artifact_sha256"] = "not-a-hash"
+    else:
+        row["metric_records"].pop()
+        row["metric_record_count"] -= 1
+    with pytest.raises(ValueError):
+        validate_stage_k_semantic_controls(
+            _rehash_semantic(artifact), expected_source=SOURCE
+        )
+
+
+def test_stage_k_rejects_predictor_selector_lineage_tampering() -> None:
+    artifact = build_valid_semantic_controls(SOURCE)
+    artifact["predictor_architecture_evidence"]["direct_evaluations"][0][
+        "candidate_manifest_sha256"
+    ] = "f" * 64
+    with pytest.raises(ValueError, match="hash differs|coverage differs"):
+        validate_stage_k_semantic_controls(
+            _rehash_semantic(artifact), expected_source=SOURCE
+        )
+
+
+def test_predictor_architecture_evidence_authenticates_selector_inputs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        semantic_finalizer, "validate_predictor_candidate", lambda row: row["content_hash"]
+    )
+    monkeypatch.setattr(
+        semantic_finalizer, "validate_locked_target_coordinate", lambda row: row["content_hash"]
+    )
+    monkeypatch.setattr(
+        semantic_finalizer, "validate_materialized_predictor_run", lambda row: row["content_hash"]
+    )
+    selection = tmp_path / "selection" / "predictor_bundle"
+    candidates, run_paths, inference_paths = [], {}, {}
+    candidate_specs = (
+        ("direct", "A3_SLOT_DECODER_DIRECT", "W_CANONICAL"),
+        ("gated", "A4_SLOT_DECODER_GATED", "W_CANONICAL"),
+        ("logit", "A0_AFFINE", "W_LOGIT_ONLY"),
+    )
+    for candidate_id, architecture, objective in candidate_specs:
+        seed_artifacts, run_hashes = {}, {}
+        run_paths[candidate_id], inference_paths[candidate_id] = {}, {}
+        metrics_by_seed = {
+            "hybrid_accuracy": {}, "hybrid_cross_entropy": {},
+            "normalized_token_error": {},
+        }
+        for seed in (101, 202, 303):
+            run = with_content_hash({
+                "contract": "fixture_run_v1", "source": SOURCE,
+                "run_id": f"{candidate_id}:{seed}", "pipeline_seed": seed,
+                "expert_id": "PT", "architecture": architecture,
+                "objective_id": objective,
+            })
+            run_path = tmp_path / "runs" / candidate_id / str(seed) / "run.json"
+            write_immutable_json(run_path, run)
+            registration = _digest(f"registration:{candidate_id}:{seed}")
+            checkpoint = _digest(f"checkpoint:{candidate_id}:{seed}")
+            capacity = _digest(f"capacity:{candidate_id}:{seed}")
+            inference = with_content_hash({
+                "contract": "retb_predictor_inference_cache_v1", "source": SOURCE,
+                "parents": {"predictor_registration": registration,
+                            "predictor_checkpoint": checkpoint},
+            })
+            inference_path = (
+                tmp_path / "runs" / candidate_id / str(seed)
+                / "val_design" / "predictor_outputs_manifest.json"
+            )
+            write_immutable_json(inference_path, inference)
+            accuracy = 0.5 + seed / 1_000_000
+            cross_entropy = 1.0 - seed / 1_000_000
+            token_error = 0.25 + seed / 1_000_000
+            metric = with_content_hash({
+                "contract": "retb_predictor_val_design_metrics_v1",
+                "source": SOURCE, "run_sha256": run["content_hash"],
+                "run_id": run["run_id"], "pipeline_seed": seed,
+                "expert_id": "PT", "capacity_report_sha256": capacity,
+                "predictor_registration_sha256": registration,
+                "val_design_accuracy": accuracy, "cross_entropy": cross_entropy,
+                "normalized_token_error": token_error,
+            })
+            write_immutable_json(inference_path.parent / "val_design_metrics.json", metric)
+            seed_artifacts[str(seed)] = {
+                "predictor_registration": registration,
+                "predictor_checkpoint": checkpoint,
+                "inference_manifest": inference["content_hash"],
+                "capacity_report": capacity,
+            }
+            run_hashes[str(seed)] = run["content_hash"]
+            metrics_by_seed["hybrid_accuracy"][str(seed)] = accuracy
+            metrics_by_seed["hybrid_cross_entropy"][str(seed)] = cross_entropy
+            metrics_by_seed["normalized_token_error"][str(seed)] = token_error
+            run_paths[candidate_id][str(seed)] = str(run_path)
+            inference_paths[candidate_id][str(seed)] = str(inference_path)
+        candidate = with_content_hash({
+            "contract": "fixture_candidate_v1", "source": SOURCE,
+            "candidate_id": candidate_id, "expert_id": "PT",
+            "configuration": {"architecture": architecture, "objective_id": objective},
+            "seed_artifacts": seed_artifacts,
+            "materialized_run_hashes": run_hashes,
+            "metrics_by_seed": metrics_by_seed,
+        })
+        candidate_path = selection / "inputs" / "candidates" / f"{candidate_id}.json"
+        write_immutable_json(candidate_path, candidate)
+        candidates.append((candidate_path, candidate))
+    coordinate = with_content_hash({
+        "contract": "fixture_coordinate_v1", "source": SOURCE,
+        "coordinate_id": "coordinate",
+    })
+    coordinate_path = selection / "inputs" / "coordinates" / "coordinate.json"
+    write_immutable_json(coordinate_path, coordinate)
+    configuration = {
+        "candidate_manifest_paths": [str(path) for path, _ in candidates],
+        "coordinate_manifest_paths": [str(coordinate_path)],
+        "materialized_run_paths": run_paths,
+        "inference_manifest_paths": inference_paths,
+        "calibration_artifact_paths": {},
+        "capacity_report_paths": {},
+        "fusion_checkpoint_paths": {},
+        "label_npz_paths": {},
+        "label_manifest_paths_by_seed": {},
+        "label_manifest_hashes_by_seed": {},
+        "label_npz_hashes_by_seed": {},
+    }
+    configuration_path = selection / "inputs" / "selector_configuration.json"
+    configuration_path.parent.mkdir(parents=True, exist_ok=True)
+    configuration_path.write_text(
+        json.dumps(configuration, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    index = with_content_hash({
+        "contract": "retb_predictor_bundle_input_index_v1", "source": SOURCE,
+        "schema_version": 1,
+        "candidate_count": len(candidates), "coordinate_count": 1,
+        "candidate_manifest_hashes": [row["content_hash"] for _, row in candidates],
+        "coordinate_manifest_hashes": [coordinate["content_hash"]],
+        "selector_configuration_sha256": hashlib.sha256(
+            configuration_path.read_bytes()
+        ).hexdigest(),
+        "predictor_phase_plan_sha256": _digest("phase-plan"),
+        "scientific_underperformance_blocks_continuation": False,
+    })
+    write_immutable_json(selection / "bundle_input_index.json", index)
+    campaign = {"source": SOURCE}
+    evidence = semantic_finalizer._predictor_architecture_evidence(
+        tmp_path, campaign=campaign
+    )
+    assert evidence["bundle_input_index_sha256"] == index["content_hash"]
+    configuration_path.write_text(
+        configuration_path.read_text("utf-8") + " ", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="input-index lineage"):
+        semantic_finalizer._predictor_architecture_evidence(
+            tmp_path, campaign=campaign
+        )
 
 
 def test_step10_contract_bundle_is_source_bound_and_fail_closed() -> None:

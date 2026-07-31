@@ -23,7 +23,7 @@ from .contracts import (
 from .step13 import FAILURE_INTERPRETATIONS
 
 
-STAGE_L_REPORT_CONTRACT = "retb_stage_l_confirmation_report_v2"
+STAGE_L_REPORT_CONTRACT = "retb_stage_l_confirmation_report_v3"
 
 
 def _interpretations(
@@ -185,13 +185,17 @@ def render_stage_l_markdown(
             "",
             "## Post-shortlist matched controls",
             "",
-            "| Graph | Capacity reproduces gain |",
-            "|---|:---:|",
+            "| Graph | H_MONO_PARAM accuracy | H_MONO_FLOP accuracy | "
+            "H_BASE_LONG accuracy | Capacity reproduces gain |",
+            "|---|---:|---:|---:|:---:|",
         ]
     )
     for row in shortlisted_controls["rows"]:
         lines.append(
             f"| {row['graph_id']} | "
+            f"{row['mean_accuracy_by_control']['H_MONO_PARAM']:.8f} | "
+            f"{row['mean_accuracy_by_control']['H_MONO_FLOP']:.8f} | "
+            f"{row['mean_accuracy_by_control']['H_BASE_LONG']:.8f} | "
             f"{'yes' if row['capacity_control_reproduces_gain'] else 'no'} |"
         )
     lines.extend(
@@ -252,7 +256,7 @@ def build_stage_l_report(
         with_content_hash(
             {
                 "contract": STAGE_L_REPORT_CONTRACT,
-                "schema_version": 2,
+                "schema_version": 3,
                 "parents": {
                     "step13_bundle": require_sha256(
                         step13_bundle_sha256,

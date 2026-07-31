@@ -32,6 +32,37 @@ PHASED_CONTROLLER_COMPLETION_CONTRACT = (
     "retb_phased_controller_completion_v1"
 )
 PHASE_RESOURCES = {"cpu", "gpu"}
+PHASE_CONCURRENCY_ENVIRONMENT = {
+    "cpu": "RETB_CPU_CACHE_CONCURRENCY",
+    "expert": "RETB_GPU_EXPERT_CONCURRENCY",
+    "predictor": "RETB_GPU_PREDICTOR_CONCURRENCY",
+    "scale": "RETB_GPU_SCALE_CONCURRENCY",
+    "final": "RETB_GPU_FINAL_CONCURRENCY",
+}
+HIGH_THROUGHPUT_DEFAULT_CONCURRENCY = 64
+
+
+def configured_phase_concurrency(
+    *, resource: str, family: str, row_count: int
+) -> int:
+    """Resolve one inherited array cap and avoid throttling below demand."""
+
+    if resource not in PHASE_RESOURCES or int(row_count) <= 0:
+        raise ValueError("internal phase concurrency identity differs")
+    key = "cpu" if resource == "cpu" else str(family)
+    variable = PHASE_CONCURRENCY_ENVIRONMENT.get(key)
+    if variable is None:
+        raise ValueError("internal GPU phase concurrency family differs")
+    raw = os.environ.get(
+        variable, str(HIGH_THROUGHPUT_DEFAULT_CONCURRENCY)
+    )
+    try:
+        configured = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{variable} must be a positive integer") from error
+    if configured <= 0:
+        raise ValueError(f"{variable} must be a positive integer")
+    return min(configured, int(row_count))
 
 
 def _file_sha256(path: Path) -> str:
@@ -515,11 +546,13 @@ def execute_phased_controller(
 
 
 __all__ = [
+    "HIGH_THROUGHPUT_DEFAULT_CONCURRENCY",
     "INTERNAL_PHASE_COMPLETION_CONTRACT",
     "INTERNAL_PHASE_PLAN_CONTRACT",
     "INTERNAL_PHASE_ROW_COMPLETION_CONTRACT",
     "PHASED_CONTROLLER_COMPLETION_CONTRACT",
     "build_internal_phase_plan",
+    "configured_phase_concurrency",
     "execute_internal_phase",
     "execute_internal_phase_row",
     "execute_phased_controller",

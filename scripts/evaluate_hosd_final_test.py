@@ -24,6 +24,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     infer_deployable_graph,
     load_deployable_graph,
     load_final_execution_claim,
+    load_authorized_identity_labels,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -65,14 +66,13 @@ def main(argv=None):
             raise ValueError("reusable final evaluation lock differs")
         print(json.dumps({"content_hash": artifact["content_hash"], "publication": "reused"}, indent=2, sort_keys=True))
         return 0
-    import numpy as np
     import torch
 
-    with np.load(args.identities_labels_npz, allow_pickle=False) as payload:
-        if set(payload.files) != {"identities", "labels"}:
-            raise ValueError("final prepared identity/label artifact differs")
-        identities = tuple(str(value) for value in payload["identities"].tolist())
-        labels = np.asarray(payload["labels"], dtype=np.int64)
+    identities, labels = load_authorized_identity_labels(
+        args.identities_labels_npz,
+        worker_role="final_inference",
+        requested_resource="postlock_final_test_identity_labels",
+    )
     caches = {}
     for value in args.cache:
         replica, separator, path = value.partition("=")

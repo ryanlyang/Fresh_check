@@ -27,6 +27,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     evaluate_posthoc_feedback_control,
     export_deployable_graph,
     feedback_model_flop_ledger,
+    initialize_feedback_from_auxiliary_checkpoint,
     load_and_validate_campaign,
     load_stage_d_loaders_from_manifest,
     load_stage_e_loaders_from_manifest,
@@ -35,11 +36,42 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     component_seed,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    AUXILIARY_COMPLETION_CONTRACT,
+    AUXILIARY_PREDICTION_CONTRACT,
+    FEEDBACK_CHECKPOINT_CONTRACT,
     FEEDBACK_COMPLETION_CONTRACT,
     SINGLE_FAMILY_SELECTION_CONTRACT,
     load_hashed_json,
     write_immutable_json,
 )
+
+
+def _initialize_from_locked_auxiliary(model, row, *, root, lock, campaign):
+    selected = str(row["selected_auxiliary_row_id"])
+    run = root / "auxiliary" / selected / "seed_101"
+    completion = load_hashed_json(
+        run / "auxiliary_completion.json",
+        expected_contract=AUXILIARY_COMPLETION_CONTRACT,
+    )
+    result = load_hashed_json(
+        run / "design_select_result.json",
+        expected_contract=AUXILIARY_PREDICTION_CONTRACT,
+    )
+    if (
+        lock["selected_row_by_target"].get(row["target_id"]) != selected
+        or lock["complete_result_hashes"].get(selected) != result["content_hash"]
+    ):
+        raise ValueError("feedback row does not continue its locked A_t")
+    return initialize_feedback_from_auxiliary_checkpoint(
+        model,
+        row,
+        checkpoint_path=run / "best_model_val.pt",
+        completion=completion,
+        result=result,
+        stage_d_plan_sha256=lock["stage_d_plan_sha256"],
+        campaign_spec_sha256=campaign["content_hash"],
+        source=campaign["source"],
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,7 +182,6 @@ def main(argv: list[str] | None = None) -> int:
             "SHUFFLED",
             "ORACLE_SUB",
             "ORACLE_TRAINED",
-            "EXACT_HLT",
         }
         if needs_intervention and not intervention_sources:
             import torch
@@ -205,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if (
                     checkpoint.get("contract")
-                    != "hosd_feedback_checkpoint_v2"
+                    != FEEDBACK_CHECKPOINT_CONTRACT
                     or checkpoint.get("row_id") != source_row["row_id"]
                     or checkpoint.get("stage_e_plan_sha256")
                     != plan["content_hash"]
@@ -365,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
             source_checkpoint, map_location="cpu", weights_only=False
         )
         if (
-            checkpoint.get("contract") != "hosd_feedback_checkpoint_v2"
+            checkpoint.get("contract") != FEEDBACK_CHECKPOINT_CONTRACT
             or checkpoint.get("row_id") != source_row["row_id"]
             or checkpoint.get("stage_e_plan_sha256") != plan["content_hash"]
             or checkpoint.get("campaign_spec_sha256")
@@ -400,6 +431,18 @@ def main(argv: list[str] | None = None) -> int:
         export_checkpoint = source_checkpoint
     else:
         model = build_feedback_model(row, weaver_module=module)
+        if row.get("control") == "EXACT_HLT":
+            runtime = loaded.get("exact_hlt_runtime")
+            if runtime is None:
+                raise ValueError("exact HLT feedback loader lacks runtime normalization")
+            model.configure_exact_hlt_runtime(**runtime)
+        initialization_lineage = _initialize_from_locked_auxiliary(
+            model,
+            row,
+            root=args.campaign_root,
+            lock=lock,
+            campaign=campaign,
+        )
         deployed_ledger = feedback_model_flop_ledger(model)
         deployed_flops = float(deployed_ledger["deployed_total_flops"])
         deployed_parameters = exact_trainable_parameter_count(model)
@@ -423,7 +466,10 @@ def main(argv: list[str] | None = None) -> int:
             component_group_ids=loaded["component_group_ids"],
             stage_e_plan_sha256=plan["content_hash"],
             campaign_spec_sha256=campaign["content_hash"],
-            lineage_hashes=loaded["lineage_hashes"],
+            lineage_hashes={
+                **loaded["lineage_hashes"],
+                **initialization_lineage,
+            },
             protocol=protocol,
             source=campaign["source"],
             deployed_analytical_flops=deployed_flops,
@@ -502,9 +548,19 @@ def main(argv: list[str] | None = None) -> int:
         try_finalize_row_wave,
     )
 
-    kind = "SCIENTIFIC" if row["row_kind"] == "SCIENTIFIC" else "CONTROL"
+    kind = (
+        "SCIENTIFIC"
+        if row["row_kind"] in {"SCIENTIFIC", "REFERENCE_BASELINE"}
+        else "CONTROL"
+    )
     expected = [
-        item for item in plan["all_rows"] if item["row_kind"] == kind
+        item
+        for item in plan["all_rows"]
+        if (
+            item["row_kind"] in {"SCIENTIFIC", "REFERENCE_BASELINE"}
+            if kind == "SCIENTIFIC"
+            else item["row_kind"] == "CONTROL"
+        )
     ]
     wave = try_finalize_row_wave(
         wave_id=f"stage_e_{kind.lower()}",

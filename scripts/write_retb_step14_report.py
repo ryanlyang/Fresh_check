@@ -45,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--locked-scale-finalists", required=True, type=Path)
     parser.add_argument("--execution-lock", required=True, type=Path)
     parser.add_argument("--final-evaluation", required=True, type=Path)
+    parser.add_argument("--semantic-controls", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -66,9 +67,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.final_evaluation,
         expected_contract=FINAL_TEST_EVALUATION_CONTRACT,
     )
+    semantic = load_hashed_json(
+        args.semantic_controls,
+        expected_contract="retb_stage_k_semantic_controls_bundle_v5",
+    )
     if any(
         row.get("source") != campaign.get("source")
-        for row in (scale, finalists, execution, final)
+        for row in (scale, finalists, execution, final, semantic)
     ):
         raise ValueError("Stage-M/N report source differs")
     artifact, markdown = build_stage_mn_report(
@@ -76,6 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         locked_scale_finalists=finalists,
         execution_lock=execution,
         final_evaluation=final,
+        semantic_controls=semantic,
         source_snapshot=source_snapshot(REPO_ROOT),
     )
     result = {

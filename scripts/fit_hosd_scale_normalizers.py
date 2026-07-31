@@ -22,6 +22,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     SCALE_INPUT_COMPLETION_CONTRACT,
     SCALE_NORMALIZER_COMPLETION_CONTRACT,
     SCALE_TREE_WAVE_COMPLETION_CONTRACT,
+    AuthenticatedTreeSplit,
+    load_materialized_input_view,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -41,7 +43,6 @@ from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa
 from teacher_logit_reco.relation_expert_token_bridge.stage_a import (  # noqa: E402
     bind_fitted_normalizer,
     bind_fitted_region_normalizer,
-    load_authenticated_tree_selection,
 )
 from teacher_logit_reco.relational_part import (  # noqa: E402
     fit_region_normalization,
@@ -53,17 +54,15 @@ from teacher_logit_reco.relational_part.normalization import (  # noqa: E402
 )
 
 
-def _load_view(path: Path) -> tuple[np.ndarray, np.ndarray, list[str], dict]:
+def _load_view(path: Path) -> tuple[np.ndarray, np.ndarray, Sequence[str], dict]:
     manifest = load_hashed_json(
         path.with_suffix(path.suffix + ".json"),
         expected_contract=INPUT_VIEW_MANIFEST_CONTRACT,
     )
-    with np.load(path, allow_pickle=False) as payload:
-        if not {"identity", "raw_tokens", "mask"}.issubset(payload.files):
-            raise ValueError("scale-normalizer view fields differ")
-        identities = [str(value) for value in payload["identity"].tolist()]
-        tokens = np.asarray(payload["raw_tokens"], dtype=np.float32)
-        mask = np.asarray(payload["mask"], dtype=bool)
+    arrays, _ = load_materialized_input_view(path)
+    identities = arrays["identities"]
+    tokens = arrays["tokens"]
+    mask = arrays["mask"]
     if (
         len(identities) != int(manifest["identity_count"])
         or tokens.shape != (len(identities), 128, 14)
@@ -187,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         != input_completion["content_hash"]
     ):
         raise ValueError("Stage-J tree/input completion lineage differs")
+    if tree_completion.get("tree_resource_sha256") != tree_resource["content_hash"]:
+        raise ValueError("Stage-J active tree resource differs from tree wave")
     scale_manifest_sha = require_sha256(
         input_completion["scale_train_manifest_sha256"],
         name="scale_train_manifest_sha256",
@@ -258,14 +259,19 @@ def main(argv: list[str] | None = None) -> int:
         hlt_profile=hlt_profile,
         snapshot=snapshot,
     )
-    offline_trees, offline_tree_manifest = load_authenticated_tree_selection(
-        root
-        / "scale_up"
-        / "trees"
-        / "offline"
-        / "scale_train_exclusive_ca_v1",
-        offline_selected_ids,
+    offline_tree_split = AuthenticatedTreeSplit(
+        root / "scale_up" / "trees" / "offline" / "scale_train_exclusive_ca_v1",
+        expected_identities=offline_ids,
+        expected_parents={
+            "hlt_content_sha256": offline_view["npz_sha256"],
+            "tree_resource_sha256": tree_resource["content_hash"],
+            "backend_manifest_sha256": tree_completion["backend_manifest_sha256"],
+        },
     )
+    offline_trees = offline_tree_split.load_event_rows(
+        selected, expected_identities=offline_selected_ids
+    )
+    offline_tree_manifest = offline_tree_split.manifest
     offline_region_raw = fit_region_normalization(
         offline_tokens,
         offline_mask,
@@ -286,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     group_limit = max(1, NORMALIZATION_JET_LIMIT // 4)
-    base_ids: list[str] | None = None
+    base_ids: Sequence[str] | None = None
     hlt_token_rows = []
     hlt_mask_rows = []
     hlt_view_hashes = []
@@ -306,15 +312,24 @@ def main(argv: list[str] | None = None) -> int:
             selected_base_ids = [
                 identities[int(index)] for index in selected_indices
             ]
-        elif identities != base_ids:
+        elif not np.array_equal(identities, base_ids):
             raise ValueError("Stage-J HLT replica identities differ")
         hlt_token_rows.append(tokens[selected_indices])
         hlt_mask_rows.append(mask[selected_indices])
         hlt_view_hashes.append(view["npz_sha256"])
-        trees, tree_manifest = load_authenticated_tree_selection(
+        tree_split = AuthenticatedTreeSplit(
             root / "scale_up" / "trees" / "hlt" / f"replica_{replica}",
-            selected_base_ids,
+            expected_identities=identities,
+            expected_parents={
+                "hlt_content_sha256": view["npz_sha256"],
+                "tree_resource_sha256": tree_resource["content_hash"],
+                "backend_manifest_sha256": tree_completion["backend_manifest_sha256"],
+            },
         )
+        trees = tree_split.load_event_rows(
+            selected_indices, expected_identities=selected_base_ids
+        )
+        tree_manifest = tree_split.manifest
         hlt_trees_by_replica.append(trees)
         hlt_tree_hashes.append(tree_manifest["content_hash"])
     if base_ids is None or selected_base_ids is None:

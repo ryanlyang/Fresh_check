@@ -43,6 +43,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     build_stage_d_loader_manifest,
     component_seed,
     export_deployable_graph,
+    exact_trainable_parameter_count,
+    initialize_feedback_from_auxiliary_checkpoint,
     load_and_validate_campaign,
     load_combination_loaders,
     NATIVE_RELATION_TARGET_CONTRACT,
@@ -118,6 +120,35 @@ def _merge_lineage(*mappings):
     return output
 
 
+def _required_scale_resources(definition):
+    kind = str(definition["graph_kind"])
+    target_ids = set()
+    if kind in {"AUXILIARY", "FEEDBACK"}:
+        target_ids.add(str(definition["row"]["target_id"]))
+    elif kind == "COMBINATION":
+        target_ids.update(
+            str(member["target_id"])
+            for member in definition["graph"]["members"]
+        )
+    baseline_id = str(definition.get("baseline_id", ""))
+    return {
+        "trees": "T_HLT_REGION_PAIR_8" in target_ids,
+        "targets": bool(target_ids),
+        "teacher_outputs": baseline_id in {
+            "H_KD_LOGIT_O_BASE",
+            "H_KD_LOGIT_O_FULLREL",
+        },
+        "native_relations": (
+            baseline_id == "H_NATIVE_REL_AUX"
+            or (
+                kind == "COMBINATION"
+                and definition["graph"].get("native_relation_auxiliary")
+                is not None
+            )
+        ),
+    }
+
+
 def _teacher_logits_npz(root: Path, teacher_id: str, labels_path: Path) -> Path:
     from teacher_logit_reco.hlt_offline_structure_distillation import load_target_cache
 
@@ -182,6 +213,7 @@ def _replace_statistics(target, definition):
 
 def _scale_member_manifest(
     *,
+    root: Path,
     base_path: Path,
     row,
     completion,
@@ -214,11 +246,27 @@ def _scale_member_manifest(
         "target": scale_target,
     }
     if scale_trees:
+        tree_completion = load_hashed_json(
+            root / "scale_up" / "trees" / "completion.json"
+        )
         scale_definition["tree_caches"] = {
             str(key): str(value.resolve()) for key, value in sorted(scale_trees.items())
         }
+        scale_definition["tree_expected_parents"] = {
+            str(key): {
+                "hlt_content_sha256": load_hashed_json(
+                    value.with_suffix(value.suffix + ".json")
+                )["npz_sha256"],
+                "tree_resource_sha256": tree_completion["tree_resource_sha256"],
+                "backend_manifest_sha256": tree_completion[
+                    "backend_manifest_sha256"
+                ],
+            }
+            for key, value in sorted(scale_caches.items())
+        }
     elif "tree_caches" in scale_definition:
         scale_definition.pop("tree_caches")
+        scale_definition.pop("tree_expected_parents", None)
     definitions = {
         "scale_train": scale_definition,
         "val_stop": {
@@ -327,6 +375,7 @@ def _load_single(
         root / "scale_up" / "execution_plan.json"
     ), source=campaign["source"])
     path = _scale_member_manifest(
+        root=root,
         base_path=base_path,
         row=row,
         completion=completion,
@@ -379,6 +428,7 @@ def _load_combination(
         )
         path = run / "members" / f"{row['target_id']}.json"
         _scale_member_manifest(
+            root=root,
             base_path=_selected_loader_path(loader_root, member),
             row=row,
             completion=completion,
@@ -486,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(matches) != 1:
         raise ValueError("scale graph row is absent or duplicated")
     definition = dict(matches[0]["graph_definition"])
+    required_resources = _required_scale_resources(definition)
     if args.dry_run:
         print(json.dumps({"graph_id": args.graph_id, "seed": args.seed, "executed": False}))
         return 0
@@ -500,38 +551,77 @@ def main(argv: list[str] | None = None) -> int:
         name="--design-confirm-cache",
         required_replicas={0},
     )
-    scale_trees = _mapping(
-        args.scale_train_tree,
-        name="--scale-train-tree",
-        required_replicas=set(range(4)),
-    ) if args.scale_train_tree else {}
+    scale_trees = {}
+    if required_resources["trees"]:
+        scale_trees = (
+            _mapping(
+                args.scale_train_tree,
+                name="--scale-train-tree",
+                required_replicas=set(range(4)),
+            )
+            if args.scale_train_tree
+            else {
+                replica: root / "scale_up" / "trees" / "hlt" / f"replica_{replica}"
+                for replica in range(4)
+            }
+        )
+    if required_resources["trees"] and not scale_trees:
+        raise ValueError("scale REGION graph lacks its tree resources")
     explicit_native = (
         _mapping(
             args.scale_native_relation,
             name="--scale-native-relation",
             required_replicas=set(range(4)),
         )
-        if args.scale_native_relation
+        if args.scale_native_relation and required_resources["native_relations"]
+        else None
+    )
+    design_confirm_native_relation = (
+        args.design_confirm_native_relation
+        if args.design_confirm_native_relation is not None
+        else (
+            root
+            / "targets"
+            / "native_relations"
+            / "design_confirm"
+            / "replica_0.npz"
+        )
+        if required_resources["native_relations"]
         else None
     )
     common_lineage = {"scale_execution_plan": plan["content_hash"]}
-    for key, relative in (
-        ("scale_input_completion", "scale_up/inputs/completion.json"),
-        ("scale_tree_completion", "scale_up/trees/completion.json"),
-        (
-            "scale_normalizer_completion",
-            "scale_up/normalization/completion.json",
-        ),
-        (
-            "scale_teacher_output_completion",
-            "scale_up/teacher_outputs/completion.json",
-        ),
-        ("scale_target_completion", "scale_up/target_completion.json"),
-        (
-            "scale_native_relation_completion",
-            "scale_up/targets/native_relations/completion.json",
-        ),
-    ):
+    required_completions = [
+        ("scale_input_completion", "scale_up/inputs/completion.json")
+    ]
+    if required_resources["trees"]:
+        required_completions.append(
+            ("scale_tree_completion", "scale_up/trees/completion.json")
+        )
+    if required_resources["targets"]:
+        required_completions.extend(
+            [
+                (
+                    "scale_normalizer_completion",
+                    "scale_up/normalization/completion.json",
+                ),
+                ("scale_target_completion", "scale_up/target_completion.json"),
+            ]
+        )
+    if required_resources["teacher_outputs"]:
+        required_completions.append(
+            (
+                "scale_teacher_output_completion",
+                "scale_up/teacher_outputs/completion.json",
+            )
+        )
+    if required_resources["native_relations"]:
+        required_completions.append(
+            (
+                "scale_native_relation_completion",
+                "scale_up/targets/native_relations/completion.json",
+            )
+        )
+    for key, relative in required_completions:
         artifact = load_hashed_json(root / relative)
         if artifact.get("source") != campaign["source"]:
             raise ValueError(f"scale graph {key} source differs")
@@ -554,9 +644,12 @@ def main(argv: list[str] | None = None) -> int:
             common_lineage[f"{role}_hlt_replica_{replica}"] = metadata[
                 "content_hash"
             ]
-    if args.design_confirm_native_relation is not None:
+    if (
+        required_resources["native_relations"]
+        and design_confirm_native_relation is not None
+    ):
         common_lineage["design_confirm_native_relation"] = _sha256_file(
-            args.design_confirm_native_relation
+            design_confirm_native_relation
         )
     registry = load_hashed_json(
         root / "registry" / "structure_target_registry.json"
@@ -675,11 +768,102 @@ def main(argv: list[str] | None = None) -> int:
             registry=registry,
             run=run,
         )
-        model = (
-            build_auxiliary_model(row, weaver_module=module)[0]
-            if kind == "AUXILIARY"
-            else build_feedback_model(row, weaver_module=module)
+        training_lineage = _merge_lineage(
+            common_lineage, loaded["lineage_hashes"]
         )
+        if kind == "AUXILIARY":
+            model = build_auxiliary_model(row, weaver_module=module)[0]
+        else:
+            # Scale feedback is a continuation experiment too: refit the
+            # locked A_t definition on scale_train, then add the registered
+            # feedback consumer for a second fixed 40-epoch phase.
+            auxiliary_row = {
+                **row,
+                "row_id": f"{row['row_id']}__SCALE_A_T",
+                "parameterization": row[
+                    "selected_auxiliary_parameterization"
+                ],
+                "auxiliary_weight": row["selected_auxiliary_weight"],
+                "row_kind": "SCIENTIFIC",
+                "selection_eligible": False,
+                "control": None,
+                "semantic_loss_enabled": True,
+                "head_component_seed": component_seed(
+                    args.seed,
+                    "scale_auxiliary_head",
+                    row["selected_auxiliary_row_id"],
+                ),
+                "resolved": True,
+            }
+            auxiliary_model = build_auxiliary_model(
+                auxiliary_row, weaver_module=module
+            )[0]
+            auxiliary_root = run / "auxiliary_initialization"
+            auxiliary_completion = train_stage_d_auxiliary(
+                model=auxiliary_model,
+                train_loader=loaded["train_loader"],
+                val_stop_loader=loaded["val_stop_loader"],
+                design_select_loader=loaded["design_confirm_loader"],
+                output_dir=auxiliary_root,
+                row=auxiliary_row,
+                component_group_ids=loaded["component_group_ids"],
+                stage_d_plan_sha256=plan["content_hash"],
+                campaign_spec_sha256=campaign["content_hash"],
+                lineage_hashes=training_lineage,
+                protocol=protocol,
+                source=campaign["source"],
+                deployed_analytical_flops=float(
+                    auxiliary_model_flop_ledger(auxiliary_model)[
+                        "deployed_total_flops"
+                    ]
+                ),
+                deployed_parameter_count=exact_trainable_parameter_count(
+                    auxiliary_model.classifier
+                ),
+                device=device,
+                checkpoint_contract=SCALE_TRAINING_CHECKPOINT_CONTRACT,
+                completion_contract=SCALE_TRAINING_COMPLETION_CONTRACT,
+                prediction_contract=SCALE_TRAINING_PREDICTION_CONTRACT,
+                plan_hash_field="scale_execution_plan_sha256",
+                stage_label="Stage-J-scale-A_t",
+                completion_filename="training_completion.json",
+                curves_contract="hosd_scale_auxiliary_initialization_curves_v1",
+                evaluation_split="design_confirm",
+            )
+            auxiliary_result = load_hashed_json(
+                auxiliary_root / "design_confirm_result.json",
+                expected_contract=SCALE_TRAINING_PREDICTION_CONTRACT,
+            )
+            row = {
+                **row,
+                "selected_auxiliary_row_id": auxiliary_row["row_id"],
+                "selected_auxiliary_result_sha256": auxiliary_result[
+                    "content_hash"
+                ],
+            }
+            model = build_feedback_model(row, weaver_module=module)
+            if row.get("control") == "EXACT_HLT":
+                runtime = loaded.get("exact_hlt_runtime")
+                if runtime is None:
+                    raise ValueError("exact HLT scale row lacks runtime normalization")
+                model.configure_exact_hlt_runtime(**runtime)
+            initialization = initialize_feedback_from_auxiliary_checkpoint(
+                model,
+                row,
+                checkpoint_path=auxiliary_root / "best_model_val.pt",
+                completion=auxiliary_completion,
+                result=auxiliary_result,
+                stage_d_plan_sha256=plan["content_hash"],
+                campaign_spec_sha256=campaign["content_hash"],
+                source=campaign["source"],
+                checkpoint_contract=SCALE_TRAINING_CHECKPOINT_CONTRACT,
+                completion_contract=SCALE_TRAINING_COMPLETION_CONTRACT,
+                prediction_contract=SCALE_TRAINING_PREDICTION_CONTRACT,
+                plan_hash_field="scale_execution_plan_sha256",
+            )
+            training_lineage = _merge_lineage(
+                training_lineage, initialization
+            )
         completion = train_stage_d_auxiliary(
             model=model,
             train_loader=loaded["train_loader"],
@@ -690,13 +874,18 @@ def main(argv: list[str] | None = None) -> int:
             component_group_ids=loaded["component_group_ids"],
             stage_d_plan_sha256=plan["content_hash"],
             campaign_spec_sha256=campaign["content_hash"],
-            lineage_hashes=_merge_lineage(
-                common_lineage, loaded["lineage_hashes"]
-            ),
+            lineage_hashes=training_lineage,
             protocol=protocol,
             source=campaign["source"],
             deployed_analytical_flops=flops,
             deployed_parameter_count=parameters,
+            deployed_operation_profile=(
+                feedback_model_flop_ledger(model).get(
+                    "exact_hlt_builder_profile"
+                )
+                if kind == "FEEDBACK"
+                else None
+            ),
             device=device,
             checkpoint_contract=SCALE_TRAINING_CHECKPOINT_CONTRACT,
             completion_contract=SCALE_TRAINING_COMPLETION_CONTRACT,
@@ -729,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
                 is not None
                 else None
             ),
-            design_confirm_native_relation=args.design_confirm_native_relation,
+            design_confirm_native_relation=design_confirm_native_relation,
             plan=plan,
         )
         model = build_combination_model(graph, seed=args.seed, weaver_module=module)
@@ -791,6 +980,13 @@ def main(argv: list[str] | None = None) -> int:
         source=campaign["source"],
         weaver_module=module,
         analytical_inference_flops_batch1_n128=int(flops),
+        deployed_operation_profile=(
+            feedback_model_flop_ledger(model).get(
+                "exact_hlt_builder_profile"
+            )
+            if kind == "FEEDBACK"
+            else None
+        ),
     )
     result = build_scale_row_result(
         scale_plan=plan,
@@ -833,6 +1029,13 @@ def main(argv: list[str] | None = None) -> int:
                 "val_stop": int(flops),
                 "design_confirm": int(flops),
             }
+        ),
+        deployed_operation_profile=(
+            feedback_model_flop_ledger(model).get(
+                "exact_hlt_builder_profile"
+            )
+            if kind == "FEEDBACK"
+            else None
         ),
         source=campaign["source"],
     )

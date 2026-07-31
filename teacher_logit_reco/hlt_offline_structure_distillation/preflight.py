@@ -18,6 +18,17 @@ from .contracts import (
 )
 
 
+REQUIRED_SCALE_MEMORY_PROJECTION_NODES = frozenset(
+    {
+        "scale_input_prepare",
+        "scale_tree_build",
+        "scale_target_build",
+        "scale_teacher_target_inference",
+        "scale_graph_train",
+    }
+)
+
+
 def run_resource_preflight(
     *,
     campaign_root: str | Path,
@@ -43,6 +54,38 @@ def run_resource_preflight(
         )
         if resource_measurements.get("source") != dict(source):
             raise ValueError("resource measurement source differs")
+        projections = resource_measurements.get(
+            "scale_resident_memory_projections"
+        )
+        if (
+            not isinstance(projections, Mapping)
+            or set(projections) != set(REQUIRED_SCALE_MEMORY_PROJECTION_NODES)
+        ):
+            raise ValueError("production preflight lacks scale-node pilots")
+        for node_id, projection in projections.items():
+            expected_unit_events = {
+                "scale_input_prepare": 1,
+                "scale_tree_build": 10_000,
+                "scale_target_build": 2_048,
+                "scale_graph_train": 10_000,
+            }[node_id]
+            if (
+                not isinstance(projection, Mapping)
+                or projection.get("pilot_node_id") != node_id
+                or projection.get("representative_real_task_completed")
+                is not True
+                or projection.get("within_registered_tigris_limit") is not True
+                or int(projection.get("projected_resident_bytes", 0)) <= 0
+                or int(projection.get("projected_resident_bytes", 0))
+                > int(projection.get("registered_tigris_limit_bytes", 0))
+                or int(
+                    projection.get("production_resident_unit_events", 0)
+                )
+                != expected_unit_events
+            ):
+                raise ValueError(
+                    f"production preflight scale pilot differs: {node_id}"
+                )
     elif resource_measurements is not None:
         raise ValueError("miniature preflight cannot use production measurements")
     root = Path(campaign_root).resolve()
@@ -91,7 +134,7 @@ def run_resource_preflight(
     return with_content_hash(
         {
             "contract": RESOURCE_PREFLIGHT_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 7,
             "source": dict(source),
             "profile": profile,
             "storage_measurements_sha256": storage_measurements[
@@ -114,6 +157,8 @@ def run_resource_preflight(
                         "checkpoint_bytes",
                         "export_bytes",
                         "requests_by_class",
+                        "scale_resident_layout_ledger",
+                        "scale_resident_memory_projections",
                     )
                 }
             ),

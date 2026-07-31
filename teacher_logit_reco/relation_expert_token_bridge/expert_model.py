@@ -380,6 +380,22 @@ class RetbParticleEncoder(torch.nn.Module if torch is not None else object):
                     :, source[:, None], destination[None, :]
                 ]
             relation = transformed
+        elif self._semantic_relation_transform == "directional_endpoint_swap":
+            relation = relation.transpose(-2, -1).contiguous()
+        elif (
+            self._semantic_relation_transform
+            == "wrong_event_matched_multiplicity"
+        ):
+            counts = mask[:, 0].bool().sum(dim=1)
+            permutation = _require_torch().empty_like(counts)
+            for count in counts.unique(sorted=True):
+                group = (counts == count).nonzero(as_tuple=False).flatten()
+                if int(group.numel()) < 2:
+                    raise ValueError(
+                        "matched-multiplicity relation control has a singleton group"
+                    )
+                permutation[group] = group.roll(1)
+            relation = relation[permutation]
         elif self._semantic_relation_transform != "active":
             raise RuntimeError("unknown evaluation relation transform")
         return details["base4"], relation
@@ -387,7 +403,13 @@ class RetbParticleEncoder(torch.nn.Module if torch is not None else object):
     def set_semantic_relation_transform(self, mode: str) -> None:
         """Set a parameter-free evaluation-only relation perturbation."""
 
-        if mode not in {"active", "zero", "within_jet_cyclic"}:
+        if mode not in {
+            "active",
+            "zero",
+            "within_jet_cyclic",
+            "wrong_event_matched_multiplicity",
+            "directional_endpoint_swap",
+        }:
             raise ValueError("semantic relation transform is unregistered")
         if self.relation_family is None and mode != "active":
             raise ValueError("BASE4 has no relation family to perturb")

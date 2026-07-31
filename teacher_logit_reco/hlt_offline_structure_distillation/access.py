@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping
+
+import numpy as np
 
 from .contracts import REGISTRY_CONTRACT, validate_content_hash, with_content_hash
 
@@ -104,7 +107,11 @@ ROLE_CAPABILITIES: dict[str, dict[str, tuple[str, ...]]] = {
         "write": ("final_test_prepared_inputs",),
     },
     "final_inference": {
-        "read": ("final_test_prepared_inputs", "final_test_execution_lock"),
+        "read": (
+            "final_test_prepared_inputs",
+            "final_test_execution_lock",
+            "postlock_final_test_identity_labels",
+        ),
         "write": ("final_test_predictions",),
     },
     "label_auditor": {
@@ -134,7 +141,7 @@ def build_access_role_registry(*, source: Mapping[str, Any]) -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "registry_id": "access_role_registry",
             "roles": {
                 role: {
@@ -169,6 +176,28 @@ def authorize_access(
         )
 
 
+def load_authorized_identity_labels(
+    path: str | Path,
+    *,
+    worker_role: str,
+    requested_resource: str,
+) -> tuple[tuple[str, ...], np.ndarray]:
+    """Typed, capability-checked loader for an identity/label manifest."""
+
+    authorize_access(
+        worker_role=worker_role,
+        requested_resource=requested_resource,
+    )
+    with np.load(Path(path), allow_pickle=False) as payload:
+        if set(payload.files) != {"identities", "labels"}:
+            raise ValueError("authorized identity/label artifact differs")
+        identities = tuple(str(value) for value in payload["identities"].tolist())
+        labels = np.asarray(payload["labels"], dtype=np.int64)
+    if len(identities) != len(labels) or len(identities) != len(set(identities)):
+        raise ValueError("authorized identity/label population differs")
+    return identities, labels
+
+
 def validate_access_role_registry(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(payload, expected_contract=REGISTRY_CONTRACT)
     if payload.get("registry_id") != "access_role_registry":
@@ -184,5 +213,6 @@ __all__ = [
     "ROLE_CAPABILITIES",
     "authorize_access",
     "build_access_role_registry",
+    "load_authorized_identity_labels",
     "validate_access_role_registry",
 ]

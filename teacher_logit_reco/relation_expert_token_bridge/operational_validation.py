@@ -1222,7 +1222,7 @@ def build_full_submission_authorization(
             "synthetic_control_plane_execution_is_sufficient"
         )
         is not False
-        or invocation_audit.get("manifest_target_count") != 48
+        or invocation_audit.get("manifest_target_count") != 63
         or invocation_audit.get(
             "bootstrap_prepublished_target_count"
         )
@@ -1230,7 +1230,7 @@ def build_full_submission_authorization(
         or invocation_audit.get(
             "downstream_plan_factory_target_count"
         )
-        != 35
+        != 50
         or invocation_audit.get(
             "missing_plan_factory_registration_count"
         )
@@ -1238,7 +1238,7 @@ def build_full_submission_authorization(
         or invocation_audit.get(
             "execution_complete_producer_count"
         )
-        != 48
+        != 63
         or invocation_audit.get(
             "missing_execution_complete_producer_count"
         )

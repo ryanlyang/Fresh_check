@@ -45,7 +45,7 @@ from .production import (
 MANIFEST_MATERIALIZATION_PLAN_CONTRACT = (
     "retb_manifest_materialization_plan_v2"
 )
-MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v2"
+MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v3"
 
 
 def manifest_plan_path(
@@ -164,7 +164,7 @@ def build_manifest_materialization_plan(
     return with_content_hash(
         {
             "contract": MANIFEST_MATERIALIZATION_PLAN_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_spec_sha256": campaign_sha,
             "production_graph_sha256": graph_sha,
             "plan_factory_registry_sha256": factory_registry[
@@ -296,24 +296,61 @@ def materialize_downstream_manifests(
             target_node_id=target,
         )
         if existing is not None:
-            publications[target] = {"status": "already_present"}
-            manifest_hashes[target] = existing["content_hash"]
             existing_plan_path = manifest_plan_path(
                 root, target_node_id=target
             )
-            if existing_plan_path.is_file():
-                existing_plan = load_hashed_json(
-                    existing_plan_path,
-                    expected_contract=MANIFEST_MATERIALIZATION_PLAN_CONTRACT,
+            if not existing_plan_path.is_file():
+                raise FileNotFoundError(
+                    f"existing non-bootstrap manifest {target} lacks its "
+                    f"authenticated producer plan: {existing_plan_path}"
                 )
-                validate_manifest_materialization_plan(
-                    existing_plan,
-                    campaign=campaign,
-                    production_graph=production_graph,
+            existing_plan = load_hashed_json(
+                existing_plan_path,
+                expected_contract=MANIFEST_MATERIALIZATION_PLAN_CONTRACT,
+            )
+            validate_manifest_materialization_plan(
+                existing_plan,
+                campaign=campaign,
+                production_graph=production_graph,
+            )
+            if (
+                existing_plan["producer_node_id"] != producer_node_id
+                or existing_plan["target_node_id"] != target
+            ):
+                raise ValueError("existing manifest producer plan differs")
+            from .early_continuation import _producer_completion
+
+            _, producer_completion = _producer_completion(
+                root, producer_node_id=producer_node_id
+            )
+            expected_completion = producer_completion["content_hash"]
+            if any(
+                row.get("input_artifact_hashes", {}).get(
+                    "producer_completion"
                 )
-                plan_hashes[target] = existing_plan["content_hash"]
-            else:
-                plan_hashes[target] = None
+                != expected_completion
+                for row in existing_plan["rows"]
+            ):
+                raise ValueError(
+                    "existing manifest producer completion has drifted"
+                )
+            if existing_plan["dynamic_continuation"]:
+                trigger_path = root / existing_plan["trigger_artifact_path"]
+                trigger = load_hashed_json(trigger_path)
+                if (
+                    trigger["content_hash"]
+                    != existing_plan["trigger_artifact_sha256"]
+                ):
+                    raise ValueError(
+                        "existing manifest producer trigger has drifted"
+                    )
+            publications[target] = {
+                "status": "already_present",
+                "producer_plan_revalidated": True,
+                "producer_completion_revalidated": True,
+            }
+            manifest_hashes[target] = existing["content_hash"]
+            plan_hashes[target] = existing_plan["content_hash"]
             continue
         plan_path = manifest_plan_path(root, target_node_id=target)
         if not plan_path.is_file():
@@ -330,6 +367,20 @@ def materialize_downstream_manifests(
         )
         if plan["producer_node_id"] != producer_node_id:
             raise ValueError("manifest plan producer differs")
+        from .early_continuation import _producer_completion
+
+        _, producer_completion = _producer_completion(
+            root, producer_node_id=producer_node_id
+        )
+        expected_completion = producer_completion["content_hash"]
+        if any(
+            row.get("input_artifact_hashes", {}).get(
+                "producer_completion"
+            )
+            != expected_completion
+            for row in plan["rows"]
+        ):
+            raise ValueError("manifest plan producer completion differs")
         rows = plan["rows"]
         trigger = None
         if plan["dynamic_continuation"]:
@@ -426,7 +477,7 @@ def materialize_downstream_manifests(
     receipt = with_content_hash(
         {
             "contract": MANIFEST_PRODUCER_RECEIPT_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": production_graph["content_hash"],
             "producer_node_id": str(producer_node_id),
@@ -434,6 +485,7 @@ def materialize_downstream_manifests(
             "manifest_hashes": manifest_hashes,
             "materialization_plan_hashes": plan_hashes,
             "all_owned_manifests_present_and_valid": True,
+            "all_reused_manifests_require_authenticated_producer_plans": True,
             "row_execution_attestation_pending": True,
             "receipt_is_not_execution_completion_evidence": True,
             "scientific_performance_used_as_gate": False,

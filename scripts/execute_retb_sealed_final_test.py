@@ -19,6 +19,8 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     bind_source,
     load_hashed_json,
+    require_sha256,
+    with_content_hash,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.final_seal import (  # noqa: E402
@@ -26,6 +28,7 @@ from teacher_logit_reco.relation_expert_token_bridge.final_seal import (  # noqa
     build_final_test_execution_claim,
     build_sealed_final_test_evaluation,
     publish_final_test_evaluation,
+    validate_final_test_execution_claim,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
     source_snapshot,
@@ -34,16 +37,25 @@ from teacher_logit_reco.relation_expert_token_bridge.scale_execution import (  #
     execute_plan_steps,
 )
 from teacher_logit_reco.relation_expert_token_bridge.stage_n_execution import (  # noqa: E402
+    FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
     FINAL_TEST_LABEL_MANIFEST_CONTRACT,
     SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT,
     build_final_test_prediction,
     validate_final_labels_manifest,
+    validate_final_test_inference_attestation,
     validate_sealed_final_test_execution_plan,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
 )
+
+
+def _safe_row_id(value: object) -> str:
+    return "".join(
+        item if item.isalnum() or item in {"-", "_"} else "_"
+        for item in str(value)
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -81,16 +93,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if lock.get("source") != campaign["source"]:
         raise ValueError("sealed final-test source differs")
-    preexisting = [
-        path
-        for step in plan["steps"]
-        for path in step["expected_outputs"]
-        if Path(path).exists()
-    ]
-    if preexisting:
-        raise FileExistsError(
-            "sealed final-test execution outputs predate the execution claim"
-        )
     claim = bind_source(
         build_final_test_execution_claim(
             execution_lock=lock,
@@ -98,12 +100,100 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         source_snapshot=source_snapshot(REPO_ROOT),
     )
-    claim_publication = write_immutable_json(
-        args.output_dir / "retb_final_test_execution_claim.json", claim
-    )
-    if claim_publication["status"] != "published":
-        raise RuntimeError(
-            "final-test execution was already claimed; refusing repeat access"
+    claim_path = args.output_dir / "retb_final_test_execution_claim.json"
+    if claim_path.is_file():
+        existing_claim = load_hashed_json(
+            claim_path, expected_contract=claim["contract"]
+        )
+        validate_final_test_execution_claim(
+            existing_claim, execution_lock=lock
+        )
+        if existing_claim != claim:
+            raise ValueError("existing final-test execution claim differs")
+        claim = existing_claim
+        claim_publication = {
+            "status": "already_present",
+            "path": str(claim_path.resolve()),
+            "content_hash": claim["content_hash"],
+        }
+    else:
+        claim_publication = write_immutable_json(claim_path, claim)
+        if claim_publication["status"] != "published":
+            raise RuntimeError("final-test execution claim publication failed")
+    for record in plan["prediction_rows"]:
+        completion_path = (
+            args.output_dir
+            / "row_completions"
+            / f"{_safe_row_id(record['row_id'])}.json"
+        )
+        if not completion_path.is_file():
+            continue
+        completion = load_hashed_json(
+            completion_path,
+            expected_contract="retb_final_test_row_completion_v3",
+        )
+        npz_path = Path(record["inference_output_npz"])
+        attestation_path = Path(record["inference_attestation_output"])
+        manifest_path = Path(record["prediction_manifest_output"])
+        attestation = load_hashed_json(
+            attestation_path,
+            expected_contract=FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
+        )
+        validate_final_test_inference_attestation(
+            attestation,
+            row=record,
+            execution_lock_sha256=lock["content_hash"],
+            execution_claim_sha256=claim["content_hash"],
+            execution_plan_sha256=plan["content_hash"],
+            locked_final_test_hlt_inputs_sha256=lock[
+                "final_input_hashes"
+            ]["final_test_HLT_inputs"],
+            npz_path=npz_path,
+            expected_source=campaign["source"],
+        )
+        if (
+            completion.get("execution_claim_sha256")
+            != claim["content_hash"]
+            or completion.get("execution_plan_sha256")
+            != plan["content_hash"]
+            or completion.get("row_id") != record["row_id"]
+            or not npz_path.is_file()
+            or not manifest_path.is_file()
+            or hashlib.sha256(npz_path.read_bytes()).hexdigest()
+            != completion.get("inference_output_npz_sha256")
+            or load_hashed_json(manifest_path)["content_hash"]
+            != completion.get("prediction_manifest_sha256")
+            or attestation["content_hash"]
+            != completion.get("inference_attestation_sha256")
+        ):
+            raise ValueError(
+                "completed final-test row cannot be reexecuted after drift"
+            )
+    # A row without a completion may still have finished inference before an
+    # outer-worker interruption.  Only a valid claim/plan/checkpoint-bound
+    # attestation allows execute_plan_steps to reuse that NPZ.  A bare NPZ
+    # deliberately leaves the attestation output absent and therefore reruns
+    # the inference command, whose immutable publication verifies the bytes.
+    for record in plan["prediction_rows"]:
+        npz_path = Path(record["inference_output_npz"])
+        attestation_path = Path(record["inference_attestation_output"])
+        if not attestation_path.is_file():
+            continue
+        attestation = load_hashed_json(
+            attestation_path,
+            expected_contract=FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
+        )
+        validate_final_test_inference_attestation(
+            attestation,
+            row=record,
+            execution_lock_sha256=lock["content_hash"],
+            execution_claim_sha256=claim["content_hash"],
+            execution_plan_sha256=plan["content_hash"],
+            locked_final_test_hlt_inputs_sha256=lock[
+                "final_input_hashes"
+            ]["final_test_HLT_inputs"],
+            npz_path=npz_path,
+            expected_source=campaign["source"],
         )
     receipts = execute_plan_steps(
         plan["steps"],
@@ -135,11 +225,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels = np.asarray(payload["labels"])
     prediction_rows = []
     prediction_publications = []
+    row_completion_publications = []
     for record in plan["prediction_rows"]:
         npz_path = Path(record["inference_output_npz"])
         if not npz_path.is_file() or npz_path.is_symlink():
             raise FileNotFoundError("final-test inference output is absent")
         encoded = npz_path.read_bytes()
+        attestation = load_hashed_json(
+            record["inference_attestation_output"],
+            expected_contract=FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT,
+        )
+        validate_final_test_inference_attestation(
+            attestation,
+            row=record,
+            execution_lock_sha256=lock["content_hash"],
+            execution_claim_sha256=claim["content_hash"],
+            execution_plan_sha256=plan["content_hash"],
+            locked_final_test_hlt_inputs_sha256=lock[
+                "final_input_hashes"
+            ]["final_test_HLT_inputs"],
+            npz_path=npz_path,
+            expected_source=campaign["source"],
+        )
         with np.load(npz_path, allow_pickle=False) as payload:
             if set(payload.files) != {
                 "identities",
@@ -164,10 +271,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             source_snapshot=source_snapshot(REPO_ROOT),
         )
+        prediction_manifest_path = Path(record["prediction_manifest_output"])
         prediction_publications.append(
-            write_immutable_json(
-                record["prediction_manifest_output"], prediction
+            write_immutable_json(prediction_manifest_path, prediction)
+        )
+        safe_row_id = _safe_row_id(record["row_id"])
+        completion = bind_source(
+            with_content_hash(
+                {
+                    "contract": "retb_final_test_row_completion_v3",
+                    "schema_version": 3,
+                    "row_id": str(record["row_id"]),
+                    "graph_id": str(record["graph_id"]),
+                    "pipeline_seed": int(record["pipeline_seed"]),
+                    "final_test_execution_lock_sha256": lock[
+                        "content_hash"
+                    ],
+                    "execution_claim_sha256": claim["content_hash"],
+                    "execution_plan_sha256": plan["content_hash"],
+                    "checkpoint_sha256": require_sha256(
+                        record["checkpoint_sha256"],
+                        name="checkpoint_sha256",
+                    ),
+                    "inference_output_npz_sha256": prediction[
+                        "npz_sha256"
+                    ],
+                    "inference_attestation_sha256": attestation[
+                        "content_hash"
+                    ],
+                    "prediction_manifest_sha256": prediction[
+                        "content_hash"
+                    ],
+                    "completed_row_must_not_be_reexecuted": True,
+                    "incomplete_other_rows_may_resume": True,
+                }
+            ),
+            source_snapshot=source_snapshot(REPO_ROOT),
+        )
+        completion_path = (
+            args.output_dir / "row_completions" / f"{safe_row_id}.json"
+        )
+        if completion_path.is_file():
+            existing_completion = load_hashed_json(
+                completion_path,
+                expected_contract="retb_final_test_row_completion_v3",
             )
+            if existing_completion != completion:
+                raise ValueError("final-test row completion differs")
+        row_completion_publications.append(
+            write_immutable_json(completion_path, completion)
         )
         prediction_rows.append(
             {
@@ -207,8 +359,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "execution_receipts": receipts,
                 "execution_claim_publication": claim_publication,
                 "prediction_publications": prediction_publications,
+                "row_completion_publications": row_completion_publications,
                 "evaluation_publication": publication,
                 "evaluation_count": 1,
+                "completed_rows_reused_without_inference": sum(
+                    1 for receipt in receipts if receipt["reused"]
+                ),
+                "incomplete_rows_resumable_under_same_claim": True,
                 "test_result_selected_replacement": False,
             },
             indent=2,

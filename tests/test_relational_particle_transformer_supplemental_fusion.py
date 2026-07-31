@@ -89,6 +89,9 @@ def test_fusion_groups_and_fail_closed_cli_contract_are_fixed() -> None:
         / "evaluate_relational_part_supplemental_fusion.py"
     ).read_text(encoding="utf-8")
     assert "validate_campaign_source" in source
+    assert "--allow-source-status-drift" in source
+    assert "supplemental fusion source commit differs from campaign" in source
+    assert '"official_campaign_workers_affected": False' in source
     assert "val_select replay differs" in source
     assert "load_region_tree_split" in source
     assert '"final_test_opened": False' in source

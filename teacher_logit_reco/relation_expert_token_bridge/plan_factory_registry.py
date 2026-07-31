@@ -14,7 +14,7 @@ from .contracts import validate_content_hash, with_content_hash
 
 
 MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT = (
-    "retb_manifest_plan_factory_registry_v8"
+    "retb_manifest_plan_factory_registry_v10"
 )
 MANIFEST_PLAN_PRODUCER_AUDIT_CONTRACT = (
     "retb_manifest_plan_producer_audit_v1"
@@ -86,8 +86,11 @@ _LATE_ALLOWED_WORKERS: dict[str, tuple[str, ...]] = {
     ),
     "semantic_controls": (
         "scripts/execute_retb_semantic_control_campaign.py",
+        "scripts/evaluate_retb_relation_predictor_semantics.py",
         "scripts/evaluate_retb_final_consumer_bypass_controls.py",
         "scripts/evaluate_retb_stage_i_substitutions.py",
+        "scripts/evaluate_retb_bias_scale_semantics.py",
+        "scripts/finalize_retb_semantic_control_campaign.py",
     ),
     "stage_l_graph_registration": (
         "scripts/execute_retb_stage_l_registration.py",
@@ -101,10 +104,31 @@ _LATE_ALLOWED_WORKERS: dict[str, tuple[str, ...]] = {
     "scale_shortlist_selector": (
         "scripts/select_retb_scale_shortlist.py",
     ),
+    "shortlisted_500k_control_training": (
+        "scripts/train_retb_scale_finalist_control.py",
+    ),
+    "shortlisted_500k_controls": (
+        "scripts/aggregate_retb_shortlisted_500k_controls.py",
+    ),
     "scale_refits": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_normalizers": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_teachers": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_offline_experts": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_targets": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_native": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_native_fusion": (
+        "scripts/execute_retb_scale_seed_refit.py",
+    ),
+    "scale_refit_predictors": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_calibrations": ("scripts/execute_retb_scale_seed_refit.py",),
     "scale_graph_training": (
         "scripts/execute_retb_scale_graph_pipeline.py",
     ),
+    "scale_joint_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_graph_datasets": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_refiner_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_final_consumer_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_graph_export": ("scripts/execute_retb_scale_graph_pipeline.py",),
     "scale_completion": ("scripts/aggregate_retb_scale_completion.py",),
 }
 

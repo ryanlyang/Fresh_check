@@ -4,9 +4,13 @@ from pathlib import Path
 import importlib.util
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (
+    AuthenticatedTreeSplit,
+    LoadedTargetCache,
+    fit_sharded_target_normalizer,
     build_campaign_monitor,
     build_full_authorization,
     build_miniature_acceptance,
@@ -24,11 +28,17 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     NODE_COORDINATE_LIMITS,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+    canonical_sha256,
     with_content_hash,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.node_runtime import (
     _row_scoped_arguments,
     resolve_node_argv,
+)
+from teacher_logit_reco.relational_part import (
+    build_reference_tree,
+    finalize_tree_split,
+    write_tree_shard,
 )
 
 
@@ -95,7 +105,18 @@ def _load_submit_module():
     return module
 
 
-def _plan(profile):
+def _load_resource_measurement_module():
+    path = REPO_ROOT / "scripts" / "measure_hosd_miniature_resources.py"
+    spec = importlib.util.spec_from_file_location(
+        "measure_hosd_miniature_resources", path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048):
     registry = build_stage_job_registry(source=SOURCE)
     files, directories = _runtime_bindings()
     runtime = build_runtime_manifest(
@@ -114,6 +135,66 @@ def _plan(profile):
         runtime_manifest=runtime,
         campaign_root="/authenticated/campaign",
     )
+    layout_ledger = with_content_hash(
+        {
+            "contract": "hosd_scale_resident_layout_ledger_v3",
+            "source_sha256": canonical_sha256(SOURCE),
+            "production_tree_shard_events": production_tree_unit,
+            "production_target_shard_events": production_target_unit,
+            "production_tree_shard_decoded_bytes_upper_bound": 1,
+            "production_target_shard_decoded_bytes_upper_bound": 1,
+            "test_layout": True,
+        }
+    )
+    projections = {}
+    for node_id in (
+        "scale_input_prepare",
+        "scale_tree_build",
+        "scale_target_build",
+        "scale_teacher_target_inference",
+        "scale_graph_train",
+    ):
+        population_model = node_id == "scale_input_prepare"
+        resource = "gpu" if node_id in {
+            "scale_graph_train", "scale_teacher_target_inference"
+        } else "cpu"
+        limit = (220 if resource == "gpu" else 192) * 1024**3
+        unit_bytes = 1024
+        fixed = 4096
+        projected = fixed + unit_bytes * (3_000_000 if population_model else 1)
+        projections[node_id] = with_content_hash(
+            {
+                "contract": "hosd_scale_resident_memory_projection_v4",
+                "pilot_node_id": node_id,
+                "pilot_job_id": "123",
+                "coordinate_type": f"test_{node_id}",
+                "resource_class": resource,
+                "source_sha256": canonical_sha256(SOURCE),
+                "layout_evidence_sha256": layout_ledger["content_hash"],
+                "fixed_resident_bytes": fixed,
+                "miniature_resident_unit_events": 7,
+                "miniature_resident_unit_bytes_upper_bound": unit_bytes,
+                "production_resident_unit_events": (
+                    1
+                    if node_id == "scale_input_prepare"
+                    else production_target_unit
+                    if node_id in {"scale_target_build", "scale_teacher_target_inference"}
+                    else production_tree_unit
+                ),
+                "production_resident_unit_bytes_upper_bound": unit_bytes,
+                "production_population": 3_000_000,
+                "projected_resident_bytes": projected,
+                "projection_model": (
+                    "fixed_plus_authenticated_per_event_population_v2"
+                    if population_model
+                    else "fixed_plus_authenticated_single_shard_v2"
+                ),
+                "loader_storage_contracts": ["hosd_npy_mmap_store_v2"],
+                "registered_tigris_limit_bytes": limit,
+                "within_registered_tigris_limit": True,
+                "representative_real_task_completed": True,
+            }
+        )
     resources = (
         build_resource_measurements(
             miniature_execution_plan_sha256="1" * 64,
@@ -139,6 +220,8 @@ def _plan(profile):
             maximum_concurrent_jobs=8,
             checkpoint_bytes=1024,
             export_bytes=512,
+            scale_resident_layout_ledger=layout_ledger,
+            scale_resident_memory_projections=projections,
             measurement_evidence_sha256="3" * 64,
             source=SOURCE,
         )
@@ -191,6 +274,94 @@ def test_execution_plan_covers_every_stage_node_and_never_performance_stops():
             node_factory_registry=factories,
             runtime_manifest=incomplete_runtime,
         )
+
+
+def test_production_walltime_is_measured_projected_and_policy_bounded():
+    module = _load_resource_measurement_module()
+    requests = module.derive_requests_from_measurements(
+        maximum_projected_seconds_by_class={"cpu": 3600, "gpu": 7200},
+        maximum_rss_bytes_by_class={
+            "cpu": 8 * 1024**3,
+            "gpu": 40 * 1024**3,
+        },
+    )
+    assert requests["cpu"]["time"] == "01:30:00"
+    assert requests["gpu"]["time"] == "03:00:00"
+    assert requests["cpu"]["memory"] == "12G"
+    assert requests["gpu"]["memory"] == "60G"
+    with pytest.raises(ValueError, match="walltime"):
+        module.derive_requests_from_measurements(
+            maximum_projected_seconds_by_class={
+                "cpu": 24 * 3600,
+                "gpu": 3600,
+            },
+            maximum_rss_bytes_by_class={"cpu": 1, "gpu": 1},
+        )
+
+
+def test_resource_authorization_requires_every_stage_j_memory_projection():
+    ledger = with_content_hash(
+        {
+            "contract": "hosd_scale_resident_layout_ledger_v3",
+            "source_sha256": canonical_sha256(SOURCE),
+            "production_tree_shard_events": 10_000,
+            "production_target_shard_events": 2_048,
+            "production_tree_shard_decoded_bytes_upper_bound": 1,
+            "production_target_shard_decoded_bytes_upper_bound": 1,
+            "test_layout": True,
+        }
+    )
+    with pytest.raises(ValueError, match="projection coverage"):
+        build_resource_measurements(
+            miniature_execution_plan_sha256="1" * 64,
+            scheduler_evidence_sha256="2" * 64,
+            requests_by_class={
+                "cpu": {
+                    "partition": "tigris",
+                    "cpus": 8,
+                    "memory": "96G",
+                    "time": "12:00:00",
+                    "gres": None,
+                },
+                "gpu": {
+                    "partition": "tigris",
+                    "cpus": 8,
+                    "memory": "128G",
+                    "time": "1-00:00:00",
+                    "gres": "gpu:gh200:1",
+                },
+            },
+            projected_target_extraction_seconds=1,
+            projected_gpu_hours_by_stage={"J": 1.0},
+            maximum_concurrent_jobs=1,
+            checkpoint_bytes=1,
+            export_bytes=1,
+            scale_resident_layout_ledger=ledger,
+            scale_resident_memory_projections={},
+            measurement_evidence_sha256="3" * 64,
+            source=SOURCE,
+        )
+
+
+def test_small_miniature_cannot_shrink_production_resident_shard_units():
+    with pytest.raises(ValueError, match="layout source differs"):
+        _plan(
+            "production_500k_scale3m",
+            production_tree_unit=7,
+            production_target_unit=7,
+        )
+
+
+def test_resource_layout_accounting_uses_authenticated_array_shapes(tmp_path):
+    module = _load_resource_measurement_module()
+    path = tmp_path / "layout.npz"
+    first = np.zeros((7, 3), dtype=np.float32)
+    second = np.zeros((7, 2), dtype=np.int16)
+    np.savez_compressed(path, first=first, second=second)
+    assert module._npz_layout_bytes(path) == first.nbytes + second.nbytes
+
+
+def test_production_execution_plan_requires_command_coverage():
     with pytest.raises(ValueError, match="coverage"):
         registry = build_stage_job_registry(source=SOURCE)
         build_production_execution_plan(
@@ -324,8 +495,8 @@ def test_real_miniature_is_required_before_full_authorization():
     production = _plan("production_500k_scale3m")
     preflight = with_content_hash(
         {
-            "contract": "hosd_resource_preflight_v3",
-            "schema_version": 3,
+                "contract": "hosd_resource_preflight_v7",
+                "schema_version": 7,
             "source": SOURCE,
             "profile": "production_500k_scale3m",
             "storage_measurements_sha256": "4" * 64,
@@ -440,6 +611,177 @@ def test_stage_j_builds_scale_inputs_trees_normalizers_and_adapters_in_dag():
         "scripts/build_hosd_scale_native_relations.py",
     ):
         assert (REPO_ROOT / path).is_file()
+
+
+def test_stage_j_tree_and_target_producers_are_bounded_resident():
+    tree_source = (REPO_ROOT / "scripts" / "build_hosd_scale_tree.py").read_text(
+        encoding="utf-8"
+    )
+    target_source = (REPO_ROOT / "scripts" / "build_hosd_targets.py").read_text(
+        encoding="utf-8"
+    )
+    cache_source = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "target_cache.py"
+    ).read_text(encoding="utf-8")
+    assert "load_materialized_input_view(" in tree_source
+    assert "np.load(input_path" not in tree_source
+    assert "load_materialized_input_view(" in target_source
+    assert "tree_by_identity" not in target_source
+    assert "publish_target_cache_shard(" in target_source
+    assert "canonical_to_source=None" in target_source
+    assert "all_identities" not in cache_source
+    teacher_source = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "teacher_inference_runtime.py"
+    ).read_text(encoding="utf-8")
+    scale_source = (REPO_ROOT / "scripts" / "execute_hosd_scale_row.py").read_text(
+        encoding="utf-8"
+    )
+    residual_source = (
+        REPO_ROOT / "scripts" / "build_hosd_target_derivatives.py"
+    ).read_text(encoding="utf-8")
+    pair_source = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "scale_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert "tree_by_identity" not in teacher_source
+    assert "load_materialized_input_view(" in teacher_source
+    assert "load_target_cache_sharded" in scale_source
+    assert "np.concatenate(" not in scale_source
+    assert "load_target_cache_sharded" in residual_source
+    assert "publish_target_cache_shard(" in residual_source
+    assert "_tree_lookup" not in pair_source
+
+
+def test_all_tree_consumers_use_shared_fail_closed_split_authentication(
+    tmp_path,
+):
+    identities = ["jet-a", "jet-b"]
+    trees = []
+    for offset in (0.0, 0.2):
+        tokens = np.zeros((4, 14), dtype=np.float32)
+        tokens[:2, 0] = (2.0, 1.0)
+        tokens[:2, 1] = (offset, offset + 0.1)
+        tokens[:2, 2] = (0.0, 0.1)
+        tokens[:2, 3] = (2.2, 1.2)
+        mask = np.asarray([True, True, False, False])
+        vectors = np.zeros((4, 4), dtype=np.float32)
+        vectors[:2] = np.asarray(
+            [[2.0, 0.0, 0.0, 2.2], [0.995, 0.1, 0.1, 1.2]],
+            dtype=np.float32,
+        )
+        trees.append(build_reference_tree(vectors, tokens, mask))
+    shard = tmp_path / "tree" / "shards" / "shard_00000.npz"
+    write_tree_shard(
+        shard,
+        trees,
+        identities,
+        hlt_content_sha256="a" * 64,
+        tree_resource_sha256="b" * 64,
+        backend_manifest_sha256="c" * 64,
+    )
+    finalize_tree_split(
+        tmp_path / "tree" / "manifest.json",
+        [shard.with_suffix(".metadata.json")],
+        split="scale_train",
+        expected_jet_count=2,
+        hlt_content_sha256="a" * 64,
+        tree_resource_sha256="b" * 64,
+        backend_manifest_sha256="c" * 64,
+    )
+    authenticated = AuthenticatedTreeSplit(
+        tmp_path / "tree",
+        expected_identities=identities,
+        expected_parents={
+            "hlt_content_sha256": "a" * 64,
+            "tree_resource_sha256": "b" * 64,
+            "backend_manifest_sha256": "c" * 64,
+        },
+    )
+    assert len(authenticated.load_shard(0)[1]) == 2
+    assert len(
+        authenticated.load_event_rows([1], expected_identities=["jet-b"])
+    ) == 1
+    with pytest.raises(ValueError, match="parents differ"):
+        AuthenticatedTreeSplit(
+            tmp_path / "tree",
+            expected_identities=identities,
+            expected_parents={
+                "hlt_content_sha256": "d" * 64,
+                "tree_resource_sha256": "b" * 64,
+                "backend_manifest_sha256": "c" * 64,
+            },
+        )
+
+    original = shard.read_bytes()
+    shard.write_bytes(original + b"drift")
+    with pytest.raises(ValueError, match="changed after split authentication"):
+        authenticated.load_shard(0)
+    with pytest.raises(ValueError, match="shard attestation differs"):
+        AuthenticatedTreeSplit(tmp_path / "tree")
+    shard.write_bytes(original)
+
+    target_source = (REPO_ROOT / "scripts" / "build_hosd_targets.py").read_text(
+        encoding="utf-8"
+    )
+    graph_source = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "stage_d_data_factory.py"
+    ).read_text(encoding="utf-8")
+    measurement_source = (
+        REPO_ROOT / "scripts" / "measure_hosd_miniature_resources.py"
+    ).read_text(encoding="utf-8")
+    assert "AuthenticatedTreeSplit(" in target_source
+    assert "AuthenticatedTreeSplit(" in graph_source
+    assert "AuthenticatedTreeSplit(" in measurement_source
+
+
+def test_stage_j_normalizer_consumes_lazy_shards_without_population_coercion(tmp_path):
+    class LazyRows:
+        def __init__(self, values):
+            self._values = values
+            self.shape = values.shape
+
+        def __getitem__(self, index):
+            return self._values[index]
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("population-wide coercion is forbidden")
+
+    values = np.arange(30, dtype=np.float32).reshape(10, 3)
+    masks = np.ones_like(values, dtype=bool)
+    cache = LoadedTargetCache(
+        identities=tuple(f"jet-{index}" for index in range(10)),
+        values={"T_OFFLINE_JET_12": LazyRows(values)},
+        masks={"T_OFFLINE_JET_12": LazyRows(masks)},
+        manifest={
+            "split": "scale_train",
+            "source": SOURCE,
+            "content_hash": "a" * 64,
+            "canonical_identity_order_sha256": "b" * 64,
+        },
+    )
+    artifact = fit_sharded_target_normalizer(
+        [cache],
+        target_id="T_OFFLINE_JET_12",
+        fitting_population="target_scale",
+        source=SOURCE,
+        component_kinds=("continuous",) * 3,
+        workspace=tmp_path,
+        batch_size=4,
+    )
+    assert artifact["bounded_statistics"] == "disk_backed_one_component_one_shard_v1"
+    assert artifact["event_count"] == 10
+    assert artifact["targets"][0]["components"][1]["q50"] == pytest.approx(14.5)
 
 
 def test_runtime_manifest_cannot_inject_scientific_rows_or_seeds():
@@ -568,6 +910,98 @@ def test_node_factory_stream_checks_only_that_nodes_bound_inputs(tmp_path):
             campaign_root=tmp_path,
             coordinate=0,
         )
+
+
+def test_every_pair_probe_coordinate_resolves_without_none_tap_cache(
+    tmp_path, monkeypatch
+):
+    from teacher_logit_reco.hlt_offline_structure_distillation import node_runtime
+
+    rows = [
+        {
+            "row_id": f"{target}__{kind}"
+            + (f"__{tap}" if tap is not None else ""),
+            "target_id": target,
+            "probe_kind": kind,
+            "tap": tap,
+        }
+        for target in ("T_HLT_TRACK_PAIR_13", "T_HLT_REGION_PAIR_8")
+        for kind, tap in (
+            ("P_STATISTICAL_REFERENCES", None),
+            ("P_LINEAR", "TAP_EARLY"),
+            ("P_SHALLOW", "TAP_MID"),
+            ("P_TARGET_TO_CLASS_ORACLE", None),
+        )
+    ]
+    monkeypatch.setattr(
+        node_runtime,
+        "_rows",
+        lambda root, node_id: rows
+        if node_id == "probe_input_materialization"
+        else None,
+    )
+    files, directories = _runtime_bindings()
+    runtime = build_runtime_manifest(
+        campaign_spec_sha256="c" * 64,
+        files=files,
+        directories=directories,
+        infrastructure_arguments_by_node=_ready_arguments(),
+        source=SOURCE,
+    )
+    node = {
+        "node_id": "probe_input_materialization",
+        "entrypoint": "scripts/materialize_hosd_pair_probe_inputs.py",
+    }
+    for coordinate, expected in enumerate(rows):
+        command, observed = resolve_node_argv(
+            node=node,
+            runtime_manifest=runtime,
+            campaign_root=tmp_path,
+            coordinate=coordinate,
+        )
+        assert observed == expected
+        rendered = " ".join(command)
+        assert "__None.npz" not in rendered
+        if expected["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}:
+            assert rendered.count("--tap-cache") == 3
+            assert f"__{expected['tap']}.npz" in rendered
+        else:
+            assert "--tap-cache" not in command
+
+
+def test_scale_graph_command_does_not_bind_all_tree_or_native_populations(
+    tmp_path, monkeypatch
+):
+    from teacher_logit_reco.hlt_offline_structure_distillation import node_runtime
+
+    row = {"graph_id": "H_BASE", "seed": 202}
+    monkeypatch.setattr(
+        node_runtime,
+        "_rows",
+        lambda root, node_id: [row] if node_id == "scale_graph_train" else None,
+    )
+    files, directories = _runtime_bindings()
+    runtime = build_runtime_manifest(
+        campaign_spec_sha256="c" * 64,
+        files=files,
+        directories=directories,
+        infrastructure_arguments_by_node=_ready_arguments(),
+        source=SOURCE,
+    )
+    command, observed = resolve_node_argv(
+        node={
+            "node_id": "scale_graph_train",
+            "entrypoint": "scripts/execute_hosd_scale_graph.py",
+        },
+        runtime_manifest=runtime,
+        campaign_root=tmp_path,
+        coordinate=0,
+    )
+    assert observed == row
+    assert command.count("--scale-train-cache") == 4
+    assert "--scale-train-tree" not in command
+    assert "--scale-native-relation" not in command
+    assert "--design-confirm-native-relation" not in command
 
 
 def test_runtime_manifest_rejects_bad_scalars_and_nonexact_key_coverage():

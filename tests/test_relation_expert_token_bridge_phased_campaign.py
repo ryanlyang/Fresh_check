@@ -5,6 +5,7 @@ import pytest
 
 from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (
     build_internal_phase_plan,
+    configured_phase_concurrency,
     execute_internal_phase,
     execute_phased_controller,
     phase_row_completion_path,
@@ -15,6 +16,30 @@ from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 SOURCE = {"git_commit": "1" * 40, "source_tree_sha256": "c" * 64}
+
+
+def test_internal_phase_concurrency_inherits_high_throughput_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert configured_phase_concurrency(
+        resource="gpu", family="predictor", row_count=100
+    ) == 64
+    monkeypatch.setenv("RETB_GPU_PREDICTOR_CONCURRENCY", "37")
+    assert configured_phase_concurrency(
+        resource="gpu", family="predictor", row_count=100
+    ) == 37
+    assert configured_phase_concurrency(
+        resource="gpu", family="predictor", row_count=12
+    ) == 12
+    monkeypatch.setenv("RETB_CPU_CACHE_CONCURRENCY", "48")
+    assert configured_phase_concurrency(
+        resource="cpu", family="final", row_count=60
+    ) == 48
+    monkeypatch.setenv("RETB_GPU_FINAL_CONCURRENCY", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        configured_phase_concurrency(
+            resource="gpu", family="final", row_count=10
+        )
 
 
 def _plan(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -12,7 +12,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
     load_hlt_v3_cache,
 )
 from .input_views import load_materialized_hlt_input_view
-from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard
+from .authenticated_tree import AuthenticatedTreeSplit
 
 from .auxiliary_data import (
     AuxiliaryTargetDataset,
@@ -27,7 +27,7 @@ from .contracts import (
 )
 from .extractors import ExtractorResources
 from .normalization import normalize_target, whiten_latents
-from .target_cache import load_target_cache
+from .target_cache import load_target_cache, load_target_cache_sharded
 from .target_cache import identity_order_sha256
 from .target_schemas import target_component_availability_groups, target_declarations
 
@@ -35,7 +35,23 @@ from .target_schemas import target_component_availability_groups, target_declara
 LOADER_MANIFEST_CONTRACT = "hosd_stage_d_loader_manifest_v1"
 LOADER_MANIFEST_CONTRACT_V2 = "hosd_stage_d_loader_manifest_v2"
 LOADER_MANIFEST_CONTRACT_V3 = "hosd_stage_d_loader_manifest_v3"
+LOADER_MANIFEST_CONTRACT_V4 = "hosd_stage_d_loader_manifest_v4"
 ROLES = ("model_train", "val_stop", "design_select")
+
+
+def data_order_seed(pipeline_seed: int, role: str) -> int:
+    """Graph-independent sampler seed for one logical population role."""
+
+    if str(role) not in {
+        "model_train",
+        "scale_train",
+        "val_stop",
+        "design_select",
+        "design_confirm",
+    }:
+        raise ValueError("data-order role differs")
+    payload = f"hosd_data_order_v1\0{int(pipeline_seed)}\0{str(role)}"
+    return int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8], 16)
 
 
 def build_default_stage_d_role_definitions(
@@ -73,6 +89,27 @@ def build_default_stage_d_role_definitions(
         base = dict(base_role_definitions[role])
         if not {"labels", "hlt_caches"}.issubset(base):
             raise ValueError("default Stage-D base role is incomplete")
+        if base.get("tree_caches"):
+            tree_resource = load_hashed_json(
+                root / "inputs" / "inherited_angular_tree_resource.json"
+            )
+            tree_backend = load_hashed_json(
+                root / "inputs" / "region_tree" / "backend_manifest.json"
+            )
+            expected_parents = {}
+            for raw_replica, raw_path in base["hlt_caches"].items():
+                path = Path(raw_path)
+                _, metadata = (
+                    load_materialized_hlt_input_view(path)
+                    if path.is_file()
+                    else load_hlt_v3_cache(path)
+                )
+                expected_parents[str(int(raw_replica))] = {
+                    "hlt_content_sha256": metadata["array_content_sha256"],
+                    "tree_resource_sha256": tree_resource["content_hash"],
+                    "backend_manifest_sha256": tree_backend["content_hash"],
+                }
+            base["tree_expected_parents"] = expected_parents
         split = split_by_role[role]
         if pair:
             target = {
@@ -311,26 +348,8 @@ def build_stage_d_loader_manifest(
         checked[role] = definition
     return with_content_hash(
         {
-            "contract": (
-                LOADER_MANIFEST_CONTRACT
-                if (
-                    evaluation_role == "design_select"
-                    and training_role == "model_train"
-                )
-                else LOADER_MANIFEST_CONTRACT_V2
-                if training_role == "model_train"
-                else LOADER_MANIFEST_CONTRACT_V3
-            ),
-            "schema_version": (
-                1
-                if (
-                    evaluation_role == "design_select"
-                    and training_role == "model_train"
-                )
-                else 2
-                if training_role == "model_train"
-                else 3
-            ),
+            "contract": LOADER_MANIFEST_CONTRACT_V4,
+            "schema_version": 4,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -341,6 +360,11 @@ def build_stage_d_loader_manifest(
             "roles": checked,
             "evaluation_role": evaluation_role,
             "training_role": training_role,
+            "data_order_contract": "hosd_data_order_v1",
+            "sampler_seed_by_role": {
+                role: data_order_seed(int(row["pipeline_seed"]), role)
+                for role in roles
+            },
             "identity_join": "authenticated_cache_identity_to_role_label_identity",
             "dense_pair_targets_persisted": False,
             "performance_dependent_inputs": False,
@@ -375,6 +399,8 @@ def _labels(path: Path) -> tuple[tuple[str, ...], np.ndarray, str]:
 def _subset_indices(
     source_identities: tuple[str, ...], requested: tuple[str, ...]
 ) -> np.ndarray:
+    if source_identities == requested:
+        return np.arange(len(requested), dtype=np.int64)
     lookup = {value: index for index, value in enumerate(source_identities)}
     if len(lookup) != len(source_identities) or not set(requested).issubset(lookup):
         raise ValueError("Stage-D identity join lacks exact source coverage")
@@ -384,9 +410,18 @@ def _subset_indices(
 def _load_hlt(
     caches: Mapping[str, Any],
     identities: tuple[str, ...],
-) -> tuple[dict[int, dict[str, np.ndarray]], dict[str, str], str, str]:
+) -> tuple[
+    dict[int, dict[str, np.ndarray]],
+    dict[int, np.ndarray],
+    dict[str, str],
+    str,
+    str,
+    dict[int, str],
+]:
     arrays_by_replica = {}
+    source_indices_by_replica = {}
     lineage = {}
+    content_hashes = {}
     logical_roles, policies = set(), set()
     for raw_replica, raw_path in sorted(caches.items(), key=lambda item: int(item[0])):
         replica, path = int(raw_replica), Path(raw_path)
@@ -398,41 +433,75 @@ def _load_hlt(
         source_ids = tuple(str(value) for value in arrays["identities"].tolist())
         order = _subset_indices(source_ids, identities)
         arrays_by_replica[replica] = {
-            name: np.asarray(arrays[name])[order]
+            name: arrays[name]
             for name in ("tokens", "mask", "measurement_states")
         }
+        source_indices_by_replica[replica] = order
         lineage[f"hlt_replica_{replica}"] = metadata["content_hash"]
+        content_hashes[replica] = metadata["array_content_sha256"]
         logical_roles.add(str(metadata["logical_role"]))
         policies.add(str(metadata["realization_policy"]))
     if len(logical_roles) != 1 or len(policies) != 1:
         raise ValueError("Stage-D HLT cache roles/policies differ")
     return (
         arrays_by_replica,
+        source_indices_by_replica,
         lineage,
         next(iter(logical_roles)),
         next(iter(policies)),
+        content_hashes,
     )
+
+
+class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
+    """One-shard resident tree sequence with exact canonical-order binding."""
+
+    def __init__(
+        self,
+        root: Path,
+        identities: tuple[str, ...],
+        expected_parents: Mapping[str, str],
+    ) -> None:
+        self.split = AuthenticatedTreeSplit(
+            root,
+            expected_identities=identities,
+            expected_parents=expected_parents,
+        )
+        self._cached_shard = -1
+        self._cached_rows: tuple[Mapping[str, Any], ...] = ()
+
+    def __len__(self) -> int:
+        return len(self.split)
+
+    def __getitem__(self, index: int) -> Mapping[str, Any]:
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        shard = self.split.shard_for_event(index)
+        start = self.split.records[shard].start
+        if shard != self._cached_shard:
+            _, rows = self.split.load_shard(shard)
+            self._cached_rows = tuple(rows)
+            self._cached_shard = shard
+        return self._cached_rows[index - start]
 
 
 def _trees(
     paths: Mapping[str, Any],
     identities: tuple[str, ...],
+    expected_parents: Mapping[str, Any],
 ) -> tuple[dict[int, tuple[Mapping[str, Any], ...]], dict[str, str]]:
     output, lineage = {}, {}
     for raw_replica, raw_path in sorted(paths.items(), key=lambda item: int(item[0])):
         replica, root = int(raw_replica), Path(raw_path)
-        manifest = load_hashed_json(root / "manifest.json")
-        by_identity = {}
-        for shard in sorted((root / "shards").glob("shard_*.npz")):
-            shard_ids, rows = unpack_tree_shard(shard)
-            for identity, tree in zip(shard_ids, rows):
-                if identity in by_identity:
-                    raise ValueError("Stage-D tree cache duplicates an identity")
-                by_identity[identity] = tree
-        if not set(identities).issubset(by_identity):
-            raise ValueError("Stage-D tree cache lacks role identities")
-        output[replica] = tuple(by_identity[value] for value in identities)
-        lineage[f"tree_replica_{replica}"] = manifest["content_hash"]
+        parents = expected_parents.get(str(replica))
+        if not isinstance(parents, Mapping):
+            raise ValueError("Stage-D tree definition lacks exact active parents")
+        output[replica] = _IdentityAlignedTreeShards(root, identities, parents)
+        lineage[f"tree_replica_{replica}"] = output[replica].split.manifest[
+            "content_hash"
+        ]
     return output, lineage
 
 
@@ -440,7 +509,58 @@ def _load_target_cache(path: Path):
     spec = load_hashed_json(
         path / "cache_spec.json", expected_contract="hosd_target_cache_spec_v1"
     )
-    return load_target_cache(path, cache_spec=spec)
+    loader = (
+        load_target_cache_sharded
+        if spec.get("split") == "scale_train"
+        else load_target_cache
+    )
+    return loader(path, cache_spec=spec)
+
+
+class _IndexedTransformedTarget:
+    def __init__(
+        self,
+        *,
+        raw: Any,
+        mask: Any,
+        order: np.ndarray,
+        coordinate_id: str,
+        parameterization: str,
+        normalizer: Mapping[str, Any] | None,
+        whitening: Mapping[str, Any] | None,
+        return_mask: bool,
+    ) -> None:
+        self.raw = raw
+        self.mask = mask
+        self.order = order
+        self.coordinate_id = coordinate_id
+        self.parameterization = parameterization
+        self.normalizer = normalizer
+        self.whitening = whitening
+        self.return_mask = return_mask
+        self.shape = (len(order), *tuple(raw.shape[1:]))
+        self.dtype = np.dtype(bool if return_mask else np.float32)
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        source = int(self.order[int(index)])
+        mask = np.asarray(self.mask[source], dtype=bool)
+        if self.return_mask:
+            return mask
+        raw = np.asarray(self.raw[source])
+        if self.parameterization == "KD":
+            return raw.astype(np.float32, copy=True)
+        if self.parameterization == "WHITENED_ABS":
+            transformed = whiten_latents(
+                raw[None], whitening=self.whitening
+            )[0]
+            transformed[~mask] = 0
+            return transformed.astype(np.float32, copy=False)
+        return normalize_target(
+            raw[None],
+            mask[None],
+            target_id=self.coordinate_id,
+            normalizer=self.normalizer,
+        )[0]
 
 
 def _static_targets(
@@ -465,7 +585,7 @@ def _static_targets(
     if row["parameterization"] == "WHITENED_ABS":
         whitening = load_hashed_json(
             Path(definition["whitening"]),
-            expected_contract="hosd_latent_whitening_v1",
+            expected_contract="hosd_latent_whitening_v2",
         )
         if whitening.get("source") != dict(source):
             raise ValueError("Stage-D whitening source differs")
@@ -512,23 +632,31 @@ def _static_targets(
         coordinate_id = str(coordinate_id)
         if coordinate_id not in cache.values:
             raise ValueError("Stage-D target coordinate is absent from cache")
-        raw = cache.values[coordinate_id][order]
-        mask = cache.masks[coordinate_id][order]
-        if row["parameterization"] == "KD":
-            transformed = raw.astype(np.float32, copy=True)
-        elif row["parameterization"] == "WHITENED_ABS":
-            transformed = whiten_latents(raw, whitening=whitening)
-            transformed[~mask] = 0
-        else:
-            transformed = normalize_target(
-                raw,
-                mask,
-                target_id=coordinate_id,
-                normalizer=normalizer,
-            )
+        raw = cache.values[coordinate_id]
+        mask = cache.masks[coordinate_id]
+        transformed = _IndexedTransformedTarget(
+            raw=raw,
+            mask=mask,
+            order=order,
+            coordinate_id=coordinate_id,
+            parameterization=row["parameterization"],
+            normalizer=normalizer,
+            whitening=whitening,
+            return_mask=False,
+        )
+        aligned_mask = _IndexedTransformedTarget(
+            raw=raw,
+            mask=mask,
+            order=order,
+            coordinate_id=coordinate_id,
+            parameterization=row["parameterization"],
+            normalizer=normalizer,
+            whitening=whitening,
+            return_mask=True,
+        )
         target_key = -1 if str(key) == "shared" else int(key)
         values[target_key] = transformed
-        masks[target_key] = mask
+        masks[target_key] = aligned_mask
         lineage[f"target_cache_{key}"] = cache.manifest["content_hash"]
     if normalizer is not None:
         lineage["target_normalizer"] = normalizer["content_hash"]
@@ -549,11 +677,7 @@ def load_stage_d_loaders_from_manifest(
 ) -> dict[str, Any]:
     del campaign_root, target_registry
     manifest = load_hashed_json(Path(manifest_path))
-    if manifest.get("contract") not in {
-        LOADER_MANIFEST_CONTRACT,
-        LOADER_MANIFEST_CONTRACT_V2,
-        LOADER_MANIFEST_CONTRACT_V3,
-    }:
+    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V4:
         raise ValueError("Stage-D loader manifest contract differs")
     evaluation_role = str(manifest.get("evaluation_role", "design_select"))
     if evaluation_role not in {"design_select", "design_confirm"}:
@@ -562,10 +686,16 @@ def load_stage_d_loaders_from_manifest(
     if training_role not in {"model_train", "scale_train"}:
         raise ValueError("Stage-D loader training role differs")
     roles = (training_role, "val_stop", evaluation_role)
+    expected_sampler_seeds = {
+        role: data_order_seed(int(row["pipeline_seed"]), role)
+        for role in roles
+    }
     if (
         manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("row_id") != row["row_id"]
+        or manifest.get("data_order_contract") != "hosd_data_order_v1"
+        or manifest.get("sampler_seed_by_role") != expected_sampler_seeds
     ):
         raise ValueError("Stage-D loader manifest lineage differs")
     if set(manifest.get("roles", {})) != set(roles):
@@ -576,12 +706,31 @@ def load_stage_d_loaders_from_manifest(
         "loader_manifest": manifest["content_hash"],
         "campaign_spec": campaign["content_hash"],
     }
+    exact_hlt_runtime = None
     for role in roles:
         definition = manifest["roles"][role]
         identities, labels, label_sha = _labels(Path(definition["labels"]))
-        hlt_arrays, hlt_lineage, logical_role, realization_policy = _load_hlt(
-            definition["hlt_caches"], identities
-        )
+        loaded_hlt = _load_hlt(definition["hlt_caches"], identities)
+        if len(loaded_hlt) == 5:
+            # Compatibility for injected non-tree test loaders; real loaders
+            # always return authenticated content hashes.
+            (
+                hlt_arrays,
+                source_indices,
+                hlt_lineage,
+                logical_role,
+                realization_policy,
+            ) = loaded_hlt
+            hlt_content_hashes = {}
+        else:
+            (
+                hlt_arrays,
+                source_indices,
+                hlt_lineage,
+                logical_role,
+                realization_policy,
+                hlt_content_hashes,
+            ) = loaded_hlt
         expected_hlt_roles = {
             "model_train": {"model_train"},
             "scale_train": {"scale_train"},
@@ -595,7 +744,16 @@ def load_stage_d_loaders_from_manifest(
         lineage[f"{role}_labels"] = label_sha
         trees = None
         if definition.get("tree_caches"):
-            trees, tree_lineage = _trees(definition["tree_caches"], identities)
+            expected_tree_parents = definition.get("tree_expected_parents")
+            if not isinstance(expected_tree_parents, Mapping):
+                raise ValueError("Stage-D tree consumers require exact parents")
+            for replica, content_hash in hlt_content_hashes.items():
+                row = expected_tree_parents.get(str(replica), {})
+                if row.get("hlt_content_sha256") != content_hash:
+                    raise ValueError("Stage-D tree/HLT content parent differs")
+            trees, tree_lineage = _trees(
+                definition["tree_caches"], identities, expected_tree_parents
+            )
             lineage.update(
                 {f"{role}_{key}": value for key, value in tree_lineage.items()}
             )
@@ -605,6 +763,7 @@ def load_stage_d_loaders_from_manifest(
             identities=identities,
             logical_role=logical_role,
             realization_policy=realization_policy,
+            source_indices_by_replica=source_indices,
             region_trees_by_replica=trees,
         )
         target_definition = definition["target"]
@@ -635,6 +794,22 @@ def load_stage_d_loaders_from_manifest(
                 or relation.get("source") != campaign["source"]
             ):
                 raise ValueError("Stage-D streamed normalizer source differs")
+            if row.get("control") == "EXACT_HLT":
+                candidate = {
+                    "target_normalizer": normalizer,
+                    "relation_normalizer": relation,
+                }
+                if exact_hlt_runtime is None:
+                    exact_hlt_runtime = candidate
+                elif (
+                    exact_hlt_runtime["target_normalizer"]["content_hash"]
+                    != normalizer["content_hash"]
+                    or exact_hlt_runtime["relation_normalizer"]["content_hash"]
+                    != relation["content_hash"]
+                ):
+                    raise ValueError(
+                        "exact HLT runtime normalization differs across roles"
+                    )
             floors = relation.get("track_uncertainty_floors", {})
             stream = StreamedHLTTarget(
                 target_id=row["target_id"],
@@ -690,12 +865,14 @@ def load_stage_d_loaders_from_manifest(
         )
         loaders[role] = make_auxiliary_loader(
             dataset,
-            seed=int(row["head_component_seed"]),
+            seed=expected_sampler_seeds[role],
             training=role == training_role,
             batch_size=64,
         )
     for name, value in lineage.items():
         require_sha256(value, name=f"stage_d_lineage.{name}")
+    if row.get("control") == "EXACT_HLT" and exact_hlt_runtime is None:
+        raise ValueError("exact HLT reference requires a streamed same-view target")
     return {
         "train_loader": loaders[training_role],
         "training_role": training_role,
@@ -711,6 +888,13 @@ def load_stage_d_loaders_from_manifest(
             row["target_id"], declaration.components
         ),
         "lineage_hashes": lineage,
+        "data_order_contract": "hosd_data_order_v1",
+        "sampler_seed_by_role": expected_sampler_seeds,
+        **(
+            {"exact_hlt_runtime": exact_hlt_runtime}
+            if exact_hlt_runtime is not None
+            else {}
+        ),
     }
 
 
@@ -721,4 +905,6 @@ __all__ = [
     "load_stage_d_loaders_from_manifest",
     "LOADER_MANIFEST_CONTRACT_V2",
     "LOADER_MANIFEST_CONTRACT_V3",
+    "LOADER_MANIFEST_CONTRACT_V4",
+    "data_order_seed",
 ]

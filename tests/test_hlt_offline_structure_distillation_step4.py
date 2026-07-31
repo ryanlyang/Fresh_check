@@ -33,6 +33,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     load_target_cache,
     normalize_target,
     publish_target_cache,
+    publish_target_cache_shard,
     stage_b_wave_rows,
     target_mean_values,
     validate_target_cache,
@@ -213,6 +214,51 @@ def test_cache_is_identity_sorted_label_blind_byte_deterministic_and_resumable(
         generator=_generator(values),
     )
     assert resumed == left
+
+
+def test_canonical_mmap_shards_publish_without_population_sort_or_index_copy(
+    tmp_path: Path,
+) -> None:
+    identities = np.asarray(["jet-a", "jet-b", "jet-c", "jet-d"])
+    values = np.arange(1, 5, dtype=np.float32)
+    spec = build_target_cache_spec(
+        cache_id="canonical-mmap",
+        split="scale_train",
+        artifact_kind="canonical_offline",
+        identities=identities,
+        identities_are_canonical=True,
+        target_components={"T_OFFLINE_TEST": ("a", "b")},
+        parent_hashes={"campaign": H},
+        source=SOURCE,
+        shard_size=2,
+    )
+    for shard_index in range(spec["shard_count"]):
+        publish_target_cache_shard(
+            tmp_path / "canonical-mmap",
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=_generator(values),
+            identity_population_attestation=spec[
+                "canonical_identity_order_sha256"
+            ],
+        )
+    manifest = validate_target_cache(
+        tmp_path / "canonical-mmap", cache_spec=spec
+    )
+    assert manifest["event_count"] == 4
+    with pytest.raises(ValueError, match="unique, and sorted"):
+        build_target_cache_spec(
+            cache_id="not-canonical",
+            split="scale_train",
+            artifact_kind="canonical_offline",
+            identities=np.asarray(["jet-b", "jet-a"]),
+            identities_are_canonical=True,
+            target_components={"T_OFFLINE_TEST": ("a", "b")},
+            parent_hashes={"campaign": H},
+            source=SOURCE,
+        )
 
 
 def test_real_physical_extractor_miniature_cache_passes_lineage_and_resume(

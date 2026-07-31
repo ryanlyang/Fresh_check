@@ -18,19 +18,24 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     ExtractorResources,
+    AuthenticatedTreeSplit,
     INPUT_VIEW_MANIFEST_CONTRACT,
     PHYSICAL_TARGET_IDS,
     STREAM_STORAGE_MODE,
     build_target_cache_spec,
     extract_registered_target,
+    load_materialized_input_view,
     load_and_validate_campaign,
     load_hashed_json,
-    publish_target_cache,
+    publish_target_cache_shard,
+    validate_target_cache,
+)
+from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    write_immutable_json,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.extractors import (  # noqa: E402
     build_target_extractor_manifest,
 )
-from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard  # noqa: E402
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_b_runtime import (  # noqa: E402
     try_finalize_stage_b_wave,
 )
@@ -120,18 +125,26 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 f"label-blind target input contains forbidden fields: {sorted(forbidden)}"
             )
-        required = {"identity", "raw_tokens", "mask"}
+        required = {"identity", "raw_tokens", "mask", "vectors"}
         if not required.issubset(archive.files):
-            raise ValueError(f"input NPZ lacks fields {sorted(required - set(archive.files))}")
-        identities = tuple(str(value) for value in archive["identity"].tolist())
-        raw_tokens = np.asarray(archive["raw_tokens"], dtype=np.float32)
-        mask = np.asarray(archive["mask"], dtype=bool)
-        vectors = (
-            np.asarray(archive["vectors"], dtype=np.float32)
-            if "vectors" in archive.files
-            else None
-        )
-    if len(identities) != raw_tokens.shape[0] or mask.shape[0] != len(identities):
+            raise ValueError(
+                f"input NPZ lacks fields {sorted(required - set(archive.files))}"
+            )
+    arrays, _ = load_materialized_input_view(
+        args.input_npz,
+        expected_view_kind=args.artifact_kind,
+        expected_source=campaign["source"],
+    )
+    identities = arrays["identities"]
+    raw_tokens = arrays["tokens"]
+    mask = arrays["mask"]
+    vectors = arrays["vectors"]
+    identity_count = int(identities.shape[0])
+    if (
+        identity_count != raw_tokens.shape[0]
+        or mask.shape[0] != identity_count
+        or vectors.shape != (identity_count, 4, 128)
+    ):
         raise ValueError("input NPZ identity and tensor populations differ")
     relation = (
         load_hashed_json(args.relation_normalizer)
@@ -167,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     uses_tree = any(
         "CA_TREE" in target_id or "REGION" in target_id for target_id in targets
     )
-    trees = None
+    tree_split = None
     if uses_tree:
         if args.tree_backend_manifest is None or args.tree_cache_dir is None:
             raise ValueError(
@@ -175,27 +188,30 @@ def main(argv: list[str] | None = None) -> int:
                 "--tree-cache-dir"
             )
         tree_backend = load_hashed_json(args.tree_backend_manifest)
+        tree_resource = load_hashed_json(
+            args.campaign_root / "inputs" / "inherited_angular_tree_resource.json"
+        )
         if tree_backend.get("source") is not None and tree_backend.get(
             "source"
         ) != campaign["source"]:
             raise ValueError("tree backend source differs from active campaign")
         parent_hashes["tree_backend"] = tree_backend["content_hash"]
-        tree_manifest = load_hashed_json(args.tree_cache_dir / "manifest.json")
+        tree_split = AuthenticatedTreeSplit(
+            args.tree_cache_dir,
+            expected_identities=identities,
+            expected_parents={
+                "hlt_content_sha256": observed_input_sha,
+                "tree_resource_sha256": tree_resource["content_hash"],
+                "backend_manifest_sha256": tree_backend["content_hash"],
+            },
+        )
+        tree_manifest = tree_split.manifest
         if tree_manifest.get("source") is not None and tree_manifest.get(
             "source"
         ) != campaign["source"]:
             raise ValueError("tree resource source differs from active campaign")
-        parent_hashes["tree_resource"] = tree_manifest["content_hash"]
-        tree_by_identity = {}
-        for shard_path in sorted((args.tree_cache_dir / "shards").glob("shard_*.npz")):
-            shard_identities, shard_trees = unpack_tree_shard(shard_path)
-            for identity, tree in zip(shard_identities, shard_trees):
-                if identity in tree_by_identity:
-                    raise ValueError("tree cache contains duplicate identities")
-                tree_by_identity[identity] = tree
-        if set(tree_by_identity) != set(identities):
-            raise ValueError("tree cache identity population differs from target input")
-        trees = tuple(tree_by_identity[identity] for identity in identities)
+        parent_hashes["tree_resource"] = tree_resource["content_hash"]
+        parent_hashes["tree_split"] = tree_manifest["content_hash"]
     component_schema = {
         target_id: tuple(registry_rows[target_id]["component_names"])
         for target_id in targets
@@ -220,11 +236,51 @@ def main(argv: list[str] | None = None) -> int:
         storage_modes=storage_modes,
         hlt_replica_id=args.hlt_replica_id,
         access_authorization_hash=args.access_authorization_sha256,
+        identities_are_canonical=True,
     )
 
     persisted = tuple(spec["persisted_target_ids"])
 
     def generate(indices: np.ndarray):
+        if (
+            indices.ndim != 1
+            or indices.size == 0
+            or not np.array_equal(
+                indices,
+                np.arange(int(indices[0]), int(indices[-1]) + 1),
+            )
+        ):
+            raise ValueError("bounded target extraction requires a contiguous shard")
+        shard_trees = None
+        if uses_tree:
+            selected_trees = []
+            cursor = int(indices[0])
+            stop = int(indices[-1]) + 1
+            while cursor < stop:
+                tree_index = tree_split.shard_for_event(cursor)
+                record = tree_split.records[tree_index]
+                local_start = cursor - record.start
+                local_stop = min(record.event_count, stop - record.start)
+                shard_identities, trees = tree_split.load_shard(
+                    tree_index,
+                    rows=range(local_start, local_stop),
+                )
+                expected_identities = tuple(
+                    str(value)
+                    for value in identities[
+                        cursor : record.start + local_stop
+                    ].tolist()
+                )
+                if (
+                    tuple(shard_identities[local_start:local_stop])
+                    != expected_identities
+                ):
+                    raise ValueError(
+                        "tree shard identities differ from the canonical input range"
+                    )
+                selected_trees.extend(trees)
+                cursor = record.start + local_stop
+            shard_trees = tuple(selected_trees)
         return {
             target_id: extract_registered_target(
                 target_id,
@@ -232,20 +288,26 @@ def main(argv: list[str] | None = None) -> int:
                 mask[indices],
                 resources=resources,
                 vectors=None if vectors is None else vectors[indices],
-                trees=(
-                    None if trees is None
-                    else tuple(trees[int(index)] for index in indices)
-                ),
+                trees=shard_trees,
             )
             for target_id in persisted
         }
 
-    manifest = publish_target_cache(
-        args.output_dir,
-        cache_spec=spec,
-        identities=identities,
-        generator=generate,
-    )
+    for shard_index in range(int(spec["shard_count"])):
+        publish_target_cache_shard(
+            args.output_dir,
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=generate,
+            identity_population_attestation=input_manifest[
+                "identity_order_sha256"
+            ],
+        )
+    manifest = validate_target_cache(args.output_dir, cache_spec=spec)
+    write_immutable_json(args.output_dir / "target_manifest.json", manifest)
+    write_immutable_json(args.output_dir / "cache_spec.json", spec)
     wave = try_finalize_stage_b_wave(
         campaign_root=args.campaign_root,
         wave_kind=(

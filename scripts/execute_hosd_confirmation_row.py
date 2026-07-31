@@ -34,14 +34,18 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     load_and_validate_campaign,
     load_combination_loaders,
     export_deployable_graph,
+    initialize_feedback_from_auxiliary_checkpoint,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    AUXILIARY_COMPLETION_CONTRACT,
+    AUXILIARY_PREDICTION_CONTRACT,
     CONFIRMATION_PLAN_CONTRACT,
     CONFIRMATION_RESULT_CONTRACT,
     CONFIRMATION_TRAINING_CHECKPOINT_CONTRACT,
     CONFIRMATION_TRAINING_COMPLETION_CONTRACT,
     CONFIRMATION_TRAINING_PREDICTION_CONTRACT,
     CONFIRMATION_WAVE_COMPLETION_CONTRACT,
+    SINGLE_FAMILY_SELECTION_CONTRACT,
     load_hashed_json,
     with_content_hash,
     write_immutable_json,
@@ -502,6 +506,36 @@ def main(argv: list[str] | None = None) -> int:
             if kind == "AUXILIARY"
             else build_feedback_model(row, weaver_module=module)
         )
+        if kind == "FEEDBACK" and row.get("control") == "EXACT_HLT":
+            runtime = loaded.get("exact_hlt_runtime")
+            if runtime is None:
+                raise ValueError("exact HLT confirmation lacks runtime normalization")
+            model.configure_exact_hlt_runtime(**runtime)
+        training_lineage = dict(loaded["lineage_hashes"])
+        if kind == "FEEDBACK":
+            selection = load_hashed_json(
+                root / "auxiliary" / "locked_single_family_choices.json",
+                expected_contract=SINGLE_FAMILY_SELECTION_CONTRACT,
+            )
+            selected = str(row["selected_auxiliary_row_id"])
+            source_run = root / "auxiliary" / selected / "seed_101"
+            initialization = initialize_feedback_from_auxiliary_checkpoint(
+                model,
+                row,
+                checkpoint_path=source_run / "best_model_val.pt",
+                completion=load_hashed_json(
+                    source_run / "auxiliary_completion.json",
+                    expected_contract=AUXILIARY_COMPLETION_CONTRACT,
+                ),
+                result=load_hashed_json(
+                    source_run / "design_select_result.json",
+                    expected_contract=AUXILIARY_PREDICTION_CONTRACT,
+                ),
+                stage_d_plan_sha256=selection["stage_d_plan_sha256"],
+                campaign_spec_sha256=campaign["content_hash"],
+                source=campaign["source"],
+            )
+            training_lineage.update(initialization)
         completion = train_stage_d_auxiliary(
             model=model,
             train_loader=loaded["train_loader"],
@@ -512,11 +546,18 @@ def main(argv: list[str] | None = None) -> int:
             component_group_ids=loaded["component_group_ids"],
             stage_d_plan_sha256=plan["content_hash"],
             campaign_spec_sha256=campaign["content_hash"],
-            lineage_hashes=loaded["lineage_hashes"],
+            lineage_hashes=training_lineage,
             protocol=protocol,
             source=campaign["source"],
             deployed_analytical_flops=deployed_flops,
             deployed_parameter_count=deployed_parameters,
+            deployed_operation_profile=(
+                feedback_model_flop_ledger(model).get(
+                    "exact_hlt_builder_profile"
+                )
+                if kind == "FEEDBACK"
+                else None
+            ),
             device=device,
             checkpoint_contract=CONFIRMATION_TRAINING_CHECKPOINT_CONTRACT,
             completion_contract=CONFIRMATION_TRAINING_COMPLETION_CONTRACT,

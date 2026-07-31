@@ -13,8 +13,22 @@ from typing import Any, Mapping
 
 
 CANONICAL_JSON_CONTRACT = "retb_canonical_json_v1"
-CAMPAIGN_SPEC_CONTRACT = "retb_campaign_spec_v1"
+CAMPAIGN_SPEC_CONTRACT = "retb_campaign_spec_v2"
 STEP1_REPORT_CONTRACT = "retb_step1_report_v1"
+SEMANTIC_CONTROL_POLICY = {
+    "relation_zero_scope": "one_biased_expert_at_a_time",
+    "relation_zero_expert_order": [
+        "PT", "TRACK", "PID", "CHARGE", "DENSITY", "REGION"
+    ],
+    "wrong_event_relation_matching": "exact_valid_particle_multiplicity",
+    "wrong_event_relation_self_match_allowed": False,
+    "wrong_event_singleton_policy": (
+        "exclude_exact_singleton_multiplicity_strata_from_both_the_"
+        "perturbed_row_and_its_paired_active_reference"
+    ),
+    "wrong_event_minimum_derangeable_stratum_size": 2,
+    "policy_frozen_before_scientific_results": True,
+}
 SOURCE_STATUS_HASH_POLICY = "git_diff_binary_HEAD_plus_sorted_untracked_file_bytes_v2"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -236,7 +250,7 @@ def build_campaign_spec(
     return with_content_hash(
         {
             "contract": CAMPAIGN_SPEC_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": campaign_id,
             "scientific_program": "relation_expert_token_bridge",
             "campaign_stage": "step1_contracts_only",
@@ -252,6 +266,7 @@ def build_campaign_spec(
                 "final_test": "sealed_until_final_test_execution_lock",
                 "performance_based_run_termination": False,
             },
+            "semantic_control_policy": dict(SEMANTIC_CONTROL_POLICY),
             "dimensions": {
                 "classes": 10,
                 "max_constituents": 128,
@@ -269,6 +284,7 @@ def build_campaign_spec(
 __all__ = [
     "CAMPAIGN_SPEC_CONTRACT",
     "CANONICAL_JSON_CONTRACT",
+    "SEMANTIC_CONTROL_POLICY",
     "STEP1_REPORT_CONTRACT",
     "bind_source",
     "build_campaign_spec",

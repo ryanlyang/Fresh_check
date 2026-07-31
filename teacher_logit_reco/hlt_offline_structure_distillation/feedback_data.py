@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-STAGE_E_LOADER_MANIFEST_CONTRACT = "hosd_stage_e_loader_manifest_v1"
+STAGE_E_LOADER_MANIFEST_CONTRACT = "hosd_stage_e_loader_manifest_v2"
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -47,7 +47,6 @@ def build_stage_e_loader_manifest(
             "SHUFFLED",
             "ORACLE_SUB",
             "ORACLE_TRAINED",
-            "EXACT_HLT",
         }
     )
     sources = {
@@ -72,7 +71,7 @@ def build_stage_e_loader_manifest(
     return with_content_hash(
         {
             "contract": STAGE_E_LOADER_MANIFEST_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -154,8 +153,6 @@ def load_stage_e_loaders_from_manifest(
         if control in {"SHUFFLED_PREDICTION", "SHUFFLED"}
         else "oracle_feedback"
         if control in {"ORACLE_SUB", "ORACLE_TRAINED"}
-        else "direct_pair_features"
-        if control == "EXACT_HLT"
         else None
     )
     if kind is None:
@@ -184,7 +181,7 @@ def load_stage_e_loaders_from_manifest(
         )
         wrapped[loader_key] = make_feedback_loader(
             dataset,
-            seed=int(row["pipeline_seed"]),
+            seed=int(loaded["sampler_seed_by_role"][role]),
             training=role == "model_train",
             batch_size=int(loaded[loader_key].batch_size),
         )
@@ -280,6 +277,34 @@ def materialize_feedback_intervention(
             else:
                 target = batch["target"].detach().float().cpu().numpy()
                 batch_fields = {"value": target}
+                if oracle:
+                    from .target_schemas import (
+                        target_component_availability_groups,
+                        target_declarations,
+                    )
+
+                    declaration = next(
+                        item
+                        for item in target_declarations()
+                        if item.target_id == row["target_id"]
+                    )
+                    groups = target_component_availability_groups(
+                        row["target_id"], declaration.components
+                    )
+                    order = tuple(dict.fromkeys(groups))
+                    target_mask = batch["target_mask"].detach().bool().cpu().numpy()
+                    availability = np.stack(
+                        [
+                            target_mask[
+                                :, [index for index, value in enumerate(groups) if value == group]
+                            ].any(axis=1)
+                            for group in order
+                        ],
+                        axis=1,
+                    )
+                    batch_fields["availability_logits"] = np.where(
+                        availability, 20.0, -20.0
+                    ).astype(np.float32)
                 if row["parameterization"] == "HET" and not direct:
                     batch_fields.update(
                         {

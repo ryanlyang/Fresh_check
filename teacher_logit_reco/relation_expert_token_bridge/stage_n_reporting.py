@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,9 +20,13 @@ from .final_seal import (
 )
 from .scale_up import SCALE_COMPLETION_CONTRACT
 from .stage_n_selection import LOCKED_SCALE_FINALISTS_CONTRACT
+from .semantic_evidence import (
+    SEMANTIC_CONTROLS_CONTRACT,
+    validate_stage_k_semantic_controls,
+)
 
 
-STAGE_MN_REPORT_CONTRACT = "retb_stage_mn_final_report_v1"
+STAGE_MN_REPORT_CONTRACT = "retb_stage_mn_final_report_v3"
 
 
 def render_stage_mn_markdown(
@@ -29,6 +34,7 @@ def render_stage_mn_markdown(
     scale_completion: Mapping[str, Any],
     locked_scale_finalists: Mapping[str, Any],
     final_evaluation: Mapping[str, Any],
+    semantic_controls: Mapping[str, Any],
 ) -> str:
     lines = [
         "# RETB Stage-M/N scale-up and sealed final evaluation",
@@ -120,6 +126,90 @@ def render_stage_mn_markdown(
     lines.extend(
         [
             "",
+            "## Semantic and causal controls (val_design only)",
+            "",
+            "These perturbations were evaluated after selection and never "
+            "selected a checkpoint. Deltas are control minus the serialized "
+            "active/reference condition.",
+            "",
+            "| Control | Evaluation coordinate | Accuracy | Δ accuracy | "
+            "Cross entropy | Δ cross entropy |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+    )
+    for control in semantic_controls["rows"]:
+        control_id = str(control["control_id"])
+        for index, record in enumerate(control["metric_records"]):
+            metrics = record.get("metrics") or record.get("learned_metrics")
+            deltas = record.get("metric_deltas") or record.get(
+                "learned_minus_fixed"
+            )
+            coordinate_parts = [
+                f"{key}={record[key]}"
+                for key in (
+                    "shape_role", "pipeline_seed", "consumer_kind",
+                    "expert_id", "condition_id", "candidate_id",
+                )
+                if key in record
+            ]
+            coordinate = ", ".join(coordinate_parts) or f"record={index}"
+            if metrics is None:
+                lines.append(
+                    f"| {control_id} | {coordinate}; diagnostics-only | "
+                    "NA | NA | NA | NA |"
+                )
+                diagnostic = {
+                    key: value for key, value in record.items()
+                    if key != "source_artifact_sha256"
+                }
+                lines.append(
+                    f"<!-- {control_id} {coordinate}: "
+                    f"{json.dumps(diagnostic, sort_keys=True)} -->"
+                )
+                continue
+            accuracy_delta = (
+                "NA" if deltas is None else
+                f"{float(deltas['accuracy_control_minus_reference']):.8f}"
+            )
+            ce_delta = (
+                "NA" if deltas is None else
+                f"{float(deltas['cross_entropy_control_minus_reference']):.8f}"
+            )
+            lines.append(
+                f"| {control_id} | {coordinate} | "
+                f"{float(metrics['accuracy']):.8f} | {accuracy_delta} | "
+                f"{float(metrics['cross_entropy']):.8f} | {ce_delta} |"
+            )
+    lines.extend(
+        [
+            "",
+            "### Frozen reconstruction, token refiner, and unrestricted fusion",
+            "",
+            "| Shape | Seed | Condition | Accuracy | Delta vs frozen | "
+            "Cross entropy | Delta vs frozen |",
+            "|---|---:|---|---:|---:|---:|---:|",
+        ]
+    )
+    for record in semantic_controls["reconstruction_metric_records"]:
+        for condition, metrics in record["condition_metrics"].items():
+            deltas = record[
+                "condition_metric_deltas_vs_frozen_reconstruction"
+            ].get(condition)
+            accuracy_delta = 0.0 if deltas is None else float(
+                deltas["accuracy_control_minus_reference"]
+            )
+            ce_delta = 0.0 if deltas is None else float(
+                deltas["cross_entropy_control_minus_reference"]
+            )
+            lines.append(
+                f"| {record['shape_role']} | {record['pipeline_seed']} | "
+                f"{condition} | {float(metrics['accuracy']):.8f} | "
+                f"{accuracy_delta:.8f} | "
+                f"{float(metrics['cross_entropy']):.8f} | {ce_delta:.8f} |"
+            )
+    lines.extend(
+        [
+            "",
             "The final-test result did not select or replace any graph. "
             "All reported rows were sealed by the execution lock.",
             "",
@@ -134,6 +224,7 @@ def build_stage_mn_report(
     locked_scale_finalists: Mapping[str, Any],
     execution_lock: Mapping[str, Any],
     final_evaluation: Mapping[str, Any],
+    semantic_controls: Mapping[str, Any],
     source_snapshot: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
     scale_sha = validate_content_hash(
@@ -151,6 +242,10 @@ def build_stage_mn_report(
         final_evaluation,
         expected_contract=FINAL_TEST_EVALUATION_CONTRACT,
     )
+    semantic_sha = validate_stage_k_semantic_controls(
+        semantic_controls,
+        expected_source=scale_completion["source"],
+    )
     if (
         locked_scale_finalists["lineage_hashes"]["scale_completion"]
         != scale_sha
@@ -166,6 +261,7 @@ def build_stage_mn_report(
                     locked_scale_finalists,
                     execution_lock,
                     final_evaluation,
+                    semantic_controls,
                 )
             }
         )
@@ -176,17 +272,19 @@ def build_stage_mn_report(
         scale_completion=scale_completion,
         locked_scale_finalists=locked_scale_finalists,
         final_evaluation=final_evaluation,
+        semantic_controls=semantic_controls,
     )
     artifact = bind_source(
         with_content_hash(
             {
                 "contract": STAGE_MN_REPORT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 3,
                 "parents": {
                     "scale_completion": scale_sha,
                     "locked_scale_finalists": finalist_sha,
                     "final_test_execution_lock": execution_sha,
                     "sealed_final_test_evaluation": final_sha,
+                    "semantic_controls": semantic_sha,
                 },
                 "ACCURACY_FINALIST": locked_scale_finalists[
                     "ACCURACY_FINALIST"
@@ -203,6 +301,10 @@ def build_stage_mn_report(
                 ],
                 "paired_between_distinct_finalists": final_evaluation[
                     "paired_between_distinct_finalists"
+                ],
+                "semantic_controls": semantic_controls["rows"],
+                "reconstruction_metric_records": semantic_controls[
+                    "reconstruction_metric_records"
                 ],
                 "markdown_sha256": hashlib.sha256(
                     markdown.encode("utf-8")

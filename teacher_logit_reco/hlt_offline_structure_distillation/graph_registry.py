@@ -94,6 +94,19 @@ def build_locked_graph_registry(
             "graph_kind": "FEEDBACK",
             "row": dict(feedback_selection["selected_feedback_definition"]),
         },
+        **{
+            role: {
+                "graph_id": definition["row_id"],
+                "graph_kind": "FEEDBACK",
+                "row": dict(definition),
+                "graph_role": "REFERENCE_BASELINE",
+                "eligible_for_hosd_family_selection": False,
+                "eligible_for_overall_finalist_selection": True,
+            }
+            for role, definition in sorted(
+                feedback_selection["reference_graph_definitions"].items()
+            )
+        },
         "BEST_COMBINATION": {
             "graph_id": combination_selection["selected_combination_graph_id"],
             "graph_kind": "COMBINATION",
@@ -117,7 +130,7 @@ def build_locked_graph_registry(
     return with_content_hash(
         {
             "contract": GRAPH_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
             "parent_locks": {
                 "single_family_selection": single_family_selection["content_hash"],

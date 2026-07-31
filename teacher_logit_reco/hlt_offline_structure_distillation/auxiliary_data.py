@@ -125,6 +125,7 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
         identities: Sequence[str],
         logical_role: str,
         realization_policy: str,
+        source_indices_by_replica: Mapping[int, Sequence[int]] | None = None,
         region_trees_by_replica: Mapping[int, Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
         self.identities = tuple(str(value) for value in identities)
@@ -133,9 +134,19 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
         self.realization_policy = str(realization_policy)
         self.replicas = {
             int(replica): {
-                name: np.asarray(value) for name, value in arrays.items()
+                # Preserve np.memmap objects; np.asarray would erase the
+                # storage type and makes accidental whole-array copies easier.
+                name: value for name, value in arrays.items()
             }
             for replica, arrays in replica_arrays.items()
+        }
+        self.source_indices_by_replica = {
+            replica: (
+                np.arange(len(self.identities), dtype=np.int64)
+                if source_indices_by_replica is None
+                else np.asarray(source_indices_by_replica[replica], dtype=np.int64)
+            )
+            for replica in self.replicas
         }
         expected_replicas = (
             {0}
@@ -147,9 +158,15 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
             or len(set(self.identities)) != len(self.identities)
             or self.labels.shape != (len(self.identities),)
             or set(self.replicas) != expected_replicas
+            or set(self.source_indices_by_replica) != set(self.replicas)
             or any(
-                len(arrays["tokens"]) != len(self.identities)
-                for arrays in self.replicas.values()
+                indices.shape != (len(self.identities),)
+                or bool((indices < 0).any())
+                or (
+                    len(indices) > 0
+                    and int(indices.max()) >= len(self.replicas[replica]["tokens"])
+                )
+                for replica, indices in self.source_indices_by_replica.items()
             )
         ):
             raise ValueError("HLT role-subset dataset population differs")
@@ -157,7 +174,7 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
             None
             if region_trees_by_replica is None
             else {
-                int(replica): tuple(rows)
+                int(replica): rows
                 for replica, rows in region_trees_by_replica.items()
             }
         )
@@ -188,10 +205,11 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
             canonical_identity=identity,
         )
         arrays = self.replicas[int(replica)]
+        source_index = int(self.source_indices_by_replica[int(replica)][index])
         return {
-            "tokens": arrays["tokens"][index],
-            "mask": arrays["mask"][index],
-            "measurement_states": arrays["measurement_states"][index],
+            "tokens": arrays["tokens"][source_index],
+            "mask": arrays["mask"][source_index],
+            "measurement_states": arrays["measurement_states"][source_index],
             "label": self.labels[index],
             "identity": identity,
             "replica_id": int(replica),
@@ -249,7 +267,11 @@ class AuxiliaryTargetDataset(torch.utils.data.Dataset if torch is not None else 
                 raise ValueError("static target values and masks must be paired")
             for value in (target_values, target_masks):
                 rows = value.values() if isinstance(value, Mapping) else (value,)
-                if any(np.asarray(row).shape[0] != len(base_dataset) for row in rows):
+                if any(
+                    not hasattr(row, "shape")
+                    or int(row.shape[0]) != len(base_dataset)
+                    for row in rows
+                ):
                     raise ValueError("static target population differs")
             for value in (target_values, target_masks):
                 if isinstance(value, Mapping) and set(value) != set(

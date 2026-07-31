@@ -6,6 +6,7 @@ masks.  Labels are intentionally absent from every API in this module.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import hashlib
 import io
@@ -20,6 +21,7 @@ from .contracts import (
     TARGET_CACHE_SPEC_CONTRACT,
     TARGET_SHARD_CONTRACT,
     canonical_sha256,
+    load_hashed_json,
     require_sha256,
     validate_content_hash,
     with_content_hash,
@@ -65,6 +67,30 @@ def identity_order_sha256(identities: Sequence[str]) -> str:
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def validate_canonical_identity_sequence(
+    identities: Sequence[str],
+) -> tuple[int, str]:
+    """Validate canonical identity order without a population-sized set/sort."""
+
+    digest = hashlib.sha256(b"hosd_target_identity_order_v1\0")
+    previous: str | None = None
+    count = 0
+    for raw in identities:
+        value = str(raw)
+        if not value or (previous is not None and value <= previous):
+            raise ValueError(
+                "canonical identities must be non-empty, unique, and sorted"
+            )
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        previous = value
+        count += 1
+    if count == 0:
+        raise ValueError("target-cache identity population must not be empty")
+    return count, digest.hexdigest()
 
 
 def _encode_string_table(values: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -130,6 +156,7 @@ def build_target_cache_spec(
     storage_modes: Mapping[str, str] | None = None,
     hlt_replica_id: str | None = None,
     access_authorization_hash: str | None = None,
+    identities_are_canonical: bool = False,
 ) -> dict[str, Any]:
     """Freeze shard boundaries and complete lineage before values are inspected."""
 
@@ -149,9 +176,16 @@ def build_target_cache_spec(
         raise ValueError("shard_size must be positive")
     if dtype != "float32":
         raise ValueError("canonical target caches must use float32")
-    canonical, _ = _canonical_identities(identities)
-    if not canonical:
-        raise ValueError("target-cache identity population must not be empty")
+    if identities_are_canonical:
+        identity_count, canonical_identity_hash = (
+            validate_canonical_identity_sequence(identities)
+        )
+    else:
+        canonical, _ = _canonical_identities(identities)
+        if not canonical:
+            raise ValueError("target-cache identity population must not be empty")
+        identity_count = len(canonical)
+        canonical_identity_hash = identity_order_sha256(canonical)
     components = {
         str(target_id): [str(component) for component in names]
         for target_id, names in sorted(target_components.items())
@@ -189,8 +223,8 @@ def build_target_cache_spec(
             "cache_id": str(cache_id),
             "split": split,
             "artifact_kind": artifact_kind,
-            "event_count": len(canonical),
-            "canonical_identity_order_sha256": identity_order_sha256(canonical),
+            "event_count": identity_count,
+            "canonical_identity_order_sha256": canonical_identity_hash,
             "target_order": sorted(components),
             "target_components": components,
             "storage_modes": modes,
@@ -206,9 +240,7 @@ def build_target_cache_spec(
             ),
             "shard_size": int(shard_size),
             "shard_count": (
-                (len(canonical) + shard_size - 1) // shard_size
-                if canonical
-                else 0
+                (identity_count + shard_size - 1) // shard_size
             ),
             "dtype": dtype,
             "hlt_replica_id": hlt_replica_id,
@@ -264,16 +296,23 @@ def publish_target_cache_shard(
     *,
     cache_spec: Mapping[str, Any],
     canonical_identities: Sequence[str],
-    canonical_to_source: np.ndarray,
+    canonical_to_source: np.ndarray | None,
     shard_index: int,
     generator: Callable[[np.ndarray], Mapping[str, TargetBatch]],
+    identity_population_attestation: str | None = None,
 ) -> dict[str, Any]:
     validate_content_hash(cache_spec, expected_contract=TARGET_CACHE_SPEC_CONTRACT)
     if not 0 <= shard_index < int(cache_spec["shard_count"]):
         raise IndexError("target-cache shard index is out of range")
-    if identity_order_sha256(canonical_identities) != cache_spec[
-        "canonical_identity_order_sha256"
-    ]:
+    observed_identity_hash = (
+        identity_order_sha256(canonical_identities)
+        if identity_population_attestation is None
+        else require_sha256(
+            identity_population_attestation,
+            name="identity_population_attestation",
+        )
+    )
+    if observed_identity_hash != cache_spec["canonical_identity_order_sha256"]:
         raise ValueError("identity population differs from cache specification")
     start = shard_index * int(cache_spec["shard_size"])
     stop = min(start + int(cache_spec["shard_size"]), len(canonical_identities))
@@ -296,7 +335,11 @@ def publish_target_cache_shard(
     if npz_path.exists():
         raise ValueError(f"unattested partial shard exists at {npz_path}")
     target_ids = list(cache_spec["persisted_target_ids"])
-    source_indices = canonical_to_source[start:stop]
+    source_indices = (
+        np.arange(start, stop, dtype=np.int64)
+        if canonical_to_source is None
+        else canonical_to_source[start:stop]
+    )
     batches = _coerce_batch(
         generator(source_indices),
         expected_targets=target_ids,
@@ -366,7 +409,8 @@ def validate_target_cache(
     root = Path(output_dir)
     shard_records = []
     cursor = 0
-    all_identities: list[str] = []
+    population_digest = hashlib.sha256(b"hosd_target_identity_order_v1\0")
+    previous_identity: str | None = None
     for shard_index in range(int(cache_spec["shard_count"])):
         from .contracts import load_hashed_json
 
@@ -388,6 +432,17 @@ def validate_target_cache(
         )
         if identity_order_sha256(identities) != record["identity_order_sha256"]:
             raise ValueError("target shard identities differ from their attestation")
+        for identity in identities:
+            if previous_identity is not None and identity <= previous_identity:
+                raise ValueError(
+                    "target-cache identity coverage is not unique and sorted"
+                )
+            encoded_identity = identity.encode("utf-8")
+            population_digest.update(
+                len(encoded_identity).to_bytes(8, "big")
+            )
+            population_digest.update(encoded_identity)
+            previous_identity = identity
         indices = arrays["identity_indices"]
         if not np.array_equal(
             indices, np.arange(record["identity_start"], record["identity_stop"])
@@ -411,15 +466,10 @@ def validate_target_cache(
             if np.any(values[~masks] != 0) or not np.all(np.isfinite(values)):
                 raise ValueError("target values violate missingness/finiteness contract")
         cursor = int(record["identity_stop"])
-        all_identities.extend(identities)
         shard_records.append(record)
     if cursor != int(cache_spec["event_count"]):
         raise ValueError("target-cache shard coverage is incomplete")
-    if all_identities != sorted(all_identities) or len(set(all_identities)) != len(
-        all_identities
-    ):
-        raise ValueError("target-cache identity coverage is not unique and sorted")
-    if identity_order_sha256(all_identities) != cache_spec[
+    if population_digest.hexdigest() != cache_spec[
         "canonical_identity_order_sha256"
     ]:
         raise ValueError("target-cache identity population differs from specification")
@@ -538,6 +588,186 @@ def load_target_cache(
     )
 
 
+class _ShardArchiveStore:
+    def __init__(self, root: Path, manifest: Mapping[str, Any]) -> None:
+        self.records = []
+        self.ends = []
+        self.identities = []
+        offset = 0
+        trailing_shapes: dict[tuple[str, str], tuple[int, ...]] = {}
+        dtypes: dict[tuple[str, str], np.dtype] = {}
+        for shard in manifest["shards"]:
+            record_path = root / "shards" / f"shard_{shard['shard_index']:06d}.json"
+            record = load_hashed_json(
+                record_path, expected_contract=TARGET_SHARD_CONTRACT
+            )
+            npz_path = root / "shards" / record["npz_filename"]
+            arrays = _load_npz_bytes(npz_path.read_bytes())
+            shard_ids = _decode_string_table(
+                arrays["identity_offsets"], arrays["identity_bytes"]
+            )
+            self.identities.extend(shard_ids)
+            target_arrays = {}
+            for target in record["targets"]:
+                target_id = str(target["target_id"])
+                for kind, field in (
+                    ("value", "value_array"),
+                    ("mask", "mask_array"),
+                ):
+                    name = str(target[field])
+                    value = arrays[name]
+                    key = (target_id, kind)
+                    shape = tuple(value.shape[1:])
+                    if key in trailing_shapes and (
+                        trailing_shapes[key] != shape or dtypes[key] != value.dtype
+                    ):
+                        raise ValueError("sharded target coordinate metadata differs")
+                    trailing_shapes[key] = shape
+                    dtypes[key] = value.dtype
+                    target_arrays[key] = name
+            offset += len(shard_ids)
+            self.ends.append(offset)
+            self.records.append((npz_path, target_arrays))
+        self.trailing_shapes = trailing_shapes
+        self.dtypes = dtypes
+        self._cached_index = -1
+        self._cached_arrays = None
+
+    def row(self, target_id: str, kind: str, index: int) -> np.ndarray:
+        from bisect import bisect_right
+
+        if index < 0:
+            index += self.ends[-1]
+        if index < 0 or index >= self.ends[-1]:
+            raise IndexError(index)
+        shard = bisect_right(self.ends, index)
+        start = 0 if shard == 0 else self.ends[shard - 1]
+        if shard != self._cached_index:
+            self._cached_arrays = _load_npz_bytes(
+                self.records[shard][0].read_bytes()
+            )
+            self._cached_index = shard
+        name = self.records[shard][1][(target_id, kind)]
+        return self._cached_arrays[name][index - start]
+
+    def rows(self, target_id: str, kind: str, start: int, stop: int) -> np.ndarray:
+        if start < 0 or stop < start or stop > self.ends[-1]:
+            raise IndexError((start, stop))
+        parts = []
+        cursor = start
+        while cursor < stop:
+            shard = bisect_right(self.ends, cursor)
+            shard_start = 0 if shard == 0 else self.ends[shard - 1]
+            shard_stop = self.ends[shard]
+            if shard != self._cached_index:
+                self._cached_arrays = _load_npz_bytes(
+                    self.records[shard][0].read_bytes()
+                )
+                self._cached_index = shard
+            name = self.records[shard][1][(target_id, kind)]
+            take_stop = min(stop, shard_stop)
+            parts.append(
+                self._cached_arrays[name][
+                    cursor - shard_start : take_stop - shard_start
+                ]
+            )
+            cursor = take_stop
+        if not parts:
+            return np.empty(
+                (0, *self.trailing_shapes[(target_id, kind)]),
+                dtype=self.dtypes[(target_id, kind)],
+            )
+        return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+
+
+class _ShardedTargetArray:
+    def __init__(self, store: _ShardArchiveStore, target_id: str, kind: str) -> None:
+        self.store = store
+        self.target_id = target_id
+        self.kind = kind
+        self.shape = (
+            store.ends[-1],
+            *store.trailing_shapes[(target_id, kind)],
+        )
+        self.dtype = store.dtypes[(target_id, kind)]
+
+    def __getitem__(self, index: int | slice) -> np.ndarray:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self.shape[0])
+            if step != 1:
+                raise TypeError("sharded target slices require unit stride")
+            return self.store.rows(self.target_id, self.kind, start, stop)
+        if not isinstance(index, (int, np.integer)):
+            raise TypeError("sharded target arrays support scalar/unit-slice access")
+        return self.store.row(self.target_id, self.kind, int(index))
+
+
+def load_target_cache_sharded(
+    output_dir: str | Path,
+    *,
+    cache_spec: Mapping[str, Any],
+) -> LoadedTargetCache:
+    """Load target metadata while keeping at most one compressed shard resident."""
+
+    manifest = validate_target_cache(output_dir, cache_spec=cache_spec)
+    store = _ShardArchiveStore(Path(output_dir), manifest)
+    targets = tuple(str(value) for value in cache_spec["persisted_target_ids"])
+    return LoadedTargetCache(
+        identities=tuple(store.identities),
+        values={key: _ShardedTargetArray(store, key, "value") for key in targets},
+        masks={key: _ShardedTargetArray(store, key, "mask") for key in targets},
+        manifest=manifest,
+    )
+
+
+def iter_authenticated_target_shard_layouts(
+    output_dir: str | Path,
+) -> Iterable[tuple[Mapping[str, Any], Mapping[str, Any], Path]]:
+    """Yield shard records/paths only after manifest and byte authentication."""
+
+    root = Path(output_dir)
+    manifest = load_hashed_json(
+        root / "target_manifest.json",
+        expected_contract=TARGET_CACHE_MANIFEST_CONTRACT,
+    )
+    spec = load_hashed_json(
+        root / "cache_spec.json", expected_contract=TARGET_CACHE_SPEC_CONTRACT
+    )
+    if manifest.get("cache_spec_sha256") != spec["content_hash"]:
+        raise ValueError("target layout manifest/spec lineage differs")
+    expected_json = {
+        f"shard_{index:06d}.json" for index in range(len(manifest["shards"]))
+    }
+    expected_npz = {
+        f"shard_{index:06d}.npz" for index in range(len(manifest["shards"]))
+    }
+    shard_root = root / "shards"
+    if (
+        {path.name for path in shard_root.glob("shard_*.json")} != expected_json
+        or {path.name for path in shard_root.glob("shard_*.npz")} != expected_npz
+    ):
+        raise ValueError("target layout shard filenames differ")
+    for index, row in enumerate(manifest["shards"]):
+        record = load_hashed_json(
+            shard_root / f"shard_{index:06d}.json",
+            expected_contract=TARGET_SHARD_CONTRACT,
+        )
+        npz_path = shard_root / f"shard_{index:06d}.npz"
+        digest = hashlib.sha256(npz_path.read_bytes()).hexdigest()
+        if (
+            int(row.get("shard_index", -1)) != index
+            or record["content_hash"] != row.get("manifest_sha256")
+            or record.get("cache_spec_sha256") != spec["content_hash"]
+            or record.get("npz_filename") != npz_path.name
+            or record.get("npz_sha256") != row.get("npz_sha256")
+            or digest != row.get("npz_sha256")
+            or int(record.get("identity_start", -1)) != int(row["identity_start"])
+            or int(record.get("identity_stop", -1)) != int(row["identity_stop"])
+        ):
+            raise ValueError("target layout shard attestation differs")
+        yield manifest, record, npz_path
+
+
 __all__ = [
     "LoadedTargetCache",
     "PERSIST_STORAGE_MODE",
@@ -548,6 +778,8 @@ __all__ = [
     "deterministic_npz_bytes",
     "identity_order_sha256",
     "load_target_cache",
+    "load_target_cache_sharded",
+    "iter_authenticated_target_shard_layouts",
     "publish_target_cache",
     "publish_target_cache_shard",
     "validate_target_cache",

@@ -23,6 +23,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     CAPACITY_GRID_CONTRACT,
     CAPACITY_PROFILE_CONTRACT,
+    CONFIRMATION_PLAN_CONTRACT,
     load_hashed_json,
     write_immutable_json,
 )
@@ -93,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         artifact = build_capacity_control_execution_plan(
             confirmation_plan=load_hashed_json(
                 args.confirmation_plan,
-                expected_contract="hosd_confirmation_plan_v2",
+                expected_contract=CONFIRMATION_PLAN_CONTRACT,
             ),
             compilations=[
                 load_hashed_json(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -65,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
         maximum_concurrent_jobs=raw["maximum_concurrent_jobs"],
         checkpoint_bytes=raw["checkpoint_bytes"],
         export_bytes=raw["export_bytes"],
+        scale_resident_layout_ledger=raw["scale_resident_layout_ledger"],
+        scale_resident_memory_projections=raw[
+            "scale_resident_memory_projections"
+        ],
         measurement_evidence_sha256=raw["content_hash"],
         source=campaign["source"],
     )

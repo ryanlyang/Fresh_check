@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     SCALE_INPUT_COMPLETION_CONTRACT,
     SCALE_NORMALIZER_COMPLETION_CONTRACT,
+    SCALE_TREE_WAVE_COMPLETION_CONTRACT,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -48,12 +49,17 @@ def main(argv: list[str] | None = None) -> int:
         root / "scale_up" / "normalization" / "completion.json",
         expected_contract=SCALE_NORMALIZER_COMPLETION_CONTRACT,
     )
+    trees = load_hashed_json(
+        root / "scale_up" / "trees" / "completion.json",
+        expected_contract=SCALE_TREE_WAVE_COMPLETION_CONTRACT,
+    )
     screening = load_hashed_json(args.screening_registry)
     for name, artifact in (
         ("teacher lock", lock),
         ("input completion", inputs),
         ("normalizer completion", normalizers),
         ("screening registry", screening),
+        ("tree completion", trees),
     ):
         if (
             artifact.get("source") is not None
@@ -102,8 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     configs = {
         "O_BASE": with_content_hash(
             {
-                "contract": "hosd_scale_teacher_adapter_config_v1",
-                "schema_version": 1,
+                "contract": "hosd_scale_teacher_adapter_config_v2",
+                "schema_version": 2,
                 "source": campaign["source"],
                 "teacher_id": "O_BASE",
                 **common,
@@ -111,8 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "O_FULLREL": with_content_hash(
             {
-                "contract": "hosd_scale_teacher_adapter_config_v1",
-                "schema_version": 1,
+                "contract": "hosd_scale_teacher_adapter_config_v2",
+                "schema_version": 2,
                 "source": campaign["source"],
                 "teacher_id": "O_FULLREL",
                 **common,
@@ -128,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
                         / "scale_train_exclusive_ca_v1"
                     ).resolve()
                 ),
+                "tree_expected_parents": {
+                    "hlt_content_sha256": offline_row["npz_sha256"],
+                    "tree_resource_sha256": trees["tree_resource_sha256"],
+                    "backend_manifest_sha256": trees[
+                        "backend_manifest_sha256"
+                    ],
+                },
             }
         ),
     }
@@ -141,13 +154,14 @@ def main(argv: list[str] | None = None) -> int:
         }
     completion = with_content_hash(
         {
-            "contract": "hosd_scale_teacher_adapter_wave_v1",
-            "schema_version": 1,
+            "contract": "hosd_scale_teacher_adapter_wave_v2",
+            "schema_version": 2,
             "source": campaign["source"],
             "campaign_spec_sha256": campaign["content_hash"],
             "teacher_lock_sha256": lock["content_hash"],
             "scale_input_completion_sha256": inputs["content_hash"],
             "scale_normalizer_completion_sha256": normalizers["content_hash"],
+            "scale_tree_completion_sha256": trees["content_hash"],
             "screening_registry_sha256": screening["content_hash"],
             "configs": paths,
             "teacher_ids": ["O_BASE", "O_FULLREL"],

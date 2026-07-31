@@ -470,9 +470,23 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     )
     validate_step15_contract_bundle(bundle)
     assert bundle["step15_bundle"]["stage_coverage"] == list("ABCDEFGHIJKLMN")
-    assert bundle["step15_preflight_report"]["checks"][
+    step15 = bundle["step15_bundle"]
+    checks = bundle["step15_preflight_report"]["checks"]
+    assert checks[
         "negative_campaign_reaches_final_report"
     ]
+    assert checks["all_63_manifest_targets_require_genuine_execution"]
+    assert checks["all_50_nonbootstrap_targets_require_plan_factories"]
+    assert checks["shortlisted_500k_controls_are_real_three_seed_training"]
+    assert checks["complete_section_28_semantic_control_matrix_required"]
+    assert checks["stage_M_training_split_into_bounded_component_continuations"]
+    assert checks["sealed_final_test_rows_resume_under_one_immutable_claim"]
+    assert step15["stage_k_m_completion_contracts"][
+        "shortlisted_500k_controls"
+    ] == "retb_shortlisted_500k_controls_v3"
+    assert step15["stage_n_completion_contracts"][
+        "final_test_execution_claim"
+    ] == "retb_final_test_execution_claim_v3"
 
     submitter = (ROOT / "sbatch" / "submit_retb_tigris_full.sh").read_text()
     common = (ROOT / "sbatch" / "retb_common.sh").read_text()
@@ -487,6 +501,15 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert "HLT-v3 cache hashes:" in submitter
     assert "monitor_retb_campaign.py" in submitter
     assert "D_NOMINAL" in submitter
+    assert submitter.count("CONCURRENCY:=64") == 5
+    assert submitter.count("export RETB_") >= 5
+    assert DEFAULT_CONCURRENCY == {
+        "cpu_cache": 64,
+        "gpu_expert": 64,
+        "gpu_predictor": 64,
+        "gpu_scale": 64,
+        "gpu_final": 64,
+    }
     assert "performance" not in submitter.lower()
     assert 'source "${PROJECT_DIR}/sbatch/retb_common.sh"' in array_launcher
     assert "sbatch --parsable --wait" in array_launcher

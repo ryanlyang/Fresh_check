@@ -17,11 +17,11 @@ from .contracts import (
     with_content_hash,
     write_immutable_json,
 )
-from .target_cache import load_target_cache
+from .target_cache import load_target_cache, load_target_cache_sharded
 from .target_schemas import target_declarations
 
 
-NATIVE_RELATION_TARGET_CONTRACT = "hosd_native_relation_target_v1"
+NATIVE_RELATION_TARGET_CONTRACT = "hosd_native_relation_target_v2"
 NATIVE_RELATION_WAVE_CONTRACT = "hosd_native_relation_target_wave_v1"
 
 
@@ -40,7 +40,7 @@ def _publish_native_npz(
     targets: np.ndarray,
     target_mask: np.ndarray,
     availability: np.ndarray,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     arrays = {
         "identities": np.asarray(identities),
         "targets": targets.astype(np.float32, copy=False),
@@ -48,7 +48,45 @@ def _publish_native_npz(
         "availability": availability,
     }
 
-    def validate_existing() -> str:
+    def publish_store() -> dict[str, Any]:
+        store = output.with_name(output.name + ".arrays")
+        if not store.exists():
+            temporary_store = Path(
+                tempfile.mkdtemp(prefix=f".{store.name}.", dir=output.parent)
+            )
+            try:
+                for name, value in sorted(arrays.items()):
+                    np.save(temporary_store / f"{name}.npy", value, allow_pickle=False)
+                try:
+                    temporary_store.rename(store)
+                except FileExistsError:
+                    pass
+            finally:
+                if temporary_store.exists():
+                    for child in temporary_store.iterdir():
+                        child.unlink()
+                    temporary_store.rmdir()
+        if store.is_symlink() or not store.is_dir():
+            raise FileExistsError("native relation memory-map store is unsafe")
+        members = {}
+        for name in sorted(arrays):
+            path = store / f"{name}.npy"
+            value = np.load(path, mmap_mode="r", allow_pickle=False)
+            if value.shape != arrays[name].shape or value.dtype != arrays[name].dtype:
+                raise FileExistsError("native relation memory-map metadata differs")
+            members[name] = {
+                "filename": path.name,
+                "sha256": _sha256_file(path),
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+            }
+        return {
+            "contract": "hosd_native_relation_npy_store_v1",
+            "directory": store.name,
+            "members": members,
+        }
+
+    def validate_existing() -> tuple[str, dict[str, Any]]:
         if output.is_symlink() or not output.is_file():
             raise FileExistsError("native relation destination is unsafe")
         with np.load(output, allow_pickle=False) as payload:
@@ -59,7 +97,7 @@ def _publish_native_npz(
                 raise FileExistsError(
                     "reusable native relation target differs"
                 )
-        return _sha256_file(output)
+        return _sha256_file(output), publish_store()
 
     if output.exists():
         return validate_existing()
@@ -75,7 +113,7 @@ def _publish_native_npz(
             os.link(temporary, output)
         except FileExistsError:
             return validate_existing()
-        return _sha256_file(output)
+        return _sha256_file(output), publish_store()
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -92,6 +130,60 @@ def native_relation_target_ids() -> tuple[str, ...]:
     return rows
 
 
+def _publish_joined_sharded_native(
+    *,
+    loaded: Mapping[str, tuple[Any, str]],
+    output: Path,
+) -> tuple[str, dict[str, Any]]:
+    ids = native_relation_target_ids()
+    first = loaded[ids[0]][0]
+    count = len(first.identities)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output.name}.join.", dir=output.parent
+    ) as directory:
+        root = Path(directory)
+        values = np.lib.format.open_memmap(
+            root / "targets.npy", mode="w+", dtype=np.float32, shape=(count, 545)
+        )
+        masks = np.lib.format.open_memmap(
+            root / "target_mask.npy", mode="w+", dtype=bool, shape=(count, 545)
+        )
+        availability = np.lib.format.open_memmap(
+            root / "availability.npy", mode="w+", dtype=np.float32, shape=(count, 7)
+        )
+        chunk_size = 4096
+        for start in range(0, count, chunk_size):
+            stop = min(count, start + chunk_size)
+            value_parts = [
+                np.asarray(loaded[key][0].values[loaded[key][1]][start:stop])
+                for key in ids
+            ]
+            mask_parts = [
+                np.asarray(loaded[key][0].masks[loaded[key][1]][start:stop])
+                for key in ids
+            ]
+            values[start:stop] = np.concatenate(value_parts, axis=1)
+            masks[start:stop] = np.concatenate(mask_parts, axis=1)
+            availability[start:stop] = np.stack(
+                [part.any(axis=1) for part in mask_parts], axis=1
+            ).astype(np.float32)
+        values.flush()
+        masks.flush()
+        availability.flush()
+        if not np.isfinite(values).all():
+            raise ValueError("native relation concatenation is nonfinite")
+        published = _publish_native_npz(
+            output,
+            identities=first.identities,
+            targets=values,
+            target_mask=masks,
+            availability=availability,
+        )
+        del values, masks, availability
+        return published
+
+
 def materialize_native_relation_target(
     *,
     target_cache_root: str | Path,
@@ -103,34 +195,18 @@ def materialize_native_relation_target(
     spec = load_hashed_json(
         root / "cache_spec.json", expected_contract=TARGET_CACHE_SPEC_CONTRACT
     )
-    cache = load_target_cache(root, cache_spec=spec)
+    cache = load_target_cache_sharded(root, cache_spec=spec)
     ids = native_relation_target_ids()
     if not set(ids).issubset(cache.values):
         raise ValueError("HLT analogue cache lacks native relation families")
-    values = np.concatenate([cache.values[key] for key in ids], axis=1)
-    masks = np.concatenate([cache.masks[key] for key in ids], axis=1)
-    availability = np.stack(
-        [cache.masks[key].any(axis=1) for key in ids], axis=1
-    ).astype(np.float32)
-    if (
-        values.shape != (len(cache.identities), 545)
-        or masks.shape != values.shape
-        or availability.shape != (len(cache.identities), 7)
-        or not np.isfinite(values).all()
-    ):
-        raise ValueError("native relation concatenation shape/finiteness differs")
     output = Path(output_path)
-    digest = _publish_native_npz(
-        output,
-        identities=cache.identities,
-        targets=values,
-        target_mask=masks,
-        availability=availability,
+    digest, mmap_store = _publish_joined_sharded_native(
+        loaded={key: (cache, key) for key in ids}, output=output
     )
     artifact = with_content_hash(
         {
             "contract": NATIVE_RELATION_TARGET_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -147,6 +223,8 @@ def materialize_native_relation_target(
             "event_count": len(cache.identities),
             "npz_filename": output.name,
             "npz_sha256": digest,
+            "storage_layout": "compressed_npz_plus_authenticated_npy_mmap_v1",
+            "mmap_store": mmap_store,
             "same_hlt_view_as_student": True,
             "offline_information_consumed": False,
         }
@@ -204,7 +282,7 @@ def materialize_native_relation_target_from_family_caches(
             root / "cache_spec.json",
             expected_contract=TARGET_CACHE_SPEC_CONTRACT,
         )
-        cache = load_target_cache(root, cache_spec=spec)
+        cache = load_target_cache_sharded(root, cache_spec=spec)
         if len(cache.values) != 1:
             raise ValueError("scale native relation cache is not family-pure")
         coordinate = next(iter(cache.values))
@@ -218,37 +296,13 @@ def materialize_native_relation_target_from_family_caches(
         for cache, _ in loaded.values()
     ):
         raise ValueError("scale native relation family identities/views differ")
-    values = np.concatenate(
-        [loaded[key][0].values[loaded[key][1]] for key in ids], axis=1
-    )
-    masks = np.concatenate(
-        [loaded[key][0].masks[loaded[key][1]] for key in ids], axis=1
-    )
-    availability = np.stack(
-        [
-            loaded[key][0].masks[loaded[key][1]].any(axis=1)
-            for key in ids
-        ],
-        axis=1,
-    ).astype(np.float32)
-    if (
-        values.shape != (len(first.identities), 545)
-        or masks.shape != values.shape
-        or availability.shape != (len(first.identities), 7)
-        or not np.isfinite(values).all()
-    ):
-        raise ValueError("scale native relation concatenation differs")
-    digest = _publish_native_npz(
-        output,
-        identities=first.identities,
-        targets=values,
-        target_mask=masks,
-        availability=availability,
+    digest, mmap_store = _publish_joined_sharded_native(
+        loaded=loaded, output=output
     )
     artifact = with_content_hash(
         {
             "contract": NATIVE_RELATION_TARGET_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -275,6 +329,8 @@ def materialize_native_relation_target_from_family_caches(
             "event_count": len(first.identities),
             "npz_filename": output.name,
             "npz_sha256": digest,
+            "storage_layout": "compressed_npz_plus_authenticated_npy_mmap_v1",
+            "mmap_store": mmap_store,
             "same_hlt_view_as_student": True,
             "offline_information_consumed": False,
         }

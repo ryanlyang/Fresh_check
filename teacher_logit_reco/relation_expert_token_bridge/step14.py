@@ -16,8 +16,8 @@ from .predictor_bundle import PIPELINE_SEEDS
 
 
 STAGE_MN_POLICY_CONTRACT = "retb_stage_mn_scale_final_seal_policy_v1"
-STEP14_BUNDLE_CONTRACT = "retb_step14_scale_final_seal_bundle_v1"
-STEP14_PREFLIGHT_CONTRACT = "retb_step14_preflight_report_v1"
+STEP14_BUNDLE_CONTRACT = "retb_step14_scale_final_seal_bundle_v2"
+STEP14_PREFLIGHT_CONTRACT = "retb_step14_preflight_report_v2"
 
 
 def build_stage_mn_policy() -> dict[str, Any]:
@@ -127,6 +127,7 @@ def build_step14_bundle(
     campaign_spec_sha256: str,
     step13_bundle_sha256: str,
     locked_scale_shortlist_sha256: str,
+    shortlisted_500k_controls_sha256: str,
     global_determinism_sha256: str,
     source_snapshot: Mapping[str, Any],
 ) -> dict[str, dict[str, Any]]:
@@ -137,7 +138,7 @@ def build_step14_bundle(
         with_content_hash(
             {
                 "contract": STEP14_BUNDLE_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "parents": {
                     "campaign_spec": require_sha256(
                         campaign_spec_sha256,
@@ -150,6 +151,10 @@ def build_step14_bundle(
                     "locked_scale_shortlist": require_sha256(
                         locked_scale_shortlist_sha256,
                         name="locked_scale_shortlist_sha256",
+                    ),
+                    "shortlisted_500k_controls": require_sha256(
+                        shortlisted_500k_controls_sha256,
+                        name="shortlisted_500k_controls_sha256",
                     ),
                     "global_determinism": require_sha256(
                         global_determinism_sha256,
@@ -172,10 +177,11 @@ def build_step14_bundle(
         with_content_hash(
             {
                 "contract": STEP14_PREFLIGHT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "step14_bundle_sha256": manifest["content_hash"],
                 "checks": {
                     "shortlist_already_immutable": True,
+                    "real_shortlisted_500k_controls_complete": True,
                     "every_and_only_scale_graph_rule_frozen": True,
                     "stack_val_label_feature_separation_frozen": True,
                     "accuracy_and_rejection_selectors_frozen": True,

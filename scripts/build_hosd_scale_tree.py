@@ -23,6 +23,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     INPUT_VIEW_MANIFEST_CONTRACT,
     SCALE_INPUT_COMPLETION_CONTRACT,
     SCALE_TREE_WAVE_COMPLETION_CONTRACT,
+    load_materialized_input_view,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -190,26 +191,30 @@ def main(argv: list[str] | None = None) -> int:
         or _sha256(input_path) != view_manifest.get("npz_sha256")
     ):
         raise ValueError("Stage-J tree input-view lineage differs")
-    with np.load(input_path, allow_pickle=False) as payload:
-        required = {"identity", "raw_tokens", "mask", "vectors"}
-        if not required.issubset(payload.files):
-            raise ValueError("Stage-J tree input fields differ")
-        identities = tuple(str(value) for value in payload["identity"].tolist())
-        tokens = np.asarray(payload["raw_tokens"], dtype=np.float32)
-        mask = np.asarray(payload["mask"], dtype=bool)
-        vectors = np.asarray(payload["vectors"], dtype=np.float32).transpose(
-            0, 2, 1
-        )
+    arrays, _ = load_materialized_input_view(
+        input_path,
+        expected_view_kind=(
+            "canonical_offline"
+            if args.coordinate == "offline"
+            else "hlt_analogue"
+        ),
+        expected_source=campaign["source"],
+    )
+    identities = arrays["identities"]
+    tokens = arrays["tokens"]
+    mask = arrays["mask"]
+    vectors = arrays["vectors"]
+    identity_count = int(identities.shape[0])
     if (
-        len(identities) != int(view_manifest["identity_count"])
-        or tokens.shape != (len(identities), 128, 14)
-        or mask.shape != (len(identities), 128)
-        or vectors.shape != (len(identities), 128, 4)
+        identity_count != int(view_manifest["identity_count"])
+        or tokens.shape != (identity_count, 128, 14)
+        or mask.shape != (identity_count, 128)
+        or vectors.shape != (identity_count, 4, 128)
     ):
         raise ValueError("Stage-J tree input shapes differ")
     specifications = []
-    for shard_index, start in enumerate(range(0, len(identities), SHARD_SIZE)):
-        stop = min(start + SHARD_SIZE, len(identities))
+    for shard_index, start in enumerate(range(0, identity_count, SHARD_SIZE)):
+        stop = min(start + SHARD_SIZE, identity_count)
         output = output_dir / "shards" / f"shard_{shard_index:05d}.npz"
         reused = validate_existing_tree_shard(
             output,
@@ -235,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "dry_run": True,
                     "coordinate": args.coordinate,
-                    "jet_count": len(identities),
+                    "jet_count": identity_count,
                     "shard_count": len(specifications),
                     "pending_shard_count": len(pending),
                 },
@@ -269,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         for position, row in enumerate(pending, start=1):
             start, stop = int(row["start"]), int(row["stop"])
             payloads = [
-                (vectors[index], tokens[index], mask[index])
+                (vectors[index].T, tokens[index], mask[index])
                 for index in range(start, stop)
             ]
             trees = (
@@ -308,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir / "manifest.json",
         shard_metadata,
         split=split,
-        expected_jet_count=len(identities),
+        expected_jet_count=identity_count,
         hlt_content_sha256=view_manifest["npz_sha256"],
         tree_resource_sha256=resource["content_hash"],
         backend_manifest_sha256=backend_manifest["content_hash"],

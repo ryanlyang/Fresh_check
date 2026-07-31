@@ -36,9 +36,12 @@ FINALIST_CONTROLS_EXECUTION_PLAN_CONTRACT = (
     "retb_finalist_controls_execution_plan_v1"
 )
 SEALED_FINAL_TEST_EXECUTION_PLAN_CONTRACT = (
-    "retb_sealed_final_test_execution_plan_v1"
+    "retb_sealed_final_test_execution_plan_v3"
 )
 FINAL_TEST_PREDICTION_CONTRACT = "retb_final_test_prediction_v1"
+FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT = (
+    "retb_final_test_inference_attestation_v2"
+)
 FINAL_TEST_LABEL_MANIFEST_CONTRACT = "retb_final_test_label_manifest_v1"
 DEPLOYABLE_INFERENCE_INPUT_CONTRACT = (
     "retb_deployable_inference_input_v1"
@@ -119,6 +122,11 @@ def _validate_inference_step(
     graph_id: str,
     pipeline_seed: int,
     output: Path,
+    row_id: str | None = None,
+    checkpoint_sha256: str | None = None,
+    attestation_output: Path | None = None,
+    deployable_export: Path | None = None,
+    input_manifest: Path | None = None,
 ) -> None:
     argv = list(step["argv"])
     required_flags = {
@@ -146,6 +154,23 @@ def _validate_inference_step(
         or "--scale-completion" in argv
     ):
         raise ValueError("final-test inference authorization differs")
+    if split == "final_test" and (
+        row_id is None
+        or checkpoint_sha256 is None
+        or attestation_output is None
+        or _argument_value(argv, "--row-id") != row_id
+        or _argument_value(argv, "--checkpoint-sha256")
+        != checkpoint_sha256
+        or _argument_value(argv, "--attestation-output")
+        != str(attestation_output)
+        or deployable_export is None
+        or _argument_value(argv, "--deployable-export")
+        != str(deployable_export)
+        or input_manifest is None
+        or _argument_value(argv, "--input-manifest")
+        != str(input_manifest)
+    ):
+        raise ValueError("final-test inference attestation lineage differs")
 
 
 def validate_stack_inference_execution_plan(
@@ -300,7 +325,7 @@ def validate_sealed_final_test_execution_plan(
     records = payload.get("prediction_rows", [])
     if (
         set(payload) != required
-        or int(payload["schema_version"]) != 1
+        or int(payload["schema_version"]) != 3
         or payload["source"] != campaign_source
         or payload["final_test_execution_lock_sha256"]
         != execution_lock["content_hash"]
@@ -323,8 +348,17 @@ def validate_sealed_final_test_execution_plan(
         "graph_id",
         "pipeline_seed",
         "checkpoint_sha256",
+        "deployable_export",
+        "deployable_export_sha256",
         "inference_output_npz",
+        "inference_attestation_output",
         "prediction_manifest_output",
+        "input_manifest",
+        "input_manifest_sha256",
+        "shared_payload_manifest",
+        "shared_payload_manifest_sha256",
+        "shared_payload_sha256",
+        "locked_final_test_HLT_inputs_sha256",
     }
     for record in records:
         row_id = str(record.get("row_id"))
@@ -337,29 +371,165 @@ def validate_sealed_final_test_execution_plan(
             or int(record["pipeline_seed"]) != expected["pipeline_seed"]
             or record["checkpoint_sha256"]
             != expected["checkpoint_sha256"]
+            or _inside(record["deployable_export"], root).suffix != ".json"
+            or require_sha256(
+                record["deployable_export_sha256"],
+                name="deployable_export_sha256",
+            ) != record["deployable_export_sha256"]
             or _inside(record["inference_output_npz"], root).suffix != ".npz"
+            or _inside(
+                record["inference_attestation_output"], root
+            ).suffix != ".json"
             or _inside(
                 record["prediction_manifest_output"], root
             ).suffix
             != ".json"
+            or _inside(record["input_manifest"], root).suffix != ".json"
+            or _inside(record["shared_payload_manifest"], root).suffix
+            != ".json"
+            or any(
+                require_sha256(record[name], name=name) != record[name]
+                for name in (
+                    "input_manifest_sha256",
+                    "shared_payload_manifest_sha256",
+                    "shared_payload_sha256",
+                    "locked_final_test_HLT_inputs_sha256",
+                )
+            )
         ):
             raise ValueError("sealed final-test prediction-row coverage differs")
         inference_path = _inside(record["inference_output_npz"], root)
+        attestation_path = _inside(
+            record["inference_attestation_output"], root
+        )
         producers = output_steps.get(str(inference_path), [])
-        if len(producers) != 1:
+        attestation_producers = output_steps.get(str(attestation_path), [])
+        if (
+            len(producers) != 1
+            or attestation_producers != producers
+        ):
             raise ValueError(
-                "sealed final-test prediction has no unique inference worker"
+                "sealed final-test prediction/attestation has no unique "
+                "inference worker"
             )
+        export_path = _inside(record["deployable_export"], root)
+        input_manifest_path = _inside(record["input_manifest"], root)
+        shared_manifest_path = _inside(
+            record["shared_payload_manifest"], root
+        )
+        shared_manifest = load_hashed_json(
+            shared_manifest_path,
+            expected_contract=SHARED_DEPLOYABLE_INFERENCE_PAYLOAD_CONTRACT,
+        )
+        shared_sha = validate_shared_deployable_inference_payload(
+            shared_manifest, manifest_path=shared_manifest_path
+        )
+        locked_input_sha = execution_lock["final_input_hashes"][
+            "final_test_HLT_inputs"
+        ]
+        expected_binding = build_deployable_inference_input_binding(
+            output_dir=input_manifest_path.parent,
+            shared_payload_manifest=shared_manifest,
+            shared_payload_manifest_path=shared_manifest_path,
+            graph_id=str(record["graph_id"]),
+            pipeline_seed=int(record["pipeline_seed"]),
+        )
+        if (
+            shared_sha != locked_input_sha
+            or record["shared_payload_manifest_sha256"] != shared_sha
+            or record["locked_final_test_HLT_inputs_sha256"]
+            != locked_input_sha
+            or record["shared_payload_sha256"]
+            != shared_manifest["payload_sha256"]
+            or record["input_manifest_sha256"]
+            != expected_binding["content_hash"]
+            or shared_manifest.get("source") != campaign_source
+        ):
+            raise ValueError("sealed final-test input lock binding differs")
+        export = load_hashed_json(export_path)
+        if (
+            export["content_hash"] != record["deployable_export_sha256"]
+            or export.get("source") != campaign_source
+        ):
+            raise ValueError("sealed final-test deployable export differs")
         _validate_inference_step(
             producers[0],
             split="final_test",
             graph_id=str(record["graph_id"]),
             pipeline_seed=int(record["pipeline_seed"]),
             output=inference_path,
+            row_id=row_id,
+            checkpoint_sha256=str(record["checkpoint_sha256"]),
+            attestation_output=attestation_path,
+            deployable_export=export_path,
+            input_manifest=input_manifest_path,
         )
         seen.add(row_id)
     if seen != set(expected_rows):
         raise ValueError("sealed final-test prediction rows are incomplete")
+    return digest
+
+
+def validate_final_test_inference_attestation(
+    payload: Mapping[str, Any],
+    *,
+    row: Mapping[str, Any],
+    execution_lock_sha256: str,
+    execution_claim_sha256: str,
+    execution_plan_sha256: str,
+    locked_final_test_hlt_inputs_sha256: str,
+    npz_path: str | Path,
+    expected_source: Mapping[str, Any],
+) -> str:
+    """Validate the commit marker that makes one final-test NPZ reusable."""
+
+    digest = validate_content_hash(
+        payload, expected_contract=FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT
+    )
+    required = {
+        "contract", "schema_version", "row_id", "graph_id",
+        "pipeline_seed", "checkpoint_sha256",
+        "final_test_execution_lock_sha256", "execution_claim_sha256",
+        "execution_plan_sha256", "deployable_export_sha256",
+        "input_manifest_path", "input_manifest_sha256",
+        "shared_payload_manifest_sha256", "shared_payload_sha256",
+        "locked_final_test_HLT_inputs_sha256", "inference_output_npz",
+        "inference_output_npz_sha256", "source", "content_hash",
+    }
+    path = Path(npz_path).resolve()
+    if (
+        set(payload) != required
+        or int(payload["schema_version"]) != 2
+        or payload["row_id"] != row["row_id"]
+        or payload["graph_id"] != row["graph_id"]
+        or int(payload["pipeline_seed"]) != int(row["pipeline_seed"])
+        or payload["checkpoint_sha256"] != row["checkpoint_sha256"]
+        or payload["deployable_export_sha256"]
+        != row["deployable_export_sha256"]
+        or payload["final_test_execution_lock_sha256"]
+        != execution_lock_sha256
+        or payload["execution_claim_sha256"] != execution_claim_sha256
+        or payload["execution_plan_sha256"] != execution_plan_sha256
+        or Path(payload["input_manifest_path"]).resolve()
+        != Path(row["input_manifest"]).resolve()
+        or payload["input_manifest_sha256"]
+        != row["input_manifest_sha256"]
+        or payload["shared_payload_manifest_sha256"]
+        != row["shared_payload_manifest_sha256"]
+        or payload["shared_payload_sha256"]
+        != row["shared_payload_sha256"]
+        or payload["locked_final_test_HLT_inputs_sha256"]
+        != locked_final_test_hlt_inputs_sha256
+        or row["locked_final_test_HLT_inputs_sha256"]
+        != locked_final_test_hlt_inputs_sha256
+        or payload["source"] != expected_source
+        or Path(payload["inference_output_npz"]).resolve() != path
+        or not path.is_file()
+        or path.is_symlink()
+        or hashlib.sha256(path.read_bytes()).hexdigest()
+        != payload["inference_output_npz_sha256"]
+    ):
+        raise ValueError("final-test inference attestation differs")
     return digest
 
 
@@ -630,6 +800,40 @@ def publish_deployable_inference_input_binding(
 ) -> dict[str, Any]:
     """Bind one graph/seed identity to an existing shared split payload."""
 
+    manifest = build_deployable_inference_input_binding(
+        output_dir=output_dir,
+        shared_payload_manifest=shared_payload_manifest,
+        shared_payload_manifest_path=shared_payload_manifest_path,
+        graph_id=graph_id,
+        pipeline_seed=pipeline_seed,
+    )
+    split = str(manifest["split"])
+    safe_graph_id = str(graph_id).replace(":", "__")
+    manifest_path = (
+        Path(output_dir)
+        / f"{split}_{safe_graph_id}_seed{int(pipeline_seed)}.json"
+    )
+    publication = write_immutable_json(manifest_path, manifest)
+    validate_deployable_inference_input_binding(
+        manifest, manifest_path=manifest_path
+    )
+    return {
+        "manifest": manifest,
+        "manifest_publication": publication,
+        "shared_payload_manifest": dict(shared_payload_manifest),
+    }
+
+
+def build_deployable_inference_input_binding(
+    *,
+    output_dir: str | Path,
+    shared_payload_manifest: Mapping[str, Any],
+    shared_payload_manifest_path: str | Path,
+    graph_id: str,
+    pipeline_seed: int,
+) -> dict[str, Any]:
+    """Build the deterministic graph/seed binding without publishing it."""
+
     shared_sha = validate_shared_deployable_inference_payload(
         shared_payload_manifest,
         manifest_path=shared_payload_manifest_path,
@@ -642,7 +846,6 @@ def publish_deployable_inference_input_binding(
         != Path(shared_payload_manifest_path).resolve().parent
     ):
         raise ValueError("deployable inference binding identity differs")
-    safe_graph_id = str(graph_id).replace(":", "__")
     # v1 graph manifests owned a distinct payload. The v2 binding records the
     # graph identity while reusing one explicitly authenticated split payload.
     manifest = with_content_hash(
@@ -672,19 +875,7 @@ def publish_deployable_inference_input_binding(
             "source": dict(shared_payload_manifest["source"]),
         }
     )
-    manifest_path = (
-        Path(output_dir)
-        / f"{split}_{safe_graph_id}_seed{int(pipeline_seed)}.json"
-    )
-    publication = write_immutable_json(manifest_path, manifest)
-    validate_deployable_inference_input_binding(
-        manifest, manifest_path=manifest_path
-    )
-    return {
-        "manifest": manifest,
-        "manifest_publication": publication,
-        "shared_payload_manifest": dict(shared_payload_manifest),
-    }
+    return manifest
 
 
 def validate_deployable_inference_input_binding(
@@ -960,10 +1151,12 @@ def validate_control_evidence(
 
 
 __all__ = [
+    "build_deployable_inference_input_binding",
     "DEPLOYABLE_INFERENCE_ENTRYPOINT",
     "DEPLOYABLE_INFERENCE_INPUT_BINDING_CONTRACT",
     "DEPLOYABLE_INFERENCE_INPUT_CONTRACT",
     "FINALIST_CONTROLS_EXECUTION_PLAN_CONTRACT",
+    "FINAL_TEST_INFERENCE_ATTESTATION_CONTRACT",
     "FINAL_TEST_LABEL_MANIFEST_CONTRACT",
     "FINAL_TEST_PREDICTION_CONTRACT",
     "POSTLOCK_TARGET_EXECUTION_PLAN_CONTRACT",
@@ -979,6 +1172,7 @@ __all__ = [
     "validate_deployable_inference_input",
     "validate_deployable_inference_input_binding",
     "validate_final_labels_manifest",
+    "validate_final_test_inference_attestation",
     "validate_finalist_controls_execution_plan",
     "validate_postlock_target_execution_plan",
     "validate_sealed_final_test_execution_plan",

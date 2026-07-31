@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from jetclass_fresh.jetclass_data import (
@@ -23,6 +24,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     build_registries,
     build_step1_bundle,
     canonical_sha256,
+    load_authorized_identity_labels,
     publish_step1_bundle,
     require_parents_ready,
     validate_content_hash,
@@ -187,6 +189,28 @@ def test_access_roles_fail_closed() -> None:
         )
     with pytest.raises(ValueError):
         authorize_access(worker_role="unknown", requested_resource="anything")
+
+
+def test_postlock_final_labels_require_typed_authorized_loader(tmp_path) -> None:
+    artifact = tmp_path / "identity_labels.npz"
+    np.savez(
+        artifact,
+        identities=np.asarray(["a", "b"]),
+        labels=np.asarray([1, 2], dtype=np.int64),
+    )
+    identities, labels = load_authorized_identity_labels(
+        artifact,
+        worker_role="final_inference",
+        requested_resource="postlock_final_test_identity_labels",
+    )
+    assert identities == ("a", "b")
+    assert labels.tolist() == [1, 2]
+    with pytest.raises(PermissionError):
+        load_authorized_identity_labels(
+            artifact,
+            worker_role="stack_inference",
+            requested_resource="postlock_final_test_identity_labels",
+        )
 
 
 def test_stage_a_to_k_and_every_artifact_producer_are_enumerated() -> None:

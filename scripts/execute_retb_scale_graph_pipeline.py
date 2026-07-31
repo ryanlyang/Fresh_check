@@ -62,6 +62,10 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 
 
 REFINER_CONTRACT = "retb_scale_selected_token_refiner_v1"
+GRAPH_PHASE_COMPLETION_CONTRACT = "retb_scale_graph_phase_completion_v1"
+GRAPH_PHASES = (
+    "joint", "datasets", "refiner", "final_consumer", "export", "complete"
+)
 COMPONENT_CONTRACT = "retb_scale_component_lineage_v1"
 
 
@@ -157,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pipeline-seed", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--stop-after", choices=GRAPH_PHASES, default="complete")
     args = parser.parse_args(argv)
 
     root = args.campaign_root.resolve()
@@ -192,6 +197,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         != shortlist["content_hash"]
     ):
         raise ValueError("scale graph pipeline lineage differs")
+    def finish_phase(phase: str, artifacts: Mapping[str, str]) -> int:
+        marker = bind_source(
+            with_content_hash({
+                "contract": GRAPH_PHASE_COMPLETION_CONTRACT,
+                "schema_version": 1,
+                "phase": phase,
+                "graph_id": args.graph_id,
+                "pipeline_seed": args.pipeline_seed,
+                "scale_component_index_sha256": components["content_hash"],
+                "scale_refit_bundle_sha256": refit["content_hash"],
+                "artifact_hashes": dict(sorted(artifacts.items())),
+                "bounded_continuation": phase != "complete",
+                "performance_based_termination": False,
+            }), source_snapshot=source_snapshot(REPO_ROOT),
+        )
+        publication = write_immutable_json(
+            output / "phase_completions" / f"{phase}.json", marker
+        )
+        print(json.dumps(publication, indent=2, sort_keys=True))
+        return 0
     for resource in ("scale_train", "val_stop", "val_design"):
         authorize_dataset_access(
             worker_role=(
@@ -260,6 +285,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         joint_completion_path,
         expected_contract=SCALE_JOINT_COMPLETION_CONTRACT,
     )
+    if args.stop_after == "joint":
+        return finish_phase(
+            "joint", {"joint_completion": joint_completion["content_hash"]}
+        )
 
     dataset_root = output / "datasets"
     seed_dataset = dataset_root / role / f"seed_{args.pipeline_seed}"
@@ -289,6 +318,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         ],
         expected=expected_datasets,
     )
+    if args.stop_after == "datasets":
+        return finish_phase(
+            "datasets",
+            {
+                split: load_hashed_json(
+                    seed_dataset / split / "final_consumer_dataset.json"
+                )["content_hash"]
+                for split in ("scale_train", "val_stop", "val_design")
+            },
+        )
 
     selected_refiner_path = None
     if definition["configuration"]["token_input"] == "TOKEN_REFINED_SELECTED":
@@ -359,6 +398,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected_refiner_path = output / "selected_token_refiner.json"
         write_immutable_json(selected_refiner_path, selected_refiner)
 
+    if args.stop_after == "refiner":
+        return finish_phase(
+            "refiner",
+            {
+                "selected_refiner_or_identity": (
+                    components["content_hash"]
+                    if selected_refiner_path is None
+                    else load_hashed_json(selected_refiner_path)["content_hash"]
+                )
+            },
+        )
+
     final_root = output / "final_consumer"
     final_args = [
         "scripts/execute_retb_final_consumer_row.py",
@@ -410,6 +461,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             final_root / final_prediction_name,
         ],
     )
+    final_registration = load_hashed_json(final_root / final_registration_name)
+    if args.stop_after == "final_consumer":
+        return finish_phase(
+            "final_consumer",
+            {"final_consumer_registration": final_registration["content_hash"]},
+        )
 
     export_root = output / "export"
     _run(
@@ -434,6 +491,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             export_root / "research_graph_parity.json",
         ],
     )
+    if args.stop_after == "export":
+        return finish_phase(
+            "export",
+            {
+                name: load_hashed_json(export_root / name)["content_hash"]
+                for name in (
+                    "deployable_retb_graph.json",
+                    "complete_graph_capacity.json",
+                    "research_graph_parity.json",
+                )
+            },
+        )
 
     prediction = load_hashed_json(final_root / final_prediction_name)
     prediction_npz = (final_root / final_prediction_name).parent / prediction[

@@ -246,8 +246,16 @@ class WeaverSplitForwardAdapter:
             return hook
 
         try:
-            for tap_id in requested:
-                index = TAP_BLOCKS[tap_id] - 1
+            requested_by_index = {
+                TAP_BLOCKS[tap_id] - 1: tap_id for tap_id in requested
+            }
+            pre_hook_indices = set(requested_by_index)
+            if later_block_transform is not None or later_pair_bias is not None:
+                # Feedback is produced after block 4 and consumed by every
+                # later particle-attention block, independently of which
+                # states the caller asks us to capture.
+                pre_hook_indices.update(range(4, 8))
+            for index in sorted(pre_hook_indices):
                 block = self.model.mod.blocks[index]
                 try:
                     handles.append(
@@ -257,6 +265,8 @@ class WeaverSplitForwardAdapter:
                     )
                 except TypeError:  # pragma: no cover - old PyTorch fallback
                     pass
+            for index, tap_id in sorted(requested_by_index.items()):
+                block = self.model.mod.blocks[index]
                 handles.append(block.register_forward_hook(post_hook(tap_id, index)))
             logits = self.model(points, features, lorentz_vectors, valid)
         finally:

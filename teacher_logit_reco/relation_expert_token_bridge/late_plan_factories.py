@@ -28,10 +28,11 @@ from .early_continuation import (
     _row,
 )
 from .production import LATE_NODE_ENTRYPOINTS
+from .registry import EXPERT_ORDER, TOKEN_SHAPES
 
 
-LATE_PLAN_FACTORY_INPUT_CONTRACT = "retb_stage_k_m_factory_input_v2"
-LATE_PLAN_FACTORY_CONTRACT = "retb_stage_k_m_plan_factories_v2"
+LATE_PLAN_FACTORY_INPUT_CONTRACT = "retb_stage_k_m_factory_input_v3"
+LATE_PLAN_FACTORY_CONTRACT = "retb_stage_k_m_plan_factories_v4"
 LATE_PLAN_FACTORY_TARGETS = (
     "robustness_controls",
     "semantic_controls",
@@ -40,7 +41,22 @@ LATE_PLAN_FACTORY_TARGETS = (
     "confirmation_summary",
     "bridge_shape_selector",
     "scale_shortlist_selector",
+    "shortlisted_500k_control_training",
+    "shortlisted_500k_controls",
+    "scale_refit_normalizers",
+    "scale_refit_teachers",
+    "scale_refit_offline_experts",
+    "scale_refit_targets",
+    "scale_refit_native",
+    "scale_refit_native_fusion",
+    "scale_refit_predictors",
+    "scale_refit_calibrations",
     "scale_refits",
+    "scale_joint_training",
+    "scale_graph_datasets",
+    "scale_refiner_training",
+    "scale_final_consumer_training",
+    "scale_graph_export",
     "scale_graph_training",
     "scale_completion",
 )
@@ -58,9 +74,29 @@ ROBUSTNESS_PROFILES = (
 )
 ROBUSTNESS_REPLICAS = (0, 1, 2, 3)
 SEMANTIC_CONTROL_KINDS = (
-    "BYPASS",
-    "SUBSTITUTION",
-    "RECONSTRUCTION",
+    "RELATION_ZERO",
+    "RELATION_WITHIN_JET_SHUFFLE",
+    "RELATION_WRONG_EVENT_MATCHED_MULTIPLICITY",
+    "RELATION_DIRECTIONAL_ENDPOINT_SWAP",
+    "RELATION_FIXED_VS_LEARNED_SCALE",
+    "TOKEN_SLOT_PERMUTE",
+    "TOKEN_WITHIN_CLASS_MEAN_BANK",
+    "TOKEN_WRONG_EVENT_SAME_CLASS_BANK",
+    "TOKEN_WRONG_EVENT_UNMATCHED_BANK",
+    "TOKEN_ZERO_BANK",
+    "TOKEN_MATCHED_GAUSSIAN_NOISE",
+    "TOKEN_NORM_COVARIANCE",
+    "PREDICTOR_ZERO_HLT_EVIDENCE",
+    "PREDICTOR_SHUFFLE_HLT_EVIDENCE",
+    "PREDICTOR_REMOVE_NATIVE_PARTICLE_CONTEXT",
+    "PREDICTOR_REMOVE_NONCORRESPONDING_BANKS",
+    "PREDICTOR_DIRECT_VS_GATED",
+    "PREDICTOR_W_LOGIT_ONLY",
+    "BYPASS_NATIVE_REMOVED",
+    "BYPASS_RECONSTRUCTED_REMOVED",
+    "BYPASS_NATIVE_DROPPED_EVAL",
+    "BYPASS_GAMMA_ZERO",
+    "BYPASS_SOURCE_EMBEDDINGS_SWAPPED",
 )
 
 
@@ -218,6 +254,8 @@ def build_late_factory_input(
         observed = {
             row["environment"].get("RETB_SEMANTIC_CONTROL_KIND")
             for row in checked
+            if row["environment"].get("RETB_SEMANTIC_CONTROL_KIND")
+            is not None
         }
         declared = set(coverage_row.get("required_semantic_control_kinds", []))
         if observed | declared != set(SEMANTIC_CONTROL_KINDS):
@@ -253,7 +291,7 @@ def build_late_factory_input(
     return with_content_hash(
         {
             "contract": LATE_PLAN_FACTORY_INPUT_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "target_node_id": target,
             "producer_node_id": str(producer_node_id),
             "campaign_spec_sha256": require_sha256(
@@ -668,12 +706,311 @@ def build_scale_shortlist_selector_manifest_plan(
         target_node_id="scale_shortlist_selector",
         rows=[row],
     )
+
+
+def build_shortlisted_500k_control_training_manifest_plan(
+    *, campaign_root: str | Path, campaign: Mapping[str, Any],
+    production_graph: Mapping[str, Any],
+    producer_node_id: str = "scale_shortlist_selector",
+) -> dict[str, Any]:
+    """Train three real controls for every shortlist graph and matched seed."""
+    root, campaign_sha, graph_sha, completion_sha = _context(
+        campaign_root=campaign_root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+    )
+    shortlist_path = root / "selection" / "locked_scale_shortlist.json"
+    shortlist = load_hashed_json(
+        shortlist_path, expected_contract="retb_locked_scale_shortlist_v2"
+    )
+    rows = []
+    for graph_id in shortlist["SCALE_SHORTLIST"]:
+        definition_sha = shortlist["locked_graph_definitions"][graph_id][
+            "complete_graph_definition_sha256"
+        ]
+        for kind in ("H_MONO_PARAM", "H_MONO_FLOP", "H_BASE_LONG"):
+            for seed in PIPELINE_SEEDS:
+                output = (
+                    root / "controls" / "shortlisted_500k" / "runs"
+                    / graph_id / kind / f"seed_{seed}"
+                )
+                rows.append(_row(
+                    target="shortlisted_500k_control_training",
+                    index=len(rows),
+                    argv=[
+                        "python", "scripts/train_retb_scale_finalist_control.py",
+                        "--campaign-root", str(root),
+                        "--locked-scale-shortlist", str(shortlist_path),
+                        "--owner-finalist-graph-id", graph_id,
+                        "--control-kind", kind,
+                        "--pipeline-seed", str(seed),
+                        "--output-dir", str(output),
+                    ],
+                    outputs=[
+                        str(output / "control_row.json"),
+                        str(output / "deployable_control.json"),
+                        str(output / "training" / "registration.json"),
+                        str(output / "training" / "val_design_metrics.json"),
+                    ],
+                    campaign_sha256=campaign_sha, graph_sha256=graph_sha,
+                    producer_completion_sha256=completion_sha,
+                    extra_input_hashes={
+                        "locked_scale_shortlist": shortlist["content_hash"],
+                        "graph_definition": definition_sha,
+                    },
+                    environment={
+                        "RETB_GRAPH_ID": graph_id,
+                        "RETB_CONTROL_KIND": kind,
+                        "RETB_PIPELINE_SEED": str(seed),
+                        "RETB_SCIENTIFIC_UNDERPERFORMANCE_BLOCKS_CONTINUATION": "0",
+                    },
+                ))
+    return _publish(
+        campaign_root=root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+        target_node_id="shortlisted_500k_control_training", rows=rows,
+    )
+
+
+def build_shortlisted_500k_controls_manifest_plan(
+    *, campaign_root: str | Path, campaign: Mapping[str, Any],
+    production_graph: Mapping[str, Any],
+    producer_node_id: str = "shortlisted_500k_control_training",
+) -> dict[str, Any]:
+    """Aggregate authenticated training outputs and publish the Stage-L report."""
+    root, campaign_sha, graph_sha, completion_sha = _context(
+        campaign_root=campaign_root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+    )
+    _, completion = _producer_completion(root, producer_node_id=producer_node_id)
+    control_paths = sorted(
+        Path(path) for row in completion["rows"]
+        for path in row["output_hashes"] if Path(path).name == "control_row.json"
+    )
+    shortlist_path = root / "selection" / "locked_scale_shortlist.json"
+    shortlist = load_hashed_json(
+        shortlist_path, expected_contract="retb_locked_scale_shortlist_v2"
+    )
+    if len(control_paths) != len(shortlist["SCALE_SHORTLIST"]) * 9:
+        raise ValueError("shortlisted 500k control completion coverage differs")
+    output = root / "selection" / "stage_l" / "shortlisted_500k_controls.json"
+    argv = [
+        "python", "scripts/aggregate_retb_shortlisted_500k_controls.py",
+        "--campaign-root", str(root),
+        "--locked-scale-shortlist", str(shortlist_path),
+        "--confirmation-summary",
+        str(root / "selection" / "stage_l" / "confirmation_summary.json"),
+        "--output", str(output),
+        "--report-output-dir", str(root / "reports" / "stage_l"),
+    ]
+    for path in control_paths:
+        argv.extend(["--control-row", str(path)])
+    row = _row(
+        target="shortlisted_500k_controls", index=0, argv=argv,
+        outputs=[
+            str(output),
+            str(root / "reports" / "stage_l" / "retb_stage_l_report.json"),
+            str(root / "reports" / "stage_l" / "retb_stage_l_report.md"),
+        ],
+        campaign_sha256=campaign_sha, graph_sha256=graph_sha,
+        producer_completion_sha256=completion_sha,
+        extra_input_hashes={
+            "locked_scale_shortlist": shortlist["content_hash"],
+            "control_rows": canonical_sha256(
+                [load_hashed_json(path)["content_hash"] for path in control_paths]
+            ),
+        },
+        environment={
+            "RETB_SCIENTIFIC_UNDERPERFORMANCE_BLOCKS_CONTINUATION": "0"
+        },
+    )
+    return _publish(
+        campaign_root=root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+        target_node_id="shortlisted_500k_controls", rows=[row],
+    )
+
+
+def _build_scale_refit_phase_manifest_plan(
+    *, target_node_id: str, stop_after: str, producer_node_id: str,
+    campaign_root: str | Path, campaign: Mapping[str, Any],
+    production_graph: Mapping[str, Any],
+) -> dict[str, Any]:
+    root, campaign_sha, graph_sha, completion_sha = _context(
+        campaign_root=campaign_root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+    )
+    shortlist_path = root / "selection" / "locked_scale_shortlist.json"
+    shortlist = load_hashed_json(
+        shortlist_path, expected_contract="retb_locked_scale_shortlist_v2"
+    )
+    definitions = shortlist["locked_graph_definitions"]
+    roles = sorted({
+        definitions[graph_id]["configuration"]["source_carried_shape_role"]
+        for graph_id in shortlist.get(
+            "SCALE_TRAINING_GRAPHS", shortlist["SCALE_SHORTLIST"]
+        )
+    })
+
+    def named_shape(k: int, d: int) -> str:
+        matches = [
+            name for name, row in TOKEN_SHAPES.items()
+            if int(row["K"]) == int(k) and int(row["D"]) == int(d)
+        ]
+        if len(matches) != 1:
+            raise ValueError("scale-refit factory shape is unregistered")
+        return matches[0]
+
+    if stop_after in {"normalizers", "teachers"}:
+        components: list[str | None] = [None]
+    elif stop_after == "offline_experts":
+        pairs = set()
+        for role in roles:
+            lock = load_hashed_json(
+                root / "selection" / "predictor_bundle" / "carried"
+                / f"{role}.json"
+            )
+            source_shape = str(lock["coordinate_id"]).split(":", 1)[1]
+            for expert in EXPERT_ORDER:
+                pairs.add((expert, source_shape))
+                K, D = lock["allocation"][expert]
+                pairs.add((expert, named_shape(int(K), int(D))))
+        components = [f"{expert}@{shape}" for expert, shape in sorted(pairs)]
+    elif stop_after in {"targets", "native_fusion"}:
+        components = list(roles)
+    elif stop_after in {"native", "predictors", "calibrations"}:
+        components = [
+            f"{role}@{expert}" for role in roles for expert in EXPERT_ORDER
+        ]
+    else:
+        raise ValueError("scale-refit factory phase is unregistered")
+
+    rows = []
+    for seed in PIPELINE_SEEDS:
+        for component_id in components:
+            marker = f"{stop_after}.json"
+            if component_id is not None:
+                suffix = hashlib.sha256(
+                    component_id.encode("utf-8")
+                ).hexdigest()[:16]
+                marker = f"{stop_after}__{suffix}.json"
+            output = root / "runs" / "scale" / "refits" / f"seed_{seed}"
+            expected = [output / "phase_completions" / marker]
+            argv = [
+                "python", "scripts/execute_retb_scale_seed_refit.py",
+                "--campaign-root", str(root),
+                "--locked-scale-shortlist", str(shortlist_path),
+                "--pipeline-seed", str(seed),
+                "--output-dir", str(output),
+                "--stop-after", stop_after,
+            ]
+            if component_id is not None:
+                argv.extend(["--component-id", component_id])
+            rows.append(
+                _row(
+                    target=target_node_id,
+                    index=len(rows),
+                    argv=argv,
+                    outputs=[str(path) for path in expected],
+                    campaign_sha256=campaign_sha,
+                    graph_sha256=graph_sha,
+                    producer_completion_sha256=completion_sha,
+                    extra_input_hashes={
+                        "locked_scale_shortlist": shortlist["content_hash"],
+                        "phase_recipe": canonical_sha256(
+                            {
+                                "phase": stop_after,
+                                "pipeline_seed": seed,
+                                "component_id": component_id,
+                            }
+                        ),
+                    },
+                    environment={
+                        "RETB_PIPELINE_SEED": str(seed),
+                        "RETB_SCALE_COMPONENT_PHASE": stop_after,
+                        "RETB_SCALE_COMPONENT_ID": component_id or "ALL",
+                        "RETB_SCIENTIFIC_UNDERPERFORMANCE_BLOCKS_CONTINUATION": "0",
+                    },
+                )
+            )
+    return _publish(
+        campaign_root=root, campaign=campaign,
+        production_graph=production_graph, producer_node_id=producer_node_id,
+        target_node_id=target_node_id, rows=rows,
+    )
+
+
+def build_scale_refit_normalizers_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_normalizers", stop_after="normalizers",
+        producer_node_id=kwargs.pop("producer_node_id", "step14_scale_final_contracts"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_teachers_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_teachers", stop_after="teachers",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_normalizers"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_offline_experts_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_offline_experts", stop_after="offline_experts",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_teachers"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_targets_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_targets", stop_after="targets",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_offline_experts"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_native_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_native", stop_after="native",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_targets"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_native_fusion_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_native_fusion", stop_after="native_fusion",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_native"),
+        **kwargs,
+    )
+
+
+def build_scale_refit_predictors_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_predictors", stop_after="predictors",
+        producer_node_id=kwargs.pop(
+            "producer_node_id", "scale_refit_native_fusion"
+        ),
+        **kwargs,
+    )
+
+
+def build_scale_refit_calibrations_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_refit_phase_manifest_plan(
+        target_node_id="scale_refit_calibrations", stop_after="calibrations",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refit_predictors"),
+        **kwargs,
+    )
+
+
 def build_scale_refits_manifest_plan(
     *,
     campaign_root: str | Path,
     campaign: Mapping[str, Any],
     production_graph: Mapping[str, Any],
-    producer_node_id: str = "step14_scale_final_contracts",
+    producer_node_id: str = "scale_refit_calibrations",
 ) -> dict[str, Any]:
     """Train shared scale components once per seed, never once per graph."""
 
@@ -714,6 +1051,8 @@ def build_scale_refits_manifest_plan(
                     str(seed),
                     "--output-dir",
                     str(output),
+                    "--stop-after",
+                    "complete",
                 ],
                 outputs=[str(path) for path in expected],
                 campaign_sha256=campaign_sha,
@@ -739,12 +1078,14 @@ def build_scale_refits_manifest_plan(
     )
 
 
-def build_scale_graph_training_manifest_plan(
+def _build_scale_graph_phase_manifest_plan(
     *,
+    target_node_id: str,
+    stop_after: str,
     campaign_root: str | Path,
     campaign: Mapping[str, Any],
     production_graph: Mapping[str, Any],
-    producer_node_id: str = "scale_refits",
+    producer_node_id: str,
 ) -> dict[str, Any]:
     """Derive every graph/seed row from complete authenticated seed refits."""
 
@@ -755,7 +1096,7 @@ def build_scale_graph_training_manifest_plan(
         producer_node_id=producer_node_id,
     )
     _, completion = _producer_completion(
-        root, producer_node_id=producer_node_id
+        root, producer_node_id="scale_refits"
     )
     indexes = [
         Path(path)
@@ -824,14 +1165,22 @@ def build_scale_graph_training_manifest_plan(
                         str(seed),
                         "--output-dir",
                         str(output),
+                        "--stop-after",
+                        stop_after,
                     ],
-                    outputs=[
-                        str(output / "scale_graph_run.json"),
-                        str(output / "pre_stack_metrics.json"),
-                        str(output / "export" / "deployable_retb_graph.json"),
-                        str(output / "export" / "complete_graph_capacity.json"),
-                        str(output / "export" / "research_graph_parity.json"),
-                    ],
+                    outputs=(
+                        [
+                            str(output / "scale_graph_run.json"),
+                            str(output / "pre_stack_metrics.json"),
+                            str(output / "export" / "deployable_retb_graph.json"),
+                            str(output / "export" / "complete_graph_capacity.json"),
+                            str(output / "export" / "research_graph_parity.json"),
+                        ]
+                        if stop_after == "complete"
+                        else [
+                            str(output / "phase_completions" / f"{stop_after}.json")
+                        ]
+                    ),
                     campaign_sha256=campaign_sha,
                     graph_sha256=graph_sha,
                     producer_completion_sha256=completion_sha,
@@ -843,6 +1192,7 @@ def build_scale_graph_training_manifest_plan(
                     environment={
                         "RETB_GRAPH_ID": graph_id,
                         "RETB_PIPELINE_SEED": str(seed),
+                        "RETB_SCALE_GRAPH_PHASE": stop_after,
                         "RETB_SCIENTIFIC_UNDERPERFORMANCE_BLOCKS_CONTINUATION": "0",
                     },
                 )
@@ -852,8 +1202,50 @@ def build_scale_graph_training_manifest_plan(
         campaign=campaign,
         production_graph=production_graph,
         producer_node_id=producer_node_id,
-        target_node_id="scale_graph_training",
+        target_node_id=target_node_id,
         rows=rows,
+    )
+
+
+def build_scale_joint_training_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_joint_training", stop_after="joint",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refits"), **kwargs,
+    )
+
+
+def build_scale_graph_datasets_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_graph_datasets", stop_after="datasets",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_joint_training"), **kwargs,
+    )
+
+
+def build_scale_refiner_training_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_refiner_training", stop_after="refiner",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_graph_datasets"), **kwargs,
+    )
+
+
+def build_scale_final_consumer_training_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_final_consumer_training", stop_after="final_consumer",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_refiner_training"), **kwargs,
+    )
+
+
+def build_scale_graph_export_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_graph_export", stop_after="export",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_final_consumer_training"), **kwargs,
+    )
+
+
+def build_scale_graph_training_manifest_plan(**kwargs: Any) -> dict[str, Any]:
+    return _build_scale_graph_phase_manifest_plan(
+        target_node_id="scale_graph_training", stop_after="complete",
+        producer_node_id=kwargs.pop("producer_node_id", "scale_graph_export"), **kwargs,
     )
 
 

@@ -5,6 +5,7 @@ from .access import (
     ROLE_CAPABILITIES,
     authorize_access,
     build_access_role_registry,
+    load_authorized_identity_labels,
     validate_access_role_registry,
 )
 from .campaign import (
@@ -129,7 +130,10 @@ from .target_cache import (
     build_target_cache_spec,
     identity_order_sha256,
     load_target_cache,
+    load_target_cache_sharded,
+    iter_authenticated_target_shard_layouts,
     publish_target_cache,
+    publish_target_cache_shard,
     validate_target_cache,
 )
 from .normalization import (
@@ -139,6 +143,8 @@ from .normalization import (
     fit_conditional_residual,
     fit_latent_ridge_adapter,
     fit_latent_whitening,
+    fit_sharded_target_normalizer,
+    fit_sharded_latent_whitening,
     fit_streamed_target_normalizer,
     fit_target_normalizer,
     normalize_target,
@@ -247,7 +253,9 @@ from .auxiliary_data import (
 from .stage_d_data_factory import (
     build_default_stage_d_role_definitions,
     LOADER_MANIFEST_CONTRACT,
+    LOADER_MANIFEST_CONTRACT_V4,
     build_stage_d_loader_manifest,
+    data_order_seed,
     load_stage_d_loaders_from_manifest,
 )
 from .feedback import (
@@ -260,6 +268,9 @@ from .feedback import (
     build_stage_e_plan,
     feedback_interface_contract,
     gate_warmup_updates,
+    global_feedback_layout,
+    initialize_feedback_from_auxiliary_checkpoint,
+    pack_global_feedback,
 )
 from .feedback_data import (
     FeedbackInterventionDataset,
@@ -421,11 +432,13 @@ from .stage_b_runtime import (
     stage_b_wave_rows,
 )
 from .input_views import (
+    load_materialized_input_view,
     load_materialized_hlt_input_view,
     materialize_hlt_input_view,
     materialize_offline_input_view,
     materialize_retb_offline_input_view,
 )
+from .authenticated_tree import AuthenticatedTreeShard, AuthenticatedTreeSplit
 
 __all__ = [
     "ARTIFACT_LAYOUT_CONTRACT",
@@ -523,6 +536,7 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_sha256",
     "load_and_validate_campaign",
+    "load_authorized_identity_labels",
     "load_hashed_json",
     "inspect_raw_schema",
     "extract_registered_target",
@@ -560,12 +574,17 @@ __all__ = [
     "fit_conditional_residual",
     "fit_latent_ridge_adapter",
     "fit_latent_whitening",
+    "fit_sharded_target_normalizer",
+    "fit_sharded_latent_whitening",
     "fit_target_normalizer",
     "identity_order_sha256",
     "infer_teacher_batch",
     "load_target_cache",
+    "load_target_cache_sharded",
+    "iter_authenticated_target_shard_layouts",
     "normalize_target",
     "publish_target_cache",
+    "publish_target_cache_shard",
     "residual_batches",
     "target_mean_values",
     "validate_target_cache",
@@ -612,6 +631,7 @@ __all__ = [
     "AuxiliaryTargetDataset",
     "HLTArrayDataset",
     "LOADER_MANIFEST_CONTRACT",
+    "LOADER_MANIFEST_CONTRACT_V4",
     "SampledPairBatch",
     "StreamedHLTTarget",
     "auxiliary_objective",
@@ -623,6 +643,7 @@ __all__ = [
     "build_single_family_selection",
     "build_stage_d_loader_manifest",
     "build_default_stage_d_role_definitions",
+    "data_order_seed",
     "build_stage_d_plan",
     "collate_auxiliary_batch",
     "global_auxiliary_loss",
@@ -641,6 +662,9 @@ __all__ = [
     "ResidualStructureTokenAdapter",
     "build_feedback_selection",
     "build_feedback_model",
+    "global_feedback_layout",
+    "initialize_feedback_from_auxiliary_checkpoint",
+    "pack_global_feedback",
     "build_stage_e_plan",
     "feedback_interface_contract",
     "gate_warmup_updates",
@@ -782,7 +806,10 @@ __all__ = [
     "build_stage_b_wave_completion",
     "stage_b_wave_rows",
     "materialize_hlt_input_view",
+    "load_materialized_input_view",
     "load_materialized_hlt_input_view",
     "materialize_offline_input_view",
     "materialize_retb_offline_input_view",
+    "AuthenticatedTreeShard",
+    "AuthenticatedTreeSplit",
 ]

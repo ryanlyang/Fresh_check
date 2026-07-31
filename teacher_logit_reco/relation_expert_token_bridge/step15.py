@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v12"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v13"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 12,
+            "schema_version": 13,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
@@ -75,10 +75,18 @@ def build_step15_preflight_report(
                 "execution_complete_plan_producer_audit_required": True,
                 "shared_hook_is_not_plan_factory_evidence": True,
                 "synthetic_dag_is_not_production_readiness_evidence": True,
-                "all_48_manifest_targets_require_genuine_execution": True,
-                "all_35_nonbootstrap_targets_require_plan_factories": True,
+                "all_63_manifest_targets_require_genuine_execution": True,
+                "all_50_nonbootstrap_targets_require_plan_factories": True,
                 "post_completion_manifest_materialization_required": True,
                 "missing_manifest_plan_fails_closed": True,
+                "reused_nonbootstrap_manifest_plan_completion_and_trigger_revalidated": True,
+                "shortlisted_500k_controls_are_real_three_seed_training": True,
+                "complete_section_28_semantic_control_matrix_required": True,
+                "stage_M_training_split_into_bounded_component_continuations": True,
+                "H_BASE_LONG_uses_exact_graph_owned_CE_exposure_ledger": True,
+                "sealed_final_test_rows_resume_under_one_immutable_claim": True,
+                "completed_final_test_rows_cannot_be_reexecuted": True,
+                "monitoring_resume_command_invokes_resume_planner_directly": True,
                 "negative_scientific_results_do_not_gate_continuation": True,
                 "performance_based_termination_disabled": True,
                 "provenance_failures_block_dependents": True,

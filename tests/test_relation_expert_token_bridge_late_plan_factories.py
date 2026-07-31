@@ -118,7 +118,15 @@ def test_semantic_factory_input_requires_all_control_kinds() -> None:
     ]
     assert _build(
         "semantic_controls", rows, _coverage()
-    )["row_count"] == 3
+    )["row_count"] == len(SEMANTIC_CONTROL_KINDS)
+    controller = _build(
+        "semantic_controls",
+        [_row("semantic_controls", 0)],
+        _coverage(
+            required_semantic_control_kinds=list(SEMANTIC_CONTROL_KINDS)
+        ),
+    )
+    assert controller["row_count"] == 1
     with pytest.raises(ValueError, match="semantic-control coverage"):
         _build("semantic_controls", rows[:-1], _coverage())
 

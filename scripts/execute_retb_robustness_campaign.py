@@ -22,6 +22,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 )
 from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (  # noqa: E402
     build_internal_phase_plan,
+    configured_phase_concurrency,
     execute_phased_controller,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
@@ -123,7 +124,7 @@ class Planner:
                             },
                         }
                     )
-            resource, maximum = "cpu", 8
+            resource = "cpu"
         elif phase_id == "ROBUSTNESS_EVALUATION_WAVE":
             for role in STAGE_E_SHAPES:
                 for seed in (101, 202, 303):
@@ -192,7 +193,7 @@ class Planner:
                                     },
                                 }
                             )
-            resource, maximum = "gpu", 8
+            resource = "gpu"
         else:
             output = (
                 self.root
@@ -224,7 +225,7 @@ class Planner:
                     },
                 }
             ]
-            resource, maximum = "cpu", 1
+            resource = "cpu"
         return build_internal_phase_plan(
             campaign_root=self.root,
             campaign_spec_sha256=self.campaign_sha,
@@ -233,7 +234,11 @@ class Planner:
             phase_id=phase_id,
             sequence_index=sequence_index,
             resource=resource,
-            maximum_concurrent_tasks=maximum,
+            maximum_concurrent_tasks=configured_phase_concurrency(
+                resource=resource,
+                family="final",
+                row_count=len(rows),
+            ),
             rows=rows,
             prerequisite_completion_hashes=completions,
             source=self.campaign["source"],

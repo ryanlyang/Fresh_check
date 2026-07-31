@@ -26,7 +26,7 @@ from .contracts import (
     with_content_hash,
     write_immutable_json,
 )
-from .feedback import build_feedback_model
+from .feedback import FeedbackHBaseClassifier, build_feedback_model
 from .taps import HBaseParticleTransformer
 
 try:
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v1"
+DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v3"
 DEPLOYABLE_INFERENCE_CONTRACT = "hosd_deployable_inference_v1"
 
 
@@ -82,6 +82,15 @@ def _forward(model: Any, batch: Mapping[str, Any]) -> Any:
     points = batch.get("points")
     if points is None:
         points = batch["features"][:, 15:17]
+    if isinstance(model, FeedbackHBaseClassifier):
+        return model(
+            points,
+            batch["features"],
+            vectors,
+            batch["mask"],
+            raw_tokens=batch.get("raw_tokens"),
+            region_trees=batch.get("region_trees"),
+        )
     return model(points, batch["features"], vectors, batch["mask"])
 
 
@@ -97,6 +106,7 @@ def export_deployable_graph(
     weaver_module: Any,
     precision: str = "FP32",
     analytical_inference_flops_batch1_n128: int,
+    deployed_operation_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if torch is None:
         raise RuntimeError("PyTorch is required for HOSD export")
@@ -157,9 +167,18 @@ def export_deployable_graph(
     ):
         raise ValueError("deployable capacity evidence differs")
     output = Path(output_path)
+    operation_profile = (
+        None
+        if deployed_operation_profile is None
+        else dict(deployed_operation_profile)
+    )
+    if operation_profile is not None:
+        from .contracts import validate_content_hash
+
+        validate_content_hash(operation_profile)
     payload = {
         "contract": DEPLOYABLE_GRAPH_EXPORT_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 3,
         "descriptor": dict(descriptor),
         "runtime_state_dict": runtime_state,
         "checkpoint_sha256": require_sha256(
@@ -172,7 +191,12 @@ def export_deployable_graph(
         "source": dict(source),
         "precision": precision,
         "parity_tolerance": tolerance,
-        "runtime_inputs": ["features", "vectors", "mask"],
+        "runtime_inputs": (
+            ["features", "vectors", "mask", "raw_tokens"]
+            if isinstance(runtime, FeedbackHBaseClassifier)
+            and runtime.control == "EXACT_HLT"
+            else ["features", "vectors", "mask"]
+        ),
         "forbidden_runtime_dependencies": [],
         "target_heads_removed": descriptor["graph_kind"]
         in {"AUXILIARY", "COMBINATION"},
@@ -184,6 +208,7 @@ def export_deployable_graph(
         "analytical_inference_flops_batch1_n128": int(
             analytical_inference_flops_batch1_n128
         ),
+        "deployed_operation_profile": operation_profile,
         "hlt_only": True,
     }
     _atomic_torch_save(payload, output)

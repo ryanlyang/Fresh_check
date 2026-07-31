@@ -413,6 +413,108 @@ class JointBridgeGraph(torch.nn.Module if torch is not None else object):
             if variant == "J3_INDEPENDENT_PLUS_ADAPTER"
             else None
         )
+        self._semantic_predictor_control = "active"
+
+    def set_semantic_predictor_control(self, mode: str) -> None:
+        """Set a deterministic evaluation-only predictor evidence control."""
+        if mode not in {
+            "active",
+            "zero_hlt_evidence",
+            "shuffle_hlt_evidence_between_events",
+            "remove_native_particle_context",
+            "remove_noncorresponding_expert_banks",
+        }:
+            raise ValueError("predictor semantic control is unregistered")
+        self._semantic_predictor_control = str(mode)
+
+    def set_semantic_relation_transform(
+        self, mode: str, *, expert_id: str | None = None
+    ) -> None:
+        """Apply one evaluation-only relation transform.
+
+        ``expert_id`` scopes the perturbation to one biased expert.  This is
+        required for the per-expert causal zero controls; all other experts
+        are explicitly restored to ordinary inference.
+        """
+        if self.hlt_experts is None:
+            raise ValueError("relation controls require live HLT experts")
+        if expert_id is not None and (
+            expert_id not in EXPERT_ORDER or expert_id == "BASE4"
+        ):
+            raise ValueError("relation-control expert is not biased")
+        for expert in EXPERT_ORDER:
+            encoder = self.hlt_experts[expert].particle_encoder
+            if expert == "BASE4" or (
+                expert_id is not None and expert != expert_id
+            ):
+                encoder.set_semantic_relation_transform("active")
+            else:
+                encoder.set_semantic_relation_transform(mode)
+
+    def _controlled_evidence(
+        self, evidence: Mapping[str, Any], *, target_expert: str | None = None
+    ) -> dict[str, Any]:
+        module = _require_torch()
+        mode = self._semantic_predictor_control
+        result = {
+            name: (dict(value) if isinstance(value, Mapping) else value)
+            for name, value in evidence.items()
+        }
+        if mode == "active":
+            return result
+        if mode == "shuffle_hlt_evidence_between_events":
+            batch = int(result["unbiased_particle_states"].shape[0])
+            if batch < 2:
+                raise ValueError("evidence shuffle requires at least two events")
+            permutation = module.arange(batch, device=result[
+                "unbiased_particle_states"
+            ].device).roll(1)
+            for name in (
+                "hlt_token_banks", "relation_particle_states",
+                "relation_particle_masks",
+            ):
+                if name in result:
+                    result[name] = {
+                        key: value[permutation]
+                        for key, value in result[name].items()
+                    }
+            result["unbiased_particle_states"] = result[
+                "unbiased_particle_states"
+            ][permutation]
+            result["particle_mask"] = result["particle_mask"][permutation]
+            return result
+        if mode == "zero_hlt_evidence":
+            for name in ("hlt_token_banks", "relation_particle_states"):
+                if name in result:
+                    result[name] = {
+                        key: module.zeros_like(value)
+                        for key, value in result[name].items()
+                    }
+            result["unbiased_particle_states"] = module.zeros_like(
+                result["unbiased_particle_states"]
+            )
+            return result
+        if mode == "remove_native_particle_context":
+            result["unbiased_particle_states"] = module.zeros_like(
+                result["unbiased_particle_states"]
+            )
+            if "relation_particle_states" in result:
+                result["relation_particle_states"] = {
+                    key: module.zeros_like(value)
+                    for key, value in result["relation_particle_states"].items()
+                }
+            return result
+        if mode == "remove_noncorresponding_expert_banks":
+            if target_expert is None:
+                raise ValueError("noncorresponding-bank control needs a target")
+            result["hlt_token_banks"] = {
+                key: (
+                    value if key == target_expert else module.zeros_like(value)
+                )
+                for key, value in result["hlt_token_banks"].items()
+            }
+            return result
+        raise RuntimeError("predictor semantic control differs")
 
     def token_normalizer(self, expert: str) -> tuple[Any, Any]:
         index = EXPERT_ORDER.index(expert)
@@ -541,6 +643,11 @@ class JointBridgeGraph(torch.nn.Module if torch is not None else object):
         assert evidence is not None
         if set(evidence["hlt_token_banks"]) != set(EXPERT_ORDER):
             raise ValueError("joint bridge evidence-bank coverage differs")
+        if (
+            self._semantic_predictor_control
+            != "remove_noncorresponding_expert_banks"
+        ):
+            evidence = self._controlled_evidence(evidence)
         shared_memory = shared_padding = None
         if self.shared_context is not None:
             shared_memory, shared_padding = self.shared_context(
@@ -560,15 +667,37 @@ class JointBridgeGraph(torch.nn.Module if torch is not None else object):
             log_variance = decoded["log_variance"]
             gates = {expert: None for expert in EXPERT_ORDER}
         else:
-            outputs = {
-                expert: self._selected_predictor(
-                    expert,
-                    evidence=evidence,
-                    shared_memory=shared_memory,
-                    shared_padding_mask=shared_padding,
+            outputs = {}
+            for expert in EXPERT_ORDER:
+                selected_evidence = evidence
+                selected_memory = shared_memory
+                selected_padding = shared_padding
+                if (
+                    self._semantic_predictor_control
+                    == "remove_noncorresponding_expert_banks"
+                ):
+                    selected_evidence = self._controlled_evidence(
+                        evidence, target_expert=expert
+                    )
+                    if self.shared_context is not None:
+                        selected_memory, selected_padding = self.shared_context(
+                            hlt_token_banks=selected_evidence["hlt_token_banks"],
+                            unbiased_particle_states=selected_evidence[
+                                "unbiased_particle_states"
+                            ],
+                            particle_mask=selected_evidence["particle_mask"],
+                            relation_particle_states=selected_evidence.get(
+                                "relation_particle_states"
+                            ),
+                            relation_particle_masks=selected_evidence.get(
+                                "relation_particle_masks"
+                            ),
+                        )
+                outputs[expert] = self._selected_predictor(
+                    expert, evidence=selected_evidence,
+                    shared_memory=selected_memory,
+                    shared_padding_mask=selected_padding,
                 )
-                for expert in EXPERT_ORDER
-            }
             normalized = {
                 expert: outputs[expert]["predicted_tokens"]
                 for expert in EXPERT_ORDER

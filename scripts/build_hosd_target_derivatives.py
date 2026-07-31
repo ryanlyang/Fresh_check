@@ -23,7 +23,10 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     load_and_validate_campaign,
     load_hashed_json,
     load_target_cache,
+    load_target_cache_sharded,
     publish_target_cache,
+    publish_target_cache_shard,
+    validate_target_cache,
     residual_batches,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -37,11 +40,12 @@ from teacher_logit_reco.hlt_offline_structure_distillation.stage_b_runtime impor
 )
 
 
-def _load_cache(path: Path):
+def _load_cache(path: Path, *, sharded: bool = False):
     spec = load_hashed_json(
         path / "cache_spec.json", expected_contract=TARGET_CACHE_SPEC_CONTRACT
     )
-    return spec, load_target_cache(path, cache_spec=spec)
+    loader = load_target_cache_sharded if sharded else load_target_cache
+    return spec, loader(path, cache_spec=spec)
 
 
 def _slice_batches(batches, indices: np.ndarray):
@@ -83,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     if target_registry.get("source") != campaign["source"]:
         raise ValueError("target registry source differs from active campaign")
-    _, canonical = _load_cache(args.canonical_cache)
+    canonical_spec, canonical = _load_cache(
+        args.canonical_cache, sharded=args.kind == "residual"
+    )
     if canonical.manifest.get("source") != campaign["source"]:
         raise ValueError("canonical target cache source differs from active campaign")
     if args.kind == "residual":
@@ -94,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "residual requires HLT cache and exactly one target-pair source"
             )
-        _, hlt = _load_cache(args.hlt_cache)
+        hlt_spec, hlt = _load_cache(args.hlt_cache, sharded=True)
         if hlt.manifest.get("source") != campaign["source"]:
             raise ValueError("HLT target cache source differs from active campaign")
         target_pairs = (
@@ -115,12 +121,12 @@ def main(argv: list[str] | None = None) -> int:
             offline_id: f"{offline_id}__RES__{hlt.manifest['hlt_replica_id']}"
             for offline_id in target_pairs
         }
-        batches = residual_batches(
-            canonical,
-            hlt,
-            target_pairs=target_pairs,
-            output_target_ids=output_ids,
-        )
+        components = {
+            output_ids[offline_id]: tuple(
+                canonical_spec["target_components"][offline_id]
+            )
+            for offline_id in target_pairs
+        }
         parent_hashes = {
             "campaign_spec": campaign["content_hash"],
             "offline_cache": canonical.manifest["content_hash"],
@@ -176,10 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         plan_hashes = {
             target_id: plan["content_hash"] for target_id, plan in plans.items()
         }
-    components = {
-        target_id: tuple(batch.component_names)
-        for target_id, batch in batches.items()
-    }
+    if args.kind != "residual":
+        components = {
+            target_id: tuple(batch.component_names)
+            for target_id, batch in batches.items()
+        }
     spec = build_target_cache_spec(
         cache_id=args.cache_id,
         split=canonical.manifest["split"],
@@ -191,12 +198,49 @@ def main(argv: list[str] | None = None) -> int:
         shard_size=args.shard_size,
         hlt_replica_id=replica_id,
     )
-    manifest = publish_target_cache(
-        args.output_dir,
-        cache_spec=spec,
-        identities=canonical.identities,
-        generator=lambda indices: _slice_batches(batches, indices),
-    )
+    if args.kind == "residual":
+        from teacher_logit_reco.hlt_offline_structure_distillation import LoadedTargetCache
+
+        def generate(indices: np.ndarray):
+            start, stop = int(indices[0]), int(indices[-1]) + 1
+            canonical_slice = LoadedTargetCache(
+                identities=canonical.identities[start:stop],
+                values={key: value[start:stop] for key, value in canonical.values.items()},
+                masks={key: value[start:stop] for key, value in canonical.masks.items()},
+                manifest={**canonical.manifest, "event_count": stop - start},
+            )
+            hlt_slice = LoadedTargetCache(
+                identities=hlt.identities[start:stop],
+                values={key: value[start:stop] for key, value in hlt.values.items()},
+                masks={key: value[start:stop] for key, value in hlt.masks.items()},
+                manifest={**hlt.manifest, "event_count": stop - start},
+            )
+            return residual_batches(
+                canonical_slice,
+                hlt_slice,
+                target_pairs=target_pairs,
+                output_target_ids=output_ids,
+            )
+
+        for shard_index in range(int(spec["shard_count"])):
+            publish_target_cache_shard(
+                args.output_dir,
+                cache_spec=spec,
+                canonical_identities=canonical.identities,
+                canonical_to_source=None,
+                shard_index=shard_index,
+                generator=generate,
+            )
+        manifest = validate_target_cache(args.output_dir, cache_spec=spec)
+        write_immutable_json(args.output_dir / "target_manifest.json", manifest)
+        write_immutable_json(args.output_dir / "cache_spec.json", spec)
+    else:
+        manifest = publish_target_cache(
+            args.output_dir,
+            cache_spec=spec,
+            identities=canonical.identities,
+            generator=lambda indices: _slice_batches(batches, indices),
+        )
     if args.kind != "residual":
         control = build_target_control_manifest(
             control_kind=args.kind,

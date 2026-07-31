@@ -15,6 +15,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relation_expert_token_bridge.confirmation import (  # noqa: E402
     SCALE_SHORTLIST_CONTRACT,
+    SHORTLISTED_CONTROLS_CONTRACT,
+    validate_shortlisted_500k_controls,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     load_hashed_json,
@@ -57,19 +59,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.locked_scale_shortlist,
         expected_contract=SCALE_SHORTLIST_CONTRACT,
     )
+    controls = load_hashed_json(
+        args.campaign_root
+        / "selection"
+        / "stage_l"
+        / "shortlisted_500k_controls.json",
+        expected_contract=SHORTLISTED_CONTROLS_CONTRACT,
+    )
+    validate_shortlisted_500k_controls(
+        controls, locked_scale_shortlist=shortlist
+    )
     determinism = load_hashed_json(
         args.campaign_root / "registry" / "global_determinism.json",
         expected_contract=GLOBAL_DETERMINISM_CONTRACT,
     )
     if any(
         row.get("source") != campaign.get("source")
-        for row in (step13, shortlist, determinism)
+        for row in (step13, shortlist, controls, determinism)
     ):
         raise ValueError("Step-14 contract parent source differs")
     bundle = build_step14_bundle(
         campaign_spec_sha256=campaign["content_hash"],
         step13_bundle_sha256=step13["content_hash"],
         locked_scale_shortlist_sha256=shortlist["content_hash"],
+        shortlisted_500k_controls_sha256=controls["content_hash"],
         global_determinism_sha256=determinism["content_hash"],
         source_snapshot=source_snapshot(REPO_ROOT),
     )

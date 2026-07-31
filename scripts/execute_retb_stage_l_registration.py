@@ -12,6 +12,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.execute_retb_semantic_control_campaign import (  # noqa: E402
+    semantic_controls_bundle_path,
+)
+
 from teacher_logit_reco.relation_expert_token_bridge.confirmation import (  # noqa: E402
     build_stage_l_graph_registry,
     validate_stage_l_graph_registry,
@@ -33,9 +37,30 @@ from teacher_logit_reco.relation_expert_token_bridge.late_plan_factories import 
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.semantic_evidence import (  # noqa: E402
+    SEMANTIC_CONTROLS_CONTRACT,
+    validate_stage_k_semantic_controls,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+
+
+def _load_semantic_controls(
+    root: str | Path, *, campaign: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Load the exact canonical Stage-K output consumed by Stage L."""
+
+    payload = load_hashed_json(
+        semantic_controls_bundle_path(root),
+        expected_contract=SEMANTIC_CONTROLS_CONTRACT,
+    )
+    validate_stage_k_semantic_controls(
+        payload,
+        expected_source=campaign["source"],
+        expected_policy=campaign["semantic_control_policy"],
+    )
+    return payload
 
 
 SEEDS = (101, 202, 303)
@@ -255,9 +280,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     robustness = load_hashed_json(
         root / "controls" / "robustness" / "robustness_bundle.json"
     )
-    semantic = load_hashed_json(
-        root / "controls" / "semantic" / "semantic_controls_bundle.json"
-    )
+    semantic = _load_semantic_controls(root, campaign=campaign)
     carried = {
         role: load_hashed_json(
             root

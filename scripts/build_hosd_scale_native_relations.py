@@ -58,7 +58,7 @@ def _try_finalize(root: Path, campaign: dict, plan: dict, target_wave: dict):
         completion = with_content_hash(
             {
                 "contract": SCALE_NATIVE_RELATION_WAVE_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "source": campaign["source"],
                 "campaign_spec_sha256": campaign["content_hash"],
                 "scale_execution_plan_sha256": plan["content_hash"],
@@ -105,6 +105,10 @@ def _try_finalize(root: Path, campaign: dict, plan: dict, target_wave: dict):
             or int(artifact.get("hlt_replica_id", -1)) != replica
             or artifact.get("target_ids")
             != list(native_relation_target_ids())
+            or artifact.get("storage_layout")
+            != "compressed_npz_plus_authenticated_npy_mmap_v1"
+            or artifact.get("mmap_store", {}).get("contract")
+            != "hosd_native_relation_npy_store_v1"
             or _sha256_file(npz_path) != artifact.get("npz_sha256")
         ):
             raise ValueError("scale native-relation artifact lineage differs")
@@ -112,7 +116,7 @@ def _try_finalize(root: Path, campaign: dict, plan: dict, target_wave: dict):
     completion = with_content_hash(
         {
             "contract": SCALE_NATIVE_RELATION_WAVE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": campaign["source"],
             "campaign_spec_sha256": campaign["content_hash"],
             "scale_execution_plan_sha256": plan["content_hash"],

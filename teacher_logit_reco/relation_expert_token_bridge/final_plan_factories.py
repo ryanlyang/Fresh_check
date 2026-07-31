@@ -33,13 +33,14 @@ from .provenance import source_snapshot
 from .production import FINAL_NODE_ENTRYPOINTS
 from .late_plan_factories import producer_plan_identity_sha256
 from .stage_n_execution import (
+    build_deployable_inference_input_binding,
     validate_control_evidence,
     validate_shared_deployable_inference_payload,
 )
 
 
 FINAL_PLAN_FACTORY_INPUT_CONTRACT = "retb_stage_n_factory_input_v2"
-FINAL_PLAN_FACTORY_CONTRACT = "retb_stage_n_plan_factories_v2"
+FINAL_PLAN_FACTORY_CONTRACT = "retb_stage_n_plan_factories_v4"
 FINAL_PLAN_FACTORY_TARGETS = (
     "prelock_final_inputs",
     "stack_val_inference",
@@ -1658,7 +1659,15 @@ def build_sealed_final_test_manifest_plan(
         input_manifest = (
             shared_root / f"final_test_{safe_graph}_seed{seed}.json"
         )
+        expected_input_binding = build_deployable_inference_input_binding(
+            output_dir=shared_root,
+            shared_payload_manifest=shared_manifest,
+            shared_payload_manifest_path=shared_manifest_path,
+            graph_id=graph_id,
+            pipeline_seed=seed,
+        )
         raw_output = working / "deployable_logits.npz"
+        inference_attestation = working / "inference_attestation.json"
         prediction_manifest = working / "prediction_manifest.json"
         if kind in {"FINALIST", "NAMED_BASELINE"}:
             export = (
@@ -1733,6 +1742,10 @@ def build_sealed_final_test_manifest_plan(
                     graph_id,
                     "--pipeline-seed",
                     str(seed),
+                    "--row-id",
+                    row_id,
+                    "--checkpoint-sha256",
+                    record["checkpoint_sha256"],
                     "--execution-lock",
                     str(
                         root / "selection" / "final_test_execution_lock.json"
@@ -1743,8 +1756,12 @@ def build_sealed_final_test_manifest_plan(
                     str(plan_path),
                     "--output",
                     str(raw_output),
+                    "--attestation-output",
+                    str(inference_attestation),
                 ],
-                "expected_outputs": [str(raw_output)],
+                "expected_outputs": [
+                    str(raw_output), str(inference_attestation)
+                ],
             }
         )
         prediction_rows.append(
@@ -1753,14 +1770,31 @@ def build_sealed_final_test_manifest_plan(
                 "graph_id": graph_id,
                 "pipeline_seed": seed,
                 "checkpoint_sha256": record["checkpoint_sha256"],
+                "deployable_export": str(export),
+                "deployable_export_sha256": load_hashed_json(export)[
+                    "content_hash"
+                ],
                 "inference_output_npz": str(raw_output),
+                "inference_attestation_output": str(inference_attestation),
                 "prediction_manifest_output": str(prediction_manifest),
+                "input_manifest": str(input_manifest),
+                "input_manifest_sha256": expected_input_binding[
+                    "content_hash"
+                ],
+                "shared_payload_manifest": str(shared_manifest_path),
+                "shared_payload_manifest_sha256": shared_manifest[
+                    "content_hash"
+                ],
+                "shared_payload_sha256": shared_manifest["payload_sha256"],
+                "locked_final_test_HLT_inputs_sha256": lock[
+                    "final_input_hashes"
+                ]["final_test_HLT_inputs"],
             }
         )
     plan = with_content_hash(
         {
-            "contract": "retb_sealed_final_test_execution_plan_v1",
-            "schema_version": 1,
+            "contract": "retb_sealed_final_test_execution_plan_v3",
+            "schema_version": 3,
             "final_test_execution_lock_sha256": lock["content_hash"],
             "steps": steps,
             "final_labels_manifest": str(label_manifest),
@@ -1845,6 +1879,10 @@ def build_final_report_manifest_plan(
         / "final_test"
         / "retb_sealed_final_test_evaluation.json"
     )
+    semantic = load_hashed_json(
+        root / "controls" / "semantics" / "semantic_controls_bundle.json",
+        expected_contract="retb_stage_k_semantic_controls_bundle_v5",
+    )
     output_dir = root / "reports"
     row = _row(
         target="final_report",
@@ -1867,6 +1905,11 @@ def build_final_report_manifest_plan(
                 / "final_test"
                 / "retb_sealed_final_test_evaluation.json"
             ),
+            "--semantic-controls",
+            str(
+                root / "controls" / "semantics"
+                / "semantic_controls_bundle.json"
+            ),
             "--output-dir",
             str(output_dir),
         ],
@@ -1882,6 +1925,7 @@ def build_final_report_manifest_plan(
             "locked_scale_finalists": finalists["content_hash"],
             "final_test_execution_lock": lock["content_hash"],
             "sealed_final_test_evaluation": final["content_hash"],
+            "semantic_controls": semantic["content_hash"],
         },
         environment={
             "RETB_TEST_RESULT_MAY_REPLACE_FINALIST": "0",

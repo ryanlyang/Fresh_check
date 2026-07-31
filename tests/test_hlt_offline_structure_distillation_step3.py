@@ -444,6 +444,19 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
         source=_source(),
     )
     assert independent["npz_sha256"] == first["npz_sha256"]
+    assert first["contract"] == "hosd_label_blind_input_view_v4"
+    assert first["mmap_store"]["contract"] == "hosd_npy_mmap_store_v2"
+    assert set(first["mmap_store"]["members"]) == {
+        "identities",
+        "tokens",
+        "mask",
+        "vectors",
+        "measurement_states",
+    }
+    assert first["schema_version"] == 4
+    assert first["storage_layout"] == (
+        "deterministic_npz_plus_authenticated_npy_mmap_v2"
+    )
     assert (
         (tmp_path / "independent-view.npz").read_bytes()
         == (tmp_path / "view.npz").read_bytes()
@@ -461,9 +474,21 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
         tmp_path / "view.npz", expected_source=_source()
     )
     assert np.array_equal(loaded["measurement_states"], measurement_states)
+    assert isinstance(loaded["tokens"], np.memmap)
+    assert isinstance(loaded["mask"], np.memmap)
     assert loaded_metadata["logical_role"] == "model_train"
     assert loaded_metadata["replica_id"] == 0
     assert loaded_metadata["realization_policy"] == "R_MULTI"
+    sidecar = (
+        tmp_path
+        / independent["mmap_store"]["directory"]
+        / independent["mmap_store"]["members"]["tokens"]["filename"]
+    )
+    sidecar_bytes = sidecar.read_bytes()
+    sidecar.write_bytes(sidecar_bytes[:-1] + bytes([sidecar_bytes[-1] ^ 1]))
+    with pytest.raises(ValueError, match="memory-map member differs"):
+        load_materialized_hlt_input_view(tmp_path / "independent-view.npz")
+    sidecar.write_bytes(sidecar_bytes)
     # The adjacent manifest authenticates bytes, not merely shapes or names.
     with np.load(tmp_path / "view.npz", allow_pickle=False) as payload:
         drifted = {name: np.asarray(payload[name]) for name in payload.files}

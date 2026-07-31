@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-FEEDBACK_EXPORT_CONTRACT = "hosd_feedback_deployable_export_v1"
+FEEDBACK_EXPORT_CONTRACT = "hosd_feedback_deployable_export_v2"
 
 
 def train_stage_e_feedback(
@@ -52,11 +52,11 @@ def train_stage_e_feedback(
         "SHUFFLED",
         "ORACLE_SUB",
         "ORACLE_TRAINED",
-        "EXACT_HLT",
     } and not bool(getattr(train_loader.dataset, "feedback_intervention_ready", False)):
         raise ValueError(
             "Stage-E intervention row requires its identity-bound feedback source"
         )
+    capacity_ledger = feedback_model_flop_ledger(model)
     return train_stage_d_auxiliary(
         model=model,
         train_loader=train_loader,
@@ -72,14 +72,17 @@ def train_stage_e_feedback(
         source=source,
         deployed_analytical_flops=deployed_analytical_flops,
         deployed_parameter_count=deployed_parameter_count,
+        deployed_operation_profile=capacity_ledger.get(
+            "exact_hlt_builder_profile"
+        ),
         device=device,
         resume=resume,
         training_gpu_hours_override=training_gpu_hours_override,
         checkpoint_contract=FEEDBACK_CHECKPOINT_CONTRACT,
         completion_contract=FEEDBACK_COMPLETION_CONTRACT,
         prediction_contract=FEEDBACK_RESULT_CONTRACT,
-        prediction_schema_version=3,
-        completion_schema_version=3,
+        prediction_schema_version=4,
+        completion_schema_version=4,
         plan_hash_field="stage_e_plan_sha256",
         stage_label="Stage-E",
         completion_filename="feedback_completion.json",
@@ -130,7 +133,7 @@ def export_feedback_model(
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "contract": FEEDBACK_EXPORT_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "row_id": row["row_id"],
         "target_id": row["target_id"],
         "interface": row["interface"],
@@ -226,7 +229,7 @@ def evaluate_posthoc_feedback_control(
     result = with_content_hash(
         {
             "contract": FEEDBACK_RESULT_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "source": dict(source),
             "stage_e_plan_sha256": require_sha256(
                 stage_e_plan_sha256, name="stage_e_plan_sha256"
@@ -275,7 +278,7 @@ def evaluate_posthoc_feedback_control(
     completion = with_content_hash(
         {
             "contract": FEEDBACK_COMPLETION_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "source": dict(source),
             "row_id": control_row["row_id"],
             "target_id": control_row["target_id"],

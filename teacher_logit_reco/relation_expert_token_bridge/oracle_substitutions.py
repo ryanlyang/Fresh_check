@@ -17,8 +17,8 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-STAGE_I_POLICY_CONTRACT = "retb_stage_i_oracle_substitution_policy_v1"
-STAGE_I_EVALUATION_CONTRACT = "retb_stage_i_oracle_substitution_evaluation_v1"
+STAGE_I_POLICY_CONTRACT = "retb_stage_i_oracle_substitution_policy_v2"
+STAGE_I_EVALUATION_CONTRACT = "retb_stage_i_oracle_substitution_evaluation_v2"
 NEGATIVE_CONTROL_SEED = 730_013
 
 
@@ -26,7 +26,7 @@ def build_stage_i_policy() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": STAGE_I_POLICY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "split": "val_design",
             "selection_use_permitted": False,
             "required_substitutions": [
@@ -51,6 +51,12 @@ def build_stage_i_policy() -> dict[str, Any]:
                 ),
                 "WITHIN_CLASS_WRONG_EVENT_TARGETS": (
                     "per_class_canonical_order_cyclic_left_shift_one"
+                ),
+                "WRONG_EVENT_BANK_by_expert": (
+                    "replace_exactly_one_bank_by_global_cyclic_wrong_event"
+                ),
+                "WITHIN_CLASS_WRONG_EVENT_BANK_by_expert": (
+                    "replace_exactly_one_bank_by_same_class_wrong_event"
                 ),
                 "SLOT_PERMUTED_TARGETS": (
                     "cyclic_left_shift_one_slot_per_bank_K1_unchanged"
@@ -368,6 +374,15 @@ def evaluate_stage_i_substitutions(
         "WITHIN_CLASS_WRONG_EVENT_TARGETS",
         _permute_events(oracle, within_class_wrong_event_indices(truth)),
     )
+    wrong = wrong_event_indices(len(ids))
+    class_wrong = within_class_wrong_event_indices(truth)
+    for expert in EXPERT_ORDER:
+        replaced = dict(oracle)
+        replaced[expert] = oracle[expert][wrong]
+        add(f"WRONG_EVENT_BANK__{expert}", replaced)
+        replaced = dict(oracle)
+        replaced[expert] = oracle[expert][class_wrong]
+        add(f"WITHIN_CLASS_WRONG_EVENT_BANK__{expert}", replaced)
     add("SLOT_PERMUTED_TARGETS", _permute_slots(oracle))
     swapped, swap_sources = _swap_equal_shape_banks(oracle)
     add("EXPERT_BANK_SWAPPED_TARGETS", swapped)
@@ -384,7 +399,7 @@ def evaluate_stage_i_substitutions(
     return with_content_hash(
         {
             "contract": STAGE_I_EVALUATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "policy_sha256": require_sha256(
                 stage_i_policy_sha256, name="stage_i_policy_sha256"
             ),
@@ -470,6 +485,8 @@ def validate_stage_i_evaluation(payload: Mapping[str, Any]) -> str:
             "ONE_ORACLE_SIX_PREDICTED",
             "WITHIN_CLASS_MEAN_TARGETS",
             "ZERO_ORACLE_BANK",
+            "WRONG_EVENT_BANK",
+            "WITHIN_CLASS_WRONG_EVENT_BANK",
         )
         for expert in EXPERT_ORDER
     }

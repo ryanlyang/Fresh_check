@@ -134,6 +134,20 @@ def main(argv: list[str] | None = None) -> int:
             fitting_population="target_500k",
             split="model_train",
             source=source,
+            tree_resource_sha256=(
+                load_hashed_json(
+                    root / "inputs" / "inherited_angular_tree_resource.json"
+                )["content_hash"]
+                if target_id == "T_HLT_REGION_PAIR_8"
+                else None
+            ),
+            tree_backend_sha256=(
+                load_hashed_json(
+                    root / "inputs" / "region_tree" / "backend_manifest.json"
+                )["content_hash"]
+                if target_id == "T_HLT_REGION_PAIR_8"
+                else None
+            ),
         )
         for target_id in ("T_HLT_TRACK_PAIR_13", "T_HLT_REGION_PAIR_8")
     ]

@@ -41,6 +41,16 @@ RESOURCE_CLASSES = {
     },
 }
 
+REQUIRED_SCALE_MEMORY_PROJECTION_NODES = frozenset(
+    {
+        "scale_input_prepare",
+        "scale_tree_build",
+        "scale_target_build",
+        "scale_teacher_target_inference",
+        "scale_graph_train",
+    }
+)
+
 MINIATURE_RESOURCE_CLASSES = {
     "cpu": {
         "partition": "tigris",
@@ -69,6 +79,8 @@ def build_resource_measurements(
     maximum_concurrent_jobs: int,
     checkpoint_bytes: int,
     export_bytes: int,
+    scale_resident_layout_ledger: Mapping[str, Any],
+    scale_resident_memory_projections: Mapping[str, Mapping[str, Any]],
     measurement_evidence_sha256: str,
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -100,10 +112,102 @@ def build_resource_measurements(
         or not projected_gpu_hours_by_stage
     ):
         raise ValueError("resource projections must be positive and complete")
+    layout_ledger = dict(scale_resident_layout_ledger)
+    validate_content_hash(
+        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v3"
+    )
+    source_sha256 = canonical_sha256(source)
+    if (
+        layout_ledger.get("source_sha256") != source_sha256
+        or int(layout_ledger.get("production_tree_shard_events", 0))
+        != 10_000
+        or int(layout_ledger.get("production_target_shard_events", 0))
+        != 2_048
+        or int(
+            layout_ledger.get(
+                "production_tree_shard_decoded_bytes_upper_bound", 0
+            )
+        )
+        <= 0
+        or int(
+            layout_ledger.get(
+                "production_target_shard_decoded_bytes_upper_bound", 0
+            )
+        )
+        <= 0
+    ):
+        raise ValueError("scale resident layout source differs")
+    projections = {
+        str(node_id): dict(row)
+        for node_id, row in scale_resident_memory_projections.items()
+    }
+    if set(projections) != set(REQUIRED_SCALE_MEMORY_PROJECTION_NODES):
+        raise ValueError("scale resident-memory projection coverage differs")
+    for node_id, projection in projections.items():
+        validate_content_hash(
+            projection,
+            expected_contract="hosd_scale_resident_memory_projection_v4",
+        )
+        model = projection.get("projection_model")
+        fixed = int(projection.get("fixed_resident_bytes", -1))
+        unit_bytes = int(
+            projection.get("production_resident_unit_bytes_upper_bound", 0)
+        )
+        required_unit_events = {
+            "scale_input_prepare": 1,
+            "scale_tree_build": 10_000,
+            "scale_target_build": 2_048,
+            "scale_teacher_target_inference": 2_048,
+            "scale_graph_train": 10_000,
+        }[node_id]
+        population = int(projection.get("production_population", 0))
+        expected_projected = (
+            fixed + unit_bytes * population
+            if model == "fixed_plus_authenticated_per_event_population_v2"
+            else fixed + unit_bytes
+            if model == "fixed_plus_authenticated_single_shard_v2"
+            else -1
+        )
+        if (
+            projection.get("pilot_node_id") != node_id
+            or projection.get("source_sha256") != source_sha256
+            or projection.get("layout_evidence_sha256")
+            != layout_ledger["content_hash"]
+            or not projection.get("coordinate_type")
+            or projection.get("resource_class") not in RESOURCE_CLASSES
+            or not projection.get("loader_storage_contracts")
+            or not projection.get("representative_real_task_completed")
+            or fixed < 0
+            or unit_bytes <= 0
+            or int(projection.get("miniature_resident_unit_bytes_upper_bound", 0))
+            <= 0
+            or int(projection.get("production_resident_unit_events", 0))
+            != required_unit_events
+            or int(projection.get("miniature_resident_unit_events", 0)) <= 0
+            or population != 3_000_000
+            or int(projection.get("projected_resident_bytes", 0))
+            != expected_projected
+            or int(projection.get("registered_tigris_limit_bytes", 0))
+            != int(
+                str(
+                    RESOURCE_CLASSES[projection["resource_class"]]["memory"]
+                ).removesuffix("G")
+            )
+            * 1024**3
+            or projection.get("within_registered_tigris_limit") is not True
+            or expected_projected
+            > int(projection["registered_tigris_limit_bytes"])
+            or expected_projected
+            > int(str(checked[projection["resource_class"]]["memory"]).removesuffix("G"))
+            * 1024**3
+        ):
+            raise ValueError(
+                f"{node_id} resident-memory projection differs"
+            )
     return with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENTS_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 7,
             "source": dict(source),
             "miniature_execution_plan_sha256": require_sha256(
                 miniature_execution_plan_sha256,
@@ -128,6 +232,8 @@ def build_resource_measurements(
             "maximum_concurrent_jobs": int(maximum_concurrent_jobs),
             "checkpoint_bytes": int(checkpoint_bytes),
             "export_bytes": int(export_bytes),
+            "scale_resident_layout_ledger": layout_ledger,
+            "scale_resident_memory_projections": projections,
             "derived_from_real_miniature": True,
             "hand_authored_measurements_allowed": False,
             "performance_results_not_read": True,
@@ -560,7 +666,7 @@ def build_full_authorization(
     return with_content_hash(
         {
             "contract": FULL_AUTHORIZATION_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 7,
             "source": dict(source),
             "production_execution_plan_sha256": production_plan["content_hash"],
             "miniature_acceptance_sha256": miniature_acceptance["content_hash"],

@@ -8,7 +8,6 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard
 from teacher_logit_reco.relational_part.normalization import (
     NORMALIZATION_PAIR_LIMIT_PER_JET,
     NORMALIZATION_PAIR_SALT,
@@ -28,6 +27,8 @@ from .contracts import (
     with_content_hash,
 )
 from .extractors import ExtractorResources, extract_registered_target
+from .authenticated_tree import AuthenticatedTreeSplit
+from .input_views import load_materialized_input_view
 from .normalization import fit_streamed_target_normalizer, validate_target_normalizer
 from .target_schemas import target_declarations
 
@@ -129,45 +130,20 @@ def merge_target_normalizers(
     )
 
 
-def _load_input(path: Path) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray | None]:
-    with np.load(path, allow_pickle=False) as archive:
-        names = set(archive.files)
-        forbidden = names & {"label", "labels", "class", "classes", "y"}
-        if forbidden:
-            raise ValueError(f"scale target input exposes labels: {sorted(forbidden)}")
-        identity_key = "identity" if "identity" in names else "identities"
-        required = {identity_key, "raw_tokens", "mask"}
-        if not required.issubset(names):
-            raise ValueError("scale target input lacks identity/raw_tokens/mask")
-        identities = tuple(str(value) for value in archive[identity_key].tolist())
-        raw = np.asarray(archive["raw_tokens"], dtype=np.float32)
-        mask = np.asarray(archive["mask"], dtype=bool)
-        vectors = (
-            np.asarray(archive["vectors"], dtype=np.float32)
-            if "vectors" in names
-            else None
-        )
+def _load_input(path: Path, *, source: Mapping[str, Any]):
+    arrays, _ = load_materialized_input_view(
+        path, expected_view_kind="hlt_analogue", expected_source=source
+    )
+    identities = arrays["identities"]
+    raw = arrays["tokens"]
+    mask = arrays["mask"]
+    vectors = arrays["vectors"]
     if (
         len(identities) != raw.shape[0]
         or mask.shape != raw.shape[:2]
-        or len(identities) != len(set(identities))
     ):
         raise ValueError("scale target input population differs")
     return identities, raw, mask, vectors
-
-
-def _tree_lookup(root: Path, identities: Sequence[str]) -> tuple[Mapping[str, Any], ...]:
-    manifest = load_hashed_json(root / "manifest.json")
-    by_identity = {}
-    for shard in sorted((root / "shards").glob("shard_*.npz")):
-        shard_ids, trees = unpack_tree_shard(shard)
-        for identity, tree in zip(shard_ids, trees):
-            if identity in by_identity:
-                raise ValueError("scale tree cache duplicates an identity")
-            by_identity[identity] = tree
-    if not set(identities).issubset(by_identity):
-        raise ValueError("scale tree cache lacks selected identities")
-    return tuple(by_identity[value] for value in identities), manifest
 
 
 def _sample_coordinates(
@@ -202,6 +178,8 @@ def fit_pair_normalizer_from_views(
     fitting_population: str,
     split: str,
     source: Mapping[str, Any],
+    tree_resource_sha256: str | None = None,
+    tree_backend_sha256: str | None = None,
     batch_size: int = 128,
 ) -> dict[str, Any]:
     """Extract only deterministic normalization coordinates from R_MULTI views."""
@@ -230,23 +208,33 @@ def fit_pair_normalizer_from_views(
     )
     for replica, raw_path in sorted(view_paths_by_replica.items()):
         path = Path(raw_path)
-        identities, raw, valid, vectors = _load_input(path)
+        identities, raw, valid, vectors = _load_input(path, source=source)
         selected = select_normalization_jet_indices(identities)
         selected_total += int(selected.size)
         parent_hashes[f"hlt_view_{replica}"] = file_sha256(path)
-        tree_rows = None
+        tree_split = None
         if requires_tree:
             tree_root = Path(tree_paths_by_replica[int(replica)])
-            selected_ids = [identities[int(index)] for index in selected]
-            tree_rows, tree_manifest = _tree_lookup(tree_root, selected_ids)
-            parent_hashes[f"tree_view_{replica}"] = tree_manifest["content_hash"]
+            if tree_resource_sha256 is None or tree_backend_sha256 is None:
+                raise ValueError("streamed REGION normalizer lacks exact tree parents")
+            tree_split = AuthenticatedTreeSplit(
+                tree_root,
+                expected_identities=identities,
+                expected_parents={
+                    "hlt_content_sha256": file_sha256(path),
+                    "tree_resource_sha256": tree_resource_sha256,
+                    "backend_manifest_sha256": tree_backend_sha256,
+                },
+            )
+            parent_hashes[f"tree_view_{replica}"] = tree_split.manifest["content_hash"]
         for start in range(0, len(selected), int(batch_size)):
             coordinate = selected[start : start + int(batch_size)]
-            batch_trees = (
-                None
-                if tree_rows is None
-                else tree_rows[start : start + len(coordinate)]
-            )
+            batch_trees = None
+            if tree_split is not None:
+                batch_trees = tree_split.load_event_rows(
+                    coordinate,
+                    expected_identities=identities[coordinate],
+                )
             batch = extract_registered_target(
                 target_id,
                 raw[coordinate],

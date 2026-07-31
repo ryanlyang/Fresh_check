@@ -3628,6 +3628,15 @@ The final report includes:
 
 No semantic perturbation is used to select a checkpoint.
 
+The wrong-event relation control uses exact valid-particle multiplicity and
+never self-matches.  A multiplicity stratum containing only one jet cannot be
+deranged under those constraints, so the globally frozen policy excludes that
+stratum from both the perturbed row and its paired active-reference row.  The
+excluded identity hash, excluded count, eligible count, and eligible fraction
+are serialized.  All other semantic controls retain the complete
+`val_design` population.  Relation-zero is evaluated independently for each
+of `PT`, `TRACK`, `PID`, `CHARGE`, `DENSITY`, and `REGION`.
+
 ---
 
 ## 29. Final-test seal
@@ -4436,7 +4445,20 @@ GPU_CPUS_PER_TASK=16
 GPU_MEM=220G
 CPU_CPUS_PER_TASK=16
 CPU_MEM=192G
+RETB_CPU_CACHE_CONCURRENCY=64
+RETB_GPU_EXPERT_CONCURRENCY=64
+RETB_GPU_PREDICTOR_CONCURRENCY=64
+RETB_GPU_SCALE_CONCURRENCY=64
+RETB_GPU_FINAL_CONCURRENCY=64
 ```
+
+These are high-throughput array caps, not requested GPU counts. Each GPU row
+still requests one GH200, while Slurm schedules up to 64 ready rows from each
+wave subject to cluster/account availability. Internal predictor, joint,
+consumer, export, robustness, and semantic-control phase arrays inherit the
+same environment settings; they must not reintroduce smaller hidden caps.
+Single-output selectors, aggregators, and the sealed exactly-once final-test
+worker remain serialized.
 
 The top-level production command will be:
 
@@ -4777,7 +4799,7 @@ components, worker CLIs, static experiment compiler, and production DAG, but
 they did not fully connect every selector-dependent worker to concrete
 production task rows.
 
-There are currently:
+At the time these closure blocks were defined, there were:
 
 - 48 manifest-driven production targets;
 - 13 targets with genuine campaign-bootstrap manifests;
@@ -4821,7 +4843,7 @@ Add a central plan-factory registry containing, for every non-bootstrap target:
 - performance-independent continuation policy.
 
 The local operational report must fail full-submission eligibility unless all
-48 manifest targets have genuine producer coverage. Synthetic DAG execution
+graph-declared manifest targets have genuine producer coverage. Synthetic DAG execution
 remains useful for control-plane testing but cannot satisfy this requirement.
 
 Version the affected operational-report, authorization, Step-15, graph, and
@@ -5119,8 +5141,8 @@ the real Tigris smoke runs.
 
 The campaign is production-ready only when all of the following are true:
 
-1. all 48 manifest-driven nodes have genuine automatic producers;
-2. all 35 non-bootstrap manifests are emitted without manual row JSON;
+1. all 63 manifest-driven nodes have genuine automatic producers;
+2. all 50 non-bootstrap manifests are emitted without manual row JSON;
 3. every manifest is source-, campaign-, graph-, trigger-, and parent-bound;
 4. a real miniature campaign executes Stages A–N using the same workers and
    continuation mechanisms as production;
@@ -5140,9 +5162,9 @@ synthetic outputs, registered entry points, or a structurally valid DAG.
 The source implementation is ready to submit for the required real Tigris
 miniature smoke:
 
-- the production graph has 69 nodes: 48 manifest-driven workers, 19 direct
+- the production graph has 84 nodes: 63 manifest-driven workers, 19 direct
   workers, and 2 virtual aliases;
-- all 35 non-bootstrap manifests have genuine automatic producers;
+- all 50 non-bootstrap manifests have genuine automatic producers;
 - the local operational traversal resolves every Stage A--N node, verifies
   authenticated reuse and restart behavior, rejects source drift and
   incomplete arrays, and observes no performance-threshold abort;

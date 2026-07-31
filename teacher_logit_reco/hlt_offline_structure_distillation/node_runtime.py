@@ -197,9 +197,13 @@ def _rows(root: Path, node_id: str) -> list[dict[str, Any]] | None:
             root / "job_ledgers" / "stage_e_execution_plan.json",
             expected_contract=STAGE_E_PLAN_CONTRACT,
         )
-        kind = "SCIENTIFIC" if node_id == "feedback_train" else "CONTROL"
+        kinds = (
+            {"SCIENTIFIC", "REFERENCE_BASELINE"}
+            if node_id == "feedback_train"
+            else {"CONTROL"}
+        )
         return [
-            dict(row) for row in plan["all_rows"] if row["row_kind"] == kind
+            dict(row) for row in plan["all_rows"] if row["row_kind"] in kinds
         ]
     if node_id in {"combination_train", "pcgrad_control"}:
         plan = load_hashed_json(
@@ -609,9 +613,7 @@ def resolve_node_argv(
                         )
                     ]
                 )
-            if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"} or row[
-                "target_id"
-            ] in {"T_HLT_TRACK_PAIR_13", "T_HLT_REGION_PAIR_8"}:
+            if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}:
                 argv.extend(
                     [
                         item
@@ -1088,14 +1090,6 @@ def resolve_node_argv(
             [
                 "--stage-d-loader-root",
                 str(root / "loaders" / "stage_d"),
-                "--design-confirm-native-relation",
-                str(
-                    root
-                    / "targets"
-                    / "native_relations"
-                    / "design_confirm"
-                    / "replica_0.npz"
-                ),
             ]
         )
         for replica in range(4):
@@ -1103,10 +1097,6 @@ def resolve_node_argv(
                 [
                     "--scale-train-cache",
                     f"{replica}={root / 'scale_up' / 'inputs' / 'hlt' / f'replica_{replica}.npz'}",
-                    "--scale-train-tree",
-                    f"{replica}={root / 'scale_up' / 'trees' / 'hlt' / f'replica_{replica}'}",
-                    "--scale-native-relation",
-                    f"{replica}={root / 'scale_up' / 'targets' / 'native_relations' / f'replica_{replica}.npz'}",
                 ]
             )
     elif node_id == "confirmation_aggregate":

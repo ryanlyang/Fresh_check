@@ -253,7 +253,7 @@ def feedback_model_flop_ledger(
     )
     interface = str(model.interface)
     dimension = int(
-        model.consumer.predictor.network[-1].out_features
+        model.consumer.bias_network[0].in_features
         if interface == "FB_PAIR"
         else model.global_predictor.target_dimension
         if hasattr(model.global_predictor, "target_dimension")
@@ -261,11 +261,12 @@ def feedback_model_flop_ledger(
     )
     terms: dict[str, int] = {}
     if interface == "FB_PAIR":
-        # Symmetric PairTargetHead: [hi+hj, |hi-hj|, hi*hj] -> 128 -> C.
-        terms["pair_predictor"] = int(
-            2 * n * n * (3 * 128) * 128
-            + 2 * n * n * 128 * dimension
-        )
+        if model.consumer.predictor is not None:
+            pair_input_factor = 3 if model.consumer.symmetric else 4
+            terms["pair_predictor"] = int(
+                2 * n * n * (pair_input_factor * 128) * 128
+                + 2 * n * n * 128 * dimension
+            )
         terms["pair_bias_network"] = int(
             2 * n * n * dimension * 128
             + 2 * n * n * 128 * 8
@@ -275,8 +276,10 @@ def feedback_model_flop_ledger(
             terms["global_predictor"] = global_target_head_flops(
                 model.global_predictor, particles=n
             )
-            source_dimension = dimension * (
-                2 if bool(getattr(model.consumer, "heteroscedastic", False)) else 1
+            source_dimension = int(
+                model.consumer.structure_projection.in_features
+                if hasattr(model.consumer, "structure_projection")
+                else model.consumer.projection.in_features
             )
         else:
             # DirectFourTokenHead: four-query attention plus 128->128 output.
@@ -307,8 +310,57 @@ def feedback_model_flop_ledger(
             terms["film_application_blocks_5_to_8"] = int(4 * 2 * n * 128)
         else:
             raise ValueError("unknown feedback interface in FLOP ledger")
+    builder_profile = None
+    exact_builder = getattr(model, "exact_pair_builder", None)
+    if exact_builder is not None:
+        directed_pairs = n * max(0, n - 1)
+        unordered_pairs = n * max(0, n - 1) // 2
+        target_id = str(exact_builder.target_id)
+        if target_id == "T_HLT_TRACK_PAIR_13":
+            operations = {
+                "validity_and_sentinel_tests": 10 * n,
+                "directed_pair_coordinate_evaluations": 13 * directed_pairs,
+                "uncertainty_floor_applications": 4 * n,
+                "normalization_component_applications": dimension * directed_pairs,
+            }
+            tree_policy = "not_applicable"
+        elif target_id == "T_HLT_REGION_PAIR_8":
+            operations = {
+                "ca_candidate_distance_evaluations_upper_bound": (
+                    n * (n + 1) * max(0, n - 1) // 6
+                ),
+                "ca_merge_operations": max(0, n - 1),
+                "lca_pair_queries": unordered_pairs,
+                "pair_coordinate_evaluations": dimension * unordered_pairs,
+                "normalization_component_applications": dimension * unordered_pairs,
+            }
+            tree_policy = (
+                "reuse_authenticated_same_event_tree_when_bound;"
+                "otherwise_reconstruct_deterministic_ca_tree_once_per_event"
+            )
+        else:  # pragma: no cover - constructor already restricts this branch
+            raise ValueError("unknown exact-HLT builder target")
+        builder_profile = with_content_hash(
+            {
+                "contract": "hosd_exact_hlt_builder_operation_ledger_v1",
+                "schema_version": 1,
+                "target_id": target_id,
+                "valid_particles_upper_bound": n,
+                "pair_domain": (
+                    "directed" if target_id == "T_HLT_TRACK_PAIR_13" else "unordered"
+                ),
+                "operation_counts": operations,
+                "tree_reuse_policy": tree_policy,
+                "normalization_cost_included": True,
+                "builder_operations_excluded_from_multiply_add_flops": True,
+                "measured_timing_evidence_contract": (
+                    "hosd_exact_hlt_builder_timing_v1"
+                ),
+                "measured_timing_evidence_required_before_production": True,
+            }
+        )
     return {
-        "contract": "hosd_analytical_feedback_flops_v1",
+        "contract": "hosd_analytical_feedback_flops_v2",
         "batch_size": 1,
         "valid_particles": n,
         "classes": int(classes),
@@ -318,6 +370,7 @@ def feedback_model_flop_ledger(
         "deployed_total_flops": int(base["total_flops"] + sum(terms.values())),
         "training_only_terms": {},
         "all_feedback_modules_retained_at_deployment": True,
+        "exact_hlt_builder_profile": builder_profile,
     }
 
 

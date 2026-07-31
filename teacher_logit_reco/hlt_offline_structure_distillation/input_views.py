@@ -120,6 +120,69 @@ def _publish_deterministic_npz(
             temporary.unlink()
 
 
+def _publish_mmap_store(
+    output: Path, arrays: Mapping[str, np.ndarray]
+) -> dict[str, Any]:
+    """Publish immutable NPY members for bounded-resident scale loading."""
+
+    store = output.with_name(output.name + ".arrays")
+    required = {
+        "identities": "identity",
+        "tokens": "raw_tokens",
+        "mask": "mask",
+        "vectors": "vectors",
+    }
+    if "measurement_states" in arrays:
+        required["measurement_states"] = "measurement_states"
+
+    def descriptor(root: Path) -> dict[str, Any]:
+        members = {}
+        for public_name, source_name in sorted(required.items()):
+            path = root / f"{public_name}.npy"
+            if path.is_symlink() or not path.is_file():
+                raise FileNotFoundError(f"memory-map member is absent: {path}")
+            value = np.load(path, mmap_mode="r", allow_pickle=False)
+            members[public_name] = {
+                "filename": path.name,
+                "sha256": _sha256_file(path),
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "bytes": int(path.stat().st_size),
+                "source_npz_member": source_name,
+            }
+        return {
+            "contract": "hosd_npy_mmap_store_v2",
+            "directory": store.name,
+            "members": members,
+            "total_bytes": sum(row["bytes"] for row in members.values()),
+        }
+
+    if store.exists():
+        if store.is_symlink() or not store.is_dir():
+            raise FileExistsError(f"unsafe memory-map store: {store}")
+        return descriptor(store)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{store.name}.", dir=output.parent)
+    )
+    try:
+        for public_name, source_name in sorted(required.items()):
+            np.save(
+                temporary / f"{public_name}.npy",
+                np.asarray(arrays[source_name]),
+                allow_pickle=False,
+            )
+        try:
+            temporary.rename(store)
+        except FileExistsError:
+            pass
+        return descriptor(store)
+    finally:
+        if temporary.exists():
+            for child in temporary.iterdir():
+                child.unlink()
+            temporary.rmdir()
+
+
 def _publish(
     *,
     output: Path,
@@ -154,6 +217,7 @@ def _publish(
             "contains_labels": False,
             "contains_degradation_construction_indices": False,
             "contains_measurement_states": measurement_states is not None,
+            "storage_layout": "deterministic_npz_plus_authenticated_npy_mmap_v2",
         }
         if (
             all(existing.get(key) == value for key, value in expected_existing.items())
@@ -186,10 +250,11 @@ def _publish(
             raise ValueError("HLT measurement-state population differs")
         arrays["measurement_states"] = states
     digest = _publish_deterministic_npz(output, arrays)
+    mmap_store = _publish_mmap_store(output, arrays)
     manifest = with_content_hash(
         {
             "contract": INPUT_VIEW_MANIFEST_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 4,
             "source": dict(source),
             "view_kind": view_kind,
             "split": split,
@@ -202,6 +267,8 @@ def _publish(
             "contains_labels": False,
             "contains_degradation_construction_indices": False,
             "contains_measurement_states": measurement_states is not None,
+            "storage_layout": "deterministic_npz_plus_authenticated_npy_mmap_v2",
+            "mmap_store": mmap_store,
         }
     )
     write_immutable_json(output.with_suffix(output.suffix + ".json"), manifest)
@@ -375,12 +442,13 @@ def materialize_retb_offline_input_view(
     )
 
 
-def load_materialized_hlt_input_view(
+def load_materialized_input_view(
     path: str | Path,
     *,
+    expected_view_kind: str | None = None,
     expected_source: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Load a HOSD HLT view with its adjacent byte/coordinate attestation."""
+    """Load a HOSD view through authenticated, bounded-resident NPY members."""
 
     input_path = Path(path)
     manifest = load_retb_hashed_json(
@@ -388,38 +456,80 @@ def load_materialized_hlt_input_view(
         expected_contract=INPUT_VIEW_MANIFEST_CONTRACT,
     )
     if (
-        manifest.get("view_kind") != "hlt_analogue"
-        or manifest.get("contains_measurement_states") is not True
+        (
+            expected_view_kind is not None
+            and manifest.get("view_kind") != expected_view_kind
+        )
         or _sha256_file(input_path) != manifest.get("npz_sha256")
+        or manifest.get("storage_layout")
+        != "deterministic_npz_plus_authenticated_npy_mmap_v2"
         or (
             expected_source is not None
             and manifest.get("source") != dict(expected_source)
         )
     ):
         raise ValueError("materialized HLT input-view lineage differs")
-    with np.load(input_path, allow_pickle=False) as payload:
-        required = {
-            "identity",
-            "raw_tokens",
-            "mask",
-            "measurement_states",
-        }
-        if not required.issubset(payload.files):
-            raise ValueError("materialized HLT input-view fields differ")
-        arrays = {
-            "identities": np.asarray(payload["identity"]),
-            "tokens": np.asarray(payload["raw_tokens"], dtype=np.float32),
-            "mask": np.asarray(payload["mask"], dtype=bool),
-            "measurement_states": np.asarray(
-                payload["measurement_states"], dtype=np.int8
-            ),
-        }
+    mmap_store = manifest.get("mmap_store")
+    if not isinstance(mmap_store, Mapping) or mmap_store.get("contract") != (
+        "hosd_npy_mmap_store_v2"
+    ):
+        raise ValueError("materialized HLT memory-map contract differs")
+    store = input_path.parent / str(mmap_store.get("directory", ""))
+    if store.is_symlink() or not store.is_dir():
+        raise ValueError("materialized HLT memory-map store is unsafe")
+    arrays = {}
+    expected_dtypes = {
+        "identities": None,
+        "tokens": np.dtype(np.float32),
+        "mask": np.dtype(bool),
+        "vectors": np.dtype(np.float32),
+    }
+    if manifest.get("contains_measurement_states") is True:
+        expected_dtypes["measurement_states"] = np.dtype(np.int8)
+    for name, expected_dtype in expected_dtypes.items():
+        row = mmap_store.get("members", {}).get(name)
+        path = store / str(row.get("filename", "")) if isinstance(row, Mapping) else store
+        if (
+            not isinstance(row, Mapping)
+            or path.parent != store
+            or path.is_symlink()
+            or not path.is_file()
+            or _sha256_file(path) != row.get("sha256")
+        ):
+            raise ValueError("materialized HLT memory-map member differs")
+        value = np.load(path, mmap_mode="r", allow_pickle=False)
+        if (
+            list(value.shape) != row.get("shape")
+            or str(value.dtype) != row.get("dtype")
+            or (expected_dtype is not None and value.dtype != expected_dtype)
+        ):
+            raise ValueError("materialized HLT memory-map metadata differs")
+        arrays[name] = value
+    identity_count = int(arrays["identities"].shape[0])
+    if (
+        identity_count != int(manifest["identity_count"])
+        or identity_order_sha256(arrays["identities"])
+        != manifest["identity_order_sha256"]
+        or arrays["tokens"].shape != (identity_count, 128, 14)
+        or arrays["mask"].shape != (identity_count, 128)
+        or arrays["vectors"].shape != (identity_count, 4, 128)
+        or (
+            "measurement_states" in arrays
+            and arrays["measurement_states"].shape[:2]
+            != arrays["mask"].shape
+        )
+    ):
+        raise ValueError("materialized HLT memory-map population differs")
     split = str(manifest["split"])
     metadata = {
         "content_hash": manifest["content_hash"],
         "array_content_sha256": manifest["npz_sha256"],
         "logical_role": split,
-        "replica_id": int(manifest["replica_id"]),
+        "replica_id": (
+            None
+            if manifest.get("replica_id") is None
+            else int(manifest["replica_id"])
+        ),
         "realization_policy": (
             "R_MULTI"
             if split in {"model_train", "scale_train"}
@@ -431,9 +541,27 @@ def load_materialized_hlt_input_view(
     return arrays, metadata
 
 
+def load_materialized_hlt_input_view(
+    path: str | Path,
+    *,
+    expected_source: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    """Load an authenticated HLT view without decompressing its full NPZ."""
+
+    arrays, metadata = load_materialized_input_view(
+        path,
+        expected_view_kind="hlt_analogue",
+        expected_source=expected_source,
+    )
+    if "measurement_states" not in arrays:
+        raise ValueError("materialized HLT view lacks measurement states")
+    return arrays, metadata
+
+
 __all__ = [
     "materialize_hlt_input_view",
     "materialize_offline_input_view",
     "materialize_retb_offline_input_view",
+    "load_materialized_input_view",
     "load_materialized_hlt_input_view",
 ]

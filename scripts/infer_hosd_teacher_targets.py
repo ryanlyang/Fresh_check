@@ -27,11 +27,13 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     infer_teacher_batch,
     load_and_validate_campaign,
     load_hashed_json,
-    publish_target_cache,
+    publish_target_cache_shard,
+    validate_target_cache,
     validate_teacher_lock,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     TEACHER_LOCK_CONTRACT,
+    write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (  # noqa: E402
     CLASS_NAMES,
@@ -126,7 +128,6 @@ def main(argv: list[str] | None = None) -> int:
             Path(config["tree_cache_dir"]) / "manifest.json"
         )
         parent_hashes["region_tree_resource"] = tree_manifest["content_hash"]
-    identities = tuple(str(value) for value in identities)
     output_ids = [f"T_OFFLINE_LOGITS_{args.teacher_id}"]
     if args.teacher_id == "O_BASE":
         output_ids.append("T_OFFLINE_POOLED_LATENT")
@@ -147,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         source=campaign["source"],
         shard_size=args.shard_size,
         access_authorization_hash=args.access_authorization_sha256,
+        identities_are_canonical=True,
     )
 
     def generate(indices: np.ndarray):
@@ -155,12 +157,18 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("teacher inference batch exposed labels")
         return infer_teacher_batch(adapter, batch)
 
-    manifest = publish_target_cache(
-        args.output_dir,
-        cache_spec=spec,
-        identities=identities,
-        generator=generate,
-    )
+    for shard_index in range(int(spec["shard_count"])):
+        publish_target_cache_shard(
+            args.output_dir,
+            cache_spec=spec,
+            canonical_identities=identities,
+            canonical_to_source=None,
+            shard_index=shard_index,
+            generator=generate,
+        )
+    manifest = validate_target_cache(args.output_dir, cache_spec=spec)
+    write_immutable_json(args.output_dir / "target_manifest.json", manifest)
+    write_immutable_json(args.output_dir / "cache_spec.json", spec)
     wave = try_finalize_stage_b_wave(
         campaign_root=args.campaign_root,
         wave_kind="teacher_output",

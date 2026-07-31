@@ -26,6 +26,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 )
 from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (  # noqa: E402
     build_internal_phase_plan,
+    configured_phase_concurrency,
     execute_phased_controller,
     phase_plan_path,
 )
@@ -750,7 +751,11 @@ class PredictorCampaignPlanner:
             phase_id=phase_id,
             sequence_index=sequence_index,
             resource=resource,
-            maximum_concurrent_tasks=4 if resource == "gpu" else 12,
+            maximum_concurrent_tasks=configured_phase_concurrency(
+                resource=resource,
+                family="predictor",
+                row_count=len(rows),
+            ),
             rows=rows,
             prerequisite_completion_hashes=completions,
             source=self.campaign["source"],

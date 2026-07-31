@@ -31,7 +31,7 @@ FINAL_TEST_EXECUTION_LOCK_CONTRACT = (
     "retb_final_test_execution_lock_v1"
 )
 FINAL_TEST_EXECUTION_CLAIM_CONTRACT = (
-    "retb_final_test_execution_claim_v1"
+    "retb_final_test_execution_claim_v3"
 )
 FINAL_TEST_EVALUATION_CONTRACT = "retb_sealed_final_test_evaluation_v3"
 
@@ -85,7 +85,7 @@ def build_prelock_final_test_inputs(
     return with_content_hash(
         {
             "contract": FINAL_TEST_INPUT_PREPARATION_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "parents": {
                 "campaign_spec": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
@@ -196,7 +196,7 @@ def build_postlock_oracle_target(
     return with_content_hash(
         {
             "contract": POSTLOCK_ORACLE_TARGET_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "graph_id": graph_id,
             "pipeline_seed": int(pipeline_seed),
             "split": split,
@@ -580,13 +580,17 @@ def build_final_test_execution_claim(
     return with_content_hash(
         {
             "contract": FINAL_TEST_EXECUTION_CLAIM_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "final_test_execution_lock_sha256": lock_sha,
             "execution_plan_sha256": require_sha256(
                 execution_plan_sha256, name="execution_plan_sha256"
             ),
             "claimed_before_final_test_model_access": True,
-            "retry_after_incomplete_claim_allowed": False,
+            "retry_after_incomplete_claim_allowed": True,
+            "completed_rows_must_not_be_reexecuted": True,
+            "incomplete_rows_may_resume_under_same_claim": True,
+            "row_completion_receipts_required": True,
+            "claim_plan_row_checkpoint_bound_inference_attestation_required": True,
             "test_result_may_select_replacement": False,
         }
     )

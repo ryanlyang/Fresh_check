@@ -53,6 +53,14 @@ from teacher_logit_reco.hlt_offline_structure_distillation.wave_completion impor
 )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _mapping(
     rows: list[str], *, name: str, required_replicas: set[int] | None = None
 ) -> dict[int, Path]:
@@ -123,17 +131,41 @@ def _privileged(path: Path | None, identities: tuple[str, ...], field: str):
 def _native_targets(path: Path | None, identities: tuple[str, ...]):
     if path is None:
         return None
-    with np.load(path, allow_pickle=False) as payload:
-        if not {
-            "identities", "targets", "target_mask", "availability"
-        }.issubset(payload.files):
-            raise ValueError(
-                "native-relation NPZ lacks identities/targets/target_mask"
-            )
-        observed = tuple(str(value) for value in payload["identities"].tolist())
-        target = np.asarray(payload["targets"], dtype=np.float32)
-        mask = np.asarray(payload["target_mask"], dtype=bool)
-        availability = np.asarray(payload["availability"], dtype=np.float32)
+    from teacher_logit_reco.hlt_offline_structure_distillation.native_relations import (
+        NATIVE_RELATION_TARGET_CONTRACT,
+    )
+
+    artifact = load_hashed_json(
+        path.with_suffix(".manifest.json"),
+        expected_contract=NATIVE_RELATION_TARGET_CONTRACT,
+    )
+    digest = _sha256_file(path)
+    store_definition = artifact.get("mmap_store")
+    if (
+        digest != artifact.get("npz_sha256")
+        or artifact.get("storage_layout")
+        != "compressed_npz_plus_authenticated_npy_mmap_v1"
+        or not isinstance(store_definition, dict)
+    ):
+        raise ValueError("native relation artifact lineage differs")
+    store = path.parent / str(store_definition.get("directory", ""))
+    mapped = {}
+    for name in ("identities", "targets", "target_mask", "availability"):
+        member = store_definition.get("members", {}).get(name)
+        member_path = store / str(member.get("filename", ""))
+        if (
+            not isinstance(member, dict)
+            or member_path.parent != store
+            or member_path.is_symlink()
+            or not member_path.is_file()
+            or _sha256_file(member_path) != member.get("sha256")
+        ):
+            raise ValueError("native relation memory-map member differs")
+        mapped[name] = np.load(member_path, mmap_mode="r", allow_pickle=False)
+    observed = tuple(str(value) for value in mapped["identities"].tolist())
+    target = mapped["targets"]
+    mask = mapped["target_mask"]
+    availability = mapped["availability"]
     if (
         observed != identities
         or target.shape != (len(identities), 545)
@@ -141,9 +173,11 @@ def _native_targets(path: Path | None, identities: tuple[str, ...]):
         or availability.shape != (len(identities), 7)
     ):
         raise ValueError("native relation target identity/shape differs")
-    return np.concatenate(
-        (target, mask.astype(np.float32), availability), axis=1
-    )
+    return {
+        "targets": target,
+        "target_mask": mask,
+        "availability": availability,
+    }
 
 
 class _ReplicaNativeTargetDataset:
@@ -152,13 +186,15 @@ class _ReplicaNativeTargetDataset:
     def __init__(self, base, targets_by_replica):
         self.base = base
         self.targets_by_replica = {
-            int(key): np.asarray(value, dtype=np.float32)
+            int(key): dict(value)
             for key, value in targets_by_replica.items()
         }
         if set(self.targets_by_replica) != set(base.replicas):
             raise ValueError("native target/HLT replica coverage differs")
         if any(
-            value.shape != (len(base), 1097)
+            value["targets"].shape != (len(base), 545)
+            or value["target_mask"].shape != (len(base), 545)
+            or value["availability"].shape != (len(base), 7)
             for value in self.targets_by_replica.values()
         ):
             raise ValueError("native relation packed target shape differs")
@@ -180,9 +216,14 @@ class _ReplicaNativeTargetDataset:
     def __getitem__(self, index):
         row = dict(self.base[index])
         replica = int(row["replica_id"])
-        row["offline_target_tokens"] = self.targets_by_replica[replica][
-            index
-        ][None, :]
+        target = self.targets_by_replica[replica]
+        row["offline_target_tokens"] = np.concatenate(
+            (
+                target["targets"][index],
+                target["target_mask"][index].astype(np.float32),
+                target["availability"][index],
+            )
+        )[None, :]
         row["offline_target_logits"] = np.zeros(10, dtype=np.float32)
         return row
 

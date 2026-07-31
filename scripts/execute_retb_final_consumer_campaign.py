@@ -20,6 +20,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 )
 from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (  # noqa: E402
     build_internal_phase_plan,
+    configured_phase_concurrency,
     execute_phased_controller,
 )
 from teacher_logit_reco.relation_expert_token_bridge.predictor_campaign import (  # noqa: E402
@@ -211,7 +212,6 @@ class FinalConsumerPlanner:
                     }
                 )
             resource = "gpu"
-            maximum = 3
         elif phase_id == "TOKEN_REFINER_WAVE":
             selected = [
                 row
@@ -223,7 +223,6 @@ class FinalConsumerPlanner:
                 for index, row in enumerate(selected)
             ]
             resource = "gpu"
-            maximum = 4
         elif phase_id == "TOKEN_REFINER_SELECT":
             rows = []
             for role in self.registry["carried_predictor_bundle_locks"]:
@@ -273,7 +272,6 @@ class FinalConsumerPlanner:
                     },
                 })
             resource = "cpu"
-            maximum = 1
         else:
             selected = [
                 row
@@ -285,7 +283,6 @@ class FinalConsumerPlanner:
                 for index, row in enumerate(selected)
             ]
             resource = "gpu"
-            maximum = 4
         return build_internal_phase_plan(
             campaign_root=self.root,
             campaign_spec_sha256=self.campaign_sha,
@@ -294,7 +291,11 @@ class FinalConsumerPlanner:
             phase_id=phase_id,
             sequence_index=sequence_index,
             resource=resource,
-            maximum_concurrent_tasks=maximum,
+            maximum_concurrent_tasks=configured_phase_concurrency(
+                resource=resource,
+                family="final",
+                row_count=len(rows),
+            ),
             rows=rows,
             prerequisite_completion_hashes=completions,
             source=self.campaign["source"],

@@ -19,6 +19,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 )
 from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (  # noqa: E402
     build_internal_phase_plan,
+    configured_phase_concurrency,
     execute_phased_controller,
 )
 from teacher_logit_reco.relation_expert_token_bridge.step12 import (  # noqa: E402
@@ -93,7 +94,6 @@ class ExportPlanner:
                     }
                 )
             resource = "gpu"
-            maximum = 4
         elif phase_id == "EXPORT_FINALIZE":
             output = (
                 self.root / "selection" / "deployable_export_index.json"
@@ -123,7 +123,6 @@ class ExportPlanner:
                 }
             ]
             resource = "cpu"
-            maximum = 1
         else:
             robustness = (
                 self.root
@@ -162,7 +161,6 @@ class ExportPlanner:
                 }
             ]
             resource = "cpu"
-            maximum = 1
         return build_internal_phase_plan(
             campaign_root=self.root,
             campaign_spec_sha256=self.campaign_sha,
@@ -171,7 +169,11 @@ class ExportPlanner:
             phase_id=phase_id,
             sequence_index=sequence_index,
             resource=resource,
-            maximum_concurrent_tasks=maximum,
+            maximum_concurrent_tasks=configured_phase_concurrency(
+                resource=resource,
+                family="final",
+                row_count=len(rows),
+            ),
             rows=rows,
             prerequisite_completion_hashes=completions,
             source=self.campaign["source"],

@@ -24,16 +24,16 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v23"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v29"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v12"
+    "retb_production_node_execution_registry_v14"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v17"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v23"
 
 TIGRIS_DEFAULTS = {
     "project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -52,11 +52,11 @@ TIGRIS_DEFAULTS = {
 }
 
 DEFAULT_CONCURRENCY = {
-    "cpu_cache": 12,
-    "gpu_expert": 4,
-    "gpu_predictor": 4,
-    "gpu_scale": 3,
-    "gpu_final": 3,
+    "cpu_cache": 64,
+    "gpu_expert": 64,
+    "gpu_predictor": 64,
+    "gpu_scale": 64,
+    "gpu_final": 64,
 }
 
 PRODUCTION_SPLIT_SIZES = {
@@ -144,8 +144,23 @@ TASK_MANIFEST_PRODUCER_NODES = {
     "confirmation_summary": "confirmation_500k",
     "bridge_shape_selector": "confirmation_summary",
     "scale_shortlist_selector": "bridge_shape_selector",
-    "scale_refits": "step14_scale_final_contracts",
-    "scale_graph_training": "scale_refits",
+    "shortlisted_500k_control_training": "scale_shortlist_selector",
+    "shortlisted_500k_controls": "shortlisted_500k_control_training",
+    "scale_refit_normalizers": "step14_scale_final_contracts",
+    "scale_refit_teachers": "scale_refit_normalizers",
+    "scale_refit_offline_experts": "scale_refit_teachers",
+    "scale_refit_targets": "scale_refit_offline_experts",
+    "scale_refit_native": "scale_refit_targets",
+    "scale_refit_native_fusion": "scale_refit_native",
+    "scale_refit_predictors": "scale_refit_native_fusion",
+    "scale_refit_calibrations": "scale_refit_predictors",
+    "scale_refits": "scale_refit_calibrations",
+    "scale_joint_training": "scale_refits",
+    "scale_graph_datasets": "scale_joint_training",
+    "scale_refiner_training": "scale_graph_datasets",
+    "scale_final_consumer_training": "scale_refiner_training",
+    "scale_graph_export": "scale_final_consumer_training",
+    "scale_graph_training": "scale_graph_export",
     "scale_completion": "scale_graph_training",
     "prelock_final_inputs": "input_audit",
     "stack_val_inference": "scale_completion",
@@ -204,7 +219,22 @@ LATE_CONTINUATION_MANIFEST_NODES = frozenset(
         "confirmation_summary",
         "bridge_shape_selector",
         "scale_shortlist_selector",
+        "shortlisted_500k_control_training",
+        "shortlisted_500k_controls",
+        "scale_refit_normalizers",
+        "scale_refit_teachers",
+        "scale_refit_offline_experts",
+        "scale_refit_targets",
+        "scale_refit_native",
+        "scale_refit_native_fusion",
+        "scale_refit_predictors",
+        "scale_refit_calibrations",
         "scale_refits",
+        "scale_joint_training",
+        "scale_graph_datasets",
+        "scale_refiner_training",
+        "scale_final_consumer_training",
+        "scale_graph_export",
         "scale_graph_training",
         "scale_completion",
     }
@@ -221,8 +251,11 @@ LATE_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     ),
     "semantic_controls": (
         "scripts/execute_retb_semantic_control_campaign.py",
+        "scripts/evaluate_retb_relation_predictor_semantics.py",
+        "scripts/evaluate_retb_bias_scale_semantics.py",
         "scripts/evaluate_retb_final_consumer_bypass_controls.py",
         "scripts/evaluate_retb_stage_i_substitutions.py",
+        "scripts/finalize_retb_semantic_control_campaign.py",
     ),
     "stage_l_graph_registration": (
         "scripts/execute_retb_stage_l_registration.py",
@@ -236,10 +269,31 @@ LATE_NODE_ENTRYPOINTS: dict[str, tuple[str, ...]] = {
     "scale_shortlist_selector": (
         "scripts/select_retb_scale_shortlist.py",
     ),
+    "shortlisted_500k_control_training": (
+        "scripts/train_retb_scale_finalist_control.py",
+    ),
+    "shortlisted_500k_controls": (
+        "scripts/aggregate_retb_shortlisted_500k_controls.py",
+    ),
     "scale_refits": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_normalizers": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_teachers": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_offline_experts": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_targets": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_native": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_native_fusion": (
+        "scripts/execute_retb_scale_seed_refit.py",
+    ),
+    "scale_refit_predictors": ("scripts/execute_retb_scale_seed_refit.py",),
+    "scale_refit_calibrations": ("scripts/execute_retb_scale_seed_refit.py",),
     "scale_graph_training": (
         "scripts/execute_retb_scale_graph_pipeline.py",
     ),
+    "scale_joint_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_graph_datasets": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_refiner_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_final_consumer_training": ("scripts/execute_retb_scale_graph_pipeline.py",),
+    "scale_graph_export": ("scripts/execute_retb_scale_graph_pipeline.py",),
     "scale_completion": (
         "scripts/aggregate_retb_scale_completion.py",
     ),
@@ -928,43 +982,97 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             access="val_design_only",
         ),
         _node(
+            "shortlisted_500k_control_training",
+            stage="L",
+            worker="run_retb_train_shortlisted_500k_controls.sh",
+            dependencies=("scale_shortlist_selector",),
+            resource="gpu",
+            array=_array(
+                task_manifest=(
+                    "job_ledgers/tasks/shortlisted_500k_control_training.json"
+                ),
+                concurrency=scale,
+                maximum_tasks=54,
+                smoke_tasks=3,
+            ),
+            dynamic=True,
+            resumable=True,
+            access="model_train_val_stop_and_val_design",
+        ),
+        _node(
+            "shortlisted_500k_controls",
+            stage="L",
+            worker="run_retb_aggregate_shortlisted_500k_controls.sh",
+            dependencies=("shortlisted_500k_control_training",),
+            dynamic=True,
+            resumable=True,
+            access="val_design_only",
+        ),
+        _node(
             "step14_scale_final_contracts",
             stage="M",
             worker="run_retb_build_step14_contracts.sh",
-            dependencies=("scale_shortlist_selector",),
+            dependencies=("shortlisted_500k_controls",),
         ),
-        _node(
-            "scale_refits",
-            stage="M",
-            worker="run_retb_register_scale_refits.sh",
-            dependencies=("step14_scale_final_contracts",),
-            resource="gpu",
-            array=_array(
-                task_manifest="job_ledgers/tasks/stage_m_scale_refits.json",
-                concurrency=3,
-                maximum_tasks=3,
-                smoke_tasks=1,
-            ),
-            dynamic=True,
-            resumable=True,
-            access="scale_train_and_label_free_val_design",
-        ),
-        _node(
-            "scale_graph_training",
-            stage="M",
-            worker="run_retb_train_scale_shortlist.sh",
-            dependencies=("scale_refits",),
-            resource="gpu",
-            array=_array(
-                task_manifest="job_ledgers/tasks/stage_m_scale_graphs.json",
-                concurrency=scale,
-                maximum_tasks=21,
-                smoke_tasks=1,
-            ),
-            dynamic=True,
-            resumable=True,
-            access="scale_train_and_val_stop",
-        ),
+        *[
+            _node(
+                node_id,
+                stage="M",
+                worker="run_retb_production_task.sh",
+                dependencies=(dependency,),
+                resource="gpu",
+                array=_array(
+                    task_manifest=f"job_ledgers/tasks/{node_id}.json",
+                    concurrency=scale,
+                    # Five possible carried roles x seven experts x two
+                    # source/allocated shapes x three seeds is the exact
+                    # worst-case offline-expert component bound.  Other
+                    # refit phases are strict subsets of this ceiling.
+                    maximum_tasks=210,
+                    smoke_tasks=1,
+                ),
+                dynamic=True,
+                resumable=True,
+                access="scale_train_and_label_free_val_design",
+            )
+            for node_id, dependency in (
+                ("scale_refit_normalizers", "step14_scale_final_contracts"),
+                ("scale_refit_teachers", "scale_refit_normalizers"),
+                ("scale_refit_offline_experts", "scale_refit_teachers"),
+                ("scale_refit_targets", "scale_refit_offline_experts"),
+                ("scale_refit_native", "scale_refit_targets"),
+                ("scale_refit_native_fusion", "scale_refit_native"),
+                ("scale_refit_predictors", "scale_refit_native_fusion"),
+                ("scale_refit_calibrations", "scale_refit_predictors"),
+                ("scale_refits", "scale_refit_calibrations"),
+            )
+        ],
+        *[
+            _node(
+                node_id,
+                stage="M",
+                worker="run_retb_production_task.sh",
+                dependencies=(dependency,),
+                resource="gpu",
+                array=_array(
+                    task_manifest=f"job_ledgers/tasks/{node_id}.json",
+                    concurrency=scale,
+                    maximum_tasks=21,
+                    smoke_tasks=1,
+                ),
+                dynamic=True,
+                resumable=True,
+                access="scale_train_and_val_stop",
+            )
+            for node_id, dependency in (
+                ("scale_joint_training", "scale_refits"),
+                ("scale_graph_datasets", "scale_joint_training"),
+                ("scale_refiner_training", "scale_graph_datasets"),
+                ("scale_final_consumer_training", "scale_refiner_training"),
+                ("scale_graph_export", "scale_final_consumer_training"),
+                ("scale_graph_training", "scale_graph_export"),
+            )
+        ],
         _node(
             "prelock_final_inputs",
             stage="N",
@@ -1079,7 +1187,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 maximum_tasks=1,
             ),
             dynamic=True,
-            resumable=False,
+            resumable=True,
             access="sealed_final_test_once",
         ),
         _node(
@@ -1453,7 +1561,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 23,
+            "schema_version": 27,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1503,8 +1611,11 @@ def build_production_graph(
                     "--format=JobID,JobName,State,Elapsed,ExitCode"
                 ),
                 "resume": (
-                    "bash sbatch/submit_retb_tigris_full.sh "
-                    "--resume \"${CAMPAIGN_ROOT}\""
+                    "python scripts/plan_retb_resume.py "
+                    "--campaign-root \"${CAMPAIGN_ROOT}\" "
+                    "--production-graph \"${CAMPAIGN_ROOT}/job_ledgers/production_graph.json\" "
+                    "--previous-ledger \"${CAMPAIGN_ROOT}/job_ledgers/initial_submission_ledger.json\" "
+                    "--dry-run"
                 ),
                 "cancel_stale": (
                     "python scripts/monitor_retb_campaign.py "
@@ -1535,7 +1646,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 23:
+    if int(payload.get("schema_version", -1)) != 27:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -2242,7 +2353,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 14,
+            "schema_version": 23,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2285,6 +2396,18 @@ def build_step15_bundle(
                     "retb_task_manifest_completion_v1"
                 ),
                 "scale_completion": "retb_scale_completion_v2",
+                "shortlisted_500k_controls": (
+                    "retb_shortlisted_500k_controls_v3"
+                ),
+                "semantic_controls": (
+                    "retb_stage_k_semantic_controls_bundle_v5"
+                ),
+                "scale_refit_phase_completion": (
+                    "retb_scale_refit_phase_completion_v2"
+                ),
+                "scale_graph_phase_completion": (
+                    "retb_scale_graph_phase_completion_v1"
+                ),
             },
             "stage_k_m_dependents_require_complete_parent_attestations": True,
             "stage_l_m_registration_only_rows_forbidden": True,
@@ -2327,15 +2450,21 @@ def build_step15_bundle(
                     "retb_final_test_execution_lock_v1"
                 ),
                 "sealed_final_test_execution_plan": (
-                    "retb_sealed_final_test_execution_plan_v1"
+                    "retb_sealed_final_test_execution_plan_v3"
                 ),
                 "final_test_execution_claim": (
-                    "retb_final_test_execution_claim_v1"
+                    "retb_final_test_execution_claim_v3"
+                ),
+                "final_test_inference_attestation": (
+                    "retb_final_test_inference_attestation_v2"
+                ),
+                "final_test_row_completion": (
+                    "retb_final_test_row_completion_v3"
                 ),
                 "sealed_final_test_evaluation": (
                     "retb_sealed_final_test_evaluation_v3"
                 ),
-                "final_report": "retb_stage_mn_final_report_v1",
+                "final_report": "retb_stage_mn_final_report_v3",
                 "completed_job_ledger": JOB_LEDGER_CONTRACT,
             },
             "sealed_final_test_task_count": 1,
@@ -2356,7 +2485,7 @@ def build_step15_bundle(
                 "materialization_plan": (
                     "retb_manifest_materialization_plan_v2"
                 ),
-                "producer_receipt": "retb_manifest_producer_receipt_v2",
+                "producer_receipt": "retb_manifest_producer_receipt_v3",
                 "plan_factory_registry": (
                     MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT
                 ),
@@ -2365,6 +2494,7 @@ def build_step15_bundle(
                 ),
                 "post_completion_hook_required": True,
                 "missing_or_drifted_plan_fails_closed": True,
+                "reused_manifest_requires_plan_completion_and_trigger": True,
                 "hook_presence_is_not_plan_factory_evidence": True,
                 "real_miniature_execution_required_for_readiness": True,
                 "scientific_performance_used_as_gate": False,

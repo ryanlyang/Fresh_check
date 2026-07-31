@@ -26,7 +26,7 @@ STAGE_L_GRAPH_REGISTRY_CONTRACT = "retb_stage_l_graph_registry_v2"
 SEED_CONFIRMATION_CONTRACT = "retb_500k_seed_confirmation_v1"
 CONFIRMATION_SUMMARY_CONTRACT = "retb_500k_confirmation_summary_v2"
 SCALE_SHORTLIST_CONTRACT = "retb_locked_scale_shortlist_v2"
-SHORTLISTED_CONTROLS_CONTRACT = "retb_shortlisted_500k_controls_v1"
+SHORTLISTED_CONTROLS_CONTRACT = "retb_shortlisted_500k_controls_v3"
 
 GRAPH_ROLES = (
     "reference_baseline",
@@ -1182,6 +1182,8 @@ def build_shortlisted_500k_controls(
         "H_BASE_LONG_label_exposure_control_sha256",
         "control_metrics_artifact_sha256",
         "capacity_control_reproduces_gain",
+        "training_row_hashes_by_kind",
+        "mean_accuracy_by_control",
     }
     for raw in rows:
         row = dict(raw)
@@ -1203,25 +1205,53 @@ def build_shortlisted_500k_controls(
                     for name in sorted(required - {
                         "graph_id",
                         "capacity_control_reproduces_gain",
+                        "training_row_hashes_by_kind",
+                        "mean_accuracy_by_control",
                     })
                 },
                 "capacity_control_reproduces_gain": bool(
                     row["capacity_control_reproduces_gain"]
                 ),
+                "training_row_hashes_by_kind": {
+                    kind: [
+                        require_sha256(value, name=f"{graph_id}.{kind}")
+                        for value in row["training_row_hashes_by_kind"][kind]
+                    ]
+                    for kind in (
+                        "H_MONO_PARAM", "H_MONO_FLOP", "H_BASE_LONG"
+                    )
+                },
+                "mean_accuracy_by_control": {
+                    kind: float(row["mean_accuracy_by_control"][kind])
+                    for kind in (
+                        "H_MONO_PARAM", "H_MONO_FLOP", "H_BASE_LONG"
+                    )
+                },
             }
         )
+        if any(
+            len(checked[-1]["training_row_hashes_by_kind"][kind]) != 3
+            for kind in ("H_MONO_PARAM", "H_MONO_FLOP", "H_BASE_LONG")
+        ):
+            raise ValueError("shortlisted controls lack three-seed training")
+        if any(
+            not math.isfinite(value) or not 0.0 <= value <= 1.0
+            for value in checked[-1]["mean_accuracy_by_control"].values()
+        ):
+            raise ValueError("shortlisted control mean accuracy differs")
     if seen != expected_ids:
         raise ValueError("shortlisted-control graph IDs differ")
     return with_content_hash(
         {
             "contract": SHORTLISTED_CONTROLS_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 3,
             "locked_scale_shortlist_sha256": shortlist_sha,
             "rows": sorted(checked, key=lambda row: row["graph_id"]),
             "complete_coverage": True,
             "created_after_shortlist_lock": True,
             "used_to_change_shortlist_membership": False,
             "performance_result_blocked_stage_M": False,
+            "all_control_rows_are_real_training_outputs": True,
             "stack_val_consumed": False,
             "final_test_consumed": False,
         }

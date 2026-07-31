@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+from pathlib import Path
+import tempfile
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -158,6 +161,129 @@ def fit_target_normalizer(
             "continuous_scale": "max((q75-q25)/1.349,1e-6)",
             "normalized_clipping": list(NORMALIZED_CLIP),
             "targets": targets,
+            "source": dict(source),
+        }
+    )
+
+
+def fit_sharded_target_normalizer(
+    caches: Sequence[LoadedTargetCache],
+    *,
+    target_id: str,
+    fitting_population: str,
+    source: Mapping[str, Any],
+    component_kinds: Sequence[str],
+    normalization_role: str = "target",
+    workspace: str | Path | None = None,
+    batch_size: int = 2048,
+) -> dict[str, Any]:
+    """Fit exact robust statistics with one target shard plus one component resident."""
+
+    if not caches or batch_size <= 0:
+        raise ValueError("sharded target normalizer requires caches and a batch size")
+    split = str(caches[0].manifest["split"])
+    _validate_fit_population(split, fitting_population)
+    if normalization_role not in {"target", "residual"}:
+        raise ValueError("normalization_role must be target or residual")
+    kinds = tuple(str(value) for value in component_kinds)
+    component_count = None
+    for cache in caches:
+        if (
+            cache.manifest.get("split") != split
+            or cache.manifest.get("source") != dict(source)
+            or target_id not in cache.values
+        ):
+            raise ValueError("sharded normalizer cache lineage/coverage differs")
+        shape = cache.values[target_id].shape
+        if len(shape) != 2 or (component_count is not None and shape[1] != component_count):
+            raise ValueError("sharded normalizer component shapes differ")
+        component_count = int(shape[1])
+    if len(kinds) != component_count:
+        raise ValueError("sharded normalizer component-kind count differs")
+    parent_hashes = [str(cache.manifest["content_hash"]) for cache in caches]
+    binding = hashlib.sha256("".join(parent_hashes).encode("ascii")).hexdigest()
+    identity_binding = hashlib.sha256(
+        ("hosd_sharded_normalizer_v1\0" + "\0".join(
+            str(cache.manifest["canonical_identity_order_sha256"])
+            for cache in caches
+        )).encode("ascii")
+    ).hexdigest()
+    event_count = sum(int(cache.values[target_id].shape[0]) for cache in caches)
+    base = None if workspace is None else Path(workspace)
+    if base is not None:
+        base.mkdir(parents=True, exist_ok=True)
+    components = []
+    with tempfile.TemporaryDirectory(dir=base, prefix="hosd-normalizer-") as temporary:
+        temporary_path = Path(temporary)
+        for index, kind in enumerate(kinds):
+            valid_count = 0
+            for cache in caches:
+                count = int(cache.values[target_id].shape[0])
+                for start in range(0, count, batch_size):
+                    stop = min(start + batch_size, count)
+                    valid_count += int(
+                        np.asarray(cache.masks[target_id][start:stop], dtype=bool)[:, index].sum()
+                    )
+            if valid_count == 0:
+                raise ValueError(f"{target_id} component {index} has no observations")
+            sample_path = temporary_path / f"component_{index:04d}.npy"
+            selected = np.lib.format.open_memmap(
+                sample_path, mode="w+", dtype=np.float64, shape=(valid_count,)
+            )
+            cursor = 0
+            for cache in caches:
+                count = int(cache.values[target_id].shape[0])
+                for start in range(0, count, batch_size):
+                    stop = min(start + batch_size, count)
+                    masks = np.asarray(cache.masks[target_id][start:stop], dtype=bool)[:, index]
+                    values = np.asarray(cache.values[target_id][start:stop], dtype=np.float64)[:, index]
+                    observed = values[masks]
+                    if not np.isfinite(observed).all():
+                        raise ValueError("normalizer input contains non-finite values")
+                    selected[cursor : cursor + observed.size] = observed
+                    cursor += observed.size
+            if cursor != valid_count:
+                raise RuntimeError("sharded normalizer observation count changed")
+            selected.flush()
+            continuous = kind == "continuous"
+            median = _linear_quantile(selected, 0.5)
+            q25 = _linear_quantile(selected, 0.25)
+            q75 = _linear_quantile(selected, 0.75)
+            scale = max((q75 - q25) / 1.349, ROBUST_SCALE_FLOOR)
+            components.append(
+                {
+                    "component_index": index,
+                    "kind": kind,
+                    "normalize": continuous,
+                    "center": median if continuous else 0.0,
+                    "scale": scale if continuous else 1.0,
+                    "unconditional_mean": float(selected.mean()),
+                    "q25": q25,
+                    "q50": median,
+                    "q75": q75,
+                    "valid_count": valid_count,
+                    "clip": list(NORMALIZED_CLIP) if continuous else None,
+                }
+            )
+            del selected
+    return with_content_hash(
+        {
+            "contract": TARGET_NORMALIZER_CONTRACT,
+            "schema_version": 1,
+            "fitting_population": fitting_population,
+            "normalization_role": normalization_role,
+            "fit_split": split,
+            "population_role": "model_train_only" if split == "model_train" else "scale_train_only",
+            "cache_manifest_sha256": binding,
+            "cache_manifest_hashes": parent_hashes,
+            "identity_order_sha256": identity_binding,
+            "event_count": event_count,
+            "identity_values_stored": False,
+            "quantile_method": "numpy_linear",
+            "continuous_scale": "max((q75-q25)/1.349,1e-6)",
+            "normalized_clipping": list(NORMALIZED_CLIP),
+            "bounded_statistics": "disk_backed_one_component_one_shard_v1",
+            "targets": [{"target_id": target_id, "component_count": component_count, "components": components}],
             "source": dict(source),
         }
     )
@@ -660,6 +786,70 @@ def fit_latent_whitening(
     mean = values.mean(axis=0)
     centered = values - mean
     covariance = centered.T @ centered / values.shape[0]
+    return _build_latent_whitening_artifact(
+        mean=mean,
+        covariance=covariance,
+        event_count=values.shape[0],
+        teacher_lock_sha256=teacher_lock_sha256,
+        fitting_population=fitting_population,
+        source=source,
+        accumulation="population_resident_reference_v2",
+    )
+
+
+def fit_sharded_latent_whitening(
+    latents: Any,
+    *,
+    teacher_lock_sha256: str,
+    fitting_population: str,
+    source: Mapping[str, Any],
+    batch_size: int = 2048,
+) -> dict[str, Any]:
+    """Fit latent whitening from a lazy array with one bounded slice resident."""
+
+    shape = tuple(latents.shape)
+    if len(shape) != 2 or shape[0] < 2 or shape[1] != 128 or batch_size <= 0:
+        raise ValueError("teacher latent whitening requires lazy [N>=2,128]")
+    if fitting_population not in {"target_500k", "target_scale"}:
+        raise ValueError("invalid latent-whitening fitting population")
+    total = np.zeros(128, dtype=np.float64)
+    cross = np.zeros((128, 128), dtype=np.float64)
+    count = 0
+    for start in range(0, shape[0], batch_size):
+        values = np.asarray(
+            latents[start : min(start + batch_size, shape[0])], dtype=np.float64
+        )
+        if values.ndim != 2 or values.shape[1] != 128 or not np.isfinite(values).all():
+            raise ValueError("teacher latents contain non-finite values")
+        total += values.sum(axis=0, dtype=np.float64)
+        cross += values.T @ values
+        count += values.shape[0]
+    if count != shape[0]:
+        raise RuntimeError("latent population changed during streamed whitening")
+    mean = total / count
+    covariance = cross / count - np.outer(mean, mean)
+    covariance = (covariance + covariance.T) * 0.5
+    return _build_latent_whitening_artifact(
+        mean=mean,
+        covariance=covariance,
+        event_count=count,
+        teacher_lock_sha256=teacher_lock_sha256,
+        fitting_population=fitting_population,
+        source=source,
+        accumulation="float64_shard_sum_and_cross_product_v2",
+    )
+
+
+def _build_latent_whitening_artifact(
+    *,
+    mean: np.ndarray,
+    covariance: np.ndarray,
+    event_count: int,
+    teacher_lock_sha256: str,
+    fitting_population: str,
+    source: Mapping[str, Any],
+    accumulation: str,
+) -> dict[str, Any]:
     eigenvalues, eigenvectors = np.linalg.eigh(covariance)
     order = np.argsort(eigenvalues, kind="stable")[::-1]
     eigenvalues = eigenvalues[order]
@@ -669,13 +859,13 @@ def fit_latent_whitening(
     return with_content_hash(
         {
             "contract": LATENT_WHITENING_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "teacher_lock_sha256": teacher_lock_sha256,
             "fitting_population": fitting_population,
             "fit_split": (
                 "model_train" if fitting_population == "target_500k" else "scale_train"
             ),
-            "event_count": values.shape[0],
+            "event_count": int(event_count),
             "dimension": 128,
             "mean": mean.tolist(),
             "eigenvalues_descending": eigenvalues.tolist(),
@@ -689,6 +879,7 @@ def fit_latent_whitening(
                 "largest_absolute_component_positive_tie_smallest_index"
             ),
             "identity_values_stored": False,
+            "covariance_accumulation": accumulation,
             "source": dict(source),
         }
     )

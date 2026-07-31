@@ -57,6 +57,11 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 
 
 SEED_REFIT_INDEX_CONTRACT = "retb_scale_seed_refit_index_v2"
+REFIT_PHASE_COMPLETION_CONTRACT = "retb_scale_refit_phase_completion_v2"
+REFIT_PHASES = (
+    "normalizers", "teachers", "offline_experts", "targets",
+    "native", "native_fusion", "predictors", "calibrations", "complete",
+)
 TARGET_CONFIGURATION_CONTRACT = (
     "retb_scale_target_coordinate_configuration_v1"
 )
@@ -68,6 +73,13 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _phase_marker_filename(phase: str, component_id: str | None) -> str:
+    if component_id is None:
+        return f"{phase}.json"
+    suffix = hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:16]
+    return f"{phase}__{suffix}.json"
 
 
 def _run(arguments: Sequence[str], *, expected: Sequence[Path]) -> None:
@@ -324,6 +336,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pipeline-seed", required=True, type=int)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--stop-after", choices=REFIT_PHASES, default="complete")
+    parser.add_argument("--component-id")
     args = parser.parse_args(argv)
     if args.pipeline_seed not in {101, 202, 303}:
         raise ValueError("scale refit seed differs")
@@ -345,6 +359,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             requested_resource=resource,
         )
     output = args.output_dir.resolve()
+    component_phases = {
+        "offline_experts", "targets", "native", "native_fusion",
+        "predictors", "calibrations",
+    }
+    if (args.stop_after in component_phases) != (args.component_id is not None):
+        raise ValueError(
+            "bounded scale-refit component phases require exactly one component ID"
+        )
+    def finish_phase(phase: str, artifacts: Mapping[str, str]) -> int:
+        marker = bind_source(
+            with_content_hash(
+                {
+                    "contract": REFIT_PHASE_COMPLETION_CONTRACT,
+                    "schema_version": 2,
+                    "phase": phase,
+                    "component_id": args.component_id,
+                    "pipeline_seed": args.pipeline_seed,
+                    "locked_scale_shortlist_sha256": shortlist["content_hash"],
+                    "artifact_hashes": dict(sorted(artifacts.items())),
+                    "bounded_continuation": phase != "complete",
+                    "performance_based_termination": False,
+                }
+            ),
+            source_snapshot=source_snapshot(REPO_ROOT),
+        )
+        path = output / "phase_completions" / _phase_marker_filename(
+            phase, args.component_id
+        )
+        publication = write_immutable_json(path, marker)
+        print(json.dumps(publication, indent=2, sort_keys=True))
+        return 0
     completed_path = output / "scale_seed_refit_index.json"
     if completed_path.is_file():
         existing = load_hashed_json(
@@ -388,6 +433,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for role in roles
     }
+    selected_role: str | None = None
+    selected_expert: str | None = None
+    if args.component_id is not None:
+        if args.stop_after in {"targets", "native_fusion"}:
+            selected_role = args.component_id
+        elif args.stop_after in {"native", "predictors", "calibrations"}:
+            pieces = args.component_id.split("@", 1)
+            if len(pieces) != 2:
+                raise ValueError("scale-refit role/expert component is malformed")
+            selected_role, selected_expert = pieces
+            if selected_expert not in EXPERT_ORDER:
+                raise ValueError("scale-refit component expert is unregistered")
+        if selected_role is not None and selected_role not in role_records:
+            raise ValueError("scale-refit component role is unregistered")
 
     normalization_root = output / "normalization"
     normalizer_bundle_path = (
@@ -408,6 +467,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected=[normalizer_bundle_path],
     )
     normalizer_bundle = load_hashed_json(normalizer_bundle_path)
+    if args.stop_after == "normalizers":
+        return finish_phase(
+            "normalizers", {"normalizer_bundle": normalizer_bundle["content_hash"]}
+        )
     offline_relation = (
         normalization_root / "offline_scale" / "relation.json"
     )
@@ -437,6 +500,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     teacher_bundle = load_hashed_json(
         teachers_root / "scale_teacher_bundle.json"
     )
+    if args.stop_after == "teachers":
+        return finish_phase(
+            "teachers",
+            {
+                "normalizer_bundle": normalizer_bundle["content_hash"],
+                "scale_teacher_bundle": teacher_bundle["content_hash"],
+            },
+        )
 
     stage_c = load_hashed_json(root / "registry" / "retb_stage_c_runs.json")
     required_pairs = set()
@@ -449,6 +520,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             required_pairs.add((expert, _named_shape(int(K), int(D))))
     offline_outputs = {}
     for expert, shape in sorted(required_pairs):
+        if (
+            args.stop_after == "offline_experts"
+            and args.component_id != f"{expert}@{shape}"
+        ):
+            continue
         row = _stage_c_expert_run(
             stage_c, shape=shape, expert=expert, seed=args.pipeline_seed
         )
@@ -509,12 +585,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "registration_sha256": registration["content_hash"],
         }
 
+    if args.stop_after == "offline_experts":
+        return finish_phase(
+            "offline_experts",
+            {
+                f"{expert}:{shape}": row["registration_sha256"]
+                for (expert, shape), row in offline_outputs.items()
+            },
+        )
+
     role_results = {}
+    phase_role_hashes: dict[str, str] = {}
     stage_d = load_hashed_json(root / "registry" / "retb_stage_d_runs.json")
     predictor_lock = load_hashed_json(
         root / "selection" / "predictor_bundle" / "predictor_bundle_lock.json"
     )
     for role, record in role_records.items():
+        if selected_role is not None and role != selected_role:
+            continue
         role_root = output / "roles" / role
         target_config = bind_source(
             with_content_hash(
@@ -736,9 +824,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_normalizer_set = load_hashed_json(
             target_normalizers / "target_normalizer_set.json"
         )
+        phase_role_hashes[f"targets:{role}"] = canonical_sha256(
+            {
+                "target_normalizer_set": target_normalizer_set["content_hash"],
+                "offline_fusion": fusion_registration["content_hash"],
+                "scale_target_cache": scale_manifest["content_hash"],
+            }
+        )
+        if args.stop_after == "targets":
+            return finish_phase(
+                "targets", {role: phase_role_hashes[f"targets:{role}"]}
+            )
 
         native_outputs = {}
         for expert in EXPERT_ORDER:
+            if args.stop_after == "native" and expert != selected_expert:
+                continue
             native_row = _stage_d_expert_run(
                 stage_d,
                 role=role,
@@ -838,6 +939,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "content_hash"
                 ],
             }
+
+        if args.stop_after == "native":
+            return finish_phase(
+                "native",
+                {
+                    f"{role}@{selected_expert}": native_outputs[
+                        str(selected_expert)
+                    ]["registration_sha256"]
+                },
+            )
 
         evidence = {}
         for split in ("scale_train", "val_stop", "val_design"):
@@ -976,6 +1087,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         native_fusion_registration = load_hashed_json(
             native_fusion_root / "fusion_registration.json"
         )
+        phase_role_hashes[f"native:{role}"] = canonical_sha256(
+            {
+                "experts": native_outputs,
+                "fusion": native_fusion_registration["content_hash"],
+            }
+        )
+        if args.stop_after == "native_fusion":
+            return finish_phase(
+                "native_fusion",
+                {role: phase_role_hashes[f"native:{role}"]},
+            )
 
         predictors, calibrations = {}, {}
         scale_target_index = load_hashed_json(
@@ -986,6 +1108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             root / "registry" / "retb_step9_predictor_bundle.json"
         )
         for expert in EXPERT_ORDER:
+            if (
+                args.stop_after in {"predictors", "calibrations"}
+                and expert != selected_expert
+            ):
+                continue
             base_path, base_run = _base_predictor_run(
                 root,
                 lock=record["lock"],
@@ -1114,6 +1241,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             predictor_registration = load_hashed_json(
                 predictor_root / "training" / "registration.json"
             )
+            predictors[expert] = {
+                "run_path": str(run_path.resolve()),
+                "output_root": str(predictor_root.resolve()),
+                "checkpoint_sha256": predictor_registration[
+                    "checkpoint_sha256"
+                ],
+                "registration_sha256": predictor_registration[
+                    "content_hash"
+                ],
+            }
+            if args.stop_after == "predictors":
+                return finish_phase(
+                    "predictors",
+                    {
+                        f"{role}@{expert}": predictor_registration[
+                            "content_hash"
+                        ]
+                    },
+                )
             calibration_path = (
                 role_root / "uncertainty" / f"{expert}.json"
             )
@@ -1143,17 +1289,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ],
                 expected=[calibration_path],
             )
-            predictors[expert] = {
-                "run_path": str(run_path.resolve()),
-                "output_root": str(predictor_root.resolve()),
-                "checkpoint_sha256": predictor_registration[
-                    "checkpoint_sha256"
-                ],
-                "registration_sha256": predictor_registration[
-                    "content_hash"
-                ],
-            }
             calibrations[expert] = str(calibration_path.resolve())
+
+            if args.stop_after == "calibrations":
+                return finish_phase(
+                    "calibrations",
+                    {
+                        f"{role}@{expert}": load_hashed_json(
+                            calibration_path
+                        )["content_hash"]
+                    },
+                )
+
+        phase_role_hashes[f"predictors:{role}"] = canonical_sha256(predictors)
+        if args.stop_after == "predictors":
+            continue
+        phase_role_hashes[f"calibrations:{role}"] = canonical_sha256(
+            {
+                expert: load_hashed_json(path)["content_hash"]
+                for expert, path in calibrations.items()
+            }
+        )
 
         role_results[role] = {
             "target_cache_root": str(target_cache_root.resolve()),
@@ -1183,6 +1339,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "content_hash"
             ],
         }
+
+    if args.stop_after in {
+        "targets", "native", "native_fusion", "predictors", "calibrations"
+    }:
+        prefix = args.stop_after
+        owned = {
+            key: value
+            for key, value in phase_role_hashes.items()
+            if key.startswith(f"{prefix}:")
+        }
+        if set(key.split(":", 1)[1] for key in owned) != set(roles):
+            raise ValueError(f"scale refit {prefix} role coverage differs")
+        return finish_phase(prefix, owned)
 
     component_indexes = {}
     refit_bundles = {}

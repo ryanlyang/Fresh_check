@@ -11,8 +11,9 @@ import torch
 
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from teacher_logit_reco.relational_part import build_runtime_model, load_hashed_json
-from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard
 
+from .authenticated_tree import AuthenticatedTreeSplit
+from .input_views import load_materialized_input_view
 from .teachers import build_relational_teacher_adapter
 
 
@@ -44,19 +45,15 @@ def build_label_blind_relational_adapter(
     input_path = Path(config["input_npz"])
     if _sha256(input_path) != config.get("input_npz_sha256"):
         raise ValueError("teacher inference input bytes differ from adapter lock")
-    with np.load(input_path, allow_pickle=False) as archive:
-        forbidden = FORBIDDEN_ARRAY_NAMES & set(archive.files)
-        if forbidden:
-            raise ValueError(
-                f"teacher inference input exposes labels: {sorted(forbidden)}"
-            )
-        required_arrays = {"identity", "raw_tokens", "mask"}
-        if not required_arrays.issubset(archive.files):
-            raise ValueError("teacher inference input lacks identity/raw_tokens/mask")
-        identities = tuple(str(value) for value in archive["identity"].tolist())
-        raw_tokens = np.asarray(archive["raw_tokens"], dtype=np.float32)
-        mask = np.asarray(archive["mask"], dtype=bool)
-    if len(identities) != raw_tokens.shape[0] or mask.shape != raw_tokens.shape[:2]:
+    arrays, _ = load_materialized_input_view(
+        input_path,
+        expected_view_kind="canonical_offline",
+        expected_source=teacher_lock.get("source"),
+    )
+    identities = arrays["identities"]
+    raw_tokens = arrays["tokens"]
+    mask = arrays["mask"]
+    if identities.shape[0] != raw_tokens.shape[0] or mask.shape != raw_tokens.shape[:2]:
         raise ValueError("teacher inference input population/shape differs")
     screening = load_hashed_json(config["screening_registry"])
     relation = load_hashed_json(config["relation_normalizer"])
@@ -68,21 +65,18 @@ def build_label_blind_relational_adapter(
     run_id = "RPT_BASE" if teacher_id == "O_BASE" else "RPT_FULL_ALL"
     if teacher_id == "O_FULLREL" and region is None:
         raise ValueError("O_FULLREL inference requires REGION normalization")
-    tree_by_identity = None
+    tree_split = None
     if teacher_id == "O_FULLREL":
         if config.get("tree_cache_dir") is None:
             raise ValueError("O_FULLREL inference requires a prebuilt tree cache")
-        tree_root = Path(config["tree_cache_dir"])
-        load_hashed_json(tree_root / "manifest.json")
-        tree_by_identity = {}
-        for shard_path in sorted((tree_root / "shards").glob("shard_*.npz")):
-            shard_identities, shard_trees = unpack_tree_shard(shard_path)
-            for identity, tree in zip(shard_identities, shard_trees):
-                if identity in tree_by_identity:
-                    raise ValueError("tree cache contains duplicate identities")
-                tree_by_identity[identity] = tree
-        if set(tree_by_identity) != set(identities):
-            raise ValueError("tree cache identity population differs from teacher input")
+        expected_parents = config.get("tree_expected_parents")
+        if not isinstance(expected_parents, Mapping):
+            raise ValueError("O_FULLREL inference lacks exact tree parents")
+        tree_split = AuthenticatedTreeSplit(
+            config["tree_cache_dir"],
+            expected_identities=identities,
+            expected_parents=expected_parents,
+        )
     model = build_runtime_model(
         run_id,
         screening_registry=screening,
@@ -124,9 +118,11 @@ def build_label_blind_relational_adapter(
             "raw_tokens": torch.from_numpy(selected_tokens).float().to(device),
         }
         if teacher_id == "O_FULLREL":
-            batch["region_trees"] = [
-                tree_by_identity[identities[int(index)]] for index in indices
-            ]
+            selected_identities = identities[indices]
+            batch["region_trees"] = tree_split.load_event_rows(
+                indices,
+                expected_identities=selected_identities,
+            )
         return batch
 
     return adapter, identities, batch_provider

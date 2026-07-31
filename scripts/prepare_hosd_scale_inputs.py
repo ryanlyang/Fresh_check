@@ -101,6 +101,10 @@ def _try_finalize(
             != expected_identity
             or manifest.get("contains_measurement_states")
             != (coordinate != "offline")
+            or manifest.get("storage_layout")
+            != "deterministic_npz_plus_authenticated_npy_mmap_v2"
+            or manifest.get("mmap_store", {}).get("contract")
+            != "hosd_npy_mmap_store_v2"
             or _sha256(output) != manifest.get("npz_sha256")
         ):
             raise ValueError("Stage-J input-view wave lineage differs")
@@ -117,6 +121,8 @@ def _try_finalize(
                 "npz_path": str(output.resolve()),
                 "npz_sha256": manifest["npz_sha256"],
                 "view_manifest_sha256": manifest["content_hash"],
+                "storage_layout": manifest["storage_layout"],
+                "mmap_store_contract": manifest["mmap_store"]["contract"],
             }
         )
     if len({int(row["identity_count"]) for row in rows}) != 1:
@@ -124,7 +130,7 @@ def _try_finalize(
     completion = with_content_hash(
         {
             "contract": SCALE_INPUT_COMPLETION_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 4,
             "source": campaign["source"],
             "campaign_spec_sha256": campaign["content_hash"],
             "scale_execution_plan_sha256": plan["content_hash"],
