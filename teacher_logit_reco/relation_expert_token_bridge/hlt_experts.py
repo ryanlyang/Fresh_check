@@ -329,15 +329,23 @@ class NativeHLTExpertDataset(
     def __len__(self) -> int:
         return len(self.identities)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        identity = self.identities[index]
-        replica = replica_for(
-            policy=self.realization_policy,
-            logical_role=self.logical_role,
-            epoch=self.zero_based_epoch,
-            canonical_identity=identity,
+    def replica_for_index(self, index: int) -> int:
+        return int(
+            replica_for(
+                policy=self.realization_policy,
+                logical_role=self.logical_role,
+                epoch=self.zero_based_epoch,
+                canonical_identity=self.identities[int(index)],
+            )
         )
-        return self.item_for_replica(index, replica)
+
+    def locality_boundaries(self) -> tuple[int, ...]:
+        if self.logical_role != "scale_train":
+            return (0, len(self))
+        return tuple([*range(0, len(self), 2_048), len(self)])
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.item_for_replica(index, self.replica_for_index(index))
 
     def item_for_replica(self, index: int, replica: int) -> dict[str, Any]:
         if int(replica) not in self.replicas:
@@ -512,17 +520,21 @@ def make_native_hlt_expert_loader(
     seed: int,
     training: bool,
     batch_size: int,
+    sampler: Any | None = None,
 ) -> Any:
     module = _require_torch()
-    sampler = (
-        DeterministicExpertSampler(dataset, seed=seed)
-        if training
-        else module.utils.data.SequentialSampler(dataset)
-    )
+    if sampler is not None and not training:
+        raise ValueError("custom native-HLT sampler requires training mode")
+    if sampler is not None:
+        selected_sampler = sampler
+    elif training:
+        selected_sampler = DeterministicExpertSampler(dataset, seed=seed)
+    else:
+        selected_sampler = module.utils.data.SequentialSampler(dataset)
     return module.utils.data.DataLoader(
         dataset,
         batch_size=int(batch_size),
-        sampler=sampler,
+        sampler=selected_sampler,
         num_workers=0,
         drop_last=False,
         collate_fn=collate_native_hlt_expert_batch,

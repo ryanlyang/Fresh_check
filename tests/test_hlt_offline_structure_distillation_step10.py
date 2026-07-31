@@ -52,6 +52,37 @@ SOURCE = {
 }
 
 
+def test_scale_baseline_uses_pipeline_shard_sampler_not_component_seed():
+    from scripts.execute_hosd_scale_graph import (
+        _scale_baseline_training_loader,
+    )
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        data_order_seed,
+    )
+
+    class ScaleDataset(torch.utils.data.Dataset):
+        logical_role = "scale_train"
+
+        def __len__(self):
+            return 5_000
+
+        def locality_boundaries(self):
+            return (0, 2_048, 4_096, 5_000)
+
+        def replica_for_index(self, index):
+            return int(index) % 4
+
+        def __getitem__(self, index):
+            raise AssertionError("loader construction must remain lazy")
+
+    loader = _scale_baseline_training_loader(
+        ScaleDataset(), pipeline_seed=303
+    )
+    assert loader.sampler.seed == data_order_seed(303, "scale_train")
+    assert loader.sampler.contract == "hosd_scale_shard_aware_sampler_v1"
+    assert len(loader.sampler.boundaries) == 4
+
+
 def _plan():
     graph_ids = (
         "H_BASE",

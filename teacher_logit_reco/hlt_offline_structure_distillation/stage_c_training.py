@@ -186,6 +186,10 @@ def train_stage_c_baseline(
     completion_filename: str = "baseline_completion.json",
     curves_contract: str = "hosd_baseline_training_curves_v1",
     stage_label: str = "Stage-C",
+    data_order_contract: str | None = None,
+    pipeline_seed: int | None = None,
+    training_sampler_seed: int | None = None,
+    training_sampler_contract: str | None = None,
 ) -> dict[str, Any]:
     """Train all epochs; metrics never stop or cancel this or future rows."""
 
@@ -201,6 +205,31 @@ def train_stage_c_baseline(
     }
     if (teacher_id is None) != (teacher_logit_key is None):
         raise ValueError("KD teacher ID and batch field must be paired")
+    order_values = (
+        data_order_contract,
+        pipeline_seed,
+        training_sampler_seed,
+        training_sampler_contract,
+    )
+    if any(value is not None for value in order_values) != all(
+        value is not None for value in order_values
+    ):
+        raise ValueError("baseline data-order attestation is incomplete")
+    data_order_attestation = {}
+    if data_order_contract is not None:
+        data_order_attestation = {
+            "data_order_contract": str(data_order_contract),
+            "pipeline_seed": int(pipeline_seed),
+            "training_sampler_seed": int(training_sampler_seed),
+            "training_sampler_contract": str(training_sampler_contract),
+        }
+        if (
+            int(getattr(train_loader.sampler, "seed", -1))
+            != data_order_attestation["training_sampler_seed"]
+            or str(getattr(train_loader.sampler, "contract", ""))
+            != data_order_attestation["training_sampler_contract"]
+        ):
+            raise ValueError("baseline training sampler differs from contract")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     best_path, last_path = root / "best_model_val.pt", root / "last.pt"
@@ -219,6 +248,10 @@ def train_stage_c_baseline(
             or completion.get("campaign_spec_sha256")
             != campaign_spec_sha256
             or completion.get("lineage_hashes") != checked_lineage
+            or any(
+                completion.get(key) != value
+                for key, value in data_order_attestation.items()
+            )
         ):
             raise ValueError("reusable baseline completion lineage differs")
         checkpoint = root / completion["checkpoint_file"]
@@ -260,6 +293,7 @@ def train_stage_c_baseline(
             "campaign_spec_sha256": campaign_spec_sha256,
             "source": dict(source),
             "lineage_hashes": checked_lineage,
+            **data_order_attestation,
         }
         if any(state.get(key) != value for key, value in expected.items()):
             raise ValueError(f"{stage_label} resume lineage differs")
@@ -417,6 +451,7 @@ def train_stage_c_baseline(
                 "campaign_spec_sha256": campaign_spec_sha256,
                 "source": dict(source),
                 "lineage_hashes": checked_lineage,
+                **data_order_attestation,
                 "model_state_dict": selected_state,
                 "selection_metrics": selected["val_stop"],
             },
@@ -435,6 +470,7 @@ def train_stage_c_baseline(
                 "campaign_spec_sha256": campaign_spec_sha256,
                 "source": dict(source),
                 "lineage_hashes": checked_lineage,
+                **data_order_attestation,
                 "model_state_dict": state,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "optimizer_update_ordinal": update_ordinal,
@@ -462,6 +498,7 @@ def train_stage_c_baseline(
                 campaign_spec_sha256, name="campaign_spec_sha256"
             ),
             "lineage_hashes": checked_lineage,
+            **data_order_attestation,
             "checkpoint_file": best_path.name,
             "checkpoint_sha256": checkpoint_sha,
             "selected_epoch": int(selected["epoch"]),
@@ -482,6 +519,7 @@ def train_stage_c_baseline(
         "rows": rows,
         "selected_epoch": int(selected["epoch"]),
         "fixed_epoch_budget": True,
+        **data_order_attestation,
     }))
     write_immutable_json(completion_path, completion)
     if last_path.exists():

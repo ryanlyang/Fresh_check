@@ -17,11 +17,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
+    DATA_ORDER_CONTRACT,
+    SCALE_SHARD_SAMPLER_CONTRACT,
     build_label_free_hlt_loader,
     load_and_validate_campaign,
     load_deployable_graph,
     measure_deployable_efficiency,
     native_relation_target_ids,
+    data_order_seed,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     EFFICIENCY_PROFILE_CONTRACT,
@@ -284,6 +287,15 @@ def main(argv=None):
         / "training_completion.json",
         expected_contract=SCALE_TRAINING_COMPLETION_CONTRACT,
     )
+    if (
+        int(completion.get("pipeline_seed", -1)) != int(args.seed)
+        or completion.get("data_order_contract") != DATA_ORDER_CONTRACT
+        or int(completion.get("training_sampler_seed", -1))
+        != data_order_seed(args.seed, "scale_train")
+        or completion.get("training_sampler_contract")
+        != SCALE_SHARD_SAMPLER_CONTRACT
+    ):
+        raise ValueError("scale efficiency training data-order differs")
     epochs = int(completion["epochs_completed"])
     forward_flops = int(
         export["analytical_inference_flops_batch1_n128"]

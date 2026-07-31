@@ -40,7 +40,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
 )
 
 
-_FORKED_BACKEND = None
+_WORKER_BACKEND = None
 
 
 def _sha256(path: Path) -> str:
@@ -51,11 +51,37 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _configure_worker_threads() -> None:
+    """Keep one spawned process on one allocated CPU core."""
+
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    import torch
+
+    torch.set_num_threads(1)
+
+
+def _initialize_worker(
+    backend_binary: str,
+    backend_manifest: str,
+    source_path: str,
+) -> None:
+    """Load the authenticated extension inside a clean spawned process."""
+
+    _configure_worker_threads()
+    global _WORKER_BACKEND
+    _WORKER_BACKEND = load_tree_backend(
+        Path(backend_binary),
+        Path(backend_manifest),
+        source_path=Path(source_path),
+    )
+
+
 def _build_one(payload):
-    if _FORKED_BACKEND is None:
-        raise RuntimeError("forked tree backend was not initialized")
+    if _WORKER_BACKEND is None:
+        raise RuntimeError("spawned tree backend was not initialized")
     vectors, tokens, mask = payload
-    return build_compiled_tree(_FORKED_BACKEND, vectors, tokens, mask)
+    return build_compiled_tree(_WORKER_BACKEND, vectors, tokens, mask)
 
 
 def _load_view(
@@ -230,19 +256,32 @@ def main() -> int:
         / "csrc"
         / "relational_ca_tree_v1.cpp"
     )
-    backend = load_tree_backend(
-        backend_binary, args.backend_manifest, source_path=source
-    )
     workers = min(max(int(args.workers), 1), shard_size)
+    backend = None
     pool = None
-    global _FORKED_BACKEND
     if workers > 1:
-        if "fork" not in multiprocessing.get_all_start_methods():
-            raise RuntimeError("parallel REGION building requires Linux fork")
-        _FORKED_BACKEND = backend
+        if "spawn" not in multiprocessing.get_all_start_methods():
+            raise RuntimeError("parallel REGION building requires spawn")
+        # Never fork a process after importing PyTorch or loading the C++
+        # extension.  Inheriting those native thread/runtime states caused a
+        # top-level SIGSEGV on a genuine Tigris miniature shard.  Each clean
+        # child imports the compile-once campaign binary and authenticates it
+        # against the same manifest and source before processing any jet.
+        _configure_worker_threads()
         pool = ProcessPoolExecutor(
             max_workers=workers,
-            mp_context=multiprocessing.get_context("fork"),
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_initialize_worker,
+            initargs=(
+                str(backend_binary),
+                str(args.backend_manifest),
+                str(source),
+            ),
+        )
+    else:
+        _configure_worker_threads()
+        backend = load_tree_backend(
+            backend_binary, args.backend_manifest, source_path=source
         )
     published = 0
     try:
@@ -292,7 +331,6 @@ def main() -> int:
     finally:
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
-        _FORKED_BACKEND = None
     print(
         json.dumps(
             {

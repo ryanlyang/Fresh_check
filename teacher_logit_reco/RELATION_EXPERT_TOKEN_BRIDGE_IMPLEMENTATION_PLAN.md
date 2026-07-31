@@ -5223,3 +5223,28 @@ identities. The split worker must read these values from the authenticated
 production graph; it may not maintain a second hard-coded miniature table.
 Stage-A cache and REGION shard ranges must be derived from the same graph
 cardinalities and must exactly match the authenticated cached views.
+
+## REGION worker process-safety amendment (2026-08-01)
+
+The compile-once REGION backend remains the sole production tree algorithm,
+but parallel shard construction must not use `fork` after importing PyTorch or
+loading the C++ extension. A genuine Tigris miniature row terminated by
+`SIGSEGV` with no Python traceback under that process model, while all ten
+input events were finite and independently passed canonical Python-reference
+tree construction and validation.
+
+Parallel REGION construction therefore uses clean `spawn` processes. Each
+child must:
+
+1. load the already-compiled campaign binary (worker JIT remains forbidden);
+2. authenticate the binary against the campaign backend manifest and exact
+   C++ source before processing a jet;
+3. use one CPU thread so the process pool does not oversubscribe its Slurm CPU
+   allocation; and
+4. return the same canonical packed-tree contract used by serial execution.
+
+Serial execution continues to authenticate and load the same binary in the
+main process. This amendment changes only runtime isolation; tree topology,
+floating-point rules, shard ordering, publication, scientific meaning, and
+all artifact lineage remain unchanged. A repeated genuine miniature REGION
+run is required to close the operational acceptance check.

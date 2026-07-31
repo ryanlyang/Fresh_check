@@ -126,8 +126,8 @@ SCALE_NATIVE_RELATION_WAVE_CONTRACT = (
     "hosd_scale_native_relation_target_wave_v2"
 )
 SCALE_GRAPH_WAVE_COMPLETION_CONTRACT = "hosd_scale_graph_wave_completion_v1"
-SCALE_TRAINING_CHECKPOINT_CONTRACT = "hosd_scale_training_checkpoint_v1"
-SCALE_TRAINING_COMPLETION_CONTRACT = "hosd_scale_training_completion_v1"
+SCALE_TRAINING_CHECKPOINT_CONTRACT = "hosd_scale_training_checkpoint_v2"
+SCALE_TRAINING_COMPLETION_CONTRACT = "hosd_scale_training_completion_v2"
 SCALE_TRAINING_PREDICTION_CONTRACT = "hosd_scale_training_prediction_v1"
 STAGE_B_WAVE_COMPLETION_CONTRACT = "hosd_stage_b_wave_completion_v2"
 TARGET_NORMALIZATION_WAVE_CONTRACT = "hosd_target_normalization_wave_v1"

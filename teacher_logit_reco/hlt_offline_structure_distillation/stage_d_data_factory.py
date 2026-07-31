@@ -39,6 +39,7 @@ LOADER_MANIFEST_CONTRACT_V2 = "hosd_stage_d_loader_manifest_v2"
 LOADER_MANIFEST_CONTRACT_V3 = "hosd_stage_d_loader_manifest_v3"
 LOADER_MANIFEST_CONTRACT_V4 = "hosd_stage_d_loader_manifest_v4"
 LOADER_MANIFEST_CONTRACT_V5 = "hosd_stage_d_loader_manifest_v5"
+LOADER_MANIFEST_CONTRACT_V6 = "hosd_stage_d_loader_manifest_v6"
 DATA_ORDER_CONTRACT = "hosd_data_order_v2"
 ROLES = ("model_train", "val_stop", "design_select")
 
@@ -54,7 +55,12 @@ def data_order_seed(pipeline_seed: int, role: str) -> int:
         "design_confirm",
     }:
         raise ValueError("data-order role differs")
-    payload = f"{DATA_ORDER_CONTRACT}\0{int(pipeline_seed)}\0{str(role)}"
+    seed_contract = (
+        DATA_ORDER_CONTRACT
+        if str(role) == "scale_train"
+        else "hosd_data_order_v1"
+    )
+    payload = f"{seed_contract}\0{int(pipeline_seed)}\0{str(role)}"
     return int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8], 16)
 
 
@@ -362,13 +368,14 @@ def build_stage_d_loader_manifest(
         checked[role] = definition
     return with_content_hash(
         {
-            "contract": LOADER_MANIFEST_CONTRACT_V5,
-            "schema_version": 5,
+            "contract": LOADER_MANIFEST_CONTRACT_V6,
+            "schema_version": 6,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
             ),
             "row_id": row["row_id"],
+            "pipeline_seed": int(row["pipeline_seed"]),
             "target_id": row["target_id"],
             "parameterization": row["parameterization"],
             "roles": checked,
@@ -377,6 +384,14 @@ def build_stage_d_loader_manifest(
             "data_order_contract": DATA_ORDER_CONTRACT,
             "sampler_contract_by_role": {
                 role: sampler_contract(role) for role in roles
+            },
+            "seed_derivation_contract_by_role": {
+                role: (
+                    DATA_ORDER_CONTRACT
+                    if role == "scale_train"
+                    else "hosd_data_order_v1"
+                )
+                for role in roles
             },
             "sampler_seed_by_role": {
                 role: data_order_seed(int(row["pipeline_seed"]), role)
@@ -796,7 +811,7 @@ def load_stage_d_loaders_from_manifest(
 ) -> dict[str, Any]:
     del campaign_root, target_registry
     manifest = load_hashed_json(Path(manifest_path))
-    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V5:
+    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V6:
         raise ValueError("Stage-D loader manifest contract differs")
     evaluation_role = str(manifest.get("evaluation_role", "design_select"))
     if evaluation_role not in {"design_select", "design_confirm"}:
@@ -813,9 +828,19 @@ def load_stage_d_loaders_from_manifest(
         manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("row_id") != row["row_id"]
+        or int(manifest.get("pipeline_seed", -1)) != int(row["pipeline_seed"])
         or manifest.get("data_order_contract") != DATA_ORDER_CONTRACT
         or manifest.get("sampler_contract_by_role")
         != {role: sampler_contract(role) for role in roles}
+        or manifest.get("seed_derivation_contract_by_role")
+        != {
+            role: (
+                DATA_ORDER_CONTRACT
+                if role == "scale_train"
+                else "hosd_data_order_v1"
+            )
+            for role in roles
+        }
         or manifest.get("sampler_seed_by_role") != expected_sampler_seeds
     ):
         raise ValueError("Stage-D loader manifest lineage differs")
@@ -1092,6 +1117,9 @@ def load_stage_d_loaders_from_manifest(
         "sampler_contract_by_role": {
             role: sampler_contract(role) for role in roles
         },
+        "seed_derivation_contract_by_role": dict(
+            manifest["seed_derivation_contract_by_role"]
+        ),
         "sampler_seed_by_role": expected_sampler_seeds,
         **(
             {"exact_hlt_runtime": exact_hlt_runtime}
@@ -1110,6 +1138,7 @@ __all__ = [
     "LOADER_MANIFEST_CONTRACT_V3",
     "LOADER_MANIFEST_CONTRACT_V4",
     "LOADER_MANIFEST_CONTRACT_V5",
+    "LOADER_MANIFEST_CONTRACT_V6",
     "DATA_ORDER_CONTRACT",
     "data_order_seed",
     "sampler_contract",

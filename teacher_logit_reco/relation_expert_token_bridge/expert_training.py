@@ -393,6 +393,8 @@ class OfflineExpertDataset(
 class DeterministicExpertSampler(
     torch.utils.data.Sampler if torch is not None else object
 ):
+    contract = "retb_deterministic_full_permutation_sampler_v1"
+
     def __init__(self, data_source: Sequence[Any], *, seed: int) -> None:
         _require_torch()
         self.data_source = data_source

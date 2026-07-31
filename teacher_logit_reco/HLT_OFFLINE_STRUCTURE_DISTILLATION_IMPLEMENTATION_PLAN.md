@@ -3273,9 +3273,10 @@ and HLT-only export contracts are in `feedback.py`, `stage_e_data_factory.py`,
 and `stage_e_training.py`, with CLI and regression coverage in
 `scripts/train_hosd_feedback.py`, `scripts/select_hosd_feedback.py`, and
 `tests/test_hlt_offline_structure_distillation_step7.py`.
-The production loader uses the graph-independent `hosd_data_order_v2` seed
-contract for discovery, confirmation, and scale manifests. Discovery and
-confirmation retain their deterministic full-population permutation, while
+The production loader uses the graph-independent `hosd_data_order_v2` role
+map for discovery, confirmation, and scale manifests. Discovery and
+confirmation retain both their `hosd_data_order_v1` seed derivation and their
+deterministic full-population permutation, while
 `scale_train` uses the versioned `hosd_scale_shard_aware_sampler_v1`: it
 deterministically shuffles authenticated locality segments, replica groups,
 and events within each group without constructing a population-sized
@@ -3289,6 +3290,16 @@ padding and a hashed capacity ledger. Exact builders publish separate hashed
 non-multiply operation profiles; authoritative scale efficiency must add the
 measured `hosd_exact_hlt_builder_timing_v1` evidence before production
 selection lineage is complete.
+Stage-D loader manifests are version 6 and serialize the pipeline seed plus
+the exact role seed, sampler, and seed-derivation maps. Combination-loader
+version 5 requires every member manifest to declare identical maps and passes
+the authenticated role seed to its loader; confirmation and scale member
+reconstruction may not substitute a default seed. Every Stage-J graph kind,
+including ordinary/KD/native-relation baselines, uses the scale shard-aware
+sampler for training while model initialization remains on its independent
+component seed. Scale checkpoint/completion version 2 records the pipeline
+seed, data-order contract, training sampler seed, and sampler contract, and
+both row finalization and efficiency profiling validate those fields.
 
 ### Step 8 of 12: combinations and mechanism controls
 
@@ -3477,7 +3488,7 @@ values. The inherited RETB campaign-storage contract and the HOSD
 target-cache storage measurement remain distinct artifacts; the latter enters
 the HOSD resource preflight and is never passed as an RETB campaign parent.
 
-Final source-closure audit on 2026-07-31: all 151 HOSD regression tests pass,
+Final source-closure audit on 2026-08-01: all 155 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD
 command-line parsers complete `--help`. Stage J produces its scale inputs,
 trees, offline/shared-HLT normalizers, scale teacher adapters, and optional

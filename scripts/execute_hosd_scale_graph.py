@@ -30,6 +30,9 @@ from scripts.execute_hosd_confirmation_row import (  # noqa: E402
 from scripts.train_hosd_baseline import _dataset, _mapping  # noqa: E402
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     HOSDTrainingProtocol,
+    DATA_ORDER_CONTRACT,
+    DeterministicScaleShardSampler,
+    SCALE_SHARD_SAMPLER_CONTRACT,
     build_auxiliary_model,
     auxiliary_model_flop_ledger,
     build_baseline_model,
@@ -42,6 +45,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     build_scale_row_result,
     build_stage_d_loader_manifest,
     component_seed,
+    data_order_seed,
     export_deployable_graph,
     exact_trainable_parameter_count,
     initialize_feedback_from_auxiliary_checkpoint,
@@ -125,6 +129,29 @@ def _merge_lineage(*mappings):
                 raise ValueError(f"scale graph lineage key differs: {key}")
             output[key] = value
     return output
+
+
+def _scale_baseline_training_loader(dataset, *, pipeline_seed: int):
+    sampler_seed = data_order_seed(int(pipeline_seed), "scale_train")
+    return make_native_hlt_expert_loader(
+        dataset,
+        seed=sampler_seed,
+        training=True,
+        batch_size=64,
+        sampler=DeterministicScaleShardSampler(dataset, seed=sampler_seed),
+    )
+
+
+def _validate_scale_training_order(completion, *, pipeline_seed: int) -> None:
+    expected_seed = data_order_seed(int(pipeline_seed), "scale_train")
+    if (
+        int(completion.get("pipeline_seed", -1)) != int(pipeline_seed)
+        or completion.get("data_order_contract") != DATA_ORDER_CONTRACT
+        or int(completion.get("training_sampler_seed", -1)) != expected_seed
+        or completion.get("training_sampler_contract")
+        != SCALE_SHARD_SAMPLER_CONTRACT
+    ):
+        raise ValueError("scale training completion data-order differs")
 
 
 def _required_scale_resources(definition):
@@ -489,6 +516,7 @@ def _load_combination(
             **dict(member),
             "row_id": member["selected_row_id"],
             "row_kind": "SCIENTIFIC",
+            "pipeline_seed": int(seed),
             "resolved": True,
         }
         completion = _target_completion(
@@ -777,14 +805,21 @@ def main(argv: list[str] | None = None) -> int:
             native_relation_targets=None,
         )
         task_seed = component_seed(args.seed, "baseline", baseline_id)
-        train_loader = make_native_hlt_expert_loader(
-            train, seed=task_seed, training=True, batch_size=64
+        train_loader = _scale_baseline_training_loader(
+            train, pipeline_seed=args.seed
         )
+        training_sampler_seed = int(train_loader.sampler.seed)
         val_loader = make_native_hlt_expert_loader(
-            val, seed=task_seed, training=False, batch_size=64
+            val,
+            seed=data_order_seed(args.seed, "val_stop"),
+            training=False,
+            batch_size=64,
         )
         evaluation_loader = make_native_hlt_expert_loader(
-            confirm, seed=task_seed, training=False, batch_size=64
+            confirm,
+            seed=data_order_seed(args.seed, "design_confirm"),
+            training=False,
+            batch_size=64,
         )
         model = build_baseline_model(baseline_id, weaver_module=module)
         completion = train_stage_c_baseline(
@@ -821,6 +856,10 @@ def main(argv: list[str] | None = None) -> int:
             completion_filename="training_completion.json",
             curves_contract="hosd_scale_training_curves_v1",
             stage_label="Stage-J-scale",
+            data_order_contract=DATA_ORDER_CONTRACT,
+            pipeline_seed=args.seed,
+            training_sampler_seed=training_sampler_seed,
+            training_sampler_contract=SCALE_SHARD_SAMPLER_CONTRACT,
         )
     elif kind in {"AUXILIARY", "FEEDBACK"}:
         row, loaded = _load_single(
@@ -1017,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluation_loader = loaded["design_confirm_loader"]
     else:
         raise ValueError("scale graph kind differs")
+    _validate_scale_training_order(completion, pipeline_seed=args.seed)
     identities, logits, labels = _inference(model, evaluation_loader, device=device)
     metrics = evaluate_classification(logits, labels, split="design_confirm")
     prediction_sha = _predictions(

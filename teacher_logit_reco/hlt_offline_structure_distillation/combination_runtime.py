@@ -37,7 +37,10 @@ from .contracts import (
 )
 from .heads import GlobalTargetHead
 from .stage_c_training import _balanced_metrics, _move, _restore_rng_state, _rng_state
-from .stage_d_data_factory import load_stage_d_loaders_from_manifest
+from .stage_d_data_factory import (
+    LOADER_MANIFEST_CONTRACT_V6,
+    load_stage_d_loaders_from_manifest,
+)
 from .target_schemas import (
     target_component_availability_groups,
     target_declarations,
@@ -59,6 +62,9 @@ COMBINATION_LOADER_MANIFEST_CONTRACT_V3 = (
 )
 COMBINATION_LOADER_MANIFEST_CONTRACT_V4 = (
     "hosd_combination_loader_manifest_v4"
+)
+COMBINATION_LOADER_MANIFEST_CONTRACT_V5 = (
+    "hosd_combination_loader_manifest_v5"
 )
 COMBINATION_CHECKPOINT_CONTRACT = "hosd_combination_checkpoint_v1"
 COMBINATION_COMPLETION_CONTRACT = "hosd_combination_completion_v1"
@@ -302,10 +308,53 @@ def build_combination_loader_manifest(
     if set(member_loader_manifests) != expected:
         raise ValueError("combination loader member coverage differs")
     rows = {}
+    order_attestation = None
+    expected_roles = {training_role, "val_stop", evaluation_role}
     for target, raw_path in sorted(member_loader_manifests.items()):
         path = Path(raw_path).resolve()
         digest = _sha256_file(path)
-        rows[target] = {"path": str(path), "sha256": digest}
+        member_manifest = load_hashed_json(
+            path, expected_contract=LOADER_MANIFEST_CONTRACT_V6
+        )
+        if (
+            member_manifest.get("source") != dict(source)
+            or member_manifest.get("campaign_spec_sha256")
+            != campaign_spec_sha256
+            or member_manifest.get("target_id") != target
+            or member_manifest.get("training_role") != training_role
+            or member_manifest.get("evaluation_role") != evaluation_role
+            or set(member_manifest.get("roles", {})) != expected_roles
+        ):
+            raise ValueError("combination member loader lineage differs")
+        candidate = {
+            "pipeline_seed": int(member_manifest["pipeline_seed"]),
+            "data_order_contract": str(
+                member_manifest["data_order_contract"]
+            ),
+            "sampler_seed_by_role": {
+                str(role): int(seed)
+                for role, seed in member_manifest[
+                    "sampler_seed_by_role"
+                ].items()
+            },
+            "sampler_contract_by_role": dict(
+                member_manifest["sampler_contract_by_role"]
+            ),
+            "seed_derivation_contract_by_role": dict(
+                member_manifest["seed_derivation_contract_by_role"]
+            ),
+        }
+        if order_attestation is None:
+            order_attestation = candidate
+        elif candidate != order_attestation:
+            raise ValueError("combination member data-order contracts differ")
+        rows[target] = {
+            "path": str(path),
+            "sha256": digest,
+            "artifact_sha256": member_manifest["content_hash"],
+        }
+    if order_attestation is None:
+        raise ValueError("combination member data-order attestation is absent")
     native_rows = {}
     if graph.get("native_relation_auxiliary") is not None:
         expected_keys = {
@@ -346,30 +395,8 @@ def build_combination_loader_manifest(
         raise ValueError("ordinary combinations cannot bind native relation targets")
     return with_content_hash(
         {
-            "contract": (
-                COMBINATION_LOADER_MANIFEST_CONTRACT_V4
-                if native_rows
-                else COMBINATION_LOADER_MANIFEST_CONTRACT
-                if (
-                    evaluation_role == "design_select"
-                    and training_role == "model_train"
-                )
-                else COMBINATION_LOADER_MANIFEST_CONTRACT_V2
-                if training_role == "model_train"
-                else COMBINATION_LOADER_MANIFEST_CONTRACT_V3
-            ),
-            "schema_version": (
-                4
-                if native_rows
-                else 1
-                if (
-                    evaluation_role == "design_select"
-                    and training_role == "model_train"
-                )
-                else 2
-                if training_role == "model_train"
-                else 3
-            ),
+            "contract": COMBINATION_LOADER_MANIFEST_CONTRACT_V5,
+            "schema_version": 5,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -379,6 +406,7 @@ def build_combination_loader_manifest(
             "native_relation_target_files": native_rows,
             "evaluation_role": evaluation_role,
             "training_role": training_role,
+            **order_attestation,
             "identity_join": "exact_before_batching",
         }
     )
@@ -393,13 +421,7 @@ def load_combination_loaders(
     target_registry: Mapping[str, Any],
 ) -> dict[str, Any]:
     if (
-        manifest.get("contract")
-        not in {
-            COMBINATION_LOADER_MANIFEST_CONTRACT,
-            COMBINATION_LOADER_MANIFEST_CONTRACT_V2,
-            COMBINATION_LOADER_MANIFEST_CONTRACT_V3,
-            COMBINATION_LOADER_MANIFEST_CONTRACT_V4,
-        }
+        manifest.get("contract") != COMBINATION_LOADER_MANIFEST_CONTRACT_V5
         or manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("graph_id") != graph["graph_id"]
@@ -412,6 +434,24 @@ def load_combination_loaders(
     training_role = str(manifest.get("training_role", "model_train"))
     if training_role not in {"model_train", "scale_train"}:
         raise ValueError("combination loader training role differs")
+    roles = (training_role, "val_stop", evaluation_role)
+    order_attestation = {
+        "pipeline_seed": int(manifest.get("pipeline_seed", -1)),
+        "data_order_contract": manifest.get("data_order_contract"),
+        "sampler_seed_by_role": manifest.get("sampler_seed_by_role"),
+        "sampler_contract_by_role": manifest.get("sampler_contract_by_role"),
+        "seed_derivation_contract_by_role": manifest.get(
+            "seed_derivation_contract_by_role"
+        ),
+    }
+    if (
+        order_attestation["pipeline_seed"] < 0
+        or set(order_attestation["sampler_seed_by_role"] or {}) != set(roles)
+        or set(order_attestation["sampler_contract_by_role"] or {}) != set(roles)
+        or set(order_attestation["seed_derivation_contract_by_role"] or {})
+        != set(roles)
+    ):
+        raise ValueError("combination loader data-order attestation differs")
     loaded_by_target = {}
     lineage = {"combination_loader_manifest": manifest["content_hash"]}
     member_definitions = []
@@ -420,6 +460,26 @@ def load_combination_loaders(
         if _sha256_file(path) != definition["sha256"]:
             raise ValueError("combination member loader bytes differ")
         member_manifest = load_hashed_json(path)
+        member_order_attestation = {
+            "pipeline_seed": int(member_manifest.get("pipeline_seed", -1)),
+            "data_order_contract": member_manifest.get("data_order_contract"),
+            "sampler_seed_by_role": member_manifest.get(
+                "sampler_seed_by_role"
+            ),
+            "sampler_contract_by_role": member_manifest.get(
+                "sampler_contract_by_role"
+            ),
+            "seed_derivation_contract_by_role": member_manifest.get(
+                "seed_derivation_contract_by_role"
+            ),
+        }
+        if (
+            member_manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V6
+            or member_manifest.get("content_hash")
+            != definition.get("artifact_sha256")
+            or member_order_attestation != order_attestation
+        ):
+            raise ValueError("combination member data-order lineage differs")
         tree_role_count = sum(
             bool(role_definition.get("tree_caches"))
             for role_definition in member_manifest.get("roles", {}).values()
@@ -435,7 +495,7 @@ def load_combination_loaders(
             "row_id": member["selected_row_id"],
             "row_kind": "SCIENTIFIC",
             "resolved": True,
-            "pipeline_seed": 101,
+            "pipeline_seed": order_attestation["pipeline_seed"],
         }
         loaded = load_stage_d_loaders_from_manifest(
             manifest_path=path,
@@ -558,11 +618,22 @@ def load_combination_loaders(
                 lineage[
                     f"native_relation_targets_{role}_{replica}"
                 ] = definition["sha256"]
+        combination_dataset = CombinationDataset(
+            datasets, native_relation_targets=native_targets
+        )
+        combination_dataset.pipeline_seed = order_attestation["pipeline_seed"]
+        combination_dataset.data_order_contract = order_attestation[
+            "data_order_contract"
+        ]
+        combination_dataset.sampler_contract_by_role = dict(
+            order_attestation["sampler_contract_by_role"]
+        )
+        combination_dataset.sampler_seed_by_role = dict(
+            order_attestation["sampler_seed_by_role"]
+        )
         result[key] = make_combination_loader(
-            CombinationDataset(
-                datasets, native_relation_targets=native_targets
-            ),
-            seed=101,
+            combination_dataset,
+            seed=int(order_attestation["sampler_seed_by_role"][role]),
             training=training,
             batch_size=next(iter(loaded_by_target.values()))[key].batch_size,
         )
@@ -572,6 +643,7 @@ def load_combination_loaders(
             result["design_confirm_loader"] = result[key]
     result["evaluation_role"] = evaluation_role
     result["training_role"] = training_role
+    result.update(order_attestation)
     for target, member in members.items():
         components = {
             row.target_id: row.components for row in target_declarations()
@@ -816,6 +888,24 @@ def train_combination(
         key: require_sha256(value, name=f"lineage.{key}")
         for key, value in sorted(lineage_hashes.items())
     }
+    training_role = str(train_loader.dataset.logical_role)
+    data_order_attestation = {
+        "pipeline_seed": int(train_loader.dataset.pipeline_seed),
+        "data_order_contract": str(train_loader.dataset.data_order_contract),
+        "training_sampler_seed": int(
+            train_loader.dataset.sampler_seed_by_role[training_role]
+        ),
+        "training_sampler_contract": str(
+            train_loader.dataset.sampler_contract_by_role[training_role]
+        ),
+    }
+    if (
+        int(getattr(train_loader.sampler, "seed", -1))
+        != data_order_attestation["training_sampler_seed"]
+        or str(getattr(train_loader.sampler, "contract", ""))
+        != data_order_attestation["training_sampler_contract"]
+    ):
+        raise ValueError("combination training sampler differs from manifest")
     resolved = torch.device(device)
     model.to(resolved)
     optimizer = torch.optim.AdamW(
@@ -843,6 +933,7 @@ def train_combination(
                 "campaign_spec_sha256": campaign_spec_sha256,
                 "source": dict(source),
                 "lineage_hashes": checked_lineage,
+                **data_order_attestation,
             }.items()
         ):
             raise ValueError("combination resume lineage differs")
@@ -856,6 +947,8 @@ def train_combination(
         _restore_rng_state(state["rng_state"])
     for epoch in range(start_epoch, protocol.maximum_epochs + 1):
         train_loader.dataset.set_epoch(epoch)
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         model.train()
         optimizer.zero_grad(set_to_none=True)
         event_sum, objective_sum, accumulated = 0, 0.0, 0
@@ -970,6 +1063,7 @@ def train_combination(
             "lineage_hashes": checked_lineage,
             plan_hash_field: stage_f_plan_sha256,
             "campaign_spec_sha256": campaign_spec_sha256,
+            **data_order_attestation,
         }
         _atomic_save(
             {
@@ -1019,6 +1113,7 @@ def train_combination(
             evaluation_split: {"classification_metrics": evaluation},
             "deployed_analytical_flops": float(deployed_analytical_flops),
             "deployed_parameter_count": int(deployed_parameter_count),
+            **data_order_attestation,
             "training_gpu_hours": (
                 elapsed_before + time.perf_counter() - started
             )
@@ -1035,6 +1130,7 @@ def train_combination(
             plan_hash_field: stage_f_plan_sha256,
             "campaign_spec_sha256": campaign_spec_sha256,
             "lineage_hashes": checked_lineage,
+            **data_order_attestation,
             "checkpoint_sha256": checkpoint_sha,
             "result_sha256": result["content_hash"],
             "epochs_completed": len(rows),
@@ -1054,6 +1150,8 @@ __all__ = [
     "COMBINATION_LOADER_MANIFEST_CONTRACT",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V2",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V3",
+    "COMBINATION_LOADER_MANIFEST_CONTRACT_V4",
+    "COMBINATION_LOADER_MANIFEST_CONTRACT_V5",
     "CombinationDataset",
     "CombinationHBaseClassifier",
     "build_combination_loader_manifest",

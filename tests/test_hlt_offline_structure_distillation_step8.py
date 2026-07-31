@@ -230,6 +230,13 @@ def test_scale_sampler_decodes_by_shard_replica_group_not_by_event_member():
     sampler.set_epoch(1)
     order = list(sampler)
     assert sorted(order) == list(range(event_count))
+    replay = DeterministicScaleShardSampler(combination, seed=101)
+    replay.set_epoch(1)
+    assert list(replay) == order
+    sampler.set_epoch(2)
+    second_epoch_order = list(sampler)
+    assert sorted(second_epoch_order) == list(range(event_count))
+    assert second_epoch_order != order
     locality_keys = [(index // shard_size, index % 4) for index in order]
     runs = 1 + sum(
         right != left for left, right in zip(locality_keys, locality_keys[1:])
@@ -244,6 +251,226 @@ def test_scale_sampler_decodes_by_shard_replica_group_not_by_event_member():
         dataset.target_cache_coordinator.maximum_simultaneously_resident == 1
         for dataset in combination.datasets.values()
     )
+
+
+@pytest.mark.parametrize(
+    ("training_role", "evaluation_role", "pipeline_seed"),
+    [
+        ("model_train", "design_confirm", 202),
+        ("scale_train", "design_confirm", 303),
+    ],
+)
+def test_combination_manifest_loads_authenticated_nondefault_role_seed(
+    tmp_path,
+    monkeypatch,
+    training_role,
+    evaluation_role,
+    pipeline_seed,
+):
+    from types import SimpleNamespace
+
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        build_combination_loader_manifest,
+        build_stage_d_loader_manifest,
+        data_order_seed,
+        load_combination_loaders,
+    )
+    from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+        write_immutable_json,
+    )
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        combination_runtime,
+    )
+
+    target_id = "T_OFFLINE_TRACK_32"
+    roles = (training_role, "val_stop", evaluation_role)
+    member_row = {
+        "row_id": "TRACK_SELECTED",
+        "target_id": target_id,
+        "parameterization": "ABS",
+        "row_kind": "SCIENTIFIC",
+        "pipeline_seed": pipeline_seed,
+        "resolved": True,
+    }
+    role_definitions = {
+        role: {
+            "labels": f"/labels/{role}.npz",
+            "hlt_caches": {"0": f"/hlt/{role}/replica_0"},
+            "target": {
+                "mode": "static_cache",
+                "caches": {"shared": f"/targets/{role}"},
+            },
+        }
+        for role in roles
+    }
+    member_manifest = build_stage_d_loader_manifest(
+        row=member_row,
+        role_definitions=role_definitions,
+        campaign_spec_sha256="c" * 64,
+        source=SOURCE,
+        training_role=training_role,
+        evaluation_role=evaluation_role,
+    )
+    member_path = tmp_path / "member.json"
+    write_immutable_json(member_path, member_manifest)
+    graph = {
+        "graph_id": "C_SEEDED",
+        "members": [
+            {
+                "target_id": target_id,
+                "selected_row_id": "TRACK_SELECTED",
+                "parameterization": "ABS",
+            }
+        ],
+    }
+    manifest = build_combination_loader_manifest(
+        graph=graph,
+        member_loader_manifests={target_id: member_path},
+        campaign_spec_sha256="c" * 64,
+        source=SOURCE,
+        evaluation_role=evaluation_role,
+        training_role=training_role,
+    )
+    assert manifest["contract"] == "hosd_combination_loader_manifest_v5"
+    assert manifest["pipeline_seed"] == pipeline_seed
+    assert manifest["sampler_seed_by_role"][training_role] == data_order_seed(
+        pipeline_seed, training_role
+    )
+
+    class Base:
+        def __init__(self, role):
+            self.logical_role = role
+            self.identities = ("jet-0", "jet-1")
+            self.identity_order_sha256 = "d" * 64
+            self.replicas = {0: None}
+
+        def __len__(self):
+            return 2
+
+        def locality_boundaries(self):
+            return (0, 2)
+
+        def replica_for_index(self, index):
+            return 0
+
+        def set_epoch(self, epoch):
+            self.epoch = epoch
+
+        def __getitem__(self, index):
+            return {"event_identity": self.identities[index], "replica_id": 0}
+
+    class Target:
+        def __init__(self, role):
+            self.base_dataset = Base(role)
+            self.identities = self.base_dataset.identities
+            self.target_stores = ()
+
+        def __len__(self):
+            return 2
+
+        def locality_boundaries(self):
+            return self.base_dataset.locality_boundaries()
+
+        def attach_target(self, index, sample):
+            return {
+                **sample,
+                "target": np.zeros(32, dtype=np.float32),
+                "target_mask": np.ones(32, dtype=bool),
+            }
+
+    def fake_member_loader(**kwargs):
+        assert kwargs["row"]["pipeline_seed"] == pipeline_seed
+        loaders = {
+            role: SimpleNamespace(dataset=Target(role), batch_size=64)
+            for role in roles
+        }
+        return {
+            "train_loader": loaders[training_role],
+            "val_stop_loader": loaders["val_stop"],
+            "evaluation_loader": loaders[evaluation_role],
+            "lineage_hashes": {"member": "e" * 64},
+        }
+
+    monkeypatch.setattr(
+        combination_runtime,
+        "load_stage_d_loaders_from_manifest",
+        fake_member_loader,
+    )
+    loaded = load_combination_loaders(
+        manifest=manifest,
+        graph=graph,
+        campaign_root=tmp_path,
+        campaign={"source": SOURCE, "content_hash": "c" * 64},
+        target_registry={},
+    )
+    assert loaded["pipeline_seed"] == pipeline_seed
+    assert loaded["train_loader"].sampler.seed == data_order_seed(
+        pipeline_seed, training_role
+    )
+    assert loaded["train_loader"].sampler.contract == manifest[
+        "sampler_contract_by_role"
+    ][training_role]
+
+
+def test_combination_manifest_rejects_mixed_member_pipeline_seeds(tmp_path):
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        build_combination_loader_manifest,
+        build_stage_d_loader_manifest,
+    )
+    from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+        write_immutable_json,
+    )
+
+    targets = ("T_OFFLINE_TRACK_32", "T_OFFLINE_DENSITY_22")
+    paths = {}
+    for target_id, seed in zip(targets, (202, 303)):
+        row = {
+            "row_id": f"{target_id}_SELECTED",
+            "target_id": target_id,
+            "parameterization": "ABS",
+            "row_kind": "SCIENTIFIC",
+            "pipeline_seed": seed,
+            "resolved": True,
+        }
+        roles = {
+            role: {
+                "labels": f"/labels/{role}.npz",
+                "hlt_caches": {"0": f"/hlt/{role}/replica_0"},
+                "target": {
+                    "mode": "static_cache",
+                    "caches": {"shared": f"/targets/{target_id}/{role}"},
+                },
+            }
+            for role in ("model_train", "val_stop", "design_confirm")
+        }
+        artifact = build_stage_d_loader_manifest(
+            row=row,
+            role_definitions=roles,
+            campaign_spec_sha256="c" * 64,
+            source=SOURCE,
+            evaluation_role="design_confirm",
+        )
+        path = tmp_path / f"{target_id}.json"
+        write_immutable_json(path, artifact)
+        paths[target_id] = path
+    graph = {
+        "graph_id": "C_MIXED",
+        "members": [
+            {
+                "target_id": target,
+                "selected_row_id": f"{target}_SELECTED",
+            }
+            for target in targets
+        ],
+    }
+    with pytest.raises(ValueError, match="data-order contracts differ"):
+        build_combination_loader_manifest(
+            graph=graph,
+            member_loader_manifests=paths,
+            campaign_spec_sha256="c" * 64,
+            source=SOURCE,
+            evaluation_role="design_confirm",
+        )
 
 
 def _locks():

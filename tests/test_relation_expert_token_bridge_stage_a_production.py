@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from scripts import build_retb_region_tree_shard as region_tree_shard_worker
 from scripts.bootstrap_retb_input_tasks import (
     build_stage_a_task_manifests,
     main as bootstrap_main,
@@ -341,6 +342,58 @@ def test_stage_a_relation_audit_rebuilds_every_owner_tensor(
     assert views["standard_four"].shape == (4, 4, 6, 6)
     assert views["REGION"].shape == (4, 41, 6, 6)
     assert all(np.isfinite(value).all() for value in views.values())
+
+
+def test_region_tree_parallel_runtime_uses_clean_spawned_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    backend = object()
+
+    def fake_load(binary, manifest, *, source_path):
+        calls["load"] = (binary, manifest, source_path)
+        return backend
+
+    def fake_build(loaded, vectors, tokens, mask):
+        calls["build"] = (loaded, vectors, tokens, mask)
+        return {"tree": "built"}
+
+    monkeypatch.setattr(
+        region_tree_shard_worker, "_configure_worker_threads", lambda: None
+    )
+    monkeypatch.setattr(
+        region_tree_shard_worker, "load_tree_backend", fake_load
+    )
+    monkeypatch.setattr(
+        region_tree_shard_worker, "build_compiled_tree", fake_build
+    )
+    monkeypatch.setattr(region_tree_shard_worker, "_WORKER_BACKEND", None)
+
+    region_tree_shard_worker._initialize_worker(
+        "/campaign/backend/tree.so",
+        "/campaign/backend/manifest.json",
+        "/source/tree.cpp",
+    )
+    payload = (
+        np.zeros((4, 4), dtype=np.float32),
+        np.zeros((4, 14), dtype=np.float32),
+        np.ones(4, dtype=bool),
+    )
+    assert region_tree_shard_worker._build_one(payload) == {"tree": "built"}
+    assert calls["load"] == (
+        Path("/campaign/backend/tree.so"),
+        Path("/campaign/backend/manifest.json"),
+        Path("/source/tree.cpp"),
+    )
+    assert calls["build"][0] is backend
+
+    source = (
+        ROOT / "scripts" / "build_retb_region_tree_shard.py"
+    ).read_text(encoding="utf-8")
+    assert 'multiprocessing.get_context("spawn")' in source
+    assert "initializer=_initialize_worker" in source
+    assert 'multiprocessing.get_context("fork")' not in source
+    assert "_FORKED_BACKEND" not in source
 
 
 def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(

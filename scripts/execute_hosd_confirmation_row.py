@@ -253,6 +253,7 @@ def _load_combination(
             **dict(member),
             "row_id": member["selected_row_id"],
             "row_kind": "SCIENTIFIC",
+            "pipeline_seed": int(seed),
             "resolved": True,
         }
         path = output_root / "members" / f"{member['target_id']}.json"
