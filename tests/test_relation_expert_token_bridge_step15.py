@@ -584,6 +584,9 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     split_worker = (
         ROOT / "sbatch" / "run_retb_build_splits.sh"
     ).read_text()
+    resource_probe_worker = (
+        ROOT / "sbatch" / "run_retb_resource_probe.sh"
+    ).read_text()
     assert "--dry-run|--smoke-simulate|--smoke-submit" in submitter
     assert "print_retb_submission_plan.py" in submitter
     assert "dispatch_mode" in submitter
@@ -617,6 +620,13 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert "retb_validate_frozen_source" in common
     assert "Frozen RETB source checkout became dirty" in common
     assert 'json.load(open(sys.argv[1]))["split_sizes"]' in split_worker
+    assert (
+        'job_ledgers/resource_probes/${RETB_RESOURCE_KIND}.json'
+        in resource_probe_worker
+    )
+    assert "job_ledgers/resource_probe_${RETB_RESOURCE_KIND}.json" not in (
+        resource_probe_worker
+    )
     assert "sizes=(20 20 0 10 20)" not in split_worker
     assert "/var/spool" not in common + submitter + array_launcher
 

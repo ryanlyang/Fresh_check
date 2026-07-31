@@ -21,4 +21,4 @@ python scripts/probe_retb_resources.py \
   --resource-kind "${RETB_RESOURCE_KIND}" \
   --compiled-region-parity "${RETB_COMPILED_REGION_PARITY}" \
   --requested-memory-bytes "${requested}" \
-  --output "${CAMPAIGN_ROOT}/job_ledgers/resource_probe_${RETB_RESOURCE_KIND}.json"
+  --output "${CAMPAIGN_ROOT}/job_ledgers/resource_probes/${RETB_RESOURCE_KIND}.json"

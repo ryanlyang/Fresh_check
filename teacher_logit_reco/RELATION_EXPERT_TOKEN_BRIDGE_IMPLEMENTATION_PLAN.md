@@ -5287,3 +5287,9 @@ the real finalized tree-manifest hash, not a synthetic placeholder derived
 from the HLT-cache hash. Corrected tree indexes, configurations, pre-lock input
 attestations, production graphs, and Step-15 bundles use new contract/schema
 versions and are not interchangeable with the earlier nine-view artifacts.
+
+Resource-probe artifacts have one canonical consumer-visible location:
+`job_ledgers/resource_probes/{cpu,gpu}.json`. Probe workers must publish there,
+and all training manifest factories must consume that same path. A successful
+probe written to a different legacy filename does not satisfy the training
+dependency.
