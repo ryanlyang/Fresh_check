@@ -27,7 +27,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 
 
 CANONICAL_JSON_CONTRACT = "hosd_canonical_json_v1"
-CAMPAIGN_SPEC_CONTRACT = "hosd_campaign_spec_v3"
+CAMPAIGN_SPEC_CONTRACT = "hosd_campaign_spec_v4"
 ARTIFACT_LAYOUT_CONTRACT = "hosd_artifact_layout_v1"
 DESIGN_PARTITION_CONTRACT = "hosd_design_partition_manifest_v1"
 DRY_RUN_PLAN_CONTRACT = "hosd_stage_a_to_k_dry_run_plan_v1"

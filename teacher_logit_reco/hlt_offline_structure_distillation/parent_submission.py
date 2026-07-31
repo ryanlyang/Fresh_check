@@ -89,6 +89,10 @@ def shared_parent_runtime_commands(
     shared_campaign = load_hashed_json(shared / "campaign_spec.json")
     if shared_campaign.get("source") != campaign.get("source"):
         raise ValueError("shared RETB parent source differs from HOSD campaign")
+    if shared_campaign.get("campaign_id") != shared.name:
+        raise ValueError(
+            "shared RETB campaign ID differs from its campaign-root basename"
+        )
     profile = str(shared_campaign.get("campaign_profile"))
     if profile not in {"miniature_test", "production_500k_scale3m"}:
         raise ValueError("shared RETB parent campaign profile differs")

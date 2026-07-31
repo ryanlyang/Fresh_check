@@ -48,7 +48,9 @@ from teacher_logit_reco.hlt_offline_structure_distillation.parents import (
 from teacher_logit_reco.relation_expert_token_bridge import (
     RetbSplitConfig,
     build_global_determinism,
+    build_production_graph,
     miniature_storage_measurements,
+    validate_production_campaign_binding,
 )
 
 
@@ -318,6 +320,27 @@ def test_publication_is_atomic_idempotent_and_preserves_shared_contracts(
         / "shared_retb_parent_campaign"
         / "campaign_spec.json"
     ).is_file()
+    shared_spec = json.loads(
+        (
+            root
+            / "inputs"
+            / "shared_retb_parent_campaign"
+            / "campaign_spec.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert shared_spec["campaign_id"] == "shared_retb_parent_campaign"
+    shared_root = root / "inputs" / "shared_retb_parent_campaign"
+    graph = build_production_graph(
+        campaign_root=shared_root,
+        campaign_id=shared_spec["campaign_id"],
+        source_commit=shared_spec["source"]["commit"],
+        source_status_sha256=shared_spec["source"]["status_sha256"],
+        storage_measurements_sha256=shared_spec["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        miniature=True,
+    )
+    validate_production_campaign_binding(graph, shared_spec)
     assert not (root / "baselines" / "predictions.npz").exists()
 
 
@@ -409,7 +432,7 @@ def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
         {
             "contract": "retb_campaign_spec_v1",
             "schema_version": 1,
-            "campaign_id": "shared-miniature",
+            "campaign_id": "shared_retb_parent_campaign",
             "campaign_profile": "miniature_test",
             "source": source,
         }

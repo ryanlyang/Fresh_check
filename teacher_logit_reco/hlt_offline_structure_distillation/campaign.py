@@ -75,6 +75,8 @@ REQUIRED_DIRECTORIES = (
     "job_ledgers",
 )
 
+SHARED_RETB_CAMPAIGN_ID = "shared_retb_parent_campaign"
+
 
 def _identity_key(row: Mapping[str, Any]) -> str:
     return JetIdentity.from_dict(dict(row)).key()
@@ -329,7 +331,7 @@ def build_step1_bundle(
 
     source = source_record(source_snapshot)
     retb = build_retb_step1_bundle(
-        campaign_id=f"{campaign_id}.shared_retb_parents",
+        campaign_id=SHARED_RETB_CAMPAIGN_ID,
         manifest=manifest,
         split_config=split_config,
         source_snapshot=source_snapshot,
@@ -607,6 +609,7 @@ def publish_step1_bundle(
 
 __all__ = [
     "REQUIRED_DIRECTORIES",
+    "SHARED_RETB_CAMPAIGN_ID",
     "build_artifact_layout",
     "build_design_partition",
     "build_dry_run_plan",

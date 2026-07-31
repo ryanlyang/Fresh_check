@@ -3489,7 +3489,10 @@ target-cache storage measurement remain distinct artifacts; the latter enters
 the HOSD resource preflight and is never passed as an RETB campaign parent.
 
 Real-miniature parent-controller correction on 2026-08-01: inherited-parent
-status and rebuild-plan contracts are version 2. Before a parent worker is
+status and rebuild-plan contracts are version 2 and the campaign contract is
+version 4. The nested RETB campaign ID is exactly its
+`shared_retb_parent_campaign` root basename, satisfying the RETB production
+graph binding rather than publishing an unexecutable child campaign. Before a parent worker is
 submitted, the controller idempotently publishes the shared RETB production
 graph and genuine Stage-A task manifests. It submits the complete
 offline-input/HLT-cache arrays, compiled-backend/tree arrays and finalizer,

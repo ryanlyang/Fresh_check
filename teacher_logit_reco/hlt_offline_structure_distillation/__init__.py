@@ -10,6 +10,7 @@ from .access import (
 )
 from .campaign import (
     REQUIRED_DIRECTORIES,
+    SHARED_RETB_CAMPAIGN_ID,
     build_artifact_layout,
     build_design_partition,
     build_dry_run_plan,
@@ -467,6 +468,7 @@ __all__ = [
     "PHYSICAL_TARGET_IDS",
     "REGISTRY_CONTRACT",
     "REQUIRED_DIRECTORIES",
+    "SHARED_RETB_CAMPAIGN_ID",
     "ROLE_CAPABILITIES",
     "STAGE_ORDER",
     "STRUCTURE_TARGET_REGISTRY_CONTRACT",
