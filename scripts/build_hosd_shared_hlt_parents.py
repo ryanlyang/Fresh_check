@@ -16,6 +16,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.parent_submission imp
     build_parent_submission_plan,
     finalize_parent_group,
     plan_json,
+    prepare_shared_parent_runtime,
     submit_parent_plan,
 )
 
@@ -27,6 +28,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--submit", action="store_true")
     args = parser.parse_args(argv)
+    if args.submit:
+        prepare_shared_parent_runtime(
+            campaign_root=args.campaign_root, repo_root=REPO_ROOT
+        )
     plan = build_parent_submission_plan(
         campaign_root=args.campaign_root, repo_root=REPO_ROOT, group="hlt"
     )

@@ -21,13 +21,36 @@ export PROJECT_ROOT=/home/ryreu/atlas/Fresh_check
 export HOSD_BOOTSTRAP="${PROJECT_ROOT}/checkpoints/hlt_offline_structure_distillation/bootstrap"
 export MINI_ROOT="${PROJECT_ROOT}/checkpoints/hlt_offline_structure_distillation/miniature"
 export PROD_ROOT="${PROJECT_ROOT}/checkpoints/hlt_offline_structure_distillation/production"
-export PARENT_MANIFEST=/absolute/path/to/authenticated_split_manifest.json
+export JETCLASS_DATA_ROOT=/home/ryreu/atlas/PracticeTagging/data
+export MINI_PARENT_MANIFEST="${HOSD_BOOTSTRAP}/miniature_source_split_manifest.json.gz"
+export PROD_PARENT_MANIFEST="${HOSD_BOOTSTRAP}/production_source_split_manifest.json.gz"
 export RETB_STORAGE_MEASUREMENTS=/absolute/path/to/authenticated_retb_storage_measurements.json
 export MINI_RUNTIME_CONFIG="${HOSD_BOOTSTRAP}/miniature_runtime_config.json"
 export PROD_RUNTIME_CONFIG="${HOSD_BOOTSTRAP}/production_runtime_config.json"
 
 cd "${PROJECT_ROOT}"
 python -s -c 'import torch,uproot,awkward,ninja,weaver; print(torch.__version__, torch.cuda.is_available())'
+```
+
+Build each exact source population with the canonical split builder. The
+miniature and production profiles deliberately have different validation
+counts and are not interchangeable.
+
+```bash
+mkdir -p "${HOSD_BOOTSTRAP}"
+python -s scripts/build_jetclass_splits.py \
+  --data-dir "${JETCLASS_DATA_ROOT}" \
+  --out "${MINI_PARENT_MANIFEST}" \
+  --tree-name tree --max-constits 128 \
+  --model-train 20 --model-val 40 --stack-train 0 \
+  --stack-val 10 --final-test 20
+
+python -s scripts/build_jetclass_splits.py \
+  --data-dir "${JETCLASS_DATA_ROOT}" \
+  --out "${PROD_PARENT_MANIFEST}" \
+  --tree-name tree --max-constits 128 \
+  --model-train 500000 --model-val 100000 --stack-train 0 \
+  --stack-val 50000 --final-test 300000
 ```
 
 Create the complete runtime template once, edit every `__REQUIRED_*__`
@@ -79,7 +102,7 @@ the DAG.
 
 ```bash
 python -s scripts/build_hosd_campaign.py \
-  --parent-manifest "${PARENT_MANIFEST}" \
+  --parent-manifest "${MINI_PARENT_MANIFEST}" \
   --output-dir "${MINI_ROOT}" \
   --campaign-id hosd_real_miniature \
   --miniature
@@ -102,6 +125,11 @@ python -s scripts/lock_hosd_inherited_parents.py \
 # shared-parent campaign.
 python -s scripts/materialize_hosd_runtime_inputs.py \
   --campaign-root "${MINI_ROOT}"
+
+# The parent controllers idempotently publish the shared RETB graph and
+# Stage-A task manifests before submission. They submit the complete
+# prerequisite arrays and route every Slurm log under the campaign's ignored
+# job_ledgers/slurm/parent_controllers directory.
 
 # Now replace every template value with the exact materialized input,
 # tree-cache, normalizer, model-contract, label-manifest, and cache path.
@@ -197,7 +225,7 @@ bundled at campaign creation.
 
 ```bash
 python -s scripts/build_hosd_campaign.py \
-  --parent-manifest "${PARENT_MANIFEST}" \
+  --parent-manifest "${PROD_PARENT_MANIFEST}" \
   --output-dir "${PROD_ROOT}" \
   --campaign-id hosd_500k_scale3m \
   --storage-measurements "${RETB_STORAGE_MEASUREMENTS}"

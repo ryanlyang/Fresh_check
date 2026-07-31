@@ -29,7 +29,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     bind_source,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
-    load_hlt_v3_cache,
+    HLT_V3_ARRAY_FILENAME,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
@@ -199,15 +199,35 @@ def build_parent_submission_plan(
         ):
             group_row = None
     shared_root = root / "inputs" / "shared_retb_parent_campaign"
+    log_directory = root / "job_ledgers" / "slurm" / "parent_controllers"
     commands = []
+    runtime_ready = True
     if group_row is not None:
         for wrapper in GROUP_WRAPPERS[group]:
+            task_node = WRAPPER_TASK_NODES.get(wrapper)
+            array_argument: list[str] = []
+            task_manifest_sha256 = None
+            if task_node is not None:
+                manifest_path = (
+                    shared_root / "job_ledgers" / "tasks" / f"{task_node}.json"
+                )
+                if manifest_path.is_file():
+                    manifest = load_retb_hashed_json(
+                        manifest_path, expected_contract=TASK_MANIFEST_CONTRACT
+                    )
+                    task_manifest_sha256 = manifest["content_hash"]
+                    array_argument = [f"--array={manifest['slurm_array']}"]
+                else:
+                    runtime_ready = False
             commands.append(
                 {
                     "argv": [
                         "sbatch",
                         "--parsable",
                         "--wait",
+                        f"--output={log_directory}/%x_%A_%a.out",
+                        f"--error={log_directory}/%x_%A_%a.err",
+                        *array_argument,
                         (
                             "--export=ALL,"
                             f"CAMPAIGN_ROOT={shared_root},"
@@ -216,6 +236,8 @@ def build_parent_submission_plan(
                         str((Path(repo_root) / wrapper).resolve()),
                     ],
                     "wrapper": wrapper,
+                    "task_node": task_node,
+                    "task_manifest_sha256": task_manifest_sha256,
                 }
             )
     return {
@@ -225,6 +247,8 @@ def build_parent_submission_plan(
         "group": group,
         "parent_ids": [] if group_row is None else list(group_row["parent_ids"]),
         "commands": commands,
+        "runtime_ready": runtime_ready,
+        "log_directory": str(log_directory.resolve()),
         "already_satisfied": group_row is None,
         "scientific_results_consulted": False,
         "performance_based_submission_pruning": False,
@@ -234,24 +258,152 @@ def build_parent_submission_plan(
 def submit_parent_plan(plan: Mapping[str, Any]) -> list[str]:
     """Submit an explicitly requested plan with afterok ordering."""
 
+    if not bool(plan.get("runtime_ready", True)):
+        raise RuntimeError(
+            "shared RETB runtime is not prepared; publish its production graph "
+            "and Stage-A task manifests before parent submission"
+        )
+    raw_log_directory = plan.get("log_directory")
+    log_directory = (
+        None
+        if raw_log_directory is None
+        else Path(str(raw_log_directory)).resolve()
+    )
+    if log_directory is not None:
+        log_directory.mkdir(parents=True, exist_ok=True)
     job_ids: list[str] = []
     previous: str | None = None
     for row in plan["commands"]:
         argv = list(row["argv"])
         if previous is not None:
             argv.insert(2, f"--dependency=afterok:{previous}")
-        completed = subprocess.run(
-            argv,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        completed = subprocess.run(argv, capture_output=True, text=True)
+        if completed.returncode:
+            diagnostics = []
+            if log_directory is not None and log_directory.is_dir():
+                logs = sorted(
+                    (
+                        path
+                        for path in log_directory.iterdir()
+                        if path.is_file() and path.suffix in {".out", ".err"}
+                    ),
+                    key=lambda path: path.stat().st_mtime_ns,
+                    reverse=True,
+                )[:6]
+                for path in logs:
+                    diagnostics.append(
+                        f"--- {path} ---\n"
+                        + path.read_text(encoding="utf-8", errors="replace")[-12000:]
+                    )
+            raise RuntimeError(
+                f"parent Slurm worker failed for {row['wrapper']}: "
+                f"exit={completed.returncode}\n"
+                f"sbatch stdout:\n{completed.stdout}\n"
+                f"sbatch stderr:\n{completed.stderr}\n"
+                + "\n".join(diagnostics)
+            )
         job_id = completed.stdout.strip().split(";", 1)[0]
         if not job_id.isdigit():
             raise RuntimeError(f"sbatch returned an invalid job ID: {job_id!r}")
         job_ids.append(job_id)
         previous = job_id
     return job_ids
+
+
+def _publish_hlt_cache_set(
+    *, campaign_root: Path, shared_root: Path
+) -> dict[str, Any]:
+    campaign = load_and_validate_campaign(
+        campaign_root, repo_root=Path(__file__).resolve().parents[2]
+    )
+    shared_campaign = load_hashed_json(shared_root / "campaign_spec.json")
+    manifest = load_retb_hashed_json(
+        shared_root / "job_ledgers" / "tasks" / "hlt_v3_cache.json",
+        expected_contract=TASK_MANIFEST_CONTRACT,
+    )
+    completion = load_retb_hashed_json(
+        shared_root
+        / "job_ledgers"
+        / "completions"
+        / "hlt_v3_cache"
+        / "manifest_completion.json",
+        expected_contract=TASK_MANIFEST_COMPLETION_CONTRACT,
+    )
+    validate_task_manifest_completion(
+        completion,
+        campaign_root=shared_root,
+        campaign=shared_campaign,
+        task_manifest=manifest,
+    )
+    caches = []
+    for row in manifest["rows"]:
+        outputs = [
+            Path(value)
+            for value in row["expected_outputs"]
+            if Path(value).name == "hlt_v3_metadata.json"
+        ]
+        if len(outputs) != 1:
+            raise ValueError("HLT-v3 task row must publish one cache metadata")
+        cache_root = outputs[0].parent
+        array_path = cache_root / HLT_V3_ARRAY_FILENAME
+        if not array_path.is_file() or array_path.is_symlink():
+            raise FileNotFoundError(f"HLT-v3 cache array is absent: {array_path}")
+        metadata = load_retb_hashed_json(
+            outputs[0], expected_contract="retb_hlt_v3_cache_v1"
+        )
+        if metadata.get("source") != campaign.get("source"):
+            raise ValueError("HLT-v3 cache source differs from HOSD campaign")
+        caches.append(
+            {
+                "task_index": int(row["task_index"]),
+                "logical_role": str(metadata["logical_role"]),
+                "replica_id": int(metadata["replica_id"]),
+                "realization_policy": str(metadata["realization_policy"]),
+                "path": str(cache_root.resolve()),
+                "metadata_sha256": str(metadata["content_hash"]),
+            }
+        )
+    artifact = with_content_hash(
+        {
+            "contract": HLT_CACHE_SET_CONTRACT,
+            "schema_version": 1,
+            "source": campaign["source"],
+            "campaign_spec_sha256": campaign["content_hash"],
+            "shared_retb_campaign_spec_sha256": shared_campaign["content_hash"],
+            "task_manifest_sha256": manifest["content_hash"],
+            "task_manifest_completion_sha256": completion["content_hash"],
+            "cache_count": len(caches),
+            "caches": caches,
+            "all_registered_coordinates_complete": True,
+        }
+    )
+    write_immutable_json(
+        campaign_root / "inputs" / "hlt_replicas" / "hlt_v3_cache_manifest.json",
+        artifact,
+    )
+    return artifact
+
+
+def _publish_source_bound_backend_alias(
+    *, campaign_root: Path, shared_root: Path
+) -> dict[str, Any]:
+    raw = load_hashed_json(
+        shared_root / "backend" / "backend_manifest.json",
+        expected_contract="relational_ca_tree_backend_manifest_v3",
+    )
+    validate_backend_manifest(
+        raw,
+        binary_path=shared_root / "backend" / str(raw["binary_filename"]),
+    )
+    bound = bind_source(
+        raw,
+        source_snapshot=source_snapshot(Path(__file__).resolve().parents[2]),
+    )
+    write_immutable_json(
+        campaign_root / "inputs" / "region_tree" / "backend_manifest.json",
+        bound,
+    )
+    return bound
 
 
 def finalize_parent_group(
@@ -283,6 +435,12 @@ def finalize_parent_group(
             raise ValueError("reusable parent-group completion lineage differs")
         return existing
     shared = root / "inputs" / "shared_retb_parent_campaign"
+    if plan["group"] == "hlt" and plan["parent_ids"]:
+        _publish_hlt_cache_set(campaign_root=root, shared_root=shared)
+    if plan["group"] == "tree" and plan["parent_ids"]:
+        _publish_source_bound_backend_alias(
+            campaign_root=root, shared_root=shared
+        )
     requirements = {
         row.parent_id: row
         for row in PARENT_REQUIREMENTS
@@ -336,7 +494,10 @@ def plan_json(plan: Mapping[str, Any], *, submitted_job_ids: list[str] | None) -
 
 __all__ = [
     "GROUP_WRAPPERS",
+    "WRAPPER_TASK_NODES",
     "build_parent_submission_plan",
+    "prepare_shared_parent_runtime",
+    "shared_parent_runtime_commands",
     "plan_json",
     "finalize_parent_group",
     "submit_parent_plan",

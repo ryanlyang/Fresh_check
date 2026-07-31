@@ -3488,7 +3488,20 @@ values. The inherited RETB campaign-storage contract and the HOSD
 target-cache storage measurement remain distinct artifacts; the latter enters
 the HOSD resource preflight and is never passed as an RETB campaign parent.
 
-Final source-closure audit on 2026-08-01: all 155 HOSD regression tests pass,
+Real-miniature parent-controller correction on 2026-08-01: inherited-parent
+status and rebuild-plan contracts are version 2. Before a parent worker is
+submitted, the controller idempotently publishes the shared RETB production
+graph and genuine Stage-A task manifests. It submits the complete
+offline-input/HLT-cache arrays, compiled-backend/tree arrays and finalizer,
+and normalizer/input-audit sequence. Slurm output and error paths are explicit
+campaign-owned paths, so a default `slurm-*.out` cannot dirty the frozen
+source checkout before worker validation. Complete HLT cache coverage uses
+`hosd_hlt_v3_cache_set_v1`, binding the RETB task-manifest completion and
+every registered cache metadata hash; one cache cannot attest the replica and
+role set. Parent resolution consumes the actual RETB backend and
+offline/shared-HLT normalizer locations rather than stale layout guesses.
+
+Final source-closure audit on 2026-08-01: all 159 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD
 command-line parsers complete `--help`. Stage J produces its scale inputs,
 trees, offline/shared-HLT normalizers, scale teacher adapters, and optional

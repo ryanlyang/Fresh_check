@@ -102,6 +102,7 @@ from .capability import (
     validate_target_capability_audit,
 )
 from .parents import (
+    HLT_CACHE_SET_CONTRACT,
     PARENT_REQUIREMENTS,
     build_parent_rebuild_plan,
     build_parent_status,
@@ -459,6 +460,7 @@ __all__ = [
     "FORBIDDEN_RUNTIME_RESOURCES",
     "FORBIDDEN_MATCHING_FIELD_FRAGMENTS",
     "FUTURE_DATA_REQUIREMENTS",
+    "HLT_CACHE_SET_CONTRACT",
     "PARENT_REBUILD_PLAN_CONTRACT",
     "PARENT_REQUIREMENTS",
     "PARENT_STATUS_CONTRACT",

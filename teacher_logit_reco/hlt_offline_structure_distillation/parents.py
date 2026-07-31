@@ -249,7 +249,8 @@ def _validate_parent_semantics(
             raise ValueError("HLT-v3 cache-set coverage differs")
         coordinates = set()
         from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
-            load_hlt_v3_cache,
+            HLT_V3_ARRAY_FILENAME,
+            HLT_V3_METADATA_FILENAME,
         )
 
         for row in rows:
@@ -264,7 +265,20 @@ def _validate_parent_semantics(
             path = Path(str(row.get("path", "")))
             if not path.is_dir() or path.is_symlink():
                 raise FileNotFoundError(f"HLT-v3 cache is absent: {path}")
-            _, metadata = load_hlt_v3_cache(path)
+            array_path = path / HLT_V3_ARRAY_FILENAME
+            metadata_path = path / HLT_V3_METADATA_FILENAME
+            if (
+                not array_path.is_file()
+                or array_path.is_symlink()
+                or not metadata_path.is_file()
+                or metadata_path.is_symlink()
+            ):
+                raise FileNotFoundError(
+                    f"HLT-v3 cache files are incomplete: {path}"
+                )
+            metadata = load_hashed_json(
+                metadata_path, expected_contract="retb_hlt_v3_cache_v1"
+            )
             if (
                 metadata.get("content_hash") != row.get("metadata_sha256")
                 or metadata.get("source") != artifact.get("source")

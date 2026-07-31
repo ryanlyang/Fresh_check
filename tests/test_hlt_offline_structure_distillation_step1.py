@@ -32,11 +32,18 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     with_content_hash,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+    PARENT_REBUILD_PLAN_CONTRACT,
     bind_source,
     source_record,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.parent_submission import (
+    build_parent_submission_plan,
     finalize_parent_group,
+    shared_parent_runtime_commands,
+    submit_parent_plan,
+)
+from teacher_logit_reco.hlt_offline_structure_distillation.parents import (
+    HLT_CACHE_SET_CONTRACT,
 )
 from teacher_logit_reco.relation_expert_token_bridge import (
     RetbSplitConfig,
@@ -384,3 +391,190 @@ def test_parent_group_completion_reuse_is_immutable_and_idempotent(
     )
     assert second == first
     assert second["parents"] == {}
+
+
+def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    root = tmp_path / "hosd"
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    shared.mkdir(parents=True)
+    source = source_record(_source())
+    hosd = {"source": source}
+    retb = with_content_hash(
+        {
+            "contract": "retb_campaign_spec_v1",
+            "schema_version": 1,
+            "campaign_id": "shared-miniature",
+            "campaign_profile": "miniature_test",
+            "source": source,
+        }
+    )
+    (shared / "campaign_spec.json").write_text(
+        json.dumps(retb), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        parent_submission, "load_and_validate_campaign", lambda *_args, **_kwargs: hosd
+    )
+    commands = shared_parent_runtime_commands(
+        campaign_root=root,
+        repo_root=tmp_path,
+        data_dir=tmp_path / "jetclass",
+    )
+    assert commands[0][-1] == "--miniature"
+    assert "submit_retb_graph.py" in commands[0][2]
+    assert "--write-artifacts" in commands[0]
+    assert "bootstrap_retb_input_tasks.py" in commands[1][2]
+    assert commands[1].index("--production-graph") < commands[1].index(
+        "--data-dir"
+    )
+
+
+def test_parent_plan_routes_logs_and_submits_complete_prerequisite_arrays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    root = tmp_path / "hosd"
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    tasks = shared / "job_ledgers" / "tasks"
+    tasks.mkdir(parents=True)
+    source = source_record(_source())
+    campaign = {"campaign_id": "hosd", "content_hash": "a" * 64, "source": source}
+    monkeypatch.setattr(
+        parent_submission, "load_and_validate_campaign", lambda *_args, **_kwargs: campaign
+    )
+    rebuild = with_content_hash(
+        {
+            "contract": PARENT_REBUILD_PLAN_CONTRACT,
+            "schema_version": 1,
+            "source": source,
+            "groups": [
+                {
+                    "group": "hlt",
+                    "parent_ids": ["hlt_v3_cache", "hlt_v3_profile"],
+                }
+            ],
+        }
+    )
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    (root / "inputs" / "inherited_parent_rebuild_plan.json").write_text(
+        json.dumps(rebuild), encoding="utf-8"
+    )
+    for node, array in (
+        ("offline_input_cache", "0-5%2"),
+        ("hlt_v3_cache", "0-8%2"),
+    ):
+        artifact = with_content_hash(
+            {
+                "contract": "retb_tigris_task_manifest_v1",
+                "schema_version": 1,
+                "node_id": node,
+                "slurm_array": array,
+            }
+        )
+        (tasks / f"{node}.json").write_text(json.dumps(artifact), encoding="utf-8")
+    plan = build_parent_submission_plan(
+        campaign_root=root, repo_root=tmp_path, group="hlt"
+    )
+    assert plan["runtime_ready"] is True
+    assert [row["task_node"] for row in plan["commands"]] == [
+        "offline_input_cache",
+        "hlt_v3_cache",
+    ]
+    flattened = [value for row in plan["commands"] for value in row["argv"]]
+    assert "--array=0-5%2" in flattened
+    assert "--array=0-8%2" in flattened
+    assert any(value.startswith("--output=") for value in flattened)
+    assert all("parent_controllers" in value for value in flattened if value.startswith("--error="))
+
+
+def test_parent_submit_failure_includes_worker_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "retb_hlt_v3_42.err").write_text(
+        "missing production_graph.json", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        parent_submission.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["sbatch"], returncode=2, stdout="42", stderr=""
+        ),
+    )
+    with pytest.raises(RuntimeError, match="missing production_graph.json"):
+        submit_parent_plan(
+            {
+                "runtime_ready": True,
+                "log_directory": str(logs),
+                "commands": [
+                    {"wrapper": "worker.sh", "argv": ["sbatch", "worker.sh"]}
+                ],
+            }
+        )
+
+
+def test_hlt_cache_set_requires_complete_unique_nested_lineage(
+    tmp_path: Path,
+) -> None:
+    source = source_record(_source())
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "hlt_v3_arrays.npz").write_bytes(b"fixture")
+    metadata = with_content_hash(
+        {
+            "contract": "retb_hlt_v3_cache_v1",
+            "schema_version": 1,
+            "source": source,
+        }
+    )
+    (cache / "hlt_v3_metadata.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    artifact = with_content_hash(
+        {
+            "contract": HLT_CACHE_SET_CONTRACT,
+            "schema_version": 1,
+            "source": source,
+            "cache_count": 1,
+            "caches": [
+                {
+                    "logical_role": "model_train",
+                    "replica_id": 0,
+                    "realization_policy": "R_MULTI",
+                    "path": str(cache),
+                    "metadata_sha256": metadata["content_hash"],
+                }
+            ],
+        }
+    )
+    status = build_parent_status(
+        source_snapshot=_source(), in_memory_artifacts={"hlt_v3_cache": artifact}
+    )
+    row = next(
+        value for value in status["requirements"] if value["parent_id"] == "hlt_v3_cache"
+    )
+    assert row["reusable"] is True
+    duplicated = dict(artifact)
+    duplicated.pop("content_hash")
+    duplicated["cache_count"] = 2
+    duplicated["caches"] = artifact["caches"] * 2
+    duplicated = with_content_hash(duplicated)
+    with pytest.raises(ValueError, match="duplicated"):
+        build_parent_status(
+            source_snapshot=_source(),
+            in_memory_artifacts={"hlt_v3_cache": duplicated},
+        )
