@@ -3489,8 +3489,8 @@ target-cache storage measurement remain distinct artifacts; the latter enters
 the HOSD resource preflight and is never passed as an RETB campaign parent.
 
 Real-miniature parent-controller correction on 2026-08-01: inherited-parent
-status and rebuild-plan contracts are version 2 and the campaign contract is
-version 4. The nested RETB campaign ID is exactly its
+status and rebuild-plan contracts are version 3 and the campaign contract is
+version 5. The nested RETB campaign ID is exactly its
 `shared_retb_parent_campaign` root basename, satisfying the RETB production
 graph binding rather than publishing an unexecutable child campaign. Before a parent worker is
 submitted, the controller idempotently publishes the shared RETB production
@@ -3503,8 +3503,13 @@ source checkout before worker validation. Complete HLT cache coverage uses
 every registered cache metadata hash; one cache cannot attest the replica and
 role set. Parent resolution consumes the actual RETB backend and
 offline/shared-HLT normalizer locations rather than stale layout guesses.
+Both relation and REGION normalizers are required for the offline and
+shared-HLT domains; producing a shared-HLT REGION normalizer without binding
+it into the parent lock is forbidden. Runtime preparation also materializes a
+byte-identical `bootstrap/split_manifest.json.gz` for the standard RETB
+offline-cache and input-audit workers before any Stage-A array is submitted.
 
-Final source-closure audit on 2026-08-01: all 159 HOSD regression tests pass,
+Final source-closure audit on 2026-08-01: all 161 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD
 command-line parsers complete `--help`. Stage J produces its scale inputs,
 trees, offline/shared-HLT normalizers, scale teacher adapters, and optional

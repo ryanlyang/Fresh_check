@@ -15,6 +15,7 @@ from .contracts import (
     load_hashed_json,
     validate_content_hash,
     with_content_hash,
+    write_immutable_bytes,
     write_immutable_json,
 )
 from .parents import HLT_CACHE_SET_CONTRACT, PARENT_REQUIREMENTS
@@ -135,6 +136,7 @@ def prepare_shared_parent_runtime(
     resolved_data = data_dir or os.environ.get(
         "DATA_DIR", "/home/ryreu/atlas/PracticeTagging/data"
     )
+    ensure_shared_bootstrap_split(campaign_root=campaign_root)
     commands = shared_parent_runtime_commands(
         campaign_root=campaign_root,
         repo_root=repo_root,
@@ -148,6 +150,7 @@ def prepare_shared_parent_runtime(
         / "shared_retb_parent_campaign"
     )
     required = [
+        shared / "bootstrap" / "split_manifest.json.gz",
         shared / "job_ledgers" / "production_graph.json",
         *(
             shared / "job_ledgers" / "tasks" / f"{node}.json"
@@ -161,6 +164,34 @@ def prepare_shared_parent_runtime(
             + repr(missing)
         )
     return commands
+
+
+def ensure_shared_bootstrap_split(
+    *, campaign_root: str | Path
+) -> dict[str, Any]:
+    """Materialize RETB's byte-identical pre-campaign split input."""
+
+    shared = (
+        Path(campaign_root).resolve()
+        / "inputs"
+        / "shared_retb_parent_campaign"
+    )
+    source = shared / "inputs" / "split_manifest.json.gz"
+    destination = shared / "bootstrap" / "split_manifest.json.gz"
+    if not source.is_file() or source.is_symlink():
+        raise FileNotFoundError(
+            f"shared RETB input split manifest is absent or unsafe: {source}"
+        )
+    encoded = source.read_bytes()
+    publication = write_immutable_bytes(destination, encoded)
+    if destination.read_bytes() != encoded:
+        raise ValueError("shared RETB bootstrap split differs from input split")
+    return {
+        "source": str(source.resolve()),
+        "destination": str(destination.resolve()),
+        "publication": publication["status"],
+        "byte_identical": True,
+    }
 
 
 def build_parent_submission_plan(
@@ -500,6 +531,7 @@ __all__ = [
     "GROUP_WRAPPERS",
     "WRAPPER_TASK_NODES",
     "build_parent_submission_plan",
+    "ensure_shared_bootstrap_split",
     "prepare_shared_parent_runtime",
     "shared_parent_runtime_commands",
     "plan_json",

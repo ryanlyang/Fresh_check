@@ -5258,3 +5258,32 @@ checkpoint. The permitted prelock command has only `--campaign-root`,
 four shared HLT payload artifacts fixed to their registered Stage-N paths.
 Any additional checkpoint, logit, prediction, probability, or metric option
 remains forbidden by this exact command-surface contract.
+
+## Complete REGION role-coverage amendment (2026-08-01)
+
+Stage A must materialize REGION trees for every role consumed anywhere in the
+campaign, not merely the roles used by the initial 500k expert fits. The exact
+cache universe is 18 views:
+
+- six offline views: `model_train`, `val_stop`, `val_design`, `stack_val`,
+  `final_test`, and `scale_train`;
+- eight replicated HLT views: replicas 0--3 with `R_MULTI` for both
+  `model_train` and `scale_train`; and
+- four fixed HLT views: replica 0 with `R_FIXED` for `val_stop`, `val_design`,
+  `stack_val`, and `final_test`.
+
+The Stage-A REGION index is valid only when this coordinate set is exact and
+complete. Missing, duplicate, or additional views fail closed. In particular,
+pre-lock deployable `stack_val` preparation, sealed `final_test` preparation,
+scale training, and post-lock oracle work may not rely on lazily generated or
+unauthenticated REGION trees.
+
+The pre-lock configuration must bind the authenticated HLT-cache metadata,
+HLT array-content hash, identity-manifest hash, and REGION-tree manifest for
+both `stack_val` and `final_test`. The live worker reloads those artifacts and
+requires exact campaign-source, split-manifest, identity, and content lineage
+before publishing either shared payload. The final-test REGION-sidecar hash is
+the real finalized tree-manifest hash, not a synthetic placeholder derived
+from the HLT-cache hash. Corrected tree indexes, configurations, pre-lock input
+attestations, production graphs, and Step-15 bundles use new contract/schema
+versions and are not interchangeable with the earlier nine-view artifacts.

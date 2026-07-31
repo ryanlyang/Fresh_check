@@ -151,6 +151,14 @@ PARENT_REQUIREMENTS: tuple[ParentRequirement, ...] = (
         "scripts/fit_hosd_relation_normalizers.py",
         "normalization",
     ),
+    ParentRequirement(
+        "hlt_shared_region_500k_normalizer",
+        "relational_part_region_normalization_v1",
+        "B",
+        "inputs/normalization/hlt_shared_500k/region.json",
+        "scripts/fit_hosd_relation_normalizers.py",
+        "normalization",
+    ),
 )
 
 _REBUILD_COMMANDS = {
@@ -317,7 +325,10 @@ def _validate_parent_semantics(
         )
 
         validate_relation_normalization_artifact(artifact)
-    elif parent_id == "region_500k_normalizer":
+    elif parent_id in {
+        "region_500k_normalizer",
+        "hlt_shared_region_500k_normalizer",
+    }:
         from teacher_logit_reco.relational_part.region_normalization import (
             validate_region_normalization,
         )

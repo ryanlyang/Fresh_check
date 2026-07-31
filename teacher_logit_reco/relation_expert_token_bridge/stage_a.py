@@ -42,18 +42,38 @@ from .hlt_v3 import (
 
 
 STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v2"
-STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v1"
+STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v2"
 STAGE_A_NORMALIZER_BUNDLE_CONTRACT = "retb_stage_a_normalizer_bundle_v1"
 STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v2"
 STAGE_A_NORMALIZER_POPULATION_FILENAME = (
     "stage_a_normalizer_population_registry.json"
 )
 
-STAGE_A_OFFLINE_TREE_ROLES = ("model_train", "val_stop", "val_design")
+STAGE_A_OFFLINE_TREE_ROLES = (
+    "model_train",
+    "val_stop",
+    "val_design",
+    "stack_val",
+    "final_test",
+    "scale_train",
+)
 STAGE_A_HLT_TREE_VIEWS = (
-    *(("model_train", replica, "R_MULTI") for replica in range(4)),
-    ("val_stop", 0, "R_FIXED"),
-    ("val_design", 0, "R_FIXED"),
+    *(
+        (role, replica, "R_MULTI")
+        for role in ("model_train", "scale_train")
+        for replica in range(4)
+    ),
+    *(
+        (role, 0, "R_FIXED")
+        for role in ("val_stop", "val_design", "stack_val", "final_test")
+    ),
+)
+STAGE_A_REQUIRED_TREE_VIEW_IDS = (
+    *(f"offline:{role}" for role in STAGE_A_OFFLINE_TREE_ROLES),
+    *(
+        f"hlt:{role}:r{replica}:{policy}"
+        for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+    ),
 )
 
 
@@ -492,12 +512,15 @@ def build_stage_a_tree_index(
 ) -> dict[str, Any]:
     rows = [dict(row) for row in views]
     identities = [str(row["view_id"]) for row in rows]
-    if len(rows) != len(set(identities)):
-        raise ValueError("Stage-A REGION view identities are duplicated")
+    if set(identities) != set(STAGE_A_REQUIRED_TREE_VIEW_IDS) or len(
+        rows
+    ) != len(STAGE_A_REQUIRED_TREE_VIEW_IDS):
+        raise ValueError("Stage-A REGION required view coverage differs")
     for row in rows:
         for field in (
             "view_content_sha256",
             "identity_manifest_sha256",
+            "cache_metadata_sha256",
             "tree_manifest_sha256",
         ):
             require_sha256(row.get(field), name=f"{row['view_id']}.{field}")
@@ -507,7 +530,7 @@ def build_stage_a_tree_index(
         with_content_hash(
             {
                 "contract": STAGE_A_TREE_INDEX_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_spec_sha256": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
                 ),
@@ -520,6 +543,7 @@ def build_stage_a_tree_index(
                 ),
                 "views": rows,
                 "view_count": len(rows),
+                "required_view_ids": list(STAGE_A_REQUIRED_TREE_VIEW_IDS),
                 "identity_order_exact": True,
                 "complete_stage_a_identity_coverage": True,
             }
@@ -542,11 +566,28 @@ def validate_stage_a_tree_index(payload: Mapping[str, Any]) -> str:
         require_sha256(payload.get(name), name=name)
     views = payload.get("views")
     if (
-        not isinstance(views, list)
+        int(payload.get("schema_version", -1)) != 2
+        or not isinstance(views, list)
         or len(views) != int(payload.get("view_count", -1))
         or len({row.get("view_id") for row in views}) != len(views)
+        or set(payload.get("required_view_ids", ()))
+        != set(STAGE_A_REQUIRED_TREE_VIEW_IDS)
+        or set(row.get("view_id") for row in views)
+        != set(STAGE_A_REQUIRED_TREE_VIEW_IDS)
     ):
         raise ValueError("Stage-A REGION index view coverage differs")
+    for row in views:
+        if not isinstance(row, Mapping):
+            raise ValueError("Stage-A REGION index row differs")
+        for field in (
+            "view_content_sha256",
+            "identity_manifest_sha256",
+            "cache_metadata_sha256",
+            "tree_manifest_sha256",
+        ):
+            require_sha256(row.get(field), name=f"{row.get('view_id')}.{field}")
+        if int(row.get("jet_count", 0)) <= 0:
+            raise ValueError("Stage-A REGION index contains an empty view")
     if (
         payload.get("identity_order_exact") is not True
         or payload.get("complete_stage_a_identity_coverage") is not True
@@ -755,6 +796,7 @@ __all__ = [
     "STAGE_A_NORMALIZER_BUNDLE_CONTRACT",
     "STAGE_A_NORMALIZER_POPULATION_FILENAME",
     "STAGE_A_OFFLINE_TREE_ROLES",
+    "STAGE_A_REQUIRED_TREE_VIEW_IDS",
     "STAGE_A_TREE_INDEX_CONTRACT",
     "bind_fitted_normalizer",
     "bind_fitted_region_normalizer",

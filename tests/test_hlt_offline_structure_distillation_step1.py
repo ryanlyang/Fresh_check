@@ -38,6 +38,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.parent_submission import (
     build_parent_submission_plan,
+    ensure_shared_bootstrap_split,
     finalize_parent_group,
     shared_parent_runtime_commands,
     submit_parent_plan,
@@ -236,6 +237,22 @@ def test_stage_a_to_k_and_every_artifact_producer_are_enumerated() -> None:
     assert {row["artifact"] for row in producer_rows} == set(outputs)
     assert len(PARENT_REQUIREMENTS) == len(
         registries["parent_requirement_registry"]["requirements"]
+    )
+
+
+def test_parent_lock_requires_both_offline_and_shared_hlt_normalizer_families() -> None:
+    rows = {row.parent_id: row for row in PARENT_REQUIREMENTS}
+    assert {
+        "relation_500k_normalizer",
+        "region_500k_normalizer",
+        "hlt_shared_500k_normalizer",
+        "hlt_shared_region_500k_normalizer",
+    }.issubset(rows)
+    assert rows["hlt_shared_500k_normalizer"].canonical_path.endswith(
+        "hlt_shared_500k/relation.json"
+    )
+    assert rows["hlt_shared_region_500k_normalizer"].canonical_path.endswith(
+        "hlt_shared_500k/region.json"
     )
 
 
@@ -455,6 +472,25 @@ def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
     assert commands[1].index("--production-graph") < commands[1].index(
         "--data-dir"
     )
+
+
+def test_shared_parent_runtime_materializes_byte_identical_bootstrap_split(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "hosd"
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    source = shared / "inputs" / "split_manifest.json.gz"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"authenticated-gzip-fixture")
+    first = ensure_shared_bootstrap_split(campaign_root=root)
+    second = ensure_shared_bootstrap_split(campaign_root=root)
+    destination = shared / "bootstrap" / "split_manifest.json.gz"
+    assert destination.read_bytes() == source.read_bytes()
+    assert first["publication"] == "published"
+    assert second["publication"] == "already_present"
+    destination.write_bytes(b"drifted")
+    with pytest.raises(FileExistsError, match="immutable"):
+        ensure_shared_bootstrap_split(campaign_root=root)
 
 
 def test_parent_plan_routes_logs_and_submits_complete_prerequisite_arrays(

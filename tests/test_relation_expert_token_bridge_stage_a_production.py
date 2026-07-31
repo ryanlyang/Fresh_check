@@ -34,11 +34,13 @@ from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
 )
 from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
+    STAGE_A_REQUIRED_TREE_VIEW_IDS,
     bind_fitted_normalizer,
     bind_fitted_region_normalizer,
     build_stage_a_contract_bundle,
     build_stage_a_input_audit,
     build_stage_a_normalizer_bundle,
+    build_stage_a_tree_index,
     load_authenticated_tree_selection,
     padding_is_exact_zero,
     publish_stage_a_contract_bundle,
@@ -46,6 +48,7 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
     validate_stage_a_contract_bundle,
     validate_stage_a_input_audit,
     validate_stage_a_normalizer_bundle,
+    validate_stage_a_tree_index,
 )
 from teacher_logit_reco.relation_expert_token_bridge import workflow
 from teacher_logit_reco.relational_part import (
@@ -260,6 +263,41 @@ def test_stage_a_contracts_and_numeric_normalizers_are_domain_bound() -> None:
     assert bundle["offline_and_hlt_interchangeable"] is False
 
 
+def test_stage_a_tree_index_requires_all_eighteen_declared_views() -> None:
+    campaign = _campaign(miniature=True)
+    rows = [
+        {
+            "view_id": view_id,
+            "view_content_sha256": f"{index + 1:064x}",
+            "identity_manifest_sha256": f"{index + 101:064x}",
+            "cache_metadata_sha256": f"{index + 151:064x}",
+            "tree_manifest_sha256": f"{index + 201:064x}",
+            "jet_count": 1,
+        }
+        for index, view_id in enumerate(STAGE_A_REQUIRED_TREE_VIEW_IDS)
+    ]
+    assert len(rows) == 18
+    artifact = build_stage_a_tree_index(
+        campaign_spec_sha256=campaign["content_hash"],
+        backend_manifest_sha256="d" * 64,
+        angular_tree_resource_sha256="e" * 64,
+        views=rows,
+        source_snapshot=_source(),
+    )
+    validate_stage_a_tree_index(artifact)
+    assert artifact["required_view_ids"] == list(
+        STAGE_A_REQUIRED_TREE_VIEW_IDS
+    )
+    with pytest.raises(ValueError, match="required view coverage"):
+        build_stage_a_tree_index(
+            campaign_spec_sha256=campaign["content_hash"],
+            backend_manifest_sha256="d" * 64,
+            angular_tree_resource_sha256="e" * 64,
+            views=rows[:-1],
+            source_snapshot=_source(),
+        )
+
+
 def test_stage_a_population_lineage_does_not_overwrite_step1_policy(
     tmp_path: Path,
 ) -> None:
@@ -432,7 +470,7 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
         assert manifests["hlt_v3_cache"]["task_count"] == 12
         assert (
             manifests["region_tree_cache"]["task_count"]
-            == 9
+            == 18
         )
         assert all(
             manifests[name]["task_count"] == 1
@@ -463,13 +501,15 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
             for row in manifests["region_tree_cache"]["rows"]
         )
         assert production_tree_outputs == (
-            18 if miniature else 540
+            36 if miniature else 3680
         )
         if miniature:
             expected_stops = {
                 "model_train": "20",
                 "val_stop": "10",
                 "val_design": "10",
+                "stack_val": "10",
+                "final_test": "20",
                 "scale_train": "40",
             }
             for row in manifests["region_tree_cache"]["rows"]:
@@ -538,7 +578,7 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
     ]
     assert bootstrap_main([*arguments, "--dry-run"]) == 0
     output = capsys.readouterr().out
-    assert '"region_tree_cache": 9' in output
+    assert '"region_tree_cache": 18' in output
     assert '"input_audit": 1' in output
     assert not (campaign_root / "job_ledgers" / "tasks").exists()
     assert bootstrap_main(arguments) == 0

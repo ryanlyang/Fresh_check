@@ -37,7 +37,15 @@ from .stage_n_execution import (
     validate_control_evidence,
     validate_shared_deployable_inference_payload,
 )
-from .stage_n_access import validate_prelock_input_row_access
+from .hlt_cache import HLT_V3_CACHE_CONTRACT
+from .stage_a import (
+    STAGE_A_TREE_INDEX_CONTRACT,
+    validate_stage_a_tree_index,
+)
+from .stage_n_access import (
+    PRELOCK_INPUT_CONFIGURATION_CONTRACT,
+    validate_prelock_input_row_access,
+)
 
 
 FINAL_PLAN_FACTORY_INPUT_CONTRACT = "retb_stage_n_factory_input_v2"
@@ -492,56 +500,82 @@ def build_prelock_final_inputs_manifest_plan(
         producer_node_id=producer_node_id,
     )
     profile = load_hashed_json(root / "inputs" / "hlt_v3_profile.json")
-    hlt = load_hashed_json(
-        root
-        / "inputs"
-        / "hlt_v3"
-        / "final_test"
-        / "replica_0"
-        / "R_FIXED"
-        / "D_NOMINAL"
-        / "hlt_v3_metadata.json"
+    hlt_by_split = {
+        split: load_hashed_json(
+            root
+            / "inputs"
+            / "hlt_v3"
+            / split
+            / "replica_0"
+            / "R_FIXED"
+            / "D_NOMINAL"
+            / "hlt_v3_metadata.json",
+            expected_contract=HLT_V3_CACHE_CONTRACT,
+        )
+        for split in ("stack_val", "final_test")
+    }
+    tree_index = load_hashed_json(
+        root / "inputs" / "region_tree" / "tree_cache_index.json",
+        expected_contract=STAGE_A_TREE_INDEX_CONTRACT,
     )
-    final_identity = canonical_sha256(
-        {
-            "split_manifest": campaign["parent_artifact_hashes"][
-                "split_manifest"
-            ],
-            "split": "final_test",
+    validate_stage_a_tree_index(tree_index)
+    if (
+        tree_index.get("source") != campaign.get("source")
+        or tree_index.get("campaign_spec_sha256") != campaign_sha
+        or profile.get("source") != campaign.get("source")
+    ):
+        raise ValueError("prelock shared-input campaign lineage differs")
+    tree_by_id = {row["view_id"]: row for row in tree_index["views"]}
+    shared_input_sources = {}
+    for split, hlt in hlt_by_split.items():
+        tree = tree_by_id[f"hlt:{split}:r0:R_FIXED"]
+        if (
+            hlt.get("source") != campaign.get("source")
+            or hlt.get("profile_contract_sha256")
+            != profile["content_hash"]
+            or hlt.get("split_manifest_sha256")
+            != campaign["parent_artifact_hashes"]["split_manifest"]
+            or tree["view_content_sha256"]
+            != hlt["array_content_sha256"]
+            or tree["cache_metadata_sha256"] != hlt["content_hash"]
+            or tree["identity_manifest_sha256"]
+            != hlt["identity_manifest_sha256"]
+        ):
+            raise ValueError(f"prelock {split} HLT/REGION lineage differs")
+        shared_input_sources[split] = {
+            "hlt_cache_sha256": hlt["content_hash"],
+            "hlt_array_content_sha256": hlt["array_content_sha256"],
+            "region_tree_manifest_sha256": tree["tree_manifest_sha256"],
+            "identity_manifest_sha256": hlt["identity_manifest_sha256"],
         }
-    )
+    final_hlt = hlt_by_split["final_test"]
+    final_tree = tree_by_id["hlt:final_test:r0:R_FIXED"]
     configuration = with_content_hash(
         {
-            "contract": "retb_prelock_final_input_configuration_v1",
-            "schema_version": 1,
+            "contract": PRELOCK_INPUT_CONFIGURATION_CONTRACT,
+            "schema_version": 2,
             "split_manifest_sha256": campaign["parent_artifact_hashes"][
                 "split_manifest"
             ],
             "degradation_profile_sha256": profile["content_hash"],
             "input_hashes": {
-                "final_test_identity_manifest": final_identity,
-                "final_test_raw_inputs": canonical_sha256(
-                    {
-                        "raw_input_schema": campaign[
-                            "parent_artifact_hashes"
-                        ]["raw_input_schema"],
-                        "split": "final_test",
-                    }
-                ),
-                "final_test_HLT_inputs": hlt["content_hash"],
+                "final_test_identity_manifest": final_hlt[
+                    "identity_manifest_sha256"
+                ],
+                "final_test_raw_inputs": final_hlt["raw_input_sha256"],
+                "final_test_HLT_inputs": final_hlt["content_hash"],
                 "final_test_relation_sidecars": canonical_sha256(
                     {
-                        "HLT_cache": hlt["content_hash"],
+                        "HLT_cache": final_hlt["content_hash"],
                         "sidecar": "relation",
                     }
                 ),
-                "final_test_REGION_sidecars": canonical_sha256(
-                    {
-                        "HLT_cache": hlt["content_hash"],
-                        "sidecar": "REGION_tree",
-                    }
-                ),
+                "final_test_REGION_sidecars": final_tree[
+                    "tree_manifest_sha256"
+                ],
             },
+            "shared_input_sources": shared_input_sources,
+            "region_tree_index_sha256": tree_index["content_hash"],
             "source": dict(campaign["source"]),
         }
     )
@@ -575,7 +609,11 @@ def build_prelock_final_inputs_manifest_plan(
         producer_completion_sha256=completion_sha,
         extra_input_hashes={
             "configuration": configuration["content_hash"],
-            "raw_HLT_cache": hlt["content_hash"],
+            "stack_val_HLT_cache": hlt_by_split["stack_val"][
+                "content_hash"
+            ],
+            "final_test_HLT_cache": final_hlt["content_hash"],
+            "region_tree_index": tree_index["content_hash"],
             "degradation_profile": profile["content_hash"],
         },
         environment={

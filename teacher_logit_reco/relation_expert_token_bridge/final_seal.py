@@ -24,7 +24,7 @@ from .stage_n_selection import LOCKED_SCALE_FINALISTS_CONTRACT
 
 POSTLOCK_ORACLE_TARGET_CONTRACT = "retb_postlock_oracle_target_v1"
 FINAL_TEST_INPUT_PREPARATION_CONTRACT = (
-    "retb_prelock_final_test_input_preparation_v2"
+    "retb_prelock_final_test_input_preparation_v3"
 )
 FINALIST_CONTROLS_CONTRACT = "retb_scale_finalist_controls_v1"
 FINAL_TEST_EXECUTION_LOCK_CONTRACT = (
@@ -85,7 +85,7 @@ def build_prelock_final_test_inputs(
     return with_content_hash(
         {
             "contract": FINAL_TEST_INPUT_PREPARATION_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "parents": {
                 "campaign_spec": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"

@@ -27,14 +27,14 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 
 
 CANONICAL_JSON_CONTRACT = "hosd_canonical_json_v1"
-CAMPAIGN_SPEC_CONTRACT = "hosd_campaign_spec_v4"
+CAMPAIGN_SPEC_CONTRACT = "hosd_campaign_spec_v5"
 ARTIFACT_LAYOUT_CONTRACT = "hosd_artifact_layout_v1"
 DESIGN_PARTITION_CONTRACT = "hosd_design_partition_manifest_v1"
 DRY_RUN_PLAN_CONTRACT = "hosd_stage_a_to_k_dry_run_plan_v1"
 STEP1_REPORT_CONTRACT = "hosd_step1_report_v1"
 REGISTRY_CONTRACT = "hosd_registry_v1"
-PARENT_STATUS_CONTRACT = "hosd_inherited_parent_status_v2"
-PARENT_REBUILD_PLAN_CONTRACT = "hosd_parent_rebuild_plan_v2"
+PARENT_STATUS_CONTRACT = "hosd_inherited_parent_status_v3"
+PARENT_REBUILD_PLAN_CONTRACT = "hosd_parent_rebuild_plan_v3"
 TARGET_CAPABILITY_AUDIT_CONTRACT = "hosd_target_capability_audit_v1"
 STRUCTURE_TARGET_REGISTRY_CONTRACT = "hosd_structure_target_registry_v1"
 TARGET_CACHE_SPEC_CONTRACT = "hosd_target_cache_spec_v1"

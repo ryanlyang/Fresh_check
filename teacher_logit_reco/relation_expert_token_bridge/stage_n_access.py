@@ -7,6 +7,9 @@ from typing import Sequence
 
 
 PRELOCK_INPUT_ENTRYPOINT = "scripts/prepare_retb_final_test_inputs.py"
+PRELOCK_INPUT_CONFIGURATION_CONTRACT = (
+    "retb_prelock_final_input_configuration_v2"
+)
 PRELOCK_INPUT_OPTION_ORDER = (
     "--campaign-root",
     "--configuration",
@@ -60,6 +63,7 @@ def validate_prelock_input_row_access(
 
 __all__ = [
     "PRELOCK_INPUT_ENTRYPOINT",
+    "PRELOCK_INPUT_CONFIGURATION_CONTRACT",
     "PRELOCK_INPUT_OPTION_ORDER",
     "validate_prelock_input_row_access",
 ]

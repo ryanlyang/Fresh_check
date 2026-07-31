@@ -24,7 +24,7 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v31"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v32"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v14"
 )
@@ -33,7 +33,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v26"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v27"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -505,7 +505,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
                 task_manifest="job_ledgers/tasks/region_tree_cache.json",
                 concurrency=cpu,
                 maximum_tasks=512,
-                smoke_tasks=9,
+                smoke_tasks=18,
             ),
             resumable=True,
             access="checkpoint_free_input_preparation",
@@ -1562,7 +1562,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 29,
+            "schema_version": 30,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1657,7 +1657,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 29:
+    if int(payload.get("schema_version", -1)) != 30:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -2389,7 +2389,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 25,
+            "schema_version": 26,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
