@@ -16,8 +16,13 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     validate_task_manifest_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    bind_source,
     build_campaign_spec,
+    load_hashed_json,
     write_immutable_json,
+)
+from teacher_logit_reco.relation_expert_token_bridge.registry import (
+    build_registries,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
@@ -30,6 +35,8 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
     build_stage_a_normalizer_bundle,
     load_authenticated_tree_selection,
     padding_is_exact_zero,
+    publish_stage_a_contract_bundle,
+    stage_a_normalizer_population_registry_path,
     validate_stage_a_contract_bundle,
     validate_stage_a_input_audit,
     validate_stage_a_normalizer_bundle,
@@ -244,6 +251,32 @@ def test_stage_a_contracts_and_numeric_normalizers_are_domain_bound() -> None:
     assert hlt_relation["logical_domain"] == "shared_hlt_500k"
     assert offline_relation["content_hash"] != hlt_relation["content_hash"]
     assert bundle["offline_and_hlt_interchangeable"] is False
+
+
+def test_stage_a_population_lineage_does_not_overwrite_step1_policy(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(miniature=True)
+    contracts = _contracts(campaign, miniature=True)
+    generic = bind_source(
+        build_registries()["normalizer_population_registry"],
+        source_snapshot=_source(),
+    )
+    generic_path = tmp_path / "registry" / "normalizer_population_registry.json"
+    write_immutable_json(generic_path, generic)
+
+    publish_stage_a_contract_bundle(
+        campaign_root=tmp_path,
+        bundle=contracts,
+        campaign_spec=campaign,
+    )
+
+    stage_a_path = stage_a_normalizer_population_registry_path(tmp_path)
+    assert stage_a_path != generic_path
+    assert load_hashed_json(generic_path) == generic
+    assert load_hashed_json(stage_a_path) == contracts[
+        "normalizer_population_registry"
+    ]
 
 
 def test_stage_a_relation_audit_rebuilds_every_owner_tensor(

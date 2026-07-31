@@ -30,6 +30,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     fit_target_normalizer,
     extract_registered_target,
     infer_teacher_batch,
+    iter_authenticated_target_shard_layouts,
     load_target_cache,
     normalize_target,
     publish_target_cache,
@@ -214,6 +215,16 @@ def test_cache_is_identity_sorted_label_blind_byte_deterministic_and_resumable(
         generator=_generator(values),
     )
     assert resumed == left
+
+
+def test_target_layout_iterator_rejects_shard_byte_drift(tmp_path: Path) -> None:
+    spec, _ = _cache(tmp_path, "layout")
+    rows = list(iter_authenticated_target_shard_layouts(tmp_path / "layout"))
+    assert len(rows) == int(spec["shard_count"])
+    shard = tmp_path / "layout" / "shards" / "shard_000000.npz"
+    shard.write_bytes(shard.read_bytes() + b"drift")
+    with pytest.raises(ValueError, match="attestation differs"):
+        list(iter_authenticated_target_shard_layouts(tmp_path / "layout"))
 
 
 def test_canonical_mmap_shards_publish_without_population_sort_or_index_copy(

@@ -72,6 +72,15 @@ def build_label_blind_relational_adapter(
         expected_parents = config.get("tree_expected_parents")
         if not isinstance(expected_parents, Mapping):
             raise ValueError("O_FULLREL inference lacks exact tree parents")
+        for path_key, parent_key in (
+            ("tree_resource_path", "tree_resource_sha256"),
+            ("tree_backend_manifest_path", "backend_manifest_sha256"),
+        ):
+            if config.get(path_key) is None:
+                raise ValueError("O_FULLREL inference lacks an active tree parent path")
+            artifact = load_hashed_json(config[path_key])
+            if artifact["content_hash"] != expected_parents.get(parent_key):
+                raise ValueError("O_FULLREL active tree parent differs from its lock")
         tree_split = AuthenticatedTreeSplit(
             config["tree_cache_dir"],
             expected_identities=identities,

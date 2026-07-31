@@ -249,6 +249,13 @@ def _scale_member_manifest(
         tree_completion = load_hashed_json(
             root / "scale_up" / "trees" / "completion.json"
         )
+        if (
+            load_hashed_json(tree_completion["tree_resource_path"])["content_hash"]
+            != tree_completion["tree_resource_sha256"]
+            or load_hashed_json(tree_completion["backend_manifest_path"])["content_hash"]
+            != tree_completion["backend_manifest_sha256"]
+        ):
+            raise ValueError("scale graph active tree parents differ")
         scale_definition["tree_caches"] = {
             str(key): str(value.resolve()) for key, value in sorted(scale_trees.items())
         }

@@ -201,13 +201,24 @@ def fit_sharded_target_normalizer(
     if len(kinds) != component_count:
         raise ValueError("sharded normalizer component-kind count differs")
     parent_hashes = [str(cache.manifest["content_hash"]) for cache in caches]
-    binding = hashlib.sha256("".join(parent_hashes).encode("ascii")).hexdigest()
-    identity_binding = hashlib.sha256(
-        ("hosd_sharded_normalizer_v1\0" + "\0".join(
-            str(cache.manifest["canonical_identity_order_sha256"])
-            for cache in caches
-        )).encode("ascii")
-    ).hexdigest()
+    binding = (
+        parent_hashes[0]
+        if len(parent_hashes) == 1
+        else hashlib.sha256("".join(parent_hashes).encode("ascii")).hexdigest()
+    )
+    identity_hashes = [
+        str(cache.manifest["canonical_identity_order_sha256"])
+        for cache in caches
+    ]
+    identity_binding = (
+        identity_hashes[0]
+        if len(identity_hashes) == 1
+        else hashlib.sha256(
+            ("hosd_sharded_normalizer_v1\0" + "\0".join(identity_hashes)).encode(
+                "ascii"
+            )
+        ).hexdigest()
+    )
     event_count = sum(int(cache.values[target_id].shape[0]) for cache in caches)
     base = None if workspace is None else Path(workspace)
     if base is not None:

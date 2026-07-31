@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -34,6 +35,27 @@ from .target_schemas import target_declarations
 
 
 PAIR_TARGETS = frozenset({"T_HLT_TRACK_PAIR_13", "T_HLT_REGION_PAIR_8"})
+
+
+class _DiskComponentSamples:
+    """Append-only float64 sample stream exposed later as a read-only memmap."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.count = 0
+
+    def append(self, values: np.ndarray) -> None:
+        array = np.ascontiguousarray(values, dtype=np.float64)
+        with self.path.open("ab") as stream:
+            stream.write(array.tobytes(order="C"))
+        self.count += int(array.size)
+
+    def array(self) -> np.ndarray:
+        if self.count == 0:
+            return np.empty(0, dtype=np.float64)
+        return np.memmap(
+            self.path, mode="r", dtype=np.float64, shape=(self.count,)
+        )
 
 
 def file_sha256(path: str | Path) -> str:
@@ -193,8 +215,11 @@ def fit_pair_normalizer_from_views(
         raise ValueError("streamed REGION tree resources differ")
     declarations = {row.target_id: row for row in target_declarations()}
     declaration = declarations[target_id]
-    component_samples: list[list[np.ndarray]] = [
-        [] for _ in declaration.components
+    temporary = tempfile.TemporaryDirectory(prefix="hosd-pair-normalizer-")
+    sample_root = Path(temporary.name)
+    component_samples = [
+        _DiskComponentSamples(sample_root / f"component_{index:04d}.bin")
+        for index in range(len(declaration.components))
     ]
     pair_digest = hashlib.sha256(b"hosd_streamed_pair_normalizer_pairs_v1\0")
     jet_digest = hashlib.sha256(b"hosd_streamed_pair_normalizer_jets_v1\0")
@@ -261,28 +286,26 @@ def fit_pair_normalizer_from_views(
                     applicable = masks[local, component, left, right]
                     if bool(applicable.any()):
                         component_samples[component].append(
-                            np.asarray(
-                                values[local, component, left[applicable], right[applicable]],
-                                dtype=np.float64,
-                            )
+                            values[local, component, left[applicable], right[applicable]]
                         )
-    flattened = tuple(
-        np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float64)
-        for chunks in component_samples
-    )
-    return fit_streamed_target_normalizer(
-        target_id=target_id,
-        component_names=tuple(declaration.components),
-        component_kinds=target_component_kinds(target_id),
-        component_samples=flattened,
-        fitting_population=fitting_population,
-        split=split,
-        selected_jet_count=selected_total,
-        selected_jet_identity_sha256=jet_digest.hexdigest(),
-        sampled_pair_identity_sha256=pair_digest.hexdigest(),
-        parent_hashes=parent_hashes,
-        source=source,
-    )
+    flattened = tuple(sample.array() for sample in component_samples)
+    try:
+        return fit_streamed_target_normalizer(
+            target_id=target_id,
+            component_names=tuple(declaration.components),
+            component_kinds=target_component_kinds(target_id),
+            component_samples=flattened,
+            fitting_population=fitting_population,
+            split=split,
+            selected_jet_count=selected_total,
+            selected_jet_identity_sha256=jet_digest.hexdigest(),
+            sampled_pair_identity_sha256=pair_digest.hexdigest(),
+            parent_hashes=parent_hashes,
+            source=source,
+        )
+    finally:
+        del flattened
+        temporary.cleanup()
 
 
 def build_scale_target_completion(

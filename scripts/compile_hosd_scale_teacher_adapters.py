@@ -54,12 +54,21 @@ def main(argv: list[str] | None = None) -> int:
         expected_contract=SCALE_TREE_WAVE_COMPLETION_CONTRACT,
     )
     screening = load_hashed_json(args.screening_registry)
+    active_tree_resource = load_hashed_json(trees["tree_resource_path"])
+    active_tree_backend = load_hashed_json(trees["backend_manifest_path"])
+    if (
+        active_tree_resource["content_hash"] != trees["tree_resource_sha256"]
+        or active_tree_backend["content_hash"] != trees["backend_manifest_sha256"]
+    ):
+        raise ValueError("scale adapter active tree parents differ from tree wave")
     for name, artifact in (
         ("teacher lock", lock),
         ("input completion", inputs),
         ("normalizer completion", normalizers),
         ("screening registry", screening),
         ("tree completion", trees),
+        ("active tree resource", active_tree_resource),
+        ("active tree backend", active_tree_backend),
     ):
         if (
             artifact.get("source") is not None
@@ -141,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
                         "backend_manifest_sha256"
                     ],
                 },
+                "tree_resource_path": str(Path(trees["tree_resource_path"]).resolve()),
+                "tree_backend_manifest_path": str(
+                    Path(trees["backend_manifest_path"]).resolve()
+                ),
             }
         ),
     }

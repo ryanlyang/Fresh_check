@@ -34,6 +34,7 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (  # noqa: E
     bind_fitted_region_normalizer,
     build_stage_a_normalizer_bundle,
     load_authenticated_tree_selection,
+    stage_a_normalizer_population_registry_path,
     validate_stage_a_contract_bundle,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
@@ -76,7 +77,7 @@ def _stage_a_contracts(root: Path) -> dict[str, dict[str, Any]]:
         ),
         "hlt_v3_profile": root / "inputs" / "hlt_v3_profile.json",
         "normalizer_population_registry": (
-            root / "registry" / "normalizer_population_registry.json"
+            stage_a_normalizer_population_registry_path(root)
         ),
     }
     return {name: load_hashed_json(path) for name, path in names.items()}

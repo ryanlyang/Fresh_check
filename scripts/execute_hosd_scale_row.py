@@ -97,9 +97,14 @@ def _fit_cache_normalizer(
 
     cache = _load_cache(cache_path)
     kinds = _component_kinds(registry, target_id_for_kinds)
+    statistics_target_id = (
+        target_id_for_kinds
+        if target_id_for_kinds in cache.values
+        else next(iter(cache.manifest["persisted_target_ids"]))
+    )
     return fit_sharded_target_normalizer(
         [cache],
-        target_id=target_id_for_kinds,
+        target_id=statistics_target_id,
         fitting_population="target_scale",
         source=source,
         component_kinds=kinds,
@@ -254,6 +259,14 @@ def _target(args, root: Path, campaign, plan) -> int:
             if trees is not None
             else None
         )
+        if tree_completion is not None:
+            if (
+                load_hashed_json(tree_completion["tree_resource_path"])["content_hash"]
+                != tree_completion["tree_resource_sha256"]
+                or load_hashed_json(tree_completion["backend_manifest_path"])["content_hash"]
+                != tree_completion["backend_manifest_sha256"]
+            ):
+                raise ValueError("scale pair active tree parents differ")
         normalizer = fit_pair_normalizer_from_views(
             target_id=args.target_id,
             view_paths_by_replica=views,

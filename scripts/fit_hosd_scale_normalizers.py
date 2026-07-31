@@ -167,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_input_schema = load_hashed_json(args.raw_input_schema)
     hlt_profile = load_hashed_json(args.hlt_profile)
     tree_resource = load_hashed_json(args.tree_resource)
+    active_tree_backend = load_hashed_json(tree_completion["backend_manifest_path"])
     for name, artifact in (
         ("input completion", input_completion),
         ("tree completion", tree_completion),
@@ -175,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         ("raw input schema", raw_input_schema),
         ("HLT profile", hlt_profile),
         ("tree resource", tree_resource),
+        ("tree backend", active_tree_backend),
     ):
         if (
             artifact.get("source") is not None
@@ -186,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         != input_completion["content_hash"]
     ):
         raise ValueError("Stage-J tree/input completion lineage differs")
+    if active_tree_backend["content_hash"] != tree_completion["backend_manifest_sha256"]:
+        raise ValueError("Stage-J active tree backend differs from tree wave")
     if tree_completion.get("tree_resource_sha256") != tree_resource["content_hash"]:
         raise ValueError("Stage-J active tree resource differs from tree wave")
     scale_manifest_sha = require_sha256(

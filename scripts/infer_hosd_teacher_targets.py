@@ -127,7 +127,16 @@ def main(argv: list[str] | None = None) -> int:
         tree_manifest = load_hashed_json(
             Path(config["tree_cache_dir"]) / "manifest.json"
         )
-        parent_hashes["region_tree_resource"] = tree_manifest["content_hash"]
+        parent_hashes["region_tree_split"] = tree_manifest["content_hash"]
+        expected_tree_parents = config.get("tree_expected_parents")
+        if not isinstance(expected_tree_parents, dict):
+            raise ValueError("teacher inference lacks exact tree-parent lineage")
+        parent_hashes["region_tree_resource"] = expected_tree_parents[
+            "tree_resource_sha256"
+        ]
+        parent_hashes["region_tree_backend"] = expected_tree_parents[
+            "backend_manifest_sha256"
+        ]
     output_ids = [f"T_OFFLINE_LOGITS_{args.teacher_id}"]
     if args.teacher_id == "O_BASE":
         output_ids.append("T_OFFLINE_POOLED_LATENT")

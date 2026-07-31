@@ -3369,11 +3369,20 @@ resource consumers can obtain a lazy shard path; it revalidates shard bytes
 again immediately before loading. Cache validation streams identity coverage instead of constructing a
 population-wide identity list, set, dictionary, or ordered tree tuple.
 Persisted target consumers and REGION-tree consumers likewise retain at most
-one shard per bound family/replica. Graph workers bind REGION trees and
+one shard per bound family/replica. Scale residuals are published from paired
+canonical/HLT shard ranges; robust component quantiles use disk-backed
+component streams; latent covariance uses deterministic float64 shard sums
+and cross-products; and streamed pair statistics use disk-backed samples.
+Teacher inference keeps the authenticated input arrays memory-mapped and
+loads only tree rows intersecting its 2,048-event output batch. Every target,
+normalizer, teacher, and graph tree consumer requires exact active input-byte,
+tree-resource, and backend-manifest parents. Graph workers bind REGION trees and
 native-relation targets only when their locked graph definition requires
 them. Production resource derivation requires completed representative tasks
-for `scale_input_prepare`, `scale_tree_build`, `scale_target_build`, and the
-worst-case `scale_graph_train`. Each source-bound projection is derived from
+for `scale_input_prepare`, `scale_tree_build`, `scale_target_build`,
+`scale_teacher_target_inference`, and the worst-case `scale_graph_train`.
+Target layout evidence authenticates each shard manifest and NPZ hash before
+reading array headers. Each source-bound projection is derived from
 authenticated NPY/NPZ layout byte accounting, records its coordinate type and
 resident shard size, and must remain within the registered Tigris limit.
 
@@ -3416,12 +3425,13 @@ same-source miniature are implemented. The exact operator workflow is
 `teacher_logit_reco/HOSD_RESEARCH_COMPUTE_RUNBOOK.md`. Production readiness
 remains intentionally false until that real miniature traverses Sections
 25.9 and 29; no local or synthetic test can set the acceptance artifact.
-In particular, the full authorization contract is version 6 and fails closed
-unless the resource preflight binds all four representative Stage-J memory
+In particular, the full authorization contract is version 7 and fails closed
+unless the resource preflight binds all five representative Stage-J memory
 projections. Population-resident input preparation is projected to 3M from
 authenticated per-event layout bytes. Bounded tree workers are projected at
 the exact 10,000-event production shard, target workers at the exact
-2,048-event production shard, and worst-case graph workers at the simultaneous
+2,048-event production shard, teacher-output inference at its 2,048-event
+batch plus one authenticated 10,000-event tree shard, and worst-case graph workers at the simultaneous
 production tree/input/target resident combination. Tree bytes use the
 analytical 128-leaf/255-node maximum and are checked against observed
 miniature layouts, so a miniature final shard smaller than production cannot

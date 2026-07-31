@@ -45,6 +45,9 @@ STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v2"
 STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v1"
 STAGE_A_NORMALIZER_BUNDLE_CONTRACT = "retb_stage_a_normalizer_bundle_v1"
 STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v2"
+STAGE_A_NORMALIZER_POPULATION_FILENAME = (
+    "stage_a_normalizer_population_registry.json"
+)
 
 STAGE_A_OFFLINE_TREE_ROLES = ("model_train", "val_stop", "val_design")
 STAGE_A_HLT_TREE_VIEWS = (
@@ -52,6 +55,18 @@ STAGE_A_HLT_TREE_VIEWS = (
     ("val_stop", 0, "R_FIXED"),
     ("val_design", 0, "R_FIXED"),
 )
+
+
+def stage_a_normalizer_population_registry_path(
+    campaign_root: str | Path,
+) -> Path:
+    """Return the Stage-A lineage registry path, distinct from Step-1 policy."""
+
+    return (
+        Path(campaign_root)
+        / "registry"
+        / STAGE_A_NORMALIZER_POPULATION_FILENAME
+    )
 
 
 def build_stage_a_contract_bundle(
@@ -251,7 +266,7 @@ def publish_stage_a_contract_bundle(
         ),
         "hlt_v3_profile": root / "inputs" / "hlt_v3_profile.json",
         "normalizer_population_registry": (
-            root / "registry" / "normalizer_population_registry.json"
+            stage_a_normalizer_population_registry_path(root)
         ),
     }
     return {
@@ -738,6 +753,7 @@ __all__ = [
     "STAGE_A_HLT_TREE_VIEWS",
     "STAGE_A_INPUT_AUDIT_CONTRACT",
     "STAGE_A_NORMALIZER_BUNDLE_CONTRACT",
+    "STAGE_A_NORMALIZER_POPULATION_FILENAME",
     "STAGE_A_OFFLINE_TREE_ROLES",
     "STAGE_A_TREE_INDEX_CONTRACT",
     "bind_fitted_normalizer",
@@ -750,6 +766,7 @@ __all__ = [
     "load_authenticated_tree_selection",
     "padding_is_exact_zero",
     "publish_stage_a_contract_bundle",
+    "stage_a_normalizer_population_registry_path",
     "validate_stage_a_contract_bundle",
     "validate_stage_a_input_audit",
     "validate_stage_a_normalizer_bundle",
