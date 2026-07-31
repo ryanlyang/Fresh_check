@@ -22,6 +22,96 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
+SCALE_SHARD_SAMPLER_CONTRACT = "hosd_scale_shard_aware_sampler_v1"
+SCALE_SAMPLER_WINDOW_EVENTS = 2_048
+
+
+class _TargetShardCoordinator:
+    """Retain at most one decoded replica shard for one target coordinate."""
+
+    def __init__(self) -> None:
+        self.active_store = None
+        self.maximum_simultaneously_resident = 0
+
+    def activate(self, store: Any) -> None:
+        if self.active_store is store:
+            return
+        if self.active_store is not None:
+            self.active_store.clear_cached_shard()
+        self.active_store = store
+        self.maximum_simultaneously_resident = max(
+            self.maximum_simultaneously_resident, 1
+        )
+
+
+def _static_target_stores(*fields: Any) -> tuple[Any, ...]:
+    stores = {}
+    for field in fields:
+        rows = field.values() if isinstance(field, Mapping) else (field,)
+        for row in rows:
+            raw = getattr(row, "raw", row)
+            store = getattr(raw, "store", None)
+            if store is not None:
+                stores[id(store)] = store
+    return tuple(stores.values())
+
+
+class DeterministicScaleShardSampler(
+    torch.utils.data.Sampler if torch is not None else object
+):
+    """Shuffle bounded locality groups without a population-sized permutation."""
+
+    contract = SCALE_SHARD_SAMPLER_CONTRACT
+
+    def __init__(self, data_source: Sequence[Any], *, seed: int) -> None:
+        if torch is None:
+            raise RuntimeError("PyTorch is required for scale shard sampling")
+        if getattr(data_source, "logical_role", None) != "scale_train":
+            raise ValueError("scale shard sampler requires scale_train data")
+        self.data_source = data_source
+        self.seed = int(seed)
+        self.epoch = 1
+        boundaries = tuple(int(value) for value in data_source.locality_boundaries())
+        if (
+            len(boundaries) < 2
+            or boundaries[0] != 0
+            or boundaries[-1] != len(data_source)
+            or any(right <= left for left, right in zip(boundaries, boundaries[1:]))
+        ):
+            raise ValueError("scale shard locality boundaries differ")
+        self.boundaries = boundaries
+
+    def set_epoch(self, epoch: int) -> None:
+        if int(epoch) <= 0:
+            raise ValueError("sampler epoch is one-based")
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed * 1_000_003 + self.epoch)
+        segment_order = torch.randperm(
+            len(self.boundaries) - 1, generator=generator
+        ).tolist()
+        for segment in segment_order:
+            start, stop = self.boundaries[segment : segment + 2]
+            by_replica: dict[int, list[int]] = {}
+            for index in range(start, stop):
+                replica = int(self.data_source.replica_for_index(index))
+                by_replica.setdefault(replica, []).append(index)
+            replica_keys = sorted(by_replica)
+            replica_order = torch.randperm(
+                len(replica_keys), generator=generator
+            ).tolist()
+            for ordinal in replica_order:
+                indices = by_replica[replica_keys[ordinal]]
+                within = torch.randperm(len(indices), generator=generator).tolist()
+                for offset in within:
+                    yield indices[offset]
+
+    def __len__(self) -> int:
+        return len(self.data_source)
+
+
 def _normalizer_row(normalizer: Mapping[str, Any], target_id: str) -> Mapping[str, Any]:
     validate_target_normalizer(normalizer)
     rows = [row for row in normalizer["targets"] if row["target_id"] == target_id]
@@ -218,14 +308,35 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
     def __len__(self) -> int:
         return len(self.identities)
 
+    def replica_for_index(self, index: int) -> int:
+        return int(
+            replica_for(
+                policy=self.realization_policy,
+                logical_role=self.logical_role,
+                epoch=self.zero_based_epoch,
+                canonical_identity=self.identities[int(index)],
+            )
+        )
+
+    def locality_boundaries(self) -> tuple[int, ...]:
+        boundaries = {0, len(self)}
+        if self.logical_role == "scale_train":
+            boundaries.update(
+                range(
+                    SCALE_SAMPLER_WINDOW_EVENTS,
+                    len(self),
+                    SCALE_SAMPLER_WINDOW_EVENTS,
+                )
+            )
+        if self.region_trees_by_replica is not None:
+            for rows in self.region_trees_by_replica.values():
+                split = getattr(rows, "split", None)
+                boundaries.update(getattr(split, "ends", ()))
+        return tuple(sorted(boundaries))
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         identity = self.identities[index]
-        replica = replica_for(
-            policy=self.realization_policy,
-            logical_role=self.logical_role,
-            epoch=self.zero_based_epoch,
-            canonical_identity=identity,
-        )
+        replica = self.replica_for_index(index)
         arrays = self.replicas[int(replica)]
         source_index = int(self.source_indices_by_replica[int(replica)][index])
         return {
@@ -284,6 +395,8 @@ class AuxiliaryTargetDataset(torch.utils.data.Dataset if torch is not None else 
         self.streamed_target = streamed_target
         self.values = target_values
         self.masks = target_masks
+        self.target_cache_coordinator = None
+        self.target_stores: tuple[Any, ...] = ()
         if static:
             if target_values is None or target_masks is None:
                 raise ValueError("static target values and masks must be paired")
@@ -302,7 +415,26 @@ class AuxiliaryTargetDataset(torch.utils.data.Dataset if torch is not None else 
                     raise ValueError(
                         "replica-specific target coverage differs from HLT views"
                     )
+            self.target_cache_coordinator = _TargetShardCoordinator()
+            self.target_stores = _static_target_stores(
+                target_values, target_masks
+            )
+            for store in self.target_stores:
+                store.bind_cache_coordinator(self.target_cache_coordinator)
         self.identities = base_dataset.identities
+
+    @property
+    def logical_role(self) -> str:
+        return str(self.base_dataset.logical_role)
+
+    def replica_for_index(self, index: int) -> int:
+        return self.base_dataset.replica_for_index(index)
+
+    def locality_boundaries(self) -> tuple[int, ...]:
+        boundaries = set(self.base_dataset.locality_boundaries())
+        for store in self.target_stores:
+            boundaries.update(int(value) for value in store.ends)
+        return tuple(sorted(boundaries))
 
     def set_epoch(self, epoch: int) -> None:
         self.base_dataset.set_epoch(epoch)
@@ -313,10 +445,13 @@ class AuxiliaryTargetDataset(torch.utils.data.Dataset if torch is not None else 
     @staticmethod
     def _select(value: Any, replica: int, index: int) -> np.ndarray:
         array = value[int(replica)] if isinstance(value, Mapping) else value
-        return np.asarray(array[index])
+        # Detach the event row so replica eviction cannot retain its archive.
+        return np.array(array[index], copy=True)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        sample = dict(self.base_dataset[index])
+    def attach_target(
+        self, index: int, base_sample: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        sample = dict(base_sample)
         if self.streamed_target is not None:
             target_sample = (
                 sample
@@ -332,6 +467,9 @@ class AuxiliaryTargetDataset(torch.utils.data.Dataset if torch is not None else 
         sample["target"] = np.asarray(target, dtype=np.float32)
         sample["target_mask"] = np.asarray(mask, dtype=bool)
         return sample
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.attach_target(index, self.base_dataset[index])
 
 
 def collate_auxiliary_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -354,7 +492,11 @@ def make_auxiliary_loader(
     batch_size: int,
 ) -> Any:
     sampler = (
-        DeterministicExpertSampler(dataset, seed=int(seed))
+        (
+            DeterministicScaleShardSampler(dataset, seed=int(seed))
+            if dataset.logical_role == "scale_train"
+            else DeterministicExpertSampler(dataset, seed=int(seed))
+        )
         if training
         else torch.utils.data.SequentialSampler(dataset)
     )
@@ -370,7 +512,10 @@ def make_auxiliary_loader(
 
 __all__ = [
     "AuxiliaryTargetDataset",
+    "DeterministicScaleShardSampler",
     "HLTArrayDataset",
+    "SCALE_SHARD_SAMPLER_CONTRACT",
+    "SCALE_SAMPLER_WINDOW_EVENTS",
     "StreamedHLTTarget",
     "collate_auxiliary_batch",
     "make_auxiliary_loader",

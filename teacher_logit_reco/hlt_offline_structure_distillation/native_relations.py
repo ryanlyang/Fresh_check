@@ -21,7 +21,7 @@ from .target_cache import load_target_cache, load_target_cache_sharded
 from .target_schemas import target_declarations
 
 
-NATIVE_RELATION_TARGET_CONTRACT = "hosd_native_relation_target_v2"
+NATIVE_RELATION_TARGET_CONTRACT = "hosd_native_relation_target_v3"
 NATIVE_RELATION_WAVE_CONTRACT = "hosd_native_relation_target_wave_v1"
 
 
@@ -206,7 +206,7 @@ def materialize_native_relation_target(
     artifact = with_content_hash(
         {
             "contract": NATIVE_RELATION_TARGET_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -221,6 +221,9 @@ def materialize_native_relation_target(
             "concatenated_dimension": 545,
             "availability_dimension": 7,
             "event_count": len(cache.identities),
+            "identity_order_sha256": cache.manifest[
+                "canonical_identity_order_sha256"
+            ],
             "npz_filename": output.name,
             "npz_sha256": digest,
             "storage_layout": "compressed_npz_plus_authenticated_npy_mmap_v1",
@@ -304,7 +307,7 @@ def materialize_native_relation_target_from_family_caches(
     artifact = with_content_hash(
         {
             "contract": NATIVE_RELATION_TARGET_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -329,6 +332,9 @@ def materialize_native_relation_target_from_family_caches(
             "concatenated_dimension": 545,
             "availability_dimension": 7,
             "event_count": len(first.identities),
+            "identity_order_sha256": first.manifest[
+                "canonical_identity_order_sha256"
+            ],
             "npz_filename": output.name,
             "npz_sha256": digest,
             "storage_layout": "compressed_npz_plus_authenticated_npy_mmap_v1",

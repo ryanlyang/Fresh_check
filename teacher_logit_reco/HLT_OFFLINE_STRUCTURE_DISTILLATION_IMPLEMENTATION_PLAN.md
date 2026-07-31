@@ -3273,8 +3273,15 @@ and HLT-only export contracts are in `feedback.py`, `stage_e_data_factory.py`,
 and `stage_e_training.py`, with CLI and regression coverage in
 `scripts/train_hosd_feedback.py`, `scripts/select_hosd_feedback.py`, and
 `tests/test_hlt_offline_structure_distillation_step7.py`.
-The production loader uses the graph-independent `hosd_data_order_v1` sampler
-seed for discovery, confirmation, and scale manifests. Exact-HLT TRACK and
+The production loader uses the graph-independent `hosd_data_order_v2` seed
+contract for discovery, confirmation, and scale manifests. Discovery and
+confirmation retain their deterministic full-population permutation, while
+`scale_train` uses the versioned `hosd_scale_shard_aware_sampler_v1`: it
+deterministically shuffles authenticated locality segments, replica groups,
+and events within each group without constructing a population-sized
+permutation. The base scale view contributes fixed boundaries no more than
+2,048 events apart even when a graph has neither static targets nor REGION
+trees, so sampler working memory is bounded for every scale graph. Exact-HLT TRACK and
 REGION rows are reference baselines, are ineligible to become
 `BEST_FEEDBACK`, and remain separately eligible for later overall finalist
 selection. `MEAN_ONLY` is exactly HET-parameter-matched with inert trainable
@@ -3368,8 +3375,17 @@ hashes, parents, and canonical identity coverage before target, graph, or
 resource consumers can obtain a lazy shard path; it revalidates shard bytes
 again immediately before loading. Cache validation streams identity coverage instead of constructing a
 population-wide identity list, set, dictionary, or ordered tree tuple.
-Persisted target consumers and REGION-tree consumers likewise retain at most
-one shard per bound family/replica. Scale residuals are published from paired
+Persisted scale-target consumers retain at most one decoded replica shard per
+static target coordinate, and REGION-tree consumers retain one decoded shard
+across replicas. The shard-aware scale sampler groups events by the union of
+authenticated target/tree boundaries and selected replica, so archive decode
+counts grow with locality segments times target coordinates rather than with
+events times combination members. Event rows are detached before replica
+eviction. Standalone residual graphs therefore retain one target shard, not
+four, while combinations retain one per simultaneous static coordinate and
+resource authorization budgets that exact multiplicity. Combination members share one
+authenticated HLT base dataset and fetch it once per event. Only a member
+whose live streamed target is `T_HLT_REGION_PAIR_8` binds REGION trees. Scale residuals are published from paired
 canonical/HLT shard ranges; robust component quantiles use disk-backed
 component streams; latent covariance uses deterministic float64 shard sums
 and cross-products; and streamed pair statistics use disk-backed samples.
@@ -3378,7 +3394,9 @@ loads only tree rows intersecting its 2,048-event output batch. Every target,
 normalizer, teacher, and graph tree consumer requires exact active input-byte,
 tree-resource, and backend-manifest parents. Graph workers bind REGION trees and
 native-relation targets only when their locked graph definition requires
-them. Shard publication authenticates the canonical identity population once
+them. Scale labels validate against the mmap input order hash without Python
+identity tuples or sets, and combination alignment compares authenticated
+counts and order hashes positionally. Shard publication authenticates the canonical identity population once
 and reuses that attestation for every new or reusable shard. Scale graph
 identity alignment is positional only after count and order-hash equality;
 the retained identity sequence, target arrays, and positional indices are
@@ -3389,8 +3407,11 @@ for `scale_input_prepare`, `scale_tree_build`, `scale_target_build`,
 `scale_teacher_target_inference`, and the worst-case `scale_graph_train`.
 Target layout evidence authenticates each shard manifest and NPZ hash before
 reading array headers. It enumerates only the active scale input, tree,
-target, and teacher-output completion lineages, checks every exact tree parent
-and target-manifest hash, and binds all four completion hashes. Each source-bound projection is derived from
+target, teacher-output, and native-relation completion lineages, checks every exact tree parent
+and target-manifest hash, and binds all five completion hashes. Exact
+shortlisted graph definitions determine simultaneous input, tree, target,
+native-relation, and KD store multiplicities; the worst graph is projected at
+the registered 10,000/2,048-event production dimensions. Each source-bound projection is derived from
 authenticated NPY/NPZ layout byte accounting, records its coordinate type and
 resident shard size, and must remain within the registered Tigris limit.
 
@@ -3433,7 +3454,7 @@ same-source miniature are implemented. The exact operator workflow is
 `teacher_logit_reco/HOSD_RESEARCH_COMPUTE_RUNBOOK.md`. Production readiness
 remains intentionally false until that real miniature traverses Sections
 25.9 and 29; no local or synthetic test can set the acceptance artifact.
-In particular, the full authorization contract is version 7 and fails closed
+In particular, the full authorization contract is version 10 and fails closed
 unless the resource preflight binds all five representative Stage-J memory
 projections. Population-resident input preparation is projected to 3M from
 authenticated per-event layout bytes. Bounded tree workers are projected at
@@ -3456,7 +3477,7 @@ values. The inherited RETB campaign-storage contract and the HOSD
 target-cache storage measurement remain distinct artifacts; the latter enters
 the HOSD resource preflight and is never passed as an RETB campaign parent.
 
-Final source-closure audit on 2026-07-31: all 112 HOSD regression tests pass,
+Final source-closure audit on 2026-07-31: all 151 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD
 command-line parsers complete `--help`. Stage J produces its scale inputs,
 trees, offline/shared-HLT normalizers, scale teacher adapters, and optional

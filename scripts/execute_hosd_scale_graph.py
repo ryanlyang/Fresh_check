@@ -300,7 +300,13 @@ def _scale_member_manifest(
         },
         "target": scale_target,
     }
-    if scale_trees:
+    requires_region_tree = (
+        scale_target.get("mode") == "stream_same_view"
+        and row["target_id"] == "T_HLT_REGION_PAIR_8"
+    )
+    if requires_region_tree and not scale_trees:
+        raise ValueError("scale REGION member lacks its authenticated trees")
+    if requires_region_tree:
         tree_completion = load_hashed_json(
             root / "scale_up" / "trees" / "completion.json"
         )

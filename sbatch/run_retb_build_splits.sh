@@ -11,9 +11,14 @@ PROJECT_DIR="${PROJECT_DIR:-/home/ryreu/atlas/Fresh_check}"
 source "${PROJECT_DIR}/sbatch/retb_common.sh"
 retb_require_campaign_root
 retb_activate
-sizes=(500000 100000 0 50000 300000)
-if [[ "${RETB_MINIATURE:-0}" == "1" ]]; then
-  sizes=(20 20 0 10 20)
+readarray -t sizes < <(
+  python -c \
+    'import json,sys; sizes=json.load(open(sys.argv[1]))["split_sizes"]; print(sizes["model_train"]); print(sizes["model_val"]); print(sizes["stack_train"]); print(sizes["stack_val"]); print(sizes["final_test"])' \
+    "${CAMPAIGN_ROOT}/job_ledgers/production_graph.json"
+)
+if [[ "${#sizes[@]}" -ne 5 ]]; then
+  echo "RETB production graph split-size vector differs" >&2
+  exit 2
 fi
 mkdir -p "${CAMPAIGN_ROOT}/bootstrap"
 python scripts/build_jetclass_splits.py \

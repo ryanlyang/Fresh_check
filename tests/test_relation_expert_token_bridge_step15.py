@@ -156,6 +156,15 @@ def test_complete_graph_covers_stages_selectors_scale_and_two_locks() -> None:
     }
     assert graph["negative_campaign_continues_to_final_report"] is True
     assert graph["performance_based_termination"] is False
+    expected_sizes = {
+        "model_train": 500_000,
+        "model_val": 100_000,
+        "stack_train": 0,
+        "stack_val": 50_000,
+        "final_test": 300_000,
+        "scale_train": 3_000_000,
+    }
+    assert graph["split_sizes"] == expected_sizes
     for node in graph["nodes"]:
         assert node["dependency_mode"] == "afterok"
         assert node["performance_warning_blocks_dependency"] is False
@@ -164,6 +173,24 @@ def test_complete_graph_covers_stages_selectors_scale_and_two_locks() -> None:
         if node["array"] is not None:
             assert node["array"]["maximum_concurrent_tasks"] > 0
             assert node["array"]["maximum_tasks"] >= node["array"]["smoke_tasks"]
+
+
+def test_miniature_graph_sizes_match_the_genuine_step1_identity_profile() -> None:
+    graph = _graph(miniature=True)
+    assert graph["split_sizes"] == {
+        "model_train": 20,
+        "model_val": 20,
+        "stack_train": 0,
+        "stack_val": 10,
+        "final_test": 20,
+        "scale_train": 40,
+    }
+    drifted = dict(graph)
+    drifted["split_sizes"] = {**graph["split_sizes"], "model_train": 400}
+    drifted.pop("content_hash")
+    drifted = with_content_hash(drifted)
+    with pytest.raises(ValueError, match="scientific controls"):
+        validate_production_graph(drifted)
 
 
 def test_node_execution_registry_covers_every_worker_and_manifest_producer() -> None:
@@ -554,6 +581,9 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     array_launcher = (
         ROOT / "sbatch" / "run_retb_array_launcher.sh"
     ).read_text()
+    split_worker = (
+        ROOT / "sbatch" / "run_retb_build_splits.sh"
+    ).read_text()
     assert "--dry-run|--smoke-simulate|--smoke-submit" in submitter
     assert "print_retb_submission_plan.py" in submitter
     assert "dispatch_mode" in submitter
@@ -586,6 +616,8 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert 'cd "${PROJECT_DIR}"' in common
     assert "retb_validate_frozen_source" in common
     assert "Frozen RETB source checkout became dirty" in common
+    assert 'json.load(open(sys.argv[1]))["split_sizes"]' in split_worker
+    assert "sizes=(20 20 0 10 20)" not in split_worker
     assert "/var/spool" not in common + submitter + array_launcher
 
     workers = {row["worker"] for row in graph["nodes"]}

@@ -24,7 +24,7 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v30"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v31"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v14"
 )
@@ -33,7 +33,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v25"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v26"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -69,12 +69,12 @@ PRODUCTION_SPLIT_SIZES = {
     "scale_train": 3_000_000,
 }
 MINIATURE_SPLIT_SIZES = {
-    "model_train": 400,
-    "model_val": 640,
+    "model_train": 20,
+    "model_val": 20,
     "stack_train": 0,
-    "stack_val": 100,
-    "final_test": 320,
-    "scale_train": 400,
+    "stack_val": 10,
+    "final_test": 20,
+    "scale_train": 40,
 }
 
 # These nodes are submitted as their declared worker directly.  Every other
@@ -1562,7 +1562,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 28,
+            "schema_version": 29,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1657,7 +1657,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 28:
+    if int(payload.get("schema_version", -1)) != 29:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1739,8 +1739,22 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
             | set(STATIC_EXPERIMENT_MANIFEST_NODES)
         ),
     )
+    profile = payload.get("campaign_profile")
+    if profile not in {
+        "nonproduction_miniature_test",
+        "production_500k_100k_50k_300k_scale3m",
+    }:
+        raise ValueError("production graph campaign profile differs")
+    expected_split_sizes = dict(
+        MINIATURE_SPLIT_SIZES
+        if profile == "nonproduction_miniature_test"
+        else PRODUCTION_SPLIT_SIZES
+    )
     if (
         payload["degradation_profile"] != "D_NOMINAL"
+        or payload.get("split_sizes") != expected_split_sizes
+        or payload.get("scientific_results_allowed")
+        != (profile != "nonproduction_miniature_test")
         or payload.get("source_execution_policy")
         != {
             "submission_checkout_role": "mutable_control_plane_only",
@@ -2375,7 +2389,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 24,
+            "schema_version": 25,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),

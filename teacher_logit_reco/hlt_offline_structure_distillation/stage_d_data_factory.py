@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -17,6 +18,7 @@ from .authenticated_tree import AuthenticatedTreeSplit
 from .auxiliary_data import (
     AuxiliaryTargetDataset,
     HLTArrayDataset,
+    SCALE_SHARD_SAMPLER_CONTRACT,
     StreamedHLTTarget,
     make_auxiliary_loader,
 )
@@ -36,6 +38,8 @@ LOADER_MANIFEST_CONTRACT = "hosd_stage_d_loader_manifest_v1"
 LOADER_MANIFEST_CONTRACT_V2 = "hosd_stage_d_loader_manifest_v2"
 LOADER_MANIFEST_CONTRACT_V3 = "hosd_stage_d_loader_manifest_v3"
 LOADER_MANIFEST_CONTRACT_V4 = "hosd_stage_d_loader_manifest_v4"
+LOADER_MANIFEST_CONTRACT_V5 = "hosd_stage_d_loader_manifest_v5"
+DATA_ORDER_CONTRACT = "hosd_data_order_v2"
 ROLES = ("model_train", "val_stop", "design_select")
 
 
@@ -50,8 +54,18 @@ def data_order_seed(pipeline_seed: int, role: str) -> int:
         "design_confirm",
     }:
         raise ValueError("data-order role differs")
-    payload = f"hosd_data_order_v1\0{int(pipeline_seed)}\0{str(role)}"
+    payload = f"{DATA_ORDER_CONTRACT}\0{int(pipeline_seed)}\0{str(role)}"
     return int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8], 16)
+
+
+def sampler_contract(role: str) -> str:
+    if role == "scale_train":
+        return SCALE_SHARD_SAMPLER_CONTRACT
+    if role == "model_train":
+        return "retb_deterministic_full_permutation_sampler_v1"
+    if role in {"val_stop", "design_select", "design_confirm"}:
+        return "torch_sequential_sampler_v1"
+    raise ValueError("data-order sampler role differs")
 
 
 def build_default_stage_d_role_definitions(
@@ -348,8 +362,8 @@ def build_stage_d_loader_manifest(
         checked[role] = definition
     return with_content_hash(
         {
-            "contract": LOADER_MANIFEST_CONTRACT_V4,
-            "schema_version": 4,
+            "contract": LOADER_MANIFEST_CONTRACT_V5,
+            "schema_version": 5,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -360,7 +374,10 @@ def build_stage_d_loader_manifest(
             "roles": checked,
             "evaluation_role": evaluation_role,
             "training_role": training_role,
-            "data_order_contract": "hosd_data_order_v1",
+            "data_order_contract": DATA_ORDER_CONTRACT,
+            "sampler_contract_by_role": {
+                role: sampler_contract(role) for role in roles
+            },
             "sampler_seed_by_role": {
                 role: data_order_seed(int(row["pipeline_seed"]), role)
                 for role in roles
@@ -396,6 +413,50 @@ def _labels(path: Path) -> tuple[tuple[str, ...], np.ndarray, str]:
     return identities, labels, _file_sha(path)
 
 
+class _AuthenticatedIdentitySequence(Sequence[str]):
+    def __init__(self, values: Sequence[str], identity_hash: str) -> None:
+        self.values = values
+        self.identity_order_sha256 = require_sha256(
+            identity_hash, name="identity_order_sha256"
+        )
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+
+def _scale_labels(
+    path: Path,
+    authenticated_identities: Sequence[str],
+    authenticated_identity_hash: str,
+) -> tuple[Sequence[str], np.ndarray, str]:
+    """Validate scale labels without a population-sized Python tuple/set."""
+
+    with np.load(path, allow_pickle=False) as payload:
+        if not {"identities", "labels"}.issubset(payload.files):
+            raise ValueError("Stage-D scale labels lack identities/labels")
+        label_identities = payload["identities"]
+        labels = np.asarray(payload["labels"], dtype=np.int64)
+        label_hash = identity_order_sha256(label_identities)
+    if (
+        len(authenticated_identities) == 0
+        or len(label_identities) != len(authenticated_identities)
+        or label_hash != authenticated_identity_hash
+        or labels.shape != (len(authenticated_identities),)
+        or bool(((labels < 0) | (labels >= 10)).any())
+    ):
+        raise ValueError("Stage-D scale label population differs")
+    return (
+        _AuthenticatedIdentitySequence(
+            authenticated_identities, authenticated_identity_hash
+        ),
+        labels,
+        _file_sha(path),
+    )
+
+
 def _subset_indices(
     source_identities: Sequence[str],
     requested: Sequence[str],
@@ -420,10 +481,10 @@ def _subset_indices(
 
 def _load_hlt(
     caches: Mapping[str, Any],
-    identities: tuple[str, ...],
+    identities: Sequence[str] | None,
 ) -> tuple[
     dict[int, dict[str, np.ndarray]],
-    dict[int, np.ndarray],
+    dict[int, Sequence[int]],
     dict[str, str],
     str,
     str,
@@ -434,6 +495,7 @@ def _load_hlt(
     lineage = {}
     content_hashes = {}
     logical_roles, policies = set(), set()
+    canonical_source_hash = None
     for raw_replica, raw_path in sorted(caches.items(), key=lambda item: int(item[0])):
         replica, path = int(raw_replica), Path(raw_path)
         arrays, metadata = (
@@ -442,15 +504,27 @@ def _load_hlt(
             else load_hlt_v3_cache(path)
         )
         source_ids = arrays["identities"]
-        order = _subset_indices(
-            source_ids,
-            identities,
-            require_positional=str(metadata["logical_role"]) == "scale_train",
+        source_hash = metadata.get("identity_order_sha256")
+        if source_hash is None:
+            source_hash = identity_order_sha256(source_ids)
+        if canonical_source_hash is None:
+            canonical_source_hash = source_hash
+        elif source_hash != canonical_source_hash:
+            raise ValueError("Stage-D HLT replica identity orders differ")
+        order = (
+            range(len(source_ids))
+            if identities is None
+            else _subset_indices(
+                source_ids,
+                identities,
+                require_positional=str(metadata["logical_role"]) == "scale_train",
+            )
         )
         arrays_by_replica[replica] = {
             name: arrays[name]
             for name in ("tokens", "mask", "measurement_states", "identities")
         }
+        arrays_by_replica[replica]["identity_order_sha256"] = source_hash
         source_indices_by_replica[replica] = order
         lineage[f"hlt_replica_{replica}"] = metadata["content_hash"]
         content_hashes[replica] = metadata["array_content_sha256"]
@@ -474,8 +548,9 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
     def __init__(
         self,
         root: Path,
-        identities: tuple[str, ...],
+        identities: Sequence[str],
         expected_parents: Mapping[str, str],
+        cache_coordinator: Any | None = None,
     ) -> None:
         self.split = AuthenticatedTreeSplit(
             root,
@@ -484,6 +559,12 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
         )
         self._cached_shard = -1
         self._cached_rows: tuple[Mapping[str, Any], ...] = ()
+        self._cache_coordinator = cache_coordinator
+        self.decoded_shard_load_count = 0
+
+    def clear_cached_shard(self) -> None:
+        self._cached_shard = -1
+        self._cached_rows = ()
 
     def __len__(self) -> int:
         return len(self.split)
@@ -496,24 +577,42 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
         shard = self.split.shard_for_event(index)
         start = self.split.records[shard].start
         if shard != self._cached_shard:
+            if self._cache_coordinator is not None:
+                self._cache_coordinator.activate(self)
             _, rows = self.split.load_shard(shard)
+            self.decoded_shard_load_count += 1
             self._cached_rows = tuple(rows)
             self._cached_shard = shard
-        return self._cached_rows[index - start]
+        return copy.deepcopy(self._cached_rows[index - start])
+
+
+class _TreeShardCoordinator:
+    def __init__(self) -> None:
+        self.active_store = None
+
+    def activate(self, store: Any) -> None:
+        if self.active_store is store:
+            return
+        if self.active_store is not None:
+            self.active_store.clear_cached_shard()
+        self.active_store = store
 
 
 def _trees(
     paths: Mapping[str, Any],
-    identities: tuple[str, ...],
+    identities: Sequence[str],
     expected_parents: Mapping[str, Any],
 ) -> tuple[dict[int, tuple[Mapping[str, Any], ...]], dict[str, str]]:
     output, lineage = {}, {}
+    coordinator = _TreeShardCoordinator()
     for raw_replica, raw_path in sorted(paths.items(), key=lambda item: int(item[0])):
         replica, root = int(raw_replica), Path(raw_path)
         parents = expected_parents.get(str(replica))
         if not isinstance(parents, Mapping):
             raise ValueError("Stage-D tree definition lacks exact active parents")
-        output[replica] = _IdentityAlignedTreeShards(root, identities, parents)
+        output[replica] = _IdentityAlignedTreeShards(
+            root, identities, parents, cache_coordinator=coordinator
+        )
         lineage[f"tree_replica_{replica}"] = output[replica].split.manifest[
             "content_hash"
         ]
@@ -693,10 +792,11 @@ def load_stage_d_loaders_from_manifest(
     row: Mapping[str, Any],
     campaign: Mapping[str, Any],
     target_registry: Mapping[str, Any],
+    shared_base_datasets_by_role: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     del campaign_root, target_registry
     manifest = load_hashed_json(Path(manifest_path))
-    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V4:
+    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V5:
         raise ValueError("Stage-D loader manifest contract differs")
     evaluation_role = str(manifest.get("evaluation_role", "design_select"))
     if evaluation_role not in {"design_select", "design_confirm"}:
@@ -713,7 +813,9 @@ def load_stage_d_loaders_from_manifest(
         manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("row_id") != row["row_id"]
-        or manifest.get("data_order_contract") != "hosd_data_order_v1"
+        or manifest.get("data_order_contract") != DATA_ORDER_CONTRACT
+        or manifest.get("sampler_contract_by_role")
+        != {role: sampler_contract(role) for role in roles}
         or manifest.get("sampler_seed_by_role") != expected_sampler_seeds
     ):
         raise ValueError("Stage-D loader manifest lineage differs")
@@ -728,36 +830,89 @@ def load_stage_d_loaders_from_manifest(
     exact_hlt_runtime = None
     for role in roles:
         definition = manifest["roles"][role]
-        identities, labels, label_sha = _labels(Path(definition["labels"]))
-        loaded_hlt = _load_hlt(definition["hlt_caches"], identities)
-        compatibility_loader = len(loaded_hlt) == 5
-        if compatibility_loader:
-            # Compatibility for injected non-tree test loaders; real loaders
-            # always return authenticated content hashes.
-            (
-                hlt_arrays,
-                source_indices,
-                hlt_lineage,
-                logical_role,
-                realization_policy,
-            ) = loaded_hlt
-            hlt_content_hashes = {}
-        else:
-            (
-                hlt_arrays,
-                source_indices,
-                hlt_lineage,
-                logical_role,
-                realization_policy,
-                hlt_content_hashes,
-            ) = loaded_hlt
-        if role == "scale_train" and not compatibility_loader:
-            mmap_identities = hlt_arrays[min(hlt_arrays)]["identities"]
-            if identity_order_sha256(mmap_identities) != identity_order_sha256(
-                identities
+        shared_base = (
+            None
+            if shared_base_datasets_by_role is None
+            else shared_base_datasets_by_role.get(role)
+        )
+        if shared_base is not None:
+            label_sha = _file_sha(Path(definition["labels"]))
+            expected_hlt_paths = {
+                str(key): str(Path(value).resolve())
+                for key, value in sorted(definition["hlt_caches"].items())
+            }
+            expected_tree_paths = {
+                str(key): str(Path(value).resolve())
+                for key, value in sorted(definition.get("tree_caches", {}).items())
+            }
+            if (
+                label_sha != getattr(shared_base, "hosd_label_sha256", None)
+                or expected_hlt_paths
+                != getattr(shared_base, "hosd_hlt_cache_paths", None)
+                or (
+                    expected_tree_paths
+                    and expected_tree_paths
+                    != getattr(shared_base, "hosd_tree_cache_paths", None)
+                )
             ):
-                raise ValueError("scale labels and authenticated HLT identities differ")
-            identities = mmap_identities
+                raise ValueError("shared Stage-D base lineage differs")
+            identities = shared_base.identities
+            identity_hash = shared_base.identity_order_sha256
+            labels = shared_base.labels
+            hlt_lineage = dict(shared_base.hosd_hlt_lineage)
+            hlt_content_hashes = dict(shared_base.hosd_hlt_content_hashes)
+            tree_lineage = dict(shared_base.hosd_tree_lineage)
+            logical_role = shared_base.logical_role
+            realization_policy = shared_base.realization_policy
+            base = shared_base
+        else:
+            if role == "scale_train":
+                loaded_hlt = _load_hlt(definition["hlt_caches"], None)
+                compatibility_loader = len(loaded_hlt) == 5
+                if compatibility_loader:
+                    identities, labels, label_sha = _labels(
+                        Path(definition["labels"])
+                    )
+                    identity_hash = identity_order_sha256(identities)
+                else:
+                    mmap_identities = loaded_hlt[0][min(loaded_hlt[0])][
+                        "identities"
+                    ]
+                    identity_hash = loaded_hlt[0][min(loaded_hlt[0])][
+                        "identity_order_sha256"
+                    ]
+                    identities, labels, label_sha = _scale_labels(
+                        Path(definition["labels"]),
+                        mmap_identities,
+                        identity_hash,
+                    )
+            else:
+                identities, labels, label_sha = _labels(
+                    Path(definition["labels"])
+                )
+                loaded_hlt = _load_hlt(definition["hlt_caches"], identities)
+                compatibility_loader = len(loaded_hlt) == 5
+                identity_hash = identity_order_sha256(identities)
+            if compatibility_loader:
+                # Compatibility for injected non-tree test loaders; real loaders
+                # always return authenticated content hashes.
+                (
+                    hlt_arrays,
+                    source_indices,
+                    hlt_lineage,
+                    logical_role,
+                    realization_policy,
+                ) = loaded_hlt
+                hlt_content_hashes = {}
+            else:
+                (
+                    hlt_arrays,
+                    source_indices,
+                    hlt_lineage,
+                    logical_role,
+                    realization_policy,
+                    hlt_content_hashes,
+                ) = loaded_hlt
         expected_hlt_roles = {
             "model_train": {"model_train"},
             "scale_train": {"scale_train"},
@@ -770,13 +925,13 @@ def load_stage_d_loaders_from_manifest(
         lineage.update({f"{role}_{key}": value for key, value in hlt_lineage.items()})
         lineage[f"{role}_labels"] = label_sha
         trees = None
-        if definition.get("tree_caches"):
+        if shared_base is None and definition.get("tree_caches"):
             expected_tree_parents = definition.get("tree_expected_parents")
             if not isinstance(expected_tree_parents, Mapping):
                 raise ValueError("Stage-D tree consumers require exact parents")
             for replica, content_hash in hlt_content_hashes.items():
-                row = expected_tree_parents.get(str(replica), {})
-                if row.get("hlt_content_sha256") != content_hash:
+                parent = expected_tree_parents.get(str(replica), {})
+                if parent.get("hlt_content_sha256") != content_hash:
                     raise ValueError("Stage-D tree/HLT content parent differs")
             trees, tree_lineage = _trees(
                 definition["tree_caches"], identities, expected_tree_parents
@@ -784,15 +939,33 @@ def load_stage_d_loaders_from_manifest(
             lineage.update(
                 {f"{role}_{key}": value for key, value in tree_lineage.items()}
             )
-        base = HLTArrayDataset(
-            replica_arrays=hlt_arrays,
-            labels=labels,
-            identities=identities,
-            logical_role=logical_role,
-            realization_policy=realization_policy,
-            source_indices_by_replica=source_indices,
-            region_trees_by_replica=trees,
-        )
+        elif shared_base is not None and definition.get("tree_caches"):
+            lineage.update(
+                {f"{role}_{key}": value for key, value in tree_lineage.items()}
+            )
+        if shared_base is None:
+            base = HLTArrayDataset(
+                replica_arrays=hlt_arrays,
+                labels=labels,
+                identities=identities,
+                logical_role=logical_role,
+                realization_policy=realization_policy,
+                source_indices_by_replica=source_indices,
+                region_trees_by_replica=trees,
+            )
+            base.identity_order_sha256 = identity_hash
+            base.hosd_label_sha256 = label_sha
+            base.hosd_hlt_cache_paths = {
+                str(key): str(Path(value).resolve())
+                for key, value in sorted(definition["hlt_caches"].items())
+            }
+            base.hosd_tree_cache_paths = {
+                str(key): str(Path(value).resolve())
+                for key, value in sorted(definition.get("tree_caches", {}).items())
+            }
+            base.hosd_hlt_lineage = dict(hlt_lineage)
+            base.hosd_hlt_content_hashes = dict(hlt_content_hashes)
+            base.hosd_tree_lineage = dict(tree_lineage if trees is not None else {})
         target_definition = definition["target"]
         mode = str(target_definition["mode"])
         control_kind = target_definition.get("control_kind")
@@ -915,7 +1088,10 @@ def load_stage_d_loaders_from_manifest(
             row["target_id"], declaration.components
         ),
         "lineage_hashes": lineage,
-        "data_order_contract": "hosd_data_order_v1",
+        "data_order_contract": DATA_ORDER_CONTRACT,
+        "sampler_contract_by_role": {
+            role: sampler_contract(role) for role in roles
+        },
         "sampler_seed_by_role": expected_sampler_seeds,
         **(
             {"exact_hlt_runtime": exact_hlt_runtime}
@@ -933,5 +1109,8 @@ __all__ = [
     "LOADER_MANIFEST_CONTRACT_V2",
     "LOADER_MANIFEST_CONTRACT_V3",
     "LOADER_MANIFEST_CONTRACT_V4",
+    "LOADER_MANIFEST_CONTRACT_V5",
+    "DATA_ORDER_CONTRACT",
     "data_order_seed",
+    "sampler_contract",
 ]

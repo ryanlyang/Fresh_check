@@ -103,6 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         hlt_spec, hlt = _load_cache(args.hlt_cache, sharded=True)
         if hlt.manifest.get("source") != campaign["source"]:
             raise ValueError("HLT target cache source differs from active campaign")
+        if (
+            len(canonical.identities) != len(hlt.identities)
+            or canonical.manifest["canonical_identity_order_sha256"]
+            != hlt.manifest["canonical_identity_order_sha256"]
+        ):
+            raise ValueError("paired scale residual identity orders differ")
         target_pairs = (
             {
                 target_id: target_id
@@ -197,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
         source=campaign["source"],
         shard_size=args.shard_size,
         hlt_replica_id=replica_id,
+        identities_are_canonical=args.kind == "residual",
+        canonical_identity_order_attestation=(
+            canonical.manifest["canonical_identity_order_sha256"]
+            if args.kind == "residual"
+            else None
+        ),
     )
     if args.kind == "residual":
         from teacher_logit_reco.hlt_offline_structure_distillation import LoadedTargetCache

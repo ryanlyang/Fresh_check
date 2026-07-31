@@ -5215,3 +5215,11 @@ invalidating the running campaign. Source-drift failures apply to the frozen
 campaign checkout itself, not to the mutable submission checkout. The frozen
 worktree is retained with the campaign evidence until deliberate archival or
 cleanup.
+
+The genuine miniature split cardinalities are frozen globally as 20
+`model_train`, 20 `model_val` (10 `val_stop` plus 10 `val_design`), zero
+`stack_train`, 10 `stack_val`, 20 `final_test`, and 40 `scale_train`
+identities. The split worker must read these values from the authenticated
+production graph; it may not maintain a second hard-coded miniature table.
+Stage-A cache and REGION shard ranges must be derived from the same graph
+cardinalities and must exactly match the authenticated cached views.

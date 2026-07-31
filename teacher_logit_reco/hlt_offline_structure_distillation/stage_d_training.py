@@ -313,7 +313,11 @@ def train_stage_d_auxiliary(
     while not hasattr(dataset, "logical_role") and hasattr(dataset, "base_dataset"):
         dataset = dataset.base_dataset
     training_role = str(getattr(dataset, "logical_role", "model_train"))
-    from .stage_d_data_factory import data_order_seed
+    from .stage_d_data_factory import (
+        DATA_ORDER_CONTRACT,
+        data_order_seed,
+        sampler_contract,
+    )
 
     training_sampler_seed = data_order_seed(int(row["pipeline_seed"]), training_role)
     observed_sampler_seed = int(
@@ -321,6 +325,11 @@ def train_stage_d_auxiliary(
     )
     if observed_sampler_seed != training_sampler_seed:
         raise ValueError(f"{stage_label} sampler order differs from pipeline contract")
+    training_sampler_contract = str(
+        getattr(train_loader.sampler, "contract", sampler_contract(training_role))
+    )
+    if training_sampler_contract != sampler_contract(training_role):
+        raise ValueError(f"{stage_label} sampler implementation differs")
     if not checked_lineage:
         raise ValueError("Stage-D training lineage must not be empty")
     root = Path(output_dir)
@@ -345,7 +354,9 @@ def train_stage_d_auxiliary(
             != int(row["encoder_component_seed"])
             or int(completion.get("task_component_seed", -1))
             != task_component_seed
-            or completion.get("data_order_contract") != "hosd_data_order_v1"
+            or completion.get("data_order_contract") != DATA_ORDER_CONTRACT
+            or completion.get("training_sampler_contract")
+            != training_sampler_contract
             or int(completion.get("training_sampler_seed", -1))
             != training_sampler_seed
             or completion.get("deployed_operation_profile_sha256")
@@ -416,7 +427,8 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
-            "data_order_contract": "hosd_data_order_v1",
+            "data_order_contract": DATA_ORDER_CONTRACT,
+            "training_sampler_contract": training_sampler_contract,
             "training_sampler_seed": training_sampler_seed,
             "deployed_operation_profile_sha256": operation_profile_sha256,
         }
@@ -569,7 +581,8 @@ def train_stage_d_auxiliary(
                 "pipeline_seed": int(row["pipeline_seed"]),
                 "encoder_component_seed": int(row["encoder_component_seed"]),
                 "task_component_seed": task_component_seed,
-                "data_order_contract": "hosd_data_order_v1",
+                "data_order_contract": DATA_ORDER_CONTRACT,
+                "training_sampler_contract": training_sampler_contract,
                 "training_sampler_seed": training_sampler_seed,
                 "deployed_operation_profile_sha256": operation_profile_sha256,
                 "epoch": selected_epoch,
@@ -591,7 +604,8 @@ def train_stage_d_auxiliary(
                 "pipeline_seed": int(row["pipeline_seed"]),
                 "encoder_component_seed": int(row["encoder_component_seed"]),
                 "task_component_seed": task_component_seed,
-                "data_order_contract": "hosd_data_order_v1",
+                "data_order_contract": DATA_ORDER_CONTRACT,
+                "training_sampler_contract": training_sampler_contract,
                 "training_sampler_seed": training_sampler_seed,
                 "deployed_operation_profile_sha256": operation_profile_sha256,
                 "epoch_completed": epoch,
@@ -651,7 +665,8 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
-            "data_order_contract": "hosd_data_order_v1",
+            "data_order_contract": DATA_ORDER_CONTRACT,
+            "training_sampler_contract": training_sampler_contract,
             "training_sampler_seed": training_sampler_seed,
             "deployed_operation_profile": operation_profile,
             "target_error_cross_family_tie_breaker": False,
@@ -686,7 +701,8 @@ def train_stage_d_auxiliary(
             "pipeline_seed": int(row["pipeline_seed"]),
             "encoder_component_seed": int(row["encoder_component_seed"]),
             "task_component_seed": task_component_seed,
-            "data_order_contract": "hosd_data_order_v1",
+            "data_order_contract": DATA_ORDER_CONTRACT,
+            "training_sampler_contract": training_sampler_contract,
             "training_sampler_seed": training_sampler_seed,
             "deployed_operation_profile_sha256": operation_profile_sha256,
             "checkpoint_file": best_path.name,

@@ -24,6 +24,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (
 )
 
 from .auxiliary import global_auxiliary_loss
+from .auxiliary_data import DeterministicScaleShardSampler
 from .baselines import HOSDTrainingProtocol, component_seed
 from .combinations import pcgrad_project
 from .contracts import (
@@ -78,13 +79,33 @@ class CombinationDataset(torch.utils.data.Dataset if torch is not None else obje
             raise ValueError("combination dataset has no targets")
         self.datasets = dict(sorted(datasets.items()))
         first = next(iter(self.datasets.values()))
-        self.identities = tuple(first.identities)
+        self.base_dataset = first.base_dataset
+        self.identities = first.identities
+        identity_hash = getattr(
+            self.base_dataset, "identity_order_sha256", None
+        )
+        if identity_hash is None:
+            raise ValueError("combination base lacks authenticated identity order")
         if any(
-            tuple(dataset.identities) != self.identities
-            or len(dataset) != len(first)
+            len(dataset) != len(first)
+            or getattr(dataset.base_dataset, "identity_order_sha256", None)
+            != identity_hash
             for dataset in self.datasets.values()
         ):
             raise ValueError("combination target datasets are not identity aligned")
+        for dataset in self.datasets.values():
+            dataset.base_dataset = self.base_dataset
+            dataset.identities = self.identities
+        self.identity_order_sha256 = identity_hash
+        target_stores = {}
+        for dataset in self.datasets.values():
+            for store in getattr(dataset, "target_stores", ()):
+                target_stores[id(store)] = store
+        self.target_store_count = len(target_stores)
+        self.resident_target_shard_budget = sum(
+            bool(getattr(dataset, "target_stores", ()))
+            for dataset in self.datasets.values()
+        )
         self.control_kind = None
         self.native_relation_targets = (
             None
@@ -116,13 +137,29 @@ class CombinationDataset(torch.utils.data.Dataset if torch is not None else obje
     def __len__(self) -> int:
         return len(next(iter(self.datasets.values())))
 
-    def set_epoch(self, epoch: int) -> None:
+    @property
+    def logical_role(self) -> str:
+        return str(self.base_dataset.logical_role)
+
+    def replica_for_index(self, index: int) -> int:
+        return self.base_dataset.replica_for_index(index)
+
+    def locality_boundaries(self) -> tuple[int, ...]:
+        boundaries = set(self.base_dataset.locality_boundaries())
         for dataset in self.datasets.values():
-            if hasattr(dataset, "set_epoch"):
-                dataset.set_epoch(epoch)
+            boundaries.update(dataset.locality_boundaries())
+        return tuple(sorted(boundaries))
+
+    def set_epoch(self, epoch: int) -> None:
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(epoch)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        rows = {target: dataset[index] for target, dataset in self.datasets.items()}
+        base_sample = self.base_dataset[index]
+        rows = {
+            target: dataset.attach_target(index, base_sample)
+            for target, dataset in self.datasets.items()
+        }
         first = dict(next(iter(rows.values())))
         identity = str(first.get("event_identity"))
         if any(str(row.get("event_identity")) != identity for row in rows.values()):
@@ -221,7 +258,11 @@ def make_combination_loader(
     batch_size: int,
 ) -> Any:
     sampler = (
-        DeterministicExpertSampler(dataset, seed=int(seed))
+        (
+            DeterministicScaleShardSampler(dataset, seed=int(seed))
+            if dataset.logical_role == "scale_train"
+            else DeterministicExpertSampler(dataset, seed=int(seed))
+        )
         if training
         else torch.utils.data.SequentialSampler(dataset)
     )
@@ -373,10 +414,21 @@ def load_combination_loaders(
         raise ValueError("combination loader training role differs")
     loaded_by_target = {}
     lineage = {"combination_loader_manifest": manifest["content_hash"]}
+    member_definitions = []
     for target, definition in manifest["member_manifests"].items():
         path = Path(definition["path"])
         if _sha256_file(path) != definition["sha256"]:
             raise ValueError("combination member loader bytes differ")
+        member_manifest = load_hashed_json(path)
+        tree_role_count = sum(
+            bool(role_definition.get("tree_caches"))
+            for role_definition in member_manifest.get("roles", {}).values()
+        )
+        member_definitions.append(
+            (0 if tree_role_count else 1, -tree_role_count, target, definition, path)
+        )
+    shared_bases_by_role = {}
+    for _, _, target, definition, path in sorted(member_definitions):
         member = members[target]
         row = {
             **member,
@@ -391,8 +443,19 @@ def load_combination_loaders(
             row=row,
             campaign=campaign,
             target_registry=target_registry,
+            shared_base_datasets_by_role=(
+                shared_bases_by_role if shared_bases_by_role else None
+            ),
         )
         loaded_by_target[target] = loaded
+        for role, key in (
+            (training_role, "train_loader"),
+            ("val_stop", "val_stop_loader"),
+            (evaluation_role, "evaluation_loader"),
+        ):
+            shared_bases_by_role.setdefault(
+                role, loaded[key].dataset.base_dataset
+            )
         lineage.update(
             {
                 f"{target}__{key}": value
@@ -476,10 +539,16 @@ def load_combination_loaders(
                     ):
                         raise ValueError("native relation memory-map metadata differs")
                     mapped[name] = value
-                expected_ids = next(iter(datasets.values())).identities
-                if mapped["identities"].shape != (len(expected_ids),) or any(
-                    str(value) != expected
-                    for value, expected in zip(mapped["identities"], expected_ids)
+                expected_dataset = next(iter(datasets.values()))
+                expected_ids = expected_dataset.identities
+                if (
+                    mapped["identities"].shape != (len(expected_ids),)
+                    or artifact.get("identity_order_sha256")
+                    != getattr(
+                        expected_dataset.base_dataset,
+                        "identity_order_sha256",
+                        None,
+                    )
                 ):
                     raise ValueError("native relation target identities differ")
                 native_targets[replica] = {

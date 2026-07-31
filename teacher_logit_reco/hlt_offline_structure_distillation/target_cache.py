@@ -157,6 +157,7 @@ def build_target_cache_spec(
     hlt_replica_id: str | None = None,
     access_authorization_hash: str | None = None,
     identities_are_canonical: bool = False,
+    canonical_identity_order_attestation: str | None = None,
 ) -> dict[str, Any]:
     """Freeze shard boundaries and complete lineage before values are inspected."""
 
@@ -177,10 +178,23 @@ def build_target_cache_spec(
     if dtype != "float32":
         raise ValueError("canonical target caches must use float32")
     if identities_are_canonical:
-        identity_count, canonical_identity_hash = (
-            validate_canonical_identity_sequence(identities)
-        )
+        if canonical_identity_order_attestation is None:
+            identity_count, canonical_identity_hash = (
+                validate_canonical_identity_sequence(identities)
+            )
+        else:
+            identity_count = len(identities)
+            if identity_count <= 0:
+                raise ValueError("target-cache identity population must not be empty")
+            canonical_identity_hash = require_sha256(
+                canonical_identity_order_attestation,
+                name="canonical_identity_order_attestation",
+            )
     else:
+        if canonical_identity_order_attestation is not None:
+            raise ValueError(
+                "identity attestation requires canonical positional identities"
+            )
         canonical, _ = _canonical_identities(identities)
         if not canonical:
             raise ValueError("target-cache identity population must not be empty")
@@ -641,15 +655,30 @@ class _ShardArchiveStore:
         self._cached_index = -1
         self._cached_arrays = None
         self._cached_identities: tuple[str, ...] | None = None
+        self._cache_coordinator = None
+        self.decoded_shard_load_count = 0
+
+    def bind_cache_coordinator(self, coordinator: Any) -> None:
+        """Join a graph-wide one-shard cache budget."""
+
+        self._cache_coordinator = coordinator
+
+    def clear_cached_shard(self) -> None:
+        self._cached_index = -1
+        self._cached_arrays = None
+        self._cached_identities = None
 
     def _load(self, shard: int) -> None:
         if shard == self._cached_index:
             return
+        if self._cache_coordinator is not None:
+            self._cache_coordinator.activate(self)
         record = self.records[shard]
         encoded = record["path"].read_bytes()
         if hashlib.sha256(encoded).hexdigest() != record["npz_sha256"]:
             raise ValueError("target shard changed after cache authentication")
         arrays = _load_npz_bytes(encoded)
+        self.decoded_shard_load_count += 1
         identities = _decode_string_table(
             arrays["identity_offsets"], arrays["identity_bytes"]
         )

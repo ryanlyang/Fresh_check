@@ -28,8 +28,13 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
     with_content_hash,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.combination_runtime import (
+    CombinationDataset,
     CombinationHBaseClassifier,
     combination_losses,
+)
+from teacher_logit_reco.hlt_offline_structure_distillation.auxiliary_data import (
+    AuxiliaryTargetDataset,
+    DeterministicScaleShardSampler,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.taps import (
     SplitForwardResult,
@@ -45,6 +50,200 @@ SOURCE = {
     "dirty": True,
     "status_hash_policy": "test",
 }
+
+
+def test_eight_member_scale_combination_never_materializes_identity_population():
+    class NoPopulationIteration:
+        def __len__(self):
+            return 3_000_000
+
+        def __iter__(self):
+            raise AssertionError("scale identities must not be iterated")
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("scale identities must not be converted")
+
+    class Base:
+        def __init__(self, identities):
+            self.identities = identities
+            self.identity_order_sha256 = "a" * 64
+            self.replicas = {0: None, 1: None, 2: None, 3: None}
+
+        def __getitem__(self, index):
+            return {"event_identity": f"jet-{index}", "replica_id": 0}
+
+        def set_epoch(self, epoch):
+            self.epoch = epoch
+
+    class Store:
+        def __init__(self):
+            self.coordinator = None
+            self.cached = False
+
+        def bind_cache_coordinator(self, coordinator):
+            self.coordinator = coordinator
+
+        def clear_cached_shard(self):
+            self.cached = False
+
+        def activate(self):
+            self.coordinator.activate(self)
+            self.cached = True
+
+    class Raw:
+        def __init__(self, store):
+            self.store = store
+
+    class Coordinator:
+        def __init__(self):
+            self.active_store = None
+
+        def activate(self, store):
+            if self.active_store is not None and self.active_store is not store:
+                self.active_store.clear_cached_shard()
+            self.active_store = store
+
+    class Target:
+        def __init__(self, base, store):
+            self.base_dataset = base
+            self.identities = base.identities
+            self.values = Raw(store)
+            self.masks = Raw(store)
+            self.store = store
+            self.target_stores = (store,)
+            self.target_cache_coordinator = Coordinator()
+            store.bind_cache_coordinator(self.target_cache_coordinator)
+
+        def __len__(self):
+            return 3_000_000
+
+        def attach_target(self, index, base_sample):
+            self.store.activate()
+            return {
+                **base_sample,
+                "target": np.asarray([index], dtype=np.float32),
+                "target_mask": np.asarray([True]),
+            }
+
+    identities = NoPopulationIteration()
+    stores = [Store() for _ in range(8)]
+    datasets = {
+        f"T_{index}": Target(Base(identities), store)
+        for index, store in enumerate(stores)
+    }
+    combination = CombinationDataset(datasets)
+    assert combination.identities is identities
+    assert combination.target_store_count == 8
+    assert len({id(row.base_dataset) for row in combination.datasets.values()}) == 1
+    sample = combination[7]
+    assert len(sample["combination_targets"]) == 8
+    assert sum(store.cached for store in stores) == 8
+    assert combination.resident_target_shard_budget == 8
+
+
+def test_scale_sampler_decodes_by_shard_replica_group_not_by_event_member():
+    event_count, shard_size, member_count = 64, 16, 8
+
+    class Base:
+        logical_role = "scale_train"
+        realization_policy = "R_MULTI"
+
+        def __init__(self):
+            self.identities = tuple(f"jet-{index}" for index in range(event_count))
+            self.identity_order_sha256 = "b" * 64
+            self.labels = np.arange(event_count, dtype=np.int64) % 10
+            self.replicas = {replica: None for replica in range(4)}
+            self.zero_based_epoch = 0
+
+        def __len__(self):
+            return event_count
+
+        def set_epoch(self, epoch):
+            self.zero_based_epoch = int(epoch) - 1
+
+        def replica_for_index(self, index):
+            return int(index) % 4
+
+        def locality_boundaries(self):
+            return tuple(range(0, event_count + 1, shard_size))
+
+        def __getitem__(self, index):
+            return {
+                "event_identity": self.identities[index],
+                "replica_id": self.replica_for_index(index),
+            }
+
+    class Store:
+        def __init__(self):
+            self.ends = tuple(range(shard_size, event_count + 1, shard_size))
+            self.cached_shard = -1
+            self.decoded_shard_load_count = 0
+            self.coordinator = None
+
+        def bind_cache_coordinator(self, coordinator):
+            self.coordinator = coordinator
+
+        def clear_cached_shard(self):
+            self.cached_shard = -1
+
+        def row(self, index):
+            shard = int(index) // shard_size
+            if shard != self.cached_shard:
+                self.coordinator.activate(self)
+                self.cached_shard = shard
+                self.decoded_shard_load_count += 1
+
+    class Array:
+        def __init__(self, store, *, mask):
+            self.store = store
+            self.mask = mask
+            self.shape = (event_count, 1)
+
+        def __getitem__(self, index):
+            self.store.row(index)
+            return np.asarray([True] if self.mask else [index], dtype=(
+                bool if self.mask else np.float32
+            ))
+
+    base = Base()
+    stores = []
+    datasets = {}
+    for member in range(member_count):
+        replica_stores = {replica: Store() for replica in range(4)}
+        stores.extend(replica_stores.values())
+        datasets[f"T_{member}"] = AuxiliaryTargetDataset(
+            base,
+            target_id=f"T_{member}",
+            target_values={
+                replica: Array(store, mask=False)
+                for replica, store in replica_stores.items()
+            },
+            target_masks={
+                replica: Array(store, mask=True)
+                for replica, store in replica_stores.items()
+            },
+            target_parent_hashes={"cache": f"{member + 1:x}" * 64},
+        )
+    combination = CombinationDataset(datasets)
+    combination.set_epoch(1)
+    sampler = DeterministicScaleShardSampler(combination, seed=101)
+    sampler.set_epoch(1)
+    order = list(sampler)
+    assert sorted(order) == list(range(event_count))
+    locality_keys = [(index // shard_size, index % 4) for index in order]
+    runs = 1 + sum(
+        right != left for left, right in zip(locality_keys, locality_keys[1:])
+    )
+    assert runs == len(set(locality_keys)) == 16
+    for index in order:
+        combination[index]
+    assert sum(store.decoded_shard_load_count for store in stores) == (
+        len(set(locality_keys)) * member_count
+    )
+    assert all(
+        dataset.target_cache_coordinator.maximum_simultaneously_resident == 1
+        for dataset in combination.datasets.values()
+    )
 
 
 def _locks():

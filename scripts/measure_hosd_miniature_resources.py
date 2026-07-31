@@ -121,6 +121,68 @@ def _maximum_tree_layout_128_255() -> dict[str, int]:
     }
 
 
+def _scale_graph_store_multiplicities(execution_plan: dict) -> list[dict]:
+    """Derive simultaneous stores from every exact shortlisted graph."""
+
+    rows = []
+    for definition_row in execution_plan["graph_definitions"]:
+        definition = definition_row["graph_definition"]
+        kind = str(definition["graph_kind"])
+        members = []
+        baseline_id = None
+        native = False
+        if kind == "COMBINATION":
+            graph = definition["graph"]
+            members = [dict(row) for row in graph["members"]]
+            native = graph.get("native_relation_auxiliary") is not None
+        elif kind in {"AUXILIARY", "FEEDBACK"}:
+            members = [dict(definition["row"])]
+        elif kind == "BASELINE":
+            baseline_id = str(definition["baseline_id"])
+            native = baseline_id == "H_NATIVE_REL_AUX"
+        target_store_instances = 0
+        resident_target_shards = 0
+        for member in members:
+            if member["target_id"] in {
+                "T_HLT_TRACK_PAIR_13",
+                "T_HLT_REGION_PAIR_8",
+            }:
+                continue
+            resident_target_shards += 1
+            target_store_instances += (
+                4
+                if (
+                    str(member.get("parameterization", "ABS")) == "RES"
+                    or str(member.get("row_kind", "")) == "HLT_SELF"
+                    or str(member["target_id"]).startswith("T_HLT_SELF_")
+                )
+                else 1
+            )
+        region_members = sum(
+            row["target_id"] == "T_HLT_REGION_PAIR_8" for row in members
+        )
+        kd_stores = sum(
+            str(row.get("parameterization", "ABS")) == "KD"
+            for row in members
+        ) + int(baseline_id in {"H_KD_LOGIT_O_BASE", "H_KD_LOGIT_O_FULLREL"})
+        rows.append(
+            {
+                "graph_id": str(definition_row["graph_id"]),
+                "simultaneous_member_count": len(members),
+                "hlt_replica_input_store_instances": 4,
+                "tree_store_instances": 4 * region_members,
+                "graph_global_resident_tree_shards": int(region_members > 0),
+                "target_store_instances": int(target_store_instances),
+                "resident_target_shard_budget": int(resident_target_shards),
+                "native_relation_mmap_store_instances": 4 if native else 0,
+                "kd_logit_mmap_store_instances": int(kd_stores),
+            }
+        )
+    if not rows:
+        raise ValueError("scale graph residency lacks shortlisted definitions")
+    return rows
+
+
 def _scale_layout_ledger(root: Path, source: dict) -> dict:
     """Authenticate resident-unit byte accounting for every risky scale node."""
 
@@ -128,6 +190,7 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         root / "scale_up" / "execution_plan.json",
         expected_contract="hosd_scale_execution_plan_v1",
     )
+    graph_multiplicities = _scale_graph_store_multiplicities(execution_plan)
     input_completion = load_hashed_json(
         root / "scale_up" / "inputs" / "completion.json",
         expected_contract="hosd_scale_input_completion_v4",
@@ -144,11 +207,16 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         root / "scale_up" / "teacher_outputs" / "completion.json",
         expected_contract="hosd_scale_teacher_output_completion_v1",
     )
+    native_completion = load_hashed_json(
+        root / "scale_up" / "targets" / "native_relations" / "completion.json",
+        expected_contract="hosd_scale_native_relation_target_wave_v2",
+    )
     for name, artifact in (
         ("input", input_completion),
         ("tree", tree_completion),
         ("target", target_completion),
         ("teacher output", teacher_completion),
+        ("native relation", native_completion),
     ):
         if artifact.get("source") != source:
             raise ValueError(f"scale memory {name} completion source differs")
@@ -161,6 +229,10 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         "content_hash"
     ]:
         raise ValueError("scale memory tree/input completion lineage differs")
+    if native_completion.get("scale_target_wave_sha256") != target_completion[
+        "content_hash"
+    ]:
+        raise ValueError("scale memory native/target completion lineage differs")
     active_tree_resource = load_hashed_json(tree_completion["tree_resource_path"])
     active_tree_backend = load_hashed_json(tree_completion["backend_manifest_path"])
     if (
@@ -354,11 +426,69 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         int(math.ceil(row["decoded_payload_bytes"] / row["event_count"]))
         for row in target_rows
     )
+    native_relation_bytes_per_event = 0
+    if any(
+        row["native_relation_mmap_store_instances"]
+        for row in graph_multiplicities
+    ):
+        if (
+            native_completion.get("required_by_shortlist") is not True
+            or native_completion.get("replicas") != [0, 1, 2, 3]
+        ):
+            raise ValueError("scale memory native relation coverage differs")
+        native_bytes = []
+        for replica in range(4):
+            manifest_path = (
+                root
+                / "scale_up"
+                / "targets"
+                / "native_relations"
+                / f"replica_{replica}.manifest.json"
+            )
+            artifact = load_hashed_json(
+                manifest_path, expected_contract="hosd_native_relation_target_v3"
+            )
+            if (
+                artifact["content_hash"]
+                != native_completion["artifact_hashes_by_replica"][str(replica)]
+                or artifact.get("source") != source
+                or int(artifact.get("event_count", 0)) <= 0
+            ):
+                raise ValueError("scale memory native relation artifact differs")
+            members = artifact["mmap_store"]["members"]
+            payload_bytes = sum(
+                int(np.prod(member["shape"], dtype=np.int64))
+                * int(np.dtype(member["dtype"]).itemsize)
+                for member in members.values()
+            )
+            native_bytes.append(
+                int(math.ceil(payload_bytes / int(artifact["event_count"])))
+            )
+        native_relation_bytes_per_event = max(native_bytes)
+    kd_logit_bytes_per_event = 10 * np.dtype(np.float32).itemsize
     production_tree_bytes = (
         maximum_tree_bytes_per_event * PRODUCTION_TREE_SHARD_EVENTS
     )
     production_target_bytes = (
         maximum_target_bytes_per_event * PRODUCTION_TARGET_SHARD_EVENTS
+    )
+    for row in graph_multiplicities:
+        row["production_resident_bytes"] = int(
+            row["hlt_replica_input_store_instances"]
+            * max_input_per_event
+            * PRODUCTION_TREE_SHARD_EVENTS
+            + row["graph_global_resident_tree_shards"] * production_tree_bytes
+            + row["resident_target_shard_budget"] * production_target_bytes
+            + row["native_relation_mmap_store_instances"]
+            * native_relation_bytes_per_event
+            * PRODUCTION_TARGET_SHARD_EVENTS
+            + row["kd_logit_mmap_store_instances"]
+            * kd_logit_bytes_per_event
+            * PRODUCTION_TARGET_SHARD_EVENTS
+        )
+    worst_graph = max(
+        graph_multiplicities,
+        key=lambda row: (row["production_resident_bytes"], row["graph_id"]),
     )
     miniature_byte_accounting = {
         "scale_input_prepare": 3 * max_input_per_event,
@@ -377,11 +507,19 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
             + 2 * max_target_shard_bytes
         ),
         "scale_graph_train": (
-            2
+            worst_graph["hlt_replica_input_store_instances"]
             * max_input_per_event
             * max(max_tree_shard_events, max_target_shard_events)
-            + max_tree_shard_bytes
-            + 2 * max_target_shard_bytes
+            + worst_graph["graph_global_resident_tree_shards"]
+            * max_tree_shard_bytes
+            + worst_graph["resident_target_shard_budget"]
+            * max_target_shard_bytes
+            + worst_graph["native_relation_mmap_store_instances"]
+            * native_relation_bytes_per_event
+            * max_target_shard_events
+            + worst_graph["kd_logit_mmap_store_instances"]
+            * kd_logit_bytes_per_event
+            * max_target_shard_events
         ),
     }
     production_byte_accounting = {
@@ -403,13 +541,11 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
             + 2 * production_target_bytes
         ),
         "scale_graph_train": (
-            2 * max_input_per_event * PRODUCTION_TREE_SHARD_EVENTS
-            + 2 * production_tree_bytes
-            + 2 * production_target_bytes
+            worst_graph["production_resident_bytes"]
         ),
     }
     ledger = {
-        "contract": "hosd_scale_resident_layout_ledger_v5",
+        "contract": "hosd_scale_resident_layout_ledger_v7",
         "source_sha256": canonical_sha256(source),
         "input_rows": input_rows,
         "tree_manifest_hashes": sorted(
@@ -424,6 +560,7 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
             "scale_trees": tree_completion["content_hash"],
             "scale_targets": target_completion["content_hash"],
             "scale_teacher_outputs": teacher_completion["content_hash"],
+            "scale_native_relations": native_completion["content_hash"],
         },
         "maximum_input_decoded_bytes_per_event": max_input_per_event,
         "maximum_tree_shard_events": max_tree_shard_events,
@@ -436,6 +573,10 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
         "maximum_target_decoded_bytes_per_event": maximum_target_bytes_per_event,
         "production_target_shard_events": PRODUCTION_TARGET_SHARD_EVENTS,
         "production_target_shard_decoded_bytes_upper_bound": production_target_bytes,
+        "native_relation_decoded_bytes_per_event": native_relation_bytes_per_event,
+        "kd_logit_decoded_bytes_per_event": kd_logit_bytes_per_event,
+        "scale_graph_store_multiplicities": graph_multiplicities,
+        "worst_case_scale_graph": dict(worst_graph),
         "miniature_byte_accounting": miniature_byte_accounting,
         "production_byte_accounting": production_byte_accounting,
         "multiplicity_basis": {
@@ -443,8 +584,11 @@ def _scale_layout_ledger(root: Path, source: dict) -> dict:
             "scale_tree_build": "one_input_shard_plus_tree_working_and_publish_copies",
             "scale_target_build": "one_input_and_tree_shard_plus_target_working_and_publish_copies",
             "scale_teacher_target_inference": "one_mmap_input_window_plus_authenticated_tree_shard_and_target_output_copies",
-            "scale_graph_train": "two_input_windows_plus_one_tree_and_two_target_windows",
+            "scale_graph_train": "exact_shortlisted_graph_store_multiplicities_with_graph_global_one_tree_shard_and_one_target_shard_per_static_coordinate",
         },
+        "scale_training_sampler_contract": "hosd_scale_shard_aware_sampler_v1",
+        "scale_sampler_maximum_locality_window_events": 2_048,
+        "scale_decode_complexity_contract": "O(locality_segments_times_static_target_coordinates_plus_tree_replica_groups)",
     }
     return {**ledger, "content_hash": canonical_sha256(ledger)}
 
@@ -774,7 +918,11 @@ def main(argv=None):
                 if population_resident
                 else miniature_unit_bytes
             )
-            fixed = max(0, node_observed_rss - observed_resident_unit)
+            fixed = (
+                node_observed_rss
+                if node_id == "scale_graph_train"
+                else max(0, node_observed_rss - observed_resident_unit)
+            )
             projected = fixed + (
                 production_unit_bytes * production_population
                 if population_resident
@@ -818,7 +966,7 @@ def main(argv=None):
                 ),
             }[node_id]
             scale_memory_projections[node_id] = with_content_hash({
-                "contract": "hosd_scale_resident_memory_projection_v5",
+                "contract": "hosd_scale_resident_memory_projection_v7",
                 "pilot_node_id": node_id,
                 "pilot_job_id": job_id,
                 "coordinate_type": coordinate_type,
@@ -898,7 +1046,7 @@ def main(argv=None):
     artifact = with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENT_EVIDENCE_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 9,
             "source": dict(campaign["source"]),
             "miniature_execution_plan_sha256": plan["content_hash"],
             "scheduler_evidence_sha256": scheduler["content_hash"],

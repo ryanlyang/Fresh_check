@@ -21,7 +21,7 @@ from .production import (
 )
 
 
-STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v14"
+STEP15_PREFLIGHT_REPORT_CONTRACT = "retb_step15_preflight_report_v15"
 
 
 def build_step15_preflight_report(
@@ -44,7 +44,7 @@ def build_step15_preflight_report(
     return bind_source(
         with_content_hash({
             "contract": STEP15_PREFLIGHT_REPORT_CONTRACT,
-            "schema_version": 14,
+            "schema_version": 15,
             "campaign_id": production_graph["campaign_id"],
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,

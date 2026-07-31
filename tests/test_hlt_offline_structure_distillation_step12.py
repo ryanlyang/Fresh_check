@@ -137,7 +137,7 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
     )
     layout_ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v5",
+            "contract": "hosd_scale_resident_layout_ledger_v7",
             "source_sha256": canonical_sha256(SOURCE),
             "scale_execution_plan_sha256": "0" * 64,
             "production_tree_shard_events": production_tree_unit,
@@ -149,7 +149,30 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
                 "scale_trees": "2" * 64,
                 "scale_targets": "3" * 64,
                 "scale_teacher_outputs": "4" * 64,
+                "scale_native_relations": "5" * 64,
             },
+            "scale_graph_store_multiplicities": [
+                {
+                    "graph_id": "G_WORST",
+                    "hlt_replica_input_store_instances": 4,
+                    "graph_global_resident_tree_shards": 1,
+                    "resident_target_shard_budget": 1,
+                    "target_store_instances": 8,
+                    "production_resident_bytes": 1,
+                }
+            ],
+            "worst_case_scale_graph": {
+                "graph_id": "G_WORST",
+                "hlt_replica_input_store_instances": 4,
+                "graph_global_resident_tree_shards": 1,
+                "resident_target_shard_budget": 1,
+                "target_store_instances": 8,
+                "production_resident_bytes": 1,
+            },
+            "production_byte_accounting": {"scale_graph_train": 1},
+            "scale_training_sampler_contract": "hosd_scale_shard_aware_sampler_v1",
+            "scale_sampler_maximum_locality_window_events": 2_048,
+            "scale_decode_complexity_contract": "O(locality_segments_times_static_target_coordinates_plus_tree_replica_groups)",
             "test_layout": True,
         }
     )
@@ -171,7 +194,7 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
         projected = fixed + unit_bytes * (3_000_000 if population_model else 1)
         projections[node_id] = with_content_hash(
             {
-                "contract": "hosd_scale_resident_memory_projection_v5",
+                "contract": "hosd_scale_resident_memory_projection_v7",
                 "pilot_node_id": node_id,
                 "pilot_job_id": "123",
                 "coordinate_type": f"test_{node_id}",
@@ -306,10 +329,82 @@ def test_production_walltime_is_measured_projected_and_policy_bounded():
         )
 
 
+def test_worst_scale_graph_multiplicities_cover_eight_members_and_residual_replicas():
+    module = _load_resource_measurement_module()
+    members = [
+        {
+            "target_id": "T_HLT_REGION_PAIR_8",
+            "parameterization": "ABS",
+        },
+        *[
+            {
+                "target_id": f"T_OFFLINE_RESIDUAL_{index}",
+                "parameterization": "RES",
+            }
+            for index in range(6)
+        ],
+        {
+            "target_id": "T_OFFLINE_LOGITS_O_BASE",
+            "parameterization": "KD",
+        },
+    ]
+    rows = module._scale_graph_store_multiplicities(
+        {
+            "graph_definitions": [
+                {
+                    "graph_id": "C_ALL_BEST",
+                    "graph_definition": {
+                        "graph_kind": "COMBINATION",
+                        "graph": {
+                            "members": members,
+                            "native_relation_auxiliary": {"weight": 1.0},
+                        },
+                    },
+                }
+            ]
+        }
+    )
+    assert rows == [
+        {
+            "graph_id": "C_ALL_BEST",
+            "simultaneous_member_count": 8,
+            "hlt_replica_input_store_instances": 4,
+            "tree_store_instances": 4,
+            "graph_global_resident_tree_shards": 1,
+            "target_store_instances": 25,
+            "resident_target_shard_budget": 7,
+            "native_relation_mmap_store_instances": 4,
+            "kd_logit_mmap_store_instances": 1,
+        }
+    ]
+
+
+def test_standalone_residual_graph_budgets_one_resident_of_four_stores():
+    module = _load_resource_measurement_module()
+    rows = module._scale_graph_store_multiplicities(
+        {
+            "graph_definitions": [
+                {
+                    "graph_id": "AUX_RES",
+                    "graph_definition": {
+                        "graph_kind": "AUXILIARY",
+                        "row": {
+                            "target_id": "T_OFFLINE_TRACK_32",
+                            "parameterization": "RES",
+                        },
+                    },
+                }
+            ]
+        }
+    )
+    assert rows[0]["target_store_instances"] == 4
+    assert rows[0]["resident_target_shard_budget"] == 1
+
+
 def test_resource_authorization_requires_every_stage_j_memory_projection():
     ledger = with_content_hash(
         {
-            "contract": "hosd_scale_resident_layout_ledger_v5",
+            "contract": "hosd_scale_resident_layout_ledger_v7",
             "source_sha256": canonical_sha256(SOURCE),
             "scale_execution_plan_sha256": "0" * 64,
             "production_tree_shard_events": 10_000,
@@ -321,7 +416,30 @@ def test_resource_authorization_requires_every_stage_j_memory_projection():
                 "scale_trees": "2" * 64,
                 "scale_targets": "3" * 64,
                 "scale_teacher_outputs": "4" * 64,
+                "scale_native_relations": "5" * 64,
             },
+            "scale_graph_store_multiplicities": [
+                {
+                    "graph_id": "G_WORST",
+                    "hlt_replica_input_store_instances": 4,
+                    "graph_global_resident_tree_shards": 1,
+                    "resident_target_shard_budget": 1,
+                    "target_store_instances": 8,
+                    "production_resident_bytes": 1,
+                }
+            ],
+            "worst_case_scale_graph": {
+                "graph_id": "G_WORST",
+                "hlt_replica_input_store_instances": 4,
+                "graph_global_resident_tree_shards": 1,
+                "resident_target_shard_budget": 1,
+                "target_store_instances": 8,
+                "production_resident_bytes": 1,
+            },
+            "production_byte_accounting": {"scale_graph_train": 1},
+            "scale_training_sampler_contract": "hosd_scale_shard_aware_sampler_v1",
+            "scale_sampler_maximum_locality_window_events": 2_048,
+            "scale_decode_complexity_contract": "O(locality_segments_times_static_target_coordinates_plus_tree_replica_groups)",
             "test_layout": True,
         }
     )
@@ -509,8 +627,8 @@ def test_real_miniature_is_required_before_full_authorization():
     production = _plan("production_500k_scale3m")
     preflight = with_content_hash(
         {
-                "contract": "hosd_resource_preflight_v8",
-                "schema_version": 8,
+                "contract": "hosd_resource_preflight_v10",
+                "schema_version": 9,
             "source": SOURCE,
             "profile": "production_500k_scale3m",
             "storage_measurements_sha256": "4" * 64,

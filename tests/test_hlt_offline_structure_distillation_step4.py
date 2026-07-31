@@ -340,6 +340,33 @@ def test_shard_publication_identity_work_is_linear_and_reuse_is_constant(
     assert identities.accesses == 0
 
 
+def test_canonical_identity_attestation_avoids_population_materialization() -> None:
+    class AttestedPopulation:
+        def __len__(self):
+            return 3_000_000
+
+        def __iter__(self):
+            raise AssertionError("attested canonical identities were iterated")
+
+        def __getitem__(self, index):
+            raise AssertionError("attested canonical identities were indexed")
+
+    spec = build_target_cache_spec(
+        cache_id="attested-scale-residual",
+        split="scale_train",
+        artifact_kind="residual",
+        identities=AttestedPopulation(),
+        target_components={"T_OFFLINE_TEST__RES__0": ("a", "b")},
+        parent_hashes={"campaign": H},
+        source=SOURCE,
+        hlt_replica_id="0",
+        identities_are_canonical=True,
+        canonical_identity_order_attestation="f" * 64,
+    )
+    assert spec["event_count"] == 3_000_000
+    assert spec["canonical_identity_order_sha256"] == "f" * 64
+
+
 def test_sharded_cache_keeps_only_one_identity_shard_resident(tmp_path: Path) -> None:
     spec, _ = _cache(tmp_path, "lazy-identities")
     loaded = load_target_cache_sharded(tmp_path / "lazy-identities", cache_spec=spec)

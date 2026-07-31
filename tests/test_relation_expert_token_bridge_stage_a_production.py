@@ -412,6 +412,18 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
         assert production_tree_outputs == (
             18 if miniature else 540
         )
+        if miniature:
+            expected_stops = {
+                "model_train": "20",
+                "val_stop": "10",
+                "val_design": "10",
+                "scale_train": "40",
+            }
+            for row in manifests["region_tree_cache"]["rows"]:
+                argv = row["argv"]
+                role = argv[argv.index("--logical-role") + 1]
+                stop = argv[argv.index("--stop") + 1]
+                assert stop == expected_stops[role]
 
 
 def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(

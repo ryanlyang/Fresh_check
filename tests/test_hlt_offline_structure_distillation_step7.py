@@ -49,6 +49,9 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_d_training import (
     train_stage_d_auxiliary,
 )
+from teacher_logit_reco.hlt_offline_structure_distillation.stage_d_data_factory import (
+    _scale_labels,
+)
 from teacher_logit_reco.hlt_offline_structure_distillation.auxiliary_data import (
     HLTArrayDataset,
 )
@@ -91,6 +94,44 @@ def test_scale_dataset_retains_mmap_like_identities_and_lazy_positions() -> None
         isinstance(indices, range)
         for indices in dataset.source_indices_by_replica.values()
     )
+    boundaries = dataset.locality_boundaries()
+    assert boundaries[0] == 0 and boundaries[-1] == count
+    assert max(
+        right - left for left, right in zip(boundaries, boundaries[1:])
+    ) <= 2_048
+
+
+def test_scale_label_validation_does_not_iterate_authenticated_input_identities(
+    tmp_path,
+) -> None:
+    identities = np.asarray(["jet-a", "jet-b", "jet-c"])
+    labels_path = tmp_path / "labels.npz"
+    np.savez(labels_path, identities=identities, labels=np.asarray([0, 1, 2]))
+
+    class NoIteration:
+        def __len__(self):
+            return 3
+
+        def __getitem__(self, index):
+            return identities[index]
+
+        def __iter__(self):
+            raise AssertionError("authenticated input identities were rescanned")
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("authenticated input identities were converted")
+
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        identity_order_sha256,
+    )
+
+    wrapped, labels, _ = _scale_labels(
+        labels_path,
+        NoIteration(),
+        identity_order_sha256(identities),
+    )
+    assert wrapped.identity_order_sha256 == identity_order_sha256(identities)
+    assert np.array_equal(labels, [0, 1, 2])
 
 
 class _PairEmbed(torch.nn.Module):
@@ -734,7 +775,12 @@ def test_feedback_production_manifest_loader_uses_graph_independent_data_order(
     expected = data_order_seed(101, training_role)
     assert manifest["sampler_seed_by_role"][training_role] == expected
     assert loaded["train_loader"].sampler.seed == expected
-    assert loaded["data_order_contract"] == "hosd_data_order_v1"
+    assert loaded["data_order_contract"] == "hosd_data_order_v2"
+    assert loaded["sampler_contract_by_role"][training_role] == (
+        "hosd_scale_shard_aware_sampler_v1"
+        if training_role == "scale_train"
+        else "retb_deterministic_full_permutation_sampler_v1"
+    )
 
 
 def test_unrestricted_feedback_is_direct_token_and_exact_capacity_matched():

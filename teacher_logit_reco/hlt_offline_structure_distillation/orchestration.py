@@ -114,15 +114,25 @@ def build_resource_measurements(
         raise ValueError("resource projections must be positive and complete")
     layout_ledger = dict(scale_resident_layout_ledger)
     validate_content_hash(
-        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v5"
+        layout_ledger, expected_contract="hosd_scale_resident_layout_ledger_v7"
     )
     source_sha256 = canonical_sha256(source)
+    graph_multiplicities = layout_ledger.get(
+        "scale_graph_store_multiplicities", []
+    )
+    worst_graph = layout_ledger.get("worst_case_scale_graph", {})
     if (
         layout_ledger.get("source_sha256") != source_sha256
         or not isinstance(layout_ledger.get("scale_execution_plan_sha256"), str)
         or len(layout_ledger["scale_execution_plan_sha256"]) != 64
         or set(layout_ledger.get("active_completion_hashes", {}))
-        != {"scale_inputs", "scale_trees", "scale_targets", "scale_teacher_outputs"}
+        != {
+            "scale_inputs",
+            "scale_trees",
+            "scale_targets",
+            "scale_teacher_outputs",
+            "scale_native_relations",
+        }
         or any(
             not isinstance(value, str) or len(value) != 64
             for value in layout_ledger.get("active_completion_hashes", {}).values()
@@ -143,6 +153,31 @@ def build_resource_measurements(
             )
         )
         <= 0
+        or not graph_multiplicities
+        or worst_graph not in graph_multiplicities
+        or int(worst_graph.get("production_resident_bytes", 0))
+        != int(
+            layout_ledger.get("production_byte_accounting", {}).get(
+                "scale_graph_train", -1
+            )
+        )
+        or layout_ledger.get("scale_training_sampler_contract")
+        != "hosd_scale_shard_aware_sampler_v1"
+        or int(
+            layout_ledger.get("scale_sampler_maximum_locality_window_events", 0)
+        )
+        != 2_048
+        or layout_ledger.get("scale_decode_complexity_contract")
+        != "O(locality_segments_times_static_target_coordinates_plus_tree_replica_groups)"
+        or any(
+            int(row.get("hlt_replica_input_store_instances", 0)) != 4
+            or int(row.get("graph_global_resident_tree_shards", -1)) not in {0, 1}
+            or int(row.get("resident_target_shard_budget", -1)) < 0
+            or int(row.get("target_store_instances", -1)) < int(
+                row.get("resident_target_shard_budget", -1)
+            )
+            for row in graph_multiplicities
+        )
     ):
         raise ValueError("scale resident layout source differs")
     projections = {
@@ -154,7 +189,7 @@ def build_resource_measurements(
     for node_id, projection in projections.items():
         validate_content_hash(
             projection,
-            expected_contract="hosd_scale_resident_memory_projection_v5",
+            expected_contract="hosd_scale_resident_memory_projection_v7",
         )
         model = projection.get("projection_model")
         fixed = int(projection.get("fixed_resident_bytes", -1))
@@ -215,7 +250,7 @@ def build_resource_measurements(
     return with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENTS_CONTRACT,
-            "schema_version": 8,
+            "schema_version": 10,
             "source": dict(source),
             "miniature_execution_plan_sha256": require_sha256(
                 miniature_execution_plan_sha256,
@@ -674,7 +709,7 @@ def build_full_authorization(
     return with_content_hash(
         {
             "contract": FULL_AUTHORIZATION_CONTRACT,
-            "schema_version": 8,
+            "schema_version": 10,
             "source": dict(source),
             "production_execution_plan_sha256": production_plan["content_hash"],
             "miniature_acceptance_sha256": miniature_acceptance["content_hash"],
