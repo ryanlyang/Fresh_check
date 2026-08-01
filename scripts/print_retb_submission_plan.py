@@ -24,7 +24,7 @@ def main() -> int:
     parser.add_argument("--production-graph", required=True, type=Path)
     parser.add_argument(
         "--submission-scope",
-        choices=("complete", "offline_abc"),
+        choices=("complete", "offline_abc", "offline_abc_streamed"),
         default="complete",
     )
     args = parser.parse_args()
@@ -38,7 +38,7 @@ def main() -> int:
     }
     selected = (
         set(offline_submission_node_ids(graph))
-        if args.submission_scope == "offline_abc"
+        if args.submission_scope in {"offline_abc", "offline_abc_streamed"}
         else {str(node["node_id"]) for node in graph["nodes"]}
     )
     for node in graph["nodes"]:

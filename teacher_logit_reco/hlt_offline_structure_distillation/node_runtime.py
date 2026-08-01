@@ -278,10 +278,10 @@ def _derived_infrastructure(
         return [
             *_repeated("--train-cache", {r: cache(root, "model_train", r) for r in range(4)}),
             "--val-stop-cache", f"0={cache(root, 'val_stop', 0)}",
-            # Stage-C baseline training does not read design_select.  Retain
-            # the registered subrole argument without pretending it is an
-            # original RETB cache coordinate.
-            "--design-select-cache", f"0={_hlt_view(root, 'design_select', 0)}",
+            # The beam-budget baseline evaluates the design_select identity
+            # subset.  Its native inputs come from the authenticated parent
+            # val_design cache; _dataset resolves the exact subrole indices.
+            "--design-select-cache", f"0={cache(root, 'val_design', 0)}",
             "--train-labels", str(_labels_npz(root, "model_train")),
             "--val-stop-labels", str(_labels_npz(root, "val_stop")),
             "--design-select-labels", str(_labels_npz(root, "design_select")),

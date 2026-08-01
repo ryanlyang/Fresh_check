@@ -38,6 +38,11 @@ case "${1:-}" in
     RETB_MINIATURE=0
     RETB_SUBMISSION_SCOPE="offline_abc"
     ;;
+  --offline-streamed-submit)
+    mode="submit"
+    RETB_MINIATURE=0
+    RETB_SUBMISSION_SCOPE="offline_abc_streamed"
+    ;;
   --resume)
     echo "Use scripts/plan_retb_resume.py with authenticated completed-node outputs, then resubmit only its ready nodes." >&2
     echo "Automatic state guessing is intentionally disabled." >&2
@@ -46,7 +51,7 @@ case "${1:-}" in
   "")
     ;;
   *)
-    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--resume CAMPAIGN_ROOT]" >&2
+    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--offline-streamed-submit|--resume CAMPAIGN_ROOT]" >&2
     exit 2
     ;;
 esac
@@ -145,6 +150,8 @@ if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" == "complete" ]];
     --authorization "${RETB_OPERATIONAL_AUTHORIZATION}" >/dev/null
 elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
   printf 'Submitting authenticated real-data Stages A-C only; Stages D-N are excluded.\n'
+elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc_streamed" ]]; then
+  printf 'Submitting authenticated streamed real-data Stages A-C; future inputs are deferred and frozen-token banks are task-local.\n'
 fi
 required_per_class=345000
 if [[ "${RETB_MINIATURE}" == "1" ]]; then
@@ -295,6 +302,8 @@ if [[ "${RETB_MINIATURE}" == "1" ]]; then
   submission_mode="smoke_submitted"
 elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
   submission_mode="offline_production_submitted"
+elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc_streamed" ]]; then
+  submission_mode="offline_streamed_production_submitted"
 fi
 python scripts/write_retb_job_ledger.py \
   --production-graph "${graph}" \
@@ -327,6 +336,10 @@ printf 'bounded concurrency: cpu-cache=%s expert=%s predictor=%s scale=%s final=
 printf 'ledger: %s/job_ledgers/initial_submission_ledger.json\n' "${campaign_root}"
 if [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
   printf 'offline scope attestation: %s/job_ledgers/offline_submission_scope.json\n' "${campaign_root}"
+  printf 'offline outputs: %s/selection/locked_offline_shapes.json and Stage-C controls\n' "${campaign_root}"
+elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc_streamed" ]]; then
+  printf 'streamed scope attestation: %s/job_ledgers/streamed_offline_submission_scope.json\n' "${campaign_root}"
+  printf 'streamed execution profile: %s/registry/retb_streamed_abc_execution_profile.json\n' "${campaign_root}"
   printf 'offline outputs: %s/selection/locked_offline_shapes.json and Stage-C controls\n' "${campaign_root}"
 else
   printf 'HLT-v3 cache hashes: %s/inputs/hlt_v3/**/hlt_v3_metadata.json\n' "${campaign_root}"

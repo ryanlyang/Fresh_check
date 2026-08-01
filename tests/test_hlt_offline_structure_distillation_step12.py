@@ -1437,13 +1437,79 @@ def test_design_roles_resolve_to_disjoint_authenticated_subrole_inputs(tmp_path)
         / "R_MULTI"
         / "D_NOMINAL"
     ) in baseline
-    assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_select" / "replica_0.npz") in baseline
+    assert str(
+        tmp_path
+        / "inputs"
+        / "shared_retb_parent_campaign"
+        / "inputs"
+        / "hlt_v3"
+        / "val_design"
+        / "replica_0"
+        / "R_FIXED"
+        / "D_NOMINAL"
+    ) in baseline
+    assert str(
+        tmp_path
+        / "inputs"
+        / "hosd_views"
+        / "hlt"
+        / "design_select"
+        / "replica_0.npz"
+    ) not in baseline
     assert "design_select_identity_labels.npz" in baseline
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_confirm" / "replica_0.npz") in confirmation
     assert "design_confirm_identity_labels.npz" in confirmation
     assert "design_confirm_identity_labels.npz" in robustness
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in baseline
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in confirmation
+
+
+def test_kd_baseline_aligns_compact_teacher_logits_by_exact_identity(
+    tmp_path, monkeypatch
+):
+    path = REPO_ROOT / "scripts" / "train_hosd_baseline.py"
+    spec = importlib.util.spec_from_file_location("hosd_baseline_kd_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    cache_root = tmp_path / "teacher_cache"
+    cache_root.mkdir()
+    canonical_logits = np.asarray(
+        [[10.0] * 10, [20.0] * 10], dtype=np.float32
+    )
+
+    class ContiguousSliceOnly:
+        shape = canonical_logits.shape
+
+        def __getitem__(self, index):
+            assert isinstance(index, slice)
+            assert index == slice(None)
+            return canonical_logits[index]
+
+    cache = LoadedTargetCache(
+        identities=("jet-a", "jet-b"),
+        values={
+            "T_OFFLINE_LOGITS_O_BASE": ContiguousSliceOnly()
+        },
+        masks={
+            "T_OFFLINE_LOGITS_O_BASE": np.ones((2, 10), dtype=bool)
+        },
+        manifest={"content_hash": "a" * 64},
+    )
+    monkeypatch.setattr(module, "load_hashed_json", lambda *args, **kwargs: {})
+    import teacher_logit_reco.hlt_offline_structure_distillation as hosd
+
+    monkeypatch.setattr(hosd, "load_target_cache", lambda *args, **kwargs: cache)
+
+    aligned = module._privileged(
+        cache_root, ("jet-b", "jet-a"), "logits"
+    )
+    assert aligned.shape == (2, 10)
+    assert aligned[:, 0].tolist() == [20.0, 10.0]
+
+    with pytest.raises(ValueError, match="identities differ"):
+        module._privileged(cache_root, ("jet-a", "jet-c"), "logits")
 
 
 def test_native_baseline_uses_identity_index_without_copying_population(tmp_path):

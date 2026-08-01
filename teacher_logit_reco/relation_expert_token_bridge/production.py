@@ -24,12 +24,15 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v36"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v37"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v17"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v3"
 OFFLINE_SUBMISSION_SCOPE_CONTRACT = "retb_offline_submission_scope_v1"
+STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT = (
+    "retb_streamed_offline_submission_scope_v1"
+)
 OFFLINE_PRODUCTION_STAGES = ("A", "B", "C")
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
@@ -1597,7 +1600,12 @@ def build_production_graph(
     miniature_split_profile: str = RETB_MINIATURE_SPLIT_PROFILE,
     split_profile_parent_sha256: str | None = None,
     concurrency: Mapping[str, int] | None = None,
+    execution_profile: str = "standard",
 ) -> dict[str, Any]:
+    if execution_profile not in {"standard", "offline_abc_streamed"}:
+        raise ValueError("production execution profile differs")
+    if miniature and execution_profile != "standard":
+        raise ValueError("miniature graph cannot use the streamed A-C profile")
     resolved = dict(DEFAULT_CONCURRENCY)
     if concurrency is not None:
         if set(concurrency) != set(DEFAULT_CONCURRENCY):
@@ -1648,7 +1656,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 33,
+            "schema_version": 34,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1672,6 +1680,13 @@ def build_production_graph(
             "storage_measurements_sha256": require_sha256(
                 storage_measurements_sha256,
                 name="storage_measurements_sha256",
+            ),
+            "execution_profile": execution_profile,
+            "persistent_future_input_materialization": (
+                execution_profile == "standard"
+            ),
+            "task_local_frozen_token_banks": (
+                execution_profile == "offline_abc_streamed"
             ),
             "degradation_profile": "D_NOMINAL",
             "degradation_profile_implicit_override_allowed": False,
@@ -1743,7 +1758,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 33:
+    if int(payload.get("schema_version", -1)) != 34:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1856,8 +1871,20 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
             or payload.get("split_profile_parent_sha256") is not None
         ):
             raise ValueError("production split-size profile differs")
+    execution_profile = payload.get("execution_profile")
+    if execution_profile not in {"standard", "offline_abc_streamed"}:
+        raise ValueError("production execution profile differs")
+    if (
+        profile == "nonproduction_miniature_test"
+        and execution_profile != "standard"
+    ):
+        raise ValueError("miniature production graph execution profile differs")
     if (
         payload["degradation_profile"] != "D_NOMINAL"
+        or payload.get("persistent_future_input_materialization")
+        != (execution_profile == "standard")
+        or payload.get("task_local_frozen_token_banks")
+        != (execution_profile == "offline_abc_streamed")
         or payload.get("split_sizes") != expected_split_sizes
         or payload.get("scientific_results_allowed")
         != (profile != "nonproduction_miniature_test")
@@ -2005,6 +2032,71 @@ def validate_offline_submission_scope(
     return digest
 
 
+def build_streamed_offline_submission_scope(
+    *, production_graph: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Authenticate the storage-bounded, scientifically identical A--C prefix."""
+
+    graph_sha = validate_production_graph(production_graph)
+    if production_graph.get("execution_profile") != "offline_abc_streamed":
+        raise ValueError("streamed A-C scope requires its execution profile")
+    node_ids = offline_submission_node_ids(production_graph)
+    selected = set(node_ids)
+    return with_content_hash(
+        {
+            "contract": STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+            "schema_version": 1,
+            "production_graph_sha256": graph_sha,
+            "campaign_id": production_graph["campaign_id"],
+            "campaign_root": production_graph["campaign_root"],
+            "campaign_profile": production_graph["campaign_profile"],
+            "source_commit": production_graph["source_commit"],
+            "source_status_sha256": production_graph[
+                "source_status_sha256"
+            ],
+            "storage_measurements_sha256": production_graph[
+                "storage_measurements_sha256"
+            ],
+            "submission_scope": "offline_abc_streamed",
+            "execution_profile": "offline_abc_streamed",
+            "submitted_stages": list(OFFLINE_PRODUCTION_STAGES),
+            "submitted_node_ids": node_ids,
+            "submitted_node_count": len(node_ids),
+            "excluded_node_ids": [
+                str(node["node_id"])
+                for node in production_graph["nodes"]
+                if str(node["node_id"]) not in selected
+            ],
+            "deferred_input_roles": [
+                "stack_val",
+                "final_test",
+                "scale_train",
+            ],
+            "frozen_token_banks_task_local": True,
+            "fusion_wave_count": 21,
+            "scientific_matrix_changed": False,
+            "run_ids_changed": False,
+            "scientific_underperformance_blocks_continuation": False,
+            "later_full_stage_a_expansion_requires_separate_audit": True,
+        }
+    )
+
+
+def validate_streamed_offline_submission_scope(
+    payload: Mapping[str, Any],
+    *,
+    production_graph: Mapping[str, Any],
+) -> str:
+    digest = validate_content_hash(
+        payload, expected_contract=STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT
+    )
+    if dict(payload) != build_streamed_offline_submission_scope(
+        production_graph=production_graph
+    ):
+        raise ValueError("streamed offline A-C submission scope differs")
+    return digest
+
+
 def validate_production_campaign_binding(
     production_graph: Mapping[str, Any],
     campaign_spec: Mapping[str, Any],
@@ -2059,6 +2151,7 @@ def build_job_ledger(
         "smoke_simulation",
         "smoke_submitted",
         "offline_production_submitted",
+        "offline_streamed_production_submitted",
         "production_submitted",
         "resumed",
         "completed",
@@ -2068,9 +2161,18 @@ def build_job_ledger(
     if set(jobs) - node_ids:
         raise ValueError("job ledger contains unknown nodes")
     offline_scope = None
-    if submission_mode == "offline_production_submitted":
-        offline_scope = build_offline_submission_scope(
-            production_graph=production_graph
+    if submission_mode in {
+        "offline_production_submitted",
+        "offline_streamed_production_submitted",
+    }:
+        offline_scope = (
+            build_streamed_offline_submission_scope(
+                production_graph=production_graph
+            )
+            if submission_mode == "offline_streamed_production_submitted"
+            else build_offline_submission_scope(
+                production_graph=production_graph
+            )
         )
         expected_jobs = set(offline_scope["submitted_node_ids"])
         bound_jobs = {
@@ -2137,7 +2239,9 @@ def build_job_ledger(
             "campaign_root": production_graph["campaign_root"],
             "submission_mode": submission_mode,
             "submission_scope": (
-                "offline_abc"
+                "offline_abc_streamed"
+                if submission_mode == "offline_streamed_production_submitted"
+                else "offline_abc"
                 if submission_mode == "offline_production_submitted"
                 else "complete"
             ),

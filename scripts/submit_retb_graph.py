@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     DEFAULT_CONCURRENCY,
     build_offline_submission_scope,
+    build_streamed_offline_submission_scope,
     build_job_ledger,
     build_production_graph,
     build_step15_contract_bundle,
@@ -75,7 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--write-artifacts", action="store_true")
     parser.add_argument(
         "--submission-scope",
-        choices=("complete", "offline_abc"),
+        choices=("complete", "offline_abc", "offline_abc_streamed"),
         default="complete",
     )
     for name, default in DEFAULT_CONCURRENCY.items():
@@ -93,8 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--dry-run may not write campaign artifacts")
     if args.smoke_simulate and not args.miniature:
         raise ValueError("--smoke-simulate requires --miniature")
-    if args.submission_scope == "offline_abc" and args.miniature:
-        raise ValueError("offline_abc submission requires real production data")
+    if args.submission_scope != "complete" and args.miniature:
+        raise ValueError("offline A-C submission requires real production data")
     if (
         args.miniature_split_profile == HOSD_MINIATURE_SPLIT_PROFILE
         and not args.miniature
@@ -155,6 +156,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         miniature_split_profile=str(args.miniature_split_profile),
         split_profile_parent_sha256=args.split_profile_parent_sha256,
         concurrency=concurrency,
+        execution_profile=(
+            "offline_abc_streamed"
+            if args.submission_scope == "offline_abc_streamed"
+            else "standard"
+        ),
     )
     mode = "smoke_simulation" if args.smoke_simulate else "dry_run"
     jobs = {
@@ -178,11 +184,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     submission_node_ids = (
         offline_submission_node_ids(graph)
-        if args.submission_scope == "offline_abc"
+        if args.submission_scope in {"offline_abc", "offline_abc_streamed"}
         else [str(node["node_id"]) for node in graph["nodes"]]
     )
     offline_scope = (
-        build_offline_submission_scope(production_graph=graph)
+        build_streamed_offline_submission_scope(production_graph=graph)
+        if args.submission_scope == "offline_abc_streamed"
+        else build_offline_submission_scope(production_graph=graph)
         if args.submission_scope == "offline_abc"
         else None
     )
@@ -233,7 +241,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write_immutable_json(
                     campaign_root
                     / "job_ledgers"
-                    / "offline_submission_scope.json",
+                    / (
+                        "streamed_offline_submission_scope.json"
+                        if args.submission_scope == "offline_abc_streamed"
+                        else "offline_submission_scope.json"
+                    ),
                     offline_scope,
                 )
             )

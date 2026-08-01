@@ -135,9 +135,34 @@ def _privileged(path: Path | None, identities: Sequence[str], field: str):
         ]
         if field != "logits" or len(target_ids) != 1:
             raise ValueError("privileged target-cache coordinate differs")
-        if cache.identities != identities:
+        target_identities = tuple(str(value) for value in cache.identities)
+        requested_identities = tuple(str(value) for value in identities)
+        target_positions = {
+            identity: index
+            for index, identity in enumerate(target_identities)
+        }
+        value = cache.values[target_ids[0]]
+        if (
+            len(target_positions) != len(target_identities)
+            or len(requested_identities) != len(set(requested_identities))
+            or set(target_positions) != set(requested_identities)
+            or value.shape != (len(target_identities), 10)
+        ):
             raise ValueError("privileged target-cache identities differ")
-        return np.asarray(cache.values[target_ids[0]], dtype=np.float32)
+        # Target caches deliberately use canonical identity order, whereas
+        # Stage-C loaders preserve the authenticated source split order.  KD
+        # logits are compact, so align only this [events, classes] value rather
+        # than copying or reordering the population-sized particle inputs.
+        source_indices = np.asarray(
+            [target_positions[identity] for identity in requested_identities],
+            dtype=np.int64,
+        )
+        # The authenticated target store exposes scalar and contiguous-slice
+        # reads only so that shards are decoded sequentially.  Materialize the
+        # compact ten-logit coordinate once, then apply the source-order
+        # permutation in memory; never issue random reads against the shards.
+        canonical_logits = np.asarray(value[:], dtype=np.float32)
+        return canonical_logits[source_indices]
     mmap_manifest_path = path.with_suffix(path.suffix + ".manifest.json")
     if mmap_manifest_path.is_file():
         from teacher_logit_reco.hlt_offline_structure_distillation import (

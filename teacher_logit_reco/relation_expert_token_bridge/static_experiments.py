@@ -901,6 +901,130 @@ def _stage_c_records(
     return output
 
 
+def _stage_c_streamed_wave_records(
+    *,
+    root: Path,
+    python: str,
+    registry: Mapping[str, Any],
+    fusion_records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group all fusion variants by the cache coordinate they share."""
+
+    grouped: dict[tuple[str, int], list[Mapping[str, Any]]] = {}
+    for record in fusion_records:
+        config = record["configuration"]
+        key = (str(config["shape_id"]), int(record["seed"]))
+        grouped.setdefault(key, []).append(record)
+    output = []
+    for shape_id in registry["uniform_shape_order"]:
+        for seed in registry["pipeline_seeds"]:
+            key = (str(shape_id), int(seed))
+            members = grouped[key]
+            receipt = (
+                root
+                / "registry"
+                / "streamed_fusion_waves"
+                / str(shape_id)
+                / f"seed_{seed}.json"
+            )
+            expected = [str(receipt)]
+            for member in members:
+                expected.extend(str(value) for value in member["expected_artifacts"])
+            output.append(
+                _record(
+                    node_id="offline_fusion_cache",
+                    static_id=f"streamed_fusion_wave:{shape_id}:seed_{seed}",
+                    stage="C",
+                    component="STREAMED_OFFLINE_FUSION_WAVE",
+                    seed=int(seed),
+                    run_id=None,
+                    configuration={
+                        "execution_profile": "offline_abc_streamed",
+                        "shape_id": str(shape_id),
+                        "pipeline_seed": int(seed),
+                        "fusion_run_ids": [
+                            str(member["run_id"]) for member in members
+                        ],
+                        "cache_splits": [
+                            "model_train",
+                            "val_stop",
+                            "val_design",
+                        ],
+                        "cache_lifetime": "single_slurm_allocation",
+                    },
+                    registry_sha256=registry["content_hash"],
+                    argv=[
+                        python,
+                        "scripts/run_retb_streamed_fusion_wave.py",
+                        "--campaign-root",
+                        str(root),
+                        "--shape-id",
+                        str(shape_id),
+                        "--pipeline-seed",
+                        str(seed),
+                        "--receipt",
+                        str(receipt),
+                    ],
+                    expected_artifacts=expected,
+                    deferred_inputs=[
+                        _deferred(
+                            _path(
+                                root,
+                                "inputs",
+                                "offline",
+                                split,
+                                "offline_input_manifest.json",
+                            ),
+                            contract="retb_offline_input_cache_v1",
+                            producer="offline_input_cache",
+                            role=f"streamed_fusion_{split}_source",
+                        )
+                        for split in ("model_train", "val_stop", "val_design")
+                    ],
+                )
+            )
+    if len(output) != 21:
+        raise RuntimeError("streamed fusion wave coordinate count differs")
+    return output
+
+
+def _stage_c_streamed_verification_records(
+    *, python: str, fusion_records: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    output = []
+    for record in fusion_records:
+        copied = dict(record)
+        copied["argv"] = [
+            python,
+            "scripts/verify_retb_streamed_fusion_output.py",
+            "--campaign-root",
+            str(Path(record["expected_artifacts"][0]).parents[2]),
+            "--run-id",
+            str(record["run_id"]),
+            *sum(
+                (["--expected-output", str(path)] for path in record["expected_artifacts"]),
+                [],
+            ),
+        ]
+        copied["command_sha256"] = canonical_sha256(copied["argv"])
+        copied["configuration"] = {
+            **dict(record["configuration"]),
+            "execution_profile": "offline_abc_streamed_verification",
+        }
+        copied["configuration_sha256"] = canonical_sha256(
+            copied["configuration"]
+        )
+        copied["environment"] = {
+            **dict(record["environment"]),
+            "RETB_CONFIGURATION_SHA256": copied["configuration_sha256"],
+        }
+        copied["row_sha256"] = canonical_sha256(
+            {key: value for key, value in copied.items() if key != "row_sha256"}
+        )
+        output.append(copied)
+    return output
+
+
 def _hlt_cache(root: Path, role: str, replica: int) -> str:
     policy = "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
     return _path(

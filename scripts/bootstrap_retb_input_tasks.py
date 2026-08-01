@@ -37,6 +37,12 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (  # noqa: E
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
+    STREAMED_ABC_PROFILE,
+    STREAMED_HLT_VIEWS,
+    STREAMED_OFFLINE_ROLES,
+    build_streamed_abc_execution_profile,
+)
 
 
 ROLES = (
@@ -115,13 +121,19 @@ def build_stage_a_task_manifests(
     campaign_root: Path,
     data_dir: str,
     stage_a_contracts: Mapping[str, Mapping[str, Any]],
+    execution_profile: str = "standard",
 ) -> dict[str, dict[str, Any]]:
     """Construct the complete deterministic Stage-A execution surface."""
 
     nodes = {str(row["node_id"]): row for row in graph["nodes"]}
     counts = _role_counts(graph)
+    streamed = execution_profile == STREAMED_ABC_PROFILE
+    if execution_profile not in {"standard", STREAMED_ABC_PROFILE}:
+        raise ValueError("Stage-A execution profile differs")
+    offline_roles = STREAMED_OFFLINE_ROLES if streamed else ROLES
+    hlt_views = STREAMED_HLT_VIEWS if streamed else HLT_VIEWS
     offline_rows: list[dict[str, Any]] = []
-    for index, role in enumerate(ROLES):
+    for index, role in enumerate(offline_roles):
         output_dir = campaign_root / "inputs" / "offline" / role
         offline_rows.append(
             {
@@ -157,7 +169,7 @@ def build_stage_a_task_manifests(
     )
 
     hlt_rows: list[dict[str, Any]] = []
-    for index, (role, replica, policy) in enumerate(HLT_VIEWS):
+    for index, (role, replica, policy) in enumerate(hlt_views):
         offline_dir = campaign_root / "inputs" / "offline" / role
         output_dir = (
             campaign_root
@@ -218,14 +230,20 @@ def build_stage_a_task_manifests(
     )
     backend_manifest = campaign_root / "backend" / "backend_manifest.json"
     tree_rows: list[dict[str, Any]] = []
+    offline_tree_roles = (
+        STREAMED_OFFLINE_ROLES if streamed else STAGE_A_OFFLINE_TREE_ROLES
+    )
+    hlt_tree_views = (
+        STREAMED_HLT_VIEWS if streamed else STAGE_A_HLT_TREE_VIEWS
+    )
     tree_views = [
         *(
             ("offline", role, None, None)
-            for role in STAGE_A_OFFLINE_TREE_ROLES
+            for role in offline_tree_roles
         ),
         *(
             ("hlt", role, replica, policy)
-            for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+            for role, replica, policy in hlt_tree_views
         ),
     ]
     for view_kind, role, replica, policy in tree_views:
@@ -335,8 +353,10 @@ def build_stage_a_task_manifests(
         rows=tree_rows,
     )
 
-    tree_index = (
-        campaign_root / "inputs" / "region_tree" / "tree_cache_index.json"
+    tree_index = campaign_root / "inputs" / "region_tree" / (
+        "tree_cache_index_streamed_abc.json"
+        if streamed
+        else "tree_cache_index.json"
     )
     finalize = _manifest(
         campaign=campaign,
@@ -353,6 +373,7 @@ def build_stage_a_task_manifests(
                     str(campaign_root),
                     "--output",
                     str(tree_index),
+                    *(["--streamed-abc"] if streamed else []),
                 ],
                 "environment": {},
                 "expected_outputs": [str(tree_index)],
@@ -434,7 +455,9 @@ def build_stage_a_task_manifests(
         ],
     )
 
-    input_audit = campaign_root / "inputs" / "input_audit.json"
+    input_audit = campaign_root / "inputs" / (
+        "input_audit_streamed_abc.json" if streamed else "input_audit.json"
+    )
     degradation_audit = (
         campaign_root / "inputs" / "hlt_v3_degradation_audit.json"
     )
@@ -453,6 +476,7 @@ def build_stage_a_task_manifests(
                     str(campaign_root),
                     "--output",
                     str(input_audit),
+                    *(["--streamed-abc"] if streamed else []),
                 ],
                 "environment": {},
                 "expected_outputs": [
@@ -516,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign_root=args.campaign_root,
         data_dir=args.data_dir,
         stage_a_contracts=stage_a_contracts,
+        execution_profile=str(graph.get("execution_profile", "standard")),
     )
     static_experiments = build_static_experiment_bundle(
         campaign=campaign,
@@ -556,6 +581,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]["execution_counts"],
     }
     if not args.dry_run:
+        if graph.get("execution_profile") == STREAMED_ABC_PROFILE:
+            profile = build_streamed_abc_execution_profile(
+                campaign_id=campaign["campaign_id"],
+                campaign_root=args.campaign_root,
+                source=campaign["source"],
+            )
+            result["streamed_execution_profile_publication"] = (
+                write_immutable_json(
+                    args.campaign_root
+                    / "registry"
+                    / "retb_streamed_abc_execution_profile.json",
+                    profile,
+                )
+            )
         result["contract_publication"] = publish_stage_a_contract_bundle(
             campaign_root=args.campaign_root,
             bundle=stage_a_contracts,

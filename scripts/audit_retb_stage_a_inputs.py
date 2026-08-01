@@ -50,6 +50,12 @@ from teacher_logit_reco.relation_expert_token_bridge.stage_a import (  # noqa: E
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
+    STREAMED_HLT_VIEWS,
+    STREAMED_OFFLINE_ROLES,
+    build_streamed_input_audit,
+    validate_streamed_abc_execution_profile,
+)
 from teacher_logit_reco.relational_part import (  # noqa: E402
     RelationalPairBuilder,
     build_standard_four_pair_features,
@@ -392,6 +398,7 @@ def main() -> int:
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--streamed-abc", action="store_true")
     args = parser.parse_args()
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
@@ -401,11 +408,27 @@ def main() -> int:
             json.dumps(
                 {
                     "dry_run": True,
-                    "offline_roles": list(OFFLINE_ROLES),
-                    "hlt_view_count": len(HLT_VIEWS),
+                    "offline_roles": list(
+                        STREAMED_OFFLINE_ROLES
+                        if args.streamed_abc
+                        else OFFLINE_ROLES
+                    ),
+                    "hlt_view_count": len(
+                        STREAMED_HLT_VIEWS
+                        if args.streamed_abc
+                        else HLT_VIEWS
+                    ),
                     "tree_view_count": (
-                        len(STAGE_A_OFFLINE_TREE_ROLES)
-                        + len(STAGE_A_HLT_TREE_VIEWS)
+                        len(
+                            STREAMED_OFFLINE_ROLES
+                            if args.streamed_abc
+                            else STAGE_A_OFFLINE_TREE_ROLES
+                        )
+                        + len(
+                            STREAMED_HLT_VIEWS
+                            if args.streamed_abc
+                            else STAGE_A_HLT_TREE_VIEWS
+                        )
                     ),
                 },
                 indent=2,
@@ -444,7 +467,9 @@ def main() -> int:
     offline_rows = []
     offline_identities = {}
     offline_metadata = {}
-    for role in OFFLINE_ROLES:
+    offline_roles = STREAMED_OFFLINE_ROLES if args.streamed_abc else OFFLINE_ROLES
+    hlt_views = STREAMED_HLT_VIEWS if args.streamed_abc else HLT_VIEWS
+    for role in offline_roles:
         cache = args.campaign_root / "inputs" / "offline" / role
         metadata = load_hashed_json(
             cache / "offline_input_manifest.json",
@@ -503,7 +528,7 @@ def main() -> int:
         offline_metadata[role] = metadata
 
     hlt_rows = []
-    for role, replica, policy in HLT_VIEWS:
+    for role, replica, policy in hlt_views:
         cache = (
             args.campaign_root
             / "inputs"
@@ -550,14 +575,30 @@ def main() -> int:
         args.campaign_root
         / "inputs"
         / "region_tree"
-        / "tree_cache_index.json"
+        / (
+            "tree_cache_index_streamed_abc.json"
+            if args.streamed_abc
+            else "tree_cache_index.json"
+        )
     )
-    validate_stage_a_tree_index(tree_index)
+    if not args.streamed_abc:
+        validate_stage_a_tree_index(tree_index)
     expected_tree_ids = {
-        *(f"offline:{role}" for role in STAGE_A_OFFLINE_TREE_ROLES),
+        *(
+            f"offline:{role}"
+            for role in (
+                STREAMED_OFFLINE_ROLES
+                if args.streamed_abc
+                else STAGE_A_OFFLINE_TREE_ROLES
+            )
+        ),
         *(
             f"hlt:{role}:r{replica}:{policy}"
-            for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+            for role, replica, policy in (
+                STREAMED_HLT_VIEWS
+                if args.streamed_abc
+                else STAGE_A_HLT_TREE_VIEWS
+            )
         ),
     }
     if {row["view_id"] for row in tree_index["views"]} != expected_tree_ids:
@@ -591,15 +632,35 @@ def main() -> int:
     degradation_publication = write_immutable_json(
         degradation_path, degradation_audit
     )
-    audit = build_stage_a_input_audit(
-        campaign_spec_sha256=campaign["content_hash"],
-        offline_views=offline_rows,
-        hlt_views=hlt_rows,
-        tree_index_sha256=tree_index["content_hash"],
-        normalizer_bundle_sha256=normalizer_bundle["content_hash"],
-        hlt_v3_degradation_audit_sha256=degradation_audit["content_hash"],
-        source_snapshot=source_snapshot(REPO_ROOT),
-    )
+    if args.streamed_abc:
+        profile = load_hashed_json(
+            args.campaign_root
+            / "registry"
+            / "retb_streamed_abc_execution_profile.json"
+        )
+        validate_streamed_abc_execution_profile(profile)
+        audit = build_streamed_input_audit(
+            campaign_spec_sha256=campaign["content_hash"],
+            execution_profile_sha256=profile["content_hash"],
+            offline_views=offline_rows,
+            hlt_views=hlt_rows,
+            tree_index_sha256=tree_index["content_hash"],
+            normalizer_bundle_sha256=normalizer_bundle["content_hash"],
+            hlt_v3_degradation_audit_sha256=degradation_audit[
+                "content_hash"
+            ],
+            source=campaign["source"],
+        )
+    else:
+        audit = build_stage_a_input_audit(
+            campaign_spec_sha256=campaign["content_hash"],
+            offline_views=offline_rows,
+            hlt_views=hlt_rows,
+            tree_index_sha256=tree_index["content_hash"],
+            normalizer_bundle_sha256=normalizer_bundle["content_hash"],
+            hlt_v3_degradation_audit_sha256=degradation_audit["content_hash"],
+            source_snapshot=source_snapshot(REPO_ROOT),
+        )
     output = args.output or (
         args.campaign_root / "inputs" / "input_audit.json"
     )
