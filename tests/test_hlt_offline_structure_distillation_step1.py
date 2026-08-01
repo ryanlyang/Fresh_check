@@ -571,6 +571,13 @@ def test_parent_plan_routes_logs_and_submits_complete_prerequisite_arrays(
     flattened = [value for row in plan["commands"] for value in row["argv"]]
     assert "--array=0-5%2" in flattened
     assert "--array=0-8%2" in flattened
+    assert "--job-name=hosd_parent_offline_inputs" in flattened
+    assert "--job-name=hosd_parent_hlt_v3" in flattened
+    assert all(
+        value.startswith("--job-name=hosd_parent_")
+        for value in flattened
+        if value.startswith("--job-name=")
+    )
     assert any(value.startswith("--output=") for value in flattened)
     assert all("parent_controllers" in value for value in flattened if value.startswith("--error="))
     assert all(row["completion_argv"] for row in plan["commands"])

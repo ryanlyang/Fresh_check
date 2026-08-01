@@ -1434,6 +1434,23 @@ def test_miniature_bootstrap_can_create_fresh_source_bound_campaign(
     assert not any("--smoke-submit" in " ".join(row[0]) for row in commands)
 
 
+def test_authoritative_parity_fixture_uses_physical_four_vectors():
+    path = REPO_ROOT / "scripts" / "validate_hosd_weaver_parity.py"
+    spec = importlib.util.spec_from_file_location("hosd_parity_fixture", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    batch = module._batch(2718)
+    vectors = batch["lorentz_vectors"]
+    mask = batch["mask"][:, 0]
+    momentum_squared = vectors[:, :3].square().sum(dim=1)
+    mass_squared = vectors[:, 3].square() - momentum_squared
+    assert np.isfinite(vectors.numpy()).all()
+    assert bool((mass_squared[mask] > 0).all())
+    assert bool((vectors[:, 3][mask] > 0).all())
+    assert bool((vectors.masked_select(~batch["mask"]).eq(0)).all())
+
+
 def test_parent_lock_consumers_use_the_versioned_contract_constant():
     consumers = (
         REPO_ROOT

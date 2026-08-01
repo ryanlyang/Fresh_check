@@ -348,7 +348,7 @@ def publish_runtime_support(
     paths = _publish_registries_and_contracts(root, campaign, support)
     parity_path = support / "hosd_weaver_parity.json"
     parity = load_hashed_json(
-        parity_path, expected_contract="hosd_weaver_split_forward_parity_v3"
+        parity_path, expected_contract="hosd_weaver_split_forward_parity_v4"
     )
     if (
         parity.get("source") != campaign["source"]

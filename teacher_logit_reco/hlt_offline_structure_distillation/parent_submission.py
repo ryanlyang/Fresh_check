@@ -67,6 +67,16 @@ WRAPPER_TASK_NODES = {
     "sbatch/run_retb_audit_inputs.sh": "input_audit",
 }
 
+HOSD_PARENT_JOB_NAMES = {
+    "sbatch/run_retb_build_offline_inputs.sh": "hosd_parent_offline_inputs",
+    "sbatch/run_retb_build_hlt_v3.sh": "hosd_parent_hlt_v3",
+    "sbatch/run_retb_compiled_region_backend.sh": "hosd_parent_tree_backend",
+    "sbatch/run_retb_build_region_trees.sh": "hosd_parent_region_tree",
+    "sbatch/run_retb_finalize_region_trees.sh": "hosd_parent_tree_finalize",
+    "sbatch/run_retb_fit_normalizers.sh": "hosd_parent_normalizers",
+    "sbatch/run_retb_audit_inputs.sh": "hosd_parent_input_audit",
+}
+
 
 def _run_controller_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(argv, capture_output=True, text=True)
@@ -289,6 +299,7 @@ def build_parent_submission_plan(
                         "sbatch",
                         "--parsable",
                         "--wait",
+                        f"--job-name={HOSD_PARENT_JOB_NAMES[wrapper]}",
                         f"--output={log_directory}/%x_%A_%a.out",
                         f"--error={log_directory}/%x_%A_%a.err",
                         *array_argument,
@@ -689,6 +700,7 @@ def plan_json(plan: Mapping[str, Any], *, submitted_job_ids: list[str] | None) -
 
 __all__ = [
     "GROUP_WRAPPERS",
+    "HOSD_PARENT_JOB_NAMES",
     "WRAPPER_TASK_NODES",
     "build_parent_submission_plan",
     "ensure_shared_bootstrap_split",

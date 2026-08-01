@@ -33,7 +33,10 @@ def _batch(seed: int):
     batch, length = 3, 12
     points = torch.randn(batch, 2, length, generator=generator)
     features = torch.randn(batch, 17, length, generator=generator)
-    vectors = torch.randn(batch, 4, length, generator=generator)
+    momentum = torch.randn(batch, 3, length, generator=generator)
+    mass = 0.1 + torch.rand(batch, length, generator=generator)
+    energy = torch.sqrt(momentum.square().sum(dim=1) + mass.square())
+    vectors = torch.cat((momentum, energy.unsqueeze(1)), dim=1)
     mask = torch.zeros(batch, 1, length, dtype=torch.bool)
     for row, count in enumerate((12, 8, 5)):
         mask[row, 0, :count] = True
@@ -143,11 +146,11 @@ def main(argv=None):
     )
     report = with_content_hash({
         "contract": (
-            "hosd_weaver_split_forward_parity_v3"
+            "hosd_weaver_split_forward_parity_v4"
             if campaign is not None
             else "hosd_weaver_split_forward_parity_v2"
         ),
-        "schema_version": 3 if campaign is not None else 2,
+        "schema_version": 4 if campaign is not None else 2,
         **(
             {
                 "source": campaign["source"],
@@ -158,6 +161,9 @@ def main(argv=None):
         ),
         "split_forward_contract_sha256": split_forward_contract()["content_hash"],
         "precision": "FP32_mixed_precision_disabled",
+        "four_vector_fixture": (
+            "physical_massive_px_py_pz_energy_with_zero_padding_v1"
+        ),
         "taps": ["TAP_EARLY", "TAP_MID", "TAP_LATE"],
         "logits_passed": True,
         "input_and_parameter_gradients_passed": True,
