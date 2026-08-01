@@ -6,12 +6,13 @@ import math
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import require_sha256, validate_content_hash, with_content_hash
+from .evaluation import CLASS_NAMES
 from .expert_training import EXPERT_LOSS_CANDIDATES
 from .registry import EXPERT_ORDER, TOKEN_SHAPES
 
 
-UNIFORM_SHAPE_METRICS_CONTRACT = "retb_uniform_shape_metrics_v1"
-OFFLINE_SHAPE_SELECTION_CONTRACT = "retb_offline_shape_selection_v1"
+UNIFORM_SHAPE_METRICS_CONTRACT = "retb_uniform_shape_metrics_v2"
+OFFLINE_SHAPE_SELECTION_CONTRACT = "retb_offline_shape_selection_v2"
 JOINT_EXPERT_LOSS_SELECTION_CONTRACT = "retb_joint_expert_loss_selection_v1"
 HETEROGENEOUS_SELECTION_CONTRACT = "retb_heterogeneous_selection_v1"
 PIPELINE_SEEDS = (101, 202, 303)
@@ -27,18 +28,36 @@ HET_PHYSICS = {
 }
 
 
+def _canonical_per_class_efficiency(value: object) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "per-class efficiency must be a class-name mapping"
+        )
+    if set(value) != set(CLASS_NAMES) or len(value) != len(CLASS_NAMES):
+        raise ValueError(
+            "per-class efficiency keys differ from the canonical class order"
+        )
+    result = {name: float(value[name]) for name in CLASS_NAMES}
+    if not all(math.isfinite(number) for number in result.values()):
+        raise FloatingPointError("selection metric is nonfinite")
+    if not all(0.0 <= number <= 1.0 for number in result.values()):
+        raise ValueError("per-class efficiency lies outside [0,1]")
+    return result
+
+
 def _finite_metrics(row: Mapping[str, Any]) -> None:
+    efficiencies = _canonical_per_class_efficiency(
+        row["per_class_efficiency"]
+    )
     values = [
         float(row["accuracy"]),
         float(row["cross_entropy"]),
-        *[float(value) for value in row["per_class_efficiency"]],
+        *efficiencies.values(),
     ]
     if not all(math.isfinite(value) for value in values):
         raise FloatingPointError("selection metric is nonfinite")
     if not 0.0 <= values[0] <= 1.0 or values[1] < 0.0:
         raise ValueError("selection metric lies outside its valid domain")
-    if len(row["per_class_efficiency"]) != 10:
-        raise ValueError("selection requires ten per-class efficiencies")
 
 
 def build_uniform_shape_metrics(
@@ -72,6 +91,9 @@ def build_uniform_shape_metrics(
             raise ValueError("uniform shape selector requires canonical fusion")
         if row.get("label_manifest_sha256") != label_sha:
             raise ValueError("uniform shape label lineage differs")
+        efficiencies = _canonical_per_class_efficiency(
+            row.get("per_class_efficiency")
+        )
         _finite_metrics(row)
         for name in (
             "fusion_checkpoint_sha256",
@@ -88,9 +110,7 @@ def build_uniform_shape_metrics(
                 "fusion_variant": "F_TOKEN_TRANSFORMER",
                 "accuracy": float(row["accuracy"]),
                 "cross_entropy": float(row["cross_entropy"]),
-                "per_class_efficiency": [
-                    float(value) for value in row["per_class_efficiency"]
-                ],
+                "per_class_efficiency": efficiencies,
                 "fusion_checkpoint_sha256": row["fusion_checkpoint_sha256"],
                 "fusion_registration_sha256": row[
                     "fusion_registration_sha256"
@@ -105,7 +125,7 @@ def build_uniform_shape_metrics(
     return with_content_hash(
         {
             "contract": UNIFORM_SHAPE_METRICS_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "stage_c_run_registry_sha256": require_sha256(
                 stage_c_run_registry_sha256,
                 name="stage_c_run_registry_sha256",
@@ -113,6 +133,7 @@ def build_uniform_shape_metrics(
             "val_design_label_manifest_sha256": label_sha,
             "shape_order": list(TOKEN_SHAPES),
             "pipeline_seeds": list(PIPELINE_SEEDS),
+            "class_order": list(CLASS_NAMES),
             "row_count": 21,
             "rows": sorted(
                 checked,
@@ -173,11 +194,14 @@ def select_offline_shapes(
                 "mean_cross_entropy": (
                     sum(row["cross_entropy"] for row in selected) / 3
                 ),
-                "mean_per_class_efficiency": [
-                    sum(row["per_class_efficiency"][index] for row in selected)
+                "mean_per_class_efficiency": {
+                    name: sum(
+                        row["per_class_efficiency"][name]
+                        for row in selected
+                    )
                     / 3
-                    for index in range(10)
-                ],
+                    for name in CLASS_NAMES
+                },
                 "all_seed_metrics_finite": True,
                 "parent_rows": [
                     {
@@ -218,9 +242,9 @@ def select_offline_shapes(
         ),
     ):
         worst_deficit = max(
-            high["mean_per_class_efficiency"][index]
-            - row["mean_per_class_efficiency"][index]
-            for index in range(10)
+            high["mean_per_class_efficiency"][name]
+            - row["mean_per_class_efficiency"][name]
+            for name in CLASS_NAMES
         )
         eligible = (
             high["mean_accuracy"] - row["mean_accuracy"] <= 0.0020
@@ -260,7 +284,7 @@ def select_offline_shapes(
     return with_content_hash(
         {
             "contract": OFFLINE_SHAPE_SELECTION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "uniform_shape_metrics_sha256": require_sha256(
                 metrics.get("content_hash"),
                 name="uniform_shape_metrics.content_hash",

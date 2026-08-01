@@ -59,11 +59,16 @@ from teacher_logit_reco.relation_expert_token_bridge.fusion_training import (
     select_best_single_expert,
     train_frozen_fusion,
 )
+from teacher_logit_reco.relation_expert_token_bridge.evaluation import (
+    CLASS_NAMES,
+)
 from teacher_logit_reco.relation_expert_token_bridge.registry import (
     EXPERT_ORDER,
     TOKEN_SHAPES,
 )
 from teacher_logit_reco.relation_expert_token_bridge.selection import (
+    OFFLINE_SHAPE_SELECTION_CONTRACT,
+    UNIFORM_SHAPE_METRICS_CONTRACT,
     build_uniform_shape_metrics,
     select_heterogeneous_allocations,
     select_joint_expert_losses,
@@ -404,7 +409,9 @@ def _shape_rows(negative: bool = True):
                     "fusion_variant": "F_TOKEN_TRANSFORMER",
                     "accuracy": accuracy,
                     "cross_entropy": 2.0 - shape_index * 0.001,
-                    "per_class_efficiency": [accuracy] * 10,
+                    "per_class_efficiency": {
+                        name: accuracy for name in CLASS_NAMES
+                    },
                     "fusion_checkpoint_sha256": "3" * 64,
                     "fusion_registration_sha256": "4" * 64,
                     "frozen_cache_sha256": "5" * 64,
@@ -425,6 +432,14 @@ def test_complete_shape_selection_emits_on_fully_negative_fixture() -> None:
     selection = select_offline_shapes(
         metrics, baseline_mean_accuracy=0.99
     )
+    assert metrics["contract"] == UNIFORM_SHAPE_METRICS_CONTRACT
+    assert metrics["schema_version"] == 2
+    assert metrics["class_order"] == list(CLASS_NAMES)
+    assert list(metrics["rows"][0]["per_class_efficiency"]) == list(
+        CLASS_NAMES
+    )
+    assert selection["contract"] == OFFLINE_SHAPE_SELECTION_CONTRACT
+    assert selection["schema_version"] == 2
     assert selection["all_multi_expert_models_worse_than_baseline"] is True
     assert selection["SHAPE_HIGH"]["shape_id"] in TOKEN_SHAPES
     assert selection["SHAPE_COMPACT"]["shape_id"] in TOKEN_SHAPES
@@ -444,6 +459,39 @@ def test_complete_shape_selection_emits_on_fully_negative_fixture() -> None:
     incomplete = with_content_hash(incomplete)
     with pytest.raises(ValueError, match="21|incomplete"):
         select_offline_shapes(incomplete)
+
+
+def test_uniform_shape_metrics_require_authoritative_class_mapping() -> None:
+    rows = _shape_rows()
+    rows[0]["per_class_efficiency"] = {
+        name: rows[0]["accuracy"] for name in reversed(CLASS_NAMES)
+    }
+    normalized = build_uniform_shape_metrics(
+        rows=rows,
+        stage_c_run_registry_sha256="8" * 64,
+        val_design_label_manifest_sha256="7" * 64,
+    )
+    assert list(normalized["rows"][0]["per_class_efficiency"]) == list(
+        CLASS_NAMES
+    )
+
+    non_mapping = _shape_rows()
+    non_mapping[0]["per_class_efficiency"] = [0.1] * 10
+    with pytest.raises(ValueError, match="class-name mapping"):
+        build_uniform_shape_metrics(
+            rows=non_mapping,
+            stage_c_run_registry_sha256="8" * 64,
+            val_design_label_manifest_sha256="7" * 64,
+        )
+
+    incomplete = _shape_rows()
+    incomplete[0]["per_class_efficiency"].pop(CLASS_NAMES[-1])
+    with pytest.raises(ValueError, match="canonical class order"):
+        build_uniform_shape_metrics(
+            rows=incomplete,
+            stage_c_run_registry_sha256="8" * 64,
+            val_design_label_manifest_sha256="7" * 64,
+        )
 
 
 def test_joint_loss_beam_uses_fresh_tuple_readouts() -> None:

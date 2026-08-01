@@ -5458,3 +5458,20 @@ The corrected complementarity report uses
 inside the report. Version-1 and corrected version-2 evidence are not
 interchangeable. This amendment changes no trained parameters, fusion logits,
 selection metric, run identity, or scientific underperformance policy.
+
+## Stage-C authoritative class-metric amendment (2026-08-01)
+
+The authoritative classification evaluator serializes
+`per_class_efficiency` as a mapping keyed by the frozen ten-class order. The
+uniform-shape selector must require exactly those ten keys and canonicalize
+the mapping in `QCD,Hbb,Hcc,Hgg,H4q,Hqql,Zqq,Wqq,Tbqq,Tbl` order. Iterating
+mapping keys as if they were positional numeric values is forbidden. Missing,
+additional, nonfinite, or out-of-range class efficiencies fail closed.
+
+The uniform-shape metric artifact now carries the explicit class order and
+uses `retb_uniform_shape_metrics_v2`, schema version 2. Its downstream shape
+selection uses mapping-valued per-class means and
+`retb_offline_shape_selection_v2`, schema version 2. Version-1 artifacts are
+not interchangeable with the corrected contracts. The class metrics,
+selection thresholds, tie rules, run identities, and non-blocking treatment
+of scientific underperformance are unchanged.
