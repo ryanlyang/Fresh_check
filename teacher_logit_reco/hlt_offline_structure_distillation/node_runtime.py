@@ -271,11 +271,17 @@ def _derived_infrastructure(
             for item in ("--label-manifest", f"{split}={support / 'labels' / f'{split}.json'}")
         ]
     if node_id in {"baseline_train", "probe_tap_capture"}:
-        cache = _hlt_cache if node_id == "probe_tap_capture" else _hlt_view
+        # NativeHLTExpertDataset authenticates the original RETB HLT-v3
+        # metadata contract.  HOSD's materialized views are independently
+        # authenticated target-extraction inputs, not RETB cache artifacts.
+        cache = _hlt_cache
         return [
             *_repeated("--train-cache", {r: cache(root, "model_train", r) for r in range(4)}),
             "--val-stop-cache", f"0={cache(root, 'val_stop', 0)}",
-            "--design-select-cache", f"0={cache(root, 'design_select', 0)}",
+            # Stage-C baseline training does not read design_select.  Retain
+            # the registered subrole argument without pretending it is an
+            # original RETB cache coordinate.
+            "--design-select-cache", f"0={_hlt_view(root, 'design_select', 0)}",
             "--train-labels", str(_labels_npz(root, "model_train")),
             "--val-stop-labels", str(_labels_npz(root, "val_stop")),
             "--design-select-labels", str(_labels_npz(root, "design_select")),

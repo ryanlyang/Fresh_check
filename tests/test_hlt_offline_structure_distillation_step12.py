@@ -1426,6 +1426,17 @@ def test_design_roles_resolve_to_disjoint_authenticated_subrole_inputs(tmp_path)
     robustness = " ".join(
         node_runtime._derived_infrastructure(tmp_path, "robustness_evaluation", {})
     )
+    assert str(
+        tmp_path
+        / "inputs"
+        / "shared_retb_parent_campaign"
+        / "inputs"
+        / "hlt_v3"
+        / "model_train"
+        / "replica_0"
+        / "R_MULTI"
+        / "D_NOMINAL"
+    ) in baseline
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_select" / "replica_0.npz") in baseline
     assert "design_select_identity_labels.npz" in baseline
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_confirm" / "replica_0.npz") in confirmation
@@ -1433,6 +1444,47 @@ def test_design_roles_resolve_to_disjoint_authenticated_subrole_inputs(tmp_path)
     assert "design_confirm_identity_labels.npz" in robustness
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in baseline
     assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in confirmation
+
+
+def test_native_baseline_uses_identity_index_without_copying_population(tmp_path):
+    path = REPO_ROOT / "scripts" / "train_hosd_baseline.py"
+    spec = importlib.util.spec_from_file_location("hosd_baseline_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Base:
+        replicas = {0: {}}
+        identities = ("jet-a", "jet-b")
+        logical_role = "model_train"
+        realization_policy = "R_MULTI"
+        metadata = {0: {}}
+
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            return {"replica_id": 0, "identity": self.identities[index]}
+
+        def set_epoch(self, epoch):
+            self.epoch = epoch
+
+    targets = np.zeros((2, 545), dtype=np.float32)
+    targets[:, 0] = [20.0, 10.0]
+    wrapped = module._ReplicaNativeTargetDataset(
+        Base(),
+        {
+            0: {
+                "targets": targets,
+                "target_mask": np.ones_like(targets, dtype=bool),
+                "availability": np.ones((2, 7), dtype=np.float32),
+                "source_indices": np.asarray([1, 0], dtype=np.int64),
+            }
+        },
+    )
+    assert wrapped[0]["offline_target_tokens"][0, 0] == 10.0
+    assert wrapped[1]["offline_target_tokens"][0, 0] == 20.0
+    assert wrapped.targets_by_replica[0]["targets"] is targets
 
 
 def test_prepare_execution_can_build_minimal_runtime_without_template(

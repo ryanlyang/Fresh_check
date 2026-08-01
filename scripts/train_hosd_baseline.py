@@ -212,16 +212,18 @@ def _native_targets(path: Path | None, identities: Sequence[str]):
         ):
             raise ValueError("native relation memory-map member differs")
         mapped[name] = np.load(member_path, mmap_mode="r", allow_pickle=False)
-    from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
-        identity_order_hash,
-    )
-
     target = mapped["targets"]
     mask = mapped["target_mask"]
     availability = mapped["availability"]
+    target_identities = tuple(str(value) for value in mapped["identities"])
+    requested_identities = tuple(str(value) for value in identities)
+    target_positions = {
+        identity: index for index, identity in enumerate(target_identities)
+    }
     if (
-        identity_order_hash(mapped["identities"])
-        != identity_order_hash(identities)
+        len(target_positions) != len(target_identities)
+        or len(requested_identities) != len(set(requested_identities))
+        or set(target_positions) != set(requested_identities)
         or target.shape != (len(identities), 545)
         or mask.shape != target.shape
         or availability.shape != (len(identities), 7)
@@ -231,6 +233,10 @@ def _native_targets(path: Path | None, identities: Sequence[str]):
         "targets": target,
         "target_mask": mask,
         "availability": availability,
+        "source_indices": np.asarray(
+            [target_positions[identity] for identity in requested_identities],
+            dtype=np.int64,
+        ),
     }
 
 
@@ -249,6 +255,7 @@ class _ReplicaNativeTargetDataset:
             value["targets"].shape != (len(base), 545)
             or value["target_mask"].shape != (len(base), 545)
             or value["availability"].shape != (len(base), 7)
+            or value["source_indices"].shape != (len(base),)
             for value in self.targets_by_replica.values()
         ):
             raise ValueError("native relation packed target shape differs")
@@ -271,11 +278,12 @@ class _ReplicaNativeTargetDataset:
         row = dict(self.base[index])
         replica = int(row["replica_id"])
         target = self.targets_by_replica[replica]
+        target_index = int(target["source_indices"][index])
         row["offline_target_tokens"] = np.concatenate(
             (
-                target["targets"][index],
-                target["target_mask"][index].astype(np.float32),
-                target["availability"][index],
+                target["targets"][target_index],
+                target["target_mask"][target_index].astype(np.float32),
+                target["availability"][target_index],
             )
         )[None, :]
         row["offline_target_logits"] = np.zeros(10, dtype=np.float32)
