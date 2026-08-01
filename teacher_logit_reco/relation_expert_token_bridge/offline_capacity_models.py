@@ -90,6 +90,7 @@ def monolithic_config(
             "num_layers": particle_blocks,
             "num_cls_layers": class_blocks,
             "block_params": {
+                "ffn_ratio": expansion,
                 "dropout": 0.0,
                 "attn_dropout": 0.0,
                 "activation_dropout": 0.0,
@@ -98,13 +99,14 @@ def monolithic_config(
                 "scale_heads": True,
                 "scale_resids": True,
             },
+            "cls_block_params": {
+                "ffn_ratio": expansion,
+                "dropout": 0.0,
+                "attn_dropout": 0.0,
+                "activation_dropout": 0.0,
+            },
         }
     )
-    # Weaver derives its feed-forward width from ``scale_fc`` rather than a
-    # public dimension argument.  Record the requested expansion and accept
-    # only its canonical factors; the explicit profile binds the instantiated
-    # graph, so selector evidence cannot silently use the requested value.
-    config["retb_feed_forward_expansion"] = expansion
     return config
 
 
@@ -199,16 +201,17 @@ class MonolithicBase4ParticleTransformer(
     ) -> None:
         super().__init__()
         resolved = monolithic_config(configuration)
-        expansion = int(resolved.pop("retb_feed_forward_expansion"))
         transformer = getattr(weaver_module, "ParticleTransformer", None)
         if transformer is None:
             raise RuntimeError("Weaver module lacks ParticleTransformer")
         self.configuration = tuple(map(int, configuration))
-        self.feed_forward_expansion = expansion
+        self.feed_forward_expansion = self.configuration[1]
         self.config = copy.deepcopy(resolved)
         self.mod = transformer(**resolved)
         module = _require_torch()
-        rewritten = 0
+        validated = 0
+        width = self.configuration[0]
+        hidden = width * self.feed_forward_expansion
         for collection_name in ("blocks", "cls_blocks"):
             collection = getattr(self.mod, collection_name, None)
             if collection is None:
@@ -216,20 +219,24 @@ class MonolithicBase4ParticleTransformer(
             for block in collection:
                 fc1 = getattr(block, "fc1", None)
                 fc2 = getattr(block, "fc2", None)
+                post_fc_norm = getattr(block, "post_fc_norm", None)
                 if not (
                     isinstance(fc1, module.nn.Linear)
                     and isinstance(fc2, module.nn.Linear)
-                    and int(fc1.in_features) == self.configuration[0]
-                    and int(fc2.out_features) == self.configuration[0]
+                    and isinstance(post_fc_norm, module.nn.LayerNorm)
+                    and int(fc1.in_features) == width
+                    and int(fc1.out_features) == hidden
+                    and int(fc2.in_features) == hidden
+                    and int(fc2.out_features) == width
+                    and tuple(post_fc_norm.normalized_shape) == (hidden,)
+                    and int(getattr(block, "ffn_dim", hidden)) == hidden
                 ):
                     raise RuntimeError(
-                        "installed Weaver block lacks rewritable fc1/fc2"
+                        "installed Weaver block does not honor the requested "
+                        "feed-forward expansion"
                     )
-                hidden = self.configuration[0] * expansion
-                block.fc1 = module.nn.Linear(self.configuration[0], hidden)
-                block.fc2 = module.nn.Linear(hidden, self.configuration[0])
-                rewritten += 1
-        if rewritten != self.configuration[3] + self.configuration[4]:
+                validated += 1
+        if validated != self.configuration[3] + self.configuration[4]:
             raise RuntimeError("monolithic feed-forward block coverage differs")
         object.__setattr__(self, "_weaver_module", weaver_module)
 

@@ -5522,3 +5522,16 @@ registration artifact.
 Parent-metric tampering must fail before wrapper publication. This correction
 changes no logits, labels, metric values, checkpoint, control definition,
 selection rule, run identity, or scientific underperformance policy.
+
+## Stage-C monolithic FFN-construction amendment (2026-08-01)
+
+The predeclared monolithic base4 grid's feed-forward expansion is supplied to
+Weaver through the public `ffn_ratio` block parameter for both particle and
+class-attention blocks. Weaver must construct `fc1`, `post_fc_norm`, and `fc2`
+at the same hidden width and apply its ordinary initialization; RETB must not
+replace only the two linear layers after construction. Every instantiated
+candidate fails closed unless all particle and class blocks attest the exact
+requested hidden width. Forward/backward regressions cover expansion factors
+2, 4, and 6. This is a runtime realization correction to the already frozen
+grid and changes no candidate tuple, selector rule, input, training budget,
+run identity, or scientific underperformance policy.

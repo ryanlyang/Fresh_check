@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,8 +23,10 @@ from teacher_logit_reco.relation_expert_token_bridge.capacity import (
     validate_offline_capacity_control_registration,
 )
 from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_models import (
+    MonolithicBase4ParticleTransformer,
     analytical_particle_transformer_flops,
     build_monolithic_grid,
+    monolithic_config,
 )
 from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
     COMPLEMENTARITY_CONTRACT,
@@ -714,6 +717,83 @@ def test_capacity_selectors_and_label_exposure_ledger() -> None:
     )
     assert ledger["optimizer_update_budget"] == 2
     assert ledger["early_stopping"] is False
+
+
+class _CapacityWeaverBlock(torch.nn.Module):
+    def __init__(self, width: int, ffn_ratio: int) -> None:
+        super().__init__()
+        self.ffn_dim = int(width) * int(ffn_ratio)
+        self.fc1 = torch.nn.Linear(width, self.ffn_dim)
+        self.post_fc_norm = torch.nn.LayerNorm(self.ffn_dim)
+        self.fc2 = torch.nn.Linear(self.ffn_dim, width)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        update = self.fc2(self.post_fc_norm(torch.nn.functional.gelu(self.fc1(inputs))))
+        return inputs + update
+
+
+class _CapacityWeaverTransformer(torch.nn.Module):
+    def __init__(self, **configuration) -> None:
+        super().__init__()
+        width = int(configuration["embed_dims"][-1])
+        particle_ratio = int(configuration["block_params"]["ffn_ratio"])
+        class_ratio = int(configuration["cls_block_params"]["ffn_ratio"])
+        self.embed = torch.nn.Linear(int(configuration["input_dim"]), width)
+        self.blocks = torch.nn.ModuleList(
+            _CapacityWeaverBlock(width, particle_ratio)
+            for _ in range(int(configuration["num_layers"]))
+        )
+        self.cls_blocks = torch.nn.ModuleList(
+            _CapacityWeaverBlock(width, class_ratio)
+            for _ in range(int(configuration["num_cls_layers"]))
+        )
+        self.norm = torch.nn.LayerNorm(width)
+        self.fc = torch.nn.Linear(width, int(configuration["num_classes"]))
+
+    def forward(self, features, v=None, mask=None):
+        del v
+        encoded = self.embed(features.transpose(1, 2))
+        for block in self.blocks:
+            encoded = block(encoded)
+        valid = mask.transpose(1, 2).to(encoded)
+        pooled = (encoded * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        pooled = pooled.unsqueeze(1)
+        for block in self.cls_blocks:
+            pooled = block(pooled)
+        return self.fc(self.norm(pooled.squeeze(1)))
+
+
+@pytest.mark.parametrize("expansion", (2, 4, 6))
+def test_monolithic_capacity_uses_weaver_ffn_ratio_end_to_end(
+    expansion: int,
+) -> None:
+    configuration = (32, expansion, 4, 1, 1)
+    resolved = monolithic_config(configuration)
+    assert resolved["block_params"]["ffn_ratio"] == expansion
+    assert resolved["cls_block_params"]["ffn_ratio"] == expansion
+    model = MonolithicBase4ParticleTransformer(
+        configuration,
+        weaver_module=SimpleNamespace(
+            ParticleTransformer=_CapacityWeaverTransformer
+        ),
+    )
+    features = torch.randn(2, 17, 5, requires_grad=True)
+    vectors = torch.randn(2, 4, 5)
+    mask = torch.ones(2, 1, 5, dtype=torch.bool)
+    logits = model(
+        points=features[:, -2:, :],
+        features=features,
+        lorentz_vectors=vectors,
+        mask=mask,
+    )
+    assert logits.shape == (2, 10)
+    logits.square().mean().backward()
+    assert features.grad is not None
+    expected_hidden = 32 * expansion
+    for block in (*model.mod.blocks, *model.mod.cls_blocks):
+        assert block.fc1.out_features == expected_hidden
+        assert block.fc2.in_features == expected_hidden
+        assert tuple(block.post_fc_norm.normalized_shape) == (expected_hidden,)
 
 
 def test_offline_capacity_execution_registry_and_registration_are_complete() -> None:
