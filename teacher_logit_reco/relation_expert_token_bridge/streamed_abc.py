@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .contracts import validate_content_hash, with_content_hash
+from .contracts import require_sha256, validate_content_hash, with_content_hash
 
 
 STREAMED_ABC_PROFILE = "offline_abc_streamed"
@@ -66,6 +66,7 @@ def build_streamed_abc_execution_profile(
             "frozen_token_cache_persistent": False,
             "fusion_wave_coordinate": ["shape_id", "pipeline_seed"],
             "fusion_wave_count": 21,
+            "fusion_wave_slurm_memory": "440G",
             "task_local_root_precedence": [
                 "RETB_STREAM_ROOT",
                 "SLURM_TMPDIR",
@@ -115,14 +116,41 @@ def build_streamed_tree_index(
     views: Sequence[Mapping[str, Any]],
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
+    expected_ids = [
+        *(f"offline:{role}" for role in STREAMED_OFFLINE_ROLES),
+        *(
+            f"hlt:{role}:r{replica}:{policy}"
+            for role, replica, policy in STREAMED_HLT_VIEWS
+        ),
+    ]
+    if [str(row.get("view_id")) for row in views] != expected_ids:
+        raise ValueError("streamed A-C tree view coordinates differ")
+    for row in views:
+        for field in (
+            "view_content_sha256",
+            "identity_manifest_sha256",
+            "cache_metadata_sha256",
+            "identity_order_sha256",
+            "tree_manifest_sha256",
+        ):
+            require_sha256(row.get(field), name=f"streamed_tree.{field}")
     return with_content_hash(
         {
             "contract": STREAMED_ABC_TREE_INDEX_CONTRACT,
             "schema_version": 1,
-            "campaign_spec_sha256": campaign_spec_sha256,
-            "backend_manifest_sha256": backend_manifest_sha256,
-            "angular_tree_resource_sha256": angular_tree_resource_sha256,
-            "execution_profile_sha256": execution_profile_sha256,
+            "campaign_spec_sha256": require_sha256(
+                campaign_spec_sha256, name="campaign_spec_sha256"
+            ),
+            "backend_manifest_sha256": require_sha256(
+                backend_manifest_sha256, name="backend_manifest_sha256"
+            ),
+            "angular_tree_resource_sha256": require_sha256(
+                angular_tree_resource_sha256,
+                name="angular_tree_resource_sha256",
+            ),
+            "execution_profile_sha256": require_sha256(
+                execution_profile_sha256, name="execution_profile_sha256"
+            ),
             "views": [dict(row) for row in views],
             "view_ids": [str(row["view_id"]) for row in views],
             "view_count": len(views),
@@ -142,20 +170,40 @@ def build_streamed_input_audit(
     hlt_v3_degradation_audit_sha256: str,
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
+    expected_offline = [f"offline:{role}" for role in STREAMED_OFFLINE_ROLES]
+    expected_hlt = [
+        f"hlt:{role}:r{replica}:{policy}"
+        for role, replica, policy in STREAMED_HLT_VIEWS
+    ]
+    if [str(row.get("view_id")) for row in offline_views] != expected_offline:
+        raise ValueError("streamed offline audit coverage differs")
+    if [str(row.get("view_id")) for row in hlt_views] != expected_hlt:
+        raise ValueError("streamed HLT audit coverage differs")
     return with_content_hash(
         {
             "contract": STREAMED_ABC_INPUT_AUDIT_CONTRACT,
             "schema_version": 1,
-            "campaign_spec_sha256": campaign_spec_sha256,
-            "execution_profile_sha256": execution_profile_sha256,
+            "campaign_spec_sha256": require_sha256(
+                campaign_spec_sha256, name="campaign_spec_sha256"
+            ),
+            "execution_profile_sha256": require_sha256(
+                execution_profile_sha256, name="execution_profile_sha256"
+            ),
             "offline_views": [dict(row) for row in offline_views],
             "hlt_views": [dict(row) for row in hlt_views],
             "offline_role_order": list(STREAMED_OFFLINE_ROLES),
             "hlt_view_coordinates": [list(row) for row in STREAMED_HLT_VIEWS],
-            "tree_index_sha256": tree_index_sha256,
-            "normalizer_bundle_sha256": normalizer_bundle_sha256,
+            "tree_index_sha256": require_sha256(
+                tree_index_sha256, name="tree_index_sha256"
+            ),
+            "normalizer_bundle_sha256": require_sha256(
+                normalizer_bundle_sha256, name="normalizer_bundle_sha256"
+            ),
             "hlt_v3_degradation_audit_sha256": (
-                hlt_v3_degradation_audit_sha256
+                require_sha256(
+                    hlt_v3_degradation_audit_sha256,
+                    name="hlt_v3_degradation_audit_sha256",
+                )
             ),
             "future_roles_audited": False,
             "valid_for_scientific_stages": ["A", "B", "C"],

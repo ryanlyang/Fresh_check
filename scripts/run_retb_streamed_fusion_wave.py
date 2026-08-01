@@ -299,6 +299,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"streamed fusion output is absent: {path}"
                     )
                 output_hashes[str(path.relative_to(root))] = _sha256(path)
+        shutil.rmtree(wave_root)
+        if wave_root.exists():
+            raise RuntimeError("task-local frozen-token cache cleanup failed")
         receipt = with_content_hash(
             {
                 "contract": STREAMED_ABC_FUSION_RECEIPT_CONTRACT,

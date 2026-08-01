@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -22,6 +23,17 @@ from teacher_logit_reco.relation_expert_token_bridge.step5 import (  # noqa: E40
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
+    STREAMED_ABC_FUSION_RECEIPT_CONTRACT,
+)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -43,7 +55,23 @@ def main() -> int:
     missing = [str(path) for path in args.expected_output if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"streamed fusion outputs are absent: {missing}")
+    receipt = load_hashed_json(
+        args.campaign_root
+        / "registry"
+        / "streamed_fusion_waves"
+        / str(run["configuration"]["shape_id"])
+        / f"seed_{int(run['seed'])}.json",
+        expected_contract=STREAMED_ABC_FUSION_RECEIPT_CONTRACT,
+    )
+    if (
+        args.run_id not in receipt["run_ids"]
+        or receipt.get("source") != campaign.get("source")
+    ):
+        raise ValueError("streamed fusion receipt lineage differs")
     for path in args.expected_output:
+        relative = str(path.resolve().relative_to(args.campaign_root.resolve()))
+        if receipt["persistent_output_hashes"].get(relative) != _sha256(path):
+            raise ValueError("streamed fusion output hash differs from receipt")
         if path.suffix == ".json":
             payload = load_hashed_json(path)
             source = payload.get("source")
@@ -55,6 +83,7 @@ def main() -> int:
                 "status": "streamed_fusion_output_verified",
                 "run_id": run["run_id"],
                 "output_count": len(args.expected_output),
+                "receipt_sha256": receipt["content_hash"],
             },
             indent=2,
             sort_keys=True,
