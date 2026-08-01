@@ -27,13 +27,11 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     infer_teacher_batch,
     load_and_validate_campaign,
     load_hashed_json,
-    publish_target_cache_shard,
-    validate_target_cache,
+    publish_target_cache,
     validate_teacher_lock,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     TEACHER_LOCK_CONTRACT,
-    write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (  # noqa: E402
     CLASS_NAMES,
@@ -157,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         source=campaign["source"],
         shard_size=args.shard_size,
         access_authorization_hash=args.access_authorization_sha256,
-        identities_are_canonical=True,
+        identities_are_canonical=False,
     )
 
     def generate(indices: np.ndarray):
@@ -166,21 +164,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("teacher inference batch exposed labels")
         return infer_teacher_batch(adapter, batch)
 
-    for shard_index in range(int(spec["shard_count"])):
-        publish_target_cache_shard(
-            args.output_dir,
-            cache_spec=spec,
-            canonical_identities=identities,
-            canonical_to_source=None,
-            shard_index=shard_index,
-            generator=generate,
-            identity_population_attestation=spec[
-                "canonical_identity_order_sha256"
-            ],
-        )
-    manifest = validate_target_cache(args.output_dir, cache_spec=spec)
-    write_immutable_json(args.output_dir / "target_manifest.json", manifest)
-    write_immutable_json(args.output_dir / "cache_spec.json", spec)
+    manifest = publish_target_cache(
+        args.output_dir,
+        cache_spec=spec,
+        identities=identities,
+        generator=generate,
+    )
     wave = try_finalize_stage_b_wave(
         campaign_root=args.campaign_root,
         wave_kind="teacher_output",

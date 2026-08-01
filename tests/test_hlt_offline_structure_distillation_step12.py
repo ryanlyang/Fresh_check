@@ -9,6 +9,7 @@ import pytest
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (
     AuthenticatedTreeSplit,
+    compatible_artifact_content_hashes,
     LoadedTargetCache,
     fit_sharded_target_normalizer,
     build_campaign_monitor,
@@ -26,6 +27,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     REQUIRED_INFRASTRUCTURE_OPTION_KEYS,
     DIRECTORY_INFRASTRUCTURE_OPTIONS,
     NODE_COORDINATE_LIMITS,
+    resolve_tree_parent_lineage,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
     canonical_sha256,
@@ -833,6 +835,9 @@ def test_stage_j_tree_and_target_producers_are_bounded_resident():
     target_source = (REPO_ROOT / "scripts" / "build_hosd_targets.py").read_text(
         encoding="utf-8"
     )
+    teacher_target_source = (
+        REPO_ROOT / "scripts" / "infer_hosd_teacher_targets.py"
+    ).read_text(encoding="utf-8")
     cache_source = (
         REPO_ROOT
         / "teacher_logit_reco"
@@ -844,7 +849,12 @@ def test_stage_j_tree_and_target_producers_are_bounded_resident():
     assert "load_materialized_input_view(" in target_source
     assert "tree_by_identity" not in target_source
     assert "publish_target_cache_shard(" in target_source
-    assert "canonical_to_source=None" in target_source
+    assert "canonicalize_identities(" in target_source
+    assert "canonical_to_source=canonical_to_source" in target_source
+    assert "raw_tokens = raw_tokens[canonical_to_source]" not in target_source
+    assert "mask = mask[canonical_to_source]" not in target_source
+    assert "identities_are_canonical=False" in teacher_target_source
+    assert "publish_target_cache(" in teacher_target_source
     assert "all_identities" not in cache_source
     teacher_source = (
         REPO_ROOT
@@ -871,6 +881,44 @@ def test_stage_j_tree_and_target_producers_are_bounded_resident():
     assert "load_target_cache_sharded" in residual_source
     assert "publish_target_cache_shard(" in residual_source
     assert "_tree_lookup" not in pair_source
+
+
+def test_source_bound_tree_parent_alias_authenticates_raw_builder_hash():
+    raw_backend = with_content_hash(
+        {"contract": "test_backend", "schema_version": 1, "compiler": "gcc"}
+    )
+    bound_backend = with_content_hash(
+        {
+            "contract": "test_backend",
+            "schema_version": 1,
+            "compiler": "gcc",
+            "source": SOURCE,
+        }
+    )
+    resource = with_content_hash(
+        {"contract": "test_resource", "schema_version": 1, "source": SOURCE}
+    )
+    assert raw_backend["content_hash"] in compatible_artifact_content_hashes(
+        bound_backend
+    )
+    parents = {
+        "hlt_content_sha256": "a" * 64,
+        "tree_resource_sha256": resource["content_hash"],
+        "backend_manifest_sha256": raw_backend["content_hash"],
+    }
+    assert resolve_tree_parent_lineage(
+        parents,
+        hlt_content_sha256="a" * 64,
+        tree_resource=resource,
+        tree_backend=bound_backend,
+    ) == parents
+    with pytest.raises(ValueError, match="backend parent differs"):
+        resolve_tree_parent_lineage(
+            {**parents, "backend_manifest_sha256": "f" * 64},
+            hlt_content_sha256="a" * 64,
+            tree_resource=resource,
+            tree_backend=bound_backend,
+        )
 
 
 def test_all_tree_consumers_use_shared_fail_closed_split_authentication(

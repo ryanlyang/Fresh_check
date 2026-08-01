@@ -23,11 +23,13 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     PHYSICAL_TARGET_IDS,
     STREAM_STORAGE_MODE,
     build_target_cache_spec,
+    canonicalize_identities,
     extract_registered_target,
     load_materialized_input_view,
     load_and_validate_campaign,
     load_hashed_json,
     publish_target_cache_shard,
+    resolve_tree_parent_lineage,
     validate_target_cache,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -209,28 +211,20 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "target-builder input view lacks its tree source-content parent"
             )
-        expected_tree_parents = {
-            "hlt_content_sha256": source_content_sha256,
-            "tree_resource_sha256": tree_resource["content_hash"],
-            "backend_manifest_sha256": tree_backend["content_hash"],
-        }
+        tree_manifest_artifact = load_hashed_json(
+            args.tree_cache_dir / "manifest.json"
+        )
+        expected_tree_parents = resolve_tree_parent_lineage(
+            tree_manifest_artifact["parents"],
+            hlt_content_sha256=source_content_sha256,
+            tree_resource=tree_resource,
+            tree_backend=tree_backend,
+        )
         tree_split = AuthenticatedTreeSplit(
             args.tree_cache_dir,
-            expected_identities=(
-                identities
-                if int(load_hashed_json(args.tree_cache_dir / "manifest.json")["jet_count"])
-                == identity_count
-                else None
-            ),
-            expected_parents={
-                **expected_tree_parents,
-            },
+            expected_parents=expected_tree_parents,
         )
-        tree_event_indices = (
-            np.arange(identity_count, dtype=np.int64)
-            if len(tree_split) == identity_count
-            else tree_split.event_indices_for_identities(identities)
-        )
+        tree_event_indices = tree_split.event_indices_for_identities(identities)
         tree_manifest = tree_split.manifest
         if tree_manifest.get("source") is not None and tree_manifest.get(
             "source"
@@ -262,21 +256,14 @@ def main(argv: list[str] | None = None) -> int:
         storage_modes=storage_modes,
         hlt_replica_id=args.hlt_replica_id,
         access_authorization_hash=args.access_authorization_sha256,
-        identities_are_canonical=True,
+        identities_are_canonical=False,
     )
 
     persisted = tuple(spec["persisted_target_ids"])
 
     def generate(indices: np.ndarray):
-        if (
-            indices.ndim != 1
-            or indices.size == 0
-            or not np.array_equal(
-                indices,
-                np.arange(int(indices[0]), int(indices[-1]) + 1),
-            )
-        ):
-            raise ValueError("bounded target extraction requires a contiguous shard")
+        if indices.ndim != 1 or indices.size == 0:
+            raise ValueError("bounded target extraction requires a non-empty shard")
         shard_trees = None
         if uses_tree:
             shard_trees = tree_split.load_event_rows(
@@ -295,16 +282,19 @@ def main(argv: list[str] | None = None) -> int:
             for target_id in persisted
         }
 
+    canonical_identities, canonical_to_source = canonicalize_identities(
+        identities
+    )
     for shard_index in range(int(spec["shard_count"])):
         publish_target_cache_shard(
             args.output_dir,
             cache_spec=spec,
-            canonical_identities=identities,
-            canonical_to_source=None,
+            canonical_identities=canonical_identities,
+            canonical_to_source=canonical_to_source,
             shard_index=shard_index,
             generator=generate,
-            identity_population_attestation=input_manifest[
-                "identity_order_sha256"
+            identity_population_attestation=spec[
+                "canonical_identity_order_sha256"
             ],
         )
     manifest = validate_target_cache(args.output_dir, cache_spec=spec)

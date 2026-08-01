@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     build_heteroscedastic_metadata,
     build_hlt_conditional_context,
+    compatible_artifact_content_hashes,
     fit_conditional_residual,
     fit_latent_whitening,
     fit_target_normalizer,
@@ -123,6 +124,35 @@ def main(argv: list[str] | None = None) -> int:
         component_kinds=physical_kinds,
         normalization_role="target",
     )
+    tree_resource = load_hashed_json(
+        root / "inputs" / "inherited_angular_tree_resource.json"
+    )
+    tree_backend = load_hashed_json(
+        root / "inputs" / "region_tree" / "backend_manifest.json"
+    )
+    tree_parent_rows = [
+        load_hashed_json(Path(path) / "manifest.json")["parents"]
+        for path in trees.values()
+    ]
+    tree_resource_hashes = {
+        row["tree_resource_sha256"] for row in tree_parent_rows
+    }
+    tree_backend_hashes = {
+        row["backend_manifest_sha256"] for row in tree_parent_rows
+    }
+    if (
+        len(tree_resource_hashes) != 1
+        or len(tree_backend_hashes) != 1
+        or not tree_resource_hashes.issubset(
+            compatible_artifact_content_hashes(tree_resource)
+        )
+        or not tree_backend_hashes.issubset(
+            compatible_artifact_content_hashes(tree_backend)
+        )
+    ):
+        raise ValueError("normalization tree-parent lineage differs")
+    tree_resource_sha256 = next(iter(tree_resource_hashes))
+    tree_backend_sha256 = next(iter(tree_backend_hashes))
     pair_normalizers = [
         fit_pair_normalizer_from_views(
             target_id=target_id,
@@ -135,16 +165,12 @@ def main(argv: list[str] | None = None) -> int:
             split="model_train",
             source=source,
             tree_resource_sha256=(
-                load_hashed_json(
-                    root / "inputs" / "inherited_angular_tree_resource.json"
-                )["content_hash"]
+                tree_resource_sha256
                 if target_id == "T_HLT_REGION_PAIR_8"
                 else None
             ),
             tree_backend_sha256=(
-                load_hashed_json(
-                    root / "inputs" / "region_tree" / "backend_manifest.json"
-                )["content_hash"]
+                tree_backend_sha256
                 if target_id == "T_HLT_REGION_PAIR_8"
                 else None
             ),

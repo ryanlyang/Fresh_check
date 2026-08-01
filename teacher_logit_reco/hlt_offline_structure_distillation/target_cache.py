@@ -60,6 +60,14 @@ def _canonical_identities(identities: Sequence[str]) -> tuple[tuple[str, ...], n
     return tuple(raw[int(index)] for index in order), order
 
 
+def canonicalize_identities(
+    identities: Sequence[str],
+) -> tuple[tuple[str, ...], np.ndarray]:
+    """Return canonical identities and their exact source-position mapping."""
+
+    return _canonical_identities(identities)
+
+
 def identity_order_sha256(identities: Sequence[str]) -> str:
     digest = hashlib.sha256(b"hosd_target_identity_order_v1\0")
     for value in identities:

@@ -22,6 +22,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     authorize_access,
     extract_registered_target,
     load_and_validate_campaign,
+    resolve_tree_parent_lineage,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     STAGE_C_PLAN_CONTRACT,
@@ -214,14 +215,18 @@ def main(argv=None):
                 )
                 if hlt_source is None:
                     raise ValueError("pair input lacks tree source parent")
+                tree_manifest_artifact = load_hashed_json(
+                    trees[(role, replica)] / "manifest.json"
+                )
                 tree_rows, tree_manifest = _trees(
                     trees[(role, replica)],
                     ids,
-                    {
-                        "hlt_content_sha256": hlt_source,
-                        "tree_resource_sha256": tree_resource["content_hash"],
-                        "backend_manifest_sha256": tree_backend["content_hash"],
-                    },
+                    resolve_tree_parent_lineage(
+                        tree_manifest_artifact["parents"],
+                        hlt_content_sha256=hlt_source,
+                        tree_resource=tree_resource,
+                        tree_backend=tree_backend,
+                    ),
                 )
                 parents[f"tree_{role}_{replica}"] = tree_manifest["content_hash"]
             batch = extract_registered_target(

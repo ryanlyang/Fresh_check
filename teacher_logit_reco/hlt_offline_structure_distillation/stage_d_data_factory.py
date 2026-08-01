@@ -13,7 +13,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
     load_hlt_v3_cache,
 )
 from .input_views import load_materialized_hlt_input_view
-from .authenticated_tree import AuthenticatedTreeSplit
+from .authenticated_tree import AuthenticatedTreeSplit, resolve_tree_parent_lineage
 
 from .auxiliary_data import (
     AuxiliaryTargetDataset,
@@ -124,14 +124,26 @@ def build_default_stage_d_role_definitions(
                     if path.is_file()
                     else load_hlt_v3_cache(path)
                 )
-                expected_parents[str(int(raw_replica))] = {
-                    "hlt_content_sha256": metadata.get(
-                        "tree_source_array_content_sha256",
-                        metadata["array_content_sha256"],
-                    ),
-                    "tree_resource_sha256": tree_resource["content_hash"],
-                    "backend_manifest_sha256": tree_backend["content_hash"],
-                }
+                tree_paths = base["tree_caches"]
+                tree_path = tree_paths.get(
+                    raw_replica, tree_paths.get(str(raw_replica))
+                )
+                if tree_path is None:
+                    raise ValueError("Stage-D tree replica coverage differs")
+                tree_manifest = load_hashed_json(
+                    Path(tree_path) / "manifest.json"
+                )
+                expected_parents[str(int(raw_replica))] = (
+                    resolve_tree_parent_lineage(
+                        tree_manifest["parents"],
+                        hlt_content_sha256=metadata.get(
+                            "tree_source_array_content_sha256",
+                            metadata["array_content_sha256"],
+                        ),
+                        tree_resource=tree_resource,
+                        tree_backend=tree_backend,
+                    )
+                )
             base["tree_expected_parents"] = expected_parents
         split = split_by_role[role]
         if pair:

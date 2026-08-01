@@ -12,7 +12,10 @@ import torch
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from teacher_logit_reco.relational_part import build_runtime_model, load_hashed_json
 
-from .authenticated_tree import AuthenticatedTreeSplit
+from .authenticated_tree import (
+    AuthenticatedTreeSplit,
+    compatible_artifact_content_hashes,
+)
 from .input_views import load_materialized_input_view
 from .teachers import build_relational_teacher_adapter
 
@@ -79,7 +82,9 @@ def build_label_blind_relational_adapter(
             if config.get(path_key) is None:
                 raise ValueError("O_FULLREL inference lacks an active tree parent path")
             artifact = load_hashed_json(config[path_key])
-            if artifact["content_hash"] != expected_parents.get(parent_key):
+            if expected_parents.get(
+                parent_key
+            ) not in compatible_artifact_content_hashes(artifact):
                 raise ValueError("O_FULLREL active tree parent differs from its lock")
         tree_split = AuthenticatedTreeSplit(
             config["tree_cache_dir"],
