@@ -5505,3 +5505,20 @@ integration regression with all ten classes and exact identity ordering. This
 is a runtime interface correction only and changes no training update,
 checkpoint, metric, identity value or order, contract version, control
 definition, run identity, or scientific underperformance policy.
+
+## Stage-C capacity-metric publication amendment (2026-08-01)
+
+`evaluate_classification` returns an already content-hashed classification
+artifact. Capacity-control publication must validate that parent hash before
+augmenting the metrics; it may not spread the artifact's `content_hash` into
+a changed payload and attempt to hash it again. Both individual and composite
+capacity controls use one shared wrapper that records the validated parent as
+`classification_metrics_sha256`, retains the direct scientific metric fields,
+and publishes `retb_capacity_val_design_metrics_v1` with a new content hash.
+Individual controls bind their checkpoint hash; composite controls serialize
+`checkpoint_sha256: null` and bind their member lineage in the existing
+registration artifact.
+
+Parent-metric tampering must fail before wrapper publication. This correction
+changes no logits, labels, metric values, checkpoint, control definition,
+selection rule, run identity, or scientific underperformance policy.

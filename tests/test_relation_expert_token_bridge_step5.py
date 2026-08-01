@@ -71,7 +71,9 @@ from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
     make_offline_expert_loader,
 )
 from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_training import (
+    CAPACITY_VAL_DESIGN_METRICS_CONTRACT,
     _collect_predictions,
+    build_capacity_val_design_metrics,
 )
 from teacher_logit_reco.relation_expert_token_bridge.registry import (
     EXPERT_ORDER,
@@ -462,6 +464,34 @@ def test_capacity_prediction_uses_production_collator_identity_key() -> None:
     assert prediction["identities"] == identities
     assert prediction["labels"].tolist() == list(range(events))
     assert prediction["metrics"]["accuracy"] == pytest.approx(1.0)
+
+    metrics = build_capacity_val_design_metrics(
+        classification_metrics=prediction["metrics"],
+        control_id="O_BASE",
+        checkpoint_sha256="a" * 64,
+    )
+    assert metrics["contract"] == CAPACITY_VAL_DESIGN_METRICS_CONTRACT
+    assert metrics["classification_metrics_sha256"] == prediction[
+        "metrics"
+    ]["content_hash"]
+    assert metrics["checkpoint_sha256"] == "a" * 64
+    assert metrics["accuracy"] == pytest.approx(1.0)
+
+    composite = build_capacity_val_design_metrics(
+        classification_metrics=prediction["metrics"],
+        control_id="O_7X_UNBIASED_ENSEMBLE",
+        checkpoint_sha256=None,
+    )
+    assert composite["checkpoint_sha256"] is None
+
+    tampered = copy.deepcopy(prediction["metrics"])
+    tampered["accuracy"] = 0.0
+    with pytest.raises(ValueError, match="content hash mismatch"):
+        build_capacity_val_design_metrics(
+            classification_metrics=tampered,
+            control_id="O_BASE",
+            checkpoint_sha256="a" * 64,
+        )
 
 
 def _shape_rows(negative: bool = True):

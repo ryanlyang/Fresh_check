@@ -59,6 +59,7 @@ from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_training i
     OfflineCapacityTrainingConfig,
     _collect_predictions,
     build_capacity_profile,
+    build_capacity_val_design_metrics,
     train_offline_capacity_model,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa: E402
@@ -479,10 +480,11 @@ def _attest_composite(
             identities=np.asarray(prediction["identities"], dtype="U"),
         )
     metrics = bind_source(
-        {
-            **prediction["metrics"],
-            "control_id": control_id,
-        },
+        build_capacity_val_design_metrics(
+            classification_metrics=prediction["metrics"],
+            control_id=control_id,
+            checkpoint_sha256=None,
+        ),
         source_snapshot=source,
     )
     write_immutable_json(output / "val_design_metrics.json", metrics)

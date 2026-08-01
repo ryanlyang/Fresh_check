@@ -449,7 +449,12 @@ from .input_views import (
     materialize_offline_input_view,
     materialize_retb_offline_input_view,
 )
-from .authenticated_tree import AuthenticatedTreeShard, AuthenticatedTreeSplit
+from .authenticated_tree import (
+    AuthenticatedTreeShard,
+    AuthenticatedTreeSplit,
+    compatible_artifact_content_hashes,
+    resolve_tree_parent_lineage,
+)
 
 __all__ = [
     "ARTIFACT_LAYOUT_CONTRACT",
@@ -834,4 +839,6 @@ __all__ = [
     "materialize_retb_offline_input_view",
     "AuthenticatedTreeShard",
     "AuthenticatedTreeSplit",
+    "compatible_artifact_content_hashes",
+    "resolve_tree_parent_lineage",
 ]

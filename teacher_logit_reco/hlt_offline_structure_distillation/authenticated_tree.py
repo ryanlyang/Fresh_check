@@ -17,7 +17,52 @@ from teacher_logit_reco.relational_part import (
     unpack_tree_shard,
 )
 
-from .contracts import load_hashed_json
+from .contracts import load_hashed_json, validate_content_hash, with_content_hash
+
+
+def compatible_artifact_content_hashes(
+    artifact: Mapping[str, Any],
+) -> frozenset[str]:
+    """Return hashes accepted for a source-bound wrapper and its raw payload."""
+
+    validate_content_hash(artifact)
+    hashes = {str(artifact["content_hash"])}
+    if "source" in artifact:
+        raw = dict(artifact)
+        raw.pop("content_hash")
+        raw.pop("source")
+        hashes.add(str(with_content_hash(raw)["content_hash"]))
+    return frozenset(hashes)
+
+
+def resolve_tree_parent_lineage(
+    manifest_parents: Mapping[str, Any],
+    *,
+    hlt_content_sha256: str,
+    tree_resource: Mapping[str, Any],
+    tree_backend: Mapping[str, Any],
+) -> dict[str, str]:
+    """Authenticate exact tree lineage through source-bound parent aliases."""
+
+    actual = {str(key): str(value) for key, value in manifest_parents.items()}
+    required = {
+        "hlt_content_sha256",
+        "tree_resource_sha256",
+        "backend_manifest_sha256",
+    }
+    if set(actual) != required:
+        raise ValueError("tree split parent schema differs")
+    if actual["hlt_content_sha256"] != str(hlt_content_sha256):
+        raise ValueError("tree split input-content parent differs")
+    if actual["tree_resource_sha256"] not in compatible_artifact_content_hashes(
+        tree_resource
+    ):
+        raise ValueError("tree split resource parent differs")
+    if actual["backend_manifest_sha256"] not in compatible_artifact_content_hashes(
+        tree_backend
+    ):
+        raise ValueError("tree split backend parent differs")
+    return actual
 
 
 def _identity_sha256(values: Sequence[Any]) -> str:

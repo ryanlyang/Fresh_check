@@ -11,11 +11,12 @@ from .contracts import (
     bind_source,
     load_hashed_json,
     require_sha256,
+    validate_content_hash,
     with_content_hash,
     write_immutable_json,
 )
 from .determinism import optimizer_update_counts, scheduled_learning_rate
-from .evaluation import evaluate_classification
+from .evaluation import CLASSIFICATION_METRICS_CONTRACT, evaluate_classification
 from .expert_training import (
     _atomic_torch_save,
     _basic_validation,
@@ -48,6 +49,9 @@ HLT_CAPACITY_REGISTRATION_CONTRACT = (
 OFFLINE_CAPACITY_REGISTRATION_CONTRACT = (
     "retb_offline_capacity_training_registration_v1"
 )
+CAPACITY_VAL_DESIGN_METRICS_CONTRACT = (
+    "retb_capacity_val_design_metrics_v1"
+)
 
 
 def _capacity_contracts(control_id: str) -> dict[str, str]:
@@ -72,6 +76,40 @@ def _require_torch() -> Any:
     if torch is None:
         raise RuntimeError("PyTorch is required for offline capacity training")
     return torch
+
+
+def build_capacity_val_design_metrics(
+    *,
+    classification_metrics: Mapping[str, Any],
+    control_id: str,
+    checkpoint_sha256: str | None,
+) -> dict[str, Any]:
+    classification_sha = validate_content_hash(
+        classification_metrics,
+        expected_contract=CLASSIFICATION_METRICS_CONTRACT,
+    )
+    payload = dict(classification_metrics)
+    payload.pop("content_hash")
+    payload.pop("source", None)
+    payload.update(
+        {
+            "contract": CAPACITY_VAL_DESIGN_METRICS_CONTRACT,
+            "schema_version": 1,
+            "classification_metrics_contract": (
+                CLASSIFICATION_METRICS_CONTRACT
+            ),
+            "classification_metrics_sha256": classification_sha,
+            "control_id": str(control_id),
+            "checkpoint_sha256": (
+                None
+                if checkpoint_sha256 is None
+                else require_sha256(
+                    checkpoint_sha256, name="checkpoint_sha256"
+                )
+            ),
+        }
+    )
+    return with_content_hash(payload)
 
 
 @dataclass(frozen=True)
@@ -452,12 +490,10 @@ def train_offline_capacity_model(
             identities=np.asarray(prediction["identities"], dtype="U"),
         )
     metrics = bind_source(
-        with_content_hash(
-            {
-                **dict(prediction["metrics"]),
-                "control_id": config.control_id,
-                "checkpoint_sha256": _file_sha256(checkpoint),
-            }
+        build_capacity_val_design_metrics(
+            classification_metrics=prediction["metrics"],
+            control_id=config.control_id,
+            checkpoint_sha256=_file_sha256(checkpoint),
         ),
         source_snapshot=source_snapshot,
     )
@@ -508,6 +544,7 @@ def train_offline_capacity_model(
 
 
 __all__ = [
+    "CAPACITY_VAL_DESIGN_METRICS_CONTRACT",
     "OFFLINE_CAPACITY_CURVES_CONTRACT",
     "OFFLINE_CAPACITY_PROFILE_CONTRACT",
     "OFFLINE_CAPACITY_TRAINING_CONTRACT",
@@ -516,6 +553,7 @@ __all__ = [
     "HLT_CAPACITY_REGISTRATION_CONTRACT",
     "HLT_CAPACITY_TRAINING_CONTRACT",
     "OfflineCapacityTrainingConfig",
+    "build_capacity_val_design_metrics",
     "build_capacity_profile",
     "train_offline_capacity_model",
 ]
