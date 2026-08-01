@@ -201,6 +201,32 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
         row["argv"][1] == "scripts/train_retb_offline_fusion.py"
         for row in stage_c
     )
+    parameter_free = [
+        row
+        for row in stage_c
+        if row["configuration"]["fusion_variant"]
+        in {"F_BEST_SINGLE", "F_UNIFORM_LOGIT_MEAN"}
+    ]
+    assert len(parameter_free) == 14
+    assert all("--val-design-cache" in row["argv"] for row in parameter_free)
+    for row in parameter_free:
+        expected_names = {
+            "val_stop_parameter_free_evaluation.json",
+            "val_design_parameter_free_evaluation.json",
+        }
+        if row["configuration"]["fusion_variant"] == "F_BEST_SINGLE":
+            expected_names.add("best_single_selection.json")
+        assert {Path(path).name for path in row["expected_artifacts"]} == (
+            expected_names
+        )
+        assert {
+            Path(value["path"]).parent.name
+            for value in row["deferred_inputs"]
+        } == {"val_stop", "val_design"}
+        assert all(
+            value["producer"] == "offline_fusion_cache"
+            for value in row["deferred_inputs"]
+        )
     confirmations = plan["groups"]["offline_expert_confirmation"]
     assert len(confirmations) == 147
     assert {

@@ -40,6 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument("--val-stop-cache", type=Path)
+    parser.add_argument("--val-design-cache", required=True, type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--dry-run", action="store_true")
@@ -59,20 +60,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("run is not a parameter-free fusion control")
 
     cache_meta, _ = load_frozen_token_cache(args.cache)
-    role = (
-        "training_worker"
-        if cache_meta["split"] == "val_stop"
-        else "design_worker"
-    )
-    authorize_dataset_access(
-        worker_role=role, requested_resource=cache_meta["split"]
-    )
-    if (
-        cache_meta.get("source") != campaign.get("source")
-        or cache_meta["shape_id"] != configuration["shape_id"]
-        or cache_meta["pipeline_seed"] != run["seed"]
+    design_meta, _ = load_frozen_token_cache(args.val_design_cache)
+    if cache_meta["split"] != "val_stop":
+        raise ValueError("fusion-control primary cache must be val_stop")
+    if design_meta["split"] != "val_design":
+        raise ValueError("fusion-control design cache must be val_design")
+    for metadata, role in (
+        (cache_meta, "training_worker"),
+        (design_meta, "design_worker"),
     ):
-        raise ValueError("fusion-control cache lineage differs")
+        authorize_dataset_access(
+            worker_role=role, requested_resource=metadata["split"]
+        )
+        if (
+            metadata.get("source") != campaign.get("source")
+            or metadata["shape_id"] != configuration["shape_id"]
+            or metadata["pipeline_seed"] != run["seed"]
+        ):
+            raise ValueError("fusion-control cache lineage differs")
 
     selection = None
     if variant == "F_BEST_SINGLE":
@@ -84,6 +89,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         selection = select_best_single_expert(
             val_stop_manifest=args.val_stop_cache
         )
+        selection_cache, _ = load_frozen_token_cache(args.val_stop_cache)
+        if selection_cache["content_hash"] != cache_meta["content_hash"]:
+            raise ValueError("best-single selection cache differs from val_stop")
         if (
             selection.get("source") != campaign.get("source")
             or selection["shape_id"] != configuration["shape_id"]
@@ -94,15 +102,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir = args.output_dir or (
         args.campaign_root / "runs" / "stage_c" / args.run_id
     )
-    output_path = (
-        output_dir / f"{cache_meta['split']}_parameter_free_evaluation.json"
-    )
+    output_paths = {
+        "val_stop": output_dir / "val_stop_parameter_free_evaluation.json",
+        "val_design": output_dir / "val_design_parameter_free_evaluation.json",
+    }
     result = {
         "dry_run": bool(args.dry_run),
         "run_id": args.run_id,
         "variant": variant,
-        "split": cache_meta["split"],
-        "output": str(output_path.resolve()),
+        "splits": ["val_stop", "val_design"],
+        "outputs": {
+            split: str(path.resolve()) for split, path in output_paths.items()
+        },
         "best_single_selection": selection,
     }
     if not args.dry_run:
@@ -111,14 +122,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_immutable_json(
                 output_dir / "best_single_selection.json", selection
             )
-        result["evaluation"] = evaluate_parameter_free_fusion(
-            cache_manifest=args.cache,
-            output_path=output_path,
-            run_id=args.run_id,
-            variant=variant,
-            best_single_selection=selection,
-            device=args.device,
-        )
+        result["evaluations"] = {
+            split: evaluate_parameter_free_fusion(
+                cache_manifest=manifest,
+                output_path=output_paths[split],
+                run_id=args.run_id,
+                variant=variant,
+                best_single_selection=selection,
+                device=args.device,
+            )
+            for split, manifest in (
+                ("val_stop", args.cache),
+                ("val_design", args.val_design_cache),
+            )
+        }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

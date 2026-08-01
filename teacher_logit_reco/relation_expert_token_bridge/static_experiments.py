@@ -48,8 +48,8 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v5"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v5"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v6"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v6"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
@@ -821,8 +821,11 @@ def _stage_c_records(
                 str(run_root),
             ]
             expected = [
-                str(run_root / "val_stop_parameter_free_evaluation.json")
+                str(run_root / "val_stop_parameter_free_evaluation.json"),
+                str(run_root / "val_design_parameter_free_evaluation.json"),
             ]
+            if variant == "F_BEST_SINGLE":
+                expected.append(str(run_root / "best_single_selection.json"))
         else:
             argv = [
                 python,
@@ -879,11 +882,17 @@ def _stage_c_records(
                             domain="offline",
                             shape=shape,
                             seed=seed,
-                            split="model_train",
+                            split=split,
                         ),
                         contract="retb_frozen_offline_token_cache_v1",
-                        producer="offline_expert_training",
-                        role="seven_frozen_offline_token_banks",
+                        producer="offline_fusion_cache",
+                        role=f"seven_frozen_offline_token_banks_{split}",
+                    )
+                    for split in (
+                        ("val_stop", "val_design")
+                        if variant
+                        in {"F_BEST_SINGLE", "F_UNIFORM_LOGIT_MEAN"}
+                        else ("model_train", "val_stop", "val_design")
                     )
                 ],
                 registry_memberships=row.get("registry_memberships", ()),

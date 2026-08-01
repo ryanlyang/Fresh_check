@@ -5404,3 +5404,19 @@ This corrects the Stage-B `offline_optimization_selector` CUDA evaluation and
 all later users of the shared diagnostic routine. It changes no checkpoint,
 model equation, metric definition, selection rule, run identity, or
 scientific meaning.
+
+## Parameter-free fusion dual-split execution amendment (2026-08-01)
+
+Every Stage-C `F_BEST_SINGLE` and `F_UNIFORM_LOGIT_MEAN` row consumes the
+authenticated `val_stop` and `val_design` frozen-token caches. Best-single
+expert identity is selected only on `val_stop`; that locked choice is then
+evaluated without parameter updates on both splits. Uniform logit mean is
+likewise evaluated on both splits without fitting. Each row publishes a
+separate immutable evaluation for each split, and best-single rows also
+publish their immutable selection artifact.
+
+The task interface must therefore accept `--val-design-cache`, bind both
+cache manifests as inputs produced by `offline_fusion_cache`, and require all
+corresponding outputs. The corrected static experiment plan and bundle are
+versioned v6. Run identities, fusion definitions, selection rules, and
+scientific meaning are unchanged.
