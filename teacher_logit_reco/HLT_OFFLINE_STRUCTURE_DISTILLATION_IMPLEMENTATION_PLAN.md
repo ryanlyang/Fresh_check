@@ -3508,8 +3508,15 @@ shared-HLT domains; producing a shared-HLT REGION normalizer without binding
 it into the parent lock is forbidden. Runtime preparation also materializes a
 byte-identical `bootstrap/split_manifest.json.gz` for the standard RETB
 offline-cache and input-audit workers before any Stage-A array is submitted.
+RETB array workers publish authenticated per-coordinate receipts; after every
+successful `sbatch --wait`, the HOSD parent controller must run the
+authoritative RETB aggregate attester before submitting the successor. Parent
+finalization independently revalidates and binds every aggregate receipt under
+`hosd_parent_group_completion_v2`. A successful Slurm array without its
+complete aggregate receipt is therefore an explicit controller failure, not a
+reusable parent.
 
-Final source-closure audit on 2026-08-01: all 161 HOSD regression tests pass,
+Final source-closure audit on 2026-08-01: all 163 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD
 command-line parsers complete `--help`. Stage J produces its scale inputs,
 trees, offline/shared-HLT normalizers, scale teacher adapters, and optional

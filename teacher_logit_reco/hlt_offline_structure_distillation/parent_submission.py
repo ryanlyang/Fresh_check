@@ -254,6 +254,23 @@ def build_parent_submission_plan(
                     array_argument = [f"--array={manifest['slurm_array']}"]
                 else:
                     runtime_ready = False
+            completion_argv = None
+            if task_node is not None:
+                completion_argv = [
+                    sys.executable,
+                    "-s",
+                    str(
+                        (
+                            Path(repo_root)
+                            / "scripts"
+                            / "attest_retb_task_manifest_completion.py"
+                        ).resolve()
+                    ),
+                    "--campaign-root",
+                    str(shared_root.resolve()),
+                    "--task-manifest",
+                    str(manifest_path.resolve()),
+                ]
             commands.append(
                 {
                     "argv": [
@@ -273,6 +290,10 @@ def build_parent_submission_plan(
                     "wrapper": wrapper,
                     "task_node": task_node,
                     "task_manifest_sha256": task_manifest_sha256,
+                    "task_manifest_path": (
+                        None if task_node is None else str(manifest_path.resolve())
+                    ),
+                    "completion_argv": completion_argv,
                 }
             )
     return {
@@ -291,7 +312,13 @@ def build_parent_submission_plan(
 
 
 def submit_parent_plan(plan: Mapping[str, Any]) -> list[str]:
-    """Submit an explicitly requested plan with afterok ordering."""
+    """Submit a plan and attest every completed RETB task manifest.
+
+    RETB array workers publish one authenticated completion per coordinate.
+    Multi-coordinate arrays deliberately cannot decide that the whole manifest is
+    complete, so the controller invokes the authoritative aggregate attester only
+    after ``sbatch --wait`` has reported success.
+    """
 
     if not bool(plan.get("runtime_ready", True)):
         raise RuntimeError(
@@ -341,8 +368,124 @@ def submit_parent_plan(plan: Mapping[str, Any]) -> list[str]:
         if not job_id.isdigit():
             raise RuntimeError(f"sbatch returned an invalid job ID: {job_id!r}")
         job_ids.append(job_id)
+        completion_argv = row.get("completion_argv")
+        if completion_argv is not None:
+            attested = subprocess.run(
+                list(completion_argv), capture_output=True, text=True
+            )
+            if attested.returncode:
+                raise RuntimeError(
+                    "parent task aggregate attestation failed for "
+                    f"{row['wrapper']} after Slurm job {job_id}: "
+                    f"exit={attested.returncode}\n"
+                    f"attester stdout:\n{attested.stdout}\n"
+                    f"attester stderr:\n{attested.stderr}"
+                )
         previous = job_id
     return job_ids
+
+
+def _validate_parent_task_completions(
+    *, plan: Mapping[str, Any], shared_root: Path
+) -> dict[str, Any]:
+    """Revalidate and bind every RETB task aggregate used by a parent group."""
+
+    task_commands = [
+        command
+        for command in plan.get("commands", [])
+        if command.get("task_node") is not None
+    ]
+    if not task_commands:
+        return {}
+    shared_campaign = load_hashed_json(shared_root / "campaign_spec.json")
+    completions: dict[str, Any] = {}
+    for command in task_commands:
+        task_node = command.get("task_node")
+        manifest_path = Path(
+            command.get("task_manifest_path")
+            or shared_root / "job_ledgers" / "tasks" / f"{task_node}.json"
+        ).resolve()
+        manifest = load_retb_hashed_json(
+            manifest_path, expected_contract=TASK_MANIFEST_CONTRACT
+        )
+        planned_hash = command.get("task_manifest_sha256")
+        if planned_hash != manifest["content_hash"]:
+            raise ValueError(
+                f"parent task manifest drifted after submission: {task_node}"
+            )
+        completion_path = (
+            shared_root
+            / "job_ledgers"
+            / "completions"
+            / str(task_node)
+            / "manifest_completion.json"
+        )
+        completion = load_retb_hashed_json(
+            completion_path,
+            expected_contract=TASK_MANIFEST_COMPLETION_CONTRACT,
+        )
+        validate_task_manifest_completion(
+            completion,
+            campaign_root=shared_root,
+            campaign=shared_campaign,
+            task_manifest=manifest,
+        )
+        completions[str(task_node)] = {
+            "task_manifest_path": str(manifest_path),
+            "task_manifest_sha256": manifest["content_hash"],
+            "manifest_completion_path": str(completion_path.resolve()),
+            "manifest_completion_sha256": completion["content_hash"],
+        }
+    return completions
+
+
+def _revalidate_parent_group_completion(
+    payload: Mapping[str, Any], *, campaign_root: Path
+) -> None:
+    """Fail closed if any nested artifact bound by a reusable receipt drifted."""
+
+    root = campaign_root.resolve()
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    task_rows = payload.get("task_manifest_completions", {})
+    shared_campaign = None
+    if task_rows:
+        shared_campaign = load_hashed_json(shared / "campaign_spec.json")
+    for task_node, row in task_rows.items():
+        manifest_path = Path(row["task_manifest_path"]).resolve()
+        completion_path = Path(row["manifest_completion_path"]).resolve()
+        if not manifest_path.is_relative_to(shared) or not completion_path.is_relative_to(
+            shared
+        ):
+            raise ValueError("parent task completion path escapes shared campaign")
+        manifest = load_retb_hashed_json(
+            manifest_path, expected_contract=TASK_MANIFEST_CONTRACT
+        )
+        completion = load_retb_hashed_json(
+            completion_path,
+            expected_contract=TASK_MANIFEST_COMPLETION_CONTRACT,
+        )
+        if (
+            manifest.get("node_id") != task_node
+            or manifest["content_hash"] != row["task_manifest_sha256"]
+            or completion["content_hash"]
+            != row["manifest_completion_sha256"]
+        ):
+            raise ValueError("reusable parent task-completion lineage differs")
+        validate_task_manifest_completion(
+            completion,
+            campaign_root=shared,
+            campaign=shared_campaign,
+            task_manifest=manifest,
+        )
+    for row in payload.get("parents", {}).values():
+        path = Path(row["path"]).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("parent artifact path escapes HOSD campaign")
+        artifact = load_hashed_json(
+            path, expected_contract=str(row["expected_contract"])
+        )
+        if artifact["content_hash"] != row["content_hash"]:
+            raise ValueError("reusable parent artifact lineage differs")
 
 
 def _publish_hlt_cache_set(
@@ -468,8 +611,12 @@ def finalize_parent_group(
             or existing.get("group") != plan["group"]
         ):
             raise ValueError("reusable parent-group completion lineage differs")
+        _revalidate_parent_group_completion(existing, campaign_root=root)
         return existing
     shared = root / "inputs" / "shared_retb_parent_campaign"
+    task_completions = _validate_parent_task_completions(
+        plan=plan, shared_root=shared
+    )
     if plan["group"] == "hlt" and plan["parent_ids"]:
         _publish_hlt_cache_set(campaign_root=root, shared_root=shared)
     if plan["group"] == "tree" and plan["parent_ids"]:
@@ -506,11 +653,12 @@ def finalize_parent_group(
     artifact = with_content_hash(
         {
             "contract": PARENT_GROUP_COMPLETION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_spec_sha256": plan["campaign_spec_sha256"],
             "rebuild_plan_sha256": plan["rebuild_plan_sha256"],
             "group": plan["group"],
             "parents": rows,
+            "task_manifest_completions": task_completions,
             "submitted_job_ids": [str(value) for value in submitted_job_ids],
             "child_jobs_waited_for_success": True,
             "scientific_performance_read": False,

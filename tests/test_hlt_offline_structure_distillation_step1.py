@@ -431,6 +431,7 @@ def test_parent_group_completion_reuse_is_immutable_and_idempotent(
     )
     assert second == first
     assert second["parents"] == {}
+    assert second["task_manifest_completions"] == {}
 
 
 def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
@@ -552,6 +553,98 @@ def test_parent_plan_routes_logs_and_submits_complete_prerequisite_arrays(
     assert "--array=0-8%2" in flattened
     assert any(value.startswith("--output=") for value in flattened)
     assert all("parent_controllers" in value for value in flattened if value.startswith("--error="))
+    assert all(row["completion_argv"] for row in plan["commands"])
+    assert all(
+        "attest_retb_task_manifest_completion.py" in row["completion_argv"][2]
+        for row in plan["commands"]
+    )
+
+
+def test_parent_submit_attests_each_array_before_submitting_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if argv[0] == "sbatch":
+            job_id = "101" if "first.sh" in argv else "102"
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=job_id + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(argv, 0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(parent_submission.subprocess, "run", fake_run)
+    job_ids = submit_parent_plan(
+        {
+            "runtime_ready": True,
+            "commands": [
+                {
+                    "wrapper": "first.sh",
+                    "argv": ["sbatch", "--parsable", "first.sh"],
+                    "completion_argv": ["python", "attest.py", "first"],
+                },
+                {
+                    "wrapper": "second.sh",
+                    "argv": ["sbatch", "--parsable", "second.sh"],
+                    "completion_argv": ["python", "attest.py", "second"],
+                },
+            ],
+        }
+    )
+    assert job_ids == ["101", "102"]
+    assert calls == [
+        ["sbatch", "--parsable", "first.sh"],
+        ["python", "attest.py", "first"],
+        ["sbatch", "--parsable", "--dependency=afterok:101", "second.sh"],
+        ["python", "attest.py", "second"],
+    ]
+
+
+def test_parent_submit_fails_closed_when_aggregate_attestation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    responses = iter(
+        [
+            subprocess.CompletedProcess(["sbatch"], 0, stdout="101\n", stderr=""),
+            subprocess.CompletedProcess(
+                ["python", "attest.py"],
+                1,
+                stdout="",
+                stderr="missing row completion 3",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        parent_submission.subprocess,
+        "run",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    with pytest.raises(RuntimeError, match="missing row completion 3"):
+        submit_parent_plan(
+            {
+                "runtime_ready": True,
+                "commands": [
+                    {
+                        "wrapper": "worker.sh",
+                        "argv": ["sbatch", "worker.sh"],
+                        "completion_argv": ["python", "attest.py"],
+                    }
+                ],
+            }
+        )
 
 
 def test_parent_submit_failure_includes_worker_log(
