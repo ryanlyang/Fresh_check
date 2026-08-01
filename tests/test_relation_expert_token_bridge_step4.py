@@ -28,6 +28,8 @@ from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
     build_attachment_pretraining_record,
     build_expert_loss_registry,
     build_teacher_logits_manifest,
+    _configure_attention_backend,
+    _move_batch,
     copy_obase_particle_backbone,
     make_offline_expert_loader,
     offline_expert_objective,
@@ -353,6 +355,33 @@ def test_obase_adapter_checkpoint_prefix_copies_particle_backbone() -> None:
         model.particle_encoder.mod.embed.weight,
         torch.full_like(model.particle_encoder.mod.embed.weight, 0.125),
     )
+
+
+def test_nested_teacher_logits_move_with_training_batch() -> None:
+    batch = {
+        "features": torch.ones(2, 3),
+        "teacher_logits": {
+            "O_BASE": torch.ones(2, 10),
+            "O_FULLREL": torch.zeros(2, 10),
+        },
+    }
+    moved = _move_batch(batch, torch.device("meta"))
+    assert moved["features"].device.type == "meta"
+    assert moved["teacher_logits"]["O_BASE"].device.type == "meta"
+    assert moved["teacher_logits"]["O_FULLREL"].device.type == "meta"
+
+
+def test_expert_training_disables_weaver_sdpa_for_stable_backward() -> None:
+    class _Attention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.use_sdpa = True
+
+    model = torch.nn.Sequential(_Attention(), torch.nn.Linear(2, 2))
+    report = _configure_attention_backend(model, device=torch.device("cpu"))
+    assert model[0].use_sdpa is False
+    assert report["policy"] == "explicit_math_only"
+    assert report["weaver_sdpa_disabled_module_names"] == ["0"]
 
 
 def test_attachment_schedule_freezes_exact_backbone_regions() -> None:

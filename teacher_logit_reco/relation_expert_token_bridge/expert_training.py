@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover - environment dependent
 
 
 EXPERT_LOSS_REGISTRY_CONTRACT = "retb_expert_loss_registry_v1"
-EXPERT_TRAINING_CONTRACT = "retb_offline_expert_training_v1"
+EXPERT_TRAINING_CONTRACT = "retb_offline_expert_training_v2"
 EXPERT_CHECKPOINT_CONTRACT = "retb_offline_expert_checkpoint_v1"
 EXPERT_CURVES_CONTRACT = "retb_offline_expert_training_curves_v1"
 EXPERT_DIAGNOSTICS_CONTRACT = "retb_offline_expert_diagnostics_v1"
@@ -277,7 +277,7 @@ class OfflineExpertTrainingConfig:
         return with_content_hash(
             {
                 "contract": EXPERT_TRAINING_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "global_determinism_sha256": require_sha256(
                     global_determinism_sha256,
                     name="global_determinism_sha256",
@@ -292,6 +292,9 @@ class OfflineExpertTrainingConfig:
                 "precision": (
                     "production_GH200_BF16;"
                     "miniature_cuda_bf16_or_fp16_else_cpu_fp32"
+                ),
+                "cuda_attention_backend": (
+                    "explicit_math_only_flash_mem_efficient_and_cudnn_disabled"
                 ),
                 "epoch_selection_split": "val_stop",
                 "architecture_selection_split_accessible": False,
@@ -831,11 +834,66 @@ def _atomic_torch_save(payload: Mapping[str, Any], path: Path) -> None:
             temporary.unlink()
 
 
-def _move_batch(batch: Mapping[str, Any], device: Any) -> dict[str, Any]:
+def _move_value(value: Any, device: Any) -> Any:
     module = _require_torch()
+    if isinstance(value, module.Tensor):
+        return value.to(device)
+    if isinstance(value, Mapping):
+        return {
+            name: _move_value(nested, device)
+            for name, nested in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_move_value(nested, device) for nested in value)
+    if isinstance(value, list):
+        return [_move_value(nested, device) for nested in value]
+    return value
+
+
+def _move_batch(batch: Mapping[str, Any], device: Any) -> dict[str, Any]:
     return {
-        name: value.to(device) if isinstance(value, module.Tensor) else value
-        for name, value in batch.items()
+        name: _move_value(value, device) for name, value in batch.items()
+    }
+
+
+def _configure_attention_backend(model: Any, *, device: Any) -> dict[str, Any]:
+    """Use the stable mathematical SDPA path on CUDA.
+
+    Torch 2.13 on GH200 can select a fused backward kernel that rejects the
+    transposed head layout used by Weaver with ``LSE ... strideH``.  Weaver's
+    explicit attention implementation has the same equation and is the
+    deterministic campaign-wide fallback.
+    """
+
+    module = _require_torch()
+    disabled_modules = []
+    for name, child in model.named_modules():
+        if getattr(child, "use_sdpa", None) is True:
+            child.use_sdpa = False
+            disabled_modules.append(name)
+    cuda_controls = {
+        "flash_sdp": False,
+        "mem_efficient_sdp": False,
+        "cudnn_sdp": False,
+        "math_sdp": True,
+    }
+    if getattr(device, "type", None) == "cuda":
+        backend = module.backends.cuda
+        controls = (
+            ("enable_flash_sdp", False),
+            ("enable_mem_efficient_sdp", False),
+            ("enable_cudnn_sdp", False),
+            ("enable_math_sdp", True),
+        )
+        for name, enabled in controls:
+            setter = getattr(backend, name, None)
+            if callable(setter):
+                setter(enabled)
+    return {
+        "policy": "explicit_math_only",
+        "device_type": str(getattr(device, "type", device)),
+        "weaver_sdpa_disabled_module_names": disabled_modules,
+        "cuda_controls": cuda_controls,
     }
 
 
@@ -1474,6 +1532,9 @@ def train_offline_expert(
             raise RuntimeError("production expert training requires a GH200 GPU")
     precision = _resolve_precision(resolved_device)
     model.to(resolved_device)
+    attention_backend = _configure_attention_backend(
+        model, device=resolved_device
+    )
 
     rows: list[dict[str, Any]] = []
     update_ordinal = 0
@@ -1779,6 +1840,7 @@ def train_offline_expert(
             "performance_result_affected_execution": False,
             "planned_update_counts": counts,
             "precision_mode": precision["mode"],
+            "attention_backend": attention_backend,
         }
     )
     curves_publication = write_immutable_json(root / "training_curves.json", curves)
@@ -1840,6 +1902,7 @@ def train_offline_expert(
             "resource_profile": (
                 None if resource_profile is None else dict(resource_profile)
             ),
+            "attention_backend": attention_backend,
             "retained_checkpoints": ["best_model_val.pt"],
             "optimizer_state_retained": False,
             "training_curves_sha256": curves["content_hash"],

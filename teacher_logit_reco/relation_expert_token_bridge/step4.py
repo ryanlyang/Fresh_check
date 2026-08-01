@@ -1142,7 +1142,7 @@ def validate_step4_bundle(bundle: Mapping[str, Any]) -> str:
         ),
         "primary_training_protocol": validate_content_hash(
             bundle["primary_training_protocol"],
-            expected_contract="retb_offline_expert_training_v1",
+            expected_contract="retb_offline_expert_training_v2",
         ),
     }
     manifest_sha = validate_content_hash(

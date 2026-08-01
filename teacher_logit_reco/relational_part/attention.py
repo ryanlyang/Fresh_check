@@ -476,6 +476,9 @@ class DirectionalPairStem(torch.nn.Module if torch is not None else object):
                     module.nn.BatchNorm1d,
                     module.nn.Identity,
                     module.nn.Dropout,
+                    module.nn.GELU,
+                    module.nn.ReLU,
+                    module.nn.SiLU,
                 ),
             )
             for child in suffix

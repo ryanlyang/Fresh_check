@@ -5332,3 +5332,30 @@ are versioned respectively as v33, v15, and v28. The two teacher-training
 nodes, teacher-cache finalizer, and all Stage-B rows remain resumable. A failed
 or weak metric never cancels future work; only execution or authenticated
 artifact failure blocks an `afterok` dependency.
+
+## Installed-Weaver and GH200 backward amendment (2026-08-01)
+
+The second genuine Stage-B miniature identified three deterministic runtime
+compatibility requirements. The installed Weaver configuration uses
+`use_pre_activation_pair=False`, so its final pair-head convolution is
+followed by both `BatchNorm1d` and the configured activation. Directional
+layerwise projections must clone that complete Conv--normalization--activation
+tail. The supported activation set is the explicit Weaver set used by the
+campaign (`GELU` or `ReLU`, with `SiLU` accepted for compatible installed
+variants); arbitrary post-projection modules remain rejected.
+
+Teacher logits are nested mappings in collated batches. Device transfer must
+therefore recurse through mappings, lists, and tuples so every KD target is on
+the same device as its student logits. Keeping the containing mapping on CPU
+is forbidden.
+
+Torch 2.13 on GH200 selected a fused SDPA backward kernel that rejected
+Weaver's transposed head layout for frozen-backbone attachment rows with an
+`LSE ... strideH` error. All offline expert configurations now use one global
+backend policy: Weaver SDPA dispatch is disabled and CUDA flash,
+memory-efficient, and cuDNN SDPA are disabled while the mathematical backend
+remains enabled. This changes only the kernel implementation of the same
+attention equation, applies equally to every expert configuration, and is
+serialized in the v2 offline-expert training contract, curves, and
+registration. Old v1 and corrected v2 training artifacts are not
+interchangeable.

@@ -97,6 +97,7 @@ class _CurrentWeaverPairEmbed(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Conv1d(12, int(heads), 1),
             torch.nn.BatchNorm1d(int(heads)),
+            torch.nn.GELU(),
         )
 
 
