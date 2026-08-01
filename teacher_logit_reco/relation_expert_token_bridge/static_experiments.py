@@ -48,8 +48,8 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v6"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v6"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v7"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v7"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
@@ -989,7 +989,7 @@ def _stage_c_streamed_wave_records(
 
 
 def _stage_c_streamed_verification_records(
-    *, python: str, fusion_records: Sequence[Mapping[str, Any]]
+    *, root: Path, python: str, fusion_records: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
     output = []
     for record in fusion_records:
@@ -998,7 +998,7 @@ def _stage_c_streamed_verification_records(
             python,
             "scripts/verify_retb_streamed_fusion_output.py",
             "--campaign-root",
-            str(Path(record["expected_artifacts"][0]).parents[2]),
+            str(root),
             "--run-id",
             str(record["run_id"]),
             *sum(
@@ -1018,6 +1018,21 @@ def _stage_c_streamed_verification_records(
             **dict(record["environment"]),
             "RETB_CONFIGURATION_SHA256": copied["configuration_sha256"],
         }
+        config = copied["configuration"]
+        copied["deferred_inputs"] = [
+            _deferred(
+                _path(
+                    root,
+                    "registry",
+                    "streamed_fusion_waves",
+                    str(config["shape_id"]),
+                    f"seed_{int(record['seed'])}.json",
+                ),
+                contract="retb_streamed_abc_fusion_cache_receipt_v1",
+                producer="offline_fusion_cache",
+                role="task_local_cache_and_persistent_output_attestation",
+            )
+        ]
         copied["row_sha256"] = canonical_sha256(
             {key: value for key, value in copied.items() if key != "row_sha256"}
         )
@@ -1618,14 +1633,35 @@ def build_static_experiment_bundle(
         execution_groups[node_id] = rows
         if not execution_groups[node_id]:
             raise RuntimeError("static experiment execution group is empty")
+    execution_profile = str(
+        production_graph.get("execution_profile", "standard")
+    )
+    if execution_profile == "offline_abc_streamed":
+        fusion_records = groups["offline_fusion_training"]
+        execution_groups["offline_fusion_cache"] = (
+            _stage_c_streamed_wave_records(
+                root=root,
+                python=python,
+                registry=registries["stage_c"],
+                fusion_records=fusion_records,
+            )
+        )
+        execution_groups["offline_fusion_training"] = (
+            _stage_c_streamed_verification_records(
+                root=root,
+                python=python,
+                fusion_records=fusion_records,
+            )
+        )
 
     plan = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_PLAN_CONTRACT,
-            "schema_version": 5,
+            "schema_version": 6,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "campaign_profile": campaign["campaign_profile"],
+            "execution_profile": execution_profile,
             "source": campaign["source"],
             "registry_hashes": {
                 name: artifact["content_hash"]
@@ -1635,7 +1671,14 @@ def build_static_experiment_bundle(
             "execution_counts": {
                 name: len(rows) for name, rows in execution_groups.items()
             },
-            "groups": groups,
+            "groups": execution_groups,
+            "scientific_matrix_counts": full_counts,
+            "persistent_frozen_token_cache_rows": (
+                0 if execution_profile == "offline_abc_streamed" else 63
+            ),
+            "streamed_fusion_wave_count": (
+                21 if execution_profile == "offline_abc_streamed" else 0
+            ),
             "physical_run_deduplication": "first_registry_membership_order",
             "miniature_policy": (
                 "complete_scientific_matrix_on_miniature_populations"
@@ -1674,7 +1717,7 @@ def build_static_experiment_bundle(
     bundle = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_BUNDLE_CONTRACT,
-            "schema_version": 5,
+            "schema_version": 6,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "static_experiment_plan_sha256": plan["content_hash"],

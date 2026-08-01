@@ -5576,3 +5576,45 @@ its outputs requires ordinary authenticated artifact and source-lineage
 validation. The full production launcher remains separately authorization
 gated, and the authoritative full miniature smoke may continue independently
 while the offline A--C campaign runs.
+
+## Storage-bounded streamed offline A--C amendment (2026-08-02)
+
+The production launcher additionally supports `--offline-streamed-submit`.
+This is an execution-profile variant of the complete real-data A--C prefix;
+it is not a smaller scientific screen. All Stage-B and Stage-C
+configurations, seeds, run IDs, training budgets, metrics, controls, and
+selectors remain identical to `--offline-submit`, and scientific
+underperformance remains non-blocking.
+
+The profile publishes `retb_streamed_abc_execution_profile_v1` and
+`retb_streamed_offline_submission_scope_v1`. Before Stage D, it materializes
+only offline `model_train`, `val_stop`, and `val_design`. Shared-HLT
+normalization and degradation evidence uses a deterministic 12,500-identity
+sample for each of the four model-train replicas, selected by the globally
+frozen normalization-identity ordering. Those sampled HLT caches and REGION
+trees live in the distinct `hlt_v3_streamed_normalizer_sample` and
+`hlt_streamed_normalizer_sample` namespaces; they may never masquerade as the
+full Stage-D model-train caches. Stack-validation, final-test, and 3M-scale
+inputs remain absent. A later D--N expansion must create and audit the full
+Stage-A surface separately.
+
+The 63 logical frozen-token cache coordinates remain in the scientific
+matrix, but their storage execution is grouped into exactly 21
+`(shape_id,pipeline_seed)` waves. Each wave creates model-train, val-stop, and
+val-design token banks under `RETB_STREAM_ROOT`, `SLURM_TMPDIR`, or `/dev/shm`;
+runs every registered fusion variant sharing that coordinate; writes the
+ordinary persistent checkpoints, predictions, metrics, and a
+`retb_streamed_abc_fusion_cache_receipt_v1`; and removes the banks in a
+`finally` path. No token-bank NPZ is a persistent campaign artifact.
+Successful task rows remove recovery-only `resume_state.pt` files only after
+their required outputs and row completion have been authenticated. Failed or
+interrupted rows retain resumable state.
+
+`retb_streamed_abc_tree_index_v1` and
+`retb_streamed_abc_input_audit_v1` explicitly limit their validity to Stages
+A--C. Storage admission is measured from an earlier completed RETB evidence
+campaign by `measure_retb_streamed_abc_storage.py`; its projection excludes
+node-local frozen-token banks, includes the persistent input/model projection
+and a serialized reserve, and remains source-evidence bound. These streamed
+contracts and paths are not interchangeable with the eager Stage-A or
+full-campaign contracts.

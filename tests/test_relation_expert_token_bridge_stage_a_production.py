@@ -522,6 +522,62 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
                 assert stop == expected_stops[role]
 
 
+def test_streamed_stage_a_defers_future_roles_and_uses_distinct_audits(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "streamed_production"
+    campaign = _campaign(miniature=False)
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=campaign["campaign_id"],
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile="offline_abc_streamed",
+    )
+    manifests = build_stage_a_task_manifests(
+        campaign=campaign,
+        graph=graph,
+        campaign_root=root,
+        data_dir="/data/jetclass",
+        stage_a_contracts=_contracts(campaign, miniature=False),
+        execution_profile="offline_abc_streamed",
+    )
+    assert manifests["offline_input_cache"]["task_count"] == 3
+    assert manifests["hlt_v3_cache"]["task_count"] == 4
+    assert manifests["region_tree_cache"]["task_count"] == 7
+    assert all(
+        "--selected-jet-limit" in row["argv"]
+        and "hlt_v3_streamed_normalizer_sample" in " ".join(row["argv"])
+        for row in manifests["hlt_v3_cache"]["rows"]
+    )
+    assert all(
+        row["argv"][row["argv"].index("--stop") + 1] == "12500"
+        for row in manifests["region_tree_cache"]["rows"]
+        if row["argv"][row["argv"].index("--view-kind") + 1] == "hlt"
+    )
+    offline_commands = manifests["offline_input_cache"]["rows"]
+    assert {
+        row["argv"][row["argv"].index("--logical-role") + 1]
+        for row in offline_commands
+    } == {"model_train", "val_stop", "val_design"}
+    finalize = manifests["region_tree_finalize"]["rows"][0]["argv"]
+    audit = manifests["input_audit"]["rows"][0]["argv"]
+    assert "--streamed-abc" in finalize
+    assert any("tree_cache_index_streamed_abc.json" in value for value in finalize)
+    assert "--streamed-abc" in audit
+    assert any("input_audit_streamed_abc.json" in value for value in audit)
+    for manifest in manifests.values():
+        validate_task_manifest_for_graph(
+            manifest,
+            production_graph=graph,
+            campaign_root=root,
+            repo_root=ROOT,
+        )
+
+
 def test_hosd_miniature_tree_tasks_cover_both_twenty_event_validation_roles(
     tmp_path: Path,
 ) -> None:

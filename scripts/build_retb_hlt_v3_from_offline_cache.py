@@ -40,6 +40,7 @@ def main() -> int:
     )
     parser.add_argument("--profile-id", default="D_NOMINAL")
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--selected-jet-limit", type=int)
     args = parser.parse_args()
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
@@ -78,6 +79,10 @@ def main() -> int:
         "--output-dir",
         str(args.output_dir),
     ]
+    if args.selected_jet_limit is not None:
+        command.extend(
+            ["--selected-jet-limit", str(args.selected_jet_limit)]
+        )
     return int(subprocess.run(command, cwd=REPO_ROOT, check=False).returncode)
 
 

@@ -72,11 +72,24 @@ def _offline_view(root: Path, role: str) -> dict:
     }
 
 
-def _hlt_view(root: Path, role: str, replica: int, policy: str) -> dict:
+def _hlt_view(
+    root: Path,
+    role: str,
+    replica: int,
+    policy: str,
+    *,
+    streamed_abc: bool = False,
+) -> dict:
+    cache_namespace = (
+        "hlt_v3_streamed_normalizer_sample" if streamed_abc else "hlt_v3"
+    )
+    tree_namespace = (
+        "hlt_streamed_normalizer_sample" if streamed_abc else "hlt"
+    )
     cache = (
         root
         / "inputs"
-        / "hlt_v3"
+        / cache_namespace
         / role
         / f"replica_{replica}"
         / policy
@@ -105,7 +118,7 @@ def _hlt_view(root: Path, role: str, replica: int, policy: str) -> dict:
         "identity_manifest_sha256": metadata["identity_manifest_sha256"],
         "cache_metadata_sha256": metadata["content_hash"],
         "tree_dir": (
-            root / "inputs" / "region_tree" / "hlt"
+            root / "inputs" / "region_tree" / tree_namespace
             / f"{role}_r{replica}_exclusive_ca_v1"
         ),
     }
@@ -147,7 +160,13 @@ def main() -> int:
             for role in offline_roles
         ),
         *(
-            _hlt_view(args.campaign_root, role, replica, policy)
+            _hlt_view(
+                args.campaign_root,
+                role,
+                replica,
+                policy,
+                streamed_abc=bool(args.streamed_abc),
+            )
             for role, replica, policy in hlt_views
         ),
     ]

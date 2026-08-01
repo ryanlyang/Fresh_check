@@ -137,6 +137,9 @@ if [[ ! -d "${DATA_DIR}" ]]; then
 fi
 if [[ "${RETB_MINIATURE}" != "1" && ! -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   echo "Authenticated RETB storage measurements are absent: ${RETB_STORAGE_MEASUREMENTS}" >&2
+  if [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc_streamed" ]]; then
+    echo "Create them with scripts/measure_retb_streamed_abc_storage.py using a completed RETB evidence campaign." >&2
+  fi
   exit 2
 fi
 if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" == "complete" ]]; then

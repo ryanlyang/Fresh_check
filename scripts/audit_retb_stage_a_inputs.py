@@ -52,6 +52,7 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
     STREAMED_HLT_VIEWS,
+    STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA,
     STREAMED_OFFLINE_ROLES,
     build_streamed_input_audit,
     validate_streamed_abc_execution_profile,
@@ -247,6 +248,7 @@ def _build_degradation_audit(
     root: Path,
     campaign: dict,
     normalizers: dict[str, dict],
+    streamed_abc: bool = False,
 ) -> dict:
     offline_dir = root / "inputs" / "offline" / "model_train"
     offline_meta = load_hashed_json(
@@ -271,7 +273,11 @@ def _build_degradation_audit(
     hlt_dir = (
         root
         / "inputs"
-        / "hlt_v3"
+        / (
+            "hlt_v3_streamed_normalizer_sample"
+            if streamed_abc
+            else "hlt_v3"
+        )
         / "model_train"
         / "replica_0"
         / "R_MULTI"
@@ -288,14 +294,25 @@ def _build_degradation_audit(
     hlt_identities = [
         str(value) for value in hlt_arrays["identities"].tolist()
     ]
-    if hlt_identities != all_identities:
-        raise ValueError("relation-audit offline/HLT identities differ")
+    if streamed_abc:
+        hlt_lookup = {
+            identity: index for index, identity in enumerate(hlt_identities)
+        }
+        if not all(identity in hlt_lookup for identity in identities):
+            raise ValueError("streamed relation-audit identities are absent")
+        hlt_selected = np.asarray(
+            [hlt_lookup[identity] for identity in identities], dtype=np.int64
+        )
+    else:
+        if hlt_identities != all_identities:
+            raise ValueError("relation-audit offline/HLT identities differ")
+        hlt_selected = selected
     hlt_tokens = np.asarray(
-        hlt_arrays["tokens"][selected], dtype=np.float32
+        hlt_arrays["tokens"][hlt_selected], dtype=np.float32
     )
-    hlt_mask = np.asarray(hlt_arrays["mask"][selected], dtype=bool)
+    hlt_mask = np.asarray(hlt_arrays["mask"][hlt_selected], dtype=bool)
     hlt_states = np.asarray(
-        hlt_arrays["measurement_states"][selected], dtype=np.int8
+        hlt_arrays["measurement_states"][hlt_selected], dtype=np.int8
     )
     del hlt_arrays
     offline_trees = _selected_trees(
@@ -310,7 +327,9 @@ def _build_degradation_audit(
         root
         / "inputs"
         / "region_tree"
-        / "hlt"
+        / (
+            "hlt_streamed_normalizer_sample" if streamed_abc else "hlt"
+        )
         / "model_train_r0_exclusive_ca_v1",
         identities,
     )
@@ -532,7 +551,11 @@ def main() -> int:
         cache = (
             args.campaign_root
             / "inputs"
-            / "hlt_v3"
+            / (
+                "hlt_v3_streamed_normalizer_sample"
+                if args.streamed_abc
+                else "hlt_v3"
+            )
             / role
             / f"replica_{replica}"
             / policy
@@ -547,7 +570,19 @@ def main() -> int:
         identities = [
             str(value) for value in arrays["identities"].tolist()
         ]
-        if identities != offline_identities[role]:
+        expected_hlt_identities = offline_identities[role]
+        if args.streamed_abc:
+            selected = select_normalization_jet_indices(
+                expected_hlt_identities,
+                limit=min(
+                    STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA,
+                    len(expected_hlt_identities),
+                ),
+            )
+            expected_hlt_identities = [
+                expected_hlt_identities[int(index)] for index in selected
+            ]
+        if identities != expected_hlt_identities:
             raise ValueError("offline/HLT identity order differs")
         if (
             metadata["identity_manifest_sha256"]
@@ -625,6 +660,7 @@ def main() -> int:
         root=args.campaign_root,
         campaign=campaign,
         normalizers=normalizer_artifacts,
+        streamed_abc=bool(args.streamed_abc),
     )
     degradation_path = (
         args.campaign_root / "inputs" / "hlt_v3_degradation_audit.json"

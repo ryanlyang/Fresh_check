@@ -38,7 +38,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v32"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v33"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -2924,6 +2924,17 @@ def build_step15_bundle(
                 "final_test_jobs_submitted": False,
                 "later_reuse_requires_authenticated_validation": True,
             },
+            "offline_abc_streamed_submission": {
+                "supported": True,
+                "scope_contract": STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+                "job_ledger_mode": "offline_streamed_production_submitted",
+                "submitted_stages": list(OFFLINE_PRODUCTION_STAGES),
+                "scientific_matrix_identical_to_offline_abc": True,
+                "future_roles_deferred": True,
+                "frozen_token_banks_task_local": True,
+                "fusion_wave_count": 21,
+                "later_full_stage_a_audit_required": True,
+            },
             "full_submission_supported": True,
             "monitoring_supported": True,
             "node_execution_registry_present": True,
@@ -2943,6 +2954,7 @@ __all__ = [
     "JOB_LEDGER_CONTRACT",
     "OFFLINE_PRODUCTION_STAGES",
     "OFFLINE_SUBMISSION_SCOPE_CONTRACT",
+    "STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT",
     "LATE_CONTINUATION_GATE_CONTRACT",
     "LATE_CONTINUATION_MANIFEST_NODES",
     "LATE_NODE_ENTRYPOINTS",
@@ -2966,6 +2978,7 @@ __all__ = [
     "TIGRIS_DEFAULTS",
     "build_job_ledger",
     "build_offline_submission_scope",
+    "build_streamed_offline_submission_scope",
     "build_node_execution_registry",
     "build_production_graph",
     "build_resource_probe",
@@ -2978,6 +2991,7 @@ __all__ = [
     "validate_job_ledger",
     "validate_node_execution_registry",
     "validate_offline_submission_scope",
+    "validate_streamed_offline_submission_scope",
     "validate_production_graph",
     "validate_production_campaign_binding",
     "validate_resource_probe",

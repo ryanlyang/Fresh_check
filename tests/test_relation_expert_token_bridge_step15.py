@@ -6,6 +6,9 @@ import subprocess
 import sys
 
 import pytest
+from scripts.measure_retb_streamed_abc_storage import (
+    main as measure_streamed_storage_main,
+)
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     with_content_hash,
 )
@@ -14,6 +17,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     DEFAULT_CONCURRENCY,
     TASK_MANIFEST_PRODUCER_NODES,
     build_offline_submission_scope,
+    build_streamed_offline_submission_scope,
     build_job_ledger,
     build_node_execution_registry,
     build_production_graph,
@@ -27,6 +31,7 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     validate_job_ledger,
     validate_node_execution_registry,
     validate_offline_submission_scope,
+    validate_streamed_offline_submission_scope,
     validate_production_graph,
     validate_production_campaign_binding,
     validate_resource_probe,
@@ -436,6 +441,98 @@ def test_offline_submission_scope_is_exact_dependency_closed_and_real() -> None:
 def test_offline_submission_scope_rejects_miniature_graph() -> None:
     with pytest.raises(ValueError, match="requires a production graph"):
         offline_submission_node_ids(_graph(miniature=True))
+
+
+def test_streamed_offline_scope_and_ledger_are_explicit() -> None:
+    graph = build_production_graph(
+        campaign_root="/campaign/retb_streamed",
+        campaign_id="retb_streamed",
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256="c" * 64,
+        execution_profile="offline_abc_streamed",
+    )
+    scope = build_streamed_offline_submission_scope(
+        production_graph=graph
+    )
+    validate_streamed_offline_submission_scope(
+        scope, production_graph=graph
+    )
+    assert scope["frozen_token_banks_task_local"] is True
+    assert scope["scientific_matrix_changed"] is False
+    node_ids = offline_submission_node_ids(graph)
+    ledger = build_job_ledger(
+        production_graph=graph,
+        jobs={node_id: str(40_000 + i) for i, node_id in enumerate(node_ids)},
+        submission_mode="offline_streamed_production_submitted",
+    )
+    validate_job_ledger(ledger, production_graph=graph)
+    assert ledger["submission_scope"] == "offline_abc_streamed"
+    assert ledger["submission_scope_sha256"] == scope["content_hash"]
+
+
+def test_streamed_storage_projection_is_source_evidence_bound(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence"
+    for role in ("model_train", "val_stop", "val_design"):
+        directory = evidence / "inputs" / "offline" / role
+        directory.mkdir(parents=True)
+        (directory / "offline_inputs.npz").write_bytes(b"x" * 100)
+        (directory / "offline_input_manifest.json").write_text(
+            json.dumps({"event_count": 100}), encoding="utf-8"
+        )
+    hlt = (
+        evidence
+        / "inputs"
+        / "hlt_v3"
+        / "model_train"
+        / "replica_0"
+        / "R_MULTI"
+        / "D_NOMINAL"
+    )
+    hlt.mkdir(parents=True)
+    (hlt / "hlt_v3_arrays.npz").write_bytes(b"h" * 100)
+    (hlt / "hlt_v3_metadata.json").write_text(
+        json.dumps({"shape": [100, 128, 14]}), encoding="utf-8"
+    )
+    tree = (
+        evidence
+        / "inputs"
+        / "region_tree"
+        / "offline"
+        / "model_train_exclusive_ca_v1"
+        / "shards"
+    )
+    tree.mkdir(parents=True)
+    (tree / "shard_00000.npz").write_bytes(b"t" * 100)
+    (tree / "shard_00000.metadata.json").write_text(
+        json.dumps({"jet_count": 100}), encoding="utf-8"
+    )
+    checkpoint = evidence / "runs" / "stage_c" / "run"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "best_model_val.pt").write_bytes(b"c" * 100)
+    output = tmp_path / "bootstrap" / "storage_measurements.json"
+    assert (
+        measure_streamed_storage_main(
+            [
+                "--evidence-campaign-root",
+                str(evidence),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    projection = json.loads(
+        output.with_name("streamed_abc_projection.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["measurement_profile"] == "production_source_evidence"
+    assert projection["storage_measurements_sha256"] == payload["content_hash"]
+    assert projection["ephemeral_frozen_token_banks_included_in_persistent_peak"] is False
 
 
 def test_offline_submission_plan_prints_only_authenticated_scope(

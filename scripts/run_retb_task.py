@@ -33,6 +33,16 @@ from teacher_logit_reco.relation_expert_token_bridge.task_completion import (  #
 )
 
 
+def _prune_streamed_resume_states(row: dict) -> list[str]:
+    removed = []
+    for output in row["expected_outputs"]:
+        candidate = Path(output).parent / "resume_state.pt"
+        if candidate.is_file():
+            candidate.unlink()
+            removed.append(str(candidate))
+    return sorted(set(removed))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
@@ -159,6 +169,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "row_completion_sha256": completion["artifact"]["content_hash"],
         "row_completion_path": completion["path"],
     }
+    if graph.get("execution_profile") == "offline_abc_streamed":
+        result["pruned_resume_states"] = _prune_streamed_resume_states(row)
     if int(manifest["task_count"]) == 1:
         aggregate = publish_task_manifest_completion(
             campaign_root=args.campaign_root,

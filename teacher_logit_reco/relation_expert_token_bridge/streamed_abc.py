@@ -26,6 +26,7 @@ STREAMED_OFFLINE_ROLES = ("model_train", "val_stop", "val_design")
 STREAMED_HLT_VIEWS = tuple(
     ("model_train", replica, "R_MULTI") for replica in range(4)
 )
+STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA = 12_500
 
 
 def build_streamed_abc_execution_profile(
@@ -54,6 +55,10 @@ def build_streamed_abc_execution_profile(
                 }
                 for role, replica, policy in STREAMED_HLT_VIEWS
             ],
+            "hlt_view_storage_namespace": "hlt_v3_streamed_normalizer_sample",
+            "hlt_normalizer_jets_per_replica": (
+                STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA
+            ),
             "deferred_roles": ["stack_val", "final_test", "scale_train"],
             "frozen_token_cache_lifetime": (
                 "single_shape_seed_slurm_allocation"
@@ -167,6 +172,7 @@ __all__ = [
     "STREAMED_ABC_PROFILE",
     "STREAMED_ABC_TREE_INDEX_CONTRACT",
     "STREAMED_HLT_VIEWS",
+    "STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA",
     "STREAMED_OFFLINE_ROLES",
     "build_streamed_abc_execution_profile",
     "build_streamed_input_audit",

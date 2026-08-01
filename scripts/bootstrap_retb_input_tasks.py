@@ -39,6 +39,7 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
     STREAMED_ABC_PROFILE,
+    STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA,
     STREAMED_HLT_VIEWS,
     STREAMED_OFFLINE_ROLES,
     build_streamed_abc_execution_profile,
@@ -171,10 +172,13 @@ def build_stage_a_task_manifests(
     hlt_rows: list[dict[str, Any]] = []
     for index, (role, replica, policy) in enumerate(hlt_views):
         offline_dir = campaign_root / "inputs" / "offline" / role
+        hlt_namespace = (
+            "hlt_v3_streamed_normalizer_sample" if streamed else "hlt_v3"
+        )
         output_dir = (
             campaign_root
             / "inputs"
-            / "hlt_v3"
+            / hlt_namespace
             / role
             / f"replica_{replica}"
             / policy
@@ -200,6 +204,14 @@ def build_stage_a_task_manifests(
                     "D_NOMINAL",
                     "--output-dir",
                     str(output_dir),
+                    *(
+                        [
+                            "--selected-jet-limit",
+                            str(STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA),
+                        ]
+                        if streamed
+                        else []
+                    ),
                 ],
                 "environment": {},
                 "expected_outputs": [
@@ -257,10 +269,15 @@ def build_stage_a_task_manifests(
                 / f"{role}_exclusive_ca_v1"
             )
         else:
+            hlt_namespace = (
+                "hlt_v3_streamed_normalizer_sample"
+                if streamed
+                else "hlt_v3"
+            )
             cache_dir = (
                 campaign_root
                 / "inputs"
-                / "hlt_v3"
+                / hlt_namespace
                 / role
                 / f"replica_{replica}"
                 / str(policy)
@@ -270,10 +287,19 @@ def build_stage_a_task_manifests(
                 campaign_root
                 / "inputs"
                 / "region_tree"
-                / "hlt"
+                / (
+                    "hlt_streamed_normalizer_sample"
+                    if streamed
+                    else "hlt"
+                )
                 / f"{role}_r{replica}_exclusive_ca_v1"
             )
-        shard_count = math.ceil(counts[role] / REGION_TREE_SHARD_SIZE)
+        view_count = (
+            STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA
+            if streamed and view_kind == "hlt"
+            else counts[role]
+        )
+        shard_count = math.ceil(view_count / REGION_TREE_SHARD_SIZE)
         task_index = len(tree_rows)
         argv = [
             sys.executable,
@@ -289,7 +315,7 @@ def build_stage_a_task_manifests(
             "--start",
             "0",
             "--stop",
-            str(counts[role]),
+            str(view_count),
             "--shard-index",
             "0",
             "--shard-size",
@@ -409,6 +435,7 @@ def build_stage_a_task_manifests(
                     str(campaign_root),
                     "--output",
                     str(normalizer_bundle),
+                    *(["--streamed-abc"] if streamed else []),
                 ],
                 "environment": {},
                 "expected_outputs": [

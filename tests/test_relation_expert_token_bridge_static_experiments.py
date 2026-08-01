@@ -122,6 +122,66 @@ def test_full_static_matrix_is_exact_deduplicated_and_fully_bound(
             )
 
 
+def test_streamed_static_matrix_groups_cache_lifetime_without_dropping_runs(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "retb_static_streamed"
+    campaign, _ = _campaign_and_graph(root, miniature=False)
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=root.name,
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile="offline_abc_streamed",
+    )
+    bundle = build_static_experiment_bundle(
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=root,
+        python_executable=sys.executable,
+    )
+    validate_static_experiment_bundle(
+        bundle,
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=root,
+        python_executable=sys.executable,
+    )
+    plan = bundle["static_experiment_plan"]
+    assert plan["scientific_matrix_counts"]["offline_fusion_cache"] == 63
+    assert plan["scientific_matrix_counts"]["offline_fusion_training"] == 49
+    assert plan["execution_counts"]["offline_fusion_cache"] == 21
+    assert plan["execution_counts"]["offline_fusion_training"] == 49
+    assert plan["persistent_frozen_token_cache_rows"] == 0
+    waves = plan["groups"]["offline_fusion_cache"]
+    assert len(
+        {
+            (
+                row["configuration"]["shape_id"],
+                row["configuration"]["pipeline_seed"],
+            )
+            for row in waves
+        }
+    ) == 21
+    run_ids = {
+        run_id
+        for wave in waves
+        for run_id in wave["configuration"]["fusion_run_ids"]
+    }
+    assert len(run_ids) == 49
+    assert all(
+        row["argv"][1] == "scripts/run_retb_streamed_fusion_wave.py"
+        for row in waves
+    )
+    assert all(
+        row["argv"][1] == "scripts/verify_retb_streamed_fusion_output.py"
+        for row in plan["groups"]["offline_fusion_training"]
+    )
+
+
 def test_static_rows_route_controls_fusions_and_deferred_pilots(
     tmp_path: Path,
 ) -> None:

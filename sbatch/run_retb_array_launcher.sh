@@ -37,10 +37,14 @@ resource_arguments=(
   --mem="${CPU_MEM}"
 )
 if [[ "${RETB_NODE_RESOURCE:-cpu}" == "gpu" ]]; then
+  resolved_gpu_mem="${GPU_MEM}"
+  if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "offline_abc_streamed" && "${RETB_NODE_ID}" == "offline_fusion_cache" ]]; then
+    resolved_gpu_mem="${RETB_STREAMED_GPU_MEM}"
+  fi
   resource_arguments+=(
     --gres="${GPU_GRES}"
     --cpus-per-task="${GPU_CPUS_PER_TASK}"
-    --mem="${GPU_MEM}"
+    --mem="${resolved_gpu_mem}"
   )
 fi
 job_id="$(sbatch --parsable --wait \

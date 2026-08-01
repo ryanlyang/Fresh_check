@@ -12,6 +12,7 @@ IFS=$'\n\t'
 : "${GPU_GRES:=gpu:gh200:1}"
 : "${GPU_CPUS_PER_TASK:=16}"
 : "${GPU_MEM:=220G}"
+: "${RETB_STREAMED_GPU_MEM:=440G}"
 : "${CPU_CPUS_PER_TASK:=16}"
 : "${CPU_MEM:=192G}"
 : "${RETB_DEVICE:=auto}"

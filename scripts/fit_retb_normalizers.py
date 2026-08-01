@@ -120,12 +120,16 @@ def _hlt_selected(
     campaign: Mapping[str, Any],
     profile_sha256: str,
     logical_role: str,
+    streamed_abc: bool = False,
 ):
+    namespace = (
+        "hlt_v3_streamed_normalizer_sample" if streamed_abc else "hlt_v3"
+    )
     cache_roots = [
         (
             root
             / "inputs"
-            / "hlt_v3"
+            / namespace
             / logical_role
             / f"replica_{replica}"
             / "R_MULTI"
@@ -280,6 +284,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--streamed-abc", action="store_true")
     return parser
 
 
@@ -391,6 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         campaign=campaign,
         profile_sha256=contracts["hlt_v3_profile"]["content_hash"],
         logical_role=training_role,
+        streamed_abc=bool(args.streamed_abc),
     )
     hlt_view_hashes = [
         row["array_content_sha256"] for row in hlt_metadata
@@ -415,7 +421,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.campaign_root
             / "inputs"
             / "region_tree"
-            / "hlt"
+            / (
+                "hlt_streamed_normalizer_sample"
+                if args.streamed_abc
+                else "hlt"
+            )
             / f"{training_role}_r{replica}_exclusive_ca_v1",
             selected_base_ids,
         )

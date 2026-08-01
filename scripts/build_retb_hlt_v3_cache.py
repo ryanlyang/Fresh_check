@@ -34,6 +34,9 @@ from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+from teacher_logit_reco.relational_part import (  # noqa: E402
+    select_normalization_jet_indices,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -54,6 +57,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-id", default="D_NOMINAL")
     parser.add_argument("--identity-manifest-sha256", required=True)
     parser.add_argument("--raw-input-sha256", required=True)
+    parser.add_argument(
+        "--selected-jet-limit",
+        type=int,
+        help=(
+            "Deterministically retain only the normalization population; "
+            "used exclusively by the streamed A-C profile."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -101,6 +112,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         tokens = np.asarray(payload["tokens"])
         mask = np.asarray(payload["mask"], dtype=bool)
         identities = [str(value) for value in payload["identities"].tolist()]
+    if args.selected_jet_limit is not None:
+        if args.selected_jet_limit <= 0:
+            raise ValueError("--selected-jet-limit must be positive")
+        selected = select_normalization_jet_indices(
+            identities,
+            limit=min(args.selected_jet_limit, len(identities)),
+        )
+        tokens = np.asarray(tokens[selected])
+        mask = np.asarray(mask[selected], dtype=bool)
+        identities = [identities[int(index)] for index in selected]
     arrays, diagnostics = build_hlt_v3_cache(
         tokens,
         mask,
