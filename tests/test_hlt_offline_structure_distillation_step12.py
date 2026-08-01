@@ -1218,6 +1218,22 @@ def test_runtime_config_template_covers_exact_required_keyed_bindings():
     }
 
 
+def test_parent_lock_consumers_use_the_versioned_contract_constant():
+    consumers = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "parent_submission.py",
+        REPO_ROOT / "scripts" / "materialize_hosd_runtime_inputs.py",
+        REPO_ROOT / "scripts" / "build_hosd_robustness_cache.py",
+        REPO_ROOT / "scripts" / "prepare_hosd_scale_inputs.py",
+    )
+    for path in consumers:
+        source = path.read_text(encoding="utf-8")
+        assert "hosd_parent_status_v1" not in source
+        assert "PARENT_STATUS_CONTRACT" in source
+
+
 def test_target_array_factory_selects_exact_split_and_replica_bindings():
     canonical = _row_scoped_arguments(
         "canonical_target_build",

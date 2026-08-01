@@ -15,6 +15,8 @@ IFS=$'\n\t'
 : "${CPU_CPUS_PER_TASK:=16}"
 : "${CPU_MEM:=192G}"
 : "${RETB_DEVICE:=auto}"
+: "${RETB_C_COMPILER:=/usr/bin/gcc}"
+: "${RETB_CXX_COMPILER:=/usr/bin/c++}"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 
@@ -47,6 +49,16 @@ retb_activate() {
   # shellcheck disable=SC1090
   source "${conda_hook}"
   conda activate "${CONDA_ENV}"
+  if [[ ! -x "${RETB_C_COMPILER}" ]]; then
+    echo "Pinned RETB C compiler is absent: ${RETB_C_COMPILER}" >&2
+    exit 2
+  fi
+  if [[ ! -x "${RETB_CXX_COMPILER}" ]]; then
+    echo "Pinned RETB C++ compiler is absent: ${RETB_CXX_COMPILER}" >&2
+    exit 2
+  fi
+  export CC="${RETB_C_COMPILER}"
+  export CXX="${RETB_CXX_COMPILER}"
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   cd "${PROJECT_DIR}"
   retb_validate_frozen_source

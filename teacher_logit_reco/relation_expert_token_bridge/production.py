@@ -24,16 +24,16 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v35"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v36"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v16"
+    "retb_production_node_execution_registry_v17"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v30"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v31"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -43,6 +43,8 @@ TIGRIS_DEFAULTS = {
     "conda_base": "/home/ryreu/miniforge3-aarch64",
     "conda_env": "atlas_kd_tigris",
     "python_no_user_site": "1",
+    "c_compiler": "/usr/bin/gcc",
+    "cxx_compiler": "/usr/bin/c++",
     "account": "reu-aisocial",
     "partition": "tigris",
     "gpu_gres": "gpu:gh200:1",
@@ -1408,13 +1410,17 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 14,
+            "schema_version": 15,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
             "direct_worker_node_count": len(direct_nodes),
             "virtual_alias_node_count": len(alias_nodes),
             "missing_manifest_producers": [],
+            "runtime_environment": {
+                "c_compiler": TIGRIS_DEFAULTS["c_compiler"],
+                "cxx_compiler": TIGRIS_DEFAULTS["cxx_compiler"],
+            },
         }
     )
     validate_node_execution_registry(artifact, nodes=nodes)
@@ -1429,8 +1435,13 @@ def validate_node_execution_registry(
     digest = validate_content_hash(
         payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 14:
+    if int(payload.get("schema_version", -1)) != 15:
         raise ValueError("node execution registry schema version differs")
+    if payload.get("runtime_environment") != {
+        "c_compiler": TIGRIS_DEFAULTS["c_compiler"],
+        "cxx_compiler": TIGRIS_DEFAULTS["cxx_compiler"],
+    }:
+        raise ValueError("node execution runtime environment differs")
     by_id = {str(node["node_id"]): node for node in nodes}
     entries = list(payload.get("entries", ()))
     by_entry = {str(entry["node_id"]): entry for entry in entries}
@@ -1635,7 +1646,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 32,
+            "schema_version": 33,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1730,7 +1741,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 32:
+    if int(payload.get("schema_version", -1)) != 33:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -2492,7 +2503,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 28,
+            "schema_version": 29,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2500,6 +2511,7 @@ def build_step15_bundle(
             "scale_up_present": True,
             "bounded_arrays_present": True,
             "resumable_target_shards_present": True,
+            "runtime_compilers_pinned": True,
             "dynamic_continuation_present": True,
             "dynamic_continuation_contracts": {
                 "intent": "retb_dynamic_continuation_intent_v1",

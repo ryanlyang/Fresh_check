@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     INPUT_VIEW_MANIFEST_CONTRACT,
+    PARENT_STATUS_CONTRACT,
     SCALE_EXECUTION_PLAN_CONTRACT,
     SCALE_INPUT_COMPLETION_CONTRACT,
     load_and_validate_campaign,
@@ -177,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parent_lock = load_hashed_json(
         root / "inputs" / "resolved_inherited_parent_lock.json",
-        expected_contract="hosd_parent_status_v1",
+        expected_contract=PARENT_STATUS_CONTRACT,
     )
     if (
         plan.get("source") != campaign["source"]

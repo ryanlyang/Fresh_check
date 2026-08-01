@@ -643,6 +643,18 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert 'source "${PROJECT_DIR}/sbatch/retb_common.sh"' in array_launcher
     assert "sbatch --parsable --wait" in array_launcher
     assert "PYTHONNOUSERSITE=1" in common
+    assert ': "${RETB_C_COMPILER:=/usr/bin/gcc}"' in common
+    assert ': "${RETB_CXX_COMPILER:=/usr/bin/c++}"' in common
+    assert 'export CC="${RETB_C_COMPILER}"' in common
+    assert 'export CXX="${RETB_CXX_COMPILER}"' in common
+    assert "Pinned RETB C compiler is absent" in common
+    assert "Pinned RETB C++ compiler is absent" in common
+    assert graph["tigris_defaults"]["c_compiler"] == "/usr/bin/gcc"
+    assert graph["tigris_defaults"]["cxx_compiler"] == "/usr/bin/c++"
+    assert graph["node_execution_registry"]["runtime_environment"] == {
+        "c_compiler": "/usr/bin/gcc",
+        "cxx_compiler": "/usr/bin/c++",
+    }
     assert 'cd "${PROJECT_DIR}"' in common
     assert "retb_validate_frozen_source" in common
     assert "Frozen RETB source checkout became dirty" in common

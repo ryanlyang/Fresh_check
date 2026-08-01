@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from .contracts import (
     PARENT_GROUP_COMPLETION_CONTRACT,
     PARENT_REBUILD_PLAN_CONTRACT,
+    PARENT_STATUS_CONTRACT,
     load_hashed_json,
     validate_content_hash,
     with_content_hash,
@@ -227,7 +228,7 @@ def build_parent_submission_plan(
     resolved_path = root / "inputs" / "resolved_inherited_parent_lock.json"
     if resolved_path.is_file():
         resolved = load_hashed_json(
-            resolved_path, expected_contract="hosd_parent_status_v1"
+            resolved_path, expected_contract=PARENT_STATUS_CONTRACT
         )
         if resolved.get("source") != campaign["source"]:
             raise ValueError("resolved parent lock source differs")

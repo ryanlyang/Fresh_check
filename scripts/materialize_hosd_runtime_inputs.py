@@ -20,6 +20,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     materialize_offline_input_view,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    PARENT_STATUS_CONTRACT,
     load_hashed_json,
     with_content_hash,
     write_immutable_json,
@@ -54,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     campaign = load_and_validate_campaign(root, repo_root=REPO_ROOT)
     parent_lock = load_hashed_json(
         root / "inputs" / "resolved_inherited_parent_lock.json",
-        expected_contract="hosd_parent_status_v1",
+        expected_contract=PARENT_STATUS_CONTRACT,
     )
     if (
         parent_lock.get("source") != campaign["source"]

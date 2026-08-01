@@ -5375,3 +5375,19 @@ unchanged. The two teachers still become runnable together and retain full
 parallelism after the short contract-publication barrier. The corrected
 production graph, node-execution registry, and Step-15 bundle are versioned
 respectively as v35, v16, and v30; their schemas are 32, 14, and 28.
+
+## Tigris runtime-compiler pinning amendment (2026-08-01)
+
+The GH200 Torch/Triton runtime may compile a small CUDA-driver helper during
+the first attention backward pass. On Tigris, unconstrained compiler lookup
+resolved `gcc` to `/tools/bin/blindfold/gcc`, causing both Stage-A teachers to
+fail before their first optimizer update. Every RETB worker must therefore
+pin `CC=/usr/bin/gcc` and `CXX=/usr/bin/c++` after conda activation and fail
+closed if either executable is absent. The same paths are serialized in the
+production graph and node-execution registry.
+
+This correction changes only runtime tool discovery; model equations,
+precision policy, kernels selected after helper initialization, seeds, data,
+and scientific meaning remain unchanged. The corrected production graph,
+node-execution registry, and Step-15 bundle are v36, v17, and v31, with
+schemas 33, 15, and 29 respectively.
