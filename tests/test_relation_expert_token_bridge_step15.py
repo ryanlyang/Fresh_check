@@ -13,6 +13,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 from teacher_logit_reco.relation_expert_token_bridge import (
     DEFAULT_CONCURRENCY,
     TASK_MANIFEST_PRODUCER_NODES,
+    build_offline_submission_scope,
     build_job_ledger,
     build_node_execution_registry,
     build_production_graph,
@@ -21,9 +22,11 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     build_step15_contract_bundle,
     build_target_shard_plan,
     build_task_manifest,
+    offline_submission_node_ids,
     source_snapshot,
     validate_job_ledger,
     validate_node_execution_registry,
+    validate_offline_submission_scope,
     validate_production_graph,
     validate_production_campaign_binding,
     validate_resource_probe,
@@ -373,6 +376,92 @@ def test_job_ledger_binds_virtual_selectors_and_rejects_unknown_jobs() -> None:
         )
 
 
+def test_offline_submission_scope_is_exact_dependency_closed_and_real() -> None:
+    graph = _graph()
+    node_ids = offline_submission_node_ids(graph)
+    selected = set(node_ids)
+    by_id = {row["node_id"]: row for row in graph["nodes"]}
+    assert {by_id[node_id]["stage"] for node_id in selected} == set("ABC")
+    assert all(
+        set(by_id[node_id]["dependencies"]).issubset(selected)
+        for node_id in selected
+    )
+    assert "offline_capacity_controls" in selected
+    assert "step6_native_hlt_contracts" not in selected
+    assert "sealed_final_test" not in selected
+
+    scope = build_offline_submission_scope(production_graph=graph)
+    validate_offline_submission_scope(scope, production_graph=graph)
+    assert scope["submitted_node_ids"] == node_ids
+    assert scope["excluded_stages"] == list("DEFGHIJKLMN")
+    assert scope["final_test_jobs_submitted"] is False
+    assert scope["full_campaign_operational_authorization_claimed"] is False
+
+    jobs = {
+        node_id: str(30_000 + index)
+        for index, node_id in enumerate(node_ids)
+    }
+    ledger = build_job_ledger(
+        production_graph=graph,
+        jobs=jobs,
+        submission_mode="offline_production_submitted",
+    )
+    validate_job_ledger(ledger, production_graph=graph)
+    assert ledger["submission_scope"] == "offline_abc"
+    assert ledger["submission_scope_sha256"] == scope["content_hash"]
+    assert ledger["all_scope_nodes_bound"] is True
+    assert ledger["all_nodes_bound"] is False
+    assert ledger["submitted_node_count"] == len(node_ids)
+    assert all(
+        ledger["jobs"][node_id] is None
+        for node_id in scope["excluded_node_ids"]
+    )
+
+    missing = dict(jobs)
+    missing.pop(node_ids[-1])
+    with pytest.raises(ValueError, match="exactly every A-C node"):
+        build_job_ledger(
+            production_graph=graph,
+            jobs=missing,
+            submission_mode="offline_production_submitted",
+        )
+    with pytest.raises(ValueError, match="exactly every A-C node"):
+        build_job_ledger(
+            production_graph=graph,
+            jobs={**jobs, "step6_native_hlt_contracts": "39999"},
+            submission_mode="offline_production_submitted",
+        )
+
+
+def test_offline_submission_scope_rejects_miniature_graph() -> None:
+    with pytest.raises(ValueError, match="requires a production graph"):
+        offline_submission_node_ids(_graph(miniature=True))
+
+
+def test_offline_submission_plan_prints_only_authenticated_scope(
+    tmp_path: Path,
+) -> None:
+    graph = _graph()
+    graph_path = tmp_path / "production_graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "print_retb_submission_plan.py"),
+            "--production-graph",
+            str(graph_path),
+            "--submission-scope",
+            "offline_abc",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    printed = [line.split("|", 1)[0] for line in completed.stdout.splitlines()]
+    assert printed == offline_submission_node_ids(graph)
+
+
 def test_resource_probe_and_storage_admission_are_deterministic() -> None:
     accepted = build_resource_probe(
         campaign_spec_sha256="a" * 64,
@@ -602,6 +691,19 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
     assert step15["current_source_authorization_scope"] == (
         "frozen_campaign_checkout_not_mutable_submission_checkout"
     )
+    assert step15["offline_abc_submission"] == {
+        "supported": True,
+        "scope_contract": "retb_offline_submission_scope_v1",
+        "job_ledger_mode": "offline_production_submitted",
+        "submitted_stages": list("ABC"),
+        "complete_graph_remains_authoritative": True,
+        "exact_dependency_closed_node_set_required": True,
+        "real_data_and_authenticated_storage_required": True,
+        "full_campaign_authorization_claimed": False,
+        "stages_D_through_N_submitted": False,
+        "final_test_jobs_submitted": False,
+        "later_reuse_requires_authenticated_validation": True,
+    }
 
     submitter = (ROOT / "sbatch" / "submit_retb_tigris_full.sh").read_text()
     common = (ROOT / "sbatch" / "retb_common.sh").read_text()
@@ -615,6 +717,11 @@ def test_step15_bundle_and_shell_contracts_cover_production_interfaces() -> None
         ROOT / "sbatch" / "run_retb_resource_probe.sh"
     ).read_text()
     assert "--dry-run|--smoke-simulate|--smoke-submit" in submitter
+    assert "--offline-submit" in submitter
+    assert 'RETB_SUBMISSION_SCOPE="offline_abc"' in submitter
+    assert '--submission-scope "${RETB_SUBMISSION_SCOPE}"' in submitter
+    assert 'submission_mode="offline_production_submitted"' in submitter
+    assert "offline_submission_scope.json" in submitter
     assert "print_retb_submission_plan.py" in submitter
     assert "dispatch_mode" in submitter
     assert "initial_submission_ledger.json" in submitter
@@ -698,3 +805,32 @@ def test_submission_graph_cli_prints_complete_miniature_dag() -> None:
     } <= node_ids
     assert payload["degradation_profile"] == "D_NOMINAL"
     assert payload["bounded_concurrency"] == DEFAULT_CONCURRENCY
+
+
+def test_submission_graph_cli_resolves_real_offline_scope() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "submit_retb_graph.py"),
+            "--dry-run",
+            "--submission-scope",
+            "offline_abc",
+            "--storage-measurements-sha256",
+            "c" * 64,
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+    assert payload["submission_scope"] == "offline_abc"
+    assert (
+        payload["submission_node_count"]
+        < payload["complete_graph_node_count"]
+    )
+    by_id = {row["node_id"]: row for row in payload["nodes"]}
+    assert {
+        by_id[node_id]["stage"] for node_id in payload["submission_node_ids"]
+    } == set("ABC")
+    assert "step6_native_hlt_contracts" not in payload["submission_node_ids"]

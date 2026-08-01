@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/retb_common.sh"
 
 : "${RETB_MINIATURE:=0}"
+: "${RETB_SUBMISSION_SCOPE:=complete}"
 : "${RETB_STORAGE_MEASUREMENTS:=${OUTPUT_ROOT}/relation_expert_token_bridge/bootstrap/storage_measurements.json}"
 : "${RETB_OPERATIONAL_AUTHORIZATION:=${OUTPUT_ROOT}/relation_expert_token_bridge/bootstrap/full_submission_authorization.json}"
 : "${RETB_CPU_CACHE_CONCURRENCY:=64}"
@@ -21,6 +22,7 @@ export RETB_GPU_SCALE_CONCURRENCY
 export RETB_GPU_FINAL_CONCURRENCY
 
 mode="submit"
+RETB_SUBMISSION_SCOPE="complete"
 case "${1:-}" in
   --dry-run) mode="dry-run" ;;
   --smoke-simulate)
@@ -31,6 +33,11 @@ case "${1:-}" in
     mode="submit"
     RETB_MINIATURE=1
     ;;
+  --offline-submit)
+    mode="submit"
+    RETB_MINIATURE=0
+    RETB_SUBMISSION_SCOPE="offline_abc"
+    ;;
   --resume)
     echo "Use scripts/plan_retb_resume.py with authenticated completed-node outputs, then resubmit only its ready nodes." >&2
     echo "Automatic state guessing is intentionally disabled." >&2
@@ -39,7 +46,7 @@ case "${1:-}" in
   "")
     ;;
   *)
-    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--resume CAMPAIGN_ROOT]" >&2
+    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--resume CAMPAIGN_ROOT]" >&2
     exit 2
     ;;
 esac
@@ -81,6 +88,7 @@ if [[ "${mode}" == "submit" && "${RETB_FROZEN_REENTRY:-0}" != "1" ]]; then
     CPU_MEM="${CPU_MEM}" \
     RETB_DEVICE="${RETB_DEVICE}" \
     RETB_MINIATURE="${RETB_MINIATURE}" \
+    RETB_SUBMISSION_SCOPE="${RETB_SUBMISSION_SCOPE}" \
     RETB_STORAGE_MEASUREMENTS="${RETB_STORAGE_MEASUREMENTS}" \
     RETB_OPERATIONAL_AUTHORIZATION="${RETB_OPERATIONAL_AUTHORIZATION}" \
     RETB_SUBMISSION_PROJECT_DIR="${submission_project_dir}" \
@@ -93,6 +101,7 @@ fi
 retb_activate
 graph_arguments=(
   --output-root "${OUTPUT_ROOT}"
+  --submission-scope "${RETB_SUBMISSION_SCOPE}"
   --cpu-cache-concurrency "${RETB_CPU_CACHE_CONCURRENCY}"
   --gpu-expert-concurrency "${RETB_GPU_EXPERT_CONCURRENCY}"
   --gpu-predictor-concurrency "${RETB_GPU_PREDICTOR_CONCURRENCY}"
@@ -125,7 +134,7 @@ if [[ "${RETB_MINIATURE}" != "1" && ! -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   echo "Authenticated RETB storage measurements are absent: ${RETB_STORAGE_MEASUREMENTS}" >&2
   exit 2
 fi
-if [[ "${RETB_MINIATURE}" != "1" ]]; then
+if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" == "complete" ]]; then
   if [[ ! -f "${RETB_OPERATIONAL_AUTHORIZATION}" ]]; then
     echo "Authenticated RETB operational authorization is absent: ${RETB_OPERATIONAL_AUTHORIZATION}" >&2
     echo "Complete local validation, a real miniature Tigris smoke, and the authenticated production dry run first." >&2
@@ -134,6 +143,8 @@ if [[ "${RETB_MINIATURE}" != "1" ]]; then
   python scripts/validate_retb_operational_readiness.py \
     verify-authorization \
     --authorization "${RETB_OPERATIONAL_AUTHORIZATION}" >/dev/null
+elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
+  printf 'Submitting authenticated real-data Stages A-C only; Stages D-N are excluded.\n'
 fi
 required_per_class=345000
 if [[ "${RETB_MINIATURE}" == "1" ]]; then
@@ -171,6 +182,7 @@ mkdir -p \
 export CAMPAIGN_ID="${campaign_id}"
 export CAMPAIGN_ROOT="${campaign_root}"
 export RETB_MINIATURE
+export RETB_SUBMISSION_SCOPE
 export RETB_STORAGE_MEASUREMENTS
 export RETB_OPERATIONAL_AUTHORIZATION
 export RETB_FROZEN_REENTRY
@@ -234,7 +246,7 @@ submit_node() {
     --job-name="${campaign_id}_${node_id}" \
     --output="${log_pattern}" \
     --error="${error_pattern}" \
-    --export="ALL,PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_NODE_ID=${node_id},RETB_NODE_RESOURCE=${resource},RETB_RESOURCE_KIND=${resource},RETB_MINIATURE=${RETB_MINIATURE},RETB_STORAGE_MEASUREMENTS=${RETB_STORAGE_MEASUREMENTS},RETB_FROZEN_REENTRY=1,RETB_FROZEN_SOURCE_COMMIT=${RETB_FROZEN_SOURCE_COMMIT},RETB_SUBMISSION_PROJECT_DIR=${RETB_SUBMISSION_PROJECT_DIR},RETB_SOURCE_WORKTREE_ROOT=${RETB_SOURCE_WORKTREE_ROOT}" \
+    --export="ALL,PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_NODE_ID=${node_id},RETB_NODE_RESOURCE=${resource},RETB_RESOURCE_KIND=${resource},RETB_MINIATURE=${RETB_MINIATURE},RETB_SUBMISSION_SCOPE=${RETB_SUBMISSION_SCOPE},RETB_STORAGE_MEASUREMENTS=${RETB_STORAGE_MEASUREMENTS},RETB_FROZEN_REENTRY=1,RETB_FROZEN_SOURCE_COMMIT=${RETB_FROZEN_SOURCE_COMMIT},RETB_SUBMISSION_PROJECT_DIR=${RETB_SUBMISSION_PROJECT_DIR},RETB_SOURCE_WORKTREE_ROOT=${RETB_SOURCE_WORKTREE_ROOT}" \
     "${executable}"
 }
 
@@ -268,7 +280,9 @@ while IFS='|' read -r node_id stage dependencies resource worker is_array alias 
     "${dispatch_mode}")"
   printf 'submitted Stage %s %-36s %s\n' \
     "${stage}" "${node_id}" "${jobs[${node_id}]}"
-done < <(python scripts/print_retb_submission_plan.py --production-graph "${graph}")
+done < <(python scripts/print_retb_submission_plan.py \
+  --production-graph "${graph}" \
+  --submission-scope "${RETB_SUBMISSION_SCOPE}")
 
 ledger_arguments=()
 binding_strings=()
@@ -279,6 +293,8 @@ done
 submission_mode="production_submitted"
 if [[ "${RETB_MINIATURE}" == "1" ]]; then
   submission_mode="smoke_submitted"
+elif [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
+  submission_mode="offline_production_submitted"
 fi
 python scripts/write_retb_job_ledger.py \
   --production-graph "${graph}" \
@@ -292,6 +308,7 @@ printf 'source commit: %s\nsource dirty-status hash: %s\n' \
 printf 'frozen source checkout: %s\nmutable submission checkout: %s\n' \
   "${PROJECT_DIR}" "${RETB_SUBMISSION_PROJECT_DIR}"
 printf 'degradation profile: D_NOMINAL\n'
+printf 'submission scope: %s\n' "${RETB_SUBMISSION_SCOPE}"
 if [[ -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   readarray -t storage_fields < <(
     python -c \
@@ -308,9 +325,14 @@ printf 'bounded concurrency: cpu-cache=%s expert=%s predictor=%s scale=%s final=
   "${RETB_GPU_PREDICTOR_CONCURRENCY}" "${RETB_GPU_SCALE_CONCURRENCY}" \
   "${RETB_GPU_FINAL_CONCURRENCY}"
 printf 'ledger: %s/job_ledgers/initial_submission_ledger.json\n' "${campaign_root}"
-printf 'HLT-v3 cache hashes: %s/inputs/hlt_v3/**/hlt_v3_metadata.json\n' "${campaign_root}"
-printf 'selection locks: %s/selection/locked_scale_finalists.json and %s/selection/final_test_execution_lock.json\n' \
-  "${campaign_root}" "${campaign_root}"
+if [[ "${RETB_SUBMISSION_SCOPE}" == "offline_abc" ]]; then
+  printf 'offline scope attestation: %s/job_ledgers/offline_submission_scope.json\n' "${campaign_root}"
+  printf 'offline outputs: %s/selection/locked_offline_shapes.json and Stage-C controls\n' "${campaign_root}"
+else
+  printf 'HLT-v3 cache hashes: %s/inputs/hlt_v3/**/hlt_v3_metadata.json\n' "${campaign_root}"
+  printf 'selection locks: %s/selection/locked_scale_finalists.json and %s/selection/final_test_execution_lock.json\n' \
+    "${campaign_root}" "${campaign_root}"
+fi
 printf 'monitor: python scripts/monitor_retb_campaign.py --campaign-root %q\n' "${campaign_root}"
 printf 'accounting: sacct -X --starttime today --name retb_ --format=JobID,JobName,State,Elapsed,ExitCode\n'
 printf 'cancel stale only: python scripts/monitor_retb_campaign.py --campaign-root %q --cancel-stale --stale-job-id JOBID\n' "${campaign_root}"

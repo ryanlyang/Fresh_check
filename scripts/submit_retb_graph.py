@@ -16,11 +16,13 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     DEFAULT_CONCURRENCY,
+    build_offline_submission_scope,
     build_job_ledger,
     build_production_graph,
     build_step15_contract_bundle,
     load_hashed_json,
     publish_step15_contract_bundle,
+    offline_submission_node_ids,
     source_snapshot,
 )
 from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
@@ -34,6 +36,7 @@ from teacher_logit_reco.relation_expert_token_bridge.storage import (  # noqa: E
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     bind_source,
+    write_immutable_json,
 )
 
 
@@ -70,6 +73,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-simulate", action="store_true")
     parser.add_argument("--write-artifacts", action="store_true")
+    parser.add_argument(
+        "--submission-scope",
+        choices=("complete", "offline_abc"),
+        default="complete",
+    )
     for name, default in DEFAULT_CONCURRENCY.items():
         parser.add_argument(
             f"--{name.replace('_', '-')}-concurrency",
@@ -85,6 +93,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--dry-run may not write campaign artifacts")
     if args.smoke_simulate and not args.miniature:
         raise ValueError("--smoke-simulate requires --miniature")
+    if args.submission_scope == "offline_abc" and args.miniature:
+        raise ValueError("offline_abc submission requires real production data")
     if (
         args.miniature_split_profile == HOSD_MINIATURE_SPLIT_PROFILE
         and not args.miniature
@@ -166,6 +176,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run_ledger=ledger,
         source_snapshot=source,
     )
+    submission_node_ids = (
+        offline_submission_node_ids(graph)
+        if args.submission_scope == "offline_abc"
+        else [str(node["node_id"]) for node in graph["nodes"]]
+    )
+    offline_scope = (
+        build_offline_submission_scope(production_graph=graph)
+        if args.submission_scope == "offline_abc"
+        else None
+    )
     result: dict[str, object] = {
         "campaign_id": campaign_id,
         "campaign_root": str(campaign_root),
@@ -177,6 +197,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dry_run": bool(args.dry_run),
         "smoke_simulate": bool(args.smoke_simulate),
         "production_submission_performed": False,
+        "submission_scope": args.submission_scope,
+        "submission_node_ids": submission_node_ids,
+        "submission_node_count": len(submission_node_ids),
+        "complete_graph_node_count": len(graph["nodes"]),
         "nodes": [
             {
                 "node_id": node["node_id"],
@@ -204,6 +228,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         result["publication"] = publish_step15_contract_bundle(
             campaign_root=campaign_root, bundle=bundle
         )
+        if offline_scope is not None:
+            result["offline_submission_scope_publication"] = (
+                write_immutable_json(
+                    campaign_root
+                    / "job_ledgers"
+                    / "offline_submission_scope.json",
+                    offline_scope,
+                )
+            )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

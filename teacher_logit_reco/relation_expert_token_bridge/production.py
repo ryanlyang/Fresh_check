@@ -28,12 +28,14 @@ PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v36"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v17"
 )
-JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
+JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v3"
+OFFLINE_SUBMISSION_SCOPE_CONTRACT = "retb_offline_submission_scope_v1"
+OFFLINE_PRODUCTION_STAGES = ("A", "B", "C")
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v31"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v32"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -1895,6 +1897,114 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     return digest
 
 
+def offline_submission_node_ids(
+    production_graph: Mapping[str, Any],
+) -> list[str]:
+    """Return the exact dependency-closed real-data Stage A--C prefix."""
+
+    validate_production_graph(production_graph)
+    if (
+        production_graph.get("campaign_profile")
+        != "production_500k_100k_50k_300k_scale3m"
+        or production_graph.get("scientific_results_allowed") is not True
+    ):
+        raise ValueError("offline A-C submission requires a production graph")
+    stages = set(OFFLINE_PRODUCTION_STAGES)
+    selected = [
+        str(node["node_id"])
+        for node in production_graph["nodes"]
+        if node["stage"] in stages
+    ]
+    selected_set = set(selected)
+    selected_nodes = [
+        node
+        for node in production_graph["nodes"]
+        if str(node["node_id"]) in selected_set
+    ]
+    if (
+        not selected
+        or {str(node["stage"]) for node in selected_nodes} != stages
+        or any(
+            not set(node["dependencies"]).issubset(selected_set)
+            for node in selected_nodes
+        )
+        or any(
+            node["virtual_alias_of"] is not None
+            and node["virtual_alias_of"] not in selected_set
+            for node in selected_nodes
+        )
+    ):
+        raise ValueError("offline A-C submission is not dependency closed")
+    return selected
+
+
+def build_offline_submission_scope(
+    *, production_graph: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Authenticate a submission that can execute only Stages A--C."""
+
+    graph_sha = validate_production_graph(production_graph)
+    node_ids = offline_submission_node_ids(production_graph)
+    selected = set(node_ids)
+    excluded = [
+        str(node["node_id"])
+        for node in production_graph["nodes"]
+        if str(node["node_id"]) not in selected
+    ]
+    return with_content_hash(
+        {
+            "contract": OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+            "schema_version": 1,
+            "production_graph_sha256": graph_sha,
+            "campaign_id": production_graph["campaign_id"],
+            "campaign_root": production_graph["campaign_root"],
+            "campaign_profile": production_graph["campaign_profile"],
+            "source_commit": production_graph["source_commit"],
+            "source_status_sha256": production_graph[
+                "source_status_sha256"
+            ],
+            "storage_measurements_sha256": production_graph[
+                "storage_measurements_sha256"
+            ],
+            "submission_scope": "offline_abc",
+            "submitted_stages": list(OFFLINE_PRODUCTION_STAGES),
+            "submitted_node_ids": node_ids,
+            "submitted_node_count": len(node_ids),
+            "excluded_stages": list("DEFGHIJKLMN"),
+            "excluded_node_ids": excluded,
+            "complete_graph_node_count": len(production_graph["nodes"]),
+            "dependency_closed": True,
+            "real_data_required": True,
+            "full_campaign_submission_performed": False,
+            "full_campaign_operational_authorization_claimed": False,
+            "hlt_model_training_submitted": False,
+            "scale_training_submitted": False,
+            "final_test_jobs_submitted": False,
+            "scientific_underperformance_blocks_continuation": False,
+            "provenance_or_execution_failure_blocks_dependents": True,
+            "later_stage_reuse_requires_authenticated_artifact_validation": (
+                True
+            ),
+        }
+    )
+
+
+def validate_offline_submission_scope(
+    payload: Mapping[str, Any],
+    *,
+    production_graph: Mapping[str, Any],
+) -> str:
+    digest = validate_content_hash(
+        payload, expected_contract=OFFLINE_SUBMISSION_SCOPE_CONTRACT
+    )
+    expected = build_offline_submission_scope(
+        production_graph=production_graph
+    )
+    if payload != expected:
+        raise ValueError("offline A-C submission scope semantics differ")
+    return digest
+
+
 def validate_production_campaign_binding(
     production_graph: Mapping[str, Any],
     campaign_spec: Mapping[str, Any],
@@ -1948,6 +2058,7 @@ def build_job_ledger(
         "dry_run",
         "smoke_simulation",
         "smoke_submitted",
+        "offline_production_submitted",
         "production_submitted",
         "resumed",
         "completed",
@@ -1956,6 +2067,21 @@ def build_job_ledger(
     node_ids = {str(node["node_id"]) for node in production_graph["nodes"]}
     if set(jobs) - node_ids:
         raise ValueError("job ledger contains unknown nodes")
+    offline_scope = None
+    if submission_mode == "offline_production_submitted":
+        offline_scope = build_offline_submission_scope(
+            production_graph=production_graph
+        )
+        expected_jobs = set(offline_scope["submitted_node_ids"])
+        bound_jobs = {
+            str(node_id)
+            for node_id, job_id in jobs.items()
+            if job_id is not None
+        }
+        if bound_jobs != expected_jobs:
+            raise ValueError(
+                "offline production ledger must bind exactly every A-C node"
+            )
     normalized: dict[str, str | None] = {}
     for node_id in sorted(node_ids):
         value = jobs.get(node_id)
@@ -2005,17 +2131,33 @@ def build_job_ledger(
     return with_content_hash(
         {
             "contract": JOB_LEDGER_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "production_graph_sha256": graph_sha,
             "campaign_id": production_graph["campaign_id"],
             "campaign_root": production_graph["campaign_root"],
             "submission_mode": submission_mode,
+            "submission_scope": (
+                "offline_abc"
+                if submission_mode == "offline_production_submitted"
+                else "complete"
+            ),
+            "submission_scope_sha256": (
+                None if offline_scope is None else offline_scope["content_hash"]
+            ),
             "jobs": normalized,
             "resolved_arrays": arrays,
             "submitted_node_count": sum(
                 value is not None for value in normalized.values()
             ),
             "all_nodes_bound": all_nodes_bound,
+            "all_scope_nodes_bound": (
+                all_nodes_bound
+                if offline_scope is None
+                else all(
+                    normalized[node_id] is not None
+                    for node_id in offline_scope["submitted_node_ids"]
+                )
+            ),
             "completion_artifact_hashes": {
                 name: require_sha256(
                     value, name=f"completion_artifact_hashes.{name}"
@@ -2503,7 +2645,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 29,
+            "schema_version": 30,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2665,6 +2807,19 @@ def build_step15_bundle(
                 "frozen_campaign_checkout_not_mutable_submission_checkout"
             ),
             "smoke_submission_supported": True,
+            "offline_abc_submission": {
+                "supported": True,
+                "scope_contract": OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+                "job_ledger_mode": "offline_production_submitted",
+                "submitted_stages": list(OFFLINE_PRODUCTION_STAGES),
+                "complete_graph_remains_authoritative": True,
+                "exact_dependency_closed_node_set_required": True,
+                "real_data_and_authenticated_storage_required": True,
+                "full_campaign_authorization_claimed": False,
+                "stages_D_through_N_submitted": False,
+                "final_test_jobs_submitted": False,
+                "later_reuse_requires_authenticated_validation": True,
+            },
             "full_submission_supported": True,
             "monitoring_supported": True,
             "node_execution_registry_present": True,
@@ -2682,6 +2837,8 @@ __all__ = [
     "FINAL_CONTINUATION_MANIFEST_NODES",
     "FINAL_NODE_ENTRYPOINTS",
     "JOB_LEDGER_CONTRACT",
+    "OFFLINE_PRODUCTION_STAGES",
+    "OFFLINE_SUBMISSION_SCOPE_CONTRACT",
     "LATE_CONTINUATION_GATE_CONTRACT",
     "LATE_CONTINUATION_MANIFEST_NODES",
     "LATE_NODE_ENTRYPOINTS",
@@ -2704,6 +2861,7 @@ __all__ = [
     "TASK_MANIFEST_PRODUCER_NODES",
     "TIGRIS_DEFAULTS",
     "build_job_ledger",
+    "build_offline_submission_scope",
     "build_node_execution_registry",
     "build_production_graph",
     "build_resource_probe",
@@ -2712,8 +2870,10 @@ __all__ = [
     "build_task_manifest",
     "build_target_shard_plan",
     "task_manifest_path_for_graph",
+    "offline_submission_node_ids",
     "validate_job_ledger",
     "validate_node_execution_registry",
+    "validate_offline_submission_scope",
     "validate_production_graph",
     "validate_production_campaign_binding",
     "validate_resource_probe",

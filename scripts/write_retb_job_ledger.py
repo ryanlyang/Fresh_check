@@ -107,6 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "dry_run",
             "smoke_simulation",
             "smoke_submitted",
+            "offline_production_submitted",
             "production_submitted",
             "resumed",
             "completed",

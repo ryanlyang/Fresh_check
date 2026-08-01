@@ -5546,3 +5546,33 @@ exactly `S1_128`, `SHAPE_COMPACT`, `SHAPE_HIGH`, `HET_PHYSICS`,
 artifacts rather than retraining them. This closes a runtime path omission and
 changes no checkpoint, shape selection, training budget, run identity, or
 scientific underperformance policy.
+
+## Real-data offline A--C submission amendment (2026-08-01)
+
+The production launcher supports `--offline-submit` for starting the complete
+real-data offline phase after authoritative Stages A--C miniature validation,
+without representing the remaining campaign as validated or submitted. It
+resolves the same complete A--N production graph and publishes an immutable
+`retb_offline_submission_scope_v1` artifact that binds the graph, frozen source
+commit and clean-status hash, authenticated storage measurement, campaign
+profile, exact ordered Stage A--C node set, and exact excluded Stage D--N node
+set. The submitted set must contain every A--C node, contain no D--N node, and
+be dependency closed. A miniature graph cannot be submitted through this mode.
+
+The offline submission uses the real production split contract and the normal
+500k offline training, validation, confirmation, fusion, complementarity, and
+capacity-control definitions. It retains data preflight, the compiled-backend
+probe, detached clean source worktree, immutable artifacts, exact Slurm
+dependencies, authenticated storage admission, and non-blocking scientific
+underperformance. Provenance or execution failures still block their own
+dependents. The initial `retb_tigris_job_ledger_v3` must use mode
+`offline_production_submitted`, bind the scope-artifact hash, and bind exactly
+all scoped jobs.
+
+This mode does not claim the complete A--N operational authorization, does not
+submit native-HLT model training, predictor, scale-up, selector, oracle, or
+final-test work, and cannot produce a completed-campaign ledger. Later use of
+its outputs requires ordinary authenticated artifact and source-lineage
+validation. The full production launcher remains separately authorization
+gated, and the authoritative full miniature smoke may continue independently
+while the offline A--C campaign runs.

@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     PRODUCTION_GRAPH_CONTRACT,
     load_hashed_json,
+    offline_submission_node_ids,
     validate_production_graph,
 )
 
@@ -21,6 +22,11 @@ from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-graph", required=True, type=Path)
+    parser.add_argument(
+        "--submission-scope",
+        choices=("complete", "offline_abc"),
+        default="complete",
+    )
     args = parser.parse_args()
     graph = load_hashed_json(
         args.production_graph, expected_contract=PRODUCTION_GRAPH_CONTRACT
@@ -30,7 +36,14 @@ def main() -> int:
         row["node_id"]: row
         for row in graph["node_execution_registry"]["entries"]
     }
+    selected = (
+        set(offline_submission_node_ids(graph))
+        if args.submission_scope == "offline_abc"
+        else {str(node["node_id"]) for node in graph["nodes"]}
+    )
     for node in graph["nodes"]:
+        if node["node_id"] not in selected:
+            continue
         fields = (
             node["node_id"],
             node["stage"],
