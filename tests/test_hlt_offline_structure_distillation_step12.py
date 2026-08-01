@@ -855,6 +855,16 @@ def test_stage_j_tree_and_target_producers_are_bounded_resident():
     assert "mask = mask[canonical_to_source]" not in target_source
     assert "identities_are_canonical=False" in teacher_target_source
     assert "publish_target_cache(" in teacher_target_source
+    normalization_source = (
+        REPO_ROOT / "scripts" / "execute_hosd_normalization_wave.py"
+    ).read_text(encoding="utf-8")
+    statistics_source = (
+        REPO_ROOT / "scripts" / "fit_hosd_teacher_statistics.py"
+    ).read_text(encoding="utf-8")
+    assert "align_conditional_context_to_cache(" in normalization_source
+    assert "align_conditional_context_to_cache(" in statistics_source
+    assert "raw = raw[" not in normalization_source
+    assert "mask = mask[" not in normalization_source
     assert "all_identities" not in cache_source
     teacher_source = (
         REPO_ROOT

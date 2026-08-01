@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
+    align_conditional_context_to_cache,
     build_heteroscedastic_metadata,
     build_hlt_conditional_context,
     compatible_artifact_content_hashes,
@@ -249,16 +250,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         identities, raw, mask = _input(views[replica])
-        if identities != cache.identities:
-            raise ValueError(
-                "conditional-residual HLT/cache identity order differs"
-            )
         context = build_hlt_conditional_context(
             raw,
             mask,
             d0_uncertainty_floor=float(floors["d0"]["floor"]),
             dz_uncertainty_floor=float(floors["dz"]["floor"]),
             sentinel_policy=relation["track_sentinel_policy"],
+        )
+        context = align_conditional_context_to_cache(
+            identities,
+            context,
+            cache.identities,
         )
         for target_id in sorted(cache.values):
             artifact = fit_conditional_residual(

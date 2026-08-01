@@ -11,6 +11,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     ExtractorResources,
     LoadedTargetCache,
     TeacherInferenceAdapter,
+    align_conditional_context_to_cache,
     apply_conditional_residual,
     apply_target_shuffle,
     build_heteroscedastic_metadata,
@@ -636,6 +637,25 @@ def test_conditional_residual_backoff_is_deterministic_and_identity_free() -> No
     output = apply_conditional_residual(context[:3], artifact=artifact)
     assert output.shape == (3, 2)
     assert np.isfinite(output).all()
+
+
+def test_conditional_context_alignment_uses_compact_identity_permutation() -> None:
+    context = np.asarray(
+        [[20.0, 21.0, 22.0, 23.0], [10.0, 11.0, 12.0, 13.0]],
+        dtype=np.float64,
+    )
+    aligned = align_conditional_context_to_cache(
+        ("jet-b", "jet-a"),
+        context,
+        ("jet-a", "jet-b"),
+    )
+    assert np.array_equal(aligned, context[[1, 0]])
+    with pytest.raises(ValueError, match="identity coverage differs"):
+        align_conditional_context_to_cache(
+            ("jet-b", "jet-a"),
+            context,
+            ("jet-a", "jet-c"),
+        )
 
 
 def test_conditional_context_uses_vector_jet_and_registered_track_validity() -> None:

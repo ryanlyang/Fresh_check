@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
+    align_conditional_context_to_cache,
     fit_conditional_residual,
     fit_latent_whitening,
     build_hlt_conditional_context,
@@ -116,8 +117,11 @@ def main(argv: list[str] | None = None) -> int:
                     sentinel_policy=relation["track_sentinel_policy"],
                 )
             context_parent = args.hlt_input_npz
-        if identities != cache.identities:
-            raise ValueError("HLT context identities differ from residual cache")
+        context = align_conditional_context_to_cache(
+            identities,
+            context,
+            cache.identities,
+        )
         artifact = fit_conditional_residual(
             cache.values[args.target_id],
             cache.masks[args.target_id],

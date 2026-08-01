@@ -140,6 +140,7 @@ from .target_cache import (
     validate_target_cache,
 )
 from .normalization import (
+    align_conditional_context_to_cache,
     apply_conditional_residual,
     build_heteroscedastic_metadata,
     build_hlt_conditional_context,
@@ -576,6 +577,7 @@ __all__ = [
     "PROJECTION_COUNTS",
     "STREAM_STORAGE_MODE",
     "TeacherInferenceAdapter",
+    "align_conditional_context_to_cache",
     "apply_conditional_residual",
     "apply_target_shuffle",
     "build_control_batches",

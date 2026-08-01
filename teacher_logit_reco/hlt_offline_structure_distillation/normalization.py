@@ -32,7 +32,7 @@ from teacher_logit_reco.relational_part.normalization import (
     NORMALIZATION_PAIR_SALT,
 )
 from .extractors import TargetBatch
-from .target_cache import LoadedTargetCache
+from .target_cache import LoadedTargetCache, canonicalize_identities
 
 
 NORMALIZED_CLIP = (-12.0, 12.0)
@@ -596,6 +596,31 @@ def build_hlt_conditional_context(
     ).astype(np.float64)
 
 
+def align_conditional_context_to_cache(
+    source_identities: Sequence[str],
+    context: np.ndarray,
+    cache_identities: Sequence[str],
+) -> np.ndarray:
+    """Align compact HLT context rows to canonical target-cache identities."""
+
+    values = np.asarray(context, dtype=np.float64)
+    source = tuple(str(value) for value in source_identities)
+    expected = tuple(str(value) for value in cache_identities)
+    if values.shape != (len(source), 4):
+        raise ValueError("conditional context/source identity shape differs")
+    canonical, canonical_to_source = canonicalize_identities(source)
+    if canonical != expected:
+        raise ValueError("conditional context/cache identity coverage differs")
+    if np.array_equal(
+        canonical_to_source,
+        np.arange(len(source), dtype=np.int64),
+    ):
+        return values
+    # Only the compact four-scalar context is reordered.  The population-wide
+    # particle tensor remains in its authenticated source order.
+    return np.take(values, canonical_to_source, axis=0)
+
+
 def _bin_index(value: float, edges: Sequence[float]) -> int:
     return int(np.searchsorted(np.asarray(edges), value, side="right"))
 
@@ -947,6 +972,7 @@ def fit_latent_ridge_adapter(
 
 
 __all__ = [
+    "align_conditional_context_to_cache",
     "BACKOFF_PATH",
     "CONDITIONAL_BIN_COUNTS",
     "CONDITIONAL_FEATURES",
