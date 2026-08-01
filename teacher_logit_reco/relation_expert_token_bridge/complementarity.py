@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-COMPLEMENTARITY_CONTRACT = "retb_offline_complementarity_v1"
+COMPLEMENTARITY_CONTRACT = "retb_offline_complementarity_v2"
 SUBSET_READOUT_CONTRACT = "retb_offline_subset_readouts_v1"
 
 
@@ -224,8 +224,10 @@ def jensen_shannon_divergence(
 def _safe_correlation(left: np.ndarray, right: np.ndarray) -> float | None:
     x = np.asarray(left, dtype=np.float64).reshape(-1)
     y = np.asarray(right, dtype=np.float64).reshape(-1)
-    if x.shape != y.shape or len(x) < 2:
+    if x.shape != y.shape:
         raise ValueError("correlation inputs are incompatible")
+    if len(x) < 2:
+        return None
     if x.std() == 0.0 or y.std() == 0.0:
         return None
     return float(np.corrcoef(x, y)[0, 1])
@@ -361,7 +363,7 @@ def build_complementarity_report(
     return with_content_hash(
         {
             "contract": COMPLEMENTARITY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "shape_id": str(shape_id),
             "pipeline_seed": int(pipeline_seed),
             "cache_manifest_sha256": require_sha256(
@@ -369,6 +371,12 @@ def build_complementarity_report(
             ),
             "expert_order": list(EXPERT_ORDER),
             "pairwise": rows,
+            "correlation_policy": {
+                "minimum_sample_count": 2,
+                "insufficient_support_serialization": None,
+                "constant_input_serialization": None,
+                "mismatched_shapes": "error",
+            },
             "subset_metrics": {
                 subset_id(mask): dict(subset_metrics[mask])
                 for mask in range(128)

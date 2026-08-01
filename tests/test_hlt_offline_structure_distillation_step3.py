@@ -412,6 +412,7 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
             },
             {
                 "content_hash": "d" * 64,
+                "array_content_sha256": "e" * 64,
                 "logical_role": "model_train",
                 "replica_id": 0,
                 "realization_policy": "R_MULTI",
@@ -464,6 +465,7 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
         == (tmp_path / "view.npz").read_bytes()
     )
     assert not first["contains_labels"]
+    assert first["parent_hashes"]["hlt_array_content"] == "e" * 64
     with np.load(tmp_path / "view.npz", allow_pickle=False) as payload:
         assert set(payload.files) == {
             "identity",

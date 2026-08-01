@@ -452,6 +452,10 @@ def materialize_hlt_input_view(
         parent_hashes={
             **parent_hashes,
             "hlt_cache": cache_sha256,
+            "hlt_array_content": require_sha256(
+                metadata["array_content_sha256"],
+                name="hlt_array_content_sha256",
+            ),
             "hlt_cache_metadata": require_sha256(
                 metadata["content_hash"], name="hlt_cache_metadata"
             ),

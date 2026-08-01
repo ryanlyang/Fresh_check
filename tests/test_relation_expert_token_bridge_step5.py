@@ -26,12 +26,17 @@ from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_models imp
     build_monolithic_grid,
 )
 from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
+    COMPLEMENTARITY_CONTRACT,
+    _safe_correlation,
     build_complementarity_report,
     build_subset_readout,
     build_subset_readout_registry,
     execute_subset_readout_screen,
     linear_cka,
     shapley_from_subset_accuracy,
+)
+from scripts.execute_retb_offline_shape_wave import (
+    _optional_source_matches,
 )
 from teacher_logit_reco.relation_expert_token_bridge.fusion import (
     GroupedHeadRelationBias,
@@ -346,6 +351,14 @@ def test_subset_registry_complementarity_and_exact_shapley() -> None:
         tokens_by_expert=tokens,
         subset_metrics=subset_metrics,
     )
+    assert report["contract"] == COMPLEMENTARITY_CONTRACT
+    assert report["schema_version"] == 2
+    assert report["correlation_policy"] == {
+        "minimum_sample_count": 2,
+        "insufficient_support_serialization": None,
+        "constant_input_serialization": None,
+        "mismatched_shapes": "error",
+    }
     assert len(report["pairwise"]) == 21
     assert report["subset_coverage"] == 128
     assert all(
@@ -355,6 +368,27 @@ def test_subset_registry_complementarity_and_exact_shapley() -> None:
     assert linear_cka(tokens["PT"], tokens["PT"]) == pytest.approx(1.0)
     with pytest.raises(ValueError, match="128"):
         shapley_from_subset_accuracy({mask: 0.0 for mask in range(127)})
+
+
+def test_complementarity_correlation_handles_miniature_class_support() -> None:
+    assert _safe_correlation(np.asarray([1.0]), np.asarray([0.0])) is None
+    assert _safe_correlation(np.asarray([]), np.asarray([])) is None
+    assert _safe_correlation(
+        np.asarray([1.0, 1.0]), np.asarray([0.0, 1.0])
+    ) is None
+    with pytest.raises(ValueError, match="incompatible"):
+        _safe_correlation(np.asarray([1.0]), np.asarray([0.0, 1.0]))
+
+
+def test_shape_selector_compares_mapping_valued_sources_directly() -> None:
+    source = {
+        "commit": "a" * 40,
+        "status_sha256": "b" * 64,
+        "dirty": False,
+    }
+    assert _optional_source_matches(source.copy(), source)
+    assert _optional_source_matches(None, source)
+    assert not _optional_source_matches({**source, "dirty": True}, source)
 
 
 def _shape_rows(negative: bool = True):

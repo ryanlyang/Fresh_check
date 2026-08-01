@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import string
 from typing import Any, Mapping
@@ -68,6 +69,347 @@ ROW_SCOPED_RUNTIME_OPTIONS = {
 }
 
 
+def _shared_root(root: Path) -> Path:
+    return root / "inputs" / "shared_retb_parent_campaign"
+
+
+def _hlt_cache(root: Path, role: str, replica: int) -> Path:
+    policy = "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
+    return (
+        _shared_root(root)
+        / "inputs"
+        / "hlt_v3"
+        / role
+        / f"replica_{replica}"
+        / policy
+        / "D_NOMINAL"
+    )
+
+
+def _hlt_view(root: Path, role: str, replica: int) -> Path:
+    return root / "inputs" / "hosd_views" / "hlt" / role / f"replica_{replica}.npz"
+
+
+def _offline_view(root: Path, role: str) -> Path:
+    return root / "inputs" / "hosd_views" / "offline" / f"{role}.npz"
+
+
+def _labels_npz(root: Path, role: str) -> Path:
+    return _shared_root(root) / "inputs" / "offline" / role / "offline_inputs.npz"
+
+
+def _tree(root: Path, view: str, role: str, replica: int | None = None) -> Path:
+    name = (
+        f"{role}_exclusive_ca_v1"
+        if replica is None
+        else f"{role}_r{replica}_exclusive_ca_v1"
+    )
+    return _shared_root(root) / "inputs" / "region_tree" / view / name
+
+
+def _support(root: Path, name: str) -> Path:
+    return root / "registry" / "runtime_support" / name
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _teacher_adapter_config(root: Path, row: Mapping[str, Any]) -> Path:
+    """Publish the exact teacher/split adapter only after its row is known."""
+
+    teacher_id = str(row["teacher_id"])
+    split = str(row["split"])
+    input_path = _offline_view(root, split)
+    campaign = load_hashed_json(root / "campaign_spec.json")
+    if split == "stack_val" and not input_path.is_file():
+        # This label-blind offline view is deliberately materialized only
+        # after finalist locking, when this function is reached by the
+        # post-lock oracle diagnostic.
+        from .input_views import materialize_retb_offline_input_view
+
+        parent_lock = load_hashed_json(
+            root / "inputs" / "resolved_inherited_parent_lock.json"
+        )
+        materialize_retb_offline_input_view(
+            offline_cache_dir=(
+                _shared_root(root) / "inputs" / "offline" / split
+            ),
+            split=split,
+            output=input_path,
+            parent_hashes={
+                "campaign_spec": campaign["content_hash"],
+                "resolved_parent_lock": parent_lock["content_hash"],
+            },
+            source=campaign["source"],
+        )
+    config: dict[str, Any] = {
+        "contract": "hosd_teacher_adapter_config_v1",
+        "source": campaign["source"],
+        "campaign_spec_sha256": campaign["content_hash"],
+        "teacher_id": teacher_id,
+        "split": split,
+        "input_npz": str(input_path.resolve()),
+        "input_npz_sha256": _sha256_file(input_path),
+        "screening_registry": str(_support(root, "screening_registry.json").resolve()),
+        "relation_normalizer": str(
+            (root / "inputs" / "normalization" / "offline_500k" / "relation.json").resolve()
+        ),
+        "device": "auto",
+    }
+    if teacher_id == "O_FULLREL":
+        tree_path = _tree(root, "offline", split)
+        tree_manifest = load_hashed_json(tree_path / "manifest.json")
+        config.update(
+            {
+                "region_normalizer": str(
+                    (root / "inputs" / "normalization" / "offline_500k" / "region.json").resolve()
+                ),
+                "tree_cache_dir": str(tree_path.resolve()),
+                "tree_expected_parents": dict(tree_manifest["parents"]),
+                "tree_resource_path": str(
+                    (root / "inputs" / "inherited_angular_tree_resource.json").resolve()
+                ),
+                "tree_backend_manifest_path": str(
+                    (root / "inputs" / "region_tree" / "backend_manifest.json").resolve()
+                ),
+            }
+        )
+    path = _support(root, "teacher_adapters") / split / f"{teacher_id}.json"
+    encoded = json.dumps(config, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_text(encoding="utf-8") != encoded:
+            raise FileExistsError(f"immutable teacher adapter differs: {path}")
+    else:
+        path.write_text(encoded, encoding="utf-8")
+    return path
+
+
+def _repeated(option: str, values: Mapping[int | str, Path]) -> list[str]:
+    return [
+        item
+        for key, path in values.items()
+        for item in (option, f"{key}={path}")
+    ]
+
+
+def _derived_infrastructure(
+    root: Path, node_id: str, row: Mapping[str, Any] | None
+) -> list[str]:
+    """Resolve campaign-owned paths without pre-binding future DAG outputs."""
+
+    relation = root / "inputs" / "normalization" / "offline_500k" / "relation.json"
+    region = root / "inputs" / "normalization" / "offline_500k" / "region.json"
+    hlt_relation = root / "inputs" / "normalization" / "hlt_shared_500k" / "relation.json"
+    backend = root / "inputs" / "region_tree" / "backend_manifest.json"
+    tree_resource = root / "inputs" / "inherited_angular_tree_resource.json"
+    support = root / "registry" / "runtime_support"
+    if node_id == "storage_measurement":
+        return ["--probe-input", str(_offline_view(root, "model_train")), "--relation-normalizer", str(relation)]
+    if node_id == "offline_teacher_train":
+        values = [
+            "--model-contract-o-base", str(support / "model_contract_O_BASE.json"),
+            "--model-contract-o-fullrel", str(support / "model_contract_O_FULLREL.json"),
+            "--normalizer-hashes", str(support / "teacher_normalizer_hashes.json"),
+            "--offline-manifest", str(root / "inputs" / "split_manifest.json.gz"),
+            "--validation-partition", str(root / "inputs" / "validation_partition_manifest.json.gz"),
+            "--screening-registry", str(support / "screening_registry.json"),
+            "--relation-registry", str(support / "relation_family_registry.json"),
+            "--relation-normalizer", str(relation),
+            "--global-determinism", str(root / "registry" / "global_determinism.json"),
+        ]
+        if row is not None and row.get("teacher_id") == "O_FULLREL":
+            values.extend(
+                [
+                    "--region-normalizer", str(region),
+                    "--tree-root", str(
+                        _shared_root(root) / "inputs" / "region_tree" / "offline"
+                    ),
+                ]
+            )
+        return values
+    if node_id in {"canonical_target_build", "hlt_analogue_target_build"}:
+        if row is None:
+            raise ValueError(f"{node_id} requires a scientific row")
+        split = str(row["split"])
+        if node_id == "canonical_target_build":
+            input_path = _offline_view(root, split)
+            tree_path = _tree(root, "offline", split)
+            active_normalizer = relation
+        else:
+            replica = int(row["replica"])
+            input_path = _hlt_view(root, split, replica)
+            tree_path = _tree(root, "hlt", split, replica)
+            active_normalizer = hlt_relation
+        return [
+            "--input-npz", str(input_path),
+            "--relation-normalizer", str(active_normalizer),
+            "--tree-backend-manifest", str(backend),
+            "--tree-cache-dir", str(tree_path),
+        ]
+    if node_id == "teacher_target_inference":
+        if row is None:
+            raise ValueError("teacher inference requires a scientific row")
+        return ["--adapter-config", str(_teacher_adapter_config(root, row))]
+    if node_id == "target_normalization":
+        return [
+            *_repeated("--model-train-hlt", {r: _hlt_view(root, "model_train", r) for r in range(4)}),
+            *_repeated("--model-train-tree", {r: _tree(root, "hlt", "model_train", r) for r in range(4)}),
+            "--relation-normalizer", str(hlt_relation),
+        ]
+    if node_id in {"target_controls", "target_audit"}:
+        return [
+            item
+            for split in ("model_train", "val_stop", "val_design")
+            for item in ("--label-manifest", f"{split}={support / 'labels' / f'{split}.json'}")
+        ]
+    if node_id in {"baseline_train", "probe_tap_capture"}:
+        cache = _hlt_cache if node_id == "probe_tap_capture" else _hlt_view
+        return [
+            *_repeated("--train-cache", {r: cache(root, "model_train", r) for r in range(4)}),
+            "--val-stop-cache", f"0={cache(root, 'val_stop', 0)}",
+            "--design-select-cache", f"0={cache(root, 'val_design', 0)}",
+            "--train-labels", str(_labels_npz(root, "model_train")),
+            "--val-stop-labels", str(_labels_npz(root, "val_stop")),
+            "--design-select-labels", str(_labels_npz(root, "val_design")),
+        ]
+    if node_id == "probe_input_materialization":
+        roles = {"model_train": "model_train", "val_stop": "val_stop", "design_select": "val_design"}
+        values = [
+            item
+            for role, physical in roles.items()
+            for item in (
+                "--labels", f"{role}={_labels_npz(root, physical)}",
+                "--raw-input", f"{role}={_offline_view(root, physical)}",
+            )
+        ]
+        for role, physical in roles.items():
+            replicas = range(4) if role == "model_train" else (0,)
+            for replica in replicas:
+                values.extend(["--hlt-input", f"{role}:{replica}={_hlt_view(root, physical, replica)}"])
+                values.extend(["--tree-cache", f"{role}:{replica}={_tree(root, 'hlt', physical, replica)}"])
+        values.extend(["--relation-normalizer", str(hlt_relation)])
+        return values
+    if node_id in {
+        "auxiliary_train", "relation_het_auxiliary_train", "hlt_self_auxiliary_train",
+        "auxiliary_controls", "feedback_train", "feedback_controls",
+    }:
+        return ["--base-roles-json", str(support / "base_roles_design_select.json")]
+    if node_id == "mechanism_controls":
+        return ["--base-roles-json", str(support / "base_roles_design_confirm.json")]
+    if node_id == "robustness_cache_build":
+        return ["--offline-input", str(_offline_view(root, "val_design"))]
+    if node_id == "robustness_evaluation":
+        return [
+            "--labels", str(_labels_npz(root, "val_design")),
+            "--covariates", str(support / "robustness_covariates.npz"),
+            "--subgroup-edges", str(support / "robustness_subgroup_edges.json"),
+        ]
+    if node_id == "confirmation_native_relation_build":
+        return [
+            "--input-npz", str(_hlt_view(root, "val_design", 0)),
+            "--relation-normalizer", str(hlt_relation),
+            "--tree-backend-manifest", str(backend),
+            "--tree-cache-dir", str(_tree(root, "hlt", "val_design", 0)),
+        ]
+    if node_id in {"confirmation_train", "capacity_controls"}:
+        return [
+            *_repeated("--train-cache", {r: _hlt_view(root, "model_train", r) for r in range(4)}),
+            "--val-stop-cache", f"0={_hlt_view(root, 'val_stop', 0)}",
+            "--design-confirm-cache", f"0={_hlt_view(root, 'val_design', 0)}",
+            "--train-labels", str(_labels_npz(root, "model_train")),
+            "--val-stop-labels", str(_labels_npz(root, "val_stop")),
+            "--design-confirm-labels", str(_labels_npz(root, "val_design")),
+        ]
+    if node_id == "scale_input_prepare":
+        return [
+            "--scale-offline-cache", str(
+                _shared_root(root) / "inputs" / "offline" / "scale_train"
+            ),
+            *_repeated("--scale-hlt-cache", {r: _hlt_cache(root, "scale_train", r) for r in range(4)}),
+        ]
+    if node_id == "scale_tree_build":
+        backend_artifact = load_hashed_json(backend)
+        binary = _shared_root(root) / "backend" / str(backend_artifact["binary_filename"])
+        return ["--tree-resource", str(tree_resource), "--backend-manifest", str(backend), "--backend-binary", str(binary)]
+    if node_id == "scale_normalization":
+        return [
+            "--normalization-contract", str(_shared_root(root) / "inputs" / "inherited_normalization_contract.json"),
+            "--relation-registry", str(support / "relation_family_registry.json"),
+            "--raw-input-schema", str(root / "inputs" / "raw_input_schema.json"),
+            "--hlt-profile", str(root / "inputs" / "hlt_v3_profile.json"),
+            "--tree-resource", str(tree_resource),
+        ]
+    if node_id == "scale_teacher_train":
+        return [
+            "--model-contract-o-base", str(support / "model_contract_O_BASE.json"),
+            "--model-contract-o-fullrel", str(support / "model_contract_O_FULLREL.json"),
+            "--offline-manifest", str(root / "inputs" / "split_manifest.json.gz"),
+            "--validation-partition", str(root / "inputs" / "validation_partition_manifest.json.gz"),
+            "--screening-registry", str(support / "screening_registry.json"),
+            "--relation-registry", str(support / "relation_family_registry.json"),
+            "--global-determinism", str(root / "registry" / "global_determinism.json"),
+            "--validation-tree-root", str(_shared_root(root) / "inputs" / "region_tree" / "offline"),
+            "--scale-train-labels", str(_labels_npz(root, "scale_train")),
+        ]
+    if node_id == "scale_teacher_adapter_compile":
+        return ["--screening-registry", str(support / "screening_registry.json")]
+    if node_id == "scale_graph_train":
+        return [
+            "--val-stop-cache", f"0={_hlt_view(root, 'val_stop', 0)}",
+            "--design-confirm-cache", f"0={_hlt_view(root, 'val_design', 0)}",
+            "--scale-train-labels", str(_labels_npz(root, "scale_train")),
+            "--val-stop-labels", str(_labels_npz(root, "val_stop")),
+            "--design-confirm-labels", str(_labels_npz(root, "val_design")),
+        ]
+    if node_id == "scale_efficiency":
+        return [
+            "--cache",
+            str(root / "scale_up" / "inputs" / "hlt" / "replica_0.npz"),
+        ]
+    if node_id == "stack_inference":
+        return [
+            "--identities-npz", str(support / "stack_val_identities.npz"),
+            "--cache", f"0={_hlt_cache(root, 'stack_val', 0)}",
+        ]
+    if node_id == "stack_selector":
+        label_manifest = load_hashed_json(
+            root / "inputs" / "final_select_label_manifest.json.gz"
+        )
+        return [
+            "--labels-npz", str(support / "stack_val_identity_labels.npz"),
+            "--label-manifest-sha256", str(label_manifest["content_hash"]),
+        ]
+    if node_id == "postlock_oracle":
+        base = _teacher_adapter_config(
+            root, {"teacher_id": "O_BASE", "split": "stack_val"}
+        )
+        full = _teacher_adapter_config(
+            root, {"teacher_id": "O_FULLREL", "split": "stack_val"}
+        )
+        return [
+            "--teacher-lock", str(root / "teachers" / "teacher_lock.json"),
+            "--adapter-config-o-base", str(base),
+            "--adapter-config-o-fullrel", str(full),
+        ]
+    if node_id == "final_input_preparation":
+        return [
+            "--input", f"hlt_cache_metadata={_hlt_cache(root, 'final_test', 0) / 'hlt_v3_metadata.json'}",
+            "--input", f"identity_labels={support / 'final_test_identity_labels.npz'}",
+        ]
+    if node_id == "final_test":
+        return [
+            "--identities-labels-npz", str(support / "final_test_identity_labels.npz"),
+            "--cache", f"0={_hlt_cache(root, 'final_test', 0)}",
+        ]
+    return []
+
+
 def _row_scoped_arguments(
     node_id: str,
     values: list[str],
@@ -76,6 +418,11 @@ def _row_scoped_arguments(
     scoped = ROW_SCOPED_RUNTIME_OPTIONS.get(node_id, frozenset())
     if not scoped:
         return list(values)
+    # Current runtime-manifest v4 derives these paths from the authenticated
+    # campaign root.  Retain keyed selection only for reading legacy v3 test
+    # fixtures and migration diagnostics.
+    if not values:
+        return []
     if row is None:
         raise ValueError(f"{node_id} requires a resolved scientific row")
     key = str(row["split"])
@@ -317,6 +664,20 @@ def resolve_node_argv(
     validate_content_hash(
         runtime_manifest, expected_contract=RUNTIME_MANIFEST_CONTRACT
     )
+    support_sha = runtime_manifest.get("runtime_support_sha256")
+    if support_sha is not None:
+        support_manifest = load_hashed_json(
+            Path(campaign_root)
+            / "registry"
+            / "runtime_support"
+            / "manifest.json",
+            expected_contract="hosd_runtime_support_manifest_v1",
+        )
+        if (
+            support_manifest["content_hash"] != support_sha
+            or support_manifest.get("source") != runtime_manifest.get("source")
+        ):
+            raise ValueError("runtime support artifacts drifted after preparation")
     node_id = str(node["node_id"])
     infrastructure = runtime_manifest[
         "infrastructure_arguments_by_node"
@@ -389,6 +750,23 @@ def resolve_node_argv(
         node_id, list(infrastructure), row
     )
     formatted = [str(value).format_map(context) for value in infrastructure]
+    formatted.extend(_derived_infrastructure(root, node_id, row))
+    if support_sha is not None:
+        by_path = {
+            str(Path(path).resolve()): key
+            for key, path in support_manifest.get("paths", {}).items()
+        }
+        for raw in formatted:
+            candidate = str(raw).split("=", 1)[-1]
+            resolved = str(Path(candidate).resolve())
+            key = by_path.get(resolved)
+            if key is not None and (
+                _sha256_file(Path(resolved))
+                != support_manifest["file_sha256"].get(key)
+            ):
+                raise ValueError(
+                    f"runtime support artifact drifted after preparation: {key}"
+                )
     argv = [
         "python",
         str(node["entrypoint"]),
@@ -1033,10 +1411,15 @@ def resolve_node_argv(
             [
                 "--scale-offline-relation-normalizer",
                 str(normalizers["artifact_paths"]["offline_relation"]),
-                "--scale-offline-region-normalizer",
-                str(normalizers["artifact_paths"]["offline_region"]),
             ]
         )
+        if row is not None and row.get("teacher_id") == "O_FULLREL":
+            argv.extend(
+                [
+                    "--scale-offline-region-normalizer",
+                    str(normalizers["artifact_paths"]["offline_region"]),
+                ]
+            )
     elif node_id == "scale_target_build":
         trees = load_hashed_json(
             root / "scale_up" / "trees" / "completion.json",

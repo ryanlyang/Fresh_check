@@ -5420,3 +5420,41 @@ cache manifests as inputs produced by `offline_fusion_cache`, and require all
 corresponding outputs. The corrected static experiment plan and bundle are
 versioned v6. Run identities, fusion definitions, selection rules, and
 scientific meaning are unchanged.
+
+## Optimization-selector checkpoint semantics amendment (2026-08-01)
+
+The Stage-B optimization selector must reconstruct each expert with every
+state-dictionary-bound semantic option from its registered configuration.
+In particular, `particle_dropout` remains the exact screened value (`0.0` or
+`0.1`) even though evaluation disables stochastic behavior through
+`model.eval()`. Hard-coding zero dropout changes the module's serialized RETB
+semantics and is forbidden. Evaluation may disable activation checkpointing,
+which is explicitly not a learned or state-dictionary-bound semantic.
+
+This correction enables strict loading of the existing registered
+checkpoints and changes no parameters, inference equation, metric, selection
+rule, run identity, or scientific meaning.
+
+## Stage-C analysis and miniature-correlation amendment (2026-08-01)
+
+Stage-C shape selection compares the complete mapping-valued campaign source
+record from each inference and registration artifact directly with the
+campaign source. An absent source remains permitted only where the existing
+artifact contract explicitly permits it. Source dictionaries must never be
+placed in a set or otherwise required to be hashable; a differing present
+source still fails closed.
+
+Pairwise complementarity correlations use one global deterministic policy.
+The two flattened inputs must have exactly equal shapes or evaluation fails.
+For equal-shaped inputs with fewer than two observations, the correlation is
+mathematically undefined and is serialized as JSON `null`. A constant input
+also yields `null`. Otherwise the ordinary finite Pearson correlation is
+reported. This convention is especially relevant to the genuine miniature
+`val_design` split, which has exactly one event per class, and is unchanged
+for production classes with sufficient support.
+
+The corrected complementarity report uses
+`retb_offline_complementarity_v2`, schema version 2, and serializes the policy
+inside the report. Version-1 and corrected version-2 evidence are not
+interchangeable. This amendment changes no trained parameters, fusion logits,
+selection metric, run identity, or scientific underperformance policy.

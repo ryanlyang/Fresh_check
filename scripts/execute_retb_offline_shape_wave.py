@@ -81,6 +81,12 @@ def _link(source: Path, target: Path) -> None:
     os.link(source, target)
 
 
+def _optional_source_matches(observed: object, expected: object) -> bool:
+    """Compare mapping-valued source records without requiring hashability."""
+
+    return observed is None or observed == expected
+
+
 def _shape_for(k: int, d: int = 128) -> str:
     matches = [
         shape
@@ -595,8 +601,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             / "fusion_registration.json"
         )
         if (
-            inference.get("source") not in {None, campaign.get("source")}
-            or registration.get("source") not in {None, campaign.get("source")}
+            not _optional_source_matches(
+                inference.get("source"), campaign.get("source")
+            )
+            or not _optional_source_matches(
+                registration.get("source"), campaign.get("source")
+            )
             or inference["checkpoint_sha256"]
             != registration["checkpoint_sha256"]
         ):

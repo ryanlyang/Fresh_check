@@ -82,313 +82,23 @@ FORBIDDEN_RUNTIME_OPTIONS = frozenset(
     }
 )
 
-# Options listed here are the infrastructure inputs that cannot be derived
-# from an immutable campaign artifact.  Factories add scientific coordinates,
-# seeds, locks, output paths, and other in-campaign lineage themselves.
-# Requiring these flags at manifest publication prevents a structurally valid
-# but non-executable production plan from being authorized.
+# Only genuinely external scalar controls belong in this manifest.  Paths to
+# authenticated parents and dependency-owned outputs are derived from the
+# campaign root by ``node_runtime``.  In particular, a future DAG output must
+# never be hashed or requested during pre-execution preparation.
 REQUIRED_INFRASTRUCTURE_OPTIONS_BY_NODE = {
-    "storage_measurement": (
-        "--probe-input",
-        "--relation-normalizer",
-        "--available-storage-bytes",
-    ),
-    "offline_teacher_train": (
-        "--model-contract-o-base",
-        "--model-contract-o-fullrel",
-        "--normalizer-hashes",
-        "--offline-manifest",
-        "--validation-partition",
-        "--screening-registry",
-        "--relation-registry",
-        "--relation-normalizer",
-        "--region-normalizer",
-        "--global-determinism",
-        "--tree-root",
-    ),
-    "canonical_target_build": (
-        "--input-npz",
-        "--relation-normalizer",
-        "--tree-backend-manifest",
-        "--tree-cache-dir",
-    ),
-    "hlt_analogue_target_build": (
-        "--input-npz",
-        "--relation-normalizer",
-        "--tree-backend-manifest",
-        "--tree-cache-dir",
-    ),
-    "teacher_target_inference": ("--adapter-config",),
-    "target_normalization": (
-        "--model-train-hlt",
-        "--model-train-tree",
-        "--relation-normalizer",
-    ),
-    "target_controls": ("--label-manifest",),
-    "target_audit": ("--label-manifest",),
-    "baseline_train": (
-        "--train-cache",
-        "--val-stop-cache",
-        "--design-select-cache",
-        "--train-labels",
-        "--val-stop-labels",
-        "--design-select-labels",
-    ),
-    "probe_tap_capture": (
-        "--train-cache",
-        "--val-stop-cache",
-        "--design-select-cache",
-        "--train-labels",
-        "--val-stop-labels",
-        "--design-select-labels",
-    ),
-    "probe_input_materialization": (
-        "--labels",
-        "--raw-input",
-        "--hlt-input",
-        "--tree-cache",
-        "--relation-normalizer",
-    ),
-    "auxiliary_train": ("--base-roles-json",),
-    "relation_het_auxiliary_train": ("--base-roles-json",),
-    "hlt_self_auxiliary_train": ("--base-roles-json",),
-    "auxiliary_controls": ("--base-roles-json",),
-    "feedback_train": ("--base-roles-json",),
-    "feedback_controls": ("--base-roles-json",),
-    "mechanism_controls": ("--base-roles-json",),
-    "robustness_cache_build": ("--offline-input",),
-    "robustness_evaluation": (
-        "--labels",
-        "--covariates",
-        "--subgroup-edges",
-    ),
-    "confirmation_native_relation_build": (
-        "--input-npz",
-        "--relation-normalizer",
-        "--tree-backend-manifest",
-        "--tree-cache-dir",
-    ),
-    "confirmation_train": (
-        "--train-cache",
-        "--val-stop-cache",
-        "--design-confirm-cache",
-        "--train-labels",
-        "--val-stop-labels",
-        "--design-confirm-labels",
-    ),
-    "capacity_controls": (
-        "--train-cache",
-        "--val-stop-cache",
-        "--design-confirm-cache",
-        "--train-labels",
-        "--val-stop-labels",
-        "--design-confirm-labels",
-    ),
-    "scale_input_prepare": (
-        "--scale-offline-cache",
-        "--scale-hlt-cache",
-    ),
-    "scale_tree_build": (
-        "--tree-resource",
-        "--backend-manifest",
-        "--backend-binary",
-    ),
-    "scale_normalization": (
-        "--normalization-contract",
-        "--relation-registry",
-        "--raw-input-schema",
-        "--hlt-profile",
-        "--tree-resource",
-    ),
-    "scale_teacher_train": (
-        "--model-contract-o-base",
-        "--model-contract-o-fullrel",
-        "--offline-manifest",
-        "--validation-partition",
-        "--screening-registry",
-        "--relation-registry",
-        "--global-determinism",
-        "--validation-tree-root",
-        "--scale-train-labels",
-    ),
-    "scale_teacher_adapter_compile": ("--screening-registry",),
-    "scale_graph_train": (
-        "--val-stop-cache",
-        "--design-confirm-cache",
-        "--scale-train-labels",
-        "--val-stop-labels",
-        "--design-confirm-labels",
-    ),
+    "storage_measurement": ("--available-storage-bytes",),
     "scale_efficiency": (
-        "--cache",
         "--production-batch-size",
         "--clock-power-mode",
     ),
-    "stack_inference": (
-        "--identities-npz",
-        "--cache",
-    ),
-    "stack_selector": (
-        "--labels-npz",
-        "--label-manifest-sha256",
-    ),
-    "postlock_oracle": (
-        "--teacher-lock",
-        "--adapter-config-o-base",
-        "--adapter-config-o-fullrel",
-    ),
-    "final_input_preparation": ("--input",),
-    "final_test": (
-        "--identities-labels-npz",
-        "--cache",
-    ),
 }
 
-REQUIRED_INFRASTRUCTURE_OPTION_MIN_COUNTS = {
-    "canonical_target_build": {
-        "--input-npz": 3,
-        "--tree-cache-dir": 3,
-    },
-    "hlt_analogue_target_build": {
-        "--input-npz": 6,
-        "--tree-cache-dir": 6,
-    },
-    "target_normalization": {
-        "--model-train-hlt": 4,
-        "--model-train-tree": 4,
-    },
-    "target_controls": {"--label-manifest": 3},
-    "target_audit": {"--label-manifest": 3},
-    "baseline_train": {
-        "--train-cache": 4,
-        "--val-stop-cache": 1,
-        "--design-select-cache": 1,
-    },
-    "probe_tap_capture": {
-        "--train-cache": 4,
-        "--val-stop-cache": 1,
-        "--design-select-cache": 1,
-    },
-    "probe_input_materialization": {
-        "--labels": 3,
-        "--raw-input": 3,
-        "--hlt-input": 6,
-        "--tree-cache": 6,
-    },
-    "confirmation_train": {
-        "--train-cache": 4,
-        "--val-stop-cache": 1,
-        "--design-confirm-cache": 1,
-    },
-    "capacity_controls": {
-        "--train-cache": 4,
-        "--val-stop-cache": 1,
-        "--design-confirm-cache": 1,
-    },
-    "scale_input_prepare": {
-        "--scale-hlt-cache": 4,
-    },
-    "scale_graph_train": {
-        "--val-stop-cache": 1,
-        "--design-confirm-cache": 1,
-    },
-}
+REQUIRED_INFRASTRUCTURE_OPTION_MIN_COUNTS: dict[str, dict[str, int]] = {}
 
-REQUIRED_INFRASTRUCTURE_OPTION_KEYS = {
-    "canonical_target_build": {
-        "--input-npz": frozenset(
-            {"model_train", "val_stop", "val_design"}
-        ),
-        "--tree-cache-dir": frozenset(
-            {"model_train", "val_stop", "val_design"}
-        ),
-    },
-    "hlt_analogue_target_build": {
-        "--input-npz": frozenset(
-            {
-                *(f"model_train:{replica}" for replica in range(4)),
-                "val_stop:0",
-                "val_design:0",
-            }
-        ),
-        "--tree-cache-dir": frozenset(
-            {
-                *(f"model_train:{replica}" for replica in range(4)),
-                "val_stop:0",
-                "val_design:0",
-            }
-        ),
-    },
-    "target_normalization": {
-        "--model-train-hlt": frozenset({"0", "1", "2", "3"}),
-        "--model-train-tree": frozenset({"0", "1", "2", "3"}),
-    },
-    "target_controls": {
-        "--label-manifest": frozenset(
-            {"model_train", "val_stop", "val_design"}
-        ),
-    },
-    "target_audit": {
-        "--label-manifest": frozenset(
-            {"model_train", "val_stop", "val_design"}
-        ),
-    },
-    "baseline_train": {
-        "--train-cache": frozenset({"0", "1", "2", "3"}),
-        "--val-stop-cache": frozenset({"0"}),
-        "--design-select-cache": frozenset({"0"}),
-    },
-    "probe_tap_capture": {
-        "--train-cache": frozenset({"0", "1", "2", "3"}),
-        "--val-stop-cache": frozenset({"0"}),
-        "--design-select-cache": frozenset({"0"}),
-    },
-    "probe_input_materialization": {
-        "--labels": frozenset(
-            {"model_train", "val_stop", "design_select"}
-        ),
-        "--raw-input": frozenset(
-            {"model_train", "val_stop", "design_select"}
-        ),
-        "--hlt-input": frozenset(
-            {
-                "model_train:0",
-                "model_train:1",
-                "model_train:2",
-                "model_train:3",
-                "val_stop:0",
-                "design_select:0",
-            }
-        ),
-        "--tree-cache": frozenset(
-            {
-                "model_train:0",
-                "model_train:1",
-                "model_train:2",
-                "model_train:3",
-                "val_stop:0",
-                "design_select:0",
-            }
-        ),
-    },
-    "confirmation_train": {
-        "--train-cache": frozenset({"0", "1", "2", "3"}),
-        "--val-stop-cache": frozenset({"0"}),
-        "--design-confirm-cache": frozenset({"0"}),
-    },
-    "capacity_controls": {
-        "--train-cache": frozenset({"0", "1", "2", "3"}),
-        "--val-stop-cache": frozenset({"0"}),
-        "--design-confirm-cache": frozenset({"0"}),
-    },
-    "scale_input_prepare": {
-        "--scale-hlt-cache": frozenset({"0", "1", "2", "3"}),
-    },
-    "scale_graph_train": {
-        "--val-stop-cache": frozenset({"0"}),
-        "--design-confirm-cache": frozenset({"0"}),
-    },
-}
+REQUIRED_INFRASTRUCTURE_OPTION_KEYS: dict[
+    str, dict[str, frozenset[str]]
+] = {}
 
 # All required infrastructure values except these three scalar controls are
 # external paths.  They must be referenced through an authenticated
@@ -573,6 +283,7 @@ def build_runtime_manifest(
     directories: Mapping[str, str | Path],
     infrastructure_arguments_by_node: Mapping[str, Sequence[str]],
     source: Mapping[str, Any],
+    runtime_support_sha256: str | None = None,
 ) -> dict[str, Any]:
     file_rows = {key: _file_record(value) for key, value in sorted(files.items())}
     directory_rows = {}
@@ -593,6 +304,15 @@ def build_runtime_manifest(
         ):
             raise ValueError(
                 f"runtime manifest attempts scientific row injection: {node_id}"
+            )
+        allowed = frozenset(
+            REQUIRED_INFRASTRUCTURE_OPTIONS_BY_NODE.get(str(node_id), ())
+        )
+        observed = _present_options(row)
+        if not observed.issubset(allowed):
+            raise ValueError(
+                "runtime manifest contains an unauthorized option: "
+                f"{node_id}: {sorted(observed - allowed)}"
             )
         arguments[str(node_id)] = row
     _validate_runtime_argument_templates(
@@ -658,10 +378,9 @@ def build_runtime_manifest(
                 missing.setdefault(node_id, []).append(
                     f"{option} must be one positive integer"
                 )
-    return with_content_hash(
-        {
+    payload = {
             "contract": RUNTIME_MANIFEST_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -681,7 +400,11 @@ def build_runtime_manifest(
             "missing_required_options_by_node": missing,
             "execution_ready": not missing,
         }
-    )
+    if runtime_support_sha256 is not None:
+        payload["runtime_support_sha256"] = require_sha256(
+            runtime_support_sha256, name="runtime_support_sha256"
+        )
+    return with_content_hash(payload)
 
 
 def build_node_factory_registry(

@@ -164,7 +164,7 @@ RESOURCE_MEASUREMENT_EVIDENCE_CONTRACT = (
 RESOURCE_MEASUREMENTS_CONTRACT = "hosd_resource_measurements_v10"
 INPUT_VIEW_MANIFEST_CONTRACT = "hosd_label_blind_input_view_v4"
 PARENT_GROUP_COMPLETION_CONTRACT = "hosd_parent_group_completion_v2"
-RUNTIME_MANIFEST_CONTRACT = "hosd_runtime_manifest_v3"
+RUNTIME_MANIFEST_CONTRACT = "hosd_runtime_manifest_v4"
 NODE_FACTORY_REGISTRY_CONTRACT = "hosd_node_factory_registry_v1"
 COMPLETED_JOB_LEDGER_CONTRACT = "hosd_completed_job_ledger_v1"
 

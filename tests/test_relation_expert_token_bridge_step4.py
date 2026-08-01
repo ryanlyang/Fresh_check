@@ -66,6 +66,9 @@ from teacher_logit_reco.relation_expert_token_bridge.step4 import (
 from teacher_logit_reco.relation_expert_token_bridge.summary_tokens import (
     CanonicalSummaryTokenizer,
 )
+from scripts.execute_retb_offline_optimization_wave import (
+    _particle_encoder_options,
+)
 
 
 SHA_A = "a" * 64
@@ -420,6 +423,22 @@ def test_expert_diagnostics_places_model_on_requested_device() -> None:
     assert model.to_call_count == 1
     assert diagnostic["event_count"] == 10
     assert prediction["logits"].shape == (10, 10)
+
+
+def test_optimization_selector_reconstructs_checkpoint_dropout_semantics() -> None:
+    options = _particle_encoder_options(
+        {
+            "measurement_embedding": True,
+            "dual_base4_capacity_control": True,
+            "particle_dropout": 0.1,
+        }
+    )
+    assert options == {
+        "measurement_embedding": True,
+        "dual_base4_capacity_control": True,
+        "activation_checkpointing": False,
+        "particle_dropout": 0.1,
+    }
 
 
 def test_expert_training_disables_weaver_sdpa_for_stable_backward() -> None:

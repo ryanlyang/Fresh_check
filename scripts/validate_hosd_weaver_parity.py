@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     AuxiliaryHBaseClassifier,
     HBaseParticleTransformer,
+    load_and_validate_campaign,
     split_forward_contract,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -66,6 +67,7 @@ def _gradients(model, batch, *, split: bool):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--campaign-root", type=Path)
     parser.add_argument("--seed", type=int, default=2718)
     args = parser.parse_args(argv)
     torch.set_autocast_enabled("cpu", False)
@@ -134,9 +136,26 @@ def main(argv=None):
     torch.testing.assert_close(
         tapped_logits, ordinary[0], atol=1e-6, rtol=1e-5
     )
+    campaign = (
+        None
+        if args.campaign_root is None
+        else load_and_validate_campaign(args.campaign_root, repo_root=REPO_ROOT)
+    )
     report = with_content_hash({
-        "contract": "hosd_weaver_split_forward_parity_v2",
-        "schema_version": 2,
+        "contract": (
+            "hosd_weaver_split_forward_parity_v3"
+            if campaign is not None
+            else "hosd_weaver_split_forward_parity_v2"
+        ),
+        "schema_version": 3 if campaign is not None else 2,
+        **(
+            {
+                "source": campaign["source"],
+                "campaign_spec_sha256": campaign["content_hash"],
+            }
+            if campaign is not None
+            else {}
+        ),
         "split_forward_contract_sha256": split_forward_contract()["content_hash"],
         "precision": "FP32_mixed_precision_disabled",
         "taps": ["TAP_EARLY", "TAP_MID", "TAP_LATE"],

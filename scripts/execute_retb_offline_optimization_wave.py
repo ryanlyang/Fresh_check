@@ -112,6 +112,21 @@ class _ProfileWrapper(torch.nn.Module):
         )
 
 
+def _particle_encoder_options(
+    configuration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recover every checkpoint-bound particle-encoder semantic option."""
+
+    return {
+        "measurement_embedding": bool(configuration["measurement_embedding"]),
+        "dual_base4_capacity_control": bool(
+            configuration.get("dual_base4_capacity_control", False)
+        ),
+        "activation_checkpointing": False,
+        "particle_dropout": float(configuration["particle_dropout"]),
+    }
+
+
 def _model(
     *,
     configuration: Mapping[str, Any],
@@ -125,12 +140,7 @@ def _model(
         weaver_module=weaver,
         normalization_artifact=relation_normalization,
         region_normalization_artifact=region_normalization,
-        measurement_embedding=configuration["measurement_embedding"],
-        dual_base4_capacity_control=bool(
-            configuration.get("dual_base4_capacity_control", False)
-        ),
-        activation_checkpointing=False,
-        particle_dropout=0.0,
+        **_particle_encoder_options(configuration),
     )
     return RetbExpertModel(
         particle_encoder=encoder,

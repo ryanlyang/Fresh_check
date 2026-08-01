@@ -196,11 +196,23 @@ def main(argv: list[str] | None = None) -> int:
         ) != campaign["source"]:
             raise ValueError("tree backend source differs from active campaign")
         parent_hashes["tree_backend"] = tree_backend["content_hash"]
+        source_content_key = (
+            "retb_offline_cache"
+            if args.artifact_kind == "canonical_offline"
+            else "hlt_array_content"
+        )
+        source_content_sha256 = input_manifest.get(
+            "parent_hashes", {}
+        ).get(source_content_key)
+        if source_content_sha256 is None:
+            raise ValueError(
+                "target-builder input view lacks its tree source-content parent"
+            )
         tree_split = AuthenticatedTreeSplit(
             args.tree_cache_dir,
             expected_identities=identities,
             expected_parents={
-                "hlt_content_sha256": observed_input_sha,
+                "hlt_content_sha256": source_content_sha256,
                 "tree_resource_sha256": tree_resource["content_hash"],
                 "backend_manifest_sha256": tree_backend["content_hash"],
             },

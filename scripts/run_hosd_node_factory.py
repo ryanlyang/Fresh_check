@@ -48,6 +48,7 @@ def main(argv=None):
         or runtime.get("source") != campaign["source"]
         or runtime.get("execution_ready") is not True
         or runtime.get("missing_required_options_by_node")
+        or runtime.get("runtime_support_sha256") is None
     ):
         raise ValueError("node runtime manifest lineage differs")
     matches = [

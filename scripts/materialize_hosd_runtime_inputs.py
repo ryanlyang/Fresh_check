@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     load_and_validate_campaign,
     materialize_hlt_input_view,
-    materialize_offline_input_view,
+    materialize_retb_offline_input_view,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     PARENT_STATUS_CONTRACT,
@@ -47,7 +47,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--hlt-cache-root", type=Path)
-    parser.add_argument("--offline-data-dir", action="append", default=[])
     parser.add_argument("--output-root", type=Path)
     args = parser.parse_args(argv)
 
@@ -64,10 +63,6 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             "runtime input views require the complete same-source parent lock"
         )
-    split_manifest = root / "inputs" / "split_manifest.json.gz"
-    validation_partition = (
-        root / "inputs" / "validation_partition_manifest.json.gz"
-    )
     output_root = (
         args.output_root.resolve()
         if args.output_root is not None
@@ -85,21 +80,22 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for split in SPLITS:
         output = output_root / "offline" / f"{split}.npz"
-        manifest = materialize_offline_input_view(
-            split_manifest_path=split_manifest,
+        manifest = materialize_retb_offline_input_view(
+            offline_cache_dir=(
+                root
+                / "inputs"
+                / "shared_retb_parent_campaign"
+                / "inputs"
+                / "offline"
+                / split
+            ),
             split=split,
-            data_dirs=args.offline_data_dir or None,
             output=output,
             parent_hashes={
                 "campaign_spec": campaign["content_hash"],
                 "resolved_parent_lock": parent_lock["content_hash"],
             },
             source=campaign["source"],
-            validation_partition_path=(
-                validation_partition
-                if split in {"val_stop", "val_design"}
-                else None
-            ),
         )
         rows.append(
             {
