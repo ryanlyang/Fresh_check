@@ -3,6 +3,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 : "${PROJECT_DIR:=/home/ryreu/atlas/Fresh_check}"
+: "${HOSD_LAUNCHER_ROOT:=${PROJECT_DIR}}"
 : "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
 : "${CONDA_ENV:=atlas_kd_tigris}"
 export PYTHONNOUSERSITE=1
@@ -21,8 +22,9 @@ hosd_setup() {
 
 hosd_run_registered_node() {
   hosd_setup
-  python scripts/run_hosd_registered_node.py \
+  python "${HOSD_LAUNCHER_ROOT}/scripts/run_hosd_registered_node.py" \
     --campaign-root "${CAMPAIGN_ROOT}" \
+    --campaign-source-root "${PROJECT_DIR}" \
     --node-id "${HOSD_NODE_ID}" \
     --coordinate "${SLURM_ARRAY_TASK_ID:-0}"
 }

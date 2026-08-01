@@ -197,7 +197,7 @@ def main(argv=None):
             f"--error={args.campaign_root}/job_ledgers/slurm/%x_%A_%a.err",
             (
                 "--export=ALL,"
-                f"PROJECT_DIR={campaign_source_root},"
+                f"PROJECT_DIR={campaign_source_root},HOSD_LAUNCHER_ROOT={REPO_ROOT},"
                 f"CAMPAIGN_ROOT={args.campaign_root},"
                 f"HOSD_NODE_ID={node_id}"
             ),

@@ -20,6 +20,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     require_parents_ready,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    PARENT_STATUS_CONTRACT,
+    load_hashed_json,
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
@@ -38,6 +40,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--campaign-source-root",
+        type=Path,
+        help="Frozen source worktree bound by the campaign specification.",
+    )
     return parser
 
 
@@ -63,15 +70,51 @@ def _paths(root: Path, values: Sequence[str]) -> dict[str, Path]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = args.campaign_root.resolve()
-    campaign = load_and_validate_campaign(root, repo_root=REPO_ROOT)
-    status = build_parent_status(
-        source_snapshot=source_snapshot(REPO_ROOT),
-        artifact_paths=_paths(root, args.inherited_parent),
+    campaign_source_root = (
+        REPO_ROOT
+        if args.campaign_source_root is None
+        else args.campaign_source_root.resolve()
     )
-    require_parents_ready(status, before_stage="B")
+    campaign = load_and_validate_campaign(
+        root, repo_root=campaign_source_root
+    )
     output = args.output or (
         root / "inputs" / "resolved_inherited_parent_lock.json"
     )
+    publication = None
+    if output.is_file():
+        if args.inherited_parent:
+            raise ValueError(
+                "an existing immutable parent lock cannot accept parent overrides"
+            )
+        locked = load_hashed_json(
+            output, expected_contract=PARENT_STATUS_CONTRACT
+        )
+        if locked.get("source") != campaign.get("source"):
+            raise ValueError("existing parent lock source differs")
+        require_parents_ready(locked, before_stage="B")
+        locked_paths = {}
+        for row in locked["requirements"]:
+            resolved = row.get("resolved_path")
+            if not isinstance(resolved, str) or not resolved:
+                raise ValueError(
+                    "existing parent lock lacks a resolved artifact path"
+                )
+            locked_paths[str(row["parent_id"])] = Path(resolved)
+        revalidated = build_parent_status(
+            source_snapshot=source_snapshot(campaign_source_root),
+            artifact_paths=locked_paths,
+        )
+        if revalidated["content_hash"] != locked["content_hash"]:
+            raise ValueError("existing parent lock artifact lineage differs")
+        status = locked
+        publication = "already_present"
+    else:
+        status = build_parent_status(
+            source_snapshot=source_snapshot(campaign_source_root),
+            artifact_paths=_paths(root, args.inherited_parent),
+        )
+        require_parents_ready(status, before_stage="B")
     result: dict[str, object] = {
         "dry_run": bool(args.dry_run),
         "campaign_spec_sha256": campaign["content_hash"],
@@ -83,7 +126,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "output": str(output.resolve()),
     }
     if not args.dry_run:
-        result["publication"] = write_immutable_json(output, status)
+        result["publication"] = (
+            publication or write_immutable_json(output, status)
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

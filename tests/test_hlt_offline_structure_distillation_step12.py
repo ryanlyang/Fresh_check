@@ -580,6 +580,55 @@ def test_submitter_accepts_a_frozen_campaign_source_root_for_launcher_recovery(
     assert args.attempt == 2
 
 
+def test_registered_runner_routes_parent_lock_through_idempotent_launcher(
+    tmp_path, monkeypatch
+):
+    path = REPO_ROOT / "scripts" / "run_hosd_registered_node.py"
+    spec = importlib.util.spec_from_file_location("hosd_registered_recovery", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    campaign_root = tmp_path / "campaign"
+    source_root = tmp_path / "frozen-source"
+    campaign = {"source": SOURCE}
+    plan = {"source": SOURCE}
+    monkeypatch.setattr(
+        module, "load_and_validate_campaign", lambda *_args, **_kwargs: campaign
+    )
+    monkeypatch.setattr(module, "load_hashed_json", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(
+        module,
+        "node_execution",
+        lambda *_args, **_kwargs: {"commands": [["python", "stale-lock.py"]]},
+    )
+    calls = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: (
+            calls.append((list(command), kwargs))
+            or SimpleNamespace(returncode=0)
+        ),
+    )
+    assert (
+        module.main(
+            [
+                "--campaign-root",
+                str(campaign_root),
+                "--campaign-source-root",
+                str(source_root),
+                "--node-id",
+                "resolved_parent_lock",
+            ]
+        )
+        == 0
+    )
+    command, kwargs = calls[0]
+    assert Path(command[2]).name == "lock_hosd_inherited_parents.py"
+    assert command[-2:] == ["--campaign-source-root", str(source_root.resolve())]
+    assert kwargs["cwd"] == source_root.resolve()
+
+
 def test_monitor_repairs_runtime_failures_not_negative_science():
     plan = _plan("miniature_test")
     states = {
@@ -707,11 +756,15 @@ def test_all_required_slurm_entrypoints_are_present_and_fail_closed():
         text = worker.read_text(encoding="utf-8")
         assert "BASH_SOURCE" not in text
         assert ': "${PROJECT_DIR:?PROJECT_DIR is required}"' in text
-        assert 'source "${PROJECT_DIR}/sbatch/hosd_common.sh"' in text
+        assert ': "${HOSD_LAUNCHER_ROOT:=${PROJECT_DIR}}"' in text
+        assert 'source "${HOSD_LAUNCHER_ROOT}/sbatch/hosd_common.sh"' in text
     submitter = (REPO_ROOT / "scripts" / "submit_hosd_slurm.py").read_text(
         encoding="utf-8"
     )
-    assert 'f"PROJECT_DIR={campaign_source_root},"' in submitter
+    assert (
+        'f"PROJECT_DIR={campaign_source_root},HOSD_LAUNCHER_ROOT={REPO_ROOT},"'
+        in submitter
+    )
     assert "repo_root=campaign_source_root" in submitter
     common = (REPO_ROOT / "sbatch" / "hosd_common.sh").read_text(encoding="utf-8")
     assert "PYTHONNOUSERSITE=1" in common

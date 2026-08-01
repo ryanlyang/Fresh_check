@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
     PARENT_REBUILD_PLAN_CONTRACT,
+    PARENT_STATUS_CONTRACT,
     bind_source,
     source_record,
 )
@@ -459,6 +461,76 @@ def test_parent_group_completion_reuse_is_immutable_and_idempotent(
     assert second == first
     assert second["parents"] == {}
     assert second["task_manifest_completions"] == {}
+
+
+def test_parent_lock_command_revalidates_and_reuses_existing_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "lock_hosd_inherited_parents.py"
+    )
+    spec = importlib.util.spec_from_file_location("hosd_parent_lock_restart", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = source_record(_source())
+    resolved = tmp_path / "shared" / "parent.json"
+    status = with_content_hash(
+        {
+            "contract": PARENT_STATUS_CONTRACT,
+            "schema_version": 1,
+            "source": source,
+            "requirements": [
+                {
+                    "parent_id": "parent",
+                    "required_before_stage": "A",
+                    "resolved_path": str(resolved.resolve()),
+                    "reusable": True,
+                }
+            ],
+            "all_stage_a_parents_reusable": True,
+            "all_stage_b_parents_reusable": True,
+            "path_existence_is_sufficient": False,
+            "source_drift_reuse_allowed": False,
+        }
+    )
+    output = tmp_path / "inputs" / "resolved_inherited_parent_lock.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps(status), encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_and_validate_campaign",
+        lambda *_args, **_kwargs: {"source": source, "content_hash": "c" * 64},
+    )
+    monkeypatch.setattr(module, "source_snapshot", lambda *_args: _source())
+    captured_paths = {}
+
+    def rebuild_status(*, source_snapshot, artifact_paths):
+        captured_paths.update(artifact_paths)
+        return status
+
+    monkeypatch.setattr(module, "build_parent_status", rebuild_status)
+    frozen_source = tmp_path / "frozen-source"
+    assert (
+        module.main(
+            [
+                "--campaign-root",
+                str(tmp_path),
+                "--campaign-source-root",
+                str(frozen_source),
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["publication"] == "already_present"
+    assert result["resolved_parent_lock_sha256"] == status["content_hash"]
+    assert captured_paths == {"parent": resolved.resolve()}
+    assert load_hashed_json(
+        output, expected_contract=PARENT_STATUS_CONTRACT
+    )["content_hash"] == status["content_hash"]
 
 
 def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
