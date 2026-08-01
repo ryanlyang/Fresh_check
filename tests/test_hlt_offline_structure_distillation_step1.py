@@ -433,8 +433,17 @@ def test_cli_dry_run_enumerates_without_writing(
 
 
 def test_parent_group_completion_reuse_is_immutable_and_idempotent(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    monkeypatch.setattr(
+        parent_submission,
+        "_publish_shared_parent_aliases",
+        lambda **_kwargs: {},
+    )
     plan = {
         "campaign_spec_sha256": "a" * 64,
         "rebuild_plan_sha256": "b" * 64,
@@ -637,7 +646,7 @@ def test_parent_submit_attests_each_array_before_submitting_successor(
     ]
 
 
-def test_normalization_parent_finalizer_publishes_hosd_canonical_aliases(
+def test_parent_finalizer_publishes_every_shared_parent_alias_group(
     tmp_path, monkeypatch
 ) -> None:
     from teacher_logit_reco.hlt_offline_structure_distillation import (
@@ -646,18 +655,20 @@ def test_normalization_parent_finalizer_publishes_hosd_canonical_aliases(
 
     root = tmp_path / "campaign"
     shared = root / "inputs" / "shared_retb_parent_campaign"
-    parent_ids = (
-        "relation_500k_normalizer",
-        "region_500k_normalizer",
-        "hlt_shared_500k_normalizer",
-        "hlt_shared_region_500k_normalizer",
-    )
+    source_record_value = source_record(_source())
+    parent_ids = ("hlt_v3_profile", "angular_tree_resource", "normalizer")
+    groups = {"hlt": parent_ids[:1], "tree": parent_ids[1:2], "normalization": parent_ids[2:]}
     requirements = []
     for index, parent_id in enumerate(parent_ids):
-        contract = f"test_normalizer_contract_{index}"
-        canonical = f"inputs/normalization/test_{index}/normalizer.json"
+        contract = f"test_parent_contract_{index}"
+        canonical = f"inputs/test_parent_{index}.json"
         artifact = with_content_hash(
-            {"contract": contract, "schema_version": 1, "value": index}
+            {
+                "contract": contract,
+                "schema_version": 1,
+                "source": source_record_value,
+                "value": index,
+            }
         )
         source = shared / canonical
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -670,9 +681,23 @@ def test_normalization_parent_finalizer_publishes_hosd_canonical_aliases(
             )
         )
     monkeypatch.setattr(parent_submission, "PARENT_REQUIREMENTS", tuple(requirements))
-    published = parent_submission._publish_normalization_aliases(
-        campaign_root=root, shared_root=shared
+    monkeypatch.setattr(
+        parent_submission,
+        "SHARED_PARENT_ALIAS_IDS_BY_GROUP",
+        {group: frozenset(ids) for group, ids in groups.items()},
     )
+    monkeypatch.setattr(
+        parent_submission,
+        "load_and_validate_campaign",
+        lambda *_args, **_kwargs: {"source": source_record_value},
+    )
+    published = {}
+    for group in groups:
+        published.update(
+            parent_submission._publish_shared_parent_aliases(
+                campaign_root=root, shared_root=shared, group=group
+            )
+        )
     assert set(published) == set(parent_ids)
     for requirement in requirements:
         destination = root / requirement.canonical_path

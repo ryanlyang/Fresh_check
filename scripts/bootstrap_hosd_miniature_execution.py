@@ -22,6 +22,10 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     load_and_validate_campaign,
 )
+from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    PARENT_STATUS_CONTRACT,
+    load_hashed_json,
+)
 
 
 def _run(argv: list[str], *, environment: dict[str, str] | None = None) -> None:
@@ -84,7 +88,26 @@ def main(argv: list[str] | None = None) -> int:
         "fit_hosd_relation_normalizers.py",
     ):
         _run([python, "-s", str(REPO_ROOT / "scripts" / script), *common, "--submit"])
-    _run([python, "-s", str(REPO_ROOT / "scripts" / "lock_hosd_inherited_parents.py"), *common])
+    lock_path = root / "inputs" / "resolved_inherited_parent_lock.json"
+    if lock_path.is_file():
+        lock = load_hashed_json(
+            lock_path, expected_contract=PARENT_STATUS_CONTRACT
+        )
+        if (
+            lock.get("source") != campaign.get("source")
+            or lock.get("all_stage_b_parents_reusable") is not True
+        ):
+            raise ValueError("existing inherited-parent lock is not reusable")
+        print(f"Reusing authenticated parent lock: {lock_path}", flush=True)
+    else:
+        _run(
+            [
+                python,
+                "-s",
+                str(REPO_ROOT / "scripts" / "lock_hosd_inherited_parents.py"),
+                *common,
+            ]
+        )
     _run([python, "-s", str(REPO_ROOT / "scripts" / "materialize_hosd_runtime_inputs.py"), *common])
     prepare = [
         python,

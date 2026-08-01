@@ -77,6 +77,20 @@ HOSD_PARENT_JOB_NAMES = {
     "sbatch/run_retb_audit_inputs.sh": "hosd_parent_input_audit",
 }
 
+SHARED_PARENT_ALIAS_IDS_BY_GROUP = {
+    "hlt": frozenset({"hlt_v3_profile"}),
+    "tree": frozenset({"angular_tree_resource"}),
+    "normalization": frozenset(
+        {
+            "hlt_v3_degradation_audit",
+            "relation_500k_normalizer",
+            "region_500k_normalizer",
+            "hlt_shared_500k_normalizer",
+            "hlt_shared_region_500k_normalizer",
+        }
+    ),
+}
+
 
 def _run_controller_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(argv, capture_output=True, text=True)
@@ -607,17 +621,18 @@ def _publish_source_bound_backend_alias(
     return bound
 
 
-def _publish_normalization_aliases(
-    *, campaign_root: Path, shared_root: Path
+def _publish_shared_parent_aliases(
+    *, campaign_root: Path, shared_root: Path, group: str
 ) -> dict[str, str]:
-    """Expose completed shared normalizers at their HOSD canonical paths."""
+    """Expose completed shared parents at their canonical HOSD paths."""
 
-    parent_ids = {
-        "relation_500k_normalizer",
-        "region_500k_normalizer",
-        "hlt_shared_500k_normalizer",
-        "hlt_shared_region_500k_normalizer",
-    }
+    try:
+        parent_ids = SHARED_PARENT_ALIAS_IDS_BY_GROUP[group]
+    except KeyError as error:
+        raise ValueError(f"unknown shared-parent alias group {group!r}") from error
+    campaign = load_and_validate_campaign(
+        campaign_root, repo_root=Path(__file__).resolve().parents[2]
+    )
     published: dict[str, str] = {}
     for requirement in PARENT_REQUIREMENTS:
         if requirement.parent_id not in parent_ids:
@@ -626,11 +641,15 @@ def _publish_normalization_aliases(
         artifact = load_hashed_json(
             source_path, expected_contract=requirement.expected_contract
         )
+        if artifact.get("source") != campaign.get("source"):
+            raise ValueError(
+                f"shared parent source differs for {requirement.parent_id}"
+            )
         destination = campaign_root / requirement.canonical_path
         write_immutable_json(destination, artifact)
         published[requirement.parent_id] = artifact["content_hash"]
     if set(published) != parent_ids:
-        raise ValueError("normalization alias coverage differs")
+        raise ValueError(f"{group} shared-parent alias coverage differs")
     return published
 
 
@@ -662,10 +681,11 @@ def finalize_parent_group(
         ):
             raise ValueError("reusable parent-group completion lineage differs")
         _revalidate_parent_group_completion(existing, campaign_root=root)
-        if plan["group"] == "normalization":
-            _publish_normalization_aliases(
+        if plan["group"] in SHARED_PARENT_ALIAS_IDS_BY_GROUP:
+            _publish_shared_parent_aliases(
                 campaign_root=root,
                 shared_root=root / "inputs" / "shared_retb_parent_campaign",
+                group=str(plan["group"]),
             )
         return existing
     shared = root / "inputs" / "shared_retb_parent_campaign"
@@ -678,9 +698,11 @@ def finalize_parent_group(
         _publish_source_bound_backend_alias(
             campaign_root=root, shared_root=shared
         )
-    if plan["group"] == "normalization" and plan["parent_ids"]:
-        _publish_normalization_aliases(
-            campaign_root=root, shared_root=shared
+    if plan["group"] in SHARED_PARENT_ALIAS_IDS_BY_GROUP:
+        _publish_shared_parent_aliases(
+            campaign_root=root,
+            shared_root=shared,
+            group=str(plan["group"]),
         )
     requirements = {
         row.parent_id: row

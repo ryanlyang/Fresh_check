@@ -1396,6 +1396,53 @@ def test_miniature_bootstrap_controller_is_resumable_and_performance_blind(
     assert "accuracy" not in source.lower()
 
 
+def test_miniature_bootstrap_reuses_authenticated_parent_lock(tmp_path, monkeypatch):
+    path = REPO_ROOT / "scripts" / "bootstrap_hosd_miniature_execution.py"
+    spec = importlib.util.spec_from_file_location("hosd_mini_bootstrap_restart", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = {
+        "commit": "a" * 40,
+        "dirty": False,
+        "status_hash_policy": "test",
+        "status_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        module,
+        "load_and_validate_campaign",
+        lambda *a, **k: {"campaign_profile": "miniature_test", "source": source},
+    )
+    monkeypatch.setattr(
+        module,
+        "load_hashed_json",
+        lambda *a, **k: {
+            "source": source,
+            "all_stage_b_parents_reusable": True,
+        },
+    )
+    (tmp_path / "campaign_spec.json").write_text("{}\n", encoding="utf-8")
+    lock_path = tmp_path / "inputs" / "resolved_inherited_parent_lock.json"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("{}\n", encoding="utf-8")
+    commands = []
+    monkeypatch.setattr(
+        module,
+        "_run",
+        lambda argv, **kwargs: commands.append((list(argv), kwargs)),
+    )
+    assert (
+        module.main(
+            ["--campaign-root", str(tmp_path), "--prepare-only"]
+        )
+        == 0
+    )
+    rendered = [" ".join(argv) for argv, _ in commands]
+    assert not any("lock_hosd_inherited_parents.py" in row for row in rendered)
+    assert any("materialize_hosd_runtime_inputs.py" in row for row in rendered)
+    assert any("prepare_hosd_execution.py" in row for row in rendered)
+
+
 def test_miniature_bootstrap_can_create_fresh_source_bound_campaign(
     tmp_path, monkeypatch
 ):
