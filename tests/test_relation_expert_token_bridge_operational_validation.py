@@ -211,6 +211,18 @@ def test_stage_b_c_manifest_ownership_follows_complete_metric_production(
         "offline_teacher_obase",
         "offline_teacher_ofullrel",
     }
+    assert nodes["offline_teacher_obase"]["dependencies"] == [
+        "step4_offline_training_contracts"
+    ]
+    assert nodes["offline_teacher_ofullrel"]["dependencies"] == [
+        "step4_offline_training_contracts"
+    ]
+    assert order.index("step4_offline_training_contracts") < order.index(
+        "offline_teacher_obase"
+    )
+    assert order.index("step4_offline_training_contracts") < order.index(
+        "offline_teacher_ofullrel"
+    )
     assert set(nodes["offline_expert_training"]["dependencies"]) == {
         "step4_offline_training_contracts",
         "offline_teacher_prerequisites",

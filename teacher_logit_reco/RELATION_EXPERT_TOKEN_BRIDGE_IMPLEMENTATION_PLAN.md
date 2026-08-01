@@ -5359,3 +5359,19 @@ attention equation, applies equally to every expert configuration, and is
 serialized in the v2 offline-expert training contract, curves, and
 registration. Old v1 and corrected v2 training artifacts are not
 interchangeable.
+
+## Stage-A teacher loss-contract dependency amendment (2026-08-01)
+
+The Stage-A `O_BASE` and `O_FULLREL` teacher workers consume the immutable
+`registry/retb_expert_losses.json` artifact. The production DAG must therefore
+publish `step4_offline_training_contracts` before either teacher is submitted,
+and both teacher nodes must declare that publication as an exact `afterok`
+dependency. It is invalid to rely on submission timing or to recreate the
+loss registry privately inside a teacher worker.
+
+This is an execution-order correction only: teacher configurations, loss
+definitions, run identities, seeds, access rules, and scientific meaning are
+unchanged. The two teachers still become runnable together and retain full
+parallelism after the short contract-publication barrier. The corrected
+production graph, node-execution registry, and Step-15 bundle are versioned
+respectively as v35, v16, and v30; their schemas are 32, 14, and 28.

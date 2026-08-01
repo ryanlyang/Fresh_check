@@ -24,16 +24,16 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v34"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v35"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v15"
+    "retb_production_node_execution_registry_v16"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v29"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v30"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -555,10 +555,16 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             dependencies=("input_audit", "gpu_resource_probe"),
         ),
         _node(
+            "step4_offline_training_contracts",
+            stage="B",
+            worker="run_retb_build_step4_contracts.sh",
+            dependencies=("step3_architecture_contracts",),
+        ),
+        _node(
             "offline_teacher_obase",
             stage="A",
             worker="run_retb_train_stage_a_obase.sh",
-            dependencies=("step3_architecture_contracts",),
+            dependencies=("step4_offline_training_contracts",),
             resource="gpu",
             access="model_train_and_val_stop",
             resumable=True,
@@ -567,7 +573,7 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             "offline_teacher_ofullrel",
             stage="A",
             worker="run_retb_train_stage_a_ofullrel.sh",
-            dependencies=("step3_architecture_contracts",),
+            dependencies=("step4_offline_training_contracts",),
             resource="gpu",
             access="model_train_and_val_stop",
             resumable=True,
@@ -583,12 +589,6 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             resource="gpu",
             access="model_train_and_val_stop",
             resumable=True,
-        ),
-        _node(
-            "step4_offline_training_contracts",
-            stage="B",
-            worker="run_retb_build_step4_contracts.sh",
-            dependencies=("step3_architecture_contracts",),
         ),
         _node(
             "offline_expert_training",
@@ -1408,7 +1408,7 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 13,
+            "schema_version": 14,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
@@ -1429,7 +1429,7 @@ def validate_node_execution_registry(
     digest = validate_content_hash(
         payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 13:
+    if int(payload.get("schema_version", -1)) != 14:
         raise ValueError("node execution registry schema version differs")
     by_id = {str(node["node_id"]): node for node in nodes}
     entries = list(payload.get("entries", ()))
@@ -1635,7 +1635,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 31,
+            "schema_version": 32,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1730,7 +1730,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 31:
+    if int(payload.get("schema_version", -1)) != 32:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -2492,7 +2492,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 27,
+            "schema_version": 28,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
