@@ -283,26 +283,114 @@ def materialize_offline_input_view(
     output: str | Path,
     parent_hashes: Mapping[str, str],
     source: Mapping[str, Any],
+    validation_partition_path: str | Path | None = None,
 ) -> dict[str, Any]:
     manifest = load_split_manifest(split_manifest_path)
+    source_manifest_sha256 = manifest_hash(manifest)
+    validation_roles = {"val_stop", "val_design"}
+    if split in validation_roles:
+        if validation_partition_path is None:
+            raise ValueError(
+                f"{split} materialization requires the validation partition"
+            )
+        validation = load_retb_hashed_json(
+            validation_partition_path,
+            expected_contract="retb_validation_partition_manifest_v1",
+        )
+        roles = validation.get("roles")
+        if (
+            validation.get("source_manifest_sha256")
+            != source_manifest_sha256
+            or not isinstance(roles, Mapping)
+            or set(roles) != validation_roles
+        ):
+            raise ValueError("validation partition lineage or roles differ")
+        requested_by_role = {
+            role: [JetIdentity.from_dict(row) for row in roles[role]]
+            for role in sorted(validation_roles)
+        }
+        role_keys = {
+            role: [identity.key() for identity in identities]
+            for role, identities in requested_by_role.items()
+        }
+        if (
+            any(
+                len(keys) != len(set(keys))
+                for keys in role_keys.values()
+            )
+            or set(role_keys["val_stop"]) & set(role_keys["val_design"])
+            or any(
+                int(validation.get("counts", {}).get(role, -1))
+                != len(role_keys[role])
+                for role in validation_roles
+            )
+        ):
+            raise ValueError("validation partition populations differ")
+        physical_split = "model_val"
+    else:
+        if validation_partition_path is not None:
+            raise ValueError(
+                "validation partition may accompany only val_stop/val_design"
+            )
+        validation = None
+        requested_by_role = {}
+        role_keys = {}
+        physical_split = split
     view = load_offline_view(
         manifest,
-        split,
+        physical_split,
         data_dir=None if data_dirs is None else list(data_dirs),
         verify_label_branches=False,
     )
-    identities = [identity.key() for identity in view.jet_ids]
+    if validation is not None:
+        positions = {
+            identity.key(): index for index, identity in enumerate(view.jet_ids)
+        }
+        if len(positions) != len(view.jet_ids):
+            raise ValueError("model_val offline view contains duplicate identities")
+        if (
+            set(role_keys["val_stop"]) | set(role_keys["val_design"])
+            != set(positions)
+        ):
+            raise ValueError(
+                "validation roles do not exactly partition model_val"
+            )
+        requested = requested_by_role[split]
+        missing_or_relabeled = [
+            identity.key()
+            for identity in requested
+            if identity.key() not in positions
+            or int(view.jet_ids[positions[identity.key()]].label)
+            != int(identity.label)
+        ]
+        if missing_or_relabeled:
+            raise ValueError(
+                f"{split} identities are absent or relabeled in model_val"
+            )
+        indices = [positions[identity.key()] for identity in requested]
+        identities = [identity.key() for identity in requested]
+        raw_tokens = view.tokens[indices]
+        mask = view.mask[indices]
+    else:
+        identities = [identity.key() for identity in view.jet_ids]
+        raw_tokens = view.tokens
+        mask = view.mask
     return _publish(
         output=Path(output),
         identities=identities,
-        raw_tokens=view.tokens,
-        mask=view.mask,
+        raw_tokens=raw_tokens,
+        mask=mask,
         view_kind="canonical_offline",
         split=split,
         replica_id=None,
         parent_hashes={
             **parent_hashes,
-            "split_manifest": manifest_hash(manifest),
+            "split_manifest": source_manifest_sha256,
+            **(
+                {"validation_partition": validation["content_hash"]}
+                if validation is not None
+                else {}
+            ),
         },
         source=source,
     )

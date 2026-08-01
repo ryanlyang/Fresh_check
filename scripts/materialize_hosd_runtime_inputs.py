@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
             "runtime input views require the complete same-source parent lock"
         )
     split_manifest = root / "inputs" / "split_manifest.json.gz"
+    validation_partition = (
+        root / "inputs" / "validation_partition_manifest.json.gz"
+    )
     output_root = (
         args.output_root.resolve()
         if args.output_root is not None
@@ -92,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
                 "resolved_parent_lock": parent_lock["content_hash"],
             },
             source=campaign["source"],
+            validation_partition_path=(
+                validation_partition
+                if split in {"val_stop", "val_design"}
+                else None
+            ),
         )
         rows.append(
             {

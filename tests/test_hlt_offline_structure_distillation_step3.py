@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from jetclass_fresh.jetclass_data import JetIdentity, JetView
 from jetclass_fresh.part_inputs import build_particle_transformer_inputs_from_tokens
 from teacher_logit_reco.hlt_offline_structure_distillation import (
     ExtractorResources,
@@ -16,6 +17,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     extract_registered_target,
     load_materialized_hlt_input_view,
     materialize_hlt_input_view,
+    materialize_offline_input_view,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.target_schemas import (
     RELATION_COMPONENTS,
@@ -522,6 +524,90 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
             split="model_train",
             replica_id=0,
             output=tmp_path / "wrong-view.npz",
+            parent_hashes={"campaign": "a" * 64},
+            source=_source(),
+        )
+
+
+def test_offline_validation_materializer_applies_authenticated_role_partition(
+    tmp_path, monkeypatch
+) -> None:
+    identities = [
+        JetIdentity(file=f"class-{index}.root", entry=index, label=index % 2)
+        for index in range(4)
+    ]
+    tokens = np.zeros((4, 128, 14), dtype=np.float32)
+    tokens[:, 0, 0] = np.arange(1, 5, dtype=np.float32)
+    mask = np.zeros((4, 128), dtype=bool)
+    mask[:, 0] = True
+    view = JetView(
+        tokens=tokens,
+        mask=mask,
+        labels=np.asarray([identity.label for identity in identities]),
+        jet_ids=identities,
+        split="model_val",
+    )
+    partition = {
+        "contract": "retb_validation_partition_manifest_v1",
+        "content_hash": "d" * 64,
+        "source_manifest_sha256": "c" * 64,
+        "counts": {"val_stop": 2, "val_design": 2},
+        "roles": {
+            "val_stop": [identities[2].to_dict(), identities[0].to_dict()],
+            "val_design": [identities[3].to_dict(), identities[1].to_dict()],
+        },
+    }
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views.load_split_manifest",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views.manifest_hash",
+        lambda _manifest: "c" * 64,
+    )
+
+    def load_view(_manifest, split, **_kwargs):
+        assert split == "model_val"
+        return view
+
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views.load_offline_view",
+        load_view,
+    )
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views.load_retb_hashed_json",
+        lambda _path, *, expected_contract: (
+            partition
+            if expected_contract == "retb_validation_partition_manifest_v1"
+            else pytest.fail("unexpected contract")
+        ),
+    )
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views._publish",
+        lambda **kwargs: kwargs,
+    )
+    result = materialize_offline_input_view(
+        split_manifest_path=tmp_path / "split.json.gz",
+        split="val_stop",
+        data_dirs=None,
+        output=tmp_path / "val-stop.npz",
+        parent_hashes={"campaign": "a" * 64},
+        source=_source(),
+        validation_partition_path=tmp_path / "validation.json.gz",
+    )
+    assert result["split"] == "val_stop"
+    assert result["identities"] == [
+        identities[2].key(),
+        identities[0].key(),
+    ]
+    assert result["raw_tokens"][:, 0, 0].tolist() == [3.0, 1.0]
+    assert result["parent_hashes"]["validation_partition"] == "d" * 64
+    with pytest.raises(ValueError, match="requires the validation partition"):
+        materialize_offline_input_view(
+            split_manifest_path=tmp_path / "split.json.gz",
+            split="val_design",
+            data_dirs=None,
+            output=tmp_path / "val-design.npz",
             parent_hashes={"campaign": "a" * 64},
             source=_source(),
         )

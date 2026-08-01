@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kind", choices=("offline", "hlt"), required=True)
     parser.add_argument("--split", required=True)
     parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--validation-partition", type=Path)
     parser.add_argument("--data-dir", action="append", default=[])
     parser.add_argument("--hlt-cache", type=Path)
     parser.add_argument("--replica-id", type=int)
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             parent_hashes=parents,
             source=campaign["source"],
+            validation_partition_path=args.validation_partition,
         )
     else:
         if args.hlt_cache is None or args.replica_id is None:

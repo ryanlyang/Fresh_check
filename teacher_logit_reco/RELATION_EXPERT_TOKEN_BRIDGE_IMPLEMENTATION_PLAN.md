@@ -5391,3 +5391,16 @@ precision policy, kernels selected after helper initialization, seeds, data,
 and scientific meaning remain unchanged. The corrected production graph,
 node-execution registry, and Step-15 bundle are v36, v17, and v31, with
 schemas 33, 15, and 29 respectively.
+
+## Diagnostic model-device ownership amendment (2026-08-01)
+
+Every call to `collect_expert_diagnostics(model, loader, device=...)` must
+place both the model and recursively moved batch on the requested device
+before inference. Callers may supply a freshly reconstructed CPU model loaded
+from a CPU-mapped checkpoint; the diagnostic boundary owns device agreement
+and may not assume that training-time placement persists across processes.
+
+This corrects the Stage-B `offline_optimization_selector` CUDA evaluation and
+all later users of the shared diagnostic routine. It changes no checkpoint,
+model equation, metric definition, selection rule, run identity, or
+scientific meaning.

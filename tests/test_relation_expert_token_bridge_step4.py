@@ -28,6 +28,7 @@ from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
     build_attachment_pretraining_record,
     build_expert_loss_registry,
     build_teacher_logits_manifest,
+    collect_expert_diagnostics,
     _configure_attention_backend,
     _move_batch,
     copy_obase_particle_backbone,
@@ -79,6 +80,34 @@ class _TinyMod(torch.nn.Module):
         self.blocks = torch.nn.ModuleList(
             [torch.nn.Linear(16, 16) for _ in range(8)]
         )
+
+
+class _DiagnosticPlacementModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(()))
+        self.to_call_count = 0
+
+    def to(self, *args: object, **kwargs: object) -> "_DiagnosticPlacementModel":
+        self.to_call_count += 1
+        return super().to(*args, **kwargs)
+
+    def forward(
+        self,
+        *,
+        features: torch.Tensor,
+        return_details: bool = False,
+        **_: object,
+    ) -> dict[str, torch.Tensor]:
+        batch = int(features.shape[0])
+        logits = self.anchor + torch.zeros(
+            batch, 10, device=self.anchor.device
+        )
+        tokens = self.anchor + torch.zeros(
+            batch, 2, 4, device=self.anchor.device
+        )
+        assert return_details is True
+        return {"logits": logits, "tokens": tokens}
 
 
 class _TinyParticleEncoder(torch.nn.Module):
@@ -369,6 +398,28 @@ def test_nested_teacher_logits_move_with_training_batch() -> None:
     assert moved["features"].device.type == "meta"
     assert moved["teacher_logits"]["O_BASE"].device.type == "meta"
     assert moved["teacher_logits"]["O_FULLREL"].device.type == "meta"
+
+
+def test_expert_diagnostics_places_model_on_requested_device() -> None:
+    model = _DiagnosticPlacementModel()
+    loader = [
+        {
+            "features": torch.zeros(10, 17, 3),
+            "vectors": torch.zeros(10, 4, 3),
+            "mask": torch.ones(10, 1, 3, dtype=torch.bool),
+            "raw_tokens": torch.zeros(10, 3, 14),
+            "labels": torch.arange(10),
+            "event_identities": [
+                f"diagnostic-{index}" for index in range(10)
+            ],
+        }
+    ]
+    diagnostic, prediction = collect_expert_diagnostics(
+        model, loader, device=torch.device("cpu")
+    )
+    assert model.to_call_count == 1
+    assert diagnostic["event_count"] == 10
+    assert prediction["logits"].shape == (10, 10)
 
 
 def test_expert_training_disables_weaver_sdpa_for_stable_backward() -> None:

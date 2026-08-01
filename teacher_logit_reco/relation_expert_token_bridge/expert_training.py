@@ -989,6 +989,7 @@ def collect_expert_diagnostics(
     device: Any,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     module = _require_torch()
+    model.to(device)
     tokenizer = getattr(model, "tokenizer", None)
     toggle = getattr(tokenizer, "set_collect_attention_diagnostics", None)
     attention_reader = getattr(
