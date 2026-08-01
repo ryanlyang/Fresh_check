@@ -33,6 +33,9 @@ from teacher_logit_reco.relation_expert_token_bridge.registry import (
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (
+    HOSD_MINIATURE_SPLIT_PROFILE,
+)
 from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
     STAGE_A_REQUIRED_TREE_VIEW_IDS,
     bind_fitted_normalizer,
@@ -517,6 +520,43 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
                 role = argv[argv.index("--logical-role") + 1]
                 stop = argv[argv.index("--stop") + 1]
                 assert stop == expected_stops[role]
+
+
+def test_hosd_miniature_tree_tasks_cover_both_twenty_event_validation_roles(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "hosd_shared_parent"
+    campaign = _campaign(miniature=True)
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=campaign["campaign_id"],
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        miniature=True,
+        miniature_split_profile=HOSD_MINIATURE_SPLIT_PROFILE,
+        split_profile_parent_sha256=campaign["parent_artifact_hashes"][
+            "split_audit"
+        ],
+    )
+    manifests = build_stage_a_task_manifests(
+        campaign=campaign,
+        graph=graph,
+        campaign_root=root,
+        data_dir="/data/jetclass",
+        stage_a_contracts=_contracts(campaign, miniature=True),
+    )
+    stops = {}
+    for row in manifests["region_tree_cache"]["rows"]:
+        argv = row["argv"]
+        if argv[argv.index("--view-kind") + 1] != "offline":
+            continue
+        role = argv[argv.index("--logical-role") + 1]
+        stops[role] = int(argv[argv.index("--stop") + 1])
+    assert stops["val_stop"] == 20
+    assert stops["val_design"] == 20
 
 
 def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(

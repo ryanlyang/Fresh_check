@@ -53,6 +53,9 @@ from teacher_logit_reco.relation_expert_token_bridge import (
     miniature_storage_measurements,
     validate_production_campaign_binding,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (
+    HOSD_MINIATURE_SPLIT_PROFILE,
+)
 
 
 def _source(*, status: str = "b" * 64) -> dict[str, object]:
@@ -356,8 +359,21 @@ def test_publication_is_atomic_idempotent_and_preserves_shared_contracts(
             "storage_measurements"
         ],
         miniature=True,
+        miniature_split_profile=HOSD_MINIATURE_SPLIT_PROFILE,
+        split_profile_parent_sha256=shared_spec["parent_artifact_hashes"][
+            "split_audit"
+        ],
     )
     validate_production_campaign_binding(graph, shared_spec)
+    assert graph["split_sizes"]["model_val"] == 40
+    drifted_graph = {
+        **graph,
+        "split_profile_parent_sha256": "e" * 64,
+    }
+    drifted_graph.pop("content_hash")
+    drifted_graph = with_content_hash(drifted_graph)
+    with pytest.raises(ValueError, match="campaign binding"):
+        validate_production_campaign_binding(drifted_graph, shared_spec)
     assert not (root / "baselines" / "predictions.npz").exists()
 
 
@@ -452,6 +468,7 @@ def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
             "schema_version": 1,
             "campaign_id": "shared_retb_parent_campaign",
             "campaign_profile": "miniature_test",
+            "parent_artifact_hashes": {"split_audit": "c" * 64},
             "source": source,
         }
     )
@@ -466,9 +483,12 @@ def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
         repo_root=tmp_path,
         data_dir=tmp_path / "jetclass",
     )
-    assert commands[0][-1] == "--miniature"
+    assert "--miniature" in commands[0]
     assert "submit_retb_graph.py" in commands[0][2]
     assert "--write-artifacts" in commands[0]
+    assert "--miniature-split-profile" in commands[0]
+    assert "hosd_real_miniature_v1" in commands[0]
+    assert "--split-profile-parent-sha256" in commands[0]
     assert "bootstrap_retb_input_tasks.py" in commands[1][2]
     assert commands[1].index("--production-graph") < commands[1].index(
         "--data-dir"

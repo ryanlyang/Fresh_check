@@ -35,6 +35,9 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (
+    HOSD_MINIATURE_SPLIT_PROFILE,
+)
 from teacher_logit_reco.relational_part.ca_tree import validate_backend_manifest
 
 
@@ -110,7 +113,15 @@ def shared_parent_runtime_commands(
         "--write-artifacts",
     ]
     if profile == "miniature_test":
-        graph.append("--miniature")
+        graph.extend(
+            [
+                "--miniature",
+                "--miniature-split-profile",
+                HOSD_MINIATURE_SPLIT_PROFILE,
+                "--split-profile-parent-sha256",
+                str(shared_campaign["parent_artifact_hashes"]["split_audit"]),
+            ]
+        )
     bootstrap = [
         sys.executable,
         "-s",

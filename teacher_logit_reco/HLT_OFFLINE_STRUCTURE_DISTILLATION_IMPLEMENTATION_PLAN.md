@@ -3515,6 +3515,14 @@ finalization independently revalidates and binds every aggregate receipt under
 `hosd_parent_group_completion_v2`. A successful Slurm array without its
 complete aggregate receipt is therefore an explicit controller failure, not a
 reusable parent.
+The shared RETB production graph uses the explicit, source-bound
+`hosd_real_miniature_v1` split-size profile. It declares 40 `model_val`
+identities so both authenticated 20-event HOSD validation roles are covered;
+the generic RETB miniature's 20-event total is not interchangeable. The graph
+binds the shared campaign's split-audit hash, and
+`retb_tigris_production_graph_v34` rejects an unknown profile, a missing or
+drifted HOSD split parent, or any profile/size mismatch before Stage-A task
+manifests are published.
 
 Final source-closure audit on 2026-08-01: all 163 HOSD regression tests pass,
 all 139 HOSD Python modules and entry points compile, and all 89 HOSD

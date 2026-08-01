@@ -193,6 +193,33 @@ def test_miniature_graph_sizes_match_the_genuine_step1_identity_profile() -> Non
         validate_production_graph(drifted)
 
 
+def test_hosd_miniature_graph_has_source_bound_double_validation_profile() -> None:
+    from teacher_logit_reco.relation_expert_token_bridge.production import (
+        HOSD_MINIATURE_SPLIT_PROFILE,
+    )
+
+    graph = build_production_graph(
+        campaign_root="/tmp/shared_retb_parent_campaign",
+        campaign_id="shared_retb_parent_campaign",
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256="c" * 64,
+        miniature=True,
+        miniature_split_profile=HOSD_MINIATURE_SPLIT_PROFILE,
+        split_profile_parent_sha256="d" * 64,
+    )
+    assert graph["split_sizes"] == {
+        "model_train": 20,
+        "model_val": 40,
+        "stack_train": 0,
+        "stack_val": 10,
+        "final_test": 20,
+        "scale_train": 40,
+    }
+    assert graph["split_profile_parent_sha256"] == "d" * 64
+    validate_production_graph(graph)
+
+
 def test_node_execution_registry_covers_every_worker_and_manifest_producer() -> None:
     graph = _graph()
     registry = graph["node_execution_registry"]

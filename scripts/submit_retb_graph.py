@@ -23,6 +23,10 @@ from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     publish_step15_contract_bundle,
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
+    HOSD_MINIATURE_SPLIT_PROFILE,
+    RETB_MINIATURE_SPLIT_PROFILE,
+)
 from teacher_logit_reco.relation_expert_token_bridge.storage import (  # noqa: E402
     STORAGE_MEASUREMENTS_CONTRACT,
     miniature_storage_measurements,
@@ -54,6 +58,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--storage-measurements", type=Path)
     parser.add_argument("--storage-measurements-sha256")
     parser.add_argument("--miniature", action="store_true")
+    parser.add_argument(
+        "--miniature-split-profile",
+        choices=(
+            RETB_MINIATURE_SPLIT_PROFILE,
+            HOSD_MINIATURE_SPLIT_PROFILE,
+        ),
+        default=RETB_MINIATURE_SPLIT_PROFILE,
+    )
+    parser.add_argument("--split-profile-parent-sha256")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-simulate", action="store_true")
     parser.add_argument("--write-artifacts", action="store_true")
@@ -72,6 +85,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--dry-run may not write campaign artifacts")
     if args.smoke_simulate and not args.miniature:
         raise ValueError("--smoke-simulate requires --miniature")
+    if (
+        args.miniature_split_profile == HOSD_MINIATURE_SPLIT_PROFILE
+        and not args.miniature
+    ):
+        raise ValueError("the HOSD split profile requires --miniature")
     if (
         args.storage_measurements is not None
         and args.storage_measurements_sha256 is not None
@@ -124,6 +142,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_status_sha256=str(source["source_status_sha256"]),
         storage_measurements_sha256=measurements_sha,
         miniature=bool(args.miniature),
+        miniature_split_profile=str(args.miniature_split_profile),
+        split_profile_parent_sha256=args.split_profile_parent_sha256,
         concurrency=concurrency,
     )
     mode = "smoke_simulation" if args.smoke_simulate else "dry_run"

@@ -24,7 +24,7 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v33"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v34"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v15"
 )
@@ -33,7 +33,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v28"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v29"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -75,6 +75,17 @@ MINIATURE_SPLIT_SIZES = {
     "stack_val": 10,
     "final_test": 20,
     "scale_train": 40,
+}
+HOSD_MINIATURE_SPLIT_SIZES = {
+    **MINIATURE_SPLIT_SIZES,
+    "model_val": 40,
+}
+RETB_MINIATURE_SPLIT_PROFILE = "retb_miniature_v1"
+HOSD_MINIATURE_SPLIT_PROFILE = "hosd_real_miniature_v1"
+PRODUCTION_SPLIT_PROFILE = "retb_production_500k_scale3m_v1"
+MINIATURE_SPLIT_PROFILES = {
+    RETB_MINIATURE_SPLIT_PROFILE: MINIATURE_SPLIT_SIZES,
+    HOSD_MINIATURE_SPLIT_PROFILE: HOSD_MINIATURE_SPLIT_SIZES,
 }
 
 # These nodes are submitted as their declared worker directly.  Every other
@@ -1570,6 +1581,8 @@ def build_production_graph(
     source_status_sha256: str,
     storage_measurements_sha256: str,
     miniature: bool = False,
+    miniature_split_profile: str = RETB_MINIATURE_SPLIT_PROFILE,
+    split_profile_parent_sha256: str | None = None,
     concurrency: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     resolved = dict(DEFAULT_CONCURRENCY)
@@ -1595,10 +1608,34 @@ def build_production_graph(
         if miniature
         else "production_500k_100k_50k_300k_scale3m"
     )
+    if miniature:
+        if miniature_split_profile not in MINIATURE_SPLIT_PROFILES:
+            raise ValueError("unknown miniature split-size profile")
+        split_profile = str(miniature_split_profile)
+        split_sizes = dict(MINIATURE_SPLIT_PROFILES[split_profile])
+        if split_profile == HOSD_MINIATURE_SPLIT_PROFILE:
+            split_parent = require_sha256(
+                split_profile_parent_sha256,
+                name="split_profile_parent_sha256",
+            )
+        elif split_profile_parent_sha256 is not None:
+            raise ValueError(
+                "default RETB miniature cannot declare a split-profile parent"
+            )
+        else:
+            split_parent = None
+    else:
+        if miniature_split_profile != RETB_MINIATURE_SPLIT_PROFILE:
+            raise ValueError("production graph cannot use a miniature split profile")
+        if split_profile_parent_sha256 is not None:
+            raise ValueError("production graph cannot declare a miniature parent")
+        split_profile = PRODUCTION_SPLIT_PROFILE
+        split_sizes = dict(PRODUCTION_SPLIT_SIZES)
+        split_parent = None
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 30,
+            "schema_version": 31,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1625,9 +1662,9 @@ def build_production_graph(
             ),
             "degradation_profile": "D_NOMINAL",
             "degradation_profile_implicit_override_allowed": False,
-            "split_sizes": dict(
-                MINIATURE_SPLIT_SIZES if miniature else PRODUCTION_SPLIT_SIZES
-            ),
+            "split_size_profile": split_profile,
+            "split_profile_parent_sha256": split_parent,
+            "split_sizes": split_sizes,
             "tigris_defaults": dict(TIGRIS_DEFAULTS),
             "bounded_concurrency": resolved,
             "nodes": nodes,
@@ -1693,7 +1730,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 30:
+    if int(payload.get("schema_version", -1)) != 31:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1787,11 +1824,25 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
         "production_500k_100k_50k_300k_scale3m",
     }:
         raise ValueError("production graph campaign profile differs")
-    expected_split_sizes = dict(
-        MINIATURE_SPLIT_SIZES
-        if profile == "nonproduction_miniature_test"
-        else PRODUCTION_SPLIT_SIZES
-    )
+    split_profile = payload.get("split_size_profile")
+    if profile == "nonproduction_miniature_test":
+        if split_profile not in MINIATURE_SPLIT_PROFILES:
+            raise ValueError("production graph miniature split profile differs")
+        expected_split_sizes = dict(MINIATURE_SPLIT_PROFILES[split_profile])
+        split_parent = payload.get("split_profile_parent_sha256")
+        if split_profile == HOSD_MINIATURE_SPLIT_PROFILE:
+            require_sha256(
+                split_parent, name="split_profile_parent_sha256"
+            )
+        elif split_parent is not None:
+            raise ValueError("default miniature split parent differs")
+    else:
+        expected_split_sizes = dict(PRODUCTION_SPLIT_SIZES)
+        if (
+            split_profile != PRODUCTION_SPLIT_PROFILE
+            or payload.get("split_profile_parent_sha256") is not None
+        ):
+            raise ValueError("production split-size profile differs")
     if (
         payload["degradation_profile"] != "D_NOMINAL"
         or payload.get("split_sizes") != expected_split_sizes
@@ -1847,6 +1898,15 @@ def validate_production_campaign_binding(
     if campaign_spec["campaign_profile"] not in profile_map:
         raise ValueError("campaign profile is not a production-DAG profile")
     expected_profile = profile_map[campaign_spec["campaign_profile"]]
+    split_parent_matches = True
+    if (
+        production_graph.get("split_size_profile")
+        == HOSD_MINIATURE_SPLIT_PROFILE
+    ):
+        split_parent_matches = (
+            production_graph.get("split_profile_parent_sha256")
+            == campaign_spec["parent_artifact_hashes"]["split_audit"]
+        )
     if (
         production_graph["campaign_id"] != campaign_spec["campaign_id"]
         or Path(production_graph["campaign_root"]).name
@@ -1858,6 +1918,7 @@ def validate_production_campaign_binding(
         or production_graph["storage_measurements_sha256"]
         != campaign_spec["parent_artifact_hashes"]["storage_measurements"]
         or production_graph["campaign_profile"] != expected_profile
+        or not split_parent_matches
     ):
         raise ValueError("production graph differs from campaign binding")
     return graph_sha
@@ -2617,6 +2678,8 @@ __all__ = [
     "MIDDLE_CONTINUATION_MANIFEST_NODES",
     "MIDDLE_NODE_ENTRYPOINTS",
     "MINIATURE_SPLIT_SIZES",
+    "HOSD_MINIATURE_SPLIT_PROFILE",
+    "HOSD_MINIATURE_SPLIT_SIZES",
     "NODE_EXECUTION_REGISTRY_CONTRACT",
     "PRODUCTION_GRAPH_CONTRACT",
     "PRODUCTION_SPLIT_SIZES",
