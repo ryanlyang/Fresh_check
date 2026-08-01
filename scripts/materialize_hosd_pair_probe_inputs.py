@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     ExtractorResources,
+    AuthenticatedTreeSplit,
     authorize_access,
     extract_registered_target,
     load_and_validate_campaign,
@@ -28,7 +29,6 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  #
     with_content_hash,
     write_immutable_json,
 )
-from teacher_logit_reco.relational_part.ca_tree import unpack_tree_shard  # noqa: E402
 from teacher_logit_reco.hlt_offline_structure_distillation.wave_completion import (  # noqa: E402
     try_finalize_row_wave,
 )
@@ -84,18 +84,17 @@ def _npz(path):
         return {name: np.asarray(payload[name]) for name in payload.files}
 
 
-def _trees(path, identities):
-    manifest = load_hashed_json(path / "manifest.json")
-    by_identity = {}
-    for shard in sorted((path / "shards").glob("shard_*.npz")):
-        shard_ids, rows = unpack_tree_shard(shard)
-        for identity, tree in zip(shard_ids, rows):
-            if identity in by_identity:
-                raise ValueError("pair tree cache duplicates an identity")
-            by_identity[identity] = tree
-    if set(by_identity) != set(identities):
-        raise ValueError("pair tree cache identity coverage differs")
-    return tuple(by_identity[value] for value in identities), manifest
+def _trees(path, identities, expected_parents):
+    split = AuthenticatedTreeSplit(path, expected_parents=expected_parents)
+    indices = (
+        np.arange(len(identities), dtype=np.int64)
+        if len(split) == len(identities)
+        else split.event_indices_for_identities(identities)
+    )
+    return (
+        split.load_event_rows(indices, expected_identities=identities),
+        split.manifest,
+    )
 
 
 def _publish(path, arrays):
@@ -118,6 +117,7 @@ def main(argv=None):
     parser.add_argument("--row-id", required=True)
     parser.add_argument("--hlt-input", action="append", default=[])
     parser.add_argument("--labels", action="append", default=[])
+    parser.add_argument("--raw-input", action="append", default=[])
     parser.add_argument("--tap-cache", action="append", default=[])
     parser.add_argument("--tree-cache", action="append", default=[])
     parser.add_argument("--relation-normalizer", required=True, type=Path)
@@ -141,6 +141,7 @@ def main(argv=None):
         raise ValueError("row is not a current HLT pair probe")
     inputs = _role_mapping(args.hlt_input, "--hlt-input", replicated=True)
     labels = _simple_mapping(args.labels, "--labels")
+    raw_inputs = _simple_mapping(args.raw_input, "--raw-input")
     learned_tap_probe = row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}
     taps = (
         _simple_mapping(args.tap_cache, "--tap-cache")
@@ -164,10 +165,17 @@ def main(argv=None):
         dz_uncertainty_floor=float(floors.get("dz", {}).get("floor", 0.0)),
         sentinel_policy=normalizer.get("track_sentinel_policy"),
     )
+    tree_resource = load_hashed_json(
+        args.campaign_root / "inputs" / "inherited_angular_tree_resource.json"
+    )
+    tree_backend = load_hashed_json(
+        args.campaign_root / "inputs" / "region_tree" / "backend_manifest.json"
+    )
     parents = {
         "relation_normalizer": normalizer["content_hash"],
         **{f"hlt_{role}_{replica}": _sha(path) for (role, replica), path in inputs.items()},
         **{f"labels_{role}": _sha(path) for role, path in labels.items()},
+        **{f"raw_input_{role}": _sha(path) for role, path in raw_inputs.items()},
         **{f"tap_{role}": _sha(path) for role, path in taps.items()},
     }
     extracted = {}
@@ -178,6 +186,11 @@ def main(argv=None):
         ids = tuple(str(value) for value in label_npz["identities"].tolist())
         canonical_ids[role] = ids
         label_values[role] = np.asarray(label_npz["labels"], dtype=np.int64)
+        with np.load(raw_inputs[role], allow_pickle=False) as raw_identity:
+            raw_key = "identity" if "identity" in raw_identity.files else "identities"
+            raw_ids = tuple(str(value) for value in raw_identity[raw_key].tolist())
+        if raw_ids != ids:
+            raise ValueError(f"{role} offline input identities differ")
         replicas = range(4) if role == "model_train" else (0,)
         role_batches = []
         for replica in replicas:
@@ -191,7 +204,25 @@ def main(argv=None):
                 raise ValueError(f"{role} replica {replica} identities differ")
             tree_rows = None
             if requires_tree:
-                tree_rows, tree_manifest = _trees(trees[(role, replica)], ids)
+                view_manifest = load_hashed_json(
+                    inputs[(role, replica)].with_suffix(
+                        inputs[(role, replica)].suffix + ".json"
+                    )
+                )
+                hlt_source = view_manifest.get("parent_hashes", {}).get(
+                    "hlt_array_content"
+                )
+                if hlt_source is None:
+                    raise ValueError("pair input lacks tree source parent")
+                tree_rows, tree_manifest = _trees(
+                    trees[(role, replica)],
+                    ids,
+                    {
+                        "hlt_content_sha256": hlt_source,
+                        "tree_resource_sha256": tree_resource["content_hash"],
+                        "backend_manifest_sha256": tree_backend["content_hash"],
+                    },
+                )
                 parents[f"tree_{role}_{replica}"] = tree_manifest["content_hash"]
             batch = extract_registered_target(
                 row["target_id"],

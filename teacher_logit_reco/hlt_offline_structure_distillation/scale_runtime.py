@@ -238,18 +238,36 @@ def fit_pair_normalizer_from_views(
         selected_total += int(selected.size)
         parent_hashes[f"hlt_view_{replica}"] = file_sha256(path)
         tree_split = None
+        tree_event_indices = None
         if requires_tree:
             tree_root = Path(tree_paths_by_replica[int(replica)])
             if tree_resource_sha256 is None or tree_backend_sha256 is None:
                 raise ValueError("streamed REGION normalizer lacks exact tree parents")
+            input_manifest = load_hashed_json(
+                path.with_suffix(path.suffix + ".json")
+            )
+            source_content = input_manifest.get("parent_hashes", {}).get(
+                "hlt_array_content"
+            )
+            if source_content is None:
+                raise ValueError("streamed REGION input lacks tree source parent")
             tree_split = AuthenticatedTreeSplit(
                 tree_root,
-                expected_identities=identities,
+                expected_identities=(
+                    identities if len(identities) == int(
+                        load_hashed_json(tree_root / "manifest.json")["jet_count"]
+                    ) else None
+                ),
                 expected_parents={
-                    "hlt_content_sha256": file_sha256(path),
+                    "hlt_content_sha256": source_content,
                     "tree_resource_sha256": tree_resource_sha256,
                     "backend_manifest_sha256": tree_backend_sha256,
                 },
+            )
+            tree_event_indices = (
+                np.arange(len(identities), dtype=np.int64)
+                if len(tree_split) == len(identities)
+                else tree_split.event_indices_for_identities(identities)
             )
             parent_hashes[f"tree_view_{replica}"] = tree_split.manifest["content_hash"]
         for start in range(0, len(selected), int(batch_size)):
@@ -257,7 +275,7 @@ def fit_pair_normalizer_from_views(
             batch_trees = None
             if tree_split is not None:
                 batch_trees = tree_split.load_event_rows(
-                    coordinate,
+                    tree_event_indices[coordinate],
                     expected_identities=identities[coordinate],
                 )
             batch = extract_registered_target(

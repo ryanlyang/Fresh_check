@@ -235,5 +235,28 @@ class AuthenticatedTreeSplit:
                 raise ValueError("selected tree identities differ from active input")
         return tuple(value for value in output if value is not None)
 
+    def event_indices_for_identities(
+        self, identities: Sequence[Any]
+    ) -> np.ndarray:
+        """Resolve a bounded subrole against the authenticated full split."""
+
+        requested = tuple(str(value) for value in identities)
+        if not requested or len(requested) != len(set(requested)):
+            raise ValueError("requested tree identities are empty or duplicated")
+        wanted = set(requested)
+        positions: dict[str, int] = {}
+        for record in self.records:
+            self._revalidate(record)
+            with np.load(record.npz_path, allow_pickle=False) as packed:
+                shard_ids = tuple(str(value) for value in packed["identity"])
+            for local_index, identity in enumerate(shard_ids):
+                if identity in wanted:
+                    if identity in positions:
+                        raise ValueError("tree split duplicates a requested identity")
+                    positions[identity] = record.start + local_index
+        if set(positions) != wanted:
+            raise ValueError("tree split lacks requested subrole identities")
+        return np.asarray([positions[value] for value in requested], dtype=np.int64)
+
 
 __all__ = ["AuthenticatedTreeShard", "AuthenticatedTreeSplit"]

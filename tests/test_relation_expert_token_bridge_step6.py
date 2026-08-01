@@ -144,6 +144,26 @@ def test_native_hlt_replica_cycle_and_evaluation_freeze() -> None:
         assert validation[3]["replica_id"] == 0
 
 
+def test_native_hlt_dataset_supports_authenticated_logical_subroles() -> None:
+    arrays, metadata = _replica_caches(
+        logical_role="val_design", policy="R_FIXED"
+    )
+    _, _, identities = _raw()
+    selected = np.asarray([5, 2], dtype=np.int64)
+    dataset = NativeHLTExpertDataset(
+        replica_arrays=arrays,
+        replica_metadata=metadata,
+        labels=np.asarray([5, 2], dtype=np.int64),
+        identities=[identities[index] for index in selected],
+        logical_role="design_confirm",
+        source_logical_role="val_design",
+        realization_policy="R_FIXED",
+        source_indices_by_replica={0: selected},
+    )
+    assert dataset[0]["identity"] == identities[5]
+    assert np.array_equal(dataset[0]["tokens"], arrays[0]["tokens"][5])
+
+
 def test_native_hlt_objectives_are_scientifically_separate() -> None:
     torch.manual_seed(6002)
     logits = torch.randn(4, 10, requires_grad=True)

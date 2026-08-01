@@ -9,14 +9,15 @@ import json
 from pathlib import Path
 import sys
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from jetclass_fresh.jetclass_data import JetIdentity  # noqa: E402
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     load_and_validate_campaign,
     materialize_hlt_input_view,
+    materialize_input_view_subset,
     materialize_retb_offline_input_view,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -63,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             "runtime input views require the complete same-source parent lock"
         )
+    design = load_hashed_json(
+        root / "inputs" / "design_partition_manifest.json.gz",
+        expected_contract="hosd_design_partition_manifest_v1",
+    )
+    if design.get("source") != campaign["source"]:
+        raise ValueError("design partition source differs from campaign")
     output_root = (
         args.output_root.resolve()
         if args.output_root is not None
@@ -142,22 +149,64 @@ def main(argv: list[str] | None = None) -> int:
                 "manifest_sha256": manifest["content_hash"],
             }
         )
+    for role in ("design_select", "design_confirm"):
+        identities = tuple(
+            JetIdentity.from_dict(row).key()
+            for row in design["roles"][role]
+        )
+        for view_kind, source_path, output in (
+            (
+                "canonical_offline",
+                output_root / "offline" / "val_design.npz",
+                output_root / "offline" / f"{role}.npz",
+            ),
+            (
+                "hlt_analogue",
+                output_root / "hlt" / "val_design" / "replica_0.npz",
+                output_root / "hlt" / role / "replica_0.npz",
+            ),
+        ):
+            subset = materialize_input_view_subset(
+                source_view=source_path,
+                identities=identities,
+                split=role,
+                output=output,
+                parent_hashes={
+                    "campaign_spec": campaign["content_hash"],
+                    "resolved_parent_lock": parent_lock["content_hash"],
+                    "design_partition": design["content_hash"],
+                },
+                source=campaign["source"],
+            )
+            rows.append(
+                {
+                    "view_kind": view_kind,
+                    "split": role,
+                    "replica": 0 if view_kind == "hlt_analogue" else None,
+                    "npz_path": str(output.resolve()),
+                    "npz_sha256": _sha256(output),
+                    "manifest_sha256": subset["content_hash"],
+                }
+            )
     completion = with_content_hash(
         {
-            "contract": "hosd_runtime_input_view_completion_v1",
-            "schema_version": 1,
+            "contract": "hosd_runtime_input_view_completion_v2",
+            "schema_version": 2,
             "source": campaign["source"],
             "campaign_spec_sha256": campaign["content_hash"],
             "resolved_parent_lock_sha256": parent_lock["content_hash"],
             "rows": rows,
             "coordinate_count": len(rows),
-            "offline_coordinate_count": len(SPLITS),
-            "hlt_coordinate_count": len(HLT_COORDINATES),
+            "offline_coordinate_count": len(SPLITS) + 2,
+            "hlt_coordinate_count": len(HLT_COORDINATES) + 2,
             "hlt_replica_policy": {
                 "model_train": "R_MULTI_0_1_2_3",
                 "val_stop": "R_FIXED_0",
                 "val_design": "R_FIXED_0",
+                "design_select": "R_FIXED_0_identity_subrole",
+                "design_confirm": "R_FIXED_0_identity_subrole",
             },
+            "design_partition_sha256": design["content_hash"],
             "label_access": False,
             "constituent_matching_used": False,
         }

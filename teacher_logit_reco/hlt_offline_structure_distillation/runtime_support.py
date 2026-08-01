@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+from jetclass_fresh.jetclass_data import JetIdentity
 
 from teacher_logit_reco.relational_part import (
     RELATION_FAMILY_REGISTRY_CONTRACT,
@@ -39,7 +40,7 @@ from .input_views import load_materialized_input_view
 from .normalization import build_hlt_conditional_context
 
 
-RUNTIME_SUPPORT_CONTRACT = "hosd_runtime_support_manifest_v1"
+RUNTIME_SUPPORT_CONTRACT = "hosd_runtime_support_manifest_v2"
 
 
 def _source_snapshot(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -122,6 +123,8 @@ def _shared_tree(root: Path, view: str, role: str, replica: int | None = None) -
 
 
 def _labels_npz(root: Path, role: str) -> Path:
+    if role in {"design_select", "design_confirm"}:
+        return root / "registry" / "runtime_support" / f"{role}_identity_labels.npz"
     return (
         root
         / "inputs"
@@ -134,21 +137,34 @@ def _labels_npz(root: Path, role: str) -> Path:
 
 
 def _base_roles(root: Path, evaluation_role: str) -> dict[str, Any]:
-    physical = "val_design" if evaluation_role in {"design_select", "design_confirm"} else evaluation_role
     definitions: dict[str, Any] = {}
     for role, source_role, replicas in (
         ("model_train", "model_train", range(4)),
         ("val_stop", "val_stop", (0,)),
-        (evaluation_role, physical, (0,)),
+        (evaluation_role, evaluation_role, (0,)),
     ):
         definitions[role] = {
             "labels": str(_labels_npz(root, source_role).resolve()),
             "hlt_caches": {
-                str(replica): str(_shared_hlt_cache(root, source_role, replica).resolve())
+                str(replica): str(
+                    (
+                        root / "inputs" / "hosd_views" / "hlt" / source_role
+                        / f"replica_{replica}.npz"
+                        if source_role in {"design_select", "design_confirm"}
+                        else _shared_hlt_cache(root, source_role, replica)
+                    ).resolve()
+                )
                 for replica in replicas
             },
             "tree_caches": {
-                str(replica): str(_shared_tree(root, "hlt", source_role, replica).resolve())
+                str(replica): str(
+                    _shared_tree(
+                        root,
+                        "hlt",
+                        "val_design" if source_role in {"design_select", "design_confirm"} else source_role,
+                        replica,
+                    ).resolve()
+                )
                 for replica in replicas
             },
         }
@@ -342,13 +358,37 @@ def publish_runtime_support(
         raise ValueError("authoritative HOSD Weaver parity lineage differs")
     paths["hosd_weaver_parity"] = str(parity_path.resolve())
 
-    for role in ("design_select", "design_confirm"):
-        path = support / f"base_roles_{role}.json"
-        _write_plain_json(path, _base_roles(root, role))
-        paths[f"base_roles_{role}"] = str(path.resolve())
-
     label_paths: dict[str, str] = {}
-    for role in ("model_train", "val_stop", "val_design"):
+    design = load_hashed_json(
+        root / "inputs" / "design_partition_manifest.json.gz",
+        expected_contract="hosd_design_partition_manifest_v1",
+    )
+    if design.get("source") != campaign["source"]:
+        raise ValueError("design partition source differs from campaign")
+    val_design_path = _labels_npz(root, "val_design")
+    with np.load(val_design_path, allow_pickle=False) as payload:
+        val_ids = tuple(str(value) for value in payload["identities"])
+        val_labels = np.asarray(payload["labels"], dtype=np.int64)
+    val_lookup = {
+        identity: int(label)
+        for identity, label in zip(val_ids, val_labels, strict=True)
+    }
+    for role in ("design_select", "design_confirm"):
+        identities = tuple(
+            JetIdentity.from_dict(row).key() for row in design["roles"][role]
+        )
+        if not set(identities).issubset(val_lookup):
+            raise ValueError(f"{role} identities are absent from val_design")
+        _write_npz(
+            _labels_npz(root, role),
+            {
+                "identities": np.asarray(identities, dtype="U"),
+                "labels": np.asarray([val_lookup[value] for value in identities], dtype=np.int64),
+            },
+        )
+        paths[f"{role}_identity_labels"] = str(_labels_npz(root, role).resolve())
+
+    for role in ("model_train", "val_stop", "val_design", "design_select", "design_confirm"):
         path = _labels_npz(root, role)
         if not path.is_file() or path.is_symlink():
             raise FileNotFoundError(f"authenticated labels are absent: {path}")
@@ -375,6 +415,11 @@ def publish_runtime_support(
         write_immutable_json(output, artifact)
         label_paths[role] = str(output.resolve())
     paths.update({f"label_manifest_{key}": value for key, value in label_paths.items()})
+
+    for role in ("design_select", "design_confirm"):
+        path = support / f"base_roles_{role}.json"
+        _write_plain_json(path, _base_roles(root, role))
+        paths[f"base_roles_{role}"] = str(path.resolve())
 
     for role in ("stack_val", "final_test"):
         source_path = _labels_npz(root, role)
@@ -406,13 +451,24 @@ def publish_runtime_support(
         expected_view_kind="hlt_analogue",
         expected_source=campaign["source"],
     )
+    confirm_path = _labels_npz(root, "design_confirm")
+    with np.load(confirm_path, allow_pickle=False) as payload:
+        confirm_ids = tuple(str(value) for value in payload["identities"])
+    hlt_ids = tuple(str(value) for value in arrays["identities"])
+    hlt_positions = {value: index for index, value in enumerate(hlt_ids)}
+    if not set(confirm_ids).issubset(hlt_positions):
+        raise ValueError("design-confirm covariate identities differ")
+    confirm_indices = np.asarray(
+        [hlt_positions[value] for value in confirm_ids], dtype=np.int64
+    )
     context_rows = []
-    for start in range(0, len(arrays["identities"]), 2048):
-        stop = min(start + 2048, len(arrays["identities"]))
+    for start in range(0, len(confirm_indices), 2048):
+        stop = min(start + 2048, len(confirm_indices))
+        indices = confirm_indices[start:stop]
         context_rows.append(
             build_hlt_conditional_context(
-                arrays["tokens"][start:stop],
-                arrays["mask"][start:stop],
+                arrays["tokens"][indices],
+                arrays["mask"][indices],
                 d0_uncertainty_floor=float(floors["d0"]["floor"]),
                 dz_uncertainty_floor=float(floors["dz"]["floor"]),
                 sentinel_policy=hlt_relation.get("track_sentinel_policy"),
@@ -420,7 +476,7 @@ def publish_runtime_support(
         )
     context = np.concatenate(context_rows, axis=0)
     covariates = {
-        "identities": np.asarray(arrays["identities"], dtype="U"),
+        "identities": np.asarray(confirm_ids, dtype="U"),
         "jet_pt": np.exp(context[:, 0]),
         "abs_jet_eta": context[:, 1],
         "valid_multiplicity": context[:, 2],
@@ -440,11 +496,12 @@ def publish_runtime_support(
     paths["robustness_covariates"] = str(covariate_path.resolve())
     edge_artifact = with_content_hash(
         {
-            "contract": "hosd_robustness_subgroup_edges_v1",
-            "schema_version": 1,
+            "contract": "hosd_robustness_subgroup_edges_v2",
+            "schema_version": 2,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
-            "population": "val_design_hlt_nominal_replica_0_label_blind",
+            "population": "design_confirm_hlt_nominal_replica_0_label_blind",
+            "design_partition_sha256": design["content_hash"],
             "quantile_method": "numpy_linear",
             "probabilities": [0.0, 0.25, 0.5, 0.75, 1.0],
             "edges": {
@@ -461,7 +518,7 @@ def publish_runtime_support(
     manifest = with_content_hash(
         {
             "contract": RUNTIME_SUPPORT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
             "paths": dict(sorted(paths.items())),

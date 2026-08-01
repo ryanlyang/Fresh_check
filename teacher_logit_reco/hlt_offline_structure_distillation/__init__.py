@@ -445,6 +445,7 @@ from .input_views import (
     load_materialized_input_view,
     load_materialized_hlt_input_view,
     materialize_hlt_input_view,
+    materialize_input_view_subset,
     materialize_offline_input_view,
     materialize_retb_offline_input_view,
 )
@@ -826,6 +827,7 @@ __all__ = [
     "build_stage_b_wave_completion",
     "stage_b_wave_rows",
     "materialize_hlt_input_view",
+    "materialize_input_view_subset",
     "load_materialized_input_view",
     "load_materialized_hlt_input_view",
     "materialize_offline_input_view",

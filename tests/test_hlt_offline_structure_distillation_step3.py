@@ -17,6 +17,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     extract_registered_target,
     load_materialized_hlt_input_view,
     materialize_hlt_input_view,
+    materialize_input_view_subset,
     materialize_offline_input_view,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.target_schemas import (
@@ -529,6 +530,62 @@ def test_real_hlt_cache_materializer_is_label_blind_and_deterministic(
             parent_hashes={"campaign": "a" * 64},
             source=_source(),
         )
+
+
+def test_materialized_design_subrole_preserves_tree_parent_and_order(
+    tmp_path, monkeypatch
+) -> None:
+    identities = np.asarray(["jet-a", "jet-b", "jet-c"])
+    tokens = np.zeros((3, 128, 14), dtype=np.float32)
+    mask = np.zeros((3, 128), dtype=bool)
+    mask[:, 0] = True
+    states = np.zeros((3, 128, 14), dtype=np.int8)
+    cache = tmp_path / "hlt_cache"
+    cache.mkdir()
+    (cache / "hlt_v3_arrays.npz").write_bytes(b"authenticated-cache")
+    monkeypatch.setattr(
+        "teacher_logit_reco.hlt_offline_structure_distillation.input_views.load_hlt_v3_cache",
+        lambda path: (
+            {
+                "identities": identities,
+                "tokens": tokens,
+                "mask": mask,
+                "measurement_states": states,
+            },
+            {
+                "content_hash": "d" * 64,
+                "array_content_sha256": "e" * 64,
+                "logical_role": "val_design",
+                "replica_id": 0,
+                "realization_policy": "R_FIXED",
+                "degradation_profile_id": "D_NOMINAL",
+                "source": _source(),
+            },
+        ),
+    )
+    full = tmp_path / "val-design.npz"
+    materialize_hlt_input_view(
+        hlt_cache_path=cache,
+        split="val_design",
+        replica_id=0,
+        output=full,
+        parent_hashes={"campaign": "a" * 64},
+        source=_source(),
+    )
+    subset_path = tmp_path / "design-confirm.npz"
+    manifest = materialize_input_view_subset(
+        source_view=full,
+        identities=("jet-c", "jet-a"),
+        split="design_confirm",
+        output=subset_path,
+        parent_hashes={"design_partition": "f" * 64},
+        source=_source(),
+    )
+    arrays, metadata = load_materialized_hlt_input_view(subset_path)
+    assert tuple(arrays["identities"]) == ("jet-c", "jet-a")
+    assert manifest["parent_hashes"]["hlt_array_content"] == "e" * 64
+    assert metadata["tree_source_array_content_sha256"] == "e" * 64
+    assert metadata["logical_role"] == "design_confirm"
 
 
 def test_offline_validation_materializer_applies_authenticated_role_partition(

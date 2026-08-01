@@ -38,6 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument(
+        "--parent-manifest",
+        type=Path,
+        help="Create the miniature first when CAMPAIGN_ROOT has no campaign_spec.json.",
+    )
+    parser.add_argument("--campaign-id")
+    parser.add_argument(
         "--prepare-only",
         action="store_true",
         help="Complete prerequisites without submitting the scientific DAG.",
@@ -47,6 +53,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.campaign_root.resolve()
+    campaign_path = root / "campaign_spec.json"
+    if not campaign_path.is_file():
+        if args.parent_manifest is None:
+            raise FileNotFoundError(
+                "a new miniature requires --parent-manifest"
+            )
+        _run(
+            [
+                sys.executable,
+                "-s",
+                str(REPO_ROOT / "scripts" / "build_hosd_campaign.py"),
+                "--parent-manifest",
+                str(args.parent_manifest.resolve()),
+                "--output-dir",
+                str(root),
+                "--campaign-id",
+                str(args.campaign_id or root.name),
+                "--miniature",
+            ]
+        )
     campaign = load_and_validate_campaign(root, repo_root=REPO_ROOT)
     if campaign.get("campaign_profile") != "miniature_test":
         raise ValueError("this controller accepts only miniature_test campaigns")

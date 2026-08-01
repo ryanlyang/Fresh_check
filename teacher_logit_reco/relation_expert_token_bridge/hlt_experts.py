@@ -218,6 +218,8 @@ class NativeHLTExpertDataset(
         identities: Sequence[str],
         logical_role: str,
         realization_policy: str,
+        source_indices_by_replica: Mapping[int, Sequence[int]] | None = None,
+        source_logical_role: str | None = None,
         offline_target_tokens: np.ndarray | None = None,
         offline_target_logits: np.ndarray | None = None,
         region_trees_by_replica: Mapping[
@@ -228,6 +230,7 @@ class NativeHLTExpertDataset(
         if realization_policy not in REALIZATION_POLICIES:
             raise ValueError("HLT dataset realization policy is unknown")
         self.logical_role = str(logical_role)
+        self.replica_selection_role = str(source_logical_role or logical_role)
         self.realization_policy = str(realization_policy)
         expected_replicas = (
             {0}
@@ -259,6 +262,16 @@ class NativeHLTExpertDataset(
             raise ValueError("HLT labels lie outside 0..9")
         self.replicas: dict[int, dict[str, np.ndarray]] = {}
         self.metadata = {}
+        self.source_indices_by_replica = {
+            replica: (
+                range(len(self.identities))
+                if source_indices_by_replica is None
+                else source_indices_by_replica[replica]
+            )
+            for replica in expected_replicas
+        }
+        if set(self.source_indices_by_replica) != expected_replicas:
+            raise ValueError("HLT source-index replica coverage differs")
         for replica in sorted(expected_replicas):
             arrays = {
                 name: np.asarray(value)
@@ -268,14 +281,30 @@ class NativeHLTExpertDataset(
             validate_hlt_v3_cache(
                 arrays,
                 metadata,
-                expected_logical_role=logical_role,
+                expected_logical_role=(source_logical_role or logical_role),
                 expected_replica_id=replica,
             )
-            if (
-                metadata.get("identity_order_sha256")
-                != identity_order_hash(self.identities)
-            ):
-                raise ValueError("HLT replica identities differ")
+            indices = self.source_indices_by_replica[replica]
+            if len(indices) != len(self.identities):
+                raise ValueError("HLT source-index population differs")
+            source_ids = arrays["identities"]
+            positional = (
+                isinstance(indices, range)
+                and indices.start == 0
+                and indices.step == 1
+                and indices.stop == len(self.identities)
+            )
+            if positional:
+                if metadata.get("identity_order_sha256") != identity_order_hash(
+                    self.identities
+                ):
+                    raise ValueError("HLT replica identities differ")
+            else:
+                selected_ids = tuple(
+                    str(source_ids[int(index)]) for index in indices
+                )
+                if selected_ids != tuple(self.identities):
+                    raise ValueError("HLT replica identity subset differs")
             if metadata["realization_policy"] != realization_policy:
                 raise ValueError("HLT cache realization policy differs")
             self.replicas[replica] = arrays
@@ -333,7 +362,7 @@ class NativeHLTExpertDataset(
         return int(
             replica_for(
                 policy=self.realization_policy,
-                logical_role=self.logical_role,
+                logical_role=self.replica_selection_role,
                 epoch=self.zero_based_epoch,
                 canonical_identity=self.identities[int(index)],
             )
@@ -353,10 +382,11 @@ class NativeHLTExpertDataset(
         identity = self.identities[index]
         replica = int(replica)
         arrays = self.replicas[replica]
+        source_index = int(self.source_indices_by_replica[replica][index])
         return {
-            "tokens": arrays["tokens"][index],
-            "mask": arrays["mask"][index],
-            "measurement_states": arrays["measurement_states"][index],
+            "tokens": arrays["tokens"][source_index],
+            "mask": arrays["mask"][source_index],
+            "measurement_states": arrays["measurement_states"][source_index],
             "label": self.labels[index],
             "identity": identity,
             "replica_id": replica,

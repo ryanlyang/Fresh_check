@@ -836,6 +836,13 @@ def test_all_tree_consumers_use_shared_fail_closed_split_authentication(
     assert len(
         authenticated.load_event_rows([1], expected_identities=["jet-b"])
     ) == 1
+    selected = authenticated.event_indices_for_identities(["jet-b", "jet-a"])
+    assert selected.tolist() == [1, 0]
+    assert len(
+        authenticated.load_event_rows(
+            selected, expected_identities=["jet-b", "jet-a"]
+        )
+    ) == 2
     with pytest.raises(ValueError, match="parents differ"):
         AuthenticatedTreeSplit(
             tmp_path / "tree",
@@ -1259,6 +1266,27 @@ def test_campaign_owned_paths_are_derived_per_scientific_coordinate(
     assert "__REQUIRED_" not in rendered
 
 
+def test_design_roles_resolve_to_disjoint_authenticated_subrole_inputs(tmp_path):
+    from teacher_logit_reco.hlt_offline_structure_distillation import node_runtime
+
+    baseline = " ".join(
+        node_runtime._derived_infrastructure(tmp_path, "baseline_train", {})
+    )
+    confirmation = " ".join(
+        node_runtime._derived_infrastructure(tmp_path, "confirmation_train", {})
+    )
+    robustness = " ".join(
+        node_runtime._derived_infrastructure(tmp_path, "robustness_evaluation", {})
+    )
+    assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_select" / "replica_0.npz") in baseline
+    assert "design_select_identity_labels.npz" in baseline
+    assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "design_confirm" / "replica_0.npz") in confirmation
+    assert "design_confirm_identity_labels.npz" in confirmation
+    assert "design_confirm_identity_labels.npz" in robustness
+    assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in baseline
+    assert str(tmp_path / "inputs" / "hosd_views" / "hlt" / "val_design" / "replica_0.npz") not in confirmation
+
+
 def test_prepare_execution_can_build_minimal_runtime_without_template(
     tmp_path, monkeypatch
 ):
@@ -1347,6 +1375,7 @@ def test_miniature_bootstrap_controller_is_resumable_and_performance_blind(
         "load_and_validate_campaign",
         lambda *a, **k: {"campaign_profile": "miniature_test"},
     )
+    (tmp_path / "campaign_spec.json").write_text("{}\n", encoding="utf-8")
     commands = []
     monkeypatch.setattr(
         module,
@@ -1365,6 +1394,44 @@ def test_miniature_bootstrap_controller_is_resumable_and_performance_blind(
     source = path.read_text(encoding="utf-8")
     assert "performance blind" in source
     assert "accuracy" not in source.lower()
+
+
+def test_miniature_bootstrap_can_create_fresh_source_bound_campaign(
+    tmp_path, monkeypatch
+):
+    path = REPO_ROOT / "scripts" / "bootstrap_hosd_miniature_execution.py"
+    spec = importlib.util.spec_from_file_location("hosd_mini_create", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    parent = tmp_path / "split_manifest.json.gz"
+    parent.write_bytes(b"split")
+    root = tmp_path / "new-campaign"
+    commands = []
+    monkeypatch.setattr(
+        module,
+        "_run",
+        lambda argv, **kwargs: commands.append((list(argv), kwargs)),
+    )
+    monkeypatch.setattr(
+        module,
+        "load_and_validate_campaign",
+        lambda *a, **k: {"campaign_profile": "miniature_test"},
+    )
+    assert module.main(
+        [
+            "--campaign-root",
+            str(root),
+            "--parent-manifest",
+            str(parent),
+            "--prepare-only",
+        ]
+    ) == 0
+    first = " ".join(commands[0][0])
+    assert "build_hosd_campaign.py" in first
+    assert "--miniature" in first
+    assert str(parent.resolve()) in first
+    assert not any("--smoke-submit" in " ".join(row[0]) for row in commands)
 
 
 def test_parent_lock_consumers_use_the_versioned_contract_constant():

@@ -125,7 +125,10 @@ def build_default_stage_d_role_definitions(
                     else load_hlt_v3_cache(path)
                 )
                 expected_parents[str(int(raw_replica))] = {
-                    "hlt_content_sha256": metadata["array_content_sha256"],
+                    "hlt_content_sha256": metadata.get(
+                        "tree_source_array_content_sha256",
+                        metadata["array_content_sha256"],
+                    ),
                     "tree_resource_sha256": tree_resource["content_hash"],
                     "backend_manifest_sha256": tree_backend["content_hash"],
                 }
@@ -542,7 +545,10 @@ def _load_hlt(
         arrays_by_replica[replica]["identity_order_sha256"] = source_hash
         source_indices_by_replica[replica] = order
         lineage[f"hlt_replica_{replica}"] = metadata["content_hash"]
-        content_hashes[replica] = metadata["array_content_sha256"]
+        content_hashes[replica] = metadata.get(
+            "tree_source_array_content_sha256",
+            metadata["array_content_sha256"],
+        )
         logical_roles.add(str(metadata["logical_role"]))
         policies.add(str(metadata["realization_policy"]))
     if len(logical_roles) != 1 or len(policies) != 1:
@@ -567,10 +573,20 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
         expected_parents: Mapping[str, str],
         cache_coordinator: Any | None = None,
     ) -> None:
+        logical_identities = tuple(str(value) for value in identities)
+        tree_count = int(load_hashed_json(root / "manifest.json")["jet_count"])
         self.split = AuthenticatedTreeSplit(
             root,
-            expected_identities=identities,
+            expected_identities=(
+                logical_identities if tree_count == len(logical_identities) else None
+            ),
             expected_parents=expected_parents,
+        )
+        self.identities = logical_identities
+        self.event_indices = (
+            np.arange(len(logical_identities), dtype=np.int64)
+            if tree_count == len(logical_identities)
+            else self.split.event_indices_for_identities(logical_identities)
         )
         self._cached_shard = -1
         self._cached_rows: tuple[Mapping[str, Any], ...] = ()
@@ -582,14 +598,15 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
         self._cached_rows = ()
 
     def __len__(self) -> int:
-        return len(self.split)
+        return len(self.identities)
 
     def __getitem__(self, index: int) -> Mapping[str, Any]:
         if index < 0:
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        shard = self.split.shard_for_event(index)
+        source_index = int(self.event_indices[index])
+        shard = self.split.shard_for_event(source_index)
         start = self.split.records[shard].start
         if shard != self._cached_shard:
             if self._cache_coordinator is not None:
@@ -598,7 +615,7 @@ class _IdentityAlignedTreeShards(Sequence[Mapping[str, Any]]):
             self.decoded_shard_load_count += 1
             self._cached_rows = tuple(rows)
             self._cached_shard = shard
-        return copy.deepcopy(self._cached_rows[index - start])
+        return copy.deepcopy(self._cached_rows[source_index - start])
 
 
 class _TreeShardCoordinator:

@@ -43,6 +43,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.stage_c_training impo
     train_stage_c_baseline,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
+    identity_order_hash,
     load_hlt_v3_cache,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
@@ -302,6 +303,25 @@ def _dataset(
     labels, identities = _labels(
         labels_path, canonical_identities=canonical_identities
     )
+    source_indices = {}
+    source_roles = {str(value["logical_role"]) for value in metadata.values()}
+    if len(source_roles) != 1:
+        raise ValueError("baseline HLT cache logical roles differ")
+    for replica, replica_arrays in arrays.items():
+        raw_source_ids = replica_arrays["identities"]
+        if (
+            len(raw_source_ids) == len(identities)
+            and identity_order_hash(raw_source_ids) == identity_order_hash(identities)
+        ):
+            source_indices[replica] = range(len(identities))
+        else:
+            source_ids = tuple(str(value) for value in raw_source_ids)
+            positions = {value: index for index, value in enumerate(source_ids)}
+            if len(positions) != len(source_ids) or not set(identities).issubset(positions):
+                raise ValueError("baseline HLT cache lacks label identities")
+            source_indices[replica] = np.asarray(
+                [positions[value] for value in identities], dtype=np.int64
+            )
     logits = _privileged(teacher_logits, identities, "logits")
     native = (
         None
@@ -330,6 +350,8 @@ def _dataset(
         realization_policy=(
             "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
         ),
+        source_indices_by_replica=source_indices,
+        source_logical_role=next(iter(source_roles)),
         offline_target_tokens=tokens,
         offline_target_logits=paired_logits,
     )

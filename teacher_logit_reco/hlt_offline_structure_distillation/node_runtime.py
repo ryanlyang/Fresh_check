@@ -95,6 +95,8 @@ def _offline_view(root: Path, role: str) -> Path:
 
 
 def _labels_npz(root: Path, role: str) -> Path:
+    if role in {"design_select", "design_confirm"}:
+        return root / "registry" / "runtime_support" / f"{role}_identity_labels.npz"
     return _shared_root(root) / "inputs" / "offline" / role / "offline_inputs.npz"
 
 
@@ -273,13 +275,13 @@ def _derived_infrastructure(
         return [
             *_repeated("--train-cache", {r: cache(root, "model_train", r) for r in range(4)}),
             "--val-stop-cache", f"0={cache(root, 'val_stop', 0)}",
-            "--design-select-cache", f"0={cache(root, 'val_design', 0)}",
+            "--design-select-cache", f"0={cache(root, 'design_select', 0)}",
             "--train-labels", str(_labels_npz(root, "model_train")),
             "--val-stop-labels", str(_labels_npz(root, "val_stop")),
-            "--design-select-labels", str(_labels_npz(root, "val_design")),
+            "--design-select-labels", str(_labels_npz(root, "design_select")),
         ]
     if node_id == "probe_input_materialization":
-        roles = {"model_train": "model_train", "val_stop": "val_stop", "design_select": "val_design"}
+        roles = {"model_train": "model_train", "val_stop": "val_stop", "design_select": "design_select"}
         values = [
             item
             for role, physical in roles.items()
@@ -292,7 +294,8 @@ def _derived_infrastructure(
             replicas = range(4) if role == "model_train" else (0,)
             for replica in replicas:
                 values.extend(["--hlt-input", f"{role}:{replica}={_hlt_view(root, physical, replica)}"])
-                values.extend(["--tree-cache", f"{role}:{replica}={_tree(root, 'hlt', physical, replica)}"])
+                tree_role = "val_design" if role == "design_select" else physical
+                values.extend(["--tree-cache", f"{role}:{replica}={_tree(root, 'hlt', tree_role, replica)}"])
         values.extend(["--relation-normalizer", str(hlt_relation)])
         return values
     if node_id in {
@@ -303,16 +306,16 @@ def _derived_infrastructure(
     if node_id == "mechanism_controls":
         return ["--base-roles-json", str(support / "base_roles_design_confirm.json")]
     if node_id == "robustness_cache_build":
-        return ["--offline-input", str(_offline_view(root, "val_design"))]
+        return ["--offline-input", str(_offline_view(root, "design_confirm"))]
     if node_id == "robustness_evaluation":
         return [
-            "--labels", str(_labels_npz(root, "val_design")),
+            "--labels", str(_labels_npz(root, "design_confirm")),
             "--covariates", str(support / "robustness_covariates.npz"),
             "--subgroup-edges", str(support / "robustness_subgroup_edges.json"),
         ]
     if node_id == "confirmation_native_relation_build":
         return [
-            "--input-npz", str(_hlt_view(root, "val_design", 0)),
+            "--input-npz", str(_hlt_view(root, "design_confirm", 0)),
             "--relation-normalizer", str(hlt_relation),
             "--tree-backend-manifest", str(backend),
             "--tree-cache-dir", str(_tree(root, "hlt", "val_design", 0)),
@@ -321,10 +324,10 @@ def _derived_infrastructure(
         return [
             *_repeated("--train-cache", {r: _hlt_view(root, "model_train", r) for r in range(4)}),
             "--val-stop-cache", f"0={_hlt_view(root, 'val_stop', 0)}",
-            "--design-confirm-cache", f"0={_hlt_view(root, 'val_design', 0)}",
+            "--design-confirm-cache", f"0={_hlt_view(root, 'design_confirm', 0)}",
             "--train-labels", str(_labels_npz(root, "model_train")),
             "--val-stop-labels", str(_labels_npz(root, "val_stop")),
-            "--design-confirm-labels", str(_labels_npz(root, "val_design")),
+            "--design-confirm-labels", str(_labels_npz(root, "design_confirm")),
         ]
     if node_id == "scale_input_prepare":
         return [
@@ -362,10 +365,10 @@ def _derived_infrastructure(
     if node_id == "scale_graph_train":
         return [
             "--val-stop-cache", f"0={_hlt_view(root, 'val_stop', 0)}",
-            "--design-confirm-cache", f"0={_hlt_view(root, 'val_design', 0)}",
+            "--design-confirm-cache", f"0={_hlt_view(root, 'design_confirm', 0)}",
             "--scale-train-labels", str(_labels_npz(root, "scale_train")),
             "--val-stop-labels", str(_labels_npz(root, "val_stop")),
-            "--design-confirm-labels", str(_labels_npz(root, "val_design")),
+            "--design-confirm-labels", str(_labels_npz(root, "design_confirm")),
         ]
     if node_id == "scale_efficiency":
         return [
@@ -671,7 +674,7 @@ def resolve_node_argv(
             / "registry"
             / "runtime_support"
             / "manifest.json",
-            expected_contract="hosd_runtime_support_manifest_v1",
+            expected_contract="hosd_runtime_support_manifest_v2",
         )
         if (
             support_manifest["content_hash"] != support_sha

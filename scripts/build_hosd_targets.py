@@ -181,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         "CA_TREE" in target_id or "REGION" in target_id for target_id in targets
     )
     tree_split = None
+    tree_event_indices = None
     if uses_tree:
         if args.tree_backend_manifest is None or args.tree_cache_dir is None:
             raise ValueError(
@@ -208,14 +209,27 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "target-builder input view lacks its tree source-content parent"
             )
+        expected_tree_parents = {
+            "hlt_content_sha256": source_content_sha256,
+            "tree_resource_sha256": tree_resource["content_hash"],
+            "backend_manifest_sha256": tree_backend["content_hash"],
+        }
         tree_split = AuthenticatedTreeSplit(
             args.tree_cache_dir,
-            expected_identities=identities,
+            expected_identities=(
+                identities
+                if int(load_hashed_json(args.tree_cache_dir / "manifest.json")["jet_count"])
+                == identity_count
+                else None
+            ),
             expected_parents={
-                "hlt_content_sha256": source_content_sha256,
-                "tree_resource_sha256": tree_resource["content_hash"],
-                "backend_manifest_sha256": tree_backend["content_hash"],
+                **expected_tree_parents,
             },
+        )
+        tree_event_indices = (
+            np.arange(identity_count, dtype=np.int64)
+            if len(tree_split) == identity_count
+            else tree_split.event_indices_for_identities(identities)
         )
         tree_manifest = tree_split.manifest
         if tree_manifest.get("source") is not None and tree_manifest.get(
@@ -265,34 +279,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("bounded target extraction requires a contiguous shard")
         shard_trees = None
         if uses_tree:
-            selected_trees = []
-            cursor = int(indices[0])
-            stop = int(indices[-1]) + 1
-            while cursor < stop:
-                tree_index = tree_split.shard_for_event(cursor)
-                record = tree_split.records[tree_index]
-                local_start = cursor - record.start
-                local_stop = min(record.event_count, stop - record.start)
-                shard_identities, trees = tree_split.load_shard(
-                    tree_index,
-                    rows=range(local_start, local_stop),
-                )
-                expected_identities = tuple(
-                    str(value)
-                    for value in identities[
-                        cursor : record.start + local_stop
-                    ].tolist()
-                )
-                if (
-                    tuple(shard_identities[local_start:local_stop])
-                    != expected_identities
-                ):
-                    raise ValueError(
-                        "tree shard identities differ from the canonical input range"
-                    )
-                selected_trees.extend(trees)
-                cursor = record.start + local_stop
-            shard_trees = tuple(selected_trees)
+            shard_trees = tree_split.load_event_rows(
+                tree_event_indices[indices],
+                expected_identities=identities[indices],
+            )
         return {
             target_id: extract_registered_target(
                 target_id,

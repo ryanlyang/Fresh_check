@@ -616,6 +616,9 @@ def load_materialized_input_view(
     metadata = {
         "content_hash": manifest["content_hash"],
         "array_content_sha256": manifest["npz_sha256"],
+        "tree_source_array_content_sha256": manifest.get(
+            "parent_hashes", {}
+        ).get("hlt_array_content", manifest["npz_sha256"]),
         "logical_role": split,
         "replica_id": (
             None
@@ -650,10 +653,72 @@ def load_materialized_hlt_input_view(
     return arrays, metadata
 
 
+def materialize_input_view_subset(
+    *,
+    source_view: str | Path,
+    identities: Sequence[str],
+    split: str,
+    output: str | Path,
+    parent_hashes: Mapping[str, str],
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Publish an identity-ordered subrole of an authenticated HOSD view."""
+
+    source_path = Path(source_view)
+    arrays, _ = load_materialized_input_view(
+        source_path, expected_source=source
+    )
+    manifest = load_retb_hashed_json(
+        source_path.with_suffix(source_path.suffix + ".json"),
+        expected_contract=INPUT_VIEW_MANIFEST_CONTRACT,
+    )
+    requested = tuple(str(value) for value in identities)
+    source_ids = tuple(str(value) for value in arrays["identities"])
+    positions = {value: index for index, value in enumerate(source_ids)}
+    if (
+        not requested
+        or len(requested) != len(set(requested))
+        or len(positions) != len(source_ids)
+        or not set(requested).issubset(positions)
+    ):
+        raise ValueError("input-view subrole identity coverage differs")
+    indices = np.asarray([positions[value] for value in requested], dtype=np.int64)
+    parents = {
+        **dict(parent_hashes),
+        "source_input_view": manifest["content_hash"],
+    }
+    source_content_key = (
+        "retb_offline_cache"
+        if manifest["view_kind"] == "canonical_offline"
+        else "hlt_array_content"
+    )
+    source_content = manifest.get("parent_hashes", {}).get(source_content_key)
+    if source_content is None:
+        raise ValueError("input-view subrole lacks its tree source parent")
+    parents[source_content_key] = source_content
+    return _publish(
+        output=Path(output),
+        identities=requested,
+        raw_tokens=arrays["tokens"][indices],
+        mask=arrays["mask"][indices],
+        view_kind=str(manifest["view_kind"]),
+        split=str(split),
+        replica_id=manifest.get("replica_id"),
+        parent_hashes=parents,
+        source=source,
+        measurement_states=(
+            None
+            if "measurement_states" not in arrays
+            else arrays["measurement_states"][indices]
+        ),
+    )
+
+
 __all__ = [
     "materialize_hlt_input_view",
     "materialize_offline_input_view",
     "materialize_retb_offline_input_view",
+    "materialize_input_view_subset",
     "load_materialized_input_view",
     "load_materialized_hlt_input_view",
 ]
