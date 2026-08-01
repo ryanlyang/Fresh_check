@@ -924,7 +924,11 @@ def test_source_bound_tree_parent_alias_authenticates_raw_builder_hash():
 def test_all_tree_consumers_use_shared_fail_closed_split_authentication(
     tmp_path,
 ):
-    identities = ["jet-a", "jet-b"]
+    # Tree shards preserve the authenticated source order; that order is not
+    # required to be lexicographic.  Consumers resolve their requested role
+    # identities explicitly instead of silently treating source order as a
+    # canonical sort order.
+    identities = ["jet-b", "jet-a"]
     trees = []
     for offset in (0.0, 0.2):
         tokens = np.zeros((4, 14), dtype=np.float32)
@@ -968,13 +972,13 @@ def test_all_tree_consumers_use_shared_fail_closed_split_authentication(
     )
     assert len(authenticated.load_shard(0)[1]) == 2
     assert len(
-        authenticated.load_event_rows([1], expected_identities=["jet-b"])
+        authenticated.load_event_rows([1], expected_identities=["jet-a"])
     ) == 1
-    selected = authenticated.event_indices_for_identities(["jet-b", "jet-a"])
+    selected = authenticated.event_indices_for_identities(["jet-a", "jet-b"])
     assert selected.tolist() == [1, 0]
     assert len(
         authenticated.load_event_rows(
-            selected, expected_identities=["jet-b", "jet-a"]
+            selected, expected_identities=["jet-a", "jet-b"]
         )
     ) == 2
     with pytest.raises(ValueError, match="parents differ"):

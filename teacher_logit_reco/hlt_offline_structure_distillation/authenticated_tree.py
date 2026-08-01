@@ -130,7 +130,6 @@ class AuthenticatedTreeSplit:
 
         records = []
         cursor = 0
-        previous_identity: str | None = None
         for index, row in enumerate(rows):
             npz_path = shard_root / f"shard_{index:05d}.npz"
             metadata_path = shard_root / f"shard_{index:05d}.metadata.json"
@@ -154,14 +153,7 @@ class AuthenticatedTreeSplit:
             if (
                 len(identities) != count
                 or _identity_sha256(identities) != row.get("identity_sha256")
-                or (
-                    previous_identity is not None
-                    and identities[0] <= previous_identity
-                )
-                or any(
-                    right <= left
-                    for left, right in zip(identities, identities[1:])
-                )
+                or len(set(identities)) != count
             ):
                 raise ValueError("tree split identity coverage differs")
             if expected_identities is not None:
@@ -173,7 +165,6 @@ class AuthenticatedTreeSplit:
                     raise ValueError(
                         "tree split identities differ from expected canonical order"
                     )
-            previous_identity = identities[-1]
             records.append(
                 AuthenticatedTreeShard(
                     shard_index=index,
