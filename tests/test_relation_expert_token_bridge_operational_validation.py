@@ -104,8 +104,8 @@ def test_local_synthetic_dag_traverses_every_stage_and_recovery_path(
     report = run_local_synthetic_dag(
         campaign_root=tmp_path / "local-retb", repo_root=ROOT
     )
-    assert report["node_count"] == 84
-    assert report["worker_interfaces"]["wrapper_count"] == 84
+    assert report["node_count"] == 87
+    assert report["worker_interfaces"]["wrapper_count"] == 87
     assert report["worker_interfaces"]["python_cli_help_probed"] is True
     assert report["worker_interfaces"]["python_cli_help_probe_count"] > 50
     assert report["checks"] == {
@@ -207,6 +207,14 @@ def test_stage_b_c_manifest_ownership_follows_complete_metric_production(
     assert order.index("offline_expert_training") < order.index(
         "offline_expert_confirmation"
     )
+    assert set(nodes["offline_teacher_prerequisites"]["dependencies"]) == {
+        "offline_teacher_obase",
+        "offline_teacher_ofullrel",
+    }
+    assert set(nodes["offline_expert_training"]["dependencies"]) == {
+        "step4_offline_training_contracts",
+        "offline_teacher_prerequisites",
+    }
     assert order.index("offline_expert_confirmation") < order.index(
         "offline_fusion_cache"
     )

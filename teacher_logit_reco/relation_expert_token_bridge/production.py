@@ -24,16 +24,16 @@ from .plan_factory_registry import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v32"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v33"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
-    "retb_production_node_execution_registry_v14"
+    "retb_production_node_execution_registry_v15"
 )
 JOB_LEDGER_CONTRACT = "retb_tigris_job_ledger_v2"
 RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v27"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v28"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -86,6 +86,9 @@ DIRECT_WORKER_NODES = frozenset(
         "compiled_region_backend",
         "cpu_resource_probe",
         "gpu_resource_probe",
+        "offline_teacher_obase",
+        "offline_teacher_ofullrel",
+        "offline_teacher_prerequisites",
         "step3_architecture_contracts",
         "step4_offline_training_contracts",
         "step5_offline_fusion_contracts",
@@ -541,6 +544,36 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             dependencies=("input_audit", "gpu_resource_probe"),
         ),
         _node(
+            "offline_teacher_obase",
+            stage="A",
+            worker="run_retb_train_stage_a_obase.sh",
+            dependencies=("step3_architecture_contracts",),
+            resource="gpu",
+            access="model_train_and_val_stop",
+            resumable=True,
+        ),
+        _node(
+            "offline_teacher_ofullrel",
+            stage="A",
+            worker="run_retb_train_stage_a_ofullrel.sh",
+            dependencies=("step3_architecture_contracts",),
+            resource="gpu",
+            access="model_train_and_val_stop",
+            resumable=True,
+        ),
+        _node(
+            "offline_teacher_prerequisites",
+            stage="A",
+            worker="run_retb_prepare_stage_b_prerequisites.sh",
+            dependencies=(
+                "offline_teacher_obase",
+                "offline_teacher_ofullrel",
+            ),
+            resource="gpu",
+            access="model_train_and_val_stop",
+            resumable=True,
+        ),
+        _node(
             "step4_offline_training_contracts",
             stage="B",
             worker="run_retb_build_step4_contracts.sh",
@@ -550,7 +583,10 @@ def _nodes(concurrency: Mapping[str, int]) -> list[dict[str, Any]]:
             "offline_expert_training",
             stage="B",
             worker="run_retb_train_offline_expert.sh",
-            dependencies=("step4_offline_training_contracts",),
+            dependencies=(
+                "step4_offline_training_contracts",
+                "offline_teacher_prerequisites",
+            ),
             resource="gpu",
             array=_array(
                 task_manifest="job_ledgers/tasks/stage_b_offline_experts.json",
@@ -1361,7 +1397,7 @@ def build_node_execution_registry(
     artifact = with_content_hash(
         {
             "contract": NODE_EXECUTION_REGISTRY_CONTRACT,
-            "schema_version": 12,
+            "schema_version": 13,
             "entries": entries,
             "node_count": len(entries),
             "manifest_driven_node_count": len(manifest_nodes),
@@ -1382,7 +1418,7 @@ def validate_node_execution_registry(
     digest = validate_content_hash(
         payload, expected_contract=NODE_EXECUTION_REGISTRY_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 12:
+    if int(payload.get("schema_version", -1)) != 13:
         raise ValueError("node execution registry schema version differs")
     by_id = {str(node["node_id"]): node for node in nodes}
     entries = list(payload.get("entries", ()))
@@ -1695,7 +1731,13 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     if set(node["stage"] for node in nodes) != set("ABCDEFGHIJKLMN"):
         raise ValueError("production graph does not cover every Stage A-N")
     required_ancestors = {
-        "offline_expert_training": {"input_audit", "normalizers_500k"},
+        "offline_expert_training": {
+            "input_audit",
+            "normalizers_500k",
+            "offline_teacher_obase",
+            "offline_teacher_ofullrel",
+            "offline_teacher_prerequisites",
+        },
         "predictor_training": {
             "target_cache_build",
             "native_hlt_expert_training",
@@ -2389,7 +2431,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 26,
+            "schema_version": 27,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),

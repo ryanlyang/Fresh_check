@@ -82,6 +82,24 @@ class _FakePairEmbed(torch.nn.Module):
         )
 
 
+class _CurrentWeaverPairEmbed(torch.nn.Module):
+    """Current Weaver keeps a BatchNorm after its final head convolution."""
+
+    def __init__(self, input_dimension: int, heads: int) -> None:
+        super().__init__()
+        self.pairwise_lv_dim = 0
+        self.pairwise_input_dim = int(input_dimension)
+        self.out_dim = int(heads)
+        self.remove_self_pair = False
+        self.fts_embed = torch.nn.Sequential(
+            torch.nn.BatchNorm1d(int(input_dimension)),
+            torch.nn.Conv1d(int(input_dimension), 12, 1),
+            torch.nn.GELU(),
+            torch.nn.Conv1d(12, int(heads), 1),
+            torch.nn.BatchNorm1d(int(heads)),
+        )
+
+
 class _FakeParticleBlock(torch.nn.Module):
     def __init__(self, dimension: int = 128, heads: int = 8) -> None:
         super().__init__()
@@ -255,6 +273,35 @@ def _pair_stem(input_dimension: int = 4) -> DirectionalPairStem:
         _FakePairEmbed(input_dimension, 8),
         input_dimension=input_dimension,
     )
+
+
+def test_directional_pair_stem_supports_current_weaver_projection_tail() -> None:
+    torch.manual_seed(917)
+    reference = _CurrentWeaverPairEmbed(4, 8)
+    stem = DirectionalPairStem(reference, input_dimension=4)
+    provider = LayerwisePairBiasProvider(
+        base_stem=stem,
+        relation_stem=DirectionalPairStem(
+            _CurrentWeaverPairEmbed(6, 8), input_dimension=6
+        ),
+        num_layers=2,
+        num_heads=8,
+        topology="B_DUAL_FIXED",
+    )
+    provider.eval()
+    base = torch.randn(2, 4, 5, 5)
+    relation = torch.randn(2, 6, 5, 5)
+    mask = torch.tensor(
+        [[[True, True, True, False, False]], [[True, True, True, True, True]]]
+    )
+    base_latent, relation_latent = provider.build_latents(
+        base, relation, mask
+    )
+    assert base_latent.shape == (2, 12, 5, 5)
+    assert relation_latent.shape == (2, 12, 5, 5)
+    provider.bind(base_latent, relation_latent, mask)
+    assert provider.bias_for_layer(0).shape == (2, 8, 5, 5)
+    assert provider.bias_for_layer(1).shape == (2, 8, 5, 5)
 
 
 def test_step3_contract_bundle_and_candidate_registration(tmp_path: Path) -> None:

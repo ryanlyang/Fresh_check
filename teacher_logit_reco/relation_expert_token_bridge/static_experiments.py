@@ -220,6 +220,18 @@ def _stage_b_records(
         run_id = str(row["run_id"])
         seed = int(row["seed"])
         config = row["configuration"]
+        loss_id = str(config.get("loss_id", "ELOSS_CE"))
+        teacher_view_root = root / "inputs" / "teacher_logits" / loss_id
+        train_npz = (
+            teacher_view_root / "model_train.npz"
+            if loss_id != "ELOSS_CE"
+            else root / "inputs" / "offline" / "model_train" / "offline_inputs.npz"
+        )
+        val_stop_npz = (
+            teacher_view_root / "val_stop.npz"
+            if loss_id != "ELOSS_CE"
+            else root / "inputs" / "offline" / "val_stop" / "offline_inputs.npz"
+        )
         run_root = root / "runs" / "stage_b" / run_id / f"seed_{seed}"
         argv = [
             python,
@@ -229,9 +241,9 @@ def _stage_b_records(
             "--run-id",
             run_id,
             "--train-npz",
-            _path(root, "inputs", "offline", "model_train", "offline_inputs.npz"),
+            str(train_npz),
             "--val-stop-npz",
-            _path(root, "inputs", "offline", "val_stop", "offline_inputs.npz"),
+            str(val_stop_npz),
             "--relation-normalization",
             _path(
                 root,
@@ -321,6 +333,116 @@ def _stage_b_records(
                     ),
                 ]
             )
+        deferred_inputs = [
+            _deferred(
+                _path(
+                    root,
+                    "inputs",
+                    "offline",
+                    "model_train",
+                    "offline_input_manifest.json",
+                ),
+                contract="retb_offline_input_cache_v1",
+                producer="offline_input_cache",
+                role="model_train_features_and_labels",
+            ),
+            _deferred(
+                _path(
+                    root,
+                    "inputs",
+                    "normalization",
+                    "stage_a_normalizer_bundle.json",
+                ),
+                contract="retb_stage_a_normalizer_bundle_v1",
+                producer="normalizers_500k",
+                role="offline_relation_and_REGION_normalizers",
+            ),
+        ]
+        if loss_id != "ELOSS_CE":
+            deferred_inputs.extend(
+                [
+                    _deferred(
+                        _path(
+                            root,
+                            "inputs",
+                            "teacher_logits",
+                            f"{loss_id}.json",
+                        ),
+                        contract="retb_teacher_logits_manifest_v1",
+                        producer="offline_teacher_prerequisites",
+                        role="authenticated_teacher_logit_lineage",
+                    ),
+                    _deferred(
+                        str(train_npz),
+                        contract="retb_teacher_logits_augmented_npz_v1",
+                        producer="offline_teacher_prerequisites",
+                        role="model_train_features_labels_and_teacher_logits",
+                    ),
+                    _deferred(
+                        str(val_stop_npz),
+                        contract="retb_teacher_logits_augmented_npz_v1",
+                        producer="offline_teacher_prerequisites",
+                        role="val_stop_features_labels_and_teacher_logits",
+                    ),
+                ]
+            )
+            for teacher_name in teacher_names:
+                deferred_inputs.append(
+                    _deferred(
+                        _path(
+                            root,
+                            "runs",
+                            "stage_a",
+                            "offline_controls",
+                            teacher_name,
+                            f"seed_{seed}",
+                            "best_model_val.pt",
+                        ),
+                        contract="retb_offline_expert_checkpoint_v1",
+                        producer=(
+                            "offline_teacher_obase"
+                            if teacher_name == "O_BASE"
+                            else "offline_teacher_ofullrel"
+                            if teacher_name == "O_FULLREL"
+                            else "offline_teacher_prerequisites"
+                        ),
+                        role=f"knowledge_distillation_teacher_{teacher_name}",
+                    )
+                )
+        if config.get("initialization") != "INIT_SCRATCH":
+            deferred_inputs.append(
+                _deferred(
+                    _path(
+                        root,
+                        "runs",
+                        "stage_a",
+                        "offline_controls",
+                        "O_BASE",
+                        f"seed_{seed}",
+                        "best_model_val.pt",
+                    ),
+                    contract="retb_offline_expert_checkpoint_v1",
+                    producer="offline_teacher_obase",
+                    role="ordinary_particle_backbone_initialization",
+                )
+            )
+        if config.get("initialization") == "INIT_ATTACH_AFTER_PRETRAIN":
+            deferred_inputs.append(
+                _deferred(
+                    _path(
+                        root,
+                        "runs",
+                        "stage_a",
+                        "offline_controls",
+                        "O_BASE",
+                        f"seed_{seed}",
+                        "attachment_pretraining_record.json",
+                    ),
+                    contract="retb_attachment_pretraining_record_v1",
+                    producer="offline_teacher_prerequisites",
+                    role="attachment_pretraining_accounting",
+                )
+            )
         output.append(
             _record(
                 node_id="offline_expert_training",
@@ -336,31 +458,7 @@ def _stage_b_records(
                     str(run_root / "checkpoint_registration.json"),
                     str(run_root / "best_model_val.pt"),
                 ],
-                deferred_inputs=[
-                    _deferred(
-                        _path(
-                            root,
-                            "inputs",
-                            "offline",
-                            "model_train",
-                            "offline_input_manifest.json",
-                        ),
-                        contract="retb_offline_input_cache_v1",
-                        producer="offline_input_cache",
-                        role="model_train_features_and_labels",
-                    ),
-                    _deferred(
-                        _path(
-                            root,
-                            "inputs",
-                            "normalization",
-                            "stage_a_normalizer_bundle.json",
-                        ),
-                        contract="retb_stage_a_normalizer_bundle_v1",
-                        producer="normalizers_500k",
-                        role="offline_relation_and_REGION_normalizers",
-                    ),
-                ],
+                deferred_inputs=deferred_inputs,
                 registry_memberships=row.get("registry_memberships", ()),
             )
         )

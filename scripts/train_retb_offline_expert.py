@@ -25,6 +25,9 @@ from teacher_logit_reco.relation_expert_token_bridge.expert_model import (  # no
     RetbExpertModel,
     RetbParticleEncoder,
 )
+from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_models import (  # noqa: E402
+    OfflineClassifierAdapter,
+)
 from teacher_logit_reco.relation_expert_token_bridge.expert_training import (  # noqa: E402
     EXPERT_LOSS_CANDIDATES,
     OfflineExpertDataset,
@@ -47,6 +50,10 @@ from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: 
 )
 from teacher_logit_reco.relational_part.ca_tree import (  # noqa: E402
     unpack_tree_shard,
+)
+from teacher_logit_reco.relational_part.model import (  # noqa: E402
+    RelationalFamilyParticleTransformer,
+    RelationalParticleTransformer,
 )
 
 import torch  # noqa: E402
@@ -192,10 +199,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             registry, run_id=args.run_id
         )
     configuration = run["configuration"]
-    if configuration["tokenizer_mode"] == "TOK_WEAVER_CLASS":
-        raise ValueError(
-            "TOK_WEAVER_CLASS is routed through the ordinary baseline worker"
-        )
     loss_registry = load_hashed_json(
         args.campaign_root / "registry" / "retb_expert_losses.json"
     )
@@ -380,24 +383,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=config.microbatch_size,
     )
     weaver = importlib.import_module("weaver.nn.model.ParticleTransformer")
-    encoder = RetbParticleEncoder(
-        expert_id=configuration["expert_id"],
-        topology=configuration["topology"],
-        weaver_module=weaver,
-        normalization_artifact=relation_normalization,
-        region_normalization_artifact=region_normalization,
-        measurement_embedding=configuration["measurement_embedding"],
-        dual_base4_capacity_control=bool(
-            configuration.get("dual_base4_capacity_control", False)
-        ),
-        activation_checkpointing=True,
-        particle_dropout=configuration["particle_dropout"],
-    )
-    model = RetbExpertModel(
-        particle_encoder=encoder,
-        shape_id=configuration["shape_id"],
-        tokenizer_mode=configuration["tokenizer_mode"],
-    )
+    if configuration["tokenizer_mode"] == "TOK_WEAVER_CLASS":
+        family = configuration["relation_family"]
+        ordinary = (
+            RelationalParticleTransformer(weaver_module=weaver)
+            if family is None
+            else RelationalFamilyParticleTransformer(
+                (family,),
+                normalization_artifact=relation_normalization,
+                region_normalization_artifact=region_normalization,
+                weaver_module=weaver,
+            )
+        )
+        model = OfflineClassifierAdapter(
+            ordinary,
+            expert_configuration=configuration,
+        )
+    else:
+        encoder = RetbParticleEncoder(
+            expert_id=configuration["expert_id"],
+            topology=configuration["topology"],
+            weaver_module=weaver,
+            normalization_artifact=relation_normalization,
+            region_normalization_artifact=region_normalization,
+            measurement_embedding=configuration["measurement_embedding"],
+            dual_base4_capacity_control=bool(
+                configuration.get("dual_base4_capacity_control", False)
+            ),
+            activation_checkpointing=True,
+            particle_dropout=configuration["particle_dropout"],
+        )
+        model = RetbExpertModel(
+            particle_encoder=encoder,
+            shape_id=configuration["shape_id"],
+            tokenizer_mode=configuration["tokenizer_mode"],
+        )
     initialization_state = (
         _checkpoint_state(args.initialization_checkpoint)
         if args.initialization_checkpoint is not None

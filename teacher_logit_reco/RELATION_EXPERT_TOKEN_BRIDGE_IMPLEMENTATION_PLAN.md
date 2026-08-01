@@ -5293,3 +5293,42 @@ Resource-probe artifacts have one canonical consumer-visible location:
 and all training manifest factories must consume that same path. A successful
 probe written to a different legacy filename does not satisfy the training
 dependency.
+
+## Stage-B prerequisite and installed-Weaver amendment (2026-08-01)
+
+The genuine miniature established that four Stage-B execution paths required
+additional explicit implementation. These corrections preserve every run ID,
+scientific configuration, fixed epoch budget, and non-blocking treatment of
+scientific underperformance.
+
+Before the 147-row Stage-B array starts, Stage A must now train the ordinary
+offline `O_BASE` and all-family `O_FULLREL` teachers on separate GH200 jobs so
+they may execute in parallel. A dependent GPU finalizer must authenticate
+both fixed-budget registrations and checkpoints, select
+`SELECTED_STRONGEST` using `val_stop` only, publish the attachment-pretraining
+record, and build source-bound teacher-logit views for every non-CE expert
+loss. Stage-B KD rows consume the augmented `model_train` and `val_stop` NPZs,
+not the teacher-free offline input files. Warm and attachment rows consume the
+published `O_BASE` checkpoint. The Stage-B array depends on the finalizer, so
+none of these rows can race missing prerequisites.
+
+`TOK_WEAVER_CLASS` is an executable ordinary Particle Transformer control,
+not a rejected placeholder. It receives the registered expert's full particle
+view and relation family, classifies through Weaver's ordinary class-token
+head, and does not introduce a RETB summary-token bottleneck. Its diagnostic
+token tensor is an explicitly non-consumable zero sentinel at the registered
+shape; only its logits are scientific outputs.
+
+The directional pair stem must support the installed Weaver layout in which
+the terminal head `Conv1d` is followed by `BatchNorm1d`. The per-layer
+projection clone includes that post-projection normalization. Unsupported
+post-projection modules still fail closed. Ordinary `O_BASE` adapter
+checkpoints use the `classifier.mod.*` prefix, which is an authorized source
+for particle-backbone-only warm initialization; relation and summary-token
+parameters remain excluded.
+
+The corrected production graph, node-execution registry, and Step-15 bundle
+are versioned respectively as v33, v15, and v28. The two teacher-training
+nodes, teacher-cache finalizer, and all Stage-B rows remain resumable. A failed
+or weak metric never cancels future work; only execution or authenticated
+artifact failure blocks an `afterok` dependency.

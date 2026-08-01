@@ -605,6 +605,7 @@ def copy_obase_particle_backbone(
             continue
         candidates = (
             target_name,
+            f"classifier.mod.{suffix}",
             f"mod.{suffix}",
             suffix,
         )

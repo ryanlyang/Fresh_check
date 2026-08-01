@@ -144,6 +144,44 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
         for row in stage_b
     )
     assert all(row["run_id"] is not None for row in stage_b)
+    kd_rows = [
+        row
+        for row in stage_b
+        if row["configuration"]["loss_id"] != "ELOSS_CE"
+    ]
+    assert kd_rows
+    assert all(
+        "/inputs/teacher_logits/" in row["argv"][
+            row["argv"].index("--train-npz") + 1
+        ].replace("\\", "/")
+        and "/inputs/teacher_logits/" in row["argv"][
+            row["argv"].index("--val-stop-npz") + 1
+        ].replace("\\", "/")
+        for row in kd_rows
+    )
+    assert all(
+        any(
+            value["producer"] == "offline_teacher_prerequisites"
+            and value["expected_contract"]
+            == "retb_teacher_logits_manifest_v1"
+            for value in row["deferred_inputs"]
+        )
+        for row in kd_rows
+    )
+    warm_rows = [
+        row
+        for row in stage_b
+        if row["configuration"]["initialization"] != "INIT_SCRATCH"
+    ]
+    assert warm_rows
+    assert all(
+        any(
+            value["producer"] == "offline_teacher_obase"
+            and value["role"] == "ordinary_particle_backbone_initialization"
+            for value in row["deferred_inputs"]
+        )
+        for row in warm_rows
+    )
 
     stage_c = plan["groups"]["offline_fusion_training"]
     assert {

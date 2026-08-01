@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import inspect
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from teacher_logit_reco.relational_part.model import (
@@ -111,9 +113,37 @@ class OfflineClassifierAdapter(
 ):
     """Give ordinary Particle Transformers the campaign batch interface."""
 
-    def __init__(self, classifier: Any) -> None:
+    def __init__(
+        self,
+        classifier: Any,
+        *,
+        expert_configuration: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self.classifier = classifier
+        self._expert_configuration = (
+            None
+            if expert_configuration is None
+            else dict(expert_configuration)
+        )
+        if self._expert_configuration is not None:
+            config = self._expert_configuration
+            # The expert trainer validates these public semantics.  The
+            # ordinary Weaver control deliberately has no RetbParticleEncoder,
+            # but it must still attest which expert/relation configuration it
+            # replaces.
+            self.particle_encoder = SimpleNamespace(
+                expert_id=config["expert_id"],
+                topology=config["topology"],
+                particle_dropout=float(config["particle_dropout"]),
+                measurement_embedding_enabled=bool(
+                    config["measurement_embedding"]
+                ),
+            )
+            self.shape_id = str(config["shape_id"])
+            self.token_count = int(config["token_count"])
+            self.token_dimension = int(config["token_dimension"])
+            self.tokenizer_mode = str(config["tokenizer_mode"])
 
     def forward(
         self,
@@ -123,6 +153,7 @@ class OfflineClassifierAdapter(
         mask: Any,
         raw_tokens: Any | None = None,
         region_trees: Any | None = None,
+        return_details: bool = False,
         **_: Any,
     ) -> Any:
         kwargs = {
@@ -135,12 +166,24 @@ class OfflineClassifierAdapter(
             kwargs["raw_tokens"] = raw_tokens
         if region_trees is not None:
             kwargs["region_trees"] = region_trees
-        try:
-            return self.classifier(**kwargs)
-        except TypeError:
-            kwargs.pop("raw_tokens", None)
-            kwargs.pop("region_trees", None)
-            return self.classifier(**kwargs)
+        accepted = inspect.signature(self.classifier.forward).parameters
+        logits = self.classifier(
+            **{name: value for name, value in kwargs.items() if name in accepted}
+        )
+        if not return_details:
+            return logits
+        if self._expert_configuration is None:
+            raise ValueError(
+                "ordinary classifier details require expert configuration"
+            )
+        # TOK_WEAVER_CLASS has no summary-token bottleneck.  Diagnostics still
+        # require a shape-stable tensor, so publish a non-consumable zero
+        # sentinel at the registered shape; the classifier logits remain the
+        # only scientific output of this control.
+        tokens = logits.new_zeros(
+            logits.shape[0], self.token_count, self.token_dimension
+        )
+        return {"tokens": tokens, "logits": logits}
 
 
 class MonolithicBase4ParticleTransformer(

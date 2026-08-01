@@ -37,6 +37,9 @@ from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
 from teacher_logit_reco.relation_expert_token_bridge.provenance import (
     source_snapshot,
 )
+from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_models import (
+    OfflineClassifierAdapter,
+)
 from teacher_logit_reco.relation_expert_token_bridge.step3 import (
     build_step3_bundle,
     publish_step3_bundle,
@@ -129,6 +132,42 @@ class _TinyExpert(torch.nn.Module):
         if return_details:
             return {"tokens": tokens, "logits": logits}
         return logits
+
+
+class _OrdinaryClassifier(torch.nn.Module):
+    def forward(self, *, points, features, lorentz_vectors, mask):
+        del points, lorentz_vectors
+        pooled = (features * mask).sum(dim=-1)
+        return pooled[:, :10]
+
+
+def test_ordinary_weaver_adapter_exposes_registered_control_semantics() -> None:
+    configuration = {
+        "expert_id": "PT",
+        "topology": "B_CONCAT",
+        "particle_dropout": 0.0,
+        "measurement_embedding": False,
+        "shape_id": "S8_128",
+        "token_count": 8,
+        "token_dimension": 128,
+        "tokenizer_mode": "TOK_WEAVER_CLASS",
+    }
+    model = OfflineClassifierAdapter(
+        _OrdinaryClassifier(), expert_configuration=configuration
+    )
+    output = model(
+        features=torch.randn(3, 17, 5),
+        vectors=torch.randn(3, 4, 5),
+        mask=torch.ones(3, 1, 5, dtype=torch.bool),
+        raw_tokens=torch.randn(3, 5, 14),
+        region_trees={"ignored": True},
+        return_details=True,
+    )
+    assert output["logits"].shape == (3, 10)
+    assert output["tokens"].shape == (3, 8, 128)
+    assert not bool(output["tokens"].any())
+    assert model.particle_encoder.expert_id == "PT"
+    assert model.tokenizer_mode == "TOK_WEAVER_CLASS"
 
 
 def _offline_arrays(events: int = 20, particles: int = 4):
@@ -299,6 +338,20 @@ def test_obase_initialization_copies_only_particle_backbone() -> None:
     assert torch.equal(
         model.particle_encoder.mod.embed.weight,
         torch.full_like(model.particle_encoder.mod.embed.weight, 0.25),
+    )
+
+
+def test_obase_adapter_checkpoint_prefix_copies_particle_backbone() -> None:
+    model = _TinyExpert(2, 64)
+    source = {
+        f"classifier.mod.{name}": torch.full_like(value, 0.125)
+        for name, value in _TinyMod().state_dict().items()
+    }
+    report = copy_obase_particle_backbone(model, source)
+    assert report["copied_tensor_count"] > 0
+    assert torch.equal(
+        model.particle_encoder.mod.embed.weight,
+        torch.full_like(model.particle_encoder.mod.embed.weight, 0.125),
     )
 
 

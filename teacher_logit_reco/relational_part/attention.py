@@ -453,17 +453,48 @@ class DirectionalPairStem(torch.nn.Module if torch is not None else object):
         children = list(network.children())
         if len(children) < 2:
             raise RuntimeError("Weaver fts_embed cannot be split")
-        final = children[-1]
-        if not isinstance(final, (module.nn.Conv1d, module.nn.Linear)):
+        projection_index = next(
+            (
+                index
+                for index in range(len(children) - 1, -1, -1)
+                if isinstance(
+                    children[index], (module.nn.Conv1d, module.nn.Linear)
+                )
+            ),
+            None,
+        )
+        if projection_index is None:
             raise RuntimeError(
-                "Weaver fts_embed final head projection is not Conv1d/Linear"
+                "Weaver fts_embed has no terminal Conv1d/Linear projection"
             )
-        self.prefix = module.nn.Sequential(*children[:-1])
+        final = children[projection_index]
+        suffix = children[projection_index + 1 :]
+        if any(
+            not isinstance(
+                child,
+                (
+                    module.nn.BatchNorm1d,
+                    module.nn.Identity,
+                    module.nn.Dropout,
+                ),
+            )
+            for child in suffix
+        ):
+            raise RuntimeError(
+                "Weaver fts_embed has an unsupported post-projection tail"
+            )
+        self.prefix = module.nn.Sequential(*children[:projection_index])
+        projection = (
+            final
+            if not suffix
+            else module.nn.Sequential(final, *suffix)
+        )
         # Keep only an unregistered construction template.  The original
-        # shared final projection is deliberately absent from the active
-        # architecture; every registered projection is layer-specific.
+        # shared final projection (including Weaver's optional trailing
+        # normalization) is deliberately absent from the active architecture;
+        # every registered projection tail is layer-specific.
         object.__setattr__(
-            self, "_reference_projection_template", copy.deepcopy(final)
+            self, "_reference_projection_template", copy.deepcopy(projection)
         )
         self.input_dimension = int(input_dimension)
         self.stem_width = int(
@@ -505,18 +536,37 @@ class LayerwiseBiasProjection(torch.nn.Module if torch is not None else object):
     def __init__(self, reference: Any, *, num_layers: int) -> None:
         module = _require_torch()
         super().__init__()
-        if not isinstance(reference, (module.nn.Conv1d, module.nn.Linear)):
-            raise TypeError("reference projection must be Conv1d or Linear")
+        projection = self._leading_projection(reference)
+        if projection is None:
+            raise TypeError(
+                "reference projection must begin with Conv1d or Linear"
+            )
         self.projections = module.nn.ModuleList(
             copy.deepcopy(reference) for _ in range(int(num_layers))
         )
+
+    @staticmethod
+    def _leading_projection(projection: Any) -> Any | None:
+        module = _require_torch()
+        if isinstance(projection, (module.nn.Conv1d, module.nn.Linear)):
+            return projection
+        if isinstance(projection, module.nn.Sequential):
+            children = list(projection.children())
+            if children and isinstance(
+                children[0], (module.nn.Conv1d, module.nn.Linear)
+            ):
+                return children[0]
+        return None
 
     @staticmethod
     def _project(projection: Any, stem: Any) -> Any:
         module = _require_torch()
         batch, width, query, context = map(int, stem.shape)
         packed = stem.reshape(batch, width, query * context)
-        if isinstance(projection, module.nn.Linear):
+        leading = LayerwiseBiasProjection._leading_projection(projection)
+        if leading is None:
+            raise TypeError("layerwise projection layout is unsupported")
+        if isinstance(leading, module.nn.Linear):
             result = projection(packed.transpose(1, 2)).transpose(1, 2)
         else:
             result = projection(packed)
