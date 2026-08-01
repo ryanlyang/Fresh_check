@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     build_registries,
     build_step1_bundle,
     canonical_sha256,
+    load_hashed_json,
     load_authorized_identity_labels,
     publish_step1_bundle,
     require_parents_ready,
@@ -633,6 +635,51 @@ def test_parent_submit_attests_each_array_before_submitting_successor(
         ["sbatch", "--parsable", "--dependency=afterok:101", "second.sh"],
         ["python", "attest.py", "second"],
     ]
+
+
+def test_normalization_parent_finalizer_publishes_hosd_canonical_aliases(
+    tmp_path, monkeypatch
+) -> None:
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        parent_submission,
+    )
+
+    root = tmp_path / "campaign"
+    shared = root / "inputs" / "shared_retb_parent_campaign"
+    parent_ids = (
+        "relation_500k_normalizer",
+        "region_500k_normalizer",
+        "hlt_shared_500k_normalizer",
+        "hlt_shared_region_500k_normalizer",
+    )
+    requirements = []
+    for index, parent_id in enumerate(parent_ids):
+        contract = f"test_normalizer_contract_{index}"
+        canonical = f"inputs/normalization/test_{index}/normalizer.json"
+        artifact = with_content_hash(
+            {"contract": contract, "schema_version": 1, "value": index}
+        )
+        source = shared / canonical
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(json.dumps(artifact), encoding="utf-8")
+        requirements.append(
+            SimpleNamespace(
+                parent_id=parent_id,
+                canonical_path=canonical,
+                expected_contract=contract,
+            )
+        )
+    monkeypatch.setattr(parent_submission, "PARENT_REQUIREMENTS", tuple(requirements))
+    published = parent_submission._publish_normalization_aliases(
+        campaign_root=root, shared_root=shared
+    )
+    assert set(published) == set(parent_ids)
+    for requirement in requirements:
+        destination = root / requirement.canonical_path
+        assert destination.is_file()
+        assert load_hashed_json(
+            destination, expected_contract=requirement.expected_contract
+        )["content_hash"] == published[requirement.parent_id]
 
 
 def test_parent_submit_fails_closed_when_aggregate_attestation_fails(

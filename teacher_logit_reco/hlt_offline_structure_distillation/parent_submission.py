@@ -607,6 +607,33 @@ def _publish_source_bound_backend_alias(
     return bound
 
 
+def _publish_normalization_aliases(
+    *, campaign_root: Path, shared_root: Path
+) -> dict[str, str]:
+    """Expose completed shared normalizers at their HOSD canonical paths."""
+
+    parent_ids = {
+        "relation_500k_normalizer",
+        "region_500k_normalizer",
+        "hlt_shared_500k_normalizer",
+        "hlt_shared_region_500k_normalizer",
+    }
+    published: dict[str, str] = {}
+    for requirement in PARENT_REQUIREMENTS:
+        if requirement.parent_id not in parent_ids:
+            continue
+        source_path = shared_root / requirement.canonical_path
+        artifact = load_hashed_json(
+            source_path, expected_contract=requirement.expected_contract
+        )
+        destination = campaign_root / requirement.canonical_path
+        write_immutable_json(destination, artifact)
+        published[requirement.parent_id] = artifact["content_hash"]
+    if set(published) != parent_ids:
+        raise ValueError("normalization alias coverage differs")
+    return published
+
+
 def finalize_parent_group(
     plan: Mapping[str, Any],
     *,
@@ -635,6 +662,11 @@ def finalize_parent_group(
         ):
             raise ValueError("reusable parent-group completion lineage differs")
         _revalidate_parent_group_completion(existing, campaign_root=root)
+        if plan["group"] == "normalization":
+            _publish_normalization_aliases(
+                campaign_root=root,
+                shared_root=root / "inputs" / "shared_retb_parent_campaign",
+            )
         return existing
     shared = root / "inputs" / "shared_retb_parent_campaign"
     task_completions = _validate_parent_task_completions(
@@ -644,6 +676,10 @@ def finalize_parent_group(
         _publish_hlt_cache_set(campaign_root=root, shared_root=shared)
     if plan["group"] == "tree" and plan["parent_ids"]:
         _publish_source_bound_backend_alias(
+            campaign_root=root, shared_root=shared
+        )
+    if plan["group"] == "normalization" and plan["parent_ids"]:
+        _publish_normalization_aliases(
             campaign_root=root, shared_root=shared
         )
     requirements = {

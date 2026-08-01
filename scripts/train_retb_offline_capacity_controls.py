@@ -83,6 +83,13 @@ import torch  # noqa: E402
 
 SEVEN_SEEDS = (101, 202, 303, 404, 505, 606, 707)
 BASE_CONFIG = (128, 4, 8, 8, 2)
+LOCKED_OFFLINE_SHAPES_RELATIVE_PATH = Path(
+    "selection/stage_c/locked_offline_shapes.json"
+)
+
+
+def _locked_offline_shapes_path(root: Path) -> Path:
+    return root / LOCKED_OFFLINE_SHAPES_RELATIVE_PATH
 
 
 def _sha(path: Path) -> str:
@@ -168,7 +175,7 @@ def _lineage(
             root / "registry" / "retb_stage_c_runs.json"
         )["content_hash"],
         "shape_high": load_hashed_json(
-            root / "selection" / "locked_offline_shapes.json"
+            _locked_offline_shapes_path(root)
         )["content_hash"],
         "relation_normalization": load_hashed_json(
             root
@@ -898,7 +905,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Seven independent token experts followed by a fresh token transformer.
     locked_shapes = load_hashed_json(
-        root / "selection" / "locked_offline_shapes.json"
+        _locked_offline_shapes_path(root)
     )
     shape_id = str(locked_shapes["SHAPE_HIGH"]["shape_id"])
     token_members, token_rows = [], []

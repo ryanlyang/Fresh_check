@@ -38,6 +38,10 @@ from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
 from scripts.execute_retb_offline_shape_wave import (
     _optional_source_matches,
 )
+from scripts.train_retb_offline_capacity_controls import (
+    LOCKED_OFFLINE_SHAPES_RELATIVE_PATH,
+    _locked_offline_shapes_path,
+)
 from teacher_logit_reco.relation_expert_token_bridge.fusion import (
     GroupedHeadRelationBias,
     LiveExpertFusion,
@@ -394,6 +398,21 @@ def test_shape_selector_compares_mapping_valued_sources_directly() -> None:
     assert _optional_source_matches(source.copy(), source)
     assert _optional_source_matches(None, source)
     assert not _optional_source_matches({**source, "dirty": True}, source)
+
+
+def test_capacity_controls_consume_declared_stage_c_shape_lock(
+    tmp_path: Path,
+) -> None:
+    expected = (
+        tmp_path / "selection" / "stage_c" / "locked_offline_shapes.json"
+    )
+    assert LOCKED_OFFLINE_SHAPES_RELATIVE_PATH == Path(
+        "selection/stage_c/locked_offline_shapes.json"
+    )
+    assert _locked_offline_shapes_path(tmp_path) == expected
+    assert _locked_offline_shapes_path(tmp_path) != (
+        tmp_path / "selection" / "locked_offline_shapes.json"
+    )
 
 
 def _shape_rows(negative: bool = True):

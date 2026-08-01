@@ -5475,3 +5475,18 @@ selection uses mapping-valued per-class means and
 not interchangeable with the corrected contracts. The class metrics,
 selection thresholds, tie rules, run identities, and non-blocking treatment
 of scientific underperformance are unchanged.
+
+## Stage-C capacity-control shape-lock path amendment (2026-08-01)
+
+The authoritative shape-selection lock is
+`selection/stage_c/locked_offline_shapes.json`, exactly as declared in the
+shape-selector output manifest. Every Stage-C capacity-control lineage and
+model-construction read must consume that path. The nonexistent legacy path
+`selection/locked_offline_shapes.json` is forbidden. The broadly consumed
+`selection/retb_offline_shapes.json` remains an immutable byte-identical
+publication alias, but it does not replace the selector's canonical lock in
+capacity-control lineage.
+
+This is a producer/consumer path correction only. It changes no artifact
+content, contract version, selected shape, capacity-control definition,
+checkpoint semantics, run identity, or scientific underperformance policy.
