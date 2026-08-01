@@ -5490,3 +5490,18 @@ capacity-control lineage.
 This is a producer/consumer path correction only. It changes no artifact
 content, contract version, selected shape, capacity-control definition,
 checkpoint semantics, run identity, or scientific underperformance policy.
+
+## Stage-C capacity-evaluation identity-key amendment (2026-08-01)
+
+Capacity-control evaluation consumes the production offline-expert collator
+without a private batch schema. Event identities are therefore read from the
+canonical `event_identities` field emitted by
+`collate_offline_expert_batch`; a nonexistent `identities` batch field is
+forbidden. The prediction artifact continues to serialize the collected
+values under its established `identities` array field.
+
+The production collator-to-capacity-evaluator boundary must be covered by an
+integration regression with all ten classes and exact identity ordering. This
+is a runtime interface correction only and changes no training update,
+checkpoint, metric, identity value or order, contract version, control
+definition, run identity, or scientific underperformance policy.

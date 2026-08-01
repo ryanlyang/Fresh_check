@@ -40,6 +40,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account", default="reu-aisocial")
     parser.add_argument("--max-parallel", type=int)
     parser.add_argument("--attempt", type=int, default=1)
+    parser.add_argument(
+        "--campaign-source-root",
+        type=Path,
+        help=(
+            "Validated frozen source worktree used by scientific workers. "
+            "This permits a newer control-plane launcher to recover a campaign "
+            "without changing its source-bound scientific code."
+        ),
+    )
     return parser
 
 
@@ -91,8 +100,13 @@ def _submission_profile_and_mode(args, plan):
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    campaign_source_root = (
+        REPO_ROOT
+        if args.campaign_source_root is None
+        else args.campaign_source_root.resolve()
+    )
     campaign = load_and_validate_campaign(
-        args.campaign_root, repo_root=REPO_ROOT
+        args.campaign_root, repo_root=campaign_source_root
     )
     plan = load_hashed_json(
         args.campaign_root / "job_ledgers" / "production_execution_plan.json",
@@ -183,7 +197,9 @@ def main(argv=None):
             f"--error={args.campaign_root}/job_ledgers/slurm/%x_%A_%a.err",
             (
                 "--export=ALL,"
-                f"CAMPAIGN_ROOT={args.campaign_root},HOSD_NODE_ID={node_id}"
+                f"PROJECT_DIR={campaign_source_root},"
+                f"CAMPAIGN_ROOT={args.campaign_root},"
+                f"HOSD_NODE_ID={node_id}"
             ),
         ]
         if resource["gres"]:

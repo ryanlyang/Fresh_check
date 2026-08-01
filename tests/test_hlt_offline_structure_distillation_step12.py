@@ -560,6 +560,26 @@ def test_miniature_resume_does_not_require_impossible_full_authorization():
     assert authorization is True
 
 
+def test_submitter_accepts_a_frozen_campaign_source_root_for_launcher_recovery(
+    tmp_path,
+):
+    submit = _load_submit_module()
+    source_root = tmp_path / "frozen-source"
+    args = submit._parser().parse_args(
+        [
+            "--campaign-root",
+            str(tmp_path / "campaign"),
+            "--smoke-submit",
+            "--attempt",
+            "2",
+            "--campaign-source-root",
+            str(source_root),
+        ]
+    )
+    assert args.campaign_source_root == source_root
+    assert args.attempt == 2
+
+
 def test_monitor_repairs_runtime_failures_not_negative_science():
     plan = _plan("miniature_test")
     states = {
@@ -671,6 +691,7 @@ def test_all_required_slurm_entrypoints_are_present_and_fail_closed():
         "run_hosd_scale_array.sh",
         "run_hosd_stack_val.sh",
         "run_hosd_final_test.sh",
+        "run_hosd_registered_node.sh",
         "submit_hosd_tigris_full.sh",
     )
     for name in names:
@@ -680,6 +701,18 @@ def test_all_required_slurm_entrypoints_are_present_and_fail_closed():
         encoding="utf-8"
     )
     assert "submit_hosd_slurm.py" in submit
+    workers = sorted((REPO_ROOT / "sbatch").glob("run_hosd_*.sh"))
+    assert workers
+    for worker in workers:
+        text = worker.read_text(encoding="utf-8")
+        assert "BASH_SOURCE" not in text
+        assert ': "${PROJECT_DIR:?PROJECT_DIR is required}"' in text
+        assert 'source "${PROJECT_DIR}/sbatch/hosd_common.sh"' in text
+    submitter = (REPO_ROOT / "scripts" / "submit_hosd_slurm.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'f"PROJECT_DIR={campaign_source_root},"' in submitter
+    assert "repo_root=campaign_source_root" in submitter
     common = (REPO_ROOT / "sbatch" / "hosd_common.sh").read_text(encoding="utf-8")
     assert "PYTHONNOUSERSITE=1" in common
     assert "load_and_validate_campaign" in common

@@ -66,6 +66,13 @@ from teacher_logit_reco.relation_expert_token_bridge.fusion_training import (
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (
     CLASS_NAMES,
 )
+from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
+    OfflineExpertDataset,
+    make_offline_expert_loader,
+)
+from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_training import (
+    _collect_predictions,
+)
 from teacher_logit_reco.relation_expert_token_bridge.registry import (
     EXPERT_ORDER,
     TOKEN_SHAPES,
@@ -413,6 +420,48 @@ def test_capacity_controls_consume_declared_stage_c_shape_lock(
     assert _locked_offline_shapes_path(tmp_path) != (
         tmp_path / "selection" / "locked_offline_shapes.json"
     )
+
+
+class _CapacityIdentityFixture(torch.nn.Module):
+    def forward(self, *, raw_tokens, **_unused):
+        class_indices = raw_tokens[:, 0, 10].round().long()
+        return torch.nn.functional.one_hot(
+            class_indices, num_classes=10
+        ).float() * 5.0
+
+
+def test_capacity_prediction_uses_production_collator_identity_key() -> None:
+    events = 10
+    tokens = np.zeros((events, 2, 14), dtype=np.float32)
+    mask = np.zeros((events, 2), dtype=bool)
+    mask[:, 0] = True
+    tokens[:, 0, 0] = 1.0
+    tokens[:, 0, 3] = 1.0
+    tokens[:, 0, 5] = 1.0
+    tokens[:, 0, 10] = np.arange(events, dtype=np.float32)
+    identities = [f"capacity-event-{index}" for index in range(events)]
+    dataset = OfflineExpertDataset(
+        tokens=tokens,
+        mask=mask,
+        labels=np.arange(events, dtype=np.int64),
+        identities=identities,
+    )
+    loader = make_offline_expert_loader(
+        dataset,
+        seed=101,
+        training=False,
+        batch_size=4,
+    )
+    first_batch = next(iter(loader))
+    assert "event_identities" in first_batch
+    assert "identities" not in first_batch
+
+    prediction = _collect_predictions(
+        _CapacityIdentityFixture(), loader, device=torch.device("cpu")
+    )
+    assert prediction["identities"] == identities
+    assert prediction["labels"].tolist() == list(range(events))
+    assert prediction["metrics"]["accuracy"] == pytest.approx(1.0)
 
 
 def _shape_rows(negative: bool = True):

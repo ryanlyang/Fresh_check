@@ -193,7 +193,9 @@ def _collect_predictions(
                     raise FloatingPointError("capacity logits are nonfinite")
                 logits.append(values.float().cpu())
                 labels.append(batch["labels"].long().cpu())
-                identities.extend(str(value) for value in batch["identities"])
+                identities.extend(
+                    str(value) for value in batch["event_identities"]
+                )
     finally:
         model.train(was_training)
     if not logits:
