@@ -39,7 +39,10 @@ from teacher_logit_reco.relation_expert_token_bridge.complementarity import (
     shapley_from_subset_accuracy,
 )
 from scripts.execute_retb_offline_shape_wave import (
+    _alias_experts,
+    _alias_uniform_fusions,
     _optional_source_matches,
+    _stage_d_parent_allocations,
 )
 from scripts.train_retb_offline_capacity_controls import (
     LOCKED_OFFLINE_SHAPES_RELATIVE_PATH,
@@ -106,6 +109,9 @@ from teacher_logit_reco.relation_expert_token_bridge.step5 import (
     resolve_stage_c_run,
     validate_stage_c_run_registry,
     validate_step5_bundle,
+)
+from teacher_logit_reco.relation_expert_token_bridge.step6 import (
+    STAGE_D_SHAPES,
 )
 
 
@@ -863,6 +869,131 @@ def test_stage_c_registry_and_miniature_completion() -> None:
     )
     assert completion["expert_147_complete"] is True
     assert completion["fusion_21_complete"] is True
+
+
+def test_stage_c_publishes_every_declared_stage_d_parent_shape() -> None:
+    selection = {
+        "SHAPE_COMPACT": {"K": 2},
+        "SHAPE_HIGH": {"K": 16},
+    }
+    heterogeneous = {
+        "HET_SELECTED": {
+            "allocation": {
+                expert: index + 1
+                for index, expert in enumerate(EXPERT_ORDER)
+            }
+        },
+        "HET_BEAM": {
+            "allocation": {
+                expert: index + 2
+                for index, expert in enumerate(EXPERT_ORDER)
+            }
+        },
+    }
+    allocations = _stage_d_parent_allocations(
+        selection=selection,
+        heterogeneous=heterogeneous,
+    )
+    assert tuple(allocations) == STAGE_D_SHAPES
+    assert allocations["S1_128"] == {
+        expert: 1 for expert in EXPERT_ORDER
+    }
+    assert allocations["SHAPE_COMPACT"] == {
+        expert: 2 for expert in EXPERT_ORDER
+    }
+    assert allocations["SHAPE_HIGH"] == {
+        expert: 16 for expert in EXPERT_ORDER
+    }
+
+
+def test_stage_c_materializes_s1_expert_and_fusion_parent_paths(
+    tmp_path: Path,
+) -> None:
+    expert_rows = []
+    for seed in (101, 202, 303):
+        for expert in EXPERT_ORDER:
+            run_id = f"offline-{expert}-{seed}"
+            expert_rows.append(
+                {
+                    "run_id": run_id,
+                    "seed": seed,
+                    "configuration": {
+                        "shape_id": "S1_128",
+                        "expert_id": expert,
+                    },
+                }
+            )
+            source = (
+                tmp_path
+                / "runs"
+                / "stage_c"
+                / "offline_experts"
+                / run_id
+                / f"seed_{seed}"
+            )
+            source.mkdir(parents=True)
+            (source / "checkpoint_registration.json").write_bytes(
+                f"registration-{expert}-{seed}".encode()
+            )
+            (source / "best_model_val.pt").write_bytes(
+                f"checkpoint-{expert}-{seed}".encode()
+            )
+    fusion_rows = []
+    for seed in (101, 202, 303):
+        run_id = f"fusion-{seed}"
+        fusion_rows.append(
+            {
+                "run_id": run_id,
+                "seed": seed,
+                "configuration": {"shape_id": "S1_128"},
+            }
+        )
+        source = tmp_path / "runs" / "stage_c" / run_id
+        source.mkdir(parents=True)
+        for name in (
+            "fusion_registration.json",
+            "best_model_val.pt",
+            "val_design_inference.json",
+            "val_design_predictions.npz",
+        ):
+            (source / name).write_bytes(f"{name}-{seed}".encode())
+    registry = {
+        "expert_confirmation_rows": expert_rows,
+        "canonical_fusion_rows": fusion_rows,
+    }
+    _alias_experts(
+        root=tmp_path,
+        alias="S1_128",
+        allocation={expert: 1 for expert in EXPERT_ORDER},
+        registry=registry,
+    )
+    _alias_uniform_fusions(
+        root=tmp_path,
+        alias="S1_128",
+        source_shape="S1_128",
+        registry=registry,
+    )
+    for seed in (101, 202, 303):
+        for expert in EXPERT_ORDER:
+            target = (
+                tmp_path
+                / "selection"
+                / "offline_experts"
+                / "S1_128"
+                / expert
+                / f"seed_{seed}"
+            )
+            assert (target / "checkpoint_registration.json").is_file()
+            assert (target / "best_model_val.pt").is_file()
+        fusion = (
+            tmp_path
+            / "selection"
+            / "offline_fusions"
+            / "S1_128"
+            / f"seed_{seed}"
+        )
+        assert (fusion / "fusion_registration.json").is_file()
+        assert (fusion / "best_model_val.pt").is_file()
 
 
 def test_step5_bundle_publication_and_selection_cli(

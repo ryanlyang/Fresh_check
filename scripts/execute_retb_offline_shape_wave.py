@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 import torch
@@ -56,6 +56,9 @@ from teacher_logit_reco.relation_expert_token_bridge.registry import (  # noqa: 
 from teacher_logit_reco.relation_expert_token_bridge.step5 import (  # noqa: E402
     validate_stage_c_run_registry,
 )
+from teacher_logit_reco.relation_expert_token_bridge.step6 import (  # noqa: E402
+    STAGE_D_SHAPES,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     authorize_dataset_access,
     load_and_validate_campaign_source,
@@ -96,6 +99,40 @@ def _shape_for(k: int, d: int = 128) -> str:
     if len(matches) != 1:
         raise ValueError(f"uniform shape for K={k}, D={d} differs")
     return matches[0]
+
+
+def _stage_d_parent_allocations(
+    *,
+    selection: Mapping[str, object],
+    heterogeneous: Mapping[str, object],
+) -> dict[str, dict[str, int]]:
+    allocations = {
+        "S1_128": {name: 1 for name in EXPERT_ORDER},
+        "SHAPE_COMPACT": {
+            name: int(selection["SHAPE_COMPACT"]["K"])
+            for name in EXPERT_ORDER
+        },
+        "SHAPE_HIGH": {
+            name: int(selection["SHAPE_HIGH"]["K"])
+            for name in EXPERT_ORDER
+        },
+        "HET_PHYSICS": {
+            name: int(HET_PHYSICS[name]) for name in EXPERT_ORDER
+        },
+        "HET_SELECTED": {
+            name: int(
+                heterogeneous["HET_SELECTED"]["allocation"][name]
+            )
+            for name in EXPERT_ORDER
+        },
+        "HET_BEAM": {
+            name: int(heterogeneous["HET_BEAM"]["allocation"][name])
+            for name in EXPERT_ORDER
+        },
+    }
+    if tuple(allocations) != STAGE_D_SHAPES:
+        raise RuntimeError("Stage-D offline parent shape coverage differs")
+    return allocations
 
 
 def _analytical_fusion_flops(
@@ -680,29 +717,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         / "retb_heterogeneous_shapes.json",
         heterogeneous,
     )
-    allocations = {
-        "SHAPE_COMPACT": {
-            name: int(selection["SHAPE_COMPACT"]["K"])
-            for name in EXPERT_ORDER
-        },
-        "SHAPE_HIGH": {
-            name: int(selection["SHAPE_HIGH"]["K"])
-            for name in EXPERT_ORDER
-        },
-        "HET_PHYSICS": {
-            name: int(HET_PHYSICS[name]) for name in EXPERT_ORDER
-        },
-        "HET_SELECTED": {
-            name: int(
-                heterogeneous["HET_SELECTED"]["allocation"][name]
-            )
-            for name in EXPERT_ORDER
-        },
-        "HET_BEAM": {
-            name: int(heterogeneous["HET_BEAM"]["allocation"][name])
-            for name in EXPERT_ORDER
-        },
-    }
+    allocations = _stage_d_parent_allocations(
+        selection=selection,
+        heterogeneous=heterogeneous,
+    )
     for alias, allocation in allocations.items():
         _alias_experts(
             root=args.campaign_root,
@@ -710,11 +728,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             allocation=allocation,
             registry=registry,
         )
-        if alias in {"SHAPE_COMPACT", "SHAPE_HIGH"}:
+        if alias in {"S1_128", "SHAPE_COMPACT", "SHAPE_HIGH"}:
             _alias_uniform_fusions(
                 root=args.campaign_root,
                 alias=alias,
-                source_shape=selection[alias]["shape_id"],
+                source_shape=(
+                    "S1_128"
+                    if alias == "S1_128"
+                    else selection[alias]["shape_id"]
+                ),
                 registry=registry,
             )
         else:

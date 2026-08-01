@@ -5535,3 +5535,14 @@ requested hidden width. Forward/backward regressions cover expansion factors
 2, 4, and 6. This is a runtime realization correction to the already frozen
 grid and changes no candidate tuple, selector rule, input, training budget,
 run identity, or scientific underperformance policy.
+
+## Stage-C-to-D parent-surface amendment (2026-08-01)
+
+Stage C publishes immutable expert-checkpoint and canonical-fusion aliases for
+every shape declared by the Stage-D registry. The publication surface is
+exactly `S1_128`, `SHAPE_COMPACT`, `SHAPE_HIGH`, `HET_PHYSICS`,
+`HET_SELECTED`, and `HET_BEAM`; missing or extra aliases fail closed.
+`S1_128` binds the already trained canonical one-token expert and fusion
+artifacts rather than retraining them. This closes a runtime path omission and
+changes no checkpoint, shape selection, training budget, run identity, or
+scientific underperformance policy.
