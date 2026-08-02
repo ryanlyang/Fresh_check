@@ -1636,7 +1636,7 @@ def build_static_experiment_bundle(
     execution_profile = str(
         production_graph.get("execution_profile", "standard")
     )
-    if execution_profile == "offline_abc_streamed":
+    if execution_profile in {"offline_abc_streamed", "full_streamed"}:
         fusion_records = groups["offline_fusion_training"]
         execution_groups["offline_fusion_cache"] = (
             _stage_c_streamed_wave_records(
@@ -1674,10 +1674,10 @@ def build_static_experiment_bundle(
             "groups": execution_groups,
             "scientific_matrix_counts": full_counts,
             "persistent_frozen_token_cache_rows": (
-                0 if execution_profile == "offline_abc_streamed" else 63
+                0 if execution_profile in {"offline_abc_streamed", "full_streamed"} else 63
             ),
             "streamed_fusion_wave_count": (
-                21 if execution_profile == "offline_abc_streamed" else 0
+                21 if execution_profile in {"offline_abc_streamed", "full_streamed"} else 0
             ),
             "physical_run_deduplication": "first_registry_membership_order",
             "miniature_policy": (

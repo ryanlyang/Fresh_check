@@ -44,6 +44,10 @@ from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # no
     STREAMED_OFFLINE_ROLES,
     build_streamed_abc_execution_profile,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    FULL_STREAMED_PROFILE,
+    STREAMED_SMOKE_PROFILE,
+)
 
 
 ROLES = (
@@ -129,7 +133,10 @@ def build_stage_a_task_manifests(
     nodes = {str(row["node_id"]): row for row in graph["nodes"]}
     counts = _role_counts(graph)
     streamed = execution_profile == STREAMED_ABC_PROFILE
-    if execution_profile not in {"standard", STREAMED_ABC_PROFILE}:
+    if execution_profile not in {
+        "standard", STREAMED_ABC_PROFILE, FULL_STREAMED_PROFILE,
+        STREAMED_SMOKE_PROFILE,
+    }:
         raise ValueError("Stage-A execution profile differs")
     offline_roles = STREAMED_OFFLINE_ROLES if streamed else ROLES
     hlt_views = STREAMED_HLT_VIEWS if streamed else HLT_VIEWS

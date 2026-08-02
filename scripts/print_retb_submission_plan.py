@@ -24,7 +24,10 @@ def main() -> int:
     parser.add_argument("--production-graph", required=True, type=Path)
     parser.add_argument(
         "--submission-scope",
-        choices=("complete", "offline_abc", "offline_abc_streamed"),
+        choices=(
+            "complete", "offline_abc", "offline_abc_streamed",
+            "full_streamed", "streamed_smoke",
+        ),
         default="complete",
     )
     args = parser.parse_args()

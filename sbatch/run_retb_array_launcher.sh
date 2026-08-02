@@ -38,7 +38,9 @@ resource_arguments=(
 )
 if [[ "${RETB_NODE_RESOURCE:-cpu}" == "gpu" ]]; then
   resolved_gpu_mem="${GPU_MEM}"
-  if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "offline_abc_streamed" && "${RETB_NODE_ID}" == "offline_fusion_cache" ]]; then
+  if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "full_streamed" ]]; then
+    resolved_gpu_mem="${RETB_STREAMED_GPU_MEM}"
+  elif [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "offline_abc_streamed" && "${RETB_NODE_ID}" == "offline_fusion_cache" ]]; then
     resolved_gpu_mem="${RETB_STREAMED_GPU_MEM}"
   fi
   resource_arguments+=(

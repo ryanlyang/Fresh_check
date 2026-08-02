@@ -432,6 +432,10 @@ def execute_internal_phase(
         maximum = min(
             int(plan["maximum_concurrent_tasks"]), int(plan["row_count"])
         )
+        streamed = os.environ.get("RETB_SUBMISSION_SCOPE") in {
+            "full_streamed", "streamed_smoke", "offline_abc_streamed"
+        }
+        gpu_memory = "440G" if streamed else "220G"
         arguments = [
             "sbatch",
             "--parsable",
@@ -449,7 +453,7 @@ def execute_internal_phase(
                 "%x_%A_%a.err"
             ),
             "--cpus-per-task=16",
-            "--mem=220G" if plan["resource"] == "gpu" else "--mem=192G",
+            f"--mem={gpu_memory}" if plan["resource"] == "gpu" else "--mem=192G",
         ]
         if plan["resource"] == "gpu":
             arguments.append("--gres=gpu:gh200:1")

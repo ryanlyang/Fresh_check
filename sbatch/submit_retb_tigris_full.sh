@@ -43,6 +43,16 @@ case "${1:-}" in
     RETB_MINIATURE=0
     RETB_SUBMISSION_SCOPE="offline_abc_streamed"
     ;;
+  --streamed-submit)
+    mode="submit"
+    RETB_MINIATURE=0
+    RETB_SUBMISSION_SCOPE="full_streamed"
+    ;;
+  --streamed-smoke-submit)
+    mode="submit"
+    RETB_MINIATURE=1
+    RETB_SUBMISSION_SCOPE="streamed_smoke"
+    ;;
   --resume)
     echo "Use scripts/plan_retb_resume.py with authenticated completed-node outputs, then resubmit only its ready nodes." >&2
     echo "Automatic state guessing is intentionally disabled." >&2
@@ -51,7 +61,7 @@ case "${1:-}" in
   "")
     ;;
   *)
-    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--offline-streamed-submit|--resume CAMPAIGN_ROOT]" >&2
+    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--offline-streamed-submit|--streamed-submit|--streamed-smoke-submit|--resume CAMPAIGN_ROOT]" >&2
     exit 2
     ;;
 esac
@@ -142,7 +152,7 @@ if [[ "${RETB_MINIATURE}" != "1" && ! -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   fi
   exit 2
 fi
-if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" == "complete" ]]; then
+if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" =~ ^(complete|full_streamed)$ ]]; then
   if [[ ! -f "${RETB_OPERATIONAL_AUTHORIZATION}" ]]; then
     echo "Authenticated RETB operational authorization is absent: ${RETB_OPERATIONAL_AUTHORIZATION}" >&2
     echo "Complete local validation, a real miniature Tigris smoke, and the authenticated production dry run first." >&2
@@ -259,6 +269,44 @@ submit_node() {
     --export="ALL,PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_NODE_ID=${node_id},RETB_NODE_RESOURCE=${resource},RETB_RESOURCE_KIND=${resource},RETB_MINIATURE=${RETB_MINIATURE},RETB_SUBMISSION_SCOPE=${RETB_SUBMISSION_SCOPE},RETB_STORAGE_MEASUREMENTS=${RETB_STORAGE_MEASUREMENTS},RETB_FROZEN_REENTRY=1,RETB_FROZEN_SOURCE_COMMIT=${RETB_FROZEN_SOURCE_COMMIT},RETB_SUBMISSION_PROJECT_DIR=${RETB_SUBMISSION_PROJECT_DIR},RETB_SOURCE_WORKTREE_ROOT=${RETB_SOURCE_WORKTREE_ROOT}" \
     "${executable}"
 }
+
+if [[ "${RETB_SUBMISSION_SCOPE}" == "streamed_smoke" ]]; then
+  declare -a smoke_bindings=()
+  split_job="$(submit_node split_build "" cpu run_retb_build_splits.sh 0 direct_worker)"
+  smoke_bindings+=("split_build=${split_job}")
+  bootstrap_job="$(submit_node campaign_bootstrap "${split_job}" cpu run_retb_build_campaign.sh 0 direct_worker)"
+  smoke_bindings+=("campaign_bootstrap=${bootstrap_job}")
+  previous_job="${bootstrap_job}"
+  while IFS='|' read -r phase_id stage resource kind; do
+    resource_arguments=(
+      --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}"
+      --cpus-per-task="${CPU_CPUS_PER_TASK}" --mem="${CPU_MEM}"
+    )
+    if [[ "${resource}" == "gpu" ]]; then
+      resource_arguments+=(--gres="${GPU_GRES}" --cpus-per-task="${GPU_CPUS_PER_TASK}" --mem="${GPU_MEM}")
+    fi
+    phase_job="$(sbatch --parsable "${resource_arguments[@]}" \
+      --dependency="afterok:${previous_job}" \
+      --job-name="${campaign_id}_streamed_smoke_${phase_id}" \
+      --output="${log_pattern}" --error="${error_pattern}" \
+      --export="ALL,PROJECT_DIR=${PROJECT_DIR},CAMPAIGN_ROOT=${campaign_root},CAMPAIGN_ID=${campaign_id},RETB_SMOKE_PHASE_ID=${phase_id},RETB_NODE_RESOURCE=${resource},RETB_SUBMISSION_SCOPE=streamed_smoke,RETB_FROZEN_REENTRY=1,RETB_FROZEN_SOURCE_COMMIT=${RETB_FROZEN_SOURCE_COMMIT},RETB_SUBMISSION_PROJECT_DIR=${RETB_SUBMISSION_PROJECT_DIR},RETB_SOURCE_WORKTREE_ROOT=${RETB_SOURCE_WORKTREE_ROOT}" \
+      "${SCRIPT_DIR}/run_retb_streamed_smoke_phase.sh")"
+    smoke_bindings+=("${phase_id}=${phase_job}")
+    previous_job="${phase_job}"
+    printf 'submitted compact smoke Stage %s %-24s %s (%s)\n' "${stage}" "${phase_id}" "${phase_job}" "${kind}"
+  done < <(python scripts/print_retb_streamed_smoke_phases.py)
+  smoke_ledger_arguments=()
+  for binding in "${smoke_bindings[@]}"; do
+    smoke_ledger_arguments+=(--job "${binding}")
+  done
+  python scripts/write_retb_streamed_smoke_ledger.py \
+    --production-graph "${graph}" \
+    "${smoke_ledger_arguments[@]}" \
+    --output "${campaign_root}/job_ledgers/streamed_smoke_submission_ledger.json"
+  printf 'campaign root: %s\ncompact streamed smoke allocations: %s\n' "${campaign_root}" "${#smoke_bindings[@]}"
+  printf 'monitor: squeue -u "$USER" -o "%%i %%j %%T %%R" | grep %q\n' "${campaign_id}"
+  exit 0
+fi
 
 declare -A jobs
 while IFS='|' read -r node_id stage dependencies resource worker is_array alias dispatch_mode; do

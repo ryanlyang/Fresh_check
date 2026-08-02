@@ -24,6 +24,13 @@ from teacher_logit_reco.relation_expert_token_bridge.phased_campaign import (  #
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    is_streamed_profile,
+    task_local_workspace,
+)
+from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
+    PRODUCTION_GRAPH_CONTRACT,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -50,9 +57,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         if raw is None or not raw.isdigit():
             raise ValueError("internal phase task index is absent")
         index = int(raw)
-    result = execute_internal_phase_row(
-        plan=plan, task_index=index, repo_root=REPO_ROOT
+    graph = load_hashed_json(
+        args.campaign_root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
     )
+    if is_streamed_profile(graph.get("execution_profile")):
+        with task_local_workspace(
+            campaign_id=str(campaign["campaign_id"]),
+            node_id=f"{plan['controller_id']}_{plan['phase_id']}",
+            task_index=index,
+        ) as workspace:
+            keys = ("RETB_TASK_LOCAL_ROOT", "TMPDIR", "TMP", "TEMP", "TORCH_EXTENSIONS_DIR")
+            previous = {key: os.environ.get(key) for key in keys}
+            for key in keys[:-1]:
+                os.environ[key] = str(workspace)
+            os.environ["TORCH_EXTENSIONS_DIR"] = str(workspace / "torch_extensions")
+            try:
+                result = execute_internal_phase_row(
+                    plan=plan, task_index=index, repo_root=REPO_ROOT
+                )
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+    else:
+        result = execute_internal_phase_row(
+            plan=plan, task_index=index, repo_root=REPO_ROOT
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

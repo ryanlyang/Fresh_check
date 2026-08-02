@@ -22,9 +22,14 @@ from .plan_factory_registry import (
     build_manifest_plan_factory_registry,
     validate_manifest_plan_factory_registry,
 )
+from .streamed_execution import (
+    FULL_STREAMED_PROFILE,
+    STREAMED_SMOKE_PROFILE,
+    is_streamed_profile,
+)
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v37"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v38"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v17"
 )
@@ -38,7 +43,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v33"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v34"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -1602,10 +1607,15 @@ def build_production_graph(
     concurrency: Mapping[str, int] | None = None,
     execution_profile: str = "standard",
 ) -> dict[str, Any]:
-    if execution_profile not in {"standard", "offline_abc_streamed"}:
+    if execution_profile not in {
+        "standard", "offline_abc_streamed", FULL_STREAMED_PROFILE,
+        STREAMED_SMOKE_PROFILE,
+    }:
         raise ValueError("production execution profile differs")
-    if miniature and execution_profile != "standard":
-        raise ValueError("miniature graph cannot use the streamed A-C profile")
+    if miniature and execution_profile not in {"standard", STREAMED_SMOKE_PROFILE}:
+        raise ValueError("miniature graph execution profile differs")
+    if not miniature and execution_profile == STREAMED_SMOKE_PROFILE:
+        raise ValueError("streamed smoke profile requires miniature data")
     resolved = dict(DEFAULT_CONCURRENCY)
     if concurrency is not None:
         if set(concurrency) != set(DEFAULT_CONCURRENCY):
@@ -1656,7 +1666,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 34,
+            "schema_version": 35,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -1683,10 +1693,16 @@ def build_production_graph(
             ),
             "execution_profile": execution_profile,
             "persistent_future_input_materialization": (
-                execution_profile == "standard"
+                execution_profile in {"standard", FULL_STREAMED_PROFILE}
             ),
             "task_local_frozen_token_banks": (
-                execution_profile == "offline_abc_streamed"
+                is_streamed_profile(execution_profile)
+            ),
+            "task_local_stage_d_through_n_intermediates": (
+                execution_profile in {FULL_STREAMED_PROFILE, STREAMED_SMOKE_PROFILE}
+            ),
+            "smoke_evidence_eligible_for_production": (
+                False if execution_profile == STREAMED_SMOKE_PROFILE else None
             ),
             "degradation_profile": "D_NOMINAL",
             "degradation_profile_implicit_override_allowed": False,
@@ -1758,7 +1774,7 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
     digest = validate_content_hash(
         payload, expected_contract=PRODUCTION_GRAPH_CONTRACT
     )
-    if int(payload.get("schema_version", -1)) != 34:
+    if int(payload.get("schema_version", -1)) != 35:
         raise ValueError("production graph schema version differs")
     nodes = list(payload.get("nodes", ()))
     by_id = {str(node["node_id"]): node for node in nodes}
@@ -1872,19 +1888,28 @@ def validate_production_graph(payload: Mapping[str, Any]) -> str:
         ):
             raise ValueError("production split-size profile differs")
     execution_profile = payload.get("execution_profile")
-    if execution_profile not in {"standard", "offline_abc_streamed"}:
+    if execution_profile not in {
+        "standard", "offline_abc_streamed", FULL_STREAMED_PROFILE,
+        STREAMED_SMOKE_PROFILE,
+    }:
         raise ValueError("production execution profile differs")
     if (
         profile == "nonproduction_miniature_test"
-        and execution_profile != "standard"
+        and execution_profile not in {"standard", STREAMED_SMOKE_PROFILE}
     ):
         raise ValueError("miniature production graph execution profile differs")
+    if profile != "nonproduction_miniature_test" and execution_profile == STREAMED_SMOKE_PROFILE:
+        raise ValueError("production graph cannot use smoke execution")
     if (
         payload["degradation_profile"] != "D_NOMINAL"
         or payload.get("persistent_future_input_materialization")
-        != (execution_profile == "standard")
+        != (execution_profile in {"standard", FULL_STREAMED_PROFILE})
         or payload.get("task_local_frozen_token_banks")
-        != (execution_profile == "offline_abc_streamed")
+        != is_streamed_profile(execution_profile)
+        or payload.get("task_local_stage_d_through_n_intermediates")
+        != (execution_profile in {FULL_STREAMED_PROFILE, STREAMED_SMOKE_PROFILE})
+        or payload.get("smoke_evidence_eligible_for_production")
+        != (False if execution_profile == STREAMED_SMOKE_PROFILE else None)
         or payload.get("split_sizes") != expected_split_sizes
         or payload.get("scientific_results_allowed")
         != (profile != "nonproduction_miniature_test")

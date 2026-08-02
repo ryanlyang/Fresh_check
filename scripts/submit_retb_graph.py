@@ -39,6 +39,11 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
     bind_source,
     write_immutable_json,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    FULL_STREAMED_PROFILE,
+    STREAMED_SMOKE_PROFILE,
+    build_streamed_execution_profile,
+)
 
 
 def _campaign_id(source: dict[str, object]) -> str:
@@ -76,7 +81,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--write-artifacts", action="store_true")
     parser.add_argument(
         "--submission-scope",
-        choices=("complete", "offline_abc", "offline_abc_streamed"),
+        choices=(
+            "complete", "offline_abc", "offline_abc_streamed",
+            "full_streamed", "streamed_smoke",
+        ),
         default="complete",
     )
     for name, default in DEFAULT_CONCURRENCY.items():
@@ -94,8 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--dry-run may not write campaign artifacts")
     if args.smoke_simulate and not args.miniature:
         raise ValueError("--smoke-simulate requires --miniature")
-    if args.submission_scope != "complete" and args.miniature:
+    if args.submission_scope not in {"complete", "streamed_smoke"} and args.miniature:
         raise ValueError("offline A-C submission requires real production data")
+    if args.submission_scope == "streamed_smoke" and not args.miniature:
+        raise ValueError("streamed smoke submission requires miniature data")
     if (
         args.miniature_split_profile == HOSD_MINIATURE_SPLIT_PROFILE
         and not args.miniature
@@ -159,6 +169,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         execution_profile=(
             "offline_abc_streamed"
             if args.submission_scope == "offline_abc_streamed"
+            else FULL_STREAMED_PROFILE
+            if args.submission_scope == "full_streamed"
+            else STREAMED_SMOKE_PROFILE
+            if args.submission_scope == "streamed_smoke"
             else "standard"
         ),
     )
@@ -247,6 +261,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                         else "offline_submission_scope.json"
                     ),
                     offline_scope,
+                )
+            )
+        if args.submission_scope in {"full_streamed", "streamed_smoke"}:
+            streamed_profile = build_streamed_execution_profile(
+                campaign_id=campaign_id,
+                campaign_root=campaign_root,
+                source=source,
+                profile=str(graph["execution_profile"]),
+            )
+            result["streamed_execution_profile_publication"] = (
+                write_immutable_json(
+                    campaign_root / "job_ledgers" / "streamed_execution_profile.json",
+                    streamed_profile,
                 )
             )
     print(json.dumps(result, indent=2, sort_keys=True))

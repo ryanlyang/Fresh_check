@@ -31,6 +31,15 @@ from teacher_logit_reco.relation_expert_token_bridge.task_completion import (  #
     publish_task_row_completion,
     reusable_task_row_completion,
 )
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    build_task_lifecycle_receipt,
+    is_streamed_profile,
+    select_task_local_parent,
+    task_local_workspace,
+)
+from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
+    write_immutable_json,
+)
 
 
 def _prune_streamed_resume_states(row: dict) -> list[str]:
@@ -141,23 +150,79 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment.update(row["environment"])
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    completed = subprocess.run(
-        row["argv"],
-        cwd=REPO_ROOT,
-        env=environment,
-        check=False,
-    )
-    if completed.returncode != 0:
-        return int(completed.returncode)
-    missing = [
-        value
-        for value in row["expected_outputs"]
-        if not Path(value).is_file()
-    ]
-    if missing:
-        raise FileNotFoundError(
-            f"task completed without expected outputs: {missing}"
+    streamed = is_streamed_profile(graph.get("execution_profile"))
+    completed = None
+    execution_error: BaseException | None = None
+    workspace_parent = select_task_local_parent(environment)
+    if streamed:
+        try:
+            with task_local_workspace(
+                campaign_id=str(campaign["campaign_id"]),
+                node_id=str(manifest["node_id"]),
+                task_index=index,
+                environment=environment,
+            ) as workspace:
+                environment["RETB_TASK_LOCAL_ROOT"] = str(workspace)
+                environment["TMPDIR"] = str(workspace)
+                environment["TMP"] = str(workspace)
+                environment["TEMP"] = str(workspace)
+                environment["TORCH_EXTENSIONS_DIR"] = str(
+                    workspace / "torch_extensions"
+                )
+                completed = subprocess.run(
+                    row["argv"], cwd=REPO_ROOT, env=environment, check=False
+                )
+                if completed.returncode != 0:
+                    execution_error = RuntimeError(
+                        f"task command exited {completed.returncode}"
+                    )
+                else:
+                    missing = [
+                        value for value in row["expected_outputs"]
+                        if not Path(value).is_file()
+                    ]
+                    if missing:
+                        execution_error = FileNotFoundError(
+                            f"task completed without expected outputs: {missing}"
+                        )
+        except BaseException as error:  # cleanup is guaranteed by the context
+            execution_error = error
+        receipt = build_task_lifecycle_receipt(
+            campaign_spec_sha256=campaign["content_hash"],
+            task_manifest_sha256=manifest["content_hash"],
+            node_id=manifest["node_id"], task_index=index,
+            status="failed" if execution_error is not None else "completed",
+            workspace_parent=workspace_parent,
+            workspace_removed=True,
+            output_paths=row["expected_outputs"], source=campaign["source"],
         )
+        receipt_name = f"task_{index:06d}.json"
+        if execution_error is not None:
+            attempt = environment.get("SLURM_JOB_ID", str(os.getpid()))
+            receipt_name = f"task_{index:06d}_failed_{attempt}.json"
+        receipt_path = (
+            args.campaign_root / "job_ledgers" / "streamed_tasks"
+            / str(manifest["node_id"]) / receipt_name
+        )
+        write_immutable_json(receipt_path, receipt)
+        if execution_error is not None:
+            if completed is not None and completed.returncode != 0:
+                return int(completed.returncode)
+            raise execution_error
+    else:
+        completed = subprocess.run(
+            row["argv"], cwd=REPO_ROOT, env=environment, check=False
+        )
+        if completed.returncode != 0:
+            return int(completed.returncode)
+        missing = [
+            value for value in row["expected_outputs"]
+            if not Path(value).is_file()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                f"task completed without expected outputs: {missing}"
+            )
     completion = publish_task_row_completion(
         campaign_root=args.campaign_root,
         campaign=campaign,
@@ -169,8 +234,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "row_completion_sha256": completion["artifact"]["content_hash"],
         "row_completion_path": completion["path"],
     }
-    if graph.get("execution_profile") == "offline_abc_streamed":
+    if streamed:
         result["pruned_resume_states"] = _prune_streamed_resume_states(row)
+        result["streamed_lifecycle_receipt"] = str(receipt_path)
+        result["streamed_lifecycle_receipt_sha256"] = receipt["content_hash"]
     if int(manifest["task_count"]) == 1:
         aggregate = publish_task_manifest_completion(
             campaign_root=args.campaign_root,
