@@ -105,6 +105,16 @@ def _identity_hash(arrays: dict[str, np.ndarray]) -> str:
     ).hexdigest()
 
 
+def _tap_probe_head_type(target: np.ndarray) -> str:
+    """Classify canonical/evaluation or replica-stacked pair target layouts."""
+    dimensions = int(np.asarray(target).ndim)
+    if dimensions in {4, 5}:
+        return "pair"
+    if dimensions == 2 or dimensions == 3:
+        return "global"
+    raise ValueError("probe target rank is not registered")
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -732,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
         if kind in {"P_LINEAR", "P_SHALLOW"}:
             if "states" not in train or "particle_mask" not in train:
                 raise ValueError("streamed tap populations are absent")
-            head_type = "pair" if train["target"].ndim == 4 else "global"
+            head_type = _tap_probe_head_type(train["target"])
             model = build_tap_probe(
                 probe_kind=kind,
                 tap=row["tap"],

@@ -518,6 +518,23 @@ def test_probe_payloads_are_content_addressed_hardlinks_without_tap_states(
         assert "particle_mask" not in payload.files
 
 
+def test_replica_stacked_pair_probe_uses_pair_head() -> None:
+    script = REPO_ROOT / "scripts" / "train_hosd_probe.py"
+    spec = importlib.util.spec_from_file_location("hosd_probe_train_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._tap_probe_head_type(
+        np.zeros((4, 2, 8, 8, 13), dtype=np.float32)
+    ) == "pair"
+    assert module._tap_probe_head_type(
+        np.zeros((2, 8, 8, 13), dtype=np.float32)
+    ) == "pair"
+    assert module._tap_probe_head_type(
+        np.zeros((4, 2, 32), dtype=np.float32)
+    ) == "global"
+
+
 def test_probe_input_materializer_accepts_locked_identity_aliases() -> None:
     script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
     spec = importlib.util.spec_from_file_location("hosd_probe_input_identity_runtime", script)
