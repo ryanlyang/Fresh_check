@@ -31,6 +31,7 @@ from teacher_logit_reco.relational_part import (
 )
 from teacher_logit_reco.relational_part.train import _capture_diagnostics
 from teacher_logit_reco.relational_part.attention import (
+    _weaver_custom_attention_weights,
     attention_allocation_diagnostics,
     capture_multihead_attention_weights,
 )
@@ -188,6 +189,88 @@ class _CustomWeaverAttention(torch.nn.Module):
             batch, query_count, dimension
         )
         return self.out_proj(output), None
+
+
+def test_edge_value_accepts_custom_weaver_attention_and_zero_path_is_exact() -> None:
+    torch.manual_seed(131)
+    reference = _CustomWeaverAttention().eval()
+    wrapped = EdgeValueAttention(reference, relation_width=5).eval()
+    wrapped.edge_projection.data.zero_()
+    query = torch.randn(2, 4, 8)
+    valid = torch.tensor([[True, True, True, False], [True, True, False, False]])
+    relation = torch.randn(2, 5, 4, 4)
+    relation = relation * (
+        valid[:, None, :, None] & valid[:, None, None, :]
+    )
+    expected, expected_weights = reference(
+        query,
+        query,
+        query,
+        key_padding_mask=~valid,
+    )
+    wrapped.bind(relation, valid)
+    actual, actual_weights = wrapped(
+        query,
+        query,
+        query,
+        key_padding_mask=~valid,
+    )
+    wrapped.clear()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert expected_weights is None and actual_weights is None
+
+
+def test_custom_weaver_edge_value_output_masking_and_gradients() -> None:
+    torch.manual_seed(137)
+    reference = _CustomWeaverAttention().eval()
+    wrapped = EdgeValueAttention(reference, relation_width=5).eval()
+    query = torch.randn(2, 4, 8, requires_grad=True)
+    valid = torch.tensor([[True, True, True, False], [True, True, False, False]])
+    raw_relation = torch.randn(2, 5, 4, 4, requires_grad=True)
+    relation = raw_relation * (
+        valid[:, None, :, None] & valid[:, None, None, :]
+    )
+    ordinary, _ = reference(
+        query,
+        query,
+        query,
+        key_padding_mask=~valid,
+    )
+    wrapped.bind(relation, valid)
+    actual, returned_weights = wrapped(
+        query,
+        query,
+        query,
+        key_padding_mask=~valid,
+    )
+    wrapped.clear()
+    assert returned_weights is None
+    weights = _weaver_custom_attention_weights(
+        reference,
+        (query, query, query),
+        {"key_padding_mask": ~valid},
+    )
+    relation_message = efficient_edge_value_message(
+        weights, relation, wrapped.edge_projection
+    )
+    projected_message = torch.nn.functional.linear(
+        relation_message.permute(0, 2, 1, 3).reshape(2, 4, 8),
+        reference.out_proj.weight,
+        bias=None,
+    ) * valid.unsqueeze(-1)
+    torch.testing.assert_close(
+        actual, ordinary + projected_message, atol=2e-6, rtol=2e-6
+    )
+    delta = actual - ordinary
+    masked_delta = delta.masked_select(~valid.unsqueeze(-1))
+    assert torch.equal(masked_delta, torch.zeros_like(masked_delta))
+    assert bool(delta.masked_select(valid.unsqueeze(-1)).abs().sum() > 0)
+    actual.square().sum().backward()
+    assert wrapped.edge_projection.grad is not None
+    assert bool(wrapped.edge_projection.grad.abs().sum() > 0)
+    assert raw_relation.grad is not None
+    assert bool(raw_relation.grad.abs().sum() > 0)
+    assert query.grad is not None
 
 
 class SequenceTrimmer(torch.nn.Module):

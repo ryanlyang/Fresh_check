@@ -101,7 +101,7 @@ def _weaver_custom_attention_weights(
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
 ) -> Any:
-    """Recompute the probabilities used by Weaver's custom Attention."""
+    """Compute Weaver's custom attention weights, including training dropout."""
 
     module = _require_torch()
     query = args[0] if len(args) > 0 else kwargs["query"]
@@ -158,8 +158,10 @@ def _weaver_custom_attention_weights(
         logits = logits + padding_mask.view(batch, 1, 1, context_count)
     probabilities = F.softmax(logits, dim=-1)
     if bool(attention.training) and float(attention.dropout) > 0:
-        raise RuntimeError(
-            "custom Weaver attention diagnostics require evaluation mode"
+        probabilities = F.dropout(
+            probabilities,
+            p=float(attention.dropout),
+            training=True,
         )
     return probabilities
 
@@ -581,6 +583,18 @@ class LayerwiseBiasProjection(torch.nn.Module if torch is not None else object):
 
 def _value_tokens(attention: Any, value: Any) -> Any:
     module = _require_torch()
+    packed_projection = getattr(attention, "in_proj", None)
+    if isinstance(packed_projection, module.nn.Linear):
+        embed_dim = int(packed_projection.out_features // 3)
+        return F.linear(
+            value,
+            packed_projection.weight[2 * embed_dim :],
+            (
+                None
+                if packed_projection.bias is None
+                else packed_projection.bias[2 * embed_dim :]
+            ),
+        )
     weight = getattr(attention, "in_proj_weight", None)
     bias = getattr(attention, "in_proj_bias", None)
     embed_dim = int(getattr(attention, "embed_dim"))
@@ -601,13 +615,30 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
     def __init__(self, reference: Any, *, relation_width: int) -> None:
         module = _require_torch()
         super().__init__()
-        if not isinstance(reference, module.nn.MultiheadAttention):
-            raise TypeError("edge-value path requires nn.MultiheadAttention")
+        native_attention = isinstance(reference, module.nn.MultiheadAttention)
+        custom_attention = _is_weaver_custom_attention(reference, module)
+        if not (native_attention or custom_attention):
+            raise TypeError(
+                "edge-value path requires nn.MultiheadAttention or Weaver Attention"
+            )
         self.reference = reference
-        self.embed_dim = int(reference.embed_dim)
+        self._weaver_custom_attention = bool(custom_attention)
+        self.embed_dim = int(
+            getattr(
+                reference,
+                "embed_dim",
+                getattr(reference.out_proj, "in_features"),
+            )
+        )
         self.num_heads = int(reference.num_heads)
-        self.head_dim = int(reference.embed_dim // reference.num_heads)
-        self.batch_first = bool(reference.batch_first)
+        self.head_dim = int(
+            getattr(reference, "head_dim", self.embed_dim // self.num_heads)
+        )
+        self.batch_first = (
+            True
+            if self._weaver_custom_attention
+            else bool(reference.batch_first)
+        )
         self.dropout = float(reference.dropout)
         self.relation_width = int(relation_width)
         self.edge_projection = module.nn.Parameter(
@@ -651,20 +682,69 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                     "exact_zero_message_reference_path": True,
                 }
             return output, returned_weights
-        call = dict(kwargs)
-        call["need_weights"] = True
-        if "average_attn_weights" in inspect.signature(
-            self.reference.forward
-        ).parameters:
-            call["average_attn_weights"] = False
-        ordinary_output, weights = self.reference(query, key, value, **call)
+        if self._weaver_custom_attention:
+            unsupported = {"need_weights", "average_attn_weights"} & set(kwargs)
+            if unsupported:
+                raise TypeError(
+                    "Weaver Attention does not accept "
+                    + ", ".join(sorted(unsupported))
+                )
+            weights = _weaver_custom_attention_weights(
+                self.reference,
+                (query, key, value),
+                kwargs,
+            )
+        else:
+            call = dict(kwargs)
+            call["need_weights"] = True
+            if "average_attn_weights" in inspect.signature(
+                self.reference.forward
+            ).parameters:
+                call["average_attn_weights"] = False
+            ordinary_output, weights = self.reference(query, key, value, **call)
         if weights.ndim == 3:
             weights = weights.unsqueeze(1)
         relation_message = efficient_edge_value_message(
             weights, relation, self.edge_projection
         )
-        batch_first = bool(getattr(self.reference, "batch_first", False))
-        if batch_first:
+        if self._weaver_custom_attention:
+            value_projected = _value_tokens(self.reference, value)
+            ordinary_heads = value_projected.reshape(
+                value_projected.shape[0],
+                value_projected.shape[1],
+                self.num_heads,
+                self.head_dim,
+            ).permute(0, 2, 1, 3)
+            ordinary_heads = module.einsum(
+                "bhqk,bhkd->bhqd", weights, ordinary_heads
+            )
+            relation_message = relation_message * query_valid[:, None, :, None]
+            if bool(getattr(self.reference, "headwise_attn_output_gate", False)):
+                gate = module.sigmoid(self.reference.gate_proj(query))
+                gate = gate.permute(0, 2, 1).unsqueeze(-1)
+                ordinary_heads = ordinary_heads * gate
+                relation_message = relation_message * gate
+            elif bool(
+                getattr(self.reference, "elementwise_attn_output_gate", False)
+            ):
+                gate = module.sigmoid(self.reference.gate_proj(query)).reshape(
+                    query.shape[0],
+                    query.shape[1],
+                    self.num_heads,
+                    self.head_dim,
+                )
+                gate = gate.permute(0, 2, 1, 3)
+                ordinary_heads = ordinary_heads * gate
+                relation_message = relation_message * gate
+            combined_heads = ordinary_heads + relation_message
+            combined = combined_heads.permute(0, 2, 1, 3).reshape(
+                combined_heads.shape[0], combined_heads.shape[2], -1
+            )
+            output = self.reference.out_proj(combined)
+        batch_first = self.batch_first
+        if self._weaver_custom_attention:
+            pass
+        elif batch_first:
             concatenated = relation_message.permute(0, 2, 1, 3).reshape(
                 relation_message.shape[0], relation_message.shape[2], -1
             )
@@ -674,21 +754,28 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                 relation_message.shape[2], relation_message.shape[0], -1
             )
             query_mask = query_valid.T.unsqueeze(-1)
-        projected = F.linear(
-            concatenated,
-            self.reference.out_proj.weight,
-            bias=None,
-        )
-        projected = projected * query_mask.to(projected.dtype)
-        output = ordinary_output + projected
+        if not self._weaver_custom_attention:
+            projected = F.linear(
+                concatenated,
+                self.reference.out_proj.weight,
+                bias=None,
+            )
+            projected = projected * query_mask.to(projected.dtype)
+            output = ordinary_output + projected
 
         if not self.collect_diagnostics:
             self.last_diagnostics = None
-            returned_weights = weights if requested_weights else None
+            returned_weights = (
+                None
+                if self._weaver_custom_attention
+                else weights if requested_weights else None
+            )
             return output, returned_weights
 
         value_projected = _value_tokens(self.reference, value)
-        if batch_first:
+        if self._weaver_custom_attention:
+            pass
+        elif batch_first:
             value_heads = value_projected.reshape(
                 value_projected.shape[0],
                 value_projected.shape[1],
@@ -702,7 +789,10 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                 self.num_heads,
                 self.head_dim,
             ).permute(0, 2, 1, 3)
-        ordinary_heads = module.einsum("bhqk,bhkd->bhqd", weights, value_heads)
+        if not self._weaver_custom_attention:
+            ordinary_heads = module.einsum(
+                "bhqk,bhkd->bhqd", weights, value_heads
+            )
         numerator = relation_message.norm(dim=-1)
         denominator = ordinary_heads.norm(dim=-1) + 1.0e-6
         ratios = numerator / denominator
@@ -756,7 +846,11 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                 for head in range(self.num_heads)
             ],
         }
-        returned_weights = weights if requested_weights else None
+        returned_weights = (
+            None
+            if self._weaver_custom_attention
+            else weights if requested_weights else None
+        )
         return output, returned_weights
 
 

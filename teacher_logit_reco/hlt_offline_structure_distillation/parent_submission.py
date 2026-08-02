@@ -133,8 +133,6 @@ def shared_parent_runtime_commands(
         str(shared_campaign["campaign_id"]),
         "--campaign-root",
         str(shared),
-        "--storage-measurements",
-        str(shared / "storage_measurements.json"),
         "--write-artifacts",
     ]
     if profile == "miniature_test":
@@ -145,6 +143,16 @@ def shared_parent_runtime_commands(
                 HOSD_MINIATURE_SPLIT_PROFILE,
                 "--split-profile-parent-sha256",
                 str(shared_campaign["parent_artifact_hashes"]["split_audit"]),
+            ]
+        )
+    else:
+        # RETB miniature graphs deliberately construct their one fixed
+        # storage contract internally.  Only genuine production preparation
+        # may consume the source-bound measured storage artifact.
+        graph.extend(
+            [
+                "--storage-measurements",
+                str(shared / "storage_measurements.json"),
             ]
         )
     bootstrap = [

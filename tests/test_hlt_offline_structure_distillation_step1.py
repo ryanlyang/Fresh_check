@@ -572,9 +572,35 @@ def test_shared_parent_runtime_bootstraps_graph_before_task_manifests(
     assert "--miniature-split-profile" in commands[0]
     assert "hosd_real_miniature_v1" in commands[0]
     assert "--split-profile-parent-sha256" in commands[0]
+    assert "--storage-measurements" not in commands[0]
     assert "bootstrap_retb_input_tasks.py" in commands[1][2]
     assert commands[1].index("--production-graph") < commands[1].index(
         "--data-dir"
+    )
+
+    production_retb = with_content_hash(
+        {
+            key: value
+            for key, value in retb.items()
+            if key != "content_hash"
+        }
+        | {"campaign_profile": "production_500k_scale3m"}
+    )
+    (shared / "campaign_spec.json").write_text(
+        json.dumps(production_retb), encoding="utf-8"
+    )
+    production_commands = shared_parent_runtime_commands(
+        campaign_root=root,
+        repo_root=tmp_path,
+        data_dir=tmp_path / "jetclass",
+    )
+    assert "--miniature" not in production_commands[0]
+    assert "--storage-measurements" in production_commands[0]
+    measurement_index = production_commands[0].index(
+        "--storage-measurements"
+    )
+    assert production_commands[0][measurement_index + 1] == str(
+        shared / "storage_measurements.json"
     )
 
 
