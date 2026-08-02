@@ -694,7 +694,19 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                 (query, key, value),
                 kwargs,
             )
+            custom_manual_attention = bool(
+                self.reference.training and self.dropout > 0
+            )
+            if not custom_manual_attention:
+                ordinary_output, returned_reference_weights = self.reference(
+                    query, key, value, **kwargs
+                )
+                if returned_reference_weights is not None:
+                    raise RuntimeError(
+                        "Weaver Attention unexpectedly returned attention weights"
+                    )
         else:
+            custom_manual_attention = False
             call = dict(kwargs)
             call["need_weights"] = True
             if "average_attn_weights" in inspect.signature(
@@ -722,7 +734,8 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
             if bool(getattr(self.reference, "headwise_attn_output_gate", False)):
                 gate = module.sigmoid(self.reference.gate_proj(query))
                 gate = gate.permute(0, 2, 1).unsqueeze(-1)
-                ordinary_heads = ordinary_heads * gate
+                if custom_manual_attention:
+                    ordinary_heads = ordinary_heads * gate
                 relation_message = relation_message * gate
             elif bool(
                 getattr(self.reference, "elementwise_attn_output_gate", False)
@@ -734,15 +747,17 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                     self.head_dim,
                 )
                 gate = gate.permute(0, 2, 1, 3)
-                ordinary_heads = ordinary_heads * gate
+                if custom_manual_attention:
+                    ordinary_heads = ordinary_heads * gate
                 relation_message = relation_message * gate
-            combined_heads = ordinary_heads + relation_message
-            combined = combined_heads.permute(0, 2, 1, 3).reshape(
-                combined_heads.shape[0], combined_heads.shape[2], -1
-            )
-            output = self.reference.out_proj(combined)
+            if custom_manual_attention:
+                combined_heads = ordinary_heads + relation_message
+                combined = combined_heads.permute(0, 2, 1, 3).reshape(
+                    combined_heads.shape[0], combined_heads.shape[2], -1
+                )
+                output = self.reference.out_proj(combined)
         batch_first = self.batch_first
-        if self._weaver_custom_attention:
+        if custom_manual_attention:
             pass
         elif batch_first:
             concatenated = relation_message.permute(0, 2, 1, 3).reshape(
@@ -754,7 +769,7 @@ class EdgeValueAttention(torch.nn.Module if torch is not None else object):
                 relation_message.shape[2], relation_message.shape[0], -1
             )
             query_mask = query_valid.T.unsqueeze(-1)
-        if not self._weaver_custom_attention:
+        if not custom_manual_attention:
             projected = F.linear(
                 concatenated,
                 self.reference.out_proj.weight,

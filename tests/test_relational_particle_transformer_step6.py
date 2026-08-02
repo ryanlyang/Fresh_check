@@ -183,7 +183,11 @@ class _CustomWeaverAttention(torch.nn.Module):
         if attn_mask is not None:
             mask = attn_mask if mask is None else mask + attn_mask
         output = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, mask
+            q,
+            k,
+            v,
+            mask,
+            dropout_p=self.dropout if self.training else 0.0,
         )
         output = output.transpose(1, 2).reshape(
             batch, query_count, dimension
@@ -271,6 +275,47 @@ def test_custom_weaver_edge_value_output_masking_and_gradients() -> None:
     assert raw_relation.grad is not None
     assert bool(raw_relation.grad.abs().sum() > 0)
     assert query.grad is not None
+
+
+def test_custom_weaver_edge_value_training_uses_one_shared_dropout_matrix() -> None:
+    torch.manual_seed(139)
+    reference = _CustomWeaverAttention()
+    reference.dropout = 0.25
+    wrapped = EdgeValueAttention(reference, relation_width=5).train()
+    query = torch.randn(2, 4, 8, requires_grad=True)
+    valid = torch.ones(2, 4, dtype=torch.bool)
+    relation = torch.randn(2, 5, 4, 4, requires_grad=True)
+
+    torch.manual_seed(149)
+    wrapped.bind(relation, valid)
+    actual, returned_weights = wrapped(
+        query,
+        query,
+        query,
+        key_padding_mask=~valid,
+    )
+    wrapped.clear()
+    assert returned_weights is None
+
+    torch.manual_seed(149)
+    weights = _weaver_custom_attention_weights(
+        reference,
+        (query, query, query),
+        {"key_padding_mask": ~valid},
+    )
+    projected_values = reference.in_proj(query)[..., 16:]
+    value_heads = projected_values.reshape(2, 4, 2, 4).permute(0, 2, 1, 3)
+    ordinary_heads = torch.einsum("bhqk,bhkd->bhqd", weights, value_heads)
+    relation_heads = efficient_edge_value_message(
+        weights, relation, wrapped.edge_projection
+    )
+    expected = reference.out_proj(
+        (ordinary_heads + relation_heads).permute(0, 2, 1, 3).reshape(2, 4, 8)
+    )
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    actual.square().mean().backward()
+    assert wrapped.edge_projection.grad is not None
+    assert relation.grad is not None
 
 
 class SequenceTrimmer(torch.nn.Module):
