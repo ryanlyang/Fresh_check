@@ -516,6 +516,107 @@ def test_probe_input_materializer_accepts_locked_identity_aliases() -> None:
         )
 
 
+def test_raw_probe_features_use_matching_hlt_summary_and_locked_context() -> None:
+    script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
+    spec = importlib.util.spec_from_file_location("hosd_raw_probe_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    summary = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    jet = torch.zeros(2, 10)
+    jet[:, 0] = torch.tensor([10.0, 20.0])
+    jet[:, 1] = torch.tensor([-0.5, 0.75])
+    jet[:, 4] = torch.tensor([2.0, 3.0])
+    jet[:, 6] = torch.tensor([4.0, 5.0])
+    track = torch.zeros(2, 32)
+    track[:, 0] = torch.tensor([0.25, 0.75])
+
+    raw_summary, context = module._raw_probe_features(
+        SimpleNamespace(
+            identities=("jet-b", "jet-a"),
+            values={
+                "T_OFFLINE_TRACK_COMPONENT_PROXY_17": summary.flip(0).numpy(),
+                "T_OFFLINE_JET_10": jet.flip(0).numpy(),
+                "T_OFFLINE_TRACK_32": track.flip(0).numpy(),
+            },
+        ),
+        ("jet-a", "jet-b"),
+        target_id="T_OFFLINE_TRACK_COMPONENT_PROXY_17",
+    )
+    np.testing.assert_array_equal(raw_summary, summary.numpy())
+    np.testing.assert_array_equal(
+        context,
+        np.asarray(
+            [[10.0, -0.5, 2.0, 4.0, 0.25], [20.0, 0.75, 3.0, 5.0, 0.75]],
+            dtype=np.float32,
+        ),
+    )
+
+
+def test_pair_probe_delegation_forwards_identity_authentication_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
+    spec = importlib.util.spec_from_file_location("hosd_pair_delegate_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source = {"commit": "a" * 40, "status_sha256": "b" * 64}
+    monkeypatch.setattr(
+        module,
+        "load_and_validate_campaign",
+        lambda *args, **kwargs: {"source": source},
+    )
+    monkeypatch.setattr(module, "authorize_access", lambda **kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "load_hashed_json",
+        lambda *args, **kwargs: {
+            "probe_rows": [
+                {
+                    "row_id": "pair-row",
+                    "target_id": "T_HLT_TRACK_PAIR_13",
+                    "probe_kind": "P_STATISTICAL_REFERENCES",
+                    "tap": None,
+                }
+            ]
+        },
+    )
+    import scripts.materialize_hosd_pair_probe_inputs as pair_module
+
+    captured = {}
+
+    def fake_pair_main(command):
+        captured["command"] = list(command)
+        return 0
+
+    monkeypatch.setattr(pair_module, "main", fake_pair_main)
+    raw_arguments = [
+        f"model_train={tmp_path / 'train.npz'}",
+        f"val_stop={tmp_path / 'stop.npz'}",
+        f"design_select={tmp_path / 'design.npz'}",
+    ]
+    argv = [
+        "--campaign-root",
+        str(tmp_path),
+        "--row-id",
+        "pair-row",
+        "--relation-normalizer",
+        str(tmp_path / "normalizer.json"),
+    ]
+    for value in raw_arguments:
+        argv.extend(["--raw-input", value])
+    assert module.main(argv) == 0
+    forwarded = captured["command"]
+    assert [
+        forwarded[index + 1]
+        for index, value in enumerate(forwarded)
+        if value == "--raw-input"
+    ] == raw_arguments
+
+
 def test_miniature_fixed_budget_baseline_trainer_never_stops_on_performance(
     tmp_path: Path,
 ) -> None:

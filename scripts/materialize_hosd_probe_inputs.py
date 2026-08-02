@@ -90,6 +90,43 @@ def _identity_subset_order(source_identities, requested_identities, *, context):
     return np.asarray([positions[value] for value in requested], dtype=np.int64)
 
 
+def _raw_probe_features(cache, identities, *, target_id):
+    """Read the already-authenticated matching HLT extractor products."""
+    order = _identity_subset_order(
+        cache.identities,
+        identities,
+        context=f"{target_id} HLT analogue cache",
+    )
+    required = {target_id, "T_OFFLINE_JET_10", "T_OFFLINE_TRACK_32"}
+    if not required.issubset(cache.values):
+        raise ValueError(
+            f"HLT analogue cache lacks {sorted(required - set(cache.values))}"
+        )
+    summary = np.asarray(cache.values[target_id][order], dtype=np.float32)
+    jet = np.asarray(cache.values["T_OFFLINE_JET_10"][order], dtype=np.float32)
+    track = np.asarray(
+        cache.values["T_OFFLINE_TRACK_32"][order], dtype=np.float32
+    )
+    context = np.stack(
+        (
+            jet[:, 0],  # log1p HLT jet pT
+            jet[:, 1],  # signed HLT jet eta
+            jet[:, 4],  # log1p HLT jet mass
+            jet[:, 6],  # log1p valid constituent multiplicity
+            track[:, 0],  # valid-track count fraction
+        ),
+        axis=-1,
+    ).astype(np.float32)
+    if (
+        summary.ndim != 2
+        or context.shape != (len(identities), 5)
+        or not np.isfinite(summary).all()
+        or not np.isfinite(context).all()
+    ):
+        raise ValueError("matching HLT raw-summary/context population differs")
+    return summary, context
+
+
 def _labels(path):
     arrays = _npz(path)
     identities = _identity_values(arrays, context="probe labels")
@@ -165,6 +202,13 @@ def main(argv=None):
     row = next((item for item in plan["probe_rows"] if item["row_id"] == args.row_id), None)
     if row is None:
         raise ValueError("probe row is absent from Stage-C plan")
+    if row["probe_kind"] == "P_RAW_MLP":
+        for resource in (
+            "model_train_hlt",
+            "val_stop_hlt",
+            "design_select_hlt",
+        ):
+            authorize_access(worker_role="probe_worker", requested_resource=resource)
     if row["target_id"] in {"T_HLT_TRACK_PAIR_13", "T_HLT_REGION_PAIR_8"}:
         if args.relation_normalizer is None:
             raise ValueError("pair probe input requires relation normalizer")
@@ -185,6 +229,7 @@ def main(argv=None):
         for option, values in (
             ("--hlt-input", args.hlt_input),
             ("--labels", args.labels),
+            ("--raw-input", args.raw_input),
             ("--tap-cache", args.tap_cache),
             ("--tree-cache", args.tree_cache),
         ):
@@ -230,6 +275,47 @@ def main(argv=None):
             parents[f"{role}_tap_file"] = _sha(tap_paths[role])
         if raw_paths:
             parents[f"{role}_raw_file"] = _sha(raw_paths[role])
+    raw_features = {}
+    if raw_paths:
+        for role in ("model_train", "val_stop", "design_select"):
+            identities, _ = _labels(label_paths[role])
+            replicas = range(4) if role == "model_train" else (0,)
+            summaries = []
+            contexts = []
+            for replica in replicas:
+                source_role = "val_design" if role == "design_select" else role
+                path = (
+                    args.campaign_root
+                    / "targets"
+                    / "hlt_analogues"
+                    / source_role
+                    / f"replica_{replica}"
+                )
+                spec = load_hashed_json(
+                    path / "cache_spec.json",
+                    expected_contract=TARGET_CACHE_SPEC_CONTRACT,
+                )
+                cache = load_target_cache(path, cache_spec=spec)
+                if (
+                    cache.manifest.get("source") != campaign["source"]
+                    or cache.manifest.get("artifact_kind") != "hlt_analogue"
+                    or int(cache.manifest.get("hlt_replica_id", -1)) != replica
+                ):
+                    raise ValueError("raw-summary HLT analogue lineage differs")
+                summary, context = _raw_probe_features(
+                    cache,
+                    identities,
+                    target_id=row["target_id"],
+                )
+                summaries.append(summary)
+                contexts.append(context)
+                parents[f"hlt_summary_{role}_{replica}"] = cache.manifest[
+                    "content_hash"
+                ]
+            raw_features[role] = (
+                np.stack(summaries) if role == "model_train" else summaries[0],
+                np.stack(contexts) if role == "model_train" else contexts[0],
+            )
     lineage = with_content_hash({
         "contract": "hosd_probe_input_lineage_v1",
         "schema_version": 1,
@@ -239,6 +325,27 @@ def main(argv=None):
         "target_registry_sha256": registry["content_hash"],
         "row_id": args.row_id,
         "target_id": row["target_id"],
+        **(
+            {
+                "raw_summary_contract": {
+                    "summary": (
+                        "registered_physical_extractor_product_for_target_id_"
+                        "from_authenticated_HLT_analogue_cache_v1"
+                    ),
+                    "model_train_replica_policy": "R_MULTI_four_replicas",
+                    "evaluation_replica_policy": "R_FIXED_replica_0",
+                    "jet_context_order": [
+                        "log1p_hlt_jet_pt",
+                        "signed_hlt_jet_eta",
+                        "log1p_hlt_jet_mass",
+                        "log1p_valid_constituent_count",
+                        "valid_track_count_fraction",
+                    ],
+                }
+            }
+            if raw_paths
+            else {}
+        ),
         "parents": parents,
     })
     output = args.output_dir or args.campaign_root / "probes" / "inputs" / args.row_id
@@ -278,13 +385,12 @@ def main(argv=None):
         if raw_paths:
             raw = _npz(raw_paths[role])
             raw_ids = _identity_values(raw, context=f"{role} raw-summary input")
-            if raw_ids != identities or not {"raw_summary", "jet_context"}.issubset(raw):
+            if raw_ids != identities:
                 raise ValueError(f"{role} raw-summary probe input differs")
-            if raw["jet_context"].shape != (len(identities), 5):
-                raise ValueError("raw jet context must have five locked fields")
+            summary, context = raw_features[role]
             arrays.update({
-                "raw_summary": raw["raw_summary"].astype(np.float32),
-                "jet_context": raw["jet_context"].astype(np.float32),
+                "raw_summary": summary,
+                "jet_context": context,
             })
         path = output / f"{role}.npz"
         files[role] = {"path": str(path.resolve()), "sha256": _publish(path, arrays)}
