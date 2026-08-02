@@ -5699,7 +5699,12 @@ fit only under a future earlier last-consumer pruning implementation.
 
 The compact real smoke profile is `streamed_smoke`, launched with
 `--streamed-smoke-submit`. Its artifacts are explicitly forbidden as
-production evidence. It uses two real miniature bootstrap allocations and 16
+production evidence. Its smoke-only defaults request four CPUs and 64 GiB of
+node memory per allocation, plus one GH200 for CUDA phases. They are
+independently overridable through `RETB_SMOKE_GPU_CPUS_PER_TASK`,
+`RETB_SMOKE_GPU_MEM`, `RETB_SMOKE_CPU_CPUS_PER_TASK`, and
+`RETB_SMOKE_CPU_MEM`; production resource defaults are unchanged. It uses two
+real miniature bootstrap allocations and 16
 strictly ordered phase allocations, for 18 total, covering every stage A--N
 and the input-cache, relation-cache, expert, streamed-fusion, native-HLT,
 bridge, target, predictor, bundle, joint, consumer, semantic, confirmation,

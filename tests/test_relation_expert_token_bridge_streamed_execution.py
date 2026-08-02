@@ -376,10 +376,23 @@ def test_full_streamed_storage_validator_authenticates_adjacent_projection(
 def test_shell_exposes_real_compact_smoke_and_full_streamed_commands() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher = (root / "sbatch" / "submit_retb_tigris_full.sh").read_text()
+    common = (root / "sbatch" / "retb_common.sh").read_text()
     worker = (root / "sbatch" / "run_retb_streamed_smoke_phase.sh").read_text()
     phase_worker = (root / "scripts" / "run_retb_streamed_smoke_phase.py").read_text()
     assert "--streamed-smoke-submit" in launcher
     assert "--streamed-submit" in launcher
+    for setting in (
+        'RETB_SMOKE_GPU_CPUS_PER_TASK:=4',
+        'RETB_SMOKE_GPU_MEM:=64G',
+        'RETB_SMOKE_CPU_CPUS_PER_TASK:=4',
+        'RETB_SMOKE_CPU_MEM:=64G',
+    ):
+        assert setting in common
+        assert setting.split(":=", 1)[0] in launcher
+    assert '--cpus-per-task="${RETB_SMOKE_GPU_CPUS_PER_TASK}"' in launcher
+    assert '--mem="${RETB_SMOKE_GPU_MEM}"' in launcher
+    assert '--cpus-per-task="${RETB_SMOKE_CPU_CPUS_PER_TASK}"' in launcher
+    assert '--mem="${RETB_SMOKE_CPU_MEM}"' in launcher
     miniature_guard = 'if [[ "${RETB_MINIATURE}" == "1" ]]; then'
     assert miniature_guard in launcher
     assert launcher.index(miniature_guard) < launcher.index(

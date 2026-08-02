@@ -101,6 +101,10 @@ if [[ "${mode}" == "submit" && "${RETB_FROZEN_REENTRY:-0}" != "1" ]]; then
     GPU_MEM="${GPU_MEM}" \
     CPU_CPUS_PER_TASK="${CPU_CPUS_PER_TASK}" \
     CPU_MEM="${CPU_MEM}" \
+    RETB_SMOKE_GPU_CPUS_PER_TASK="${RETB_SMOKE_GPU_CPUS_PER_TASK}" \
+    RETB_SMOKE_GPU_MEM="${RETB_SMOKE_GPU_MEM}" \
+    RETB_SMOKE_CPU_CPUS_PER_TASK="${RETB_SMOKE_CPU_CPUS_PER_TASK}" \
+    RETB_SMOKE_CPU_MEM="${RETB_SMOKE_CPU_MEM}" \
     RETB_DEVICE="${RETB_DEVICE}" \
     RETB_MINIATURE="${RETB_MINIATURE}" \
     RETB_SUBMISSION_SCOPE="${RETB_SUBMISSION_SCOPE}" \
@@ -238,20 +242,30 @@ submit_node() {
   local is_array="$5"
   local dispatch_mode="$6"
   local dependency_arguments=()
+  local cpu_count="${CPU_CPUS_PER_TASK}"
+  local memory="${CPU_MEM}"
+  local gpu_cpu_count="${GPU_CPUS_PER_TASK}"
+  local gpu_memory="${GPU_MEM}"
+  if [[ "${RETB_SUBMISSION_SCOPE}" == "streamed_smoke" ]]; then
+    cpu_count="${RETB_SMOKE_CPU_CPUS_PER_TASK}"
+    memory="${RETB_SMOKE_CPU_MEM}"
+    gpu_cpu_count="${RETB_SMOKE_GPU_CPUS_PER_TASK}"
+    gpu_memory="${RETB_SMOKE_GPU_MEM}"
+  fi
   if [[ -n "${dependency}" ]]; then
     dependency_arguments=(--dependency="afterok:${dependency}")
   fi
   local resource_arguments=(
     --account="${SBATCH_ACCOUNT}"
     --partition="${SBATCH_PARTITION}"
-    --cpus-per-task="${CPU_CPUS_PER_TASK}"
-    --mem="${CPU_MEM}"
+    --cpus-per-task="${cpu_count}"
+    --mem="${memory}"
   )
   if [[ "${resource}" == "gpu" && "${is_array}" == "0" ]]; then
     resource_arguments+=(
       --gres="${GPU_GRES}"
-      --cpus-per-task="${GPU_CPUS_PER_TASK}"
-      --mem="${GPU_MEM}"
+      --cpus-per-task="${gpu_cpu_count}"
+      --mem="${gpu_memory}"
     )
   fi
   local executable="${SCRIPT_DIR}/${worker}"
@@ -290,10 +304,15 @@ if [[ "${RETB_SUBMISSION_SCOPE}" == "streamed_smoke" ]]; then
   while IFS='|' read -r phase_id stage resource kind; do
     resource_arguments=(
       --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}"
-      --cpus-per-task="${CPU_CPUS_PER_TASK}" --mem="${CPU_MEM}"
+      --cpus-per-task="${RETB_SMOKE_CPU_CPUS_PER_TASK}"
+      --mem="${RETB_SMOKE_CPU_MEM}"
     )
     if [[ "${resource}" == "gpu" ]]; then
-      resource_arguments+=(--gres="${GPU_GRES}" --cpus-per-task="${GPU_CPUS_PER_TASK}" --mem="${GPU_MEM}")
+      resource_arguments+=(
+        --gres="${GPU_GRES}"
+        --cpus-per-task="${RETB_SMOKE_GPU_CPUS_PER_TASK}"
+        --mem="${RETB_SMOKE_GPU_MEM}"
+      )
     fi
     phase_job="$(sbatch --parsable "${resource_arguments[@]}" \
       --dependency="afterok:${previous_job}" \
