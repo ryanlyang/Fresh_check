@@ -20,7 +20,7 @@ from teacher_logit_reco.relation_expert_token_bridge.early_continuation import (
     EARLY_PLAN_FACTORIES,
 )
 from teacher_logit_reco.relation_expert_token_bridge.manifest_orchestration import (  # noqa: E402
-    producer_targets,
+    producer_targets_for_submission,
 )
 from teacher_logit_reco.relation_expert_token_bridge.late_plan_factories import (  # noqa: E402
     LATE_PLAN_FACTORIES,
@@ -113,7 +113,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.campaign_root / "job_ledgers" / "production_graph.json",
         expected_contract=PRODUCTION_GRAPH_CONTRACT,
     )
-    targets = producer_targets(args.producer_node_id)
+    target_resolution = producer_targets_for_submission(
+        campaign_root=args.campaign_root,
+        production_graph=graph,
+        producer_node_id=args.producer_node_id,
+    )
+    registered_targets = tuple(target_resolution["registered_targets"])
+    targets = tuple(target_resolution["active_targets"])
     factories = {
         **EARLY_PLAN_FACTORIES,
         **MIDDLE_PLAN_FACTORIES,
@@ -127,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         STATIC_EXPERIMENT_MANIFEST_NODES
     )
     if args.producer_node_id == "campaign_bootstrap":
-        if set(targets) != bootstrap_prepublished or selected:
+        if set(registered_targets) != bootstrap_prepublished or selected:
             raise RuntimeError(
                 "campaign bootstrap manifest ownership differs from the "
                 "frozen prepublished target set"
@@ -137,6 +143,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "producer_node_id": args.producer_node_id,
                     "targets": list(targets),
+                    "registered_targets": list(registered_targets),
+                    "excluded_targets": list(
+                        target_resolution["excluded_targets"]
+                    ),
+                    "submission_scope": target_resolution[
+                        "submission_scope"
+                    ],
+                    "submission_scope_sha256": target_resolution[
+                        "submission_scope_sha256"
+                    ],
                     "factory_symbols": [],
                     "publication_symbol": None,
                     "manifest_production_mode": (
@@ -165,6 +181,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "producer_node_id": args.producer_node_id,
                     "targets": selected,
+                    "registered_targets": list(registered_targets),
+                    "excluded_targets": list(
+                        target_resolution["excluded_targets"]
+                    ),
+                    "submission_scope": target_resolution[
+                        "submission_scope"
+                    ],
+                    "submission_scope_sha256": target_resolution[
+                        "submission_scope_sha256"
+                    ],
                     "factory_symbols": list(FACTORY_SYMBOLS),
                     "publication_symbol": PUBLICATION_SYMBOL,
                     "dry_run": True,

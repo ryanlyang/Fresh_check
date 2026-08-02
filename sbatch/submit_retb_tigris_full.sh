@@ -152,6 +152,10 @@ if [[ "${RETB_MINIATURE}" != "1" && ! -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   fi
   exit 2
 fi
+if [[ "${RETB_SUBMISSION_SCOPE}" == "full_streamed" ]]; then
+  python scripts/validate_retb_full_streamed_storage.py \
+    --measurements "${RETB_STORAGE_MEASUREMENTS}" >/dev/null
+fi
 if [[ "${RETB_MINIATURE}" != "1" && "${RETB_SUBMISSION_SCOPE}" =~ ^(complete|full_streamed)$ ]]; then
   if [[ ! -f "${RETB_OPERATIONAL_AUTHORIZATION}" ]]; then
     echo "Authenticated RETB operational authorization is absent: ${RETB_OPERATIONAL_AUTHORIZATION}" >&2

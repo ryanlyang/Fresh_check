@@ -694,6 +694,7 @@ from .manifest_orchestration import (
     manifest_producer_receipt_path,
     materialize_downstream_manifests,
     producer_targets,
+    producer_targets_for_submission,
     publish_manifest_materialization_plan,
     validate_manifest_materialization_plan,
 )
@@ -1299,6 +1300,7 @@ __all__ = [
     "manifest_plan_path",
     "manifest_producer_receipt_path",
     "producer_targets",
+    "producer_targets_for_submission",
     "validate_job_ledger",
     "validate_full_submission_authorization",
     "validate_manifest_plan_producer_audit",

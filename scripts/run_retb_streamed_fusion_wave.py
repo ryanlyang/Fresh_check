@@ -26,9 +26,17 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.step5 import (  # noqa: E402
     validate_stage_c_run_registry,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
+    PRODUCTION_GRAPH_CONTRACT,
+    validate_production_graph,
+)
 from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
     STREAMED_ABC_FUSION_RECEIPT_CONTRACT,
     validate_streamed_abc_execution_profile,
+)
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    FULL_STREAMED_PROFILE,
+    validate_streamed_execution_profile,
 )
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
@@ -144,6 +152,30 @@ def _expected_run_outputs(root: Path, row: Mapping[str, Any]) -> list[Path]:
     ]
 
 
+def _load_execution_profile(root: Path) -> Mapping[str, Any]:
+    graph = load_hashed_json(
+        root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
+    )
+    validate_production_graph(graph)
+    execution_profile = str(graph.get("execution_profile", "standard"))
+    if execution_profile == "offline_abc_streamed":
+        profile = load_hashed_json(
+            root / "registry" / "retb_streamed_abc_execution_profile.json"
+        )
+        validate_streamed_abc_execution_profile(profile)
+    elif execution_profile == FULL_STREAMED_PROFILE:
+        profile = load_hashed_json(
+            root / "job_ledgers" / "streamed_execution_profile.json"
+        )
+        validate_streamed_execution_profile(profile)
+    else:
+        raise ValueError("streamed fusion worker received another execution profile")
+    if profile.get("execution_profile") != execution_profile:
+        raise ValueError("streamed fusion execution profile differs from graph")
+    return profile
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
@@ -155,10 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     root = args.campaign_root.resolve()
     campaign = load_and_validate_campaign_source(root, repo_root=REPO_ROOT)
-    profile = load_hashed_json(
-        root / "registry" / "retb_streamed_abc_execution_profile.json"
-    )
-    validate_streamed_abc_execution_profile(profile)
+    profile = _load_execution_profile(root)
     if profile["campaign_id"] != campaign["campaign_id"]:
         raise ValueError("streamed execution profile belongs to another campaign")
     registry = load_hashed_json(root / "registry" / "retb_stage_c_runs.json")

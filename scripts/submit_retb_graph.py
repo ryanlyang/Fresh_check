@@ -41,6 +41,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
     FULL_STREAMED_PROFILE,
+    SMOKE_PHASES,
     STREAMED_SMOKE_PROFILE,
     build_streamed_execution_profile,
 )
@@ -196,11 +197,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run_ledger=ledger,
         source_snapshot=source,
     )
-    submission_node_ids = (
-        offline_submission_node_ids(graph)
-        if args.submission_scope in {"offline_abc", "offline_abc_streamed"}
-        else [str(node["node_id"]) for node in graph["nodes"]]
-    )
+    if args.submission_scope in {"offline_abc", "offline_abc_streamed"}:
+        submission_node_ids = offline_submission_node_ids(graph)
+    elif args.submission_scope == "streamed_smoke":
+        submission_node_ids = [
+            "split_build", "campaign_bootstrap",
+            *[str(row["phase_id"]) for row in SMOKE_PHASES],
+        ]
+    else:
+        submission_node_ids = [str(node["node_id"]) for node in graph["nodes"]]
     offline_scope = (
         build_streamed_offline_submission_scope(production_graph=graph)
         if args.submission_scope == "offline_abc_streamed"

@@ -36,6 +36,8 @@ from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (
     is_streamed_profile,
     select_task_local_parent,
     task_local_workspace,
+    validate_task_lifecycle_receipt,
+    STREAMED_TASK_RECEIPT_CONTRACT,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa: E402
     write_immutable_json,
@@ -79,6 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         row for row in graph["nodes"]
         if row["node_id"] == manifest["node_id"]
     )
+    streamed = is_streamed_profile(graph.get("execution_profile"))
     if graph_node["dynamic_continuation"]:
         validate_published_dynamic_continuation(
             campaign=campaign,
@@ -122,6 +125,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         task_index=index,
     )
     if reusable is not None:
+        if streamed:
+            retained_receipt = load_hashed_json(
+                args.campaign_root / "job_ledgers" / "streamed_tasks"
+                / str(manifest["node_id"]) / f"task_{index:06d}.json",
+                expected_contract=STREAMED_TASK_RECEIPT_CONTRACT,
+            )
+            validate_task_lifecycle_receipt(retained_receipt)
+            if (
+                retained_receipt["task_manifest_sha256"]
+                != manifest["content_hash"]
+                or int(retained_receipt["task_index"]) != index
+            ):
+                raise ValueError("reusable streamed task receipt differs")
         aggregate = None
         if int(manifest["task_count"]) == 1:
             aggregate = publish_task_manifest_completion(
@@ -150,7 +166,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment.update(row["environment"])
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    streamed = is_streamed_profile(graph.get("execution_profile"))
     completed = None
     execution_error: BaseException | None = None
     workspace_parent = select_task_local_parent(environment)

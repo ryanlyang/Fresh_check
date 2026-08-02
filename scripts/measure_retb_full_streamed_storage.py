@@ -51,8 +51,16 @@ def main() -> int:
         "offline_inputs_pre_scale": math.ceil(950_000 * offline_rate),
         "hlt_inputs_pre_scale": math.ceil(2_450_000 * hlt_rate),
         "region_sidecars_pre_scale": math.ceil(3_400_000 * tree_rate),
-        "selected_and_candidate_checkpoints": 1_600 * checkpoint,
+        "selected_checkpoints": 250 * checkpoint,
         "compact_logits_metrics_locks_receipts": 24 * 2**30,
+    }
+    rolling = {
+        "stages_f_through_l_targets_predictions_and_candidates": math.ceil(
+            500_000 * 16 * 128 * 16 * 2
+        ) + 600 * checkpoint,
+        "stage_m_scale_refit_cross_node_caches_and_shortlist": math.ceil(
+            3_000_000 * 16 * 128 * 8 * 2
+        ) + 250 * checkpoint,
     }
     # K=16, D=128, seven experts, fp16 is the largest token-cache term.
     scale_tokens = 3_000_000 * 16 * 128 * 7 * 2
@@ -68,7 +76,7 @@ def main() -> int:
     storage_path = (args.available_storage_path or args.output.parent).resolve()
     storage_path.mkdir(parents=True, exist_ok=True)
     available = shutil.disk_usage(storage_path).free
-    projected_peak = sum(persistent.values()) + reserve
+    projected_peak = sum(persistent.values()) + max(rolling.values()) + reserve
     updated = dict(measured)
     updated["projected_peak_concurrent_bytes"] = projected_peak
     updated["available_storage_bytes"] = available
@@ -76,16 +84,19 @@ def main() -> int:
         name: {"path": row["path"], "sha256": row["sha256"], "bytes": row["bytes"], "purpose": row["purpose"]}
         for name, row in source_measurements.get("source_evidence", {}).items()
     }
-    measurements = build_storage_measurements(
-        measurements=updated, source_evidence=evidence,
-        measurement_profile="production_source_evidence",
-    )
     projection = build_streamed_storage_projection(
-        storage_measurements_sha256=measurements["content_hash"],
-        persistent_classes=persistent, transient_classes=transient,
+        storage_measurements_sha256=source_measurements["content_hash"],
+        persistent_classes=persistent, rolling_classes=rolling,
+        transient_classes=transient,
         maximum_concurrent_allocations=args.maximum_concurrent_allocations,
         serialized_reserve_bytes=reserve,
         available_storage_bytes=available, source=source_snapshot(REPO_ROOT),
+    )
+    measurements = build_storage_measurements(
+        measurements=updated,
+        evidence_hashes={"full_streamed_storage_projection": projection["content_hash"]},
+        source_evidence=evidence,
+        measurement_profile="production_source_evidence",
     )
     result = {
         "storage_measurements_sha256": measurements["content_hash"],

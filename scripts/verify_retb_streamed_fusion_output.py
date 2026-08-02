@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -20,11 +21,20 @@ from teacher_logit_reco.relation_expert_token_bridge.step5 import (  # noqa: E40
     resolve_stage_c_run,
     validate_stage_c_run_registry,
 )
+from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
+    PRODUCTION_GRAPH_CONTRACT,
+    validate_production_graph,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (  # noqa: E402
     STREAMED_ABC_FUSION_RECEIPT_CONTRACT,
+    validate_streamed_abc_execution_profile,
+)
+from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
+    FULL_STREAMED_PROFILE,
+    validate_streamed_execution_profile,
 )
 
 
@@ -34,6 +44,30 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _execution_profile(root: Path) -> Mapping[str, Any]:
+    graph = load_hashed_json(
+        root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
+    )
+    validate_production_graph(graph)
+    name = str(graph.get("execution_profile", "standard"))
+    if name == "offline_abc_streamed":
+        profile = load_hashed_json(
+            root / "registry" / "retb_streamed_abc_execution_profile.json"
+        )
+        validate_streamed_abc_execution_profile(profile)
+    elif name == FULL_STREAMED_PROFILE:
+        profile = load_hashed_json(
+            root / "job_ledgers" / "streamed_execution_profile.json"
+        )
+        validate_streamed_execution_profile(profile)
+    else:
+        raise ValueError("streamed fusion verifier received another execution profile")
+    if profile.get("execution_profile") != name:
+        raise ValueError("streamed fusion execution profile differs from graph")
+    return profile
 
 
 def main() -> int:
@@ -47,6 +81,7 @@ def main() -> int:
     campaign = load_and_validate_campaign_source(
         args.campaign_root, repo_root=REPO_ROOT
     )
+    profile = _execution_profile(args.campaign_root)
     registry = load_hashed_json(
         args.campaign_root / "registry" / "retb_stage_c_runs.json"
     )
@@ -66,6 +101,7 @@ def main() -> int:
     if (
         args.run_id not in receipt["run_ids"]
         or receipt.get("source") != campaign.get("source")
+        or receipt.get("execution_profile_sha256") != profile.get("content_hash")
     ):
         raise ValueError("streamed fusion receipt lineage differs")
     for path in args.expected_output:

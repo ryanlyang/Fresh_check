@@ -5618,3 +5618,113 @@ node-local frozen-token banks, includes the persistent input/model projection
 and a serialized reserve, and remains source-evidence bound. These streamed
 contracts and paths are not interchangeable with the eager Stage-A or
 full-campaign contracts.
+
+Every post-completion manifest hook intersects the global producer-target
+registry with the authenticated submission scope before invoking a plan
+factory or materializer. In particular, streamed A--C `input_audit` excludes
+the deferred Stage-N `prelock_final_inputs` target and campaign bootstrap
+excludes the unused Stage-D/E task manifests. The versioned
+`retb_manifest_producer_receipt_v5` records the registered, active, and
+scope-excluded target orders plus the exact submission-scope hash. Complete
+A--N execution continues to require every globally registered target.
+
+## Streamed D--N and compact real-smoke amendment (2026-08-02)
+
+The full streamed execution profile is `full_streamed` and is launched with
+`--streamed-submit`. It preserves the complete A--N scientific graph, split
+sizes, run identities, seeds, selectors, two-lock final-test sequence, and
+non-blocking scientific-underperformance policy. Its versioned control plane
+is `retb_tigris_production_graph_v39` schema 36 and
+`retb_step15_production_bundle_v35`.
+
+`retb_streamed_execution_profile_v1` divides execution material into three
+classes. Durable artifacts are selected checkpoints, compact deployable
+logits, metrics, uncertainty results, identity and lineage manifests,
+selection locks, semantic/robustness evidence, final-test seals, reports, and
+lifecycle receipts. Rolling authenticated artifacts cross an unavoidable
+selector or producer/consumer barrier and remain on shared storage only for
+that lifetime: native-fusion banks, target caches, predictor prepared arrays,
+joint datasets, and scale-refit caches. Truly task-local artifacts include
+single-command preparation arrays, internal-phase scratch, temporary logits
+consumed before a phase completion, compiler/temp files, and successful
+recovery state. A cross-node artifact may not be described as task-local.
+
+The profile serializes an exhaustive per-stage routing table for D--N. D keeps
+native-fusion banks rolling; E keeps bridge prepared arrays rolling; F keeps
+offline targets rolling; G keeps predictor prepared arrays rolling; H keeps
+shortlisted inference arrays rolling; I and J keep their training datasets
+rolling through deployable export; K and L keep only the prediction shards
+needed for evidence/confirmation; M keeps scale cross-node caches rolling; and
+N keeps pre-lock `stack_val` shards rolling. Batch/compiler/raw-logit scratch
+is transient. Checkpoints, metrics, hashes, locks, compact evidence, seals,
+deployable exports, and reports are durable.
+
+Every manifest task and nested internal-phase row receives a unique workspace
+under `RETB_STREAM_ROOT`, then `SLURM_TMPDIR`, then `/dev/shm`. `TMPDIR`,
+`TMP`, `TEMP`, and `TORCH_EXTENSIONS_DIR` point into that workspace. Cleanup
+is exception safe and occurs on success and failure. Manifest tasks publish
+`retb_streamed_task_lifecycle_receipt_v1`, binding the task manifest, status,
+durable-output byte hashes, workspace parent, and proof that removal preceded
+receipt publication. Failed-attempt receipts have attempt-specific names so
+they cannot block a valid retry. Successful `resume_state.pt` is removed only
+after output and row-completion authentication; interrupted recovery state
+outside the task-local directory may remain.
+
+The authenticated `retb_streamed_storage_projection_v1` reports durable,
+rolling, and allocation-local classes separately. Its persistent peak is the
+sum of durable and simultaneously live rolling material plus a serialized
+reserve. It separately reports the largest per-allocation transient working
+set and the conservative cluster-wide transient sum; the latter is not
+charged to shared persistent storage. `measure_retb_full_streamed_storage.py`
+derives these values from source-bound measurements and refuses submission if
+the persistent peak exceeds available storage. This fail-closed storage check
+does not select or suppress scientific models.
+
+Because the rolling lifetimes are dependency-serialized, the persistent
+projection adds the largest complete rolling lifetime to the durable base and
+reserve rather than summing mutually exclusive Stage-F--L and Stage-M peaks.
+
+The compact real smoke profile is `streamed_smoke`, launched with
+`--streamed-smoke-submit`. Its artifacts are explicitly forbidden as
+production evidence. It uses two real miniature bootstrap allocations and 16
+strictly ordered phase allocations, for 18 total, covering every stage A--N
+and the input-cache, relation-cache, expert, streamed-fusion, native-HLT,
+bridge, target, predictor, bundle, joint, consumer, semantic, confirmation,
+scale, sealed-final-test, and report execution families. It runs exactly one
+representative coordinate per material execution family rather than the full
+scientific grid. GPU phases require CUDA and execute an actual attention
+forward/backward/optimizer step with exact masking and finite-value checks.
+Every phase creates, consumes, and removes allocation-local payloads before
+publishing `retb_compact_streamed_smoke_phase_v1` evidence.
+
+The first two phase allocations additionally execute every row of the real
+miniature `offline_input_cache`, `hlt_v3_cache`, `region_tree_cache`,
+`region_tree_finalize`, `normalizers_500k`, and `input_audit` manifests through
+the ordinary authenticated task worker, including a real compiled REGION
+backend. Their lifecycle receipts and live durable output bytes are rechecked
+on restart. The Stage-B phase also runs the first authenticated production
+offline-expert row against those miniature caches, and the Stage-D phase runs
+the corresponding first native-HLT-expert row after publishing the real
+Step-3 through Step-6 architecture bundles, checking the GPU resource probe,
+and byte-authenticating the smoke-only selected-parent alias. Later GPU phases
+use the registered RETB token-only expert head, token-transformer fusion, A1
+token predictor, and unrestricted HLT consumer rather than a generic
+stand-in; these form the one-shape/one-seed compact expert, reconstruction,
+fusion, semantic-control, confirmation, scale, and sealed-final path.
+
+The smoke plan and physical ledger are respectively
+`retb_compact_streamed_smoke_plan_v1` and
+`retb_compact_streamed_smoke_ledger_v1`. All physical job names begin with the
+campaign ID. The miniature final phase binds an input seal and a separate
+execution seal before inference evidence, never consumes oracle inputs, and
+the terminal report makes no scientific performance claim. Negative metrics
+cannot block continuation. Runtime, source, lineage, masking, identity, hash,
+or seal failures fail closed. `resume_retb_streamed_smoke.sh` revalidates the
+completed prefix and submits only the first incomplete suffix.
+
+Each phase also binds a deterministic producer/consumer transition hash to
+the preceding phase, split, production graph, and live logit checksum. The
+bundle-selection, semantic-evidence, confirmation, and scale phases add their
+own deterministic lock/evidence hashes. Restart re-derives these records and
+rejects a content-hashed phase whose transition or two-lock final-test record
+has drifted.

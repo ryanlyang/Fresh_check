@@ -182,6 +182,36 @@ def test_streamed_static_matrix_groups_cache_lifetime_without_dropping_runs(
     )
 
 
+def test_full_streamed_stage_c_rows_bind_the_full_profile(tmp_path: Path) -> None:
+    root = tmp_path / "retb_static_full_streamed"
+    campaign, _ = _campaign_and_graph(root, miniature=False)
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=root.name,
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile="full_streamed",
+    )
+    plan = build_static_experiment_bundle(
+        campaign=campaign,
+        production_graph=graph,
+        campaign_root=root,
+        python_executable=sys.executable,
+    )["static_experiment_plan"]
+    assert all(
+        row["configuration"]["execution_profile"] == "full_streamed"
+        for row in plan["groups"]["offline_fusion_cache"]
+    )
+    assert all(
+        row["configuration"]["execution_profile"]
+        == "full_streamed_verification"
+        for row in plan["groups"]["offline_fusion_training"]
+    )
+
+
 def test_static_rows_route_controls_fusions_and_deferred_pilots(
     tmp_path: Path,
 ) -> None:

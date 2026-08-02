@@ -15,9 +15,12 @@ from scripts.bootstrap_retb_input_tasks import (
 from scripts.produce_retb_downstream_manifest_plans import (
     main as produce_downstream_plans_main,
 )
+from scripts import produce_retb_downstream_manifest_plans as downstream_plans
 from teacher_logit_reco.relation_expert_token_bridge import (
+    build_streamed_offline_submission_scope,
     build_production_graph,
     materialize_downstream_manifests,
+    producer_targets_for_submission,
     task_manifest_path_for_graph,
     validate_task_manifest_for_graph,
 )
@@ -758,8 +761,144 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
         for record in materialized["publications"].values()
     )
     assert materialized["receipt"]["contract"] == (
-        "retb_manifest_producer_receipt_v4"
+        "retb_manifest_producer_receipt_v5"
     )
+
+
+def test_streamed_a_c_manifest_hooks_exclude_deferred_stage_n_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    campaign = _campaign(miniature=False)
+    root = tmp_path / campaign["campaign_id"]
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=campaign["campaign_id"],
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile="offline_abc_streamed",
+    )
+    write_immutable_json(root / "campaign_spec.json", campaign)
+    write_immutable_json(
+        root / "job_ledgers" / "production_graph.json", graph
+    )
+    scope = build_streamed_offline_submission_scope(production_graph=graph)
+    write_immutable_json(
+        root / "job_ledgers" / "streamed_offline_submission_scope.json",
+        scope,
+    )
+
+    resolution = producer_targets_for_submission(
+        campaign_root=root,
+        production_graph=graph,
+        producer_node_id="input_audit",
+    )
+    assert resolution["active_targets"] == ()
+    assert resolution["excluded_targets"] == ("prelock_final_inputs",)
+    assert resolution["submission_scope"] == "offline_abc_streamed"
+    assert resolution["submission_scope_sha256"] == scope["content_hash"]
+    bootstrap_resolution = producer_targets_for_submission(
+        campaign_root=root,
+        production_graph=graph,
+        producer_node_id="campaign_bootstrap",
+    )
+    assert bootstrap_resolution["excluded_targets"] == (
+        "native_hlt_expert_training",
+        "native_hlt_fusion_training",
+        "bridge_pilot_training",
+    )
+    assert set(bootstrap_resolution["active_targets"]).issubset(
+        set(scope["submitted_node_ids"])
+    )
+
+    monkeypatch.setattr(
+        downstream_plans,
+        "load_and_validate_campaign_source",
+        lambda *args, **kwargs: campaign,
+    )
+    assert produce_downstream_plans_main(
+        [
+            "--campaign-root",
+            str(root),
+            "--producer-node-id",
+            "input_audit",
+        ]
+    ) == 0
+    assert capsys.readouterr().out.strip() == "[]"
+    assert not (
+        root / "job_ledgers" / "manifest_plans" / "prelock_final_inputs.json"
+    ).exists()
+
+    materialized = materialize_downstream_manifests(
+        campaign_root=root,
+        repo_root=ROOT,
+        producer_node_id="input_audit",
+        campaign=campaign,
+        production_graph=graph,
+    )
+    assert materialized["target_count"] == 0
+    receipt = materialized["receipt"]
+    assert receipt["contract"] == "retb_manifest_producer_receipt_v5"
+    assert receipt["submission_scope"] == "offline_abc_streamed"
+    assert receipt["registered_target_node_order"] == [
+        "prelock_final_inputs"
+    ]
+    assert receipt["target_node_order"] == []
+    assert receipt["excluded_target_node_order"] == [
+        "prelock_final_inputs"
+    ]
+
+
+def test_streamed_a_c_manifest_hooks_require_scope_attestation(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(miniature=False)
+    graph = build_production_graph(
+        campaign_root=tmp_path,
+        campaign_id=campaign["campaign_id"],
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile="offline_abc_streamed",
+    )
+    with pytest.raises(FileNotFoundError, match="authenticated submission scope"):
+        producer_targets_for_submission(
+            campaign_root=tmp_path,
+            production_graph=graph,
+            producer_node_id="input_audit",
+        )
+
+
+def test_complete_campaign_retains_input_audit_stage_n_target(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(miniature=True)
+    root = tmp_path / campaign["campaign_id"]
+    graph = build_production_graph(
+        campaign_root=root,
+        campaign_id=campaign["campaign_id"],
+        source_commit="a" * 40,
+        source_status_sha256="b" * 64,
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        miniature=True,
+    )
+    resolution = producer_targets_for_submission(
+        campaign_root=root,
+        production_graph=graph,
+        producer_node_id="input_audit",
+    )
+    assert resolution["submission_scope"] == "complete"
+    assert resolution["scope_filter_applied"] is False
+    assert resolution["active_targets"] == ("prelock_final_inputs",)
+    assert resolution["excluded_targets"] == ()
 
 
 def test_nonarray_manifest_requires_manifest_driven_graph_node(

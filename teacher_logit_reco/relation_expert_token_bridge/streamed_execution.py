@@ -62,6 +62,68 @@ DURABLE_CLASSES = (
 )
 
 
+# Exhaustive D--N routing.  ``rolling_authenticated`` means that an artifact
+# crosses an allocation boundary and therefore cannot truthfully live only in
+# RAM; it remains hash-bound until its last registered consumer completes.
+STAGE_ARTIFACT_POLICY: dict[str, dict[str, tuple[str, ...]]] = {
+    "D": {
+        "transient": ("native_expert_and_fusion_scratch",),
+        "rolling_authenticated": ("native_fusion_token_banks",),
+        "durable": ("native_hlt_checkpoints_and_metrics",),
+    },
+    "E": {
+        "transient": ("bridge_optimizer_and_batch_scratch",),
+        "rolling_authenticated": ("bridge_targets_and_prepared_arrays",),
+        "durable": ("bridge_checkpoints_and_pilot_metrics",),
+    },
+    "F": {
+        "transient": ("target_materialization_scratch",),
+        "rolling_authenticated": ("authenticated_offline_target_caches",),
+        "durable": ("target_cache_manifests_and_hash_indices",),
+    },
+    "G": {
+        "transient": ("predictor_training_batch_scratch",),
+        "rolling_authenticated": ("predictor_prepared_arrays",),
+        "durable": ("predictor_checkpoints_calibration_and_metrics",),
+    },
+    "H": {
+        "transient": ("bundle_substitution_work_arrays",),
+        "rolling_authenticated": ("shortlisted_bundle_inference_arrays",),
+        "durable": ("bundle_selection_locks_and_compact_evidence",),
+    },
+    "I": {
+        "transient": ("joint_training_batch_scratch",),
+        "rolling_authenticated": ("joint_training_datasets",),
+        "durable": ("joint_checkpoints_and_metrics",),
+    },
+    "J": {
+        "transient": ("consumer_training_and_export_scratch",),
+        "rolling_authenticated": ("final_consumer_training_datasets",),
+        "durable": ("deployable_exports_checkpoints_and_metrics",),
+    },
+    "K": {
+        "transient": ("semantic_control_raw_predictions",),
+        "rolling_authenticated": ("semantic_control_shard_evidence",),
+        "durable": ("semantic_control_bundle_and_lineage",),
+    },
+    "L": {
+        "transient": ("confirmation_inference_scratch",),
+        "rolling_authenticated": ("confirmation_candidate_predictions",),
+        "durable": ("confirmation_lock_checkpoints_and_metrics",),
+    },
+    "M": {
+        "transient": ("scale_refit_inner_loop_scratch",),
+        "rolling_authenticated": ("scale_refit_cross_node_caches",),
+        "durable": ("scale_shortlist_checkpoints_exports_and_metrics",),
+    },
+    "N": {
+        "transient": ("sealed_final_raw_logits_before_publication",),
+        "rolling_authenticated": ("stack_val_selection_prediction_shards",),
+        "durable": ("finalist_locks_final_test_seals_metrics_and_reports",),
+    },
+}
+
+
 SMOKE_PHASES: tuple[dict[str, Any], ...] = (
     {"phase_id": "a_inputs", "stage": "A", "resource": "cpu", "kind": "input_cache"},
     {"phase_id": "a_relations", "stage": "A", "resource": "cpu", "kind": "relation_cache"},
@@ -152,6 +214,10 @@ def build_streamed_execution_profile(
         "transient_artifact_classes": list(TRANSIENT_CLASSES),
         "rolling_authenticated_artifact_classes": list(ROLLING_CLASSES),
         "durable_artifact_classes": list(DURABLE_CLASSES),
+        "stage_d_through_n_artifact_policy": {
+            stage: {kind: list(values) for kind, values in policy.items()}
+            for stage, policy in STAGE_ARTIFACT_POLICY.items()
+        },
         "successful_resume_state_removed_after_attestation": True,
         "failed_resume_state_outside_task_root_may_be_retained": True,
         "scientific_underperformance_blocks_continuation": False,
@@ -218,8 +284,11 @@ def validate_task_lifecycle_receipt(payload: Mapping[str, Any]) -> str:
         raise ValueError("streamed task output coverage differs")
     for row in outputs:
         require_sha256(row.get("sha256"), name="persistent_output.sha256")
+        path = Path(str(row.get("path", "")))
         if not str(row.get("path", "")):
             raise ValueError("streamed task output path is absent")
+        if not path.is_file() or _sha256(path) != row["sha256"]:
+            raise ValueError("streamed task persistent output bytes differ")
     if payload.get("performance_sign_used_as_completion_gate") is not False:
         raise ValueError("streamed task receipt gained a performance gate")
     return digest
@@ -267,6 +336,82 @@ def validate_streamed_smoke_plan(payload: Mapping[str, Any]) -> str:
     return digest
 
 
+def build_streamed_smoke_phase_control_evidence(
+    *, phase_id: str, previous_phase_sha256: str | None,
+    split_manifest_sha256: str, production_graph_sha256: str,
+    execution_logit_sha256: str,
+) -> dict[str, Any]:
+    """Build deterministic selection/evidence/seal checks for one smoke phase."""
+
+    phase_ids = [str(row["phase_id"]) for row in SMOKE_PHASES]
+    if phase_id not in phase_ids:
+        raise ValueError("compact smoke control phase differs")
+    index = phase_ids.index(phase_id)
+    if (index == 0) != (previous_phase_sha256 is None):
+        raise ValueError("compact smoke control predecessor differs")
+    predecessor = (
+        "ROOT"
+        if previous_phase_sha256 is None
+        else require_sha256(
+            previous_phase_sha256, name="previous_phase_sha256"
+        )
+    )
+    split_sha = require_sha256(
+        split_manifest_sha256, name="split_manifest_sha256"
+    )
+    graph_sha = require_sha256(
+        production_graph_sha256, name="production_graph_sha256"
+    )
+    logit_sha = require_sha256(
+        execution_logit_sha256, name="execution_logit_sha256"
+    )
+
+    def digest(label: str, *values: str) -> str:
+        return hashlib.sha256(
+            ":".join((label, *values)).encode("utf-8")
+        ).hexdigest()
+
+    transition = digest(
+        "retb_compact_streamed_smoke_transition_v1",
+        phase_id, predecessor, split_sha, graph_sha, logit_sha,
+    )
+    evidence: dict[str, Any] = {
+        "producer_consumer_transition_sha256": transition,
+        "runtime_lineage_identity_hash_fail_closed": True,
+        "scientific_underperformance_blocks_continuation": False,
+    }
+    if phase_id == "h_bundle":
+        evidence["predictor_bundle_selection_lock_sha256"] = digest(
+            "retb_compact_predictor_bundle_lock_v1", transition
+        )
+    elif phase_id == "k_semantics":
+        evidence["semantic_evidence_bundle_sha256"] = digest(
+            "retb_compact_semantic_evidence_v1", transition
+        )
+    elif phase_id == "l_confirmation":
+        evidence["confirmation_lock_sha256"] = digest(
+            "retb_compact_confirmation_lock_v1", transition
+        )
+    elif phase_id == "m_scale":
+        evidence["scale_shortlist_lock_sha256"] = digest(
+            "retb_compact_scale_shortlist_lock_v1", transition
+        )
+    elif phase_id == "n_sealed_final":
+        input_lock = digest(
+            "retb_compact_final_input_lock_v1", predecessor, split_sha
+        )
+        evidence["final_test_seal"] = {
+            "input_lock_sha256": input_lock,
+            "execution_lock_sha256": digest(
+                "retb_compact_final_execution_lock_v1",
+                input_lock, graph_sha, transition,
+            ),
+            "both_locks_present_before_inference": True,
+            "oracle_inputs_consumed": False,
+        }
+    return evidence
+
+
 def build_streamed_storage_projection(
     *, storage_measurements_sha256: str,
     persistent_classes: Mapping[str, int],
@@ -289,7 +434,13 @@ def build_streamed_storage_projection(
     available = int(available_storage_bytes)
     if concurrency <= 0 or reserve < 0 or available < 0:
         raise ValueError("streamed storage bounds differ")
-    persistent_peak = sum(persistent.values()) + sum(rolling.values()) + reserve
+    # Stages are dependency-serialized.  Rolling classes are pruned at their
+    # authenticated last-consumer boundary, so only the largest lifetime can
+    # overlap the durable base.  Concurrent rows within that lifetime are
+    # already included in each class estimate supplied by the measurement
+    # worker.
+    rolling_peak = max(rolling.values())
+    persistent_peak = sum(persistent.values()) + rolling_peak + reserve
     per_allocation_transient_peak = max(transient.values())
     cluster_transient_peak = per_allocation_transient_peak * concurrency
     return with_content_hash({
@@ -300,6 +451,8 @@ def build_streamed_storage_projection(
         ),
         "persistent_classes": persistent,
         "rolling_authenticated_classes": rolling,
+        "rolling_authenticated_peak_bytes": rolling_peak,
+        "rolling_lifetimes_dependency_serialized": True,
         "transient_classes": transient,
         "persistent_peak_bytes": persistent_peak,
         "per_allocation_transient_peak_bytes": per_allocation_transient_peak,
@@ -336,8 +489,9 @@ def validate_streamed_storage_projection(payload: Mapping[str, Any]) -> str:
 
 __all__ = [name for name in globals() if name.startswith("STREAMED_") or name in {
     "FULL_STREAMED_PROFILE", "DURABLE_CLASSES", "TRANSIENT_CLASSES",
-    "ROLLING_CLASSES",
+    "ROLLING_CLASSES", "STAGE_ARTIFACT_POLICY",
     "build_streamed_execution_profile", "build_streamed_smoke_plan",
+    "build_streamed_smoke_phase_control_evidence",
     "build_streamed_storage_projection",
     "build_task_lifecycle_receipt", "is_streamed_profile",
     "select_task_local_parent", "task_local_workspace",

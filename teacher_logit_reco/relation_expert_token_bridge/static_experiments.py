@@ -907,6 +907,7 @@ def _stage_c_streamed_wave_records(
     python: str,
     registry: Mapping[str, Any],
     fusion_records: Sequence[Mapping[str, Any]],
+    execution_profile: str,
 ) -> list[dict[str, Any]]:
     """Group all fusion variants by the cache coordinate they share."""
 
@@ -939,7 +940,7 @@ def _stage_c_streamed_wave_records(
                     seed=int(seed),
                     run_id=None,
                     configuration={
-                        "execution_profile": "offline_abc_streamed",
+                        "execution_profile": execution_profile,
                         "shape_id": str(shape_id),
                         "pipeline_seed": int(seed),
                         "fusion_run_ids": [
@@ -989,7 +990,8 @@ def _stage_c_streamed_wave_records(
 
 
 def _stage_c_streamed_verification_records(
-    *, root: Path, python: str, fusion_records: Sequence[Mapping[str, Any]]
+    *, root: Path, python: str, fusion_records: Sequence[Mapping[str, Any]],
+    execution_profile: str,
 ) -> list[dict[str, Any]]:
     output = []
     for record in fusion_records:
@@ -1009,7 +1011,7 @@ def _stage_c_streamed_verification_records(
         copied["command_sha256"] = canonical_sha256(copied["argv"])
         copied["configuration"] = {
             **dict(record["configuration"]),
-            "execution_profile": "offline_abc_streamed_verification",
+            "execution_profile": f"{execution_profile}_verification",
         }
         copied["configuration_sha256"] = canonical_sha256(
             copied["configuration"]
@@ -1644,6 +1646,7 @@ def build_static_experiment_bundle(
                 python=python,
                 registry=registries["stage_c"],
                 fusion_records=fusion_records,
+                execution_profile=execution_profile,
             )
         )
         execution_groups["offline_fusion_training"] = (
@@ -1651,6 +1654,7 @@ def build_static_experiment_bundle(
                 root=root,
                 python=python,
                 fusion_records=fusion_records,
+                execution_profile=execution_profile,
             )
         )
 

@@ -34,12 +34,16 @@ from .production import (
     FINAL_CONTINUATION_MANIFEST_NODES,
     LATE_CONTINUATION_MANIFEST_NODES,
     MIDDLE_CONTINUATION_MANIFEST_NODES,
+    OFFLINE_SUBMISSION_SCOPE_CONTRACT,
     STATIC_EXPERIMENT_MANIFEST_NODES,
+    STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT,
     TASK_MANIFEST_PRODUCER_NODES,
     build_task_manifest,
     task_manifest_path_for_graph,
+    validate_offline_submission_scope,
     validate_production_campaign_binding,
     validate_production_graph,
+    validate_streamed_offline_submission_scope,
     validate_task_manifest_for_graph,
 )
 
@@ -47,7 +51,7 @@ from .production import (
 MANIFEST_MATERIALIZATION_PLAN_CONTRACT = (
     "retb_manifest_materialization_plan_v2"
 )
-MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v4"
+MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v5"
 
 
 def manifest_plan_path(
@@ -78,6 +82,82 @@ def producer_targets(producer_node_id: str) -> tuple[str, ...]:
         for target, producer in TASK_MANIFEST_PRODUCER_NODES.items()
         if producer == str(producer_node_id)
     )
+
+
+def producer_targets_for_submission(
+    *,
+    campaign_root: str | Path,
+    production_graph: Mapping[str, Any],
+    producer_node_id: str,
+) -> dict[str, Any]:
+    """Resolve one producer's targets against its authenticated submission.
+
+    The production graph always describes the complete A--N campaign.  A
+    scoped A--C submission therefore must intersect the global producer
+    registry with its immutable scope attestation before a plan factory is
+    invoked.  Otherwise an early producer such as ``input_audit`` can
+    accidentally request deferred Stage-N inputs.
+    """
+
+    validate_production_graph(production_graph)
+    root = Path(campaign_root).resolve()
+    registered = producer_targets(producer_node_id)
+    offline_path = root / "job_ledgers" / "offline_submission_scope.json"
+    streamed_path = (
+        root / "job_ledgers" / "streamed_offline_submission_scope.json"
+    )
+    present = [path for path in (offline_path, streamed_path) if path.is_file()]
+    if len(present) > 1:
+        raise ValueError("campaign has conflicting offline submission scopes")
+
+    execution_profile = str(
+        production_graph.get("execution_profile", "standard")
+    )
+    if execution_profile == "offline_abc_streamed" and not streamed_path.is_file():
+        raise FileNotFoundError(
+            "streamed A-C campaign lacks its authenticated submission scope: "
+            f"{streamed_path}"
+        )
+    if streamed_path.is_file() and execution_profile != "offline_abc_streamed":
+        raise ValueError("streamed A-C scope and execution profile disagree")
+
+    scope: Mapping[str, Any] | None = None
+    scope_name = "complete"
+    if streamed_path.is_file():
+        scope = load_hashed_json(
+            streamed_path,
+            expected_contract=STREAMED_OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+        )
+        validate_streamed_offline_submission_scope(
+            scope, production_graph=production_graph
+        )
+        scope_name = "offline_abc_streamed"
+    elif offline_path.is_file():
+        scope = load_hashed_json(
+            offline_path,
+            expected_contract=OFFLINE_SUBMISSION_SCOPE_CONTRACT,
+        )
+        validate_offline_submission_scope(scope, production_graph=production_graph)
+        scope_name = "offline_abc"
+
+    submitted = (
+        {str(node["node_id"]) for node in production_graph["nodes"]}
+        if scope is None
+        else {str(value) for value in scope["submitted_node_ids"]}
+    )
+    active = tuple(target for target in registered if target in submitted)
+    excluded = tuple(target for target in registered if target not in submitted)
+    return {
+        "producer_node_id": str(producer_node_id),
+        "submission_scope": scope_name,
+        "submission_scope_sha256": (
+            None if scope is None else str(scope["content_hash"])
+        ),
+        "registered_targets": registered,
+        "active_targets": active,
+        "excluded_targets": excluded,
+        "scope_filter_applied": scope is not None,
+    }
 
 
 def build_manifest_materialization_plan(
@@ -285,12 +365,18 @@ def materialize_downstream_manifests(
     root = Path(campaign_root).resolve()
     source_root = Path(repo_root).resolve()
     validate_production_campaign_binding(production_graph, campaign)
-    targets = producer_targets(producer_node_id)
+    target_resolution = producer_targets_for_submission(
+        campaign_root=root,
+        production_graph=production_graph,
+        producer_node_id=producer_node_id,
+    )
+    registered_targets = tuple(target_resolution["registered_targets"])
+    targets = tuple(target_resolution["active_targets"])
     bootstrap_targets = set(BOOTSTRAP_INPUT_MANIFEST_NODES) | set(
         STATIC_EXPERIMENT_MANIFEST_NODES
     )
     bootstrap_prepublication = producer_node_id == "campaign_bootstrap"
-    if bootstrap_prepublication and set(targets) != bootstrap_targets:
+    if bootstrap_prepublication and set(registered_targets) != bootstrap_targets:
         raise ValueError(
             "campaign bootstrap manifest ownership differs from the frozen "
             "prepublished target set"
@@ -513,11 +599,22 @@ def materialize_downstream_manifests(
     receipt = with_content_hash(
         {
             "contract": MANIFEST_PRODUCER_RECEIPT_CONTRACT,
-            "schema_version": 4,
+            "schema_version": 5,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": production_graph["content_hash"],
             "producer_node_id": str(producer_node_id),
+            "submission_scope": target_resolution["submission_scope"],
+            "submission_scope_sha256": target_resolution[
+                "submission_scope_sha256"
+            ],
+            "scope_filter_applied": target_resolution[
+                "scope_filter_applied"
+            ],
+            "registered_target_node_order": list(registered_targets),
             "target_node_order": list(targets),
+            "excluded_target_node_order": list(
+                target_resolution["excluded_targets"]
+            ),
             "manifest_hashes": manifest_hashes,
             "materialization_plan_hashes": plan_hashes,
             "all_owned_manifests_present_and_valid": True,
@@ -558,6 +655,7 @@ __all__ = [
     "manifest_producer_receipt_path",
     "materialize_downstream_manifests",
     "producer_targets",
+    "producer_targets_for_submission",
     "publish_manifest_materialization_plan",
     "validate_manifest_materialization_plan",
 ]
