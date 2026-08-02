@@ -471,6 +471,51 @@ def test_probe_tap_loader_resolves_authenticated_design_select_subrole(
     assert captured["source_indices_by_replica"][0].tolist() == [2, 0]
 
 
+def test_probe_input_materializer_gathers_design_subset_in_label_order() -> None:
+    script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
+    spec = importlib.util.spec_from_file_location("hosd_probe_input_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    order = module._identity_subset_order(
+        ("jet-a", "jet-b", "jet-c"),
+        ("jet-c", "jet-a"),
+        context="design_select target cache",
+    )
+    assert order.tolist() == [2, 0]
+    with pytest.raises(ValueError, match="lacks 1 requested identities"):
+        module._identity_subset_order(
+            ("jet-a", "jet-b"),
+            ("jet-a", "jet-missing"),
+            context="design_select target cache",
+        )
+
+
+def test_probe_input_materializer_accepts_locked_identity_aliases() -> None:
+    script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
+    spec = importlib.util.spec_from_file_location("hosd_probe_input_identity_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    expected = ("jet-a", "jet-b")
+    assert module._identity_values(
+        {"identity": np.asarray(expected)}, context="offline view"
+    ) == expected
+    assert module._identity_values(
+        {"identities": np.asarray(expected)}, context="labels"
+    ) == expected
+    with pytest.raises(ValueError, match="identity aliases disagree"):
+        module._identity_values(
+            {
+                "identity": np.asarray(expected),
+                "identities": np.asarray(("jet-b", "jet-a")),
+            },
+            context="ambiguous view",
+        )
+
+
 def test_miniature_fixed_budget_baseline_trainer_never_stops_on_performance(
     tmp_path: Path,
 ) -> None:

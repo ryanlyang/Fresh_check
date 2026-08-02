@@ -60,9 +60,39 @@ def _npz(path):
         return {name: np.asarray(payload[name]) for name in payload.files}
 
 
+def _identity_values(arrays, *, context):
+    """Read either repository identity spelling without weakening identity checks."""
+    keys = [name for name in ("identity", "identities") if name in arrays]
+    if not keys:
+        raise ValueError(f"{context} lacks identity/identities")
+    identities = tuple(str(value) for value in arrays[keys[0]].tolist())
+    if len(keys) == 2:
+        alternate = tuple(str(value) for value in arrays[keys[1]].tolist())
+        if alternate != identities:
+            raise ValueError(f"{context} identity aliases disagree")
+    if len(identities) != len(set(identities)):
+        raise ValueError(f"{context} identities are duplicated")
+    return identities
+
+
+def _identity_subset_order(source_identities, requested_identities, *, context):
+    """Return source rows in requested order, permitting an authenticated subset."""
+    source = tuple(str(value) for value in source_identities)
+    requested = tuple(str(value) for value in requested_identities)
+    if len(source) != len(set(source)):
+        raise ValueError(f"{context} source identities are duplicated")
+    if len(requested) != len(set(requested)):
+        raise ValueError(f"{context} requested identities are duplicated")
+    positions = {value: index for index, value in enumerate(source)}
+    missing = [value for value in requested if value not in positions]
+    if missing:
+        raise ValueError(f"{context} lacks {len(missing)} requested identities")
+    return np.asarray([positions[value] for value in requested], dtype=np.int64)
+
+
 def _labels(path):
     arrays = _npz(path)
-    identities = tuple(str(value) for value in arrays["identities"].tolist())
+    identities = _identity_values(arrays, context="probe labels")
     labels = np.asarray(arrays["labels"], dtype=np.int64)
     if labels.shape != (len(identities),) or len(identities) != len(set(identities)):
         raise ValueError("probe labels differ")
@@ -217,10 +247,11 @@ def main(argv=None):
     for role in ("model_train", "val_stop", "design_select"):
         identities, labels = _labels(label_paths[role])
         cache = loaded[role]
-        positions = {value: index for index, value in enumerate(cache.identities)}
-        if set(positions) != set(identities):
-            raise ValueError(f"{role} target and labels identities differ")
-        order = np.asarray([positions[value] for value in identities], dtype=np.int64)
+        order = _identity_subset_order(
+            cache.identities,
+            identities,
+            context=f"{role} target cache",
+        )
         target = cache.values[row["target_id"]][order].astype(np.float32)
         target_mask = cache.masks[row["target_id"]][order].astype(bool)
         availability, group_order = _availability(target_mask, target_row)
@@ -246,7 +277,7 @@ def main(argv=None):
             })
         if raw_paths:
             raw = _npz(raw_paths[role])
-            raw_ids = tuple(str(value) for value in raw["identities"].tolist())
+            raw_ids = _identity_values(raw, context=f"{role} raw-summary input")
             if raw_ids != identities or not {"raw_summary", "jet_context"}.issubset(raw):
                 raise ValueError(f"{role} raw-summary probe input differs")
             if raw["jet_context"].shape != (len(identities), 5):
