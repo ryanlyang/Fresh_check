@@ -28,6 +28,8 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     teacher_probe_metrics,
     pair_probe_metrics,
     deterministic_pair_indices,
+    HBaseParticleTransformer,
+    validate_frozen_encoder,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     PROBE_COMPLETION_CONTRACT,
@@ -109,6 +111,103 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stream_tap_populations(args, row, lock, *, device):
+    """Encode one exact frozen tap into bounded worker RAM, never disk."""
+    import importlib
+    import torch
+    from scripts.build_hosd_probe_taps import (
+        _dataset,
+        _mapping,
+        capture_tap_in_memory,
+    )
+
+    required = (
+        args.baseline_checkpoint,
+        args.train_labels,
+        args.val_stop_labels,
+        args.design_select_labels,
+    )
+    if any(value is None for value in required):
+        raise ValueError("streamed tap execution lacks checkpoint/label inputs")
+    if _sha256_file(args.baseline_checkpoint) != lock["checkpoint_sha256"]:
+        raise ValueError("streamed tap checkpoint differs from encoder lock")
+    module = importlib.import_module("weaver.nn.model.ParticleTransformer")
+    encoder = HBaseParticleTransformer(weaver_module=module)
+    checkpoint = torch.load(
+        args.baseline_checkpoint, map_location="cpu", weights_only=False
+    )
+    encoder.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    for parameter in encoder.parameters():
+        parameter.requires_grad_(False)
+    encoder.to(device).eval()
+    validate_frozen_encoder(encoder, lock)
+    datasets = {
+        "model_train": _dataset(
+            _mapping(
+                args.train_cache,
+                "--train-cache",
+                required_replicas={0, 1, 2, 3},
+            ),
+            args.train_labels,
+            "model_train",
+            realization_policy="R_MULTI",
+        ),
+        "val_stop": _dataset(
+            _mapping(
+                args.val_stop_cache,
+                "--val-stop-cache",
+                required_replicas={0},
+            ),
+            args.val_stop_labels,
+            "val_stop",
+            realization_policy="R_FIXED",
+        ),
+        "design_select": _dataset(
+            _mapping(
+                args.design_select_cache,
+                "--design-select-cache",
+                required_replicas={0},
+            ),
+            args.design_select_labels,
+            "design_select",
+            realization_policy="R_FIXED",
+        ),
+    }
+    populations = {}
+    for role, dataset in datasets.items():
+        replicas = range(4) if role == "model_train" else (0,)
+        states = None
+        masks = None
+        for offset, replica in enumerate(replicas):
+            replica_states, replica_masks = capture_tap_in_memory(
+                encoder, dataset, replica, tap=row["tap"], device=device
+            )
+            if role == "model_train":
+                if states is None:
+                    states = np.empty(
+                        (4, *replica_states.shape), dtype=replica_states.dtype
+                    )
+                    masks = np.empty(
+                        (4, *replica_masks.shape), dtype=replica_masks.dtype
+                    )
+                states[offset] = replica_states
+                masks[offset] = replica_masks
+            else:
+                states, masks = replica_states, replica_masks
+            del replica_states, replica_masks
+        if states is None or masks is None:
+            raise RuntimeError("streamed tap population is empty")
+        populations[role] = {
+            "identities": tuple(str(value) for value in dataset.identities),
+            "states": states,
+            "particle_mask": masks,
+        }
+    del datasets, encoder
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return populations
 
 
 def _target_metrics(row: dict, prediction: np.ndarray, data: dict) -> dict:
@@ -436,6 +535,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--val-stop-npz", type=Path)
     parser.add_argument("--design-select-npz", type=Path)
     parser.add_argument("--probe-encoder-lock", type=Path)
+    parser.add_argument("--baseline-checkpoint", type=Path)
+    parser.add_argument("--train-cache", action="append", default=[])
+    parser.add_argument("--val-stop-cache", action="append", default=[])
+    parser.add_argument("--design-select-cache", action="append", default=[])
+    parser.add_argument("--train-labels", type=Path)
+    parser.add_argument("--val-stop-labels", type=Path)
+    parser.add_argument("--design-select-labels", type=Path)
     parser.add_argument("--input-lineage", type=Path)
     parser.add_argument("--target-cache-manifest-sha256", required=False)
     parser.add_argument("--output-dir", type=Path)
@@ -474,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.input_lineage is None:
         raise ValueError("probe execution requires --input-lineage")
     input_lineage = load_hashed_json(
-        args.input_lineage, expected_contract="hosd_probe_input_lineage_v1"
+        args.input_lineage, expected_contract="hosd_probe_input_lineage_v2"
     )
     if (
         input_lineage.get("source") != campaign["source"]
@@ -535,21 +641,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("probe encoder lock source differs")
         lock_sha = lock["content_hash"]
         for name, data in (("train", train), ("val_stop", val), ("design_select", design)):
-            required_tap_fields = {
-                "probe_encoder_lock_sha256",
-                "tap",
-                "target_cache_manifest_sha256",
-            }
-            if not required_tap_fields.issubset(data):
-                raise ValueError(
-                    f"{name} tap NPZ lacks authenticated tap-cache metadata"
-                )
-            if (
-                str(data["probe_encoder_lock_sha256"].item()) != lock_sha
-                or str(data["tap"].item()) != row["tap"]
-                or str(data["target_cache_manifest_sha256"].item()) != cache_sha
-            ):
-                raise ValueError(f"{name} tap-cache lineage differs")
+            if "states" in data or "particle_mask" in data:
+                raise ValueError(f"{name} unexpectedly persists frozen tap states")
 
     if kind == "P_STATISTICAL_REFERENCES":
         statistical_target = train["target"]
@@ -615,6 +708,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         component_seed = int(row["component_seed"])
         torch.manual_seed(component_seed)
+        if kind in {"P_LINEAR", "P_SHALLOW"}:
+            streamed = _stream_tap_populations(
+                args, row, lock, device=device
+            )
+            for role, data in (
+                ("model_train", train),
+                ("val_stop", val),
+                ("design_select", design),
+            ):
+                if streamed[role]["identities"] != tuple(
+                    str(value) for value in data["_identity_strings"].tolist()
+                ):
+                    raise ValueError(f"{role} streamed tap identities differ")
+                data["states"] = streamed[role]["states"]
+                data["particle_mask"] = streamed[role]["particle_mask"]
         output_dim = int(train["target"].shape[-1])
         availability_groups = int(
             train["availability"].shape[-1]
@@ -623,7 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if kind in {"P_LINEAR", "P_SHALLOW"}:
             if "states" not in train or "particle_mask" not in train:
-                raise ValueError("tap probe inputs lack states/particle_mask")
+                raise ValueError("streamed tap populations are absent")
             head_type = "pair" if train["target"].ndim == 4 else "global"
             model = build_tap_probe(
                 probe_kind=kind,
@@ -681,7 +789,7 @@ def main(argv: list[str] | None = None) -> int:
             start_epoch = int(resume["epoch_completed"]) + 1
         for epoch in range(start_epoch, epochs + 1):
             order = np.random.default_rng(
-                component_seed * 1_000_003 + epoch
+                int(row["pipeline_seed"]) * 1_000_003 + epoch
             ).permutation(len(train["labels"]))
             model.train()
             optimizer.zero_grad(set_to_none=True)

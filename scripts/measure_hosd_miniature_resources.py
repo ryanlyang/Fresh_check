@@ -62,6 +62,18 @@ SCALE_MEMORY_PROJECTION_NODES = (
 )
 PRODUCTION_TREE_SHARD_EVENTS = 10_000
 PRODUCTION_TARGET_SHARD_EVENTS = 2_048
+# Four model-train replicas plus fixed val-stop/design-select populations are
+# held in CPU RAM by one learned-probe worker.  Float32 states and bool masks
+# retain the exact padded 128-particle, width-128 tap contract.
+PROBE_TAP_BYTES_PER_EVENT_REPLICA = 128 * 128 * 4 + 128
+PROBE_TAP_RESIDENT_EVENT_REPLICAS = (
+    4 * PRODUCTION_COUNTS["model_train"]
+    + PRODUCTION_COUNTS["val_stop"]
+    + PRODUCTION_COUNTS["design_select"]
+)
+PROBE_TAP_PROJECTED_RESIDENT_BYTES = (
+    PROBE_TAP_BYTES_PER_EVENT_REPLICA * PROBE_TAP_RESIDENT_EVENT_REPLICAS
+)
 TRAINING_NODE_FRAGMENTS = (
     "train",
     "beam",
@@ -1022,6 +1034,9 @@ def main(argv=None):
         }
     if not all(max_rss.values()):
         raise ValueError("miniature MaxRSS evidence is incomplete")
+    max_rss["gpu"] = max(
+        max_rss["gpu"], PROBE_TAP_PROJECTED_RESIDENT_BYTES
+    )
     if set(scale_memory_projections) != set(SCALE_MEMORY_PROJECTION_NODES) or any(
         not row["observed_maximum_rss_bytes"]
         for row in scale_memory_projections.values()
@@ -1046,7 +1061,7 @@ def main(argv=None):
     artifact = with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENT_EVIDENCE_CONTRACT,
-            "schema_version": 9,
+            "schema_version": 10,
             "source": dict(campaign["source"]),
             "miniature_execution_plan_sha256": plan["content_hash"],
             "scheduler_evidence_sha256": scheduler["content_hash"],
@@ -1063,6 +1078,13 @@ def main(argv=None):
             "checkpoint_bytes": checkpoint_bytes,
             "export_bytes": export_bytes,
             "maximum_rss_bytes_by_class": max_rss,
+            "probe_tap_ram_projection": {
+                "storage_contract": "stream_exact_frozen_tap_into_worker_RAM_v1",
+                "bytes_per_event_replica": PROBE_TAP_BYTES_PER_EVENT_REPLICA,
+                "resident_event_replicas": PROBE_TAP_RESIDENT_EVENT_REPLICAS,
+                "projected_resident_bytes": PROBE_TAP_PROJECTED_RESIDENT_BYTES,
+                "persistent_bytes": 0,
+            },
             "scale_resident_layout_ledger": scale_layout_ledger,
             "scale_resident_memory_projections": scale_memory_projections,
             "projection_population_counts": PRODUCTION_COUNTS,

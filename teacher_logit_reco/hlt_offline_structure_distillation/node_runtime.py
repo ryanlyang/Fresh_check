@@ -1000,23 +1000,6 @@ def resolve_node_argv(
                         )
                     ]
                 )
-            if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}:
-                argv.extend(
-                    [
-                        item
-                        for role, source_role in (
-                            ("model_train", "model_train"),
-                            ("val_stop", "val_stop"),
-                            ("design_select", "design_select"),
-                        )
-                        for item in (
-                            "--tap-cache",
-                            (
-                                f"{role}={root / 'probes' / 'frozen_taps' / (source_role + '__' + row['tap'] + '.npz')}"
-                            ),
-                        )
-                    ]
-                )
         elif node["node_id"] == "probe_train":
             probe_root = root / "probes" / "inputs" / row["row_id"]
             argv.extend(
@@ -1036,6 +1019,7 @@ def resolve_node_argv(
                 ]
             )
             if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}:
+                run = root / "baselines" / "H_BASE" / "seed_101"
                 argv.extend(
                     [
                         "--probe-encoder-lock",
@@ -1045,7 +1029,12 @@ def resolve_node_argv(
                             / "frozen_taps"
                             / "probe_encoder_lock.json"
                         ),
+                        "--baseline-checkpoint",
+                        str(run / "best_model_val.pt"),
                     ]
+                )
+                argv.extend(
+                    _derived_infrastructure(root, "probe_tap_capture", row)
                 )
         elif node["node_id"] in {"combination_train", "pcgrad_control"}:
             argv.extend(

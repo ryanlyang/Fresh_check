@@ -74,24 +74,50 @@ def build_storage_measurements(
                 "target_mask_sparsity": 1.0 - valid_components / total_components,
             }
         )
-    projections = {
+    persistent_projections = {
         name: int(round(persistent_bytes_per_jet * count))
         for name, count in PROJECTION_COUNTS.items()
+    }
+    # Stage-C pair inputs are content-addressed (one physical payload per
+    # target/role, regardless of probe/tap) and reconstructible.  Until the
+    # pair worker itself is fully fused, include their measured transient peak
+    # rather than pretending that streamed families consume zero disk.
+    stage_c_pair_event_equivalents = (
+        4 * PRODUCTION_TRAIN_POPULATION + PRODUCTION_DESIGN_POPULATION
+    )
+    transient_pair_peak = int(
+        round(streamed_bytes_per_jet * stage_c_pair_event_equivalents)
+    )
+    projections = {
+        name: persistent + transient_pair_peak
+        for name, persistent in persistent_projections.items()
     }
     exceeds = any(value > available_storage_bytes for value in projections.values())
     return with_content_hash(
         {
             "contract": STORAGE_MEASUREMENT_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "families": families,
             "available_storage_bytes": int(available_storage_bytes),
             "total_measured_bytes_per_jet": persistent_bytes_per_jet,
             "measured_streamed_dense_bytes_per_jet": streamed_bytes_per_jet,
             "projected_storage_bytes": projections,
+            "projected_persistent_storage_bytes": persistent_projections,
+            "projected_stage_c_transient_pair_peak_bytes": transient_pair_peak,
+            "stage_c_transient_pair_event_equivalents": stage_c_pair_event_equivalents,
             "projection_populations": dict(PROJECTION_COUNTS),
             "persistent_cache_multiplicity": PERSISTENT_CACHE_MULTIPLICITY,
             "fixed_validation_cache_multiplicity": 3,
             "pair_target_bytes_excluded_from_persistent_projection": True,
+            "pair_target_bytes_included_in_peak_projection": True,
+            "probe_tap_persistent_bytes": 0,
+            "probe_tap_storage_contract": (
+                "stream_exact_frozen_tap_into_worker_RAM_v1"
+            ),
+            "probe_payload_storage_contract": (
+                "hardlinked_content_addressed_probe_payload_v1"
+            ),
+            "duplicate_probe_payload_physical_multiplicity": 1,
             "projection_exceeds_available_storage": exceeds,
             "policy": (
                 "persist_compact_jet_targets_stream_same_view_node_pair"

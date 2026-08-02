@@ -129,7 +129,9 @@ def _plan(profile, *, production_tree_unit=10_000, production_target_unit=2_048)
         source=SOURCE,
     )
     factories = build_node_factory_registry(
-        stage_job_registry=registry, source=SOURCE
+        stage_job_registry=registry,
+        source=SOURCE,
+        execution_profile=profile,
     )
     commands = build_registered_command_matrix(
         stage_job_registry=registry,
@@ -290,7 +292,9 @@ def test_execution_plan_covers_every_stage_node_and_never_performance_stops():
     with pytest.raises(ValueError, match="runtime manifest is incomplete"):
         registry = build_stage_job_registry(source=SOURCE)
         factories = build_node_factory_registry(
-            stage_job_registry=registry, source=SOURCE
+            stage_job_registry=registry,
+            source=SOURCE,
+            execution_profile="miniature_test",
         )
         build_production_execution_plan(
             stage_job_registry=registry,
@@ -306,6 +310,47 @@ def test_execution_plan_covers_every_stage_node_and_never_performance_stops():
             node_factory_registry=factories,
             runtime_manifest=incomplete_runtime,
         )
+
+
+def test_miniature_batches_every_logical_coordinate_into_bounded_allocations():
+    registry = build_stage_job_registry(source=SOURCE)
+    production = build_node_factory_registry(
+        stage_job_registry=registry,
+        source=SOURCE,
+        execution_profile="production_500k_scale3m",
+    )
+    miniature = build_node_factory_registry(
+        stage_job_registry=registry,
+        source=SOURCE,
+        execution_profile="miniature_test",
+    )
+    assert sum(row["coordinate_limit"] for row in miniature["entries"]) == 1251
+    assert sum(row["scheduled_coordinate_count"] for row in miniature["entries"]) == 139
+    assert all(row["coordinate_span"] == 1 for row in production["entries"])
+    assert all(
+        1 <= row["coordinate_span"] <= 16 for row in miniature["entries"]
+    )
+    runtime = _ready_runtime()
+    commands = build_registered_command_matrix(
+        stage_job_registry=registry,
+        factory_registry=miniature,
+        runtime_manifest=runtime,
+        campaign_root="/authenticated/campaign",
+    )
+    probe_commands = commands["probe_input_materialization"]
+    assert len(probe_commands) == 11
+    assert probe_commands[0][-4:] == [
+        "--coordinate-start",
+        "0",
+        "--coordinate-stop",
+        "16",
+    ]
+    assert probe_commands[-1][-4:] == [
+        "--coordinate-start",
+        "160",
+        "--coordinate-stop",
+        "162",
+    ]
 
 
 def test_production_walltime_is_measured_projected_and_policy_bounded():
@@ -698,8 +743,8 @@ def test_real_miniature_is_required_before_full_authorization():
     production = _plan("production_500k_scale3m")
     preflight = with_content_hash(
         {
-                "contract": "hosd_resource_preflight_v10",
-                "schema_version": 9,
+                "contract": "hosd_resource_preflight_v11",
+                "schema_version": 11,
             "source": SOURCE,
             "profile": "production_500k_scale3m",
             "storage_measurements_sha256": "4" * 64,
@@ -1204,7 +1249,7 @@ def test_node_factory_stream_checks_only_that_nodes_bound_inputs(tmp_path):
     assert "--screening-registry" in second
 
 
-def test_every_pair_probe_coordinate_resolves_without_none_tap_cache(
+def test_pair_probe_materialization_never_persists_tap_states(
     tmp_path, monkeypatch
 ):
     from teacher_logit_reco.hlt_offline_structure_distillation import node_runtime
@@ -1254,11 +1299,49 @@ def test_every_pair_probe_coordinate_resolves_without_none_tap_cache(
         assert observed == expected
         rendered = " ".join(command)
         assert "__None.npz" not in rendered
-        if expected["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}:
-            assert rendered.count("--tap-cache") == 3
-            assert f"__{expected['tap']}.npz" in rendered
-        else:
-            assert "--tap-cache" not in command
+        assert "--tap-cache" not in command
+        assert "frozen_taps" not in rendered
+
+
+def test_learned_probe_training_streams_exact_tap_from_native_inputs(
+    tmp_path, monkeypatch
+):
+    from teacher_logit_reco.hlt_offline_structure_distillation import node_runtime
+
+    row = {
+        "row_id": "T_OFFLINE_JET_10__P_LINEAR__TAP_EARLY",
+        "target_id": "T_OFFLINE_JET_10",
+        "probe_kind": "P_LINEAR",
+        "tap": "TAP_EARLY",
+    }
+    monkeypatch.setattr(
+        node_runtime,
+        "_rows",
+        lambda root, node_id: [row] if node_id == "probe_train" else None,
+    )
+    runtime = _ready_runtime()
+    command, observed = resolve_node_argv(
+        node={"node_id": "probe_train", "entrypoint": "scripts/train_hosd_probe.py"},
+        runtime_manifest=runtime,
+        campaign_root=tmp_path,
+        coordinate=0,
+    )
+    assert observed == row
+    assert command.count("--train-cache") == 4
+    assert command.count("--val-stop-cache") == 1
+    assert command.count("--design-select-cache") == 1
+    assert "--baseline-checkpoint" in command
+    assert "--probe-encoder-lock" in command
+    assert "--tap-cache" not in command
+
+
+def test_streamed_probe_tap_ram_projection_fits_registered_gpu_request() -> None:
+    module = _load_resource_measurement_module()
+    assert module.PROBE_TAP_BYTES_PER_EVENT_REPLICA == 65_664
+    assert module.PROBE_TAP_RESIDENT_EVENT_REPLICAS == 2_075_000
+    projected = module.PROBE_TAP_PROJECTED_RESIDENT_BYTES
+    assert projected == 136_252_800_000
+    assert projected * module.MEMORY_SAFETY_FACTOR < 220 * 1024**3
 
 
 def test_scale_graph_command_does_not_bind_all_tree_or_native_populations(

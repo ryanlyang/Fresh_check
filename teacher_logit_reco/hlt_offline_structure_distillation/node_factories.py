@@ -9,6 +9,7 @@ the registered factory.
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 import string
 from typing import Any, Mapping, Sequence
@@ -61,6 +62,12 @@ NODE_COORDINATE_LIMITS = {
     "scale_efficiency": 21,
     "stack_inference": 21,
 }
+
+# A real miniature must traverse every registered logical coordinate, but it
+# does not need one Slurm allocation per tiny coordinate.  Coordinates are
+# executed serially in immutable batches inside one allocation.  Production
+# remains one scientific coordinate per allocation for independent recovery.
+MINIATURE_COORDINATE_SPAN = 16
 
 FORBIDDEN_RUNTIME_OPTIONS = frozenset(
     {
@@ -411,17 +418,28 @@ def build_node_factory_registry(
     *,
     stage_job_registry: Mapping[str, Any],
     source: Mapping[str, Any],
+    execution_profile: str = "production_500k_scale3m",
 ) -> dict[str, Any]:
     validate_stage_job_registry(stage_job_registry)
+    if execution_profile not in {"miniature_test", "production_500k_scale3m"}:
+        raise ValueError("node-factory execution profile differs")
     entries = []
     for node in stage_job_registry["nodes"]:
+        coordinate_limit = int(NODE_COORDINATE_LIMITS.get(node["node_id"], 1))
+        coordinate_span = (
+            min(MINIATURE_COORDINATE_SPAN, coordinate_limit)
+            if execution_profile == "miniature_test"
+            else 1
+        )
         entries.append(
             {
                 "node_id": node["node_id"],
                 "worker_entrypoint": node["entrypoint"],
                 "factory_entrypoint": FACTORY_ENTRYPOINT,
-                "coordinate_limit": int(
-                    NODE_COORDINATE_LIMITS.get(node["node_id"], 1)
+                "coordinate_limit": coordinate_limit,
+                "coordinate_span": coordinate_span,
+                "scheduled_coordinate_count": math.ceil(
+                    coordinate_limit / coordinate_span
                 ),
                 "row_resolution": (
                     "immutable_upstream_plan_or_lock"
@@ -435,8 +453,9 @@ def build_node_factory_registry(
     return with_content_hash(
         {
             "contract": NODE_FACTORY_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(source),
+            "execution_profile": execution_profile,
             "stage_job_registry_sha256": stage_job_registry["content_hash"],
             "factory_entrypoint": FACTORY_ENTRYPOINT,
             "entries": entries,
@@ -481,10 +500,23 @@ def build_registered_command_matrix(
                 root,
                 "--node-id",
                 node_id,
-                "--coordinate",
-                str(coordinate),
+                *(
+                    ["--coordinate", str(coordinate)]
+                    if int(row["coordinate_span"]) == 1
+                    else [
+                        "--coordinate-start",
+                        str(coordinate * int(row["coordinate_span"])),
+                        "--coordinate-stop",
+                        str(
+                            min(
+                                int(row["coordinate_limit"]),
+                                (coordinate + 1) * int(row["coordinate_span"]),
+                            )
+                        ),
+                    ]
+                ),
             ]
-            for coordinate in range(int(row["coordinate_limit"]))
+            for coordinate in range(int(row["scheduled_coordinate_count"]))
         ]
         for node_id, row in by_id.items()
     }
@@ -495,6 +527,7 @@ __all__ = [
     "FORBIDDEN_RUNTIME_OPTIONS",
     "DIRECTORY_INFRASTRUCTURE_OPTIONS",
     "NODE_COORDINATE_LIMITS",
+    "MINIATURE_COORDINATE_SPAN",
     "PATH_INFRASTRUCTURE_OPTIONS",
     "REQUIRED_INFRASTRUCTURE_OPTIONS_BY_NODE",
     "REQUIRED_INFRASTRUCTURE_OPTION_MIN_COUNTS",

@@ -425,6 +425,7 @@ from .mechanism_execution import execute_mechanism_plan
 from .preflight import math_ceil_ratio, run_resource_preflight
 from .node_factories import (
     FACTORY_ENTRYPOINT,
+    MINIATURE_COORDINATE_SPAN,
     NODE_COORDINATE_LIMITS,
     REQUIRED_INFRASTRUCTURE_OPTIONS_BY_NODE,
     REQUIRED_INFRASTRUCTURE_OPTION_MIN_COUNTS,
@@ -820,6 +821,7 @@ __all__ = [
     "math_ceil_ratio",
     "run_resource_preflight",
     "FACTORY_ENTRYPOINT",
+    "MINIATURE_COORDINATE_SPAN",
     "NODE_COORDINATE_LIMITS",
     "REQUIRED_INFRASTRUCTURE_OPTIONS_BY_NODE",
     "REQUIRED_INFRASTRUCTURE_OPTION_MIN_COUNTS",

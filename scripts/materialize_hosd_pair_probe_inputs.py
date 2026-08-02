@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 import numpy as np
 
@@ -98,7 +100,7 @@ def _trees(path, identities, expected_parents):
     )
 
 
-def _publish(path, arrays):
+def _publish(path, arrays, *, content_store=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = _npz(path)
@@ -108,8 +110,30 @@ def _publish(path, arrays):
         ):
             raise FileExistsError("pair probe input differs on reuse")
         return _sha(path)
-    np.savez_compressed(path, **arrays)
-    return _sha(path)
+    if content_store is None:
+        np.savez_compressed(path, **arrays)
+        return _sha(path)
+    store = Path(content_store)
+    store.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix="payload_", suffix=".npz", dir=store)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            np.savez_compressed(stream, **arrays)
+        digest = _sha(temporary)
+        canonical = store / f"{digest}.npz"
+        try:
+            os.link(temporary, canonical)
+        except FileExistsError:
+            if _sha(canonical) != digest:
+                raise RuntimeError("pair probe content-addressed payload changed")
+        try:
+            os.link(canonical, path)
+        except FileExistsError:
+            if _sha(path) != digest:
+                raise FileExistsError("pair probe input differs on concurrent reuse")
+        return digest
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def main(argv=None):
@@ -144,13 +168,10 @@ def main(argv=None):
     labels = _simple_mapping(args.labels, "--labels")
     raw_inputs = _simple_mapping(args.raw_input, "--raw-input")
     learned_tap_probe = row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}
-    taps = (
-        _simple_mapping(args.tap_cache, "--tap-cache")
-        if learned_tap_probe
-        else {}
-    )
-    if not learned_tap_probe and args.tap_cache:
-        raise ValueError("target-only pair probes must not receive tap caches")
+    if args.tap_cache:
+        raise ValueError(
+            "persistent tap caches are forbidden; learned taps stream in the trainer"
+        )
     requires_tree = row["target_id"] == "T_HLT_REGION_PAIR_8"
     trees = (
         _role_mapping(args.tree_cache, "--tree-cache", replicated=True)
@@ -177,7 +198,6 @@ def main(argv=None):
         **{f"hlt_{role}_{replica}": _sha(path) for (role, replica), path in inputs.items()},
         **{f"labels_{role}": _sha(path) for role, path in labels.items()},
         **{f"raw_input_{role}": _sha(path) for role, path in raw_inputs.items()},
-        **{f"tap_{role}": _sha(path) for role, path in taps.items()},
     }
     extracted = {}
     canonical_ids = {}
@@ -252,28 +272,25 @@ def main(argv=None):
             )
         extracted[role] = role_batches
     lineage = with_content_hash({
-        "contract": "hosd_probe_input_lineage_v1",
-        "schema_version": 1,
+        "contract": "hosd_probe_input_lineage_v2",
+        "schema_version": 2,
         "source": campaign["source"],
         "campaign_spec_sha256": campaign["content_hash"],
         "stage_c_plan_sha256": plan["content_hash"],
         "row_id": args.row_id,
         "target_id": row["target_id"],
         "streaming": "same_view_pair_target_recomputed_from_bound_HLT_replica",
+        "tap_storage_policy": (
+            "stream_exact_frozen_tap_into_worker_RAM_v1"
+            if learned_tap_probe else "not_applicable"
+        ),
+        "payload_storage_contract": "hardlinked_content_addressed_probe_payload_v1",
         "parents": parents,
     })
     output = args.output_dir or args.campaign_root / "probes" / "inputs" / args.row_id
     write_immutable_json(output / "input_lineage.json", lineage)
     files = {}
     for role in ROLES:
-        tap = _npz(taps[role]) if learned_tap_probe else None
-        if learned_tap_probe:
-            tap_ids = tuple(str(value) for value in tap["identities"].tolist())
-            if (
-                tap_ids != canonical_ids[role]
-                or str(tap["tap"].item()) != row["tap"]
-            ):
-                raise ValueError(f"{role} pair tap lineage differs")
         values = (
             np.stack([item[0] for item in extracted[role]])
             if role == "model_train" else extracted[role][0][0]
@@ -287,24 +304,19 @@ def main(argv=None):
             "labels": label_values[role],
             "target": values,
             "target_mask": masks,
-            "target_cache_manifest_sha256": np.asarray(lineage["content_hash"]),
         }
-        if learned_tap_probe:
-            arrays.update(
-                {
-                    "states": tap["states"].astype(np.float32),
-                    "particle_mask": tap["particle_mask"].astype(bool),
-                    "probe_encoder_lock_sha256": tap[
-                        "probe_encoder_lock_sha256"
-                    ],
-                    "tap": tap["tap"],
-                }
-            )
         path = output / f"{role}.npz"
-        files[role] = {"path": str(path.resolve()), "sha256": _publish(path, arrays)}
+        files[role] = {
+            "path": str(path.resolve()),
+            "sha256": _publish(
+                path,
+                arrays,
+                content_store=args.campaign_root / "probes" / "input_payloads",
+            ),
+        }
     completion = with_content_hash({
-        "contract": "hosd_probe_input_completion_v1",
-        "schema_version": 1,
+        "contract": "hosd_probe_input_completion_v2",
+        "schema_version": 2,
         "source": campaign["source"],
         "row_id": args.row_id,
         "input_lineage_sha256": lineage["content_hash"],
@@ -330,7 +342,7 @@ def main(argv=None):
             }
             for item in plan["probe_rows"]
         },
-        expected_contract="hosd_probe_input_completion_v1",
+        expected_contract="hosd_probe_input_completion_v2",
         parent_hashes={"stage_c_plan": plan["content_hash"]},
         source=campaign["source"],
         output=args.campaign_root

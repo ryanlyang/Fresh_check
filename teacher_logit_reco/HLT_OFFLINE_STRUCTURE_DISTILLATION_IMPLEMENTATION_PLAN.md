@@ -3232,6 +3232,20 @@ logit, gradient, mask, and state parity is
 baseline, KD, probe, and matrix-bound regressions live in
 `tests/test_hlt_offline_structure_distillation_step5.py`.
 
+Storage closeout (2026-08-02): frozen particle-tap states are no longer
+written to campaign storage. `build_hosd_probe_taps.py` publishes only the
+immutable seed-101 encoder lock; each learned-probe worker reconstructs its
+exact requested tap from that checkpoint into worker RAM and releases it at
+process exit (`stream_exact_frozen_tap_into_worker_RAM_v1`). Probe input
+payloads use content-addressed hardlinks, so probes sharing an identical
+target population retain one physical payload rather than one copy per tap
+and head. Storage evidence contract `hosd_storage_measurements_v3` records
+zero persistent tap bytes and includes the measured Stage-C pair-payload
+transient peak in admission instead of silently excluding it. The miniature
+still executes every logical coordinate, but immutable ranges of at most 16
+coordinates share one allocation; 1,251 logical coordinates therefore
+schedule as 139 Slurm allocations without scientific pruning.
+
 ### Step 6 of 12: auxiliary training
 
 Implement per-event losses, fixed weights, `ABS/RES/HET`, checkpointing,

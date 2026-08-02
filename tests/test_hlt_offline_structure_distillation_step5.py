@@ -492,6 +492,32 @@ def test_probe_input_materializer_gathers_design_subset_in_label_order() -> None
         )
 
 
+def test_probe_payloads_are_content_addressed_hardlinks_without_tap_states(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
+    spec = importlib.util.spec_from_file_location("hosd_probe_payload_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    arrays = {
+        "identities": np.asarray(["jet-a", "jet-b"]),
+        "labels": np.asarray([0, 1], dtype=np.int64),
+        "target": np.zeros((2, 3), dtype=np.float32),
+        "target_mask": np.ones((2, 3), dtype=bool),
+    }
+    store = tmp_path / "cas"
+    left, right = tmp_path / "left.npz", tmp_path / "right.npz"
+    left_sha = module._publish(left, arrays, content_store=store)
+    right_sha = module._publish(right, arrays, content_store=store)
+    assert left_sha == right_sha
+    assert len(list(store.glob("*.npz"))) == 1
+    assert left.stat().st_ino == right.stat().st_ino
+    with np.load(left, allow_pickle=False) as payload:
+        assert "states" not in payload.files
+        assert "particle_mask" not in payload.files
+
+
 def test_probe_input_materializer_accepts_locked_identity_aliases() -> None:
     script = REPO_ROOT / "scripts" / "materialize_hosd_probe_inputs.py"
     spec = importlib.util.spec_from_file_location("hosd_probe_input_identity_runtime", script)

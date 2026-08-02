@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     factories = build_node_factory_registry(
         stage_job_registry=registry,
         source=campaign["source"],
+        execution_profile=args.profile,
     )
     commands = build_registered_command_matrix(
         stage_job_registry=registry,

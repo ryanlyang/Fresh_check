@@ -865,8 +865,16 @@ def test_storage_projection_is_complete_and_performance_blind() -> None:
     assert artifact["decision_uses_scientific_results"] is False
     assert artifact["projection_exceeds_available_storage"]
     assert artifact["pair_target_bytes_excluded_from_persistent_projection"]
+    assert artifact["pair_target_bytes_included_in_peak_projection"]
     assert artifact["measured_streamed_dense_bytes_per_jet"] == 1000.0
     assert artifact["persistent_cache_multiplicity"] == 9
+    assert artifact["probe_tap_persistent_bytes"] == 0
+    assert artifact["duplicate_probe_payload_physical_multiplicity"] == 1
+    assert artifact["projected_stage_c_transient_pair_peak_bytes"] == 2_075_000_000
+    assert artifact["projected_storage_bytes"]["production_500k"] == (
+        artifact["projected_persistent_storage_bytes"]["production_500k"]
+        + artifact["projected_stage_c_transient_pair_peak_bytes"]
+    )
 
 
 def test_real_storage_probe_is_label_blind_and_measures_extractor_bytes(

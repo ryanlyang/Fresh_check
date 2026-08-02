@@ -250,7 +250,7 @@ def build_resource_measurements(
     return with_content_hash(
         {
             "contract": RESOURCE_MEASUREMENTS_CONTRACT,
-            "schema_version": 10,
+            "schema_version": 11,
             "source": dict(source),
             "miniature_execution_plan_sha256": require_sha256(
                 miniature_execution_plan_sha256,
@@ -319,6 +319,7 @@ def build_production_execution_plan(
     if (
         node_factory_registry.get("stage_job_registry_sha256")
         != stage_job_registry["content_hash"]
+        or node_factory_registry.get("execution_profile") != profile
         or node_factory_registry.get("source") != dict(source)
         or runtime_manifest.get("source") != dict(source)
         or runtime_manifest.get("campaign_spec_sha256")
@@ -709,7 +710,7 @@ def build_full_authorization(
     return with_content_hash(
         {
             "contract": FULL_AUTHORIZATION_CONTRACT,
-            "schema_version": 10,
+            "schema_version": 11,
             "source": dict(source),
             "production_execution_plan_sha256": production_plan["content_hash"],
             "miniature_acceptance_sha256": miniature_acceptance["content_hash"],

@@ -30,8 +30,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--node-id", required=True)
-    parser.add_argument("--coordinate", required=True, type=int)
+    parser.add_argument("--coordinate", type=int)
+    parser.add_argument("--coordinate-start", type=int)
+    parser.add_argument("--coordinate-stop", type=int)
     args = parser.parse_args(argv)
+    if args.coordinate is not None:
+        if args.coordinate_start is not None or args.coordinate_stop is not None:
+            raise ValueError("single and batched coordinates are mutually exclusive")
+        coordinates = range(args.coordinate, args.coordinate + 1)
+    else:
+        if (
+            args.coordinate_start is None
+            or args.coordinate_stop is None
+            or args.coordinate_start < 0
+            or args.coordinate_stop <= args.coordinate_start
+        ):
+            raise ValueError("batched coordinates require a positive half-open range")
+        coordinates = range(args.coordinate_start, args.coordinate_stop)
     campaign = load_and_validate_campaign(
         args.campaign_root, repo_root=REPO_ROOT
     )
@@ -56,37 +71,34 @@ def main(argv=None):
     ]
     if len(matches) != 1:
         raise ValueError("node factory registry coordinate differs")
-    command, row = resolve_node_argv(
-        node=matches[0],
-        runtime_manifest=runtime,
-        campaign_root=args.campaign_root,
-        coordinate=args.coordinate,
-    )
-    if command is None:
-        print(
-            json.dumps(
-                {
-                    "node_id": args.node_id,
-                    "coordinate": args.coordinate,
-                    "inactive_upper_bound_slot": True,
-                    "scientific_row_omitted": False,
-                },
-                indent=2,
-                sort_keys=True,
+    resolved = []
+    inactive = []
+    for coordinate in coordinates:
+        command, row = resolve_node_argv(
+            node=matches[0],
+            runtime_manifest=runtime,
+            campaign_root=args.campaign_root,
+            coordinate=coordinate,
+        )
+        if command is None:
+            inactive.append(coordinate)
+            continue
+        completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+        if completed.returncode:
+            raise RuntimeError(
+                f"registered node worker coordinate {coordinate} failed with "
+                f"{completed.returncode}"
             )
-        )
-        return 0
-    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
-    if completed.returncode:
-        raise RuntimeError(
-            f"registered node worker failed with {completed.returncode}"
-        )
+        resolved.append({"coordinate": coordinate, "row": row})
     print(
         json.dumps(
             {
                 "node_id": args.node_id,
-                "coordinate": args.coordinate,
-                "resolved_row": row,
+                "coordinate_start": coordinates.start,
+                "coordinate_stop": coordinates.stop,
+                "resolved_rows": resolved,
+                "inactive_upper_bound_slots": inactive,
+                "scientific_rows_omitted": False,
                 "worker_entrypoint": matches[0]["entrypoint"],
                 "scientific_performance_inspected": False,
             },

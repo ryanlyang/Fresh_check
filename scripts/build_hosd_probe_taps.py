@@ -157,6 +157,43 @@ def _capture(model, dataset, replica, *, device):
     )
 
 
+def capture_tap_in_memory(model, dataset, replica, *, tap, device):
+    """Capture one frozen tap into process RAM without a persistent cache."""
+    if tap not in TAP_BLOCKS:
+        raise ValueError("unknown streamed probe tap")
+    rows, masks = [], []
+    full_length = int(dataset.replicas[replica]["tokens"].shape[1])
+    with torch.no_grad():
+        for start in range(0, len(dataset), 64):
+            samples = [
+                dataset.item_for_replica(index, replica)
+                for index in range(start, min(start + 64, len(dataset)))
+            ]
+            batch = collate_native_hlt_expert_batch(samples)
+            result = model.forward_with_taps(
+                batch["features"][:, 15:17].to(device),
+                batch["features"].to(device),
+                batch["vectors"].to(device),
+                batch["mask"].to(device),
+                capture=(tap,),
+            )
+            state = result.states[tap].float().cpu()
+            mask = result.masks[tap].cpu()
+            if state.shape[1] > full_length:
+                raise RuntimeError("Weaver tap exceeds source particle length")
+            padded = torch.zeros(
+                state.shape[0], full_length, state.shape[2], dtype=state.dtype
+            )
+            padded_mask = torch.zeros(
+                state.shape[0], full_length, dtype=torch.bool
+            )
+            padded[:, : state.shape[1]] = state
+            padded_mask[:, : mask.shape[1]] = mask
+            rows.append(padded.numpy())
+            masks.append(padded_mask.numpy())
+    return np.concatenate(rows), np.concatenate(masks)
+
+
 def _publish(path: Path, arrays):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -219,76 +256,17 @@ def main(argv=None):
     )
     output = args.output_dir or args.campaign_root / "probes" / "frozen_taps"
     write_immutable_json(output / "probe_encoder_lock.json", lock)
-    datasets = {
-        "model_train": _dataset(
-            _mapping(
-                args.train_cache,
-                "--train-cache",
-                required_replicas={0, 1, 2, 3},
-            ),
-            args.train_labels,
-            "model_train",
-            realization_policy="R_MULTI",
-        ),
-        "val_stop": _dataset(
-            _mapping(
-                args.val_stop_cache,
-                "--val-stop-cache",
-                required_replicas={0},
-            ),
-            args.val_stop_labels,
-            "val_stop",
-            realization_policy="R_FIXED",
-        ),
-        "design_select": _dataset(
-            _mapping(
-                args.design_select_cache,
-                "--design-select-cache",
-                required_replicas={0},
-            ),
-            args.design_select_labels,
-            "design_select",
-            realization_policy="R_FIXED",
-        ),
-    }
-    files = {}
-    for split, dataset in datasets.items():
-        replicas = range(4) if split == "model_train" else (0,)
-        captured = {}
-        for replica in replicas:
-            captured[replica] = _capture(model, dataset, replica, device=device)
-        for tap in TAP_BLOCKS:
-            states = (
-                np.stack([captured[r][0][tap] for r in replicas])
-                if split == "model_train"
-                else captured[0][0][tap]
-            )
-            mask = (
-                np.stack([captured[r][1][tap] for r in replicas])
-                if split == "model_train"
-                else captured[0][1][tap]
-            )
-            path = output / f"{split}__{tap}.npz"
-            files[f"{split}/{tap}"] = {
-                "path": str(path.resolve()),
-                "sha256": _publish(path, {
-                    "identities": np.asarray(dataset.identities),
-                    "labels": dataset.labels,
-                    "states": states.astype(np.float32),
-                    "particle_mask": mask.astype(bool),
-                    "probe_encoder_lock_sha256": np.asarray(lock["content_hash"]),
-                    "tap": np.asarray(tap),
-                }),
-            }
     manifest = {
-        "contract": "hosd_frozen_probe_tap_cache_manifest_v1",
-        "schema_version": 1,
+        "contract": "hosd_frozen_probe_tap_cache_manifest_v2",
+        "schema_version": 2,
         "source": campaign["source"],
         "campaign_spec_sha256": campaign["content_hash"],
         "probe_encoder_lock_sha256": lock["content_hash"],
         "model_train_replicas": [0, 1, 2, 3],
         "evaluation_replica": 0,
-        "files": files,
+        "storage_policy": "stream_exact_frozen_tap_into_worker_RAM_v1",
+        "persistent_particle_state_files": 0,
+        "files": {},
     }
     from teacher_logit_reco.hlt_offline_structure_distillation.contracts import with_content_hash
     manifest = with_content_hash(manifest)

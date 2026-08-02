@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 import numpy as np
 
@@ -158,7 +160,7 @@ def _availability(mask, target_row):
     return np.stack(values, axis=-1), order
 
 
-def _publish(path, arrays):
+def _publish(path, arrays, *, content_store=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = _npz(path)
@@ -168,8 +170,30 @@ def _publish(path, arrays):
         ):
             raise FileExistsError("probe input differs on reuse")
         return _sha(path)
-    np.savez_compressed(path, **arrays)
-    return _sha(path)
+    if content_store is None:
+        np.savez_compressed(path, **arrays)
+        return _sha(path)
+    store = Path(content_store)
+    store.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix="payload_", suffix=".npz", dir=store)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            np.savez_compressed(stream, **arrays)
+        digest = _sha(temporary)
+        canonical = store / f"{digest}.npz"
+        try:
+            os.link(temporary, canonical)
+        except FileExistsError:
+            if _sha(canonical) != digest:
+                raise RuntimeError("probe content-addressed payload changed")
+        try:
+            os.link(canonical, path)
+        except FileExistsError:
+            if _sha(path) != digest:
+                raise FileExistsError("probe input differs on concurrent reuse")
+        return digest
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def main(argv=None):
@@ -238,11 +262,11 @@ def main(argv=None):
         return pair_main(command)
     target_paths = _mapping(args.target_cache, "--target-cache")
     label_paths = _mapping(args.labels, "--labels")
-    tap_paths = (
-        _mapping(args.tap_cache, "--tap-cache")
-        if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}
-        else {}
-    )
+    if args.tap_cache:
+        raise ValueError(
+            "persistent tap caches are forbidden; learned taps stream in the trainer"
+        )
+    tap_paths = {}
     raw_paths = (
         _mapping(args.raw_input, "--raw-input")
         if row["probe_kind"] == "P_RAW_MLP"
@@ -271,8 +295,6 @@ def main(argv=None):
         loaded[role] = cache
         parents[f"{role}_target_manifest"] = cache.manifest["content_hash"]
         parents[f"{role}_labels_file"] = _sha(label_paths[role])
-        if tap_paths:
-            parents[f"{role}_tap_file"] = _sha(tap_paths[role])
         if raw_paths:
             parents[f"{role}_raw_file"] = _sha(raw_paths[role])
     raw_features = {}
@@ -317,14 +339,20 @@ def main(argv=None):
                 np.stack(contexts) if role == "model_train" else contexts[0],
             )
     lineage = with_content_hash({
-        "contract": "hosd_probe_input_lineage_v1",
-        "schema_version": 1,
+        "contract": "hosd_probe_input_lineage_v2",
+        "schema_version": 2,
         "source": campaign["source"],
         "campaign_spec_sha256": campaign["content_hash"],
         "stage_c_plan_sha256": plan["content_hash"],
         "target_registry_sha256": registry["content_hash"],
         "row_id": args.row_id,
         "target_id": row["target_id"],
+        "tap_storage_policy": (
+            "stream_exact_frozen_tap_into_worker_RAM_v1"
+            if row["probe_kind"] in {"P_LINEAR", "P_SHALLOW"}
+            else "not_applicable"
+        ),
+        "payload_storage_contract": "hardlinked_content_addressed_probe_payload_v1",
         **(
             {
                 "raw_summary_contract": {
@@ -369,19 +397,7 @@ def main(argv=None):
             "target_mask": target_mask,
             "availability": availability.astype(np.float32),
             "availability_group_order": np.asarray(group_order),
-            "target_cache_manifest_sha256": np.asarray(lineage["content_hash"]),
         }
-        if tap_paths:
-            tap = _npz(tap_paths[role])
-            tap_ids = tuple(str(value) for value in tap["identities"].tolist())
-            if tap_ids != identities or str(tap["tap"].item()) != row["tap"]:
-                raise ValueError(f"{role} frozen tap identities/tap differ")
-            arrays.update({
-                "states": tap["states"].astype(np.float32),
-                "particle_mask": tap["particle_mask"].astype(bool),
-                "probe_encoder_lock_sha256": tap["probe_encoder_lock_sha256"],
-                "tap": tap["tap"],
-            })
         if raw_paths:
             raw = _npz(raw_paths[role])
             raw_ids = _identity_values(raw, context=f"{role} raw-summary input")
@@ -393,10 +409,17 @@ def main(argv=None):
                 "jet_context": context,
             })
         path = output / f"{role}.npz"
-        files[role] = {"path": str(path.resolve()), "sha256": _publish(path, arrays)}
+        files[role] = {
+            "path": str(path.resolve()),
+            "sha256": _publish(
+                path,
+                arrays,
+                content_store=args.campaign_root / "probes" / "input_payloads",
+            ),
+        }
     completion = with_content_hash({
-        "contract": "hosd_probe_input_completion_v1",
-        "schema_version": 1,
+        "contract": "hosd_probe_input_completion_v2",
+        "schema_version": 2,
         "source": campaign["source"],
         "row_id": args.row_id,
         "input_lineage_sha256": lineage["content_hash"],
@@ -422,7 +445,7 @@ def main(argv=None):
             }
             for item in plan["probe_rows"]
         },
-        expected_contract="hosd_probe_input_completion_v1",
+        expected_contract="hosd_probe_input_completion_v2",
         parent_hashes={"stage_c_plan": plan["content_hash"]},
         source=campaign["source"],
         output=args.campaign_root
