@@ -366,6 +366,11 @@ def test_shell_exposes_real_compact_smoke_and_full_streamed_commands() -> None:
     phase_worker = (root / "scripts" / "run_retb_streamed_smoke_phase.py").read_text()
     assert "--streamed-smoke-submit" in launcher
     assert "--streamed-submit" in launcher
+    miniature_guard = 'if [[ "${RETB_MINIATURE}" == "1" ]]; then'
+    assert miniature_guard in launcher
+    assert launcher.index(miniature_guard) < launcher.index(
+        'graph_arguments+=(--storage-measurements "${RETB_STORAGE_MEASUREMENTS}")'
+    )
     assert "streamed_smoke_submission_ledger.json" in launcher
     assert "run_retb_streamed_smoke_phase.py" in worker
     finalizer = (root / "sbatch" / "run_retb_finalize_job_ledger.sh").read_text()
@@ -400,3 +405,30 @@ def test_graph_cli_reports_only_18_physical_smoke_allocations(tmp_path: Path) ->
     assert payload["submission_node_count"] == 18
     assert payload["complete_graph_node_count"] == 87
     assert payload["production_submission_performed"] is False
+
+
+def test_miniature_graph_rejects_external_storage_measurements(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "submit_retb_graph.py"),
+            "--miniature",
+            "--submission-scope",
+            "streamed_smoke",
+            "--dry-run",
+            "--storage-measurements",
+            str(tmp_path / "production_storage_measurements.json"),
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert (
+        "miniature graphs must use the fixed miniature storage contract"
+        in completed.stderr
+    )

@@ -31,6 +31,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  #
     write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
+    identity_order_hash,
     load_hlt_v3_cache,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
@@ -78,12 +79,42 @@ def _dataset(paths, labels_path, role, *, realization_policy):
     for replica, path in paths.items():
         arrays[replica], metadata[replica] = load_hlt_v3_cache(path)
     labels, identities = _labels(labels_path)
+    source_role = "val_design" if role == "design_select" else role
+    if {
+        str(value.get("logical_role")) for value in metadata.values()
+    } != {source_role}:
+        raise ValueError("probe tap HLT cache logical role differs")
+    source_indices = {}
+    for replica, replica_arrays in arrays.items():
+        raw_source_ids = replica_arrays["identities"]
+        if (
+            len(raw_source_ids) == len(identities)
+            and identity_order_hash(raw_source_ids)
+            == identity_order_hash(identities)
+        ):
+            source_indices[replica] = range(len(identities))
+            continue
+        source_ids = tuple(str(value) for value in raw_source_ids)
+        positions = {value: index for index, value in enumerate(source_ids)}
+        requested = set(identities)
+        if (
+            len(positions) != len(source_ids)
+            or len(requested) != len(identities)
+            or not requested.issubset(positions)
+            or (role != "design_select" and requested != set(positions))
+        ):
+            raise ValueError("probe tap HLT cache lacks label identities")
+        source_indices[replica] = np.asarray(
+            [positions[value] for value in identities], dtype=np.int64
+        )
     return NativeHLTExpertDataset(
         replica_arrays=arrays,
         replica_metadata=metadata,
         labels=labels,
         identities=identities,
         logical_role=role,
+        source_logical_role=source_role,
+        source_indices_by_replica=source_indices,
         realization_policy=realization_policy,
     )
 
@@ -216,7 +247,7 @@ def main(argv=None):
                 required_replicas={0},
             ),
             args.design_select_labels,
-            "val_design",
+            "design_select",
             realization_policy="R_FIXED",
         ),
     }

@@ -117,6 +117,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         and args.storage_measurements_sha256 is not None
     ):
         raise ValueError("storage measurement path/hash options are exclusive")
+    if args.miniature and (
+        args.storage_measurements is not None
+        or args.storage_measurements_sha256 is not None
+    ):
+        raise ValueError(
+            "miniature graphs must use the fixed miniature storage contract"
+        )
     if args.storage_measurements_sha256 is not None:
         if args.write_artifacts or not (args.dry_run or args.smoke_simulate):
             raise ValueError(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -427,6 +428,47 @@ def test_stage_c_scripts_and_authoritative_parity_entrypoint_exist() -> None:
     assert "atol=1e-6" in parity
     assert "atol=2e-6" in parity
     assert "set_autocast_enabled" in parity
+
+
+def test_probe_tap_loader_resolves_authenticated_design_select_subrole(
+    tmp_path: Path, monkeypatch
+) -> None:
+    script = REPO_ROOT / "scripts" / "build_hosd_probe_taps.py"
+    spec = importlib.util.spec_from_file_location("hosd_probe_tap_runtime", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source_identities = np.asarray(["jet-a", "jet-b", "jet-c"])
+    arrays = {"identities": source_identities}
+    metadata = {"logical_role": "val_design"}
+    monkeypatch.setattr(
+        module, "load_hlt_v3_cache", lambda path: (arrays, metadata)
+    )
+    labels_path = tmp_path / "design_select.npz"
+    np.savez(
+        labels_path,
+        identities=np.asarray(["jet-c", "jet-a"]),
+        labels=np.asarray([2, 0], dtype=np.int64),
+    )
+    captured = {}
+
+    def fake_dataset(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(module, "NativeHLTExpertDataset", fake_dataset)
+    module._dataset(
+        {0: tmp_path / "val_design_cache"},
+        labels_path,
+        "design_select",
+        realization_policy="R_FIXED",
+    )
+
+    assert captured["logical_role"] == "design_select"
+    assert captured["source_logical_role"] == "val_design"
+    assert captured["identities"] == ("jet-c", "jet-a")
+    assert captured["source_indices_by_replica"][0].tolist() == [2, 0]
 
 
 def test_miniature_fixed_budget_baseline_trainer_never_stops_on_performance(

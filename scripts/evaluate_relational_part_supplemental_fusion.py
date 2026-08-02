@@ -16,7 +16,8 @@ import numpy as np
 import torch
 
 
-CONTRACT = "relational_part_posthoc_fusion_comparison_v1"
+LEGACY_CONTRACT = "relational_part_posthoc_fusion_comparison_v1"
+CONFIGURABLE_CONTRACT = "relational_part_posthoc_fusion_comparison_v2"
 CONTROL_RUN_IDS = (
     "RPT_BASE",
     "RPT_BASE_WIDE_MAX",
@@ -27,11 +28,40 @@ RELATION_RUN_IDS = (
     "RPT_CHARGE",
     "RPT_PT",
 )
+TRACK_CHARGE_DENSITY_RUN_IDS = (
+    "RPT_TRACK",
+    "RPT_CHARGE",
+    "RPT_DENSITY",
+)
+COMPARISON_RELATION_RUN_IDS = {
+    "track_charge_pt": RELATION_RUN_IDS,
+    "track_charge_density": TRACK_CHARGE_DENSITY_RUN_IDS,
+}
 PAIR_FUSIONS = {
     "RPT_TRACK_CHARGE_LOGIT_FUSION": ("RPT_TRACK", "RPT_CHARGE"),
     "RPT_TRACK_PT_LOGIT_FUSION": ("RPT_TRACK", "RPT_PT"),
     "RPT_CHARGE_PT_LOGIT_FUSION": ("RPT_CHARGE", "RPT_PT"),
 }
+
+
+def pair_fusion_definitions(
+    run_ids: Sequence[str],
+) -> dict[str, tuple[str, str]]:
+    """Return stable pairwise fusion IDs for a three-member comparison."""
+
+    members = tuple(str(value) for value in run_ids)
+    if len(members) != 3 or len(set(members)) != 3:
+        raise ValueError("pair fusions require three distinct run IDs")
+    definitions: dict[str, tuple[str, str]] = {}
+    for left_index, left in enumerate(members):
+        for right in members[left_index + 1 :]:
+            left_name = left.removeprefix("RPT_")
+            right_name = right.removeprefix("RPT_")
+            definitions[f"RPT_{left_name}_{right_name}_LOGIT_FUSION"] = (
+                left,
+                right,
+            )
+    return definitions
 
 
 def _center_logits(logits: np.ndarray) -> np.ndarray:
@@ -270,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--campaign-root", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=101)
+    parser.add_argument(
+        "--comparison-id",
+        choices=tuple(COMPARISON_RELATION_RUN_IDS),
+        default="track_charge_pt",
+        help="Fixed supplemental fusion definition to evaluate.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output", type=Path)
     parser.add_argument(
@@ -281,6 +317,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    comparison_id = str(args.comparison_id)
+    relation_run_ids = COMPARISON_RELATION_RUN_IDS[comparison_id]
+    pair_fusions = pair_fusion_definitions(relation_run_ids)
+    artifact_contract = (
+        LEGACY_CONTRACT
+        if comparison_id == "track_charge_pt"
+        else CONFIGURABLE_CONTRACT
+    )
+    artifact_schema_version = 1 if comparison_id == "track_charge_pt" else 2
 
     source_root = args.source_root.resolve()
     campaign_root = args.campaign_root.resolve()
@@ -353,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
 
-    run_ids = (*CONTROL_RUN_IDS, *RELATION_RUN_IDS)
+    run_ids = (*CONTROL_RUN_IDS, *relation_run_ids)
     registrations = {}
     model_contracts = {}
     official_metrics = {}
@@ -515,8 +561,8 @@ def main(argv: list[str] | None = None) -> int:
 
     group_definitions = {
         "CONTROL_LOGIT_FUSION": CONTROL_RUN_IDS,
-        "RELATION_LOGIT_FUSION": RELATION_RUN_IDS,
-        **PAIR_FUSIONS,
+        "RELATION_LOGIT_FUSION": relation_run_ids,
+        **pair_fusions,
     }
     fusion_rows = {}
     fusion_predictions = {}
@@ -609,11 +655,11 @@ def main(argv: list[str] | None = None) -> int:
         {
             **{
                 run_id: member_predictions[run_id]
-                for run_id in RELATION_RUN_IDS
+                for run_id in relation_run_ids
             },
             **{
                 fusion_id: fusion_predictions[fusion_id]
-                for fusion_id in PAIR_FUSIONS
+                for fusion_id in pair_fusions
             },
         },
         fusion_predictions["RELATION_LOGIT_FUSION"],
@@ -624,10 +670,9 @@ def main(argv: list[str] | None = None) -> int:
         "RELATION_LOGIT_FUSION"
     )
 
-    artifact = with_content_hash(
-        {
-            "contract": CONTRACT,
-            "schema_version": 1,
+    artifact_fields = {
+            "contract": artifact_contract,
+            "schema_version": artifact_schema_version,
             "scientific_status": "supplemental_post_hoc_diagnostic_only",
             "official_campaign_metric": False,
             "eligible_for_model_selection": False,
@@ -639,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
             "final_test_opened": False,
             "class_order": list(CLASS_NAMES),
             "control_member_run_ids": list(CONTROL_RUN_IDS),
-            "relation_member_run_ids": list(RELATION_RUN_IDS),
+            "relation_member_run_ids": list(relation_run_ids),
             "temperature_calibration": temperatures,
             "fusion_results": fusion_rows,
             "primary_relation_minus_control_paired_statistics": primary_paired,
@@ -686,17 +731,23 @@ def main(argv: list[str] | None = None) -> int:
             "diagnostic_script_sha256": sha256_file(Path(__file__)),
             "calculation_dtype": "float64",
         }
-    )
+    if comparison_id != "track_charge_pt":
+        artifact_fields["comparison_id"] = comparison_id
+    artifact = with_content_hash(artifact_fields)
     output = args.output or (
         campaign_root
         / "supplemental_diagnostics"
         / "fusion"
-        / "control_vs_track_charge_pt.json"
+        / (
+            "control_vs_track_charge_pt.json"
+            if comparison_id == "track_charge_pt" and int(args.seed) == 101
+            else f"control_vs_{comparison_id}_seed_{int(args.seed)}.json"
+        )
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.is_file():
         existing = json.loads(output.read_text(encoding="utf-8"))
-        validate_content_hash(existing, expected_contract=CONTRACT)
+        validate_content_hash(existing, expected_contract=artifact_contract)
         if existing != artifact:
             raise FileExistsError(
                 f"supplemental fusion output differs from existing artifact: {output}"

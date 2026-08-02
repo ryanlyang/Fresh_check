@@ -123,7 +123,13 @@ graph_arguments=(
   --gpu-scale-concurrency "${RETB_GPU_SCALE_CONCURRENCY}"
   --gpu-final-concurrency "${RETB_GPU_FINAL_CONCURRENCY}"
 )
-if [[ -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
+if [[ "${RETB_MINIATURE}" == "1" ]]; then
+  # Miniature campaigns are bound to the deterministic miniature storage
+  # contract in both the graph and Step-1 campaign builder.  A production
+  # measurement may legitimately exist at the default path, but allowing it
+  # into only the graph would make campaign bootstrap fail its lineage check.
+  :
+elif [[ -f "${RETB_STORAGE_MEASUREMENTS}" ]]; then
   graph_arguments+=(--storage-measurements "${RETB_STORAGE_MEASUREMENTS}")
 elif [[ "${mode}" == "dry-run" ]]; then
   graph_arguments+=(--storage-measurements-sha256 "$(printf '0%.0s' {1..64})")
