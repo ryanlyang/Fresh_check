@@ -23,7 +23,7 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
     load_hashed_json, with_content_hash, write_immutable_json,
 )
 from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
-    PRODUCTION_GRAPH_CONTRACT,
+    PRODUCTION_GRAPH_CONTRACT, task_manifest_path_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (  # noqa: E402
     SMOKE_PHASES, STREAMED_SMOKE_PHASE_CONTRACT,
@@ -180,7 +180,13 @@ def _run_authenticated_manifest(
 ) -> dict[str, Any]:
     """Run every row of one real miniature preparation manifest."""
 
-    manifest = campaign_root / "job_ledgers" / "tasks" / f"{node_id}.json"
+    graph = load_hashed_json(
+        campaign_root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
+    )
+    manifest = task_manifest_path_for_graph(
+        graph, node_id=node_id, campaign_root=campaign_root
+    )
     if not manifest.is_file():
         raise FileNotFoundError(f"compact smoke task manifest is absent: {manifest}")
     task_manifest = load_hashed_json(manifest)
@@ -273,8 +279,16 @@ def _run_python(arguments: Sequence[str]) -> None:
 
 
 def _prepare_native_smoke_parent(campaign_root: Path) -> dict[str, Any]:
+    graph = load_hashed_json(
+        campaign_root / "job_ledgers" / "production_graph.json",
+        expected_contract=PRODUCTION_GRAPH_CONTRACT,
+    )
     manifest = load_hashed_json(
-        campaign_root / "job_ledgers" / "tasks" / "offline_expert_training.json"
+        task_manifest_path_for_graph(
+            graph,
+            node_id="offline_expert_training",
+            campaign_root=campaign_root,
+        )
     )
     row = manifest["rows"][0]
     source_root = Path(row["expected_outputs"][0]).parent

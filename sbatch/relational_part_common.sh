@@ -43,6 +43,12 @@ rpt_setup() {
   conda activate "${CONDA_ENV}"
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   cd "${PROJECT_DIR}"
+  if [[ -n "${RPT_SOURCE_RECOVERY_AUTHORIZATION:-}" ]]; then
+    python -c \
+      'from pathlib import Path; from teacher_logit_reco.relational_part import load_hashed_json, validate_campaign_source; root=Path("'"${CAMPAIGN_ROOT}"'"); validate_campaign_source(load_hashed_json(root / "campaign_spec.json"), repo_root=Path.cwd()); print("authenticated RPT source recovery")'
+    python -c "import sys; print(sys.executable)"
+    return 0
+  fi
   local production_graph="${CAMPAIGN_ROOT}/job_ledgers/production_graph.json"
   if [[ ! -f "${production_graph}" ]]; then
     echo "Production graph is absent: ${production_graph}" >&2

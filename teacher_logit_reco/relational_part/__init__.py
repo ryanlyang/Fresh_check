@@ -386,10 +386,15 @@ from .runtime import (
     load_region_tree_split,
 )
 from .workflow import (
+    RECOVERED_ARCHITECTURE_RUN_IDS,
     RUN_RESULT_ENVELOPE_CONTRACT,
+    SOURCE_RECOVERY_AUTHORIZATION_CONTRACT,
+    SOURCE_RECOVERY_AUTHORIZATION_ENV,
     build_run_result_envelope,
     expected_training_lineage,
     load_run_result,
+    resolve_model_contract_path,
+    validate_source_recovery_authorization,
     validate_campaign_source,
 )
 from .train import (
@@ -622,9 +627,14 @@ __all__ = [
     "zero_relation_family",
     "build_runtime_model",
     "RUN_RESULT_ENVELOPE_CONTRACT",
+    "RECOVERED_ARCHITECTURE_RUN_IDS",
+    "SOURCE_RECOVERY_AUTHORIZATION_CONTRACT",
+    "SOURCE_RECOVERY_AUTHORIZATION_ENV",
     "build_run_result_envelope",
     "expected_training_lineage",
     "load_run_result",
+    "resolve_model_contract_path",
+    "validate_source_recovery_authorization",
     "validate_campaign_source",
     "build_step6_attention_contract",
     "build_step6_model_contract",

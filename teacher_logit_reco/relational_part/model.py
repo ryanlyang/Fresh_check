@@ -56,7 +56,7 @@ RPT_BASE_MODEL_CONTRACT = "relational_part_rpt_base_model_v1"
 STEP3_RELATIONAL_MODEL_CONTRACT = "relational_part_step3_model_v1"
 STEP4_RELATIONAL_MODEL_CONTRACT = "relational_part_step4_model_v1"
 STEP5_RELATIONAL_MODEL_CONTRACT = "relational_part_step5_model_v1"
-STEP6_RELATIONAL_MODEL_CONTRACT = "relational_part_step6_model_v1"
+STEP6_RELATIONAL_MODEL_CONTRACT = "relational_part_step6_model_v2"
 
 RPT_BASE_CONFIG: dict[str, Any] = {
     "input_dim": 17,
@@ -1728,7 +1728,7 @@ def build_step6_model_contract(
     return with_content_hash(
         {
             "contract": STEP6_RELATIONAL_MODEL_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "configuration_role": (
                 "architecture_control" if base_control else "scientific_finalist"
@@ -1750,7 +1750,14 @@ def build_step6_model_contract(
             "independent_bias_projection_per_layer": True,
             "layerwise_bias_projection_initialization": (
                 "independent_parameters_initialized_as_deep_copies_of_one_"
-                "Weaver_initialized_final_projection"
+                "Weaver_initialized_final_projection_tail"
+            ),
+            "layerwise_bias_split_boundary": (
+                "immediately_before_final_Conv1d_or_Linear_head_projection"
+            ),
+            "layerwise_bias_projection_tail": (
+                "final_head_projection_plus_supported_trailing_modules_"
+                "including_Weaver_output_BatchNorm1d"
             ),
             "particle_attention_layer_count": 8,
             "edge_value": {

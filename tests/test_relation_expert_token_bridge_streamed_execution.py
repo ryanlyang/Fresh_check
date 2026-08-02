@@ -12,7 +12,7 @@ from scripts.cleanup_retb_full_streamed_terminal_payloads import _eligible
 
 from teacher_logit_reco.relation_expert_token_bridge.campaign import build_campaign_spec
 from teacher_logit_reco.relation_expert_token_bridge.production import (
-    build_job_ledger, build_production_graph,
+    build_job_ledger, build_production_graph, task_manifest_path_for_graph,
 )
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     load_hashed_json, write_immutable_json,
@@ -55,6 +55,20 @@ def test_full_and_smoke_graph_profiles_are_distinct_and_fail_closed() -> None:
     assert smoke["smoke_evidence_eligible_for_production"] is False
     with pytest.raises(ValueError):
         _graph(miniature=False, profile=STREAMED_SMOKE_PROFILE)
+
+
+def test_compact_smoke_uses_graph_authoritative_static_manifest_paths() -> None:
+    graph = _graph(miniature=True, profile=STREAMED_SMOKE_PROFILE)
+    assert task_manifest_path_for_graph(
+        graph,
+        node_id="offline_expert_training",
+        campaign_root="/campaign/streamed",
+    ).as_posix().endswith("/job_ledgers/tasks/stage_b_offline_experts.json")
+    assert task_manifest_path_for_graph(
+        graph,
+        node_id="native_hlt_expert_training",
+        campaign_root="/campaign/streamed",
+    ).as_posix().endswith("/job_ledgers/tasks/stage_d_hlt_experts.json")
 
 
 def test_streamed_profile_freezes_transient_and_durable_classes() -> None:
@@ -373,6 +387,8 @@ def test_shell_exposes_real_compact_smoke_and_full_streamed_commands() -> None:
     )
     assert "streamed_smoke_submission_ledger.json" in launcher
     assert "run_retb_streamed_smoke_phase.py" in worker
+    assert "task_manifest_path_for_graph" in phase_worker
+    assert 'f"{node_id}.json"' not in phase_worker
     finalizer = (root / "sbatch" / "run_retb_finalize_job_ledger.sh").read_text()
     assert "cleanup_retb_full_streamed_terminal_payloads.py" in finalizer
     assert 'RETB_SUBMISSION_SCOPE:-complete' in finalizer

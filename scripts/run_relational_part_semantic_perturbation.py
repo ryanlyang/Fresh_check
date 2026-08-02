@@ -19,6 +19,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     build_semantic_diagnostics_bundle,
     load_hashed_json,
     semantic_diagnostic_rows,
+    resolve_model_contract_path,
     validate_semantic_run_diagnostics_artifact,
     validate_campaign_source,
     write_immutable_json,
@@ -29,16 +30,7 @@ from scripts.evaluate_relational_part_semantic_controls import (  # noqa: E402
 
 
 def _model_contract(root: Path, run_id: str) -> Path:
-    candidates = [
-        root / "registry" / "model_contracts" / f"{run_id}.json",
-        root / "registry" / "confirmation_model_contracts" / f"{run_id}.json",
-    ]
-    matches = [path for path in candidates if path.is_file()]
-    if len(matches) != 1:
-        raise FileNotFoundError(
-            f"semantic model {run_id} has {len(matches)} model contracts"
-        )
-    return matches[0]
+    return resolve_model_contract_path(root, run_id)
 
 
 def _load_reusable_artifact(

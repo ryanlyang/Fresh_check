@@ -516,6 +516,9 @@ def test_step6_contracts_bind_global_policy_and_base_controls() -> None:
     assert base["base4_architecture_control"] is True
     assert selected["enabled_relations"] == ["base4", "PT", "TRACK"]
     assert selected["layerwise_bias"]["projection_count"] == 8
+    assert selected["contract"] == "relational_part_step6_attention_v2"
+    assert selected["schema_version"] == 2
+    assert "BatchNorm1d" in selected["layerwise_bias"]["projection_tail"]
 
     model = _MiniModel().eval()
     batch = next(iter(_loaders(1)[1]))
@@ -543,6 +546,8 @@ class _FakePairEmbed(torch.nn.Module):
             torch.nn.Conv1d(input_dimension, 7, 1),
             torch.nn.GELU(),
             torch.nn.Conv1d(7, heads, 1),
+            # Match real Weaver's post-output normalization topology.
+            torch.nn.BatchNorm1d(heads),
         )
 
 
@@ -643,6 +648,12 @@ def test_full_layerwise_and_edgevalue_base4_topology_zero_message_parity() -> No
         attention.edge_projection.data.zero_()
     assert len(layerwise.layer_bias.projections) == 8
     assert len(edge.edge_attention) == 8
+    assert all(
+        isinstance(projection, torch.nn.Sequential)
+        and isinstance(projection[0], torch.nn.Conv1d)
+        and isinstance(projection[1], torch.nn.BatchNorm1d)
+        for projection in layerwise.layer_bias.projections
+    )
     assert not any(
         "reference_projection" in name for name, _ in edge.named_parameters()
     )

@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - contract imports without torch
     F = None
 
 
-STEP6_ATTENTION_CONTRACT = "relational_part_step6_attention_v1"
+STEP6_ATTENTION_CONTRACT = "relational_part_step6_attention_v2"
 ATTENTION_ANGULAR_BAND_EDGES = (0.0, 0.05, 0.10, 0.20, 0.40)
 
 
@@ -1019,7 +1019,7 @@ def build_step6_attention_contract(
     return with_content_hash(
         {
             "contract": STEP6_ATTENTION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": str(run_id),
             "model_contract_sha256": require_sha256(
                 model_contract_sha256, name="model_contract_sha256"
@@ -1032,7 +1032,14 @@ def build_step6_attention_contract(
                 "shared_final_projection": False,
                 "initialization": (
                     "independent_parameters_initialized_as_deep_copies_of_one_"
-                    "Weaver_initialized_final_projection"
+                    "Weaver_initialized_final_projection_tail"
+                ),
+                "split_boundary": (
+                    "immediately_before_final_Conv1d_or_Linear_head_projection"
+                ),
+                "projection_tail": (
+                    "final_head_projection_plus_supported_trailing_modules_"
+                    "including_Weaver_output_BatchNorm1d"
                 ),
             },
             "edge_value": {

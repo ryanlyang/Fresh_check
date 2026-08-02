@@ -19,6 +19,7 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     LOCKED_FINALISTS_CONTRACT,
     bind_source_provenance,
     load_hashed_json,
+    resolve_model_contract_path,
     source_snapshot,
     with_content_hash,
     write_immutable_json,
@@ -30,24 +31,7 @@ FINAL_TASK_REGISTRY = "relational_part_final_test_task_registry_v1"
 
 
 def _model_contract(root: Path, run_id: str) -> Path:
-    candidates = [
-        root / "registry" / "model_contracts" / f"{run_id}.json",
-        root / "registry" / "confirmation_model_contracts" / f"{run_id}.json",
-        root
-        / "selection"
-        / "semantic_controls"
-        / "unary_model_contract.json",
-    ]
-    existing = [path for path in candidates if path.is_file()]
-    if len(existing) != 1:
-        raise FileNotFoundError(
-            f"{run_id} must resolve to exactly one model contract; "
-            f"found={existing}"
-        )
-    contract = load_hashed_json(existing[0])
-    if contract.get("run_id") != run_id:
-        raise ValueError(f"{existing[0]} belongs to another run")
-    return existing[0]
+    return resolve_model_contract_path(root, run_id)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

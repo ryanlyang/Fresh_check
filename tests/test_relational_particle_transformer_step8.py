@@ -582,9 +582,11 @@ def test_step8_worker_surface_and_tigris_defaults_are_present() -> None:
 
 def test_continuation_source_snapshot_and_dynamic_ledger_fail_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from teacher_logit_reco.relational_part import source_snapshot, with_content_hash
 
+    monkeypatch.delenv("RPT_SOURCE_RECOVERY_AUTHORIZATION", raising=False)
     source = source_snapshot(ROOT)
     campaign = with_content_hash(
         {
@@ -634,6 +636,122 @@ def test_continuation_source_snapshot_and_dynamic_ledger_fail_closed(
     )
     assert failed.returncode != 0
     assert "another binding" in failed.stderr
+
+
+def test_architecture_source_recovery_is_campaign_bound_and_narrow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teacher_logit_reco.relational_part import (
+        RECOVERED_ARCHITECTURE_RUN_IDS,
+        SOURCE_RECOVERY_AUTHORIZATION_CONTRACT,
+    )
+    from teacher_logit_reco.relational_part import workflow
+
+    campaign_root = tmp_path / "campaign"
+    recovery_root = campaign_root / "selection" / "architecture_recovery_v1"
+    recovery_root.mkdir(parents=True)
+    original = {"commit": "a" * 40, "status_sha256": "b" * 64, "dirty": False}
+    current = {
+        "source_commit": "c" * 40,
+        "source_status_sha256": "d" * 64,
+        "source_dirty": False,
+    }
+    campaign = with_content_hash(
+        {
+            "contract": "test_campaign",
+            "schema_version": 1,
+            "source": original,
+        }
+    )
+    corrected_contracts = {}
+    for run_id in RECOVERED_ARCHITECTURE_RUN_IDS:
+        contract = with_content_hash(
+            {
+                "contract": "relational_part_step6_model_v2",
+                "schema_version": 2,
+                "run_id": run_id,
+            }
+        )
+        contract_path = recovery_root / f"{run_id}.json"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        corrected_contracts[run_id] = {
+            "path": f"selection/architecture_recovery_v1/{run_id}.json",
+            "sha256": contract["content_hash"],
+        }
+    task_registry = with_content_hash(
+        {
+            "contract": (
+                "relational_part_confirmation_architecture_recovery_tasks_v1"
+            ),
+            "schema_version": 1,
+            "task_count": 12,
+        }
+    )
+    (recovery_root / "architecture_tasks.json").write_text(
+        json.dumps(task_registry), encoding="utf-8"
+    )
+    preflight = with_content_hash(
+        {
+            "contract": (
+                "relational_part_real_weaver_architecture_recovery_preflight_v1"
+            ),
+            "schema_version": 1,
+            "real_weaver_import_and_construction_passed": True,
+            "trailing_BatchNorm1d_captured_per_layer": True,
+        }
+    )
+    (recovery_root / "real_weaver_construction_preflight.json").write_text(
+        json.dumps(preflight), encoding="utf-8"
+    )
+    reused = {f"run_{index}": f"{index + 1:064x}" for index in range(39)}
+    authorization = with_content_hash(
+        {
+            "contract": SOURCE_RECOVERY_AUTHORIZATION_CONTRACT,
+            "schema_version": 1,
+            "campaign_root": str(campaign_root.resolve()),
+            "campaign_spec_sha256": campaign["content_hash"],
+            "original_campaign_source": original,
+            "recovery_source": {
+                "commit": current["source_commit"],
+                "status_sha256": current["source_status_sha256"],
+                "dirty": False,
+            },
+            "authorized_run_ids": sorted(RECOVERED_ARCHITECTURE_RUN_IDS),
+            "corrected_model_contracts": corrected_contracts,
+            "recovery_task_registry_sha256": task_registry["content_hash"],
+            "real_weaver_construction_preflight_sha256": preflight[
+                "content_hash"
+            ],
+            "reused_ordinary_checkpoint_registration_hashes": reused,
+            "reused_ordinary_run_seed_count": 39,
+            "retrain_ordinary_runs": False,
+            "downstream_continuation_authorized": True,
+            "final_test_still_requires_locked_finalists": True,
+            "performance_gate": False,
+        }
+    )
+    authorization_path = recovery_root / "source_recovery_authorization.json"
+    authorization_path.write_text(json.dumps(authorization), encoding="utf-8")
+    monkeypatch.setenv(
+        "RPT_SOURCE_RECOVERY_AUTHORIZATION", str(authorization_path)
+    )
+    monkeypatch.setattr(workflow, "source_snapshot", lambda _: current)
+
+    assert validate_campaign_source(campaign, repo_root=tmp_path) == current
+    wrong_campaign = with_content_hash(
+        {"contract": "test_campaign", "schema_version": 1, "source": original}
+        | {"different": True}
+    )
+    with pytest.raises(ValueError, match="another campaign"):
+        validate_campaign_source(wrong_campaign, repo_root=tmp_path)
+
+    submitter = (
+        ROOT / "sbatch" / "submit_relational_part_architecture_recovery.sh"
+    ).read_text(encoding="utf-8")
+    assert "architecture_recovery_training_v1" in submitter
+    assert 'count}" != "12"' in submitter
+    assert "RPT_SOURCE_RECOVERY_AUTHORIZATION" in submitter
 
 
 def test_smoke_simulation_prints_complete_nonmutating_ledger(

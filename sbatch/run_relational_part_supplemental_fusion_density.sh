@@ -4,9 +4,12 @@ IFS=$'\n\t'
 
 : "${CAMPAIGN_ROOT:?CAMPAIGN_ROOT is required}"
 : "${PINNED_SOURCE_ROOT:?PINNED_SOURCE_ROOT is required}"
+: "${PROJECT_DIR:=${PINNED_SOURCE_ROOT}}"
 : "${FUSION_SCRIPT:=${CAMPAIGN_ROOT}/evaluate_relational_part_supplemental_fusion.py}"
-: "${CONDA_BASE:=/home/ryreu/miniforge3-aarch64}"
-: "${CONDA_ENV:=atlas_kd_tigris}"
+SCRIPT_DIR="${PROJECT_DIR}/sbatch"
+# shellcheck source=relational_part_common.sh
+source "${SCRIPT_DIR}/relational_part_common.sh"
+rpt_setup
 
 seeds=(101 202 303)
 task_index="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
@@ -15,12 +18,6 @@ if (( task_index < 0 || task_index >= ${#seeds[@]} )); then
   exit 2
 fi
 seed="${seeds[task_index]}"
-
-source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate "${CONDA_ENV}"
-export PYTHONNOUSERSITE=1
-export PYTHONDONTWRITEBYTECODE=1
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 python "${FUSION_SCRIPT}" \
   --source-root "${PINNED_SOURCE_ROOT}" \

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Sequence
@@ -16,7 +17,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.relational_part import (  # noqa: E402
     SCREENING_REGISTRY_CONTRACT,
+    SOURCE_RECOVERY_AUTHORIZATION_ENV,
     load_hashed_json,
+    validate_campaign_source,
+    validate_source_recovery_authorization,
 )
 from scripts.train_relational_part import main as train_main  # noqa: E402
 
@@ -69,7 +73,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.task_registry is None:
             raise ValueError("confirmation tasks require --task-registry")
         registry = load_hashed_json(args.task_registry)
-        if registry.get("contract") != "relational_part_confirmation_task_registry_v1":
+        contract = registry.get("contract")
+        if contract == "relational_part_confirmation_architecture_recovery_tasks_v1":
+            campaign = load_hashed_json(args.campaign_root / "campaign_spec.json")
+            current = validate_campaign_source(campaign, repo_root=REPO_ROOT)
+            authorization_path = os.environ.get(
+                SOURCE_RECOVERY_AUTHORIZATION_ENV
+            )
+            if not authorization_path:
+                raise ValueError("recovery tasks require source authorization")
+            authorization = validate_source_recovery_authorization(
+                authorization_path,
+                campaign=campaign,
+                current_source=current,
+            )
+            if authorization.get("recovery_task_registry_sha256") != registry[
+                "content_hash"
+            ]:
+                raise ValueError("recovery task registry is not authorized")
+        elif contract != "relational_part_confirmation_task_registry_v1":
             raise ValueError("confirmation task registry contract differs")
         if args.task_index < 0 or args.task_index >= len(registry["tasks"]):
             raise IndexError("confirmation task index is outside its registry")

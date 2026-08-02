@@ -21,6 +21,7 @@ from teacher_logit_reco.relational_part.workflow import (  # noqa: E402
     build_run_result_envelope,
     expected_training_lineage,
     load_run_result,
+    resolve_model_contract_path,
     validate_campaign_source,
 )
 
@@ -68,28 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 row.get("unary_source_relation_set", ()),
             )
         )
-        if run_id == "RPT_SELECTED_UNARY":
-            contract_path = (
-                args.campaign_root
-                / "selection"
-                / "semantic_controls"
-                / "unary_model_contract.json"
-            )
-        else:
-            confirmation_path = (
-                args.campaign_root
-                / "registry"
-                / "confirmation_model_contracts"
-                / f"{run_id}.json"
-            )
-            contract_path = (
-                confirmation_path
-                if confirmation_path.is_file()
-                else args.campaign_root
-                / "registry"
-                / "model_contracts"
-                / f"{run_id}.json"
-            )
+        contract_path = resolve_model_contract_path(args.campaign_root, run_id)
         model_contract = load_hashed_json(contract_path)
         expected_run_registry = registry["content_hash"]
         if (

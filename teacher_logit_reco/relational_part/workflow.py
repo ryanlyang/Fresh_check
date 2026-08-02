@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,6 +19,123 @@ from .provenance import source_snapshot
 
 RUN_RESULT_ENVELOPE_CONTRACT = "relational_part_run_results_v1"
 CHECKPOINT_REGISTRATION_CONTRACT = "relational_part_checkpoint_registration_v2"
+SOURCE_RECOVERY_AUTHORIZATION_CONTRACT = (
+    "relational_part_source_recovery_authorization_v1"
+)
+SOURCE_RECOVERY_AUTHORIZATION_ENV = "RPT_SOURCE_RECOVERY_AUTHORIZATION"
+RECOVERED_ARCHITECTURE_RUN_IDS = (
+    "RPT_BASE_LAYERWISE",
+    "RPT_BASE_EDGEVALUE",
+    "RPT_SELECTED_LAYERWISE",
+    "RPT_SELECTED_EDGEVALUE",
+)
+
+
+def _source_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "commit": snapshot["source_commit"],
+        "status_sha256": require_sha256(
+            snapshot["source_status_sha256"], name="source.status_sha256"
+        ),
+        "dirty": bool(snapshot["source_dirty"]),
+    }
+
+
+def validate_source_recovery_authorization(
+    authorization_path: str | Path,
+    *,
+    campaign: Mapping[str, Any],
+    current_source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the narrow source repair used by the failed Step-6 rows."""
+
+    path = Path(authorization_path).resolve()
+    authorization = load_hashed_json(
+        path, expected_contract=SOURCE_RECOVERY_AUTHORIZATION_CONTRACT
+    )
+    campaign_sha = validate_content_hash(campaign)
+    if authorization.get("campaign_spec_sha256") != campaign_sha:
+        raise ValueError("source recovery belongs to another campaign")
+    if authorization.get("campaign_root") != str(path.parents[2]):
+        raise ValueError("source recovery path is outside its campaign root")
+    expected_original = campaign.get("source")
+    if not isinstance(expected_original, Mapping) or authorization.get(
+        "original_campaign_source"
+    ) != dict(expected_original):
+        raise ValueError("source recovery original source differs from campaign")
+    if authorization.get("recovery_source") != _source_identity(current_source):
+        raise ValueError("active source differs from recovery authorization")
+    if tuple(authorization.get("authorized_run_ids", ())) != tuple(
+        sorted(RECOVERED_ARCHITECTURE_RUN_IDS)
+    ):
+        raise ValueError("source recovery run scope differs")
+    if authorization.get("downstream_continuation_authorized") is not True:
+        raise ValueError("source recovery does not authorize continuation")
+    if authorization.get("final_test_still_requires_locked_finalists") is not True:
+        raise ValueError("source recovery weakens the final-test seal")
+    contracts = authorization.get("corrected_model_contracts")
+    if not isinstance(contracts, Mapping) or set(contracts) != set(
+        RECOVERED_ARCHITECTURE_RUN_IDS
+    ):
+        raise ValueError("source recovery model-contract coverage differs")
+    campaign_root = path.parents[2]
+    for run_id, row in contracts.items():
+        if not isinstance(row, Mapping):
+            raise ValueError(f"source recovery contract row differs for {run_id}")
+        contract_path = (campaign_root / str(row.get("path", ""))).resolve()
+        try:
+            contract_path.relative_to(campaign_root)
+        except ValueError as exc:
+            raise ValueError("source recovery model contract escapes campaign") from exc
+        contract = load_hashed_json(contract_path)
+        if (
+            contract.get("contract") != "relational_part_step6_model_v2"
+            or contract.get("run_id") != run_id
+            or contract.get("content_hash") != row.get("sha256")
+        ):
+            raise ValueError(f"source recovery model contract differs for {run_id}")
+    task_registry = load_hashed_json(
+        campaign_root
+        / "selection"
+        / "architecture_recovery_v1"
+        / "architecture_tasks.json"
+    )
+    if (
+        task_registry.get("contract")
+        != "relational_part_confirmation_architecture_recovery_tasks_v1"
+        or task_registry.get("content_hash")
+        != authorization.get("recovery_task_registry_sha256")
+        or int(task_registry.get("task_count", -1)) != 12
+    ):
+        raise ValueError("source recovery task registry differs")
+    preflight = load_hashed_json(
+        campaign_root
+        / "selection"
+        / "architecture_recovery_v1"
+        / "real_weaver_construction_preflight.json"
+    )
+    if (
+        preflight.get("contract")
+        != "relational_part_real_weaver_architecture_recovery_preflight_v1"
+        or preflight.get("content_hash")
+        != authorization.get("real_weaver_construction_preflight_sha256")
+        or preflight.get("real_weaver_import_and_construction_passed") is not True
+        or preflight.get("trailing_BatchNorm1d_captured_per_layer") is not True
+    ):
+        raise ValueError("source recovery real-Weaver preflight differs")
+    reused = authorization.get("reused_ordinary_checkpoint_registration_hashes")
+    if (
+        not isinstance(reused, Mapping)
+        or len(reused) != 39
+        or int(authorization.get("reused_ordinary_run_seed_count", -1)) != 39
+        or authorization.get("retrain_ordinary_runs") is not False
+    ):
+        raise ValueError("source recovery ordinary-run reuse coverage differs")
+    for name, digest in reused.items():
+        require_sha256(digest, name=f"reused_ordinary.{name}")
+    if authorization.get("performance_gate") is not False:
+        raise ValueError("source recovery contains a performance gate")
+    return authorization
 
 
 def parse_named_hashes(values: Sequence[str]) -> dict[str, str]:
@@ -65,21 +183,64 @@ def validate_campaign_source(
     expected = campaign.get("source")
     if not isinstance(expected, Mapping):
         raise ValueError("campaign spec lacks its source snapshot")
-    observed = {
-        "commit": current["source_commit"],
-        "status_sha256": current["source_status_sha256"],
-        "dirty": bool(current["source_dirty"]),
-    }
+    observed = _source_identity(current)
     locked = {
         "commit": expected.get("commit"),
         "status_sha256": expected.get("status_sha256"),
         "dirty": bool(expected.get("dirty")),
     }
     if observed != locked:
-        raise ValueError(
-            "active repository source snapshot differs from campaign_spec.json"
+        authorization_path = os.environ.get(SOURCE_RECOVERY_AUTHORIZATION_ENV)
+        if not authorization_path:
+            raise ValueError(
+                "active repository source snapshot differs from campaign_spec.json"
+            )
+        validate_source_recovery_authorization(
+            authorization_path,
+            campaign=campaign,
+            current_source=current,
         )
     return current
+
+
+def resolve_model_contract_path(
+    campaign_root: str | Path,
+    run_id: str,
+) -> Path:
+    """Resolve a model contract, honoring an authenticated Step-6 repair."""
+
+    root = Path(campaign_root).resolve()
+    authorization_path = os.environ.get(SOURCE_RECOVERY_AUTHORIZATION_ENV)
+    if authorization_path and run_id in RECOVERED_ARCHITECTURE_RUN_IDS:
+        campaign = load_hashed_json(root / "campaign_spec.json")
+        current = source_snapshot(Path(__file__).resolve().parents[2])
+        authorization = validate_source_recovery_authorization(
+            authorization_path,
+            campaign=campaign,
+            current_source=current,
+        )
+        row = authorization["corrected_model_contracts"][run_id]
+        path = root / str(row["path"])
+        artifact = load_hashed_json(path)
+        if artifact.get("run_id") != run_id or artifact.get(
+            "content_hash"
+        ) != row.get("sha256"):
+            raise ValueError(f"recovered model contract differs for {run_id}")
+        return path
+    candidates = [
+        root / "registry" / "model_contracts" / f"{run_id}.json",
+        root / "registry" / "confirmation_model_contracts" / f"{run_id}.json",
+        root / "selection" / "semantic_controls" / "unary_model_contract.json",
+    ]
+    matches = [path for path in candidates if path.is_file()]
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            f"{run_id} must resolve to exactly one model contract; found={matches}"
+        )
+    artifact = load_hashed_json(matches[0])
+    if artifact.get("run_id") != run_id:
+        raise ValueError(f"{matches[0]} belongs to another run")
+    return matches[0]
 
 
 def expected_training_lineage(
@@ -274,5 +435,10 @@ __all__ = [
     "parse_named_hashes",
     "reject_final_test_paths",
     "RUN_RESULT_ENVELOPE_CONTRACT",
+    "RECOVERED_ARCHITECTURE_RUN_IDS",
+    "SOURCE_RECOVERY_AUTHORIZATION_CONTRACT",
+    "SOURCE_RECOVERY_AUTHORIZATION_ENV",
+    "resolve_model_contract_path",
+    "validate_source_recovery_authorization",
     "validate_campaign_source",
 ]

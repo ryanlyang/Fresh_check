@@ -347,6 +347,11 @@ def test_registries_are_complete_hashed_and_training_independent() -> None:
         confirmation_registry=confirmation,
         semantic_registry=semantic,
     )["configuration_role"] == "semantic_control"
+    assert confirmation["contract"].endswith("_v2")
+    assert confirmation["schema_version"] == 2
+    assert "BatchNorm1d" in confirmation["architecture_contracts"][
+        "layerwise_projection_tail"
+    ]
     for artifact in (relations, screening, confirmation, semantic):
         assert validate_content_hash(artifact) == artifact["content_hash"]
 

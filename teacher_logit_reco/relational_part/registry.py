@@ -11,7 +11,7 @@ from .contracts import require_sha256, validate_content_hash, with_content_hash
 RELATION_FAMILY_REGISTRY_CONTRACT = "relational_part_relation_family_registry_v4"
 SCREENING_REGISTRY_CONTRACT = "relational_part_screening_registry_v2"
 CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT = (
-    "relational_part_confirmation_architecture_registry_v1"
+    "relational_part_confirmation_architecture_registry_v2"
 )
 SEMANTIC_CONTROL_REGISTRY_CONTRACT = "relational_part_semantic_control_registry_v1"
 
@@ -499,7 +499,7 @@ def build_confirmation_architecture_registry(
     return with_content_hash(
         {
             "contract": CONFIRMATION_ARCHITECTURE_REGISTRY_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "relation_registry_sha256": relation_registry_sha256,
             "screening_registry_sha256": screening_registry_sha256,
             "confirmation_seeds": [101, 202, 303],
@@ -530,7 +530,14 @@ def build_confirmation_architecture_registry(
             "architecture_contracts": {
                 "shared_pair_stem_evaluations_per_batch": 1,
                 "layerwise_bias": (
-                    "independent_final_head_projection_per_particle_attention_layer"
+                    "independent_final_head_projection_tail_per_particle_attention_layer"
+                ),
+                "layerwise_split_boundary": (
+                    "immediately_before_final_Conv1d_or_Linear_head_projection"
+                ),
+                "layerwise_projection_tail": (
+                    "final_head_projection_plus_supported_trailing_modules_"
+                    "including_Weaver_output_BatchNorm1d"
                 ),
                 "edge_value": {
                     "projection": "per_layer_per_head_linear_no_bias",
