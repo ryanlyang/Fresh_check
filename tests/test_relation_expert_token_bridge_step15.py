@@ -526,7 +526,7 @@ def test_streamed_storage_projection_is_source_evidence_bound(
     )
     payload = json.loads(output.read_text(encoding="utf-8"))
     projection = json.loads(
-        output.with_name("streamed_abc_projection.json").read_text(
+        output.with_name(f"{output.stem}_projection.json").read_text(
             encoding="utf-8"
         )
     )

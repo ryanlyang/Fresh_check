@@ -204,11 +204,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "storage_admitted": projection["storage_admitted"],
     }
     if not args.dry_run:
+        projection_output = args.output.with_name(
+            f"{args.output.stem}_projection.json"
+        )
         result["measurement_publication"] = write_immutable_json(
             args.output, artifact
         )
         result["projection_publication"] = write_immutable_json(
-            args.output.with_name("streamed_abc_projection.json"), projection
+            projection_output, projection
         )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if projection["storage_admitted"] else 2

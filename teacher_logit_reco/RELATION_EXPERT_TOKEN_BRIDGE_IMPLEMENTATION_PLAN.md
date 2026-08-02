@@ -5615,7 +5615,9 @@ interrupted rows retain resumable state.
 A--C. Storage admission is measured from an earlier completed RETB evidence
 campaign by `measure_retb_streamed_abc_storage.py`; its projection excludes
 node-local frozen-token banks, includes the persistent input/model projection
-and a serialized reserve, and remains source-evidence bound. These streamed
+and a serialized reserve, and remains source-evidence bound. Each timestamped
+measurement writes a same-stem immutable projection so repeated live-space
+measurements cannot collide with an earlier projection. These streamed
 contracts and paths are not interchangeable with the eager Stage-A or
 full-campaign contracts.
 
