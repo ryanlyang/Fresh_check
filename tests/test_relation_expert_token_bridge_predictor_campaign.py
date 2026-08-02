@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+from scripts.execute_retb_predictor_campaign import _hlt_cache
 
 from teacher_logit_reco.relation_expert_token_bridge.predictor_campaign import (
     FINAL_CONSUMER_PHASE_ORDER,
@@ -16,6 +20,20 @@ from teacher_logit_reco.relation_expert_token_bridge.step9 import (
     build_stage_f_registry,
     build_stage_g_registry,
 )
+
+
+def test_confirmation_native_hlt_commands_use_cache_directories() -> None:
+    root = Path("/campaign")
+    assert _hlt_cache(root, "model_train", 3) == (
+        root
+        / "inputs"
+        / "hlt_v3"
+        / "model_train"
+        / "replica_3"
+        / "R_MULTI"
+        / "D_NOMINAL"
+    )
+    assert _hlt_cache(root, "val_design", 0).name == "D_NOMINAL"
 
 
 def _result(identity_field: str, identity: str, index: int) -> dict:

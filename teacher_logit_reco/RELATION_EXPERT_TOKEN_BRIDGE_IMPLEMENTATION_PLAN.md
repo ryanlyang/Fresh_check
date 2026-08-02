@@ -5724,8 +5724,12 @@ on restart. The Stage-B phase also runs the first authenticated production
 offline-expert row against those miniature caches, and the Stage-D phase runs
 the corresponding first native-HLT-expert row after publishing the real
 Step-3 through Step-6 architecture bundles, checking the GPU resource probe,
-and byte-authenticating the smoke-only selected-parent alias. Later GPU phases
-use the registered RETB token-only expert head, token-transformer fusion, A1
+and byte-authenticating the smoke-only selected-parent alias. Native-HLT
+training CLI cache arguments are graph-bound cache directories, while their
+deferred lineage inputs bind the contained `hlt_v3_metadata.json` artifacts;
+this distinction is frozen by `retb_static_experiment_plan_v8` and
+`retb_static_experiment_bundle_v8`, schema 7. Later GPU phases use the
+registered RETB token-only expert head, token-transformer fusion, A1
 token predictor, and unrestricted HLT consumer rather than a generic
 stand-in; these form the one-shape/one-seed compact expert, reconstruction,
 fusion, semantic-control, confirmation, scale, and sealed-final path.

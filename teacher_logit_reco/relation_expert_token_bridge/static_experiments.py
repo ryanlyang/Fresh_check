@@ -48,8 +48,8 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v7"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v7"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v8"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v8"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
@@ -1052,7 +1052,12 @@ def _hlt_cache(root: Path, role: str, replica: int) -> str:
         f"replica_{replica}",
         policy,
         "D_NOMINAL",
-        "hlt_v3_metadata.json",
+    )
+
+
+def _hlt_cache_metadata(root: Path, role: str, replica: int) -> str:
+    return _path(
+        Path(_hlt_cache(root, role, replica)), "hlt_v3_metadata.json"
     )
 
 
@@ -1285,7 +1290,7 @@ def _stage_d_expert_records(
                 expected_artifacts=expected,
                 deferred_inputs=[
                     _deferred(
-                        _hlt_cache(root, "model_train", 0),
+                        _hlt_cache_metadata(root, "model_train", 0),
                         contract="retb_hlt_v3_cache_v1",
                         producer="hlt_v3_cache",
                         role="nominal_HLT_training_replica_zero",
@@ -1661,7 +1666,7 @@ def build_static_experiment_bundle(
     plan = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_PLAN_CONTRACT,
-            "schema_version": 6,
+            "schema_version": 7,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "campaign_profile": campaign["campaign_profile"],
@@ -1721,7 +1726,7 @@ def build_static_experiment_bundle(
     bundle = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_BUNDLE_CONTRACT,
-            "schema_version": 6,
+            "schema_version": 7,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "static_experiment_plan_sha256": plan["content_hash"],

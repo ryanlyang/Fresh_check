@@ -6,7 +6,9 @@ import sys
 import pytest
 
 from teacher_logit_reco.relation_expert_token_bridge import (
+    STATIC_EXPERIMENT_BUNDLE_CONTRACT,
     STATIC_EXPERIMENT_MANIFEST_NODES,
+    STATIC_EXPERIMENT_PLAN_CONTRACT,
     STATIC_MANIFEST_NODES,
     build_production_graph,
     build_static_experiment_bundle,
@@ -83,6 +85,10 @@ def test_full_static_matrix_is_exact_deduplicated_and_fully_bound(
         python_executable=sys.executable,
     )
     plan = bundle["static_experiment_plan"]
+    assert STATIC_EXPERIMENT_PLAN_CONTRACT == "retb_static_experiment_plan_v8"
+    assert STATIC_EXPERIMENT_BUNDLE_CONTRACT == "retb_static_experiment_bundle_v8"
+    assert plan["schema_version"] == 7
+    assert bundle["static_experiment_bundle"]["schema_version"] == 7
     assert tuple(plan["groups"]) == STATIC_MANIFEST_NODES
     assert plan["full_matrix_counts"] == {
         "offline_expert_training": 147,
@@ -352,6 +358,24 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
         row["configuration"].get("mode") == "HE_DUAL_OBJECTIVE"
         for row in stage_d
     )
+    for row in stage_d:
+        cache_values = [
+            row["argv"][index + 1]
+            for index, value in enumerate(row["argv"][:-1])
+            if value in {
+                "--train-cache", "--val-stop-cache", "--val-design-cache"
+            }
+        ]
+        assert cache_values
+        assert all(
+            Path(value.split("=", 1)[1]).name == "D_NOMINAL"
+            for value in cache_values
+        )
+        assert all(
+            Path(value["path"]).name == "hlt_v3_metadata.json"
+            for value in row["deferred_inputs"]
+            if value["producer"] == "hlt_v3_cache"
+        )
     assert len(plan["groups"]["native_hlt_fusion_training"]) == 30
 
     pilots = plan["groups"]["bridge_pilot_training"]

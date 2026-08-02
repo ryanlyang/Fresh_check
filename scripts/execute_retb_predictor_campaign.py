@@ -82,6 +82,19 @@ def _snapshot(campaign: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _hlt_cache(root: Path, role: str, replica: int) -> Path:
+    policy = "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
+    return (
+        root
+        / "inputs"
+        / "hlt_v3"
+        / role
+        / f"replica_{replica}"
+        / policy
+        / "D_NOMINAL"
+    )
+
+
 class PredictorCampaignPlanner:
     def __init__(
         self,
@@ -823,26 +836,15 @@ class PredictorCampaignPlanner:
                 argv.extend(
                     [
                         "--train-cache",
-                        (
-                            f"{replica}="
-                            f"{self.root}/inputs/hlt_v3/model_train/"
-                            f"replica_{replica}/R_MULTI/D_NOMINAL/"
-                            "hlt_v3_metadata.json"
-                        ),
+                        f"{replica}={_hlt_cache(self.root, 'model_train', replica)}",
                     ]
                 )
             argv.extend(
                 [
                     "--val-stop-cache",
-                    (
-                        f"0={self.root}/inputs/hlt_v3/val_stop/"
-                        "replica_0/R_FIXED/D_NOMINAL/hlt_v3_metadata.json"
-                    ),
+                    f"0={_hlt_cache(self.root, 'val_stop', 0)}",
                     "--val-design-cache",
-                    (
-                        f"0={self.root}/inputs/hlt_v3/val_design/"
-                        "replica_0/R_FIXED/D_NOMINAL/hlt_v3_metadata.json"
-                    ),
+                    f"0={_hlt_cache(self.root, 'val_design', 0)}",
                     "--train-labels",
                     str(
                         self.root
