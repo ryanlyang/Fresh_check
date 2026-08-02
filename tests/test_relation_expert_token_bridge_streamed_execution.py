@@ -8,16 +8,22 @@ import sys
 import pytest
 
 from scripts.run_retb_streamed_smoke_phase import _tiny_gpu_step
+from scripts.cleanup_retb_full_streamed_terminal_payloads import _eligible
 
-from teacher_logit_reco.relation_expert_token_bridge.production import build_production_graph
-from teacher_logit_reco.relation_expert_token_bridge.contracts import write_immutable_json
+from teacher_logit_reco.relation_expert_token_bridge.campaign import build_campaign_spec
+from teacher_logit_reco.relation_expert_token_bridge.production import (
+    build_job_ledger, build_production_graph,
+)
+from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    load_hashed_json, write_immutable_json,
+)
 from teacher_logit_reco.relation_expert_token_bridge.provenance import source_snapshot
 from teacher_logit_reco.relation_expert_token_bridge.storage import (
     build_storage_measurements, miniature_storage_measurements,
 )
 from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (
     DURABLE_CLASSES, FULL_STREAMED_PROFILE, SMOKE_PHASES,
-    STAGE_ARTIFACT_POLICY,
+    STAGE_ARTIFACT_POLICY, TERMINAL_ROLLING_PAYLOAD_PATTERNS,
     STREAMED_SMOKE_PROFILE, TRANSIENT_CLASSES,
     build_streamed_execution_profile, build_streamed_smoke_plan,
     build_streamed_smoke_phase_control_evidence,
@@ -192,7 +198,7 @@ def test_storage_projection_separates_persistent_and_transient() -> None:
     assert projection["persistent_storage_admitted"] is True
 
 
-def test_storage_projection_uses_lifetime_peak_not_sum() -> None:
+def test_storage_projection_conservatively_sums_unpruned_rolling_lifetimes() -> None:
     projection = build_streamed_storage_projection(
         storage_measurements_sha256="a" * 64,
         persistent_classes={"durable": 100},
@@ -200,13 +206,102 @@ def test_storage_projection_uses_lifetime_peak_not_sum() -> None:
         transient_classes={"allocation": 300},
         maximum_concurrent_allocations=8,
         serialized_reserve_bytes=10,
-        available_storage_bytes=200,
+        available_storage_bytes=300,
         source=SOURCE,
     )
     validate_streamed_storage_projection(projection)
-    assert projection["rolling_authenticated_peak_bytes"] == 90
-    assert projection["persistent_peak_bytes"] == 200
-    assert projection["rolling_lifetimes_dependency_serialized"] is True
+    assert projection["rolling_authenticated_peak_bytes"] == 160
+    assert projection["persistent_peak_bytes"] == 270
+    assert projection["rolling_lifetimes_dependency_serialized"] is False
+    assert projection["persistent_storage_admitted"] is True
+
+
+def test_terminal_cleanup_patterns_exclude_durable_scientific_outputs() -> None:
+    assert "inputs/target_caches/**/*.npz" in TERMINAL_ROLLING_PAYLOAD_PATTERNS
+    joined = "\n".join(TERMINAL_ROLLING_PAYLOAD_PATTERNS)
+    for forbidden in ("best_model_val.pt", "predictions", "metrics", "locks", "reports"):
+        assert forbidden not in joined
+    assert _eligible("inputs/target_caches/c0/s101/model_train/targets.npz")
+    assert _eligible("inputs/final_consumers/shape/seed_101/model_train/dataset.npz")
+    assert not _eligible("runs/stage_n/predictions/final_test_predictions.npz")
+    assert not _eligible("runs/stage_g/predictor/best_model_val.pt")
+
+
+def test_terminal_cleanup_is_planned_authenticated_restart_safe_and_scoped(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = source_snapshot(root)
+    parent_names = (
+        "artifact_layout", "final_select_label_manifest", "global_determinism",
+        "hlt_replica_manifest", "raw_input_schema", "scale_train_manifest",
+        "split_audit", "split_manifest", "storage_measurements",
+        "validation_partition_manifest",
+    )
+    campaign_id = "retb_terminal_cleanup_fixture"
+    campaign_root = tmp_path / campaign_id
+    campaign = build_campaign_spec(
+        campaign_id=campaign_id,
+        campaign_profile="production_500k_scale3m",
+        source_snapshot=source,
+        parent_artifact_hashes={
+            name: f"{index + 1:064x}" for index, name in enumerate(parent_names)
+        },
+        run_registry_hashes={"runs": "f" * 64},
+    )
+    graph = build_production_graph(
+        campaign_root=campaign_root, campaign_id=campaign_id,
+        source_commit=source["source_commit"],
+        source_status_sha256=source["source_status_sha256"],
+        storage_measurements_sha256=campaign["parent_artifact_hashes"][
+            "storage_measurements"
+        ],
+        execution_profile=FULL_STREAMED_PROFILE,
+    )
+    ledger = build_job_ledger(
+        production_graph=graph,
+        jobs={str(node["node_id"]): "1" for node in graph["nodes"]},
+        submission_mode="completed",
+        completion_artifact_hashes={
+            "locked_scale_finalists": "1" * 64,
+            "final_test_execution_lock": "2" * 64,
+            "sealed_final_test_evaluation": "3" * 64,
+            "final_report": "4" * 64,
+        },
+    )
+    write_immutable_json(campaign_root / "campaign_spec.json", campaign)
+    write_immutable_json(
+        campaign_root / "job_ledgers" / "production_graph.json", graph
+    )
+    write_immutable_json(
+        campaign_root / "job_ledgers" / "completed_job_ledger.json", ledger
+    )
+    rolling = (
+        campaign_root / "inputs" / "target_caches" / "c0" / "train"
+        / "targets.npz"
+    )
+    durable = campaign_root / "runs" / "stage_n" / "predictions" / "final.npz"
+    rolling.parent.mkdir(parents=True, exist_ok=True)
+    durable.parent.mkdir(parents=True, exist_ok=True)
+    rolling.write_bytes(b"rolling target cache")
+    durable.write_bytes(b"durable prediction evidence")
+    command = [
+        sys.executable,
+        str(root / "scripts" / "cleanup_retb_full_streamed_terminal_payloads.py"),
+        "--campaign-root", str(campaign_root),
+    ]
+    subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
+    assert not rolling.exists()
+    assert durable.read_bytes() == b"durable prediction evidence"
+    plan = load_hashed_json(
+        campaign_root / "job_ledgers" / "streamed_terminal_cleanup_plan.json"
+    )
+    receipt = load_hashed_json(
+        campaign_root / "job_ledgers" / "streamed_terminal_cleanup_receipt.json"
+    )
+    assert plan["payload_count"] == 1
+    assert receipt["cleanup_plan_sha256"] == plan["content_hash"]
+    subprocess.run(command, cwd=root, check=True, capture_output=True, text=True)
 
 
 def test_full_streamed_storage_validator_authenticates_adjacent_projection(
@@ -273,6 +368,9 @@ def test_shell_exposes_real_compact_smoke_and_full_streamed_commands() -> None:
     assert "--streamed-submit" in launcher
     assert "streamed_smoke_submission_ledger.json" in launcher
     assert "run_retb_streamed_smoke_phase.py" in worker
+    finalizer = (root / "sbatch" / "run_retb_finalize_job_ledger.sh").read_text()
+    assert "cleanup_retb_full_streamed_terminal_payloads.py" in finalizer
+    assert 'RETB_SUBMISSION_SCOPE:-complete' in finalizer
     for node_id in (
         "offline_input_cache", "hlt_v3_cache", "region_tree_cache",
         "region_tree_finalize", "normalizers_500k", "input_audit",

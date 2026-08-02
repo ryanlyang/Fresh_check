@@ -76,7 +76,7 @@ def main() -> int:
     storage_path = (args.available_storage_path or args.output.parent).resolve()
     storage_path.mkdir(parents=True, exist_ok=True)
     available = shutil.disk_usage(storage_path).free
-    projected_peak = sum(persistent.values()) + max(rolling.values()) + reserve
+    projected_peak = sum(persistent.values()) + sum(rolling.values()) + reserve
     updated = dict(measured)
     updated["projected_peak_concurrent_bytes"] = projected_peak
     updated["available_storage_bytes"] = available

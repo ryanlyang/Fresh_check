@@ -14,3 +14,7 @@ python scripts/write_retb_job_ledger.py \
   --previous-ledger "${CAMPAIGN_ROOT}/job_ledgers/initial_submission_ledger.json" \
   --submission-mode completed \
   --output "${CAMPAIGN_ROOT}/job_ledgers/completed_job_ledger.json"
+if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "full_streamed" ]]; then
+  python scripts/cleanup_retb_full_streamed_terminal_payloads.py \
+    --campaign-root "${CAMPAIGN_ROOT}"
+fi

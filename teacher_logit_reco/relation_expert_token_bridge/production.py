@@ -24,7 +24,15 @@ from .plan_factory_registry import (
 )
 from .streamed_execution import (
     FULL_STREAMED_PROFILE,
+    STREAMED_EXECUTION_CONTRACT,
+    STREAMED_SMOKE_LEDGER_CONTRACT,
+    STREAMED_SMOKE_PHASE_CONTRACT,
+    STREAMED_SMOKE_PLAN_CONTRACT,
+    STREAMED_STORAGE_PROJECTION_CONTRACT,
     STREAMED_SMOKE_PROFILE,
+    STREAMED_TASK_RECEIPT_CONTRACT,
+    STREAMED_TERMINAL_CLEANUP_PLAN_CONTRACT,
+    STREAMED_TERMINAL_CLEANUP_RECEIPT_CONTRACT,
     is_streamed_profile,
 )
 
@@ -43,7 +51,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v35"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v36"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -2774,7 +2782,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 31,
+            "schema_version": 32,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2920,6 +2928,22 @@ def build_step15_bundle(
                 "hook_presence_is_not_plan_factory_evidence": True,
                 "real_miniature_execution_required_for_readiness": True,
                 "scientific_performance_used_as_gate": False,
+            },
+            "streamed_execution_contracts": {
+                "execution_profile": STREAMED_EXECUTION_CONTRACT,
+                "task_lifecycle_receipt": STREAMED_TASK_RECEIPT_CONTRACT,
+                "storage_projection": STREAMED_STORAGE_PROJECTION_CONTRACT,
+                "terminal_cleanup_plan": (
+                    STREAMED_TERMINAL_CLEANUP_PLAN_CONTRACT
+                ),
+                "terminal_cleanup_receipt": (
+                    STREAMED_TERMINAL_CLEANUP_RECEIPT_CONTRACT
+                ),
+                "compact_smoke_plan": STREAMED_SMOKE_PLAN_CONTRACT,
+                "compact_smoke_phase": STREAMED_SMOKE_PHASE_CONTRACT,
+                "compact_smoke_ledger": STREAMED_SMOKE_LEDGER_CONTRACT,
+                "scientific_underperformance_used_as_gate": False,
+                "durable_scientific_outputs_cleanup_eligible": False,
             },
             "source_execution_policy": {
                 "submission_checkout_role": "mutable_control_plane_only",

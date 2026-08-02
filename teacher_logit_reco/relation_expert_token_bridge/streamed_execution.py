@@ -31,6 +31,12 @@ STREAMED_STORAGE_PROJECTION_CONTRACT = "retb_streamed_storage_projection_v1"
 STREAMED_SMOKE_PLAN_CONTRACT = "retb_compact_streamed_smoke_plan_v1"
 STREAMED_SMOKE_PHASE_CONTRACT = "retb_compact_streamed_smoke_phase_v1"
 STREAMED_SMOKE_LEDGER_CONTRACT = "retb_compact_streamed_smoke_ledger_v1"
+STREAMED_TERMINAL_CLEANUP_PLAN_CONTRACT = (
+    "retb_streamed_terminal_cleanup_plan_v1"
+)
+STREAMED_TERMINAL_CLEANUP_RECEIPT_CONTRACT = (
+    "retb_streamed_terminal_cleanup_receipt_v1"
+)
 
 
 # These classes are semantic policy, not a glob-based deletion list.  A worker
@@ -59,6 +65,22 @@ DURABLE_CLASSES = (
     "final_test_input_and_execution_seals",
     "final_reports",
     "task_and_phase_lifecycle_receipts",
+)
+
+
+# Terminal cleanup is intentionally conservative.  Only payload files in
+# these exact recomputable namespaces are eligible; JSON manifests, model
+# checkpoints, predictions/evidence, locks, and reports are never matched.
+TERMINAL_ROLLING_PAYLOAD_PATTERNS = (
+    "inputs/fusion_cache/native_hlt/**/*.npz",
+    "inputs/selected_native_fusion/**/*.npz",
+    "inputs/selected_hlt_evidence/**/*.npz",
+    "inputs/stage_d_offline_targets/**/*.npz",
+    "inputs/target_caches/**/*.npz",
+    "inputs/final_consumers/**/*.npz",
+    "selection/predictor_bundle/inputs/**/*.npz",
+    "selection/stage_e_parents/**/*_dataset.npz",
+    "runs/stage_i/**/stage_i_inputs.npz",
 )
 
 
@@ -434,12 +456,11 @@ def build_streamed_storage_projection(
     available = int(available_storage_bytes)
     if concurrency <= 0 or reserve < 0 or available < 0:
         raise ValueError("streamed storage bounds differ")
-    # Stages are dependency-serialized.  Rolling classes are pruned at their
-    # authenticated last-consumer boundary, so only the largest lifetime can
-    # overlap the durable base.  Concurrent rows within that lifetime are
-    # already included in each class estimate supplied by the measurement
-    # worker.
-    rolling_peak = max(rolling.values())
+    # Cross-allocation artifacts are charged simultaneously until an actual
+    # authenticated last-consumer cleanup barrier exists.  The current v1
+    # implementation prunes its registered payloads at terminal completion,
+    # so summing every rolling class is the conservative peak.
+    rolling_peak = sum(rolling.values())
     persistent_peak = sum(persistent.values()) + rolling_peak + reserve
     per_allocation_transient_peak = max(transient.values())
     cluster_transient_peak = per_allocation_transient_peak * concurrency
@@ -452,7 +473,10 @@ def build_streamed_storage_projection(
         "persistent_classes": persistent,
         "rolling_authenticated_classes": rolling,
         "rolling_authenticated_peak_bytes": rolling_peak,
-        "rolling_lifetimes_dependency_serialized": True,
+        "rolling_lifetimes_dependency_serialized": False,
+        "rolling_cleanup_boundary": (
+            "terminal_completed_job_ledger_then_authenticated_cleanup"
+        ),
         "transient_classes": transient,
         "persistent_peak_bytes": persistent_peak,
         "per_allocation_transient_peak_bytes": per_allocation_transient_peak,
@@ -490,6 +514,7 @@ def validate_streamed_storage_projection(payload: Mapping[str, Any]) -> str:
 __all__ = [name for name in globals() if name.startswith("STREAMED_") or name in {
     "FULL_STREAMED_PROFILE", "DURABLE_CLASSES", "TRANSIENT_CLASSES",
     "ROLLING_CLASSES", "STAGE_ARTIFACT_POLICY",
+    "TERMINAL_ROLLING_PAYLOAD_PATTERNS",
     "build_streamed_execution_profile", "build_streamed_smoke_plan",
     "build_streamed_smoke_phase_control_evidence",
     "build_streamed_storage_projection",

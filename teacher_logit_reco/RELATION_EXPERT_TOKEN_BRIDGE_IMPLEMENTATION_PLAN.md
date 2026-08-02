@@ -5637,16 +5637,18 @@ The full streamed execution profile is `full_streamed` and is launched with
 sizes, run identities, seeds, selectors, two-lock final-test sequence, and
 non-blocking scientific-underperformance policy. Its versioned control plane
 is `retb_tigris_production_graph_v39` schema 36 and
-`retb_step15_production_bundle_v35`.
+`retb_step15_production_bundle_v36` schema 32.
 
 `retb_streamed_execution_profile_v1` divides execution material into three
 classes. Durable artifacts are selected checkpoints, compact deployable
 logits, metrics, uncertainty results, identity and lineage manifests,
 selection locks, semantic/robustness evidence, final-test seals, reports, and
 lifecycle receipts. Rolling authenticated artifacts cross an unavoidable
-selector or producer/consumer barrier and remain on shared storage only for
-that lifetime: native-fusion banks, target caches, predictor prepared arrays,
-joint datasets, and scale-refit caches. Truly task-local artifacts include
+selector or producer/consumer barrier. In v1 they remain authenticated on
+shared storage through the terminal cleanup boundary, and storage admission
+therefore charges all rolling classes concurrently: native-fusion banks,
+target caches, predictor prepared arrays, joint datasets, and scale-refit
+caches. Truly task-local artifacts include
 single-command preparation arrays, internal-phase scratch, temporary logits
 consumed before a phase completion, compiler/temp files, and successful
 recovery state. A cross-node artifact may not be described as task-local.
@@ -5682,9 +5684,18 @@ derives these values from source-bound measurements and refuses submission if
 the persistent peak exceeds available storage. This fail-closed storage check
 does not select or suppress scientific models.
 
-Because the rolling lifetimes are dependency-serialized, the persistent
-projection adds the largest complete rolling lifetime to the durable base and
-reserve rather than summing mutually exclusive Stage-F--L and Stage-M peaks.
+The v1 projection does not assume an unimplemented last-consumer deletion
+barrier. It conservatively adds every cross-allocation rolling class to the
+durable base and reserve. After `completed_job_ledger.json` has been published
+and revalidated, full-streamed execution publishes
+`retb_streamed_terminal_cleanup_plan_v1`, byte-binds only the explicitly
+registered recomputable NPZ namespaces, removes those payloads with campaign-
+root and symlink checks, and publishes
+`retb_streamed_terminal_cleanup_receipt_v1`. The immutable manifests,
+checkpoints, predictions/evidence, metrics, locks, seals, and reports are not
+eligible for this cleanup. A partially completed cleanup safely resumes from
+the immutable plan. This conservative peak may reject a filesystem that would
+fit only under a future earlier last-consumer pruning implementation.
 
 The compact real smoke profile is `streamed_smoke`, launched with
 `--streamed-smoke-submit`. Its artifacts are explicitly forbidden as
