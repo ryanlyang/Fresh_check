@@ -72,9 +72,9 @@ if checkpoint.get("checkpoint_role") != "best_model_val":
     raise SystemExit("C3 source is not the final model-val-selected checkpoint")
 if checkpoint.get("final_test_loaded") is not False:
     raise SystemExit("C3 checkpoint does not attest final-test isolation")
-if provenance.get("checkpoint_sha256") in (None, ""):
+if provenance.get("file_sha256") in (None, ""):
     raise SystemExit("C3 checkpoint provenance lacks its file hash")
-print(f"validated_C3_checkpoint_sha256={provenance['checkpoint_sha256']}")
+print(f"validated_C3_checkpoint_sha256={provenance['file_sha256']}")
 PY
 
 if [[ -f "${tagger_report}" ]]; then

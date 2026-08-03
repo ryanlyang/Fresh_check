@@ -1849,6 +1849,26 @@ it is an **oracle particle-feature-injection diagnostic**, not an offline ParT
 or pure tagger-architecture ceiling. `A4_offline_part_ceiling` remains the
 actual offline ParT ceiling. D6 is never a deployable result.
 
+### Supplemental early-signal kT8 branch
+
+`D7_kt8_mh4_particles_screen` is a focused model-validation screen that starts
+from the selected `C3_kt_8` checkpoint. It preserves C3's trained root and
+exclusive-kT hierarchy at capacities 2, 4, and 8, then trains the same local
+particle renderer, distribution heads, and one-mean-plus-four-stochastic-view
+contract used by D1. It does not add untrained 16- or 32-group hierarchy
+levels.
+
+`E12_kt8_mh4_dualcross_screen` pairs the frozen D7 generator with the frozen
+`A0_hlt_part` anchor and uses the E5 hierarchy-memory, uncertainty-gating, and
+dual-cross-attention tagger design at the available 2/4/8 hierarchy depths.
+The screen is trained and selected on model-train/model-val only.
+
+Both variants are supplemental, non-gating, and final-test-ineligible. They do
+not alter canonical campaign membership, E5/E7/F0 training, or any claim-model
+selection. Their purpose is to answer the narrower early question: does the
+completed kT8 hierarchy become useful once it renders particle-level views and
+is fused with the HLT anchor?
+
 ### Tier E: Tagger Fusion
 
 `E0_pseudo_only`:
