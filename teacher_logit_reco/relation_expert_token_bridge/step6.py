@@ -29,8 +29,8 @@ from .replicas import REALIZATION_POLICIES
 
 STAGE_D_RUN_REGISTRY_CONTRACT = "retb_stage_d_run_registry_v2"
 HLT_MATCHED_CONTROL_CONTRACT = "retb_native_hlt_matched_controls_v1"
-STEP6_BUNDLE_CONTRACT = "retb_step6_native_hlt_bundle_v1"
-STEP6_REPORT_CONTRACT = "retb_step6_report_v1"
+STEP6_BUNDLE_CONTRACT = "retb_step6_native_hlt_bundle_v2"
+STEP6_REPORT_CONTRACT = "retb_step6_report_v2"
 STEP6_MINIATURE_COMPLETION_CONTRACT = "retb_step6_miniature_completion_v1"
 STAGE_D_CONFIRMATION_REGISTRY_CONTRACT = (
     "retb_stage_d_confirmation_registry_v1"
@@ -588,7 +588,7 @@ def build_step6_bundle(
         with_content_hash(
             {
                 "contract": STEP6_BUNDLE_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "parents": parents,
                 "artifact_hashes": {
                     name: artifact["content_hash"]
@@ -606,7 +606,7 @@ def build_step6_bundle(
         with_content_hash(
             {
                 "contract": STEP6_REPORT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_spec_sha256": parents["campaign_spec"],
                 "step6_bundle_sha256": manifest["content_hash"],
                 "checks": {
@@ -659,7 +659,7 @@ def validate_step6_bundle(bundle: Mapping[str, Any]) -> str:
         ),
         "hlt_expert_training": validate_content_hash(
             bundle["hlt_expert_training"],
-            expected_contract="retb_native_hlt_expert_training_v1",
+            expected_contract="retb_native_hlt_expert_training_v2",
         ),
     }
     digest = validate_content_hash(

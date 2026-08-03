@@ -147,8 +147,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if (
             manifest.get("contract")
             not in {
-                "retb_native_hlt_expert_outputs_v3",
-                "retb_native_hlt_expert_outputs_v4",
+                "retb_native_hlt_expert_outputs_v5",
+                "retb_native_hlt_expert_outputs_v6",
             }
             or manifest.get("expert_id") != expert
             or manifest.get("expert_registration_sha256")

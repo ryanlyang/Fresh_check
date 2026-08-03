@@ -309,10 +309,18 @@ class HLTArrayDataset(torch.utils.data.Dataset if torch is not None else object)
         return len(self.identities)
 
     def replica_for_index(self, index: int) -> int:
+        # HOSD subdivides RETB's authenticated val_design population into
+        # disjoint design_select/design_confirm roles.  Replica selection is
+        # still governed by the parent population's RETB logical role; both
+        # HOSD subdivisions are evaluation-only and therefore use replica 0.
+        replica_logical_role = {
+            "design_select": "val_design",
+            "design_confirm": "val_design",
+        }.get(self.logical_role, self.logical_role)
         return int(
             replica_for(
                 policy=self.realization_policy,
-                logical_role=self.logical_role,
+                logical_role=replica_logical_role,
                 epoch=self.zero_based_epoch,
                 canonical_identity=self.identities[int(index)],
             )

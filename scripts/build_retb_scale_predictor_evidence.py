@@ -107,7 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for expert in EXPERT_ORDER:
         manifest = load_hashed_json(paths[expert])
         if (
-            manifest.get("contract") != "retb_native_hlt_expert_outputs_v4"
+            manifest.get("contract") != "retb_native_hlt_expert_outputs_v6"
             or manifest.get("source") != campaign.get("source")
             or manifest.get("expert_id") != expert
             or int(manifest.get("pipeline_seed", -1))

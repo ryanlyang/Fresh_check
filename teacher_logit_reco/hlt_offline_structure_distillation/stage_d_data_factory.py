@@ -147,6 +147,19 @@ def build_default_stage_d_role_definitions(
             base["tree_expected_parents"] = expected_parents
         split = split_by_role[role]
         if pair:
+            relation_normalizer = (
+                root
+                / "scale_up"
+                / "normalization"
+                / "shared_hlt_scale"
+                / "relation.json"
+                if training_role == "scale_train"
+                else root
+                / "inputs"
+                / "normalization"
+                / "hlt_shared_500k"
+                / "relation.json"
+            )
             target = {
                 "mode": "stream_same_view",
                 "normalizer": str(
@@ -159,16 +172,7 @@ def build_default_stage_d_role_definitions(
                     )
                     / "normalizer_manifest.json"
                 ),
-                "relation_normalizer": str(
-                    root
-                    / "normalization"
-                    / (
-                        "relation_scale"
-                        if training_role == "scale_train"
-                        else "relation_500k"
-                    )
-                    / "normalizer.json"
-                ),
+                "relation_normalizer": str(relation_normalizer),
                 "control_kind": control_kind,
             }
             if row["row_kind"] in {

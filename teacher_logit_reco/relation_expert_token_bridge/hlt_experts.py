@@ -33,12 +33,13 @@ except ImportError:  # pragma: no cover
 
 
 HLT_EVIDENCE_MODE_CONTRACT = "retb_native_hlt_evidence_modes_v1"
-HLT_EXPERT_TRAINING_CONTRACT = "retb_native_hlt_expert_training_v1"
-HLT_EXPERT_CHECKPOINT_CONTRACT = "retb_native_hlt_expert_checkpoint_v1"
-HLT_EXPERT_CURVES_CONTRACT = "retb_native_hlt_expert_curves_v1"
-HLT_EXPERT_REGISTRATION_CONTRACT = "retb_native_hlt_expert_registration_v1"
+HLT_EXPERT_TRAINING_CONTRACT = "retb_native_hlt_expert_training_v2"
+HLT_EXPERT_CHECKPOINT_CONTRACT = "retb_native_hlt_expert_checkpoint_v2"
+HLT_EXPERT_CURVES_CONTRACT = "retb_native_hlt_expert_curves_v2"
+HLT_EXPERT_REGISTRATION_CONTRACT = "retb_native_hlt_expert_registration_v2"
 HLT_MODES = ("HE_SCRATCH_CE", "HE_OFFLINE_INIT", "HE_DUAL_OBJECTIVE")
 DUAL_WEIGHTS = ((0.10, 0.25), (0.25, 0.25), (0.25, 0.50))
+HLT_EVALUATION_REALIZATION_POLICY = "R_FIXED"
 
 
 def _require_torch() -> Any:
@@ -181,8 +182,12 @@ class NativeHLTExpertTrainingConfig:
         return with_content_hash(
             {
                 "contract": HLT_EXPERT_TRAINING_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "config": asdict(self),
+                "training_realization_policy": self.realization_policy,
+                "evaluation_realization_policy": (
+                    HLT_EVALUATION_REALIZATION_POLICY
+                ),
                 "global_determinism_sha256": require_sha256(
                     global_determinism_sha256,
                     name="global_determinism_sha256",
@@ -817,7 +822,7 @@ def train_native_hlt_expert(
         or getattr(train_dataset, "realization_policy", None)
         != config.realization_policy
         or getattr(val_dataset, "realization_policy", None)
-        != config.realization_policy
+        != HLT_EVALUATION_REALIZATION_POLICY
     ):
         raise ValueError("native HLT loader split/realization contract differs")
     train_has_targets = (
@@ -1031,7 +1036,7 @@ def train_native_hlt_expert(
     _atomic_save(
         {
             "contract": HLT_EXPERT_CHECKPOINT_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "selected_epoch": int(selected["epoch"]),
             "training_contract_sha256": contract["content_hash"],
@@ -1044,7 +1049,7 @@ def train_native_hlt_expert(
     curves = with_content_hash(
         {
             "contract": HLT_EXPERT_CURVES_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "rows": rows,
             "selected_epoch": int(selected["epoch"]),
@@ -1058,11 +1063,15 @@ def train_native_hlt_expert(
     registration = with_content_hash(
         {
             "contract": HLT_EXPERT_REGISTRATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "seed": config.seed,
             "mode": config.mode,
             "realization_policy": config.realization_policy,
+            "training_realization_policy": config.realization_policy,
+            "evaluation_realization_policy": (
+                HLT_EVALUATION_REALIZATION_POLICY
+            ),
             "measurement_embedding": config.measurement_embedding,
             "dual_weights": [config.lambda_token, config.lambda_logit],
             "privileged_offline_targets_consumed": (
@@ -1090,6 +1099,7 @@ def train_native_hlt_expert(
 
 __all__ = [
     "DUAL_WEIGHTS",
+    "HLT_EVALUATION_REALIZATION_POLICY",
     "HLT_EVIDENCE_MODE_CONTRACT",
     "HLT_EXPERT_REGISTRATION_CONTRACT",
     "HLT_MODES",

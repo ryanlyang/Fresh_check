@@ -25,6 +25,7 @@ from .contracts import (
 from .determinism import optimizer_update_counts, scheduled_learning_rate
 from .evaluation import evaluate_classification
 from .expert_training import preferred_expert_epoch
+from .hlt_experts import HLT_EVALUATION_REALIZATION_POLICY
 
 try:
     import torch
@@ -32,9 +33,9 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-HLT_CONTROL_TRAINING_CONTRACT = "retb_native_hlt_control_training_v1"
-HLT_CONTROL_REGISTRATION_CONTRACT = "retb_native_hlt_control_registration_v1"
-HLT_CONTROL_CURVES_CONTRACT = "retb_native_hlt_control_curves_v1"
+HLT_CONTROL_TRAINING_CONTRACT = "retb_native_hlt_control_training_v2"
+HLT_CONTROL_REGISTRATION_CONTRACT = "retb_native_hlt_control_registration_v2"
+HLT_CONTROL_CURVES_CONTRACT = "retb_native_hlt_control_curves_v2"
 
 
 def _require_torch() -> Any:
@@ -111,8 +112,12 @@ class NativeHLTControlTrainingConfig:
         return with_content_hash(
             {
                 "contract": HLT_CONTROL_TRAINING_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "config": asdict(self),
+                "training_realization_policy": "R_MULTI",
+                "evaluation_realization_policy": (
+                    HLT_EVALUATION_REALIZATION_POLICY
+                ),
                 "global_determinism_sha256": require_sha256(
                     global_determinism_sha256,
                     name="global_determinism_sha256",
@@ -201,6 +206,9 @@ def train_native_hlt_control(
     if (
         getattr(train_loader.dataset, "logical_role", None) != "model_train"
         or getattr(val_stop_loader.dataset, "logical_role", None) != "val_stop"
+        or getattr(train_loader.dataset, "realization_policy", None) != "R_MULTI"
+        or getattr(val_stop_loader.dataset, "realization_policy", None)
+        != HLT_EVALUATION_REALIZATION_POLICY
         or getattr(train_loader.dataset, "offline_target_tokens", None) is not None
         or getattr(val_stop_loader.dataset, "offline_target_tokens", None) is not None
     ):
@@ -339,7 +347,7 @@ def train_native_hlt_control(
     curves = with_content_hash(
         {
             "contract": HLT_CONTROL_CURVES_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "rows": rows,
             "optimizer_update_counts": counts,
@@ -351,10 +359,14 @@ def train_native_hlt_control(
     registration = with_content_hash(
         {
             "contract": HLT_CONTROL_REGISTRATION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "control_id": config.control_id,
             "seed": config.seed,
+            "training_realization_policy": "R_MULTI",
+            "evaluation_realization_policy": (
+                HLT_EVALUATION_REALIZATION_POLICY
+            ),
             "training_contract_sha256": contract["content_hash"],
             "run_registry_sha256": registry_sha,
             "lineage_hashes": parents,

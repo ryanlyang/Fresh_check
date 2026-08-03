@@ -5727,8 +5727,13 @@ Step-3 through Step-6 architecture bundles, checking the GPU resource probe,
 and byte-authenticating the smoke-only selected-parent alias. Native-HLT
 training CLI cache arguments are graph-bound cache directories, while their
 deferred lineage inputs bind the contained `hlt_v3_metadata.json` artifacts;
-this distinction is frozen by `retb_static_experiment_plan_v8` and
-`retb_static_experiment_bundle_v8`, schema 7. Later GPU phases use the
+this distinction is frozen by `retb_static_experiment_plan_v9` and
+`retb_static_experiment_bundle_v9`, schema 8. Native-HLT expert and matched
+control training use their registered `R_MULTI`, `R_FIXED`, or `R_RANDOM`
+policy only on `model_train`; `val_stop` and every other evaluation role are
+always bound to the replica-zero `R_FIXED` cache. The corrected distinction is
+serialized by the v2 native-HLT training, curve, checkpoint, and registration
+contracts, and by the v5/v6 native-output manifests. Later GPU phases use the
 registered RETB token-only expert head, token-transformer fusion, A1
 token predictor, and unrestricted HLT consumer rather than a generic
 stand-in; these form the one-shape/one-seed compact expert, reconstruction,

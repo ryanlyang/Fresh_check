@@ -13,6 +13,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     auxiliary_objective,
     auxiliary_objective_contract,
     build_sampled_pair_batch,
+    build_default_stage_d_role_definitions,
     build_single_family_phase_lock,
     build_single_family_selection,
     build_stage_d_loader_manifest,
@@ -129,6 +130,59 @@ def test_complete_stage_d_matrix_is_fixed_bounded_and_performance_independent():
     )
     assert loader["dense_pair_targets_persisted"] is False
     assert loader["performance_dependent_inputs"] is False
+
+
+def test_pair_target_roles_bind_the_authenticated_hlt_relation_normalizer(tmp_path):
+    row = {
+        "target_id": "T_HLT_TRACK_PAIR_13",
+        "parameterization": "ABS",
+        "row_kind": "SCIENTIFIC",
+    }
+
+    def base_roles(training_role, evaluation_role):
+        return {
+            role: {
+                "labels": str(tmp_path / f"{role}.npz"),
+                "hlt_caches": {"0": str(tmp_path / f"{role}-hlt")},
+            }
+            for role in (training_role, "val_stop", evaluation_role)
+        }
+
+    roles_500k = build_default_stage_d_role_definitions(
+        row=row,
+        campaign_root=tmp_path,
+        base_role_definitions=base_roles("model_train", "design_select"),
+    )
+    expected_500k = (
+        tmp_path
+        / "inputs"
+        / "normalization"
+        / "hlt_shared_500k"
+        / "relation.json"
+    )
+    assert {
+        definition["target"]["relation_normalizer"]
+        for definition in roles_500k.values()
+    } == {str(expected_500k)}
+
+    roles_scale = build_default_stage_d_role_definitions(
+        row=row,
+        campaign_root=tmp_path,
+        base_role_definitions=base_roles("scale_train", "design_confirm"),
+        evaluation_role="design_confirm",
+        training_role="scale_train",
+    )
+    expected_scale = (
+        tmp_path
+        / "scale_up"
+        / "normalization"
+        / "shared_hlt_scale"
+        / "relation.json"
+    )
+    assert {
+        definition["target"]["relation_normalizer"]
+        for definition in roles_scale.values()
+    } == {str(expected_scale)}
 
 
 class _TinyClassifier(torch.nn.Module):

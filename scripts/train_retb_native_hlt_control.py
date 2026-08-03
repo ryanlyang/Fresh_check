@@ -28,6 +28,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_controls import (  # no
     train_native_hlt_control,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
+    HLT_EVALUATION_REALIZATION_POLICY,
     NativeHLTExpertDataset,
     make_native_hlt_expert_loader,
 )
@@ -116,7 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=val_labels,
         identities=val_ids,
         logical_role="val_stop",
-        realization_policy="R_MULTI",
+        realization_policy=HLT_EVALUATION_REALIZATION_POLICY,
     )
     miniature = campaign["campaign_profile"] == "miniature_test"
     config = NativeHLTControlTrainingConfig(

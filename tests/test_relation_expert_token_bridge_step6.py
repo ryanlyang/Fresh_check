@@ -118,7 +118,13 @@ def _replica_caches(
     return arrays, metadata
 
 
-def _native_dataset(role: str, policy: str = "R_MULTI"):
+def _native_dataset(role: str, policy: str | None = None):
+    if policy is None:
+        policy = (
+            "R_MULTI"
+            if role in {"model_train", "scale_train"}
+            else "R_FIXED"
+        )
     arrays, metadata = _replica_caches(logical_role=role, policy=policy)
     _, _, identities = _raw()
     return NativeHLTExpertDataset(
@@ -297,6 +303,8 @@ def test_miniature_native_expert_runs_full_budget_and_reuses(tmp_path: Path) -> 
     assert first["fixed_epoch_budget_completed"] is True
     assert first["performance_based_termination"] is False
     assert first["ordinary_hlt_only_baseline"] is True
+    assert first["training_realization_policy"] == "R_MULTI"
+    assert first["evaluation_realization_policy"] == "R_FIXED"
     output = infer_native_hlt_expert_replica(
         model=kwargs["model"],
         dataset=train,
@@ -336,6 +344,8 @@ def test_miniature_matched_control_runs_full_budget(tmp_path: Path) -> None:
             campaign_profile="miniature_test",
         ),
     )
+    assert registration["training_realization_policy"] == "R_MULTI"
+    assert registration["evaluation_realization_policy"] == "R_FIXED"
     assert registration["epochs_completed"] == 2
     assert registration["offline_targets_consumed"] is False
     assert registration["performance_based_termination"] is False

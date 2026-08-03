@@ -85,10 +85,10 @@ def test_full_static_matrix_is_exact_deduplicated_and_fully_bound(
         python_executable=sys.executable,
     )
     plan = bundle["static_experiment_plan"]
-    assert STATIC_EXPERIMENT_PLAN_CONTRACT == "retb_static_experiment_plan_v8"
-    assert STATIC_EXPERIMENT_BUNDLE_CONTRACT == "retb_static_experiment_bundle_v8"
-    assert plan["schema_version"] == 7
-    assert bundle["static_experiment_bundle"]["schema_version"] == 7
+    assert STATIC_EXPERIMENT_PLAN_CONTRACT == "retb_static_experiment_plan_v9"
+    assert STATIC_EXPERIMENT_BUNDLE_CONTRACT == "retb_static_experiment_bundle_v9"
+    assert plan["schema_version"] == 8
+    assert bundle["static_experiment_bundle"]["schema_version"] == 8
     assert tuple(plan["groups"]) == STATIC_MANIFEST_NODES
     assert plan["full_matrix_counts"] == {
         "offline_expert_training": 147,

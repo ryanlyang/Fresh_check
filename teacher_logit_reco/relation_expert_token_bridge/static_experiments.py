@@ -48,8 +48,8 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v8"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v8"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v9"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v9"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
@@ -1516,7 +1516,7 @@ def _stage_e_pilot_records(
                             ),
                             _deferred(
                                 str(parent_root / "hlt_encoder_registration.json"),
-                                contract="retb_native_hlt_expert_registration_v1",
+                                contract="retb_native_hlt_expert_registration_v2",
                                 producer="native_hlt_expert_training",
                                 role="seed_matched_HLT_encoder_parent",
                             ),
@@ -1666,7 +1666,7 @@ def build_static_experiment_bundle(
     plan = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_PLAN_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 8,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "campaign_profile": campaign["campaign_profile"],
@@ -1726,7 +1726,7 @@ def build_static_experiment_bundle(
     bundle = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_BUNDLE_CONTRACT,
-            "schema_version": 7,
+            "schema_version": 8,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "static_experiment_plan_sha256": plan["content_hash"],

@@ -34,6 +34,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa:
     load_hlt_v3_cache,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
+    HLT_EVALUATION_REALIZATION_POLICY,
     NativeHLTExpertDataset,
     NativeHLTExpertTrainingConfig,
     infer_native_hlt_expert_replica,
@@ -380,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=val_labels,
         identities=val_ids,
         logical_role="val_stop",
-        realization_policy=configuration["realization_policy"],
+        realization_policy=HLT_EVALUATION_REALIZATION_POLICY,
         region_trees_by_replica=_trees(
             args.region_tree_root,
             logical_role="val_stop",
@@ -602,11 +603,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         with_content_hash(
             {
             "contract": (
-                "retb_native_hlt_expert_outputs_v4"
+                "retb_native_hlt_expert_outputs_v6"
                 if args.training_role == "scale_train"
-                else "retb_native_hlt_expert_outputs_v3"
+                else "retb_native_hlt_expert_outputs_v5"
             ),
-            "schema_version": 4 if args.training_role == "scale_train" else 3,
+            "schema_version": 6 if args.training_role == "scale_train" else 5,
             "run_id": args.run_id,
             "expert_id": expert,
             "expert_registration_sha256": registration["content_hash"],
@@ -614,6 +615,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "shape_alias": configuration["shape_id"],
             "resolved_token_shape": [token_count, token_dimension],
             "realization_policy": configuration["realization_policy"],
+            "training_realization_policy": configuration["realization_policy"],
+            "evaluation_realization_policy": (
+                HLT_EVALUATION_REALIZATION_POLICY
+            ),
             **(
                 {"training_population": "scale_train"}
                 if args.training_role == "scale_train"

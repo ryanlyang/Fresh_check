@@ -223,7 +223,7 @@ def _native_banks(
         manifest = load_hashed_json(parent / "native_output_manifest.json")
         registration = load_hashed_json(parent / "checkpoint_registration.json")
         if (
-            manifest.get("contract") != "retb_native_hlt_expert_outputs_v3"
+            manifest.get("contract") != "retb_native_hlt_expert_outputs_v5"
             or manifest.get("expert_id") != expert
             or manifest.get("expert_registration_sha256")
             != registration["content_hash"]

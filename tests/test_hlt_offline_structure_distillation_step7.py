@@ -101,6 +101,26 @@ def test_scale_dataset_retains_mmap_like_identities_and_lazy_positions() -> None
     ) <= 2_048
 
 
+def test_design_subroles_use_the_authenticated_val_design_replica_contract() -> None:
+    arrays = {
+        0: {
+            "tokens": np.zeros((2, 1, 4), dtype=np.float32),
+            "mask": np.ones((2, 1), dtype=bool),
+            "measurement_states": np.zeros((2, 1, 4), dtype=np.int8),
+        }
+    }
+    for role in ("design_select", "design_confirm"):
+        dataset = HLTArrayDataset(
+            replica_arrays=arrays,
+            labels=np.asarray([0, 1]),
+            identities=("jet-a", "jet-b"),
+            logical_role=role,
+            realization_policy="R_FIXED",
+        )
+        assert dataset.replica_for_index(0) == 0
+        assert dataset.replica_for_index(1) == 0
+
+
 def test_scale_label_validation_does_not_iterate_authenticated_input_identities(
     tmp_path,
 ) -> None:
