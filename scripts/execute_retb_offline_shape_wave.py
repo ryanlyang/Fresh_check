@@ -435,8 +435,23 @@ def _alias_experts(
     root: Path,
     alias: str,
     allocation: dict[str, int],
+    uniform_source_shape: str | None,
     registry: dict,
 ) -> None:
+    selected_uniform_aliases = {"S1_128", "SHAPE_COMPACT", "SHAPE_HIGH"}
+    if alias in selected_uniform_aliases:
+        if uniform_source_shape is None:
+            raise ValueError("uniform Stage-D alias lacks its exact source shape")
+        if uniform_source_shape not in TOKEN_SHAPES:
+            raise ValueError("uniform Stage-D alias source shape is unregistered")
+        source_specification = TOKEN_SHAPES[uniform_source_shape]
+        if any(
+            int(allocation[expert]) != int(source_specification["K"])
+            for expert in EXPERT_ORDER
+        ):
+            raise ValueError("uniform Stage-D alias source K differs")
+    elif uniform_source_shape is not None:
+        raise ValueError("heterogeneous Stage-D alias has a uniform source shape")
     lookup = {
         (
             str(row["configuration"]["shape_id"]),
@@ -447,7 +462,14 @@ def _alias_experts(
     }
     for seed in (101, 202, 303):
         for expert in EXPERT_ORDER:
-            source_shape = _shape_for(allocation[expert])
+            # Selected uniform aliases must retain the complete Stage-C (K, D)
+            # coordinate.  Reconstructing a name from K alone silently maps
+            # S8_64/S16_64 to their D=128 counterparts.
+            source_shape = (
+                uniform_source_shape
+                if uniform_source_shape is not None
+                else _shape_for(allocation[expert])
+            )
             run_id = lookup[(source_shape, expert, seed)]
             source = (
                 root
@@ -722,21 +744,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         heterogeneous=heterogeneous,
     )
     for alias, allocation in allocations.items():
+        uniform_source_shape = (
+            "S1_128"
+            if alias == "S1_128"
+            else str(selection[alias]["shape_id"])
+            if alias in {"SHAPE_COMPACT", "SHAPE_HIGH"}
+            else None
+        )
         _alias_experts(
             root=args.campaign_root,
             alias=alias,
             allocation=allocation,
+            uniform_source_shape=uniform_source_shape,
             registry=registry,
         )
         if alias in {"S1_128", "SHAPE_COMPACT", "SHAPE_HIGH"}:
             _alias_uniform_fusions(
                 root=args.campaign_root,
                 alias=alias,
-                source_shape=(
-                    "S1_128"
-                    if alias == "S1_128"
-                    else selection[alias]["shape_id"]
-                ),
+                source_shape=uniform_source_shape,
                 registry=registry,
             )
         else:

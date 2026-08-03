@@ -35,8 +35,17 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v4"
+DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v5"
 DEPLOYABLE_INFERENCE_CONTRACT = "hosd_deployable_inference_v1"
+
+# Section 15 of the implementation plan deliberately distinguishes this
+# reconstruction check from the stricter authoritative Weaver-equivalence
+# check.  Export parity compares two independently constructed eager modules;
+# it is not the unmodified-Weaver identity path.
+EAGER_EXPORT_PARITY_TOLERANCES = {
+    "FP32": {"absolute": 1e-5, "relative": 1e-5},
+    "BF16": {"absolute": 1e-2, "relative": 1e-2},
+}
 
 
 def _atomic_torch_save(payload: Mapping[str, Any], path: Path) -> None:
@@ -162,11 +171,12 @@ def export_deployable_graph(
     with torch.no_grad():
         expected = _forward(research_forward_model, parity_batch)
         actual = _forward(runtime, parity_batch)
-    tolerance = (
-        {"absolute": 1e-6, "relative": 1e-5}
-        if precision == "FP32"
-        else {"absolute": 2e-3, "relative": 2e-3}
-    )
+    try:
+        tolerance = dict(EAGER_EXPORT_PARITY_TOLERANCES[precision])
+    except KeyError as error:
+        raise ValueError(
+            f"unsupported deployable parity precision {precision!r}"
+        ) from error
     torch.testing.assert_close(
         actual,
         expected,
@@ -208,7 +218,7 @@ def export_deployable_graph(
         validate_content_hash(operation_profile)
     payload = {
         "contract": DEPLOYABLE_GRAPH_EXPORT_CONTRACT,
-        "schema_version": 4,
+        "schema_version": 5,
         "descriptor": dict(descriptor),
         "runtime_state_dict": runtime_state,
         "checkpoint_sha256": require_sha256(
@@ -220,6 +230,7 @@ def export_deployable_graph(
         },
         "source": dict(source),
         "precision": precision,
+        "parity_path": "eager_research_to_reconstructed_export",
         "parity_tolerance": tolerance,
         "parity_execution_device_type": parity_device.type,
         "representative_batch_moved_to_model_device": True,
@@ -465,6 +476,7 @@ def _infer_identity_bound_wrong_event(
 __all__ = [
     "DEPLOYABLE_GRAPH_EXPORT_CONTRACT",
     "DEPLOYABLE_INFERENCE_CONTRACT",
+    "EAGER_EXPORT_PARITY_TOLERANCES",
     "build_label_free_hlt_loader",
     "export_deployable_graph",
     "infer_deployable_graph",

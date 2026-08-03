@@ -162,7 +162,15 @@ def _inputs(
     mask: Any,
     vectors: Any | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]:
-    raw = torch.as_tensor(raw_tokens, dtype=torch.float32).detach().cpu()
+    if isinstance(raw_tokens, torch.Tensor):
+        raw = raw_tokens.detach().to(device="cpu", dtype=torch.float32).clone()
+    else:
+        # Materialized views may be read-only memory maps.  The downstream
+        # extractor masks a writable clone, so make ownership explicit here
+        # and avoid constructing a tensor backed by immutable NumPy storage.
+        raw = torch.from_numpy(
+            np.array(raw_tokens, dtype=np.float32, copy=True)
+        )
     if raw.ndim != 3 or int(raw.shape[2]) != 14:
         raise ValueError("raw_tokens must have shape [batch,particles,14]")
     valid = torch.as_tensor(mask).detach().cpu()

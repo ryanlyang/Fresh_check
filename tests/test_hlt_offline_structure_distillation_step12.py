@@ -1039,11 +1039,62 @@ def test_deployable_export_moves_cpu_batch_to_research_device(
         weaver_module=object(),
         analytical_inference_flops_batch1_n128=1,
     )
-    assert manifest["contract"] == "hosd_deployable_graph_export_v4"
+    assert manifest["contract"] == "hosd_deployable_graph_export_v5"
+    assert manifest["schema_version"] == 5
+    assert manifest["parity_path"] == "eager_research_to_reconstructed_export"
+    assert manifest["parity_tolerance"] == {
+        "absolute": 1e-5,
+        "relative": 1e-5,
+    }
     assert manifest["parity_execution_device_type"] == device_type
     assert manifest["representative_batch_moved_to_model_device"] is True
     assert representative["features"].device.type == "cpu"
     assert representative["nested_metadata"]["tensor"].device.type == "cpu"
+
+
+def test_deployable_export_parity_tolerances_are_path_and_dtype_specific():
+    assert deployment_runtime.EAGER_EXPORT_PARITY_TOLERANCES == {
+        "FP32": {"absolute": 1e-5, "relative": 1e-5},
+        "BF16": {"absolute": 1e-2, "relative": 1e-2},
+    }
+    # The authoritative unmodified-Weaver identity path remains stricter and
+    # is not silently coupled to eager export reconstruction.
+    from teacher_logit_reco.hlt_offline_structure_distillation.taps import (
+        split_forward_contract,
+    )
+
+    assert split_forward_contract()["authoritative_parity"]["logits"] == {
+        "absolute": 1e-6,
+        "relative": 1e-5,
+    }
+
+
+def test_deployable_export_rejects_unknown_precision(tmp_path, monkeypatch):
+    research = _ExportDeviceProbe()
+    representative = {
+        "points": torch.randn(2, 2, 4),
+        "features": torch.randn(2, 3, 4),
+        "vectors": torch.randn(2, 4, 4),
+        "mask": torch.ones(2, 1, 4, dtype=torch.bool),
+    }
+    monkeypatch.setattr(
+        deployment_runtime,
+        "_runtime_model",
+        lambda descriptor, weaver_module: _ExportDeviceProbe(),
+    )
+    with pytest.raises(ValueError, match="unsupported deployable parity precision"):
+        deployment_runtime.export_deployable_graph(
+            descriptor={"graph_kind": "BASELINE", "baseline_id": "H_BASE"},
+            research_model=research,
+            representative_batch=representative,
+            output_path=tmp_path / "unsupported.pt",
+            checkpoint_sha256="a" * 64,
+            lineage_hashes={"checkpoint": "b" * 64},
+            source=SOURCE,
+            weaver_module=object(),
+            precision="TF32",
+            analytical_inference_flops_batch1_n128=1,
+        )
 
 
 def test_stage_j_tree_and_target_producers_are_bounded_resident():

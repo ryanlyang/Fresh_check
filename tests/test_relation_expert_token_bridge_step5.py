@@ -965,6 +965,7 @@ def test_stage_c_materializes_s1_expert_and_fusion_parent_paths(
         root=tmp_path,
         alias="S1_128",
         allocation={expert: 1 for expert in EXPERT_ORDER},
+        uniform_source_shape="S1_128",
         registry=registry,
     )
     _alias_uniform_fusions(
@@ -994,6 +995,62 @@ def test_stage_c_materializes_s1_expert_and_fusion_parent_paths(
         )
         assert (fusion / "fusion_registration.json").is_file()
         assert (fusion / "best_model_val.pt").is_file()
+
+
+def test_stage_c_uniform_alias_preserves_selected_token_dimension(
+    tmp_path: Path,
+) -> None:
+    expert_rows = []
+    for seed in (101, 202, 303):
+        for expert in EXPERT_ORDER:
+            for shape_id in ("S16_64", "S16_128"):
+                run_id = f"offline-{shape_id}-{expert}-{seed}"
+                expert_rows.append(
+                    {
+                        "run_id": run_id,
+                        "seed": seed,
+                        "configuration": {
+                            "shape_id": shape_id,
+                            "expert_id": expert,
+                        },
+                    }
+                )
+                source = (
+                    tmp_path
+                    / "runs"
+                    / "stage_c"
+                    / "offline_experts"
+                    / run_id
+                    / f"seed_{seed}"
+                )
+                source.mkdir(parents=True)
+                (source / "checkpoint_registration.json").write_text(
+                    shape_id, encoding="utf-8"
+                )
+                (source / "best_model_val.pt").write_text(
+                    shape_id, encoding="utf-8"
+                )
+
+    _alias_experts(
+        root=tmp_path,
+        alias="SHAPE_HIGH",
+        allocation={expert: 16 for expert in EXPERT_ORDER},
+        uniform_source_shape="S16_64",
+        registry={"expert_confirmation_rows": expert_rows},
+    )
+
+    for seed in (101, 202, 303):
+        for expert in EXPERT_ORDER:
+            target = (
+                tmp_path
+                / "selection"
+                / "offline_experts"
+                / "SHAPE_HIGH"
+                / expert
+                / f"seed_{seed}"
+                / "checkpoint_registration.json"
+            )
+            assert target.read_text(encoding="utf-8") == "S16_64"
 
 
 def test_step5_bundle_publication_and_selection_cli(
