@@ -442,6 +442,44 @@ def test_region_tree_parallel_runtime_uses_clean_spawned_backends(
     assert "_FORKED_BACKEND" not in source
 
 
+@pytest.mark.parametrize(
+    ("policy", "replica"),
+    [
+        ("R_FIXED", 0),
+        ("R_MULTI", 0),
+        ("R_MULTI", 3),
+        ("R_RANDOM", 0),
+        ("R_RANDOM", 3),
+    ],
+)
+def test_region_tree_worker_accepts_every_registered_training_policy(
+    policy: str, replica: int
+) -> None:
+    region_tree_shard_worker._validate_view_coordinate(
+        view_kind="hlt",
+        logical_role="model_train",
+        replica_id=replica,
+        realization_policy=policy,
+    )
+
+
+def test_region_tree_worker_rejects_policy_replica_mismatch() -> None:
+    with pytest.raises(ValueError, match="incompatible with policy"):
+        region_tree_shard_worker._validate_view_coordinate(
+            view_kind="hlt",
+            logical_role="model_train",
+            replica_id=1,
+            realization_policy="R_FIXED",
+        )
+    with pytest.raises(ValueError, match="replica-zero R_FIXED"):
+        region_tree_shard_worker._validate_view_coordinate(
+            view_kind="hlt",
+            logical_role="val_stop",
+            replica_id=0,
+            realization_policy="R_RANDOM",
+        )
+
+
 def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
     tmp_path: Path,
 ) -> None:

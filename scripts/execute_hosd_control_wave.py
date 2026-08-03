@@ -119,15 +119,15 @@ def main(argv: list[str] | None = None) -> int:
         raw_labels = load_hashed_json(
             labels[split], expected_contract=RUNTIME_LABEL_MANIFEST_CONTRACT
         )
-        manifest_identities, _, label_hash = _ordered_label_population(
+        (
+            manifest_identities,
+            manifest_label_values,
+            label_hash,
+        ) = _ordered_label_population(
             raw_labels, split=split
         )
         if set(manifest_identities) != set(canonical_cache.identities):
             raise ValueError("control-wave label identities differ")
-        label_values = [
-            int(raw_labels["identity_to_label"][identity])
-            for identity in canonical_cache.identities
-        ]
         for shuffle_kind in ("global", "within_class"):
             plan_dir = (
                 root
@@ -157,8 +157,8 @@ def main(argv: list[str] | None = None) -> int:
                 "T_HLT_REGION_PAIR_8",
             ):
                 plan = build_target_shuffle_plan(
-                    canonical_cache.identities,
-                    labels=label_values,
+                    manifest_identities,
+                    labels=manifest_label_values,
                     target_id=target_id,
                     split=split,
                     shuffle_kind=shuffle_kind,

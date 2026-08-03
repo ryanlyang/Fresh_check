@@ -27,6 +27,9 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.hlt_cache import (  # noqa: E402
     load_hlt_v3_cache,
 )
+from teacher_logit_reco.relation_expert_token_bridge.replicas import (  # noqa: E402
+    REALIZATION_POLICIES,
+)
 from teacher_logit_reco.relation_expert_token_bridge.workflow import (  # noqa: E402
     load_and_validate_campaign_source,
 )
@@ -41,6 +44,29 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
 
 
 _WORKER_BACKEND = None
+
+
+def _validate_view_coordinate(
+    *,
+    view_kind: str,
+    logical_role: str,
+    replica_id: int | None,
+    realization_policy: str | None,
+) -> None:
+    if view_kind == "offline":
+        if replica_id is not None or realization_policy is not None:
+            raise ValueError("offline REGION view cannot declare HLT realization")
+        return
+    if replica_id is None or realization_policy not in REALIZATION_POLICIES:
+        raise ValueError("HLT REGION view requires exact replica/policy")
+    if logical_role in {"model_train", "scale_train"}:
+        expected_replicas = REALIZATION_POLICIES[realization_policy][
+            "training_replicas"
+        ]
+        if replica_id not in expected_replicas:
+            raise ValueError("HLT REGION replica is incompatible with policy")
+    elif realization_policy != "R_FIXED" or replica_id != 0:
+        raise ValueError("evaluation REGION view must use replica-zero R_FIXED")
 
 
 def _sha256(path: Path) -> str:
@@ -166,14 +192,12 @@ def main() -> int:
     backend_binary = args.backend_binary or (
         args.backend_manifest.parent / backend_manifest["binary_filename"]
     )
-    if args.view_kind == "offline":
-        if args.replica_id is not None or args.realization_policy is not None:
-            raise ValueError("offline REGION view cannot declare HLT realization")
-    elif args.replica_id is None or args.realization_policy not in {
-        "R_MULTI",
-        "R_FIXED",
-    }:
-        raise ValueError("HLT REGION view requires exact replica/policy")
+    _validate_view_coordinate(
+        view_kind=args.view_kind,
+        logical_role=args.logical_role,
+        replica_id=args.replica_id,
+        realization_policy=args.realization_policy,
+    )
     tokens, mask, identities, view_content_sha = _load_view(
         view_kind=args.view_kind,
         cache_dir=args.cache_dir,

@@ -971,6 +971,18 @@ def test_design_shuffle_population_preserves_authenticated_npz_order():
         _ordered_label_population(corrupted, split="design_select")
 
 
+def test_every_pair_shuffle_plan_uses_runtime_label_order():
+    source = (
+        REPO_ROOT / "scripts" / "execute_hosd_control_wave.py"
+    ).read_text(encoding="utf-8")
+    pair_plan_block = source.split(
+        'for target_id in (\n                "T_HLT_TRACK_PAIR_13",', 1
+    )[1].split("for control in (", 1)[0]
+    assert "manifest_identities" in pair_plan_block
+    assert "manifest_label_values" in pair_plan_block
+    assert "canonical_cache.identities," not in pair_plan_block
+
+
 def test_stage_j_tree_and_target_producers_are_bounded_resident():
     tree_source = (REPO_ROOT / "scripts" / "build_hosd_scale_tree.py").read_text(
         encoding="utf-8"
