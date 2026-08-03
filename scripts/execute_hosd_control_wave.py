@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     artifact = with_content_hash(
         {
             "contract": TARGET_CONTROL_WAVE_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
             "source_splits": list(SOURCE_SPLITS),

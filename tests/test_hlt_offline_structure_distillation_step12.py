@@ -932,7 +932,7 @@ def test_stage_d_boundary_contracts_cover_current_wave_and_design_subroles():
     for role in ("design_select", "design_confirm"):
         assert role in runtime
         assert role in controls
-    assert "hosd_target_control_wave_v2" in (
+    assert "hosd_target_control_wave_v3" in (
         REPO_ROOT
         / "teacher_logit_reco"
         / "hlt_offline_structure_distillation"
