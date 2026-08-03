@@ -74,6 +74,13 @@ def _graph(*, miniature: bool = False) -> dict:
     )
 
 
+def test_production_graph_contract_and_schema_validator_are_consistent() -> None:
+    graph = _graph(miniature=True)
+    assert graph["contract"] == "retb_tigris_production_graph_v40"
+    assert graph["schema_version"] == 37
+    assert validate_production_graph(graph) == graph["content_hash"]
+
+
 def test_detached_campaign_source_is_independent_of_mutable_checkout(
     tmp_path: Path,
 ) -> None:
