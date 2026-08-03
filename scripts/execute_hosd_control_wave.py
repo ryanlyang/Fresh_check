@@ -17,6 +17,7 @@ from scripts.build_hosd_target_derivatives import main as derivative_main  # noq
 from scripts.build_hosd_target_shuffle_plans import main as shuffle_main  # noqa: E402
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     build_target_shuffle_plan,
+    identity_order_sha256,
     load_and_validate_campaign,
     load_hashed_json,
     load_target_cache,
@@ -26,6 +27,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  #
     TARGET_CACHE_SPEC_CONTRACT,
     TARGET_CONTROL_WAVE_CONTRACT,
     TARGET_SHUFFLE_PLAN_CONTRACT,
+    RUNTIME_LABEL_MANIFEST_CONTRACT,
     canonical_sha256,
     with_content_hash,
     write_immutable_json,
@@ -36,6 +38,38 @@ SOURCE_SPLITS = ("model_train", "val_stop", "val_design")
 DESIGN_SUBROLES = ("design_select", "design_confirm")
 LABEL_ROLES = (*SOURCE_SPLITS, *DESIGN_SUBROLES)
 CONTROL_SOURCES = ("physical", "O_BASE", "O_FULLREL")
+
+
+def _ordered_label_population(
+    raw: object, *, split: str
+) -> tuple[tuple[str, ...], list[int], str]:
+    """Return the authenticated positional population for a label role."""
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"{split} label manifest is not an object")
+    if (
+        raw.get("contract") != RUNTIME_LABEL_MANIFEST_CONTRACT
+        or raw.get("schema_version") != 2
+        or raw.get("split") != split
+    ):
+        raise ValueError(f"{split} label-manifest contract differs")
+    identity_to_label = raw.get("identity_to_label")
+    order = raw.get("identity_order")
+    if not isinstance(identity_to_label, dict) or not isinstance(order, list):
+        raise ValueError(f"{split} label manifest lacks ordered identities")
+    identities = tuple(str(value) for value in order)
+    if (
+        not identities
+        or len(identities) != len(set(identities))
+        or set(identities) != set(identity_to_label)
+        or raw.get("identity_order_sha256")
+        != identity_order_sha256(identities)
+    ):
+        raise ValueError(f"{split} ordered label population differs")
+    labels = [int(identity_to_label[identity]) for identity in identities]
+    if any(value < 0 or value >= 10 for value in labels):
+        raise ValueError(f"{split} labels differ from the ten-class contract")
+    return identities, labels, str(raw.get("content_hash") or canonical_sha256(raw))
 
 
 def _labels(values: list[str]) -> dict[str, Path]:
@@ -82,20 +116,18 @@ def main(argv: list[str] | None = None) -> int:
                 source_root, cache_spec=source_spec
             )
         canonical_cache = source_caches["physical"]
-        raw_labels = json.loads(labels[split].read_text(encoding="utf-8"))
-        if not isinstance(raw_labels.get("identity_to_label"), dict):
-            raise ValueError("control-wave labels lack identity_to_label")
-        if set(raw_labels["identity_to_label"]) != set(
-            canonical_cache.identities
-        ):
+        raw_labels = load_hashed_json(
+            labels[split], expected_contract=RUNTIME_LABEL_MANIFEST_CONTRACT
+        )
+        manifest_identities, _, label_hash = _ordered_label_population(
+            raw_labels, split=split
+        )
+        if set(manifest_identities) != set(canonical_cache.identities):
             raise ValueError("control-wave label identities differ")
         label_values = [
             int(raw_labels["identity_to_label"][identity])
             for identity in canonical_cache.identities
         ]
-        label_hash = raw_labels.get("content_hash") or canonical_sha256(
-            raw_labels
-        )
         for shuffle_kind in ("global", "within_class"):
             plan_dir = (
                 root
@@ -204,19 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     for split in DESIGN_SUBROLES:
-        raw_labels = json.loads(labels[split].read_text(encoding="utf-8"))
-        identity_to_label = raw_labels.get("identity_to_label")
-        if not isinstance(identity_to_label, dict):
-            raise ValueError("design-subrole control labels lack identity_to_label")
-        identities = [
-            identity
-            for identity in val_design_cache.identities
-            if identity in identity_to_label
-        ]
-        if set(identities) != set(identity_to_label) or not identities:
+        raw_labels = load_hashed_json(
+            labels[split], expected_contract=RUNTIME_LABEL_MANIFEST_CONTRACT
+        )
+        identities, label_values, label_hash = _ordered_label_population(
+            raw_labels, split=split
+        )
+        if not set(identities).issubset(set(val_design_cache.identities)):
             raise ValueError("design-subrole control identity coverage differs")
-        label_values = [int(identity_to_label[identity]) for identity in identities]
-        label_hash = raw_labels.get("content_hash") or canonical_sha256(raw_labels)
         for shuffle_kind in ("global", "within_class"):
             plan_dir = (
                 root

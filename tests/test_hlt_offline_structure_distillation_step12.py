@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from scripts.execute_hosd_control_wave import _ordered_label_population
 from teacher_logit_reco.hlt_offline_structure_distillation import (
     AuthenticatedTreeSplit,
     compatible_artifact_content_hashes,
@@ -30,8 +31,12 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     resolve_tree_parent_lineage,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
+    RUNTIME_LABEL_MANIFEST_CONTRACT,
     canonical_sha256,
     with_content_hash,
+)
+from teacher_logit_reco.hlt_offline_structure_distillation.target_cache import (
+    identity_order_sha256,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.node_runtime import (
     _row_scoped_arguments,
@@ -933,6 +938,37 @@ def test_stage_d_boundary_contracts_cover_current_wave_and_design_subroles():
         / "hlt_offline_structure_distillation"
         / "contracts.py"
     ).read_text(encoding="utf-8")
+
+
+def test_design_shuffle_population_preserves_authenticated_npz_order():
+    # Canonical JSON sorts identity_to_label keys.  The explicit order must
+    # remain authoritative because recipient-to-donor mappings are positional.
+    identities = ("jet-z", "jet-a", "jet-m")
+    raw = with_content_hash(
+        {
+            "contract": RUNTIME_LABEL_MANIFEST_CONTRACT,
+            "schema_version": 2,
+            "split": "design_select",
+            "identity_order": list(identities),
+            "identity_order_sha256": identity_order_sha256(identities),
+            "identity_to_label": {
+                "jet-a": 1,
+                "jet-m": 2,
+                "jet-z": 3,
+            },
+        }
+    )
+    observed, labels, lineage = _ordered_label_population(
+        raw, split="design_select"
+    )
+    assert observed == identities
+    assert labels == [3, 1, 2]
+    assert lineage == raw["content_hash"]
+
+    corrupted = dict(raw)
+    corrupted["identity_order_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="ordered label population differs"):
+        _ordered_label_population(corrupted, split="design_select")
 
 
 def test_stage_j_tree_and_target_producers_are_bounded_resident():

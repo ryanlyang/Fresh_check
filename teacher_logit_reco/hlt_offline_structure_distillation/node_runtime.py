@@ -691,7 +691,7 @@ def resolve_node_argv(
             / "registry"
             / "runtime_support"
             / "manifest.json",
-            expected_contract="hosd_runtime_support_manifest_v2",
+            expected_contract="hosd_runtime_support_manifest_v3",
         )
         if (
             support_manifest["content_hash"] != support_sha

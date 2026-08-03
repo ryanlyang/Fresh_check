@@ -165,6 +165,7 @@ RESOURCE_MEASUREMENTS_CONTRACT = "hosd_resource_measurements_v11"
 INPUT_VIEW_MANIFEST_CONTRACT = "hosd_label_blind_input_view_v4"
 PARENT_GROUP_COMPLETION_CONTRACT = "hosd_parent_group_completion_v2"
 RUNTIME_MANIFEST_CONTRACT = "hosd_runtime_manifest_v4"
+RUNTIME_LABEL_MANIFEST_CONTRACT = "hosd_runtime_label_manifest_v2"
 NODE_FACTORY_REGISTRY_CONTRACT = "hosd_node_factory_registry_v2"
 COMPLETED_JOB_LEDGER_CONTRACT = "hosd_completed_job_ledger_v1"
 
@@ -209,6 +210,7 @@ __all__ = [
     "TARGET_CONTROL_WAVE_CONTRACT",
     "TARGET_AUDIT_WAVE_CONTRACT",
     "ROW_WAVE_COMPLETION_CONTRACT",
+    "RUNTIME_LABEL_MANIFEST_CONTRACT",
     "TARGET_CAPABILITY_AUDIT_CONTRACT",
     "TARGET_AUDIT_CONTRACT",
     "SPLIT_FORWARD_CONTRACT",

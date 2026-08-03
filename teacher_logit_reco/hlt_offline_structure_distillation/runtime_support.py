@@ -31,6 +31,7 @@ from teacher_logit_reco.relational_part import (
 )
 
 from .contracts import (
+    RUNTIME_LABEL_MANIFEST_CONTRACT,
     load_hashed_json,
     with_content_hash,
     write_immutable_bytes,
@@ -38,9 +39,10 @@ from .contracts import (
 )
 from .input_views import load_materialized_input_view
 from .normalization import build_hlt_conditional_context
+from .target_cache import identity_order_sha256
 
 
-RUNTIME_SUPPORT_CONTRACT = "hosd_runtime_support_manifest_v2"
+RUNTIME_SUPPORT_CONTRACT = "hosd_runtime_support_manifest_v3"
 
 
 def _source_snapshot(source: Mapping[str, Any]) -> dict[str, Any]:
@@ -399,12 +401,17 @@ def publish_runtime_support(
             raise ValueError(f"label population differs for {role}")
         artifact = with_content_hash(
             {
-                "contract": "hosd_runtime_label_manifest_v1",
-                "schema_version": 1,
+                "contract": RUNTIME_LABEL_MANIFEST_CONTRACT,
+                "schema_version": 2,
                 "source": dict(campaign["source"]),
                 "campaign_spec_sha256": campaign["content_hash"],
                 "split": role,
                 "source_npz_sha256": _sha256(path),
+                # Shuffle mappings are positional.  Keep the authenticated
+                # NPZ order explicit because canonical JSON sorts mapping
+                # keys and therefore cannot preserve identity_to_label order.
+                "identity_order": list(identities),
+                "identity_order_sha256": identity_order_sha256(identities),
                 "identity_to_label": {
                     identity: int(label)
                     for identity, label in zip(identities, labels, strict=True)
