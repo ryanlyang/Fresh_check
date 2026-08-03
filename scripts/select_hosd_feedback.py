@@ -16,10 +16,12 @@ if str(REPO_ROOT) not in sys.path:
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     authorize_access,
     build_feedback_selection,
+    build_stage_f_plan,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
     FEEDBACK_RESULT_CONTRACT,
+    SINGLE_FAMILY_SELECTION_CONTRACT,
     STAGE_E_PLAN_CONTRACT,
     load_hashed_json,
     write_immutable_json,
@@ -52,12 +54,29 @@ def main(argv: list[str] | None = None) -> int:
         args.campaign_root / "feedback" / "locked_feedback_choices.json"
     )
     publication = write_immutable_json(output, artifact)
+    single = load_hashed_json(
+        args.campaign_root / "auxiliary" / "locked_single_family_choices.json",
+        expected_contract=SINGLE_FAMILY_SELECTION_CONTRACT,
+    )
+    if single.get("source") != campaign["source"]:
+        raise ValueError("Stage-F single-family selection source differs")
+    stage_f_plan = build_stage_f_plan(
+        single_family_selection=single,
+        feedback_selection=artifact,
+        campaign_spec_sha256=campaign["content_hash"],
+        source=campaign["source"],
+    )
+    write_immutable_json(
+        args.campaign_root / "job_ledgers" / "stage_f_execution_plan.json",
+        stage_f_plan,
+    )
     print(
         json.dumps(
             {
                 "output": str(output.resolve()),
                 "content_hash": artifact["content_hash"],
                 "publication": publication["status"],
+                "stage_f_plan_sha256": stage_f_plan["content_hash"],
             },
             indent=2,
             sort_keys=True,

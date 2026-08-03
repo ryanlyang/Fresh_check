@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
+    build_stage_d_plan,
     load_and_validate_campaign,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
@@ -64,6 +65,21 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise ValueError("probe result lineage differs")
         probes.append(artifact)
+    target_registry = load_hashed_json(
+        args.campaign_root / "registry" / "structure_target_registry.json",
+        expected_contract="hosd_structure_target_registry_v1",
+    )
+    if target_registry.get("source") != campaign["source"]:
+        raise ValueError("Stage-D target registry source differs")
+    stage_d_plan = build_stage_d_plan(
+        campaign_spec_sha256=campaign["content_hash"],
+        target_registry=target_registry,
+        source=campaign["source"],
+    )
+    write_immutable_json(
+        args.campaign_root / "job_ledgers" / "stage_d_execution_plan.json",
+        stage_d_plan,
+    )
     matrix = with_content_hash({
         "contract": PREDICTABILITY_MATRIX_CONTRACT,
         "schema_version": 1,
@@ -100,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     write_immutable_json(output, matrix)
     print(json.dumps({
         "predictability_matrix_sha256": matrix["content_hash"],
+        "stage_d_plan_sha256": stage_d_plan["content_hash"],
         "baseline_count": len(baselines),
         "probe_count": len(probes),
     }, indent=2, sort_keys=True))

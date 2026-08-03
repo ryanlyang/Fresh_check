@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E402
     authorize_access,
+    build_stage_e_plan,
     build_single_family_phase_lock,
     build_single_family_selection,
     load_and_validate_campaign,
@@ -82,6 +83,17 @@ def main(argv: list[str] | None = None) -> int:
             args.campaign_root / "auxiliary" / "locked_single_family_choices.json"
         )
     publication = write_immutable_json(output, artifact)
+    next_plan = None
+    if args.mode == "final-selection":
+        next_plan = build_stage_e_plan(
+            single_family_selection=artifact,
+            campaign_spec_sha256=campaign["content_hash"],
+            source=campaign["source"],
+        )
+        write_immutable_json(
+            args.campaign_root / "job_ledgers" / "stage_e_execution_plan.json",
+            next_plan,
+        )
     print(
         json.dumps(
             {
@@ -89,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
                 "output": str(output.resolve()),
                 "content_hash": artifact["content_hash"],
                 "publication": publication["status"],
+                "stage_e_plan_sha256": (
+                    None if next_plan is None else next_plan["content_hash"]
+                ),
             },
             indent=2,
             sort_keys=True,

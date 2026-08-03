@@ -279,7 +279,10 @@ _NODES = (
         "design_selector",
         "scripts/aggregate_hosd_predictability.py",
         ("probe_train",),
-        ("probes/predictability_matrix.json",),
+        (
+            "probes/predictability_matrix.json",
+            "job_ledgers/stage_d_execution_plan.json",
+        ),
         implementation_step=5,
     ),
     _node(
@@ -341,7 +344,10 @@ _NODES = (
             "hlt_self_auxiliary_train",
             "auxiliary_controls",
         ),
-        ("auxiliary/locked_single_family_choices.json",),
+        (
+            "auxiliary/locked_single_family_choices.json",
+            "job_ledgers/stage_e_execution_plan.json",
+        ),
         implementation_step=6,
     ),
     _node(
@@ -370,7 +376,10 @@ _NODES = (
         "design_selector",
         "scripts/select_hosd_feedback.py",
         ("feedback_train", "feedback_controls"),
-        ("feedback/locked_feedback_choices.json",),
+        (
+            "feedback/locked_feedback_choices.json",
+            "job_ledgers/stage_f_execution_plan.json",
+        ),
         implementation_step=7,
     ),
     _node(

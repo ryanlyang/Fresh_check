@@ -873,6 +873,41 @@ def test_stage_j_builds_scale_inputs_trees_normalizers_and_adapters_in_dag():
         assert (REPO_ROOT / path).is_file()
 
 
+def test_dynamic_stage_plans_are_published_by_completed_predecessors():
+    nodes = {
+        row["node_id"]: row
+        for row in build_stage_job_registry(source=SOURCE)["nodes"]
+    }
+    assert "job_ledgers/stage_d_execution_plan.json" in nodes[
+        "predictability_aggregate"
+    ]["outputs"]
+    assert "job_ledgers/stage_e_execution_plan.json" in nodes[
+        "single_family_select"
+    ]["outputs"]
+    assert "job_ledgers/stage_f_execution_plan.json" in nodes[
+        "feedback_select"
+    ]["outputs"]
+
+    source_requirements = {
+        "scripts/aggregate_hosd_predictability.py": (
+            "build_stage_d_plan",
+            "stage_d_execution_plan.json",
+        ),
+        "scripts/select_hosd_single_targets.py": (
+            "build_stage_e_plan",
+            "stage_e_execution_plan.json",
+        ),
+        "scripts/select_hosd_feedback.py": (
+            "build_stage_f_plan",
+            "stage_f_execution_plan.json",
+        ),
+    }
+    for relative, required in source_requirements.items():
+        source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        for token in required:
+            assert token in source
+
+
 def test_stage_j_tree_and_target_producers_are_bounded_resident():
     tree_source = (REPO_ROOT / "scripts" / "build_hosd_scale_tree.py").read_text(
         encoding="utf-8"
