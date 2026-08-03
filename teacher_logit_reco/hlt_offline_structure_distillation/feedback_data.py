@@ -22,6 +22,12 @@ except ImportError:  # pragma: no cover
 
 
 STAGE_E_LOADER_MANIFEST_CONTRACT = "hosd_stage_e_loader_manifest_v2"
+FEEDBACK_SHUFFLE_SPLIT_BY_ROLE = {
+    "model_train": "model_train",
+    "val_stop": "val_stop",
+    "design_select": "design_select",
+    "design_confirm": "design_confirm",
+}
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -349,13 +355,10 @@ def materialize_feedback_intervention(
             shuffle_plan, expected_contract=TARGET_SHUFFLE_PLAN_CONTRACT
         )
         if (
-            shuffle_plan["target_id"] != row["target_id"]
+            role not in FEEDBACK_SHUFFLE_SPLIT_BY_ROLE
+            or shuffle_plan["target_id"] != row["target_id"]
             or shuffle_plan["split"]
-            != {
-                "model_train": "model_train",
-                "val_stop": "val_stop",
-                "design_select": "val_design",
-            }[role]
+            != FEEDBACK_SHUFFLE_SPLIT_BY_ROLE[role]
             or shuffle_plan["shuffle_kind"] != "global"
             or shuffle_plan["canonical_identity_order_sha256"]
             != identity_order_sha256(identities)

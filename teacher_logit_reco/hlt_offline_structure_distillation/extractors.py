@@ -173,7 +173,11 @@ def _inputs(
         )
     if raw.ndim != 3 or int(raw.shape[2]) != 14:
         raise ValueError("raw_tokens must have shape [batch,particles,14]")
-    valid = torch.as_tensor(mask).detach().cpu()
+    valid = (
+        mask.detach().cpu().clone()
+        if isinstance(mask, torch.Tensor)
+        else torch.from_numpy(np.array(mask, copy=True))
+    )
     if tuple(valid.shape) == (int(raw.shape[0]), int(raw.shape[1])):
         valid = valid.unsqueeze(1)
     if tuple(valid.shape) != (int(raw.shape[0]), 1, int(raw.shape[1])):
@@ -203,7 +207,11 @@ def _inputs(
             dim=-1,
         )
     else:
-        supplied = torch.as_tensor(vectors).detach().cpu().double()
+        supplied = (
+            vectors.detach().cpu().double().clone()
+            if isinstance(vectors, torch.Tensor)
+            else torch.from_numpy(np.array(vectors, copy=True)).double()
+        )
         if tuple(supplied.shape) == (
             int(raw.shape[0]),
             4,

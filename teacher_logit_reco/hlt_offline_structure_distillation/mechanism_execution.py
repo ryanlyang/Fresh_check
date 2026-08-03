@@ -347,7 +347,8 @@ def _evaluate_wrong_event_row(
         / "targets"
         / "controls"
         / "plans"
-        / "val_design"
+        / "feedback"
+        / "design_confirm"
         / "global"
         / f"{control_row['target_id']}.json",
         expected_contract="hosd_target_shuffle_plan_v1",
@@ -357,9 +358,9 @@ def _evaluate_wrong_event_row(
         row=control_row,
         loader=loaded["design_confirm_loader"],
         output_path=npz,
-        role="design_select",
+        role="design_confirm",
         prediction_model=model,
-        shuffle_plan={**split_plan, "split": "val_design"},
+        shuffle_plan=split_plan,
         device=device,
     )
     values, donors = _load_intervention(npz)

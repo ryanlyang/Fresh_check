@@ -467,6 +467,7 @@ def infer_native_hlt_expert_replica(
             ):
                 output = model(return_details=True, **_model_inputs(batch))
             particle_states = output.get("particle_states")
+            particle_mask = output.get("particle_mask")
             if particle_states is None:
                 # Lightweight test doubles may expose only tokens/logits.  The
                 # production RETB expert always exposes its block-8 particle
@@ -486,6 +487,38 @@ def infer_native_hlt_expert_replica(
                     particle_states,
                     (0, max(0, 128 - width)),
                 )[..., :128]
+                particle_mask = batch["mask"][:, 0].bool()
+            elif particle_mask is None:
+                raise RuntimeError(
+                    "native RETB particle states omitted their aligned mask"
+                )
+            particle_mask = particle_mask.bool()
+            if (
+                particle_states.ndim != 3
+                or int(particle_states.shape[-1]) != 128
+                or tuple(particle_mask.shape) != tuple(particle_states.shape[:2])
+            ):
+                raise RuntimeError(
+                    "native RETB particle-state and mask shapes differ"
+                )
+            # Weaver may trim a batch to its longest live particle sequence.
+            # Persist a fixed-width, zero-padded representation so separately
+            # inferred batches concatenate deterministically.  The aligned
+            # mask must come from the encoder output, not the pre-trim input.
+            input_particles = int(batch["mask"].shape[-1])
+            encoded_particles = int(particle_states.shape[1])
+            if encoded_particles > input_particles:
+                raise RuntimeError(
+                    "native RETB particle states exceed the input width"
+                )
+            padding = input_particles - encoded_particles
+            if padding:
+                particle_states = module.nn.functional.pad(
+                    particle_states, (0, 0, 0, padding)
+                )
+                particle_mask = module.nn.functional.pad(
+                    particle_mask, (0, padding), value=False
+                )
             if not bool(
                 module.isfinite(output["tokens"]).all()
                 and module.isfinite(output["logits"]).all()
@@ -498,7 +531,7 @@ def infer_native_hlt_expert_replica(
                 particle_states.float().cpu().numpy()
             )
             mask_rows.append(
-                batch["mask"][:, 0].bool().cpu().numpy()
+                particle_mask.cpu().numpy()
             )
             labels.append(batch["labels"].cpu().numpy())
             identities.extend(batch["event_identities"])

@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             split_by_role = {
                 "model_train": "model_train",
                 "val_stop": "val_stop",
-                "design_select": "val_design",
+                "design_select": "design_select",
             }
             intervention_root = (
                 args.campaign_root
@@ -278,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                         / "targets"
                         / "controls"
                         / "plans"
+                        / "feedback"
                         / split_by_role[role]
                         / "global"
                         / f"{row['target_id']}.json",

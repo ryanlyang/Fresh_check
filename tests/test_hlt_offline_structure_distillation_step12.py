@@ -936,12 +936,45 @@ def test_stage_d_boundary_contracts_cover_current_wave_and_design_subroles():
     for role in ("design_select", "design_confirm"):
         assert role in runtime
         assert role in controls
-    assert "hosd_target_control_wave_v3" in (
+    assert "hosd_target_control_wave_v4" in (
         REPO_ROOT
         / "teacher_logit_reco"
         / "hlt_offline_structure_distillation"
         / "contracts.py"
     ).read_text(encoding="utf-8")
+
+
+def test_feedback_shuffle_plans_are_role_specific_and_runtime_ordered():
+    control_wave = (
+        REPO_ROOT / "scripts" / "execute_hosd_control_wave.py"
+    ).read_text(encoding="utf-8")
+    trainer = (
+        REPO_ROOT / "scripts" / "train_hosd_feedback.py"
+    ).read_text(encoding="utf-8")
+    mechanism = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "mechanism_execution.py"
+    ).read_text(encoding="utf-8")
+    assert 'FEEDBACK_SHUFFLE_TARGETS = ("T_OFFLINE_TRACK_32",)' in control_wave
+    assert '"feedback_shuffle_plan_order": "runtime_label_identity_order"' in control_wave
+    assert '/ "feedback"' in trainer
+    assert '"design_select": "design_select"' in trainer
+    assert '/ "feedback"' in mechanism
+    assert '/ "design_confirm"' in mechanism
+    assert 'role="design_confirm"' in mechanism
+
+    from teacher_logit_reco.hlt_offline_structure_distillation.feedback_data import (
+        FEEDBACK_SHUFFLE_SPLIT_BY_ROLE,
+    )
+
+    assert FEEDBACK_SHUFFLE_SPLIT_BY_ROLE == {
+        "model_train": "model_train",
+        "val_stop": "val_stop",
+        "design_select": "design_select",
+        "design_confirm": "design_confirm",
+    }
 
 
 def test_design_shuffle_population_preserves_authenticated_npz_order():

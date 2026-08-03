@@ -262,6 +262,24 @@ class _TinyControl(torch.nn.Module):
         return self.projection(features.mean(dim=2))
 
 
+class _TrimmedTinyNativeExpert(_TinyNativeExpert):
+    def forward(self, *, features, mask, return_details=False, **kwargs):
+        output = super().forward(
+            features=features,
+            return_details=True,
+            **kwargs,
+        )
+        states = features.transpose(1, 2).float()[:, :5]
+        states = torch.nn.functional.pad(states, (0, 128 - states.shape[-1]))
+        output.update(
+            {
+                "particle_states": states,
+                "particle_mask": mask[:, 0, :5].bool(),
+            }
+        )
+        return output if return_details else output["logits"]
+
+
 def test_offline_initialization_and_two_learning_rate_groups() -> None:
     source = _TinyNativeExpert(False)
     target = _TinyNativeExpert(True)
@@ -333,6 +351,21 @@ def test_miniature_native_expert_runs_full_budget_and_reuses(tmp_path: Path) -> 
     assert output["tokens"].shape == (20, 2, 64)
     assert output["logits"].shape == (20, 10)
     assert output["identities"].tolist() == list(train.identities)
+
+
+def test_native_expert_inference_aligns_trimmed_particle_states_and_masks() -> None:
+    dataset = _native_dataset("model_train")
+    output = infer_native_hlt_expert_replica(
+        model=_TrimmedTinyNativeExpert(),
+        dataset=dataset,
+        replica_id=0,
+        batch_size=6,
+    )
+    assert output["particle_states"].shape == (20, 8, 128)
+    assert output["particle_mask"].shape == (20, 8)
+    assert output["particle_mask"][:, :5].all()
+    assert not output["particle_mask"][:, 5:].any()
+    assert not np.count_nonzero(output["particle_states"][:, 5:])
 
 
 def test_miniature_matched_control_runs_full_budget(tmp_path: Path) -> None:

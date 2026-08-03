@@ -38,6 +38,7 @@ SOURCE_SPLITS = ("model_train", "val_stop", "val_design")
 DESIGN_SUBROLES = ("design_select", "design_confirm")
 LABEL_ROLES = (*SOURCE_SPLITS, *DESIGN_SUBROLES)
 CONTROL_SOURCES = ("physical", "O_BASE", "O_FULLREL")
+FEEDBACK_SHUFFLE_TARGETS = ("T_OFFLINE_TRACK_32",)
 
 
 def _ordered_label_population(
@@ -228,6 +229,36 @@ def main(argv: list[str] | None = None) -> int:
                 hashes[
                     f"cache::{split}::{control}::{source_name}"
                 ] = manifest["content_hash"]
+        # The derivative caches above consume plans positionally in their own
+        # canonical cache order.  Stage-E feedback loaders instead follow the
+        # authenticated runtime-label order.  Publish a distinct plan rather
+        # than allowing those two positional contracts to look interchangeable.
+        feedback_plan_dir = (
+            root
+            / "targets"
+            / "controls"
+            / "plans"
+            / "feedback"
+            / split
+            / "global"
+        )
+        for target_id in FEEDBACK_SHUFFLE_TARGETS:
+            plan = build_target_shuffle_plan(
+                manifest_identities,
+                labels=manifest_label_values,
+                target_id=target_id,
+                split=split,
+                shuffle_kind="global",
+                label_manifest_sha256=label_hash,
+                canonical_cache_manifest_sha256=canonical_cache.manifest[
+                    "content_hash"
+                ],
+                source=campaign["source"],
+            )
+            write_immutable_json(feedback_plan_dir / f"{target_id}.json", plan)
+            hashes[
+                f"feedback_plan::{split}::global::{target_id}"
+            ] = plan["content_hash"]
     val_design_cache = load_target_cache(
         root / "targets" / "canonical" / "val_design",
         cache_spec=load_hashed_json(
@@ -274,10 +305,36 @@ def main(argv: list[str] | None = None) -> int:
                 hashes[
                     f"plan::{split}::{shuffle_kind}::{target_id}"
                 ] = plan["content_hash"]
+        feedback_plan_dir = (
+            root
+            / "targets"
+            / "controls"
+            / "plans"
+            / "feedback"
+            / split
+            / "global"
+        )
+        for target_id in FEEDBACK_SHUFFLE_TARGETS:
+            plan = build_target_shuffle_plan(
+                identities,
+                labels=label_values,
+                target_id=target_id,
+                split=split,
+                shuffle_kind="global",
+                label_manifest_sha256=label_hash,
+                canonical_cache_manifest_sha256=(
+                    val_design_cache.manifest["content_hash"]
+                ),
+                source=campaign["source"],
+            )
+            write_immutable_json(feedback_plan_dir / f"{target_id}.json", plan)
+            hashes[
+                f"feedback_plan::{split}::global::{target_id}"
+            ] = plan["content_hash"]
     artifact = with_content_hash(
         {
             "contract": TARGET_CONTROL_WAVE_CONTRACT,
-            "schema_version": 3,
+            "schema_version": 4,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
             "source_splits": list(SOURCE_SPLITS),
@@ -289,6 +346,8 @@ def main(argv: list[str] | None = None) -> int:
                 "within_class_shuffle",
             ],
             "control_sources": list(CONTROL_SOURCES),
+            "feedback_shuffle_targets": list(FEEDBACK_SHUFFLE_TARGETS),
+            "feedback_shuffle_plan_order": "runtime_label_identity_order",
             "control_source_semantics": {
                 "physical": "canonical_offline_physical_targets",
                 "O_BASE": (
