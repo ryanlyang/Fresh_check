@@ -1424,7 +1424,9 @@ class ConstrainedParticleRenderer(_ModuleBase):
             + self.latent_projection(latent)[:, None, :]
         )
         path = _ancestor_path(hierarchy, layout.group_indices, layout.mask)
-        path = path + self.path_depth_embedding.weight[None, None, :, :]
+        path = path + self.path_depth_embedding.weight[
+            None, None, : path.shape[2], :
+        ]
         query = self.path_query(slots)[:, :, None, :]
         score = (query * self.path_key(path)).sum(dim=-1) / math.sqrt(self.config.d_model)
         path_weights = score.softmax(dim=-1)

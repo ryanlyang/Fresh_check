@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
     torch = None
 
 
-DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v3"
+DEPLOYABLE_GRAPH_EXPORT_CONTRACT = "hosd_deployable_graph_export_v4"
 DEPLOYABLE_INFERENCE_CONTRACT = "hosd_deployable_inference_v1"
 
 
@@ -94,6 +94,33 @@ def _forward(model: Any, batch: Mapping[str, Any]) -> Any:
     return model(points, batch["features"], vectors, batch["mask"])
 
 
+def _module_device(module: Any) -> Any:
+    devices = {value.device for value in module.parameters()}
+    devices.update(value.device for value in module.buffers())
+    if not devices:
+        return torch.device("cpu")
+    if len(devices) != 1:
+        raise ValueError("deployable parity model spans multiple devices")
+    return next(iter(devices))
+
+
+def _move_value(value: Any, device: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _move_value(item, device) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_move_value(item, device) for item in value)
+    if isinstance(value, list):
+        return [_move_value(item, device) for item in value]
+    return value.to(device) if hasattr(value, "to") else value
+
+
+def _move_batch(batch: Mapping[str, Any], device: Any) -> dict[str, Any]:
+    return {
+        key: _move_value(value, device)
+        for key, value in batch.items()
+    }
+
+
 def export_deployable_graph(
     *,
     descriptor: Mapping[str, Any],
@@ -124,14 +151,17 @@ def export_deployable_graph(
     runtime = _runtime_model(descriptor, weaver_module=weaver_module)
     runtime.load_state_dict(runtime_state, strict=True)
     research_model.eval()
-    runtime.eval()
+    research_forward_model = (
+        research_model.classifier
+        if descriptor["graph_kind"] in {"AUXILIARY", "COMBINATION"}
+        else research_model
+    )
+    parity_device = _module_device(research_forward_model)
+    runtime.to(parity_device).eval()
+    parity_batch = _move_batch(representative_batch, parity_device)
     with torch.no_grad():
-        expected = (
-            _forward(research_model.classifier, representative_batch)
-            if descriptor["graph_kind"] in {"AUXILIARY", "COMBINATION"}
-            else _forward(research_model, representative_batch)
-        )
-        actual = _forward(runtime, representative_batch)
+        expected = _forward(research_forward_model, parity_batch)
+        actual = _forward(runtime, parity_batch)
     tolerance = (
         {"absolute": 1e-6, "relative": 1e-5}
         if precision == "FP32"
@@ -178,7 +208,7 @@ def export_deployable_graph(
         validate_content_hash(operation_profile)
     payload = {
         "contract": DEPLOYABLE_GRAPH_EXPORT_CONTRACT,
-        "schema_version": 3,
+        "schema_version": 4,
         "descriptor": dict(descriptor),
         "runtime_state_dict": runtime_state,
         "checkpoint_sha256": require_sha256(
@@ -191,6 +221,8 @@ def export_deployable_graph(
         "source": dict(source),
         "precision": precision,
         "parity_tolerance": tolerance,
+        "parity_execution_device_type": parity_device.type,
+        "representative_batch_moved_to_model_device": True,
         "runtime_inputs": (
             ["features", "vectors", "mask", "raw_tokens"]
             if isinstance(runtime, FeedbackHBaseClassifier)
@@ -337,13 +369,6 @@ def _wrong_event_rank(
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest(), str(identity)
-
-
-def _move_batch(batch: Mapping[str, Any], device: Any) -> dict[str, Any]:
-    return {
-        key: value.to(device) if hasattr(value, "to") else value
-        for key, value in batch.items()
-    }
 
 
 def _feedback_inputs(batch: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:

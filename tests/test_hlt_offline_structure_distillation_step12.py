@@ -6,8 +6,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from scripts.execute_hosd_control_wave import _ordered_label_population
+from teacher_logit_reco.hlt_offline_structure_distillation import (
+    deployment_runtime,
+)
 from teacher_logit_reco.hlt_offline_structure_distillation import (
     AuthenticatedTreeSplit,
     compatible_artifact_content_hashes,
@@ -981,6 +985,65 @@ def test_every_pair_shuffle_plan_uses_runtime_label_order():
     assert "manifest_identities" in pair_plan_block
     assert "manifest_label_values" in pair_plan_block
     assert "canonical_cache.identities," not in pair_plan_block
+
+
+class _ExportDeviceProbe(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.output = torch.nn.Linear(3, 10)
+        self.register_buffer("device_attestation", torch.ones(1))
+
+    def forward(self, points, features, vectors, mask):
+        del points, vectors
+        pooled = (features * mask).sum(dim=2) / mask.sum(dim=2).clamp_min(1)
+        return self.output(pooled)
+
+
+@pytest.mark.parametrize(
+    "device_type",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
+def test_deployable_export_moves_cpu_batch_to_research_device(
+    tmp_path, monkeypatch, device_type
+):
+    torch.manual_seed(7)
+    research = _ExportDeviceProbe().to(device_type)
+    representative = {
+        "points": torch.randn(2, 2, 4),
+        "features": torch.randn(2, 3, 4),
+        "vectors": torch.randn(2, 4, 4),
+        "mask": torch.ones(2, 1, 4, dtype=torch.bool),
+        "nested_metadata": {"tensor": torch.ones(1)},
+    }
+    monkeypatch.setattr(
+        deployment_runtime,
+        "_runtime_model",
+        lambda descriptor, weaver_module: _ExportDeviceProbe(),
+    )
+    manifest = deployment_runtime.export_deployable_graph(
+        descriptor={"graph_kind": "BASELINE", "baseline_id": "H_BASE"},
+        research_model=research,
+        representative_batch=representative,
+        output_path=tmp_path / f"export-{device_type}.pt",
+        checkpoint_sha256="a" * 64,
+        lineage_hashes={"checkpoint": "b" * 64},
+        source=SOURCE,
+        weaver_module=object(),
+        analytical_inference_flops_batch1_n128=1,
+    )
+    assert manifest["contract"] == "hosd_deployable_graph_export_v4"
+    assert manifest["parity_execution_device_type"] == device_type
+    assert manifest["representative_batch_moved_to_model_device"] is True
+    assert representative["features"].device.type == "cpu"
+    assert representative["nested_metadata"]["tensor"].device.type == "cpu"
 
 
 def test_stage_j_tree_and_target_producers_are_bounded_resident():

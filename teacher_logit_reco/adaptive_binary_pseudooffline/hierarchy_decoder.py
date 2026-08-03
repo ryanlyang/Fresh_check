@@ -92,8 +92,12 @@ class RecursiveHierarchyDecoderConfig:
                 raise ValueError(f"{name} must be positive")
         if int(self.d_model) % int(self.num_heads):
             raise ValueError("d_model must be divisible by num_heads")
-        if tuple(int(value) for value in self.level_capacities) != ABPH_LEVEL_CAPACITIES:
-            raise ValueError(f"level capacities must be exactly {ABPH_LEVEL_CAPACITIES}")
+        capacities = tuple(int(value) for value in self.level_capacities)
+        if not capacities or capacities != ABPH_LEVEL_CAPACITIES[: len(capacities)]:
+            raise ValueError(
+                "level capacities must be a nonempty prefix of "
+                f"{ABPH_LEVEL_CAPACITIES}"
+            )
         for name in ("dropout", "attention_dropout"):
             if not 0.0 <= float(getattr(self, name)) < 1.0:
                 raise ValueError(f"{name} must lie in [0, 1)")
@@ -107,7 +111,10 @@ class RecursiveHierarchyDecoderConfig:
                 "contract": ABPH_HIERARCHY_DECODER_CONTRACT,
                 "hlt_support_features": list(ABPH_HLT_SUPPORT_FEATURE_NAMES),
                 "group_support_features": list(ABPH_GROUP_SUPPORT_NAMES),
-                "decoder_transitions": ["1_to_2", "2_to_4", "4_to_8", "8_to_16", "16_to_32"],
+                "decoder_transitions": [
+                    f"{1 if index == 0 else self.level_capacities[index - 1]}_to_{capacity}"
+                    for index, capacity in enumerate(self.level_capacities)
+                ],
                 "global_hlt_access_at_every_level": True,
                 "local_attention_policy": "bounded_support_bias_not_hard_crop",
             }
@@ -684,11 +691,13 @@ class RecursiveHierarchyDecoder(_ModuleBase):
         )
         self.uncertainty_projection = torch.nn.Linear(1, resolved.d_model)
         self.latent_projection = torch.nn.Linear(resolved.latent_dim, resolved.d_model)
-        self.depth_embedding = torch.nn.Embedding(len(ABPH_LEVEL_CAPACITIES) + 1, resolved.d_model)
+        self.depth_embedding = torch.nn.Embedding(
+            len(resolved.level_capacities) + 1, resolved.d_model
+        )
         self.levels = torch.nn.ModuleList(
             [
                 _HierarchyLevelDecoder(resolved, depth=index + 1)
-                for index in range(len(ABPH_LEVEL_CAPACITIES))
+                for index in range(len(resolved.level_capacities))
             ]
         )
 

@@ -107,6 +107,30 @@ def _small_model() -> RecursiveHierarchyDecoder:
     return model
 
 
+def test_hierarchy_decoder_accepts_only_nonempty_capacity_prefixes():
+    prefix = RecursiveHierarchyDecoderConfig(
+        hlt_input_dims=(16,),
+        d_model=32,
+        num_heads=4,
+        ffn_dim=64,
+        blocks_per_level=1,
+        dropout=0.0,
+        attention_dropout=0.0,
+        level_capacities=(2, 4, 8),
+        root_semantic_dim=32,
+        latent_dim=8,
+    )
+    assert prefix.level_capacities == (2, 4, 8)
+    assert prefix.to_dict()["decoder_transitions"] == [
+        "1_to_2",
+        "2_to_4",
+        "4_to_8",
+    ]
+
+    with pytest.raises(ValueError, match="nonempty prefix"):
+        RecursiveHierarchyDecoderConfig(level_capacities=(2, 8))
+
+
 def _model_inputs(targets):
     torch.manual_seed(123)
     batch = targets.n_jets

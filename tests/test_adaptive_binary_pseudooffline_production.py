@@ -182,6 +182,29 @@ def _phase4_context() -> ReconstructorStepContext:
     )
 
 
+def _phase4_kt8_context() -> ReconstructorStepContext:
+    return ReconstructorStepContext(
+        curriculum=CurriculumState(
+            stage_index=5,
+            stage_key="phase4_distribution",
+            phase=4,
+            phase_name="probabilistic_multi_hypothesis",
+            global_update=1,
+            stage_update=1,
+            stage_maximum_updates=2,
+            active_capacity=8,
+            stage_progress=0.5,
+            teacher_forcing_probability=0.0,
+            distribution_weight=0.25,
+            supervised_capacities=(2, 4, 8),
+        ),
+        split="model_train",
+        mode="rollout",
+        validation=False,
+        teacher_forcing_probability=0.0,
+    )
+
+
 def _phase3_context() -> ReconstructorStepContext:
     return ReconstructorStepContext(
         curriculum=CurriculumState(
@@ -394,6 +417,38 @@ def test_phase4_rolls_and_renders_hypothesis_zero_exactly_once(monkeypatch):
     assert output.rendered_views["exclusive_kt"][0] is zero.rendered_views[
         "exclusive_kt"
     ][0]
+
+
+def test_d7_phase4_stops_and_renders_at_the_configured_kt8_frontier():
+    model = AdaptiveBinaryReconstructorModel(
+        variant_name="D7_kt8_mh4_particles_screen", smoke=True
+    ).eval()
+    model.renderer.config = replace(
+        model.renderer.config, exact_nbody_projection=False
+    )
+    rendered_capacities = []
+
+    def capture_frontier(_module, args):
+        rendered_capacities.append(args[0].final_frontier.capacity)
+
+    handle = model.renderer.register_forward_pre_hook(capture_frontier)
+    result = reconstructor_step(
+        model, _reconstruction_batch(), _phase4_kt8_context()
+    )
+    handle.remove()
+
+    assert model.hierarchy_capacities == (2, 4, 8)
+    assert len(model.hierarchy_reconstructor.decoders["exclusive_kt"].levels) == 3
+    assert rendered_capacities == [8, 8, 8, 8, 8]
+    assert result.metrics["active_capacity"] == 8
+    assert {"group_2", "group_4", "group_8", "particle", "distribution"} <= set(
+        result.loss_terms
+    )
+    assert "group_16" not in result.loss_terms
+    assert "group_32" not in result.loss_terms
+    module_groups = model.module_groups()
+    assert list(module_groups["hierarchy_16"].parameters()) == []
+    assert list(module_groups["hierarchy_32"].parameters()) == []
 
 
 def test_d5_oracle_groups_share_the_offline_root_and_close_particle_counts():

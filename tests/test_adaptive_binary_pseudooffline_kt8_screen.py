@@ -24,6 +24,10 @@ def test_kt8_submitter_is_guarded_and_orders_renderer_before_tagger() -> None:
     assert 'provenance.get("file_sha256")' in source
     assert 'checkpoint.get("final_test_loaded") is not False' in source
     assert "ABPH_KT8_CONFIRM_RESUBMIT" in source
+    assert 'archives/kt8_screen_resubmit_${stamp}' in source
+    assert 'scancel "${previous_jobs[@]}"' in source
+    assert "for artifact_kind in runtime_batch_measurements runtime_batch_contracts" in source
+    assert 'squeue -h -j "${previous_job_csv}"' in source
     assert "ABPH_RECONSTRUCTOR_PARALLELISM=ddp8" in source
     assert "--nodes=8 --ntasks=8" in source
     assert 'tagger_dependency=("--dependency=afterok:${renderer_job}")' in source

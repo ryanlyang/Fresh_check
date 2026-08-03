@@ -89,6 +89,41 @@ if [[ -f "${ABPH_KT8_MANIFEST}" ]] &&
   exit 2
 fi
 
+if [[ -f "${ABPH_KT8_MANIFEST}" ]]; then
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive_root="${ABPH_ROOT}/archives/kt8_screen_resubmit_${stamp}"
+  mapfile -t previous_jobs < <(
+    awk -F $'\t' 'NR > 1 && $3 ~ /^[0-9]+$/ {print $3}' \
+      "${ABPH_KT8_MANIFEST}"
+  )
+  if ((${#previous_jobs[@]})); then
+    scancel "${previous_jobs[@]}" 2>/dev/null || true
+    previous_job_csv="$(IFS=,; echo "${previous_jobs[*]}")"
+    for _attempt in {1..30}; do
+      [[ -z "$(squeue -h -j "${previous_job_csv}" 2>/dev/null)" ]] && break
+      sleep 2
+    done
+    [[ -z "$(squeue -h -j "${previous_job_csv}" 2>/dev/null)" ]] || {
+      echo "Timed out waiting for superseded kT8 jobs to leave the queue" >&2
+      exit 2
+    }
+  fi
+  mkdir -p "${archive_root}"
+  for artifact_kind in runtime_batch_measurements runtime_batch_contracts; do
+    previous="${ABPH_ROOT}/${artifact_kind}/${renderer_variant}"
+    if [[ -e "${previous}" ]]; then
+      [[ ! -L "${previous}" ]] || {
+        echo "Refusing to archive symlinked kT8 evidence: ${previous}" >&2
+        exit 2
+      }
+      mkdir -p "${archive_root}/${artifact_kind}"
+      mv -- "${previous}" "${archive_root}/${artifact_kind}/"
+    fi
+  done
+  mv -- "${ABPH_KT8_MANIFEST}" "${archive_root}/"
+  echo "Archived superseded kT8 evidence under ${archive_root}"
+fi
+
 mkdir -p "$(dirname "${ABPH_KT8_MANIFEST}")"
 manifest_tmp="${ABPH_KT8_MANIFEST}.tmp.$$"
 printf 'role\tvariant\tjob_id\tdependency\n' > "${manifest_tmp}"

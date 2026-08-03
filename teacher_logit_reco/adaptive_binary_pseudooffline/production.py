@@ -1071,6 +1071,16 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
         self.direct_group_set = hierarchy_options.get("kind") == "direct_set"
         self.constrained_hierarchy = bool(hierarchy_options.get("constrained", True))
         self.sample_root = bool(distribution_options.get("sample_root"))
+        self.hierarchy_capacities = tuple(
+            int(value) for value in hierarchy_options.get("capacities", ())
+        )
+        if not self.hierarchy_capacities:
+            self.hierarchy_capacities = ABPH_LEVEL_CAPACITIES
+        self.decoder_capacities = (
+            ABPH_LEVEL_CAPACITIES
+            if self.direct_group_set
+            else self.hierarchy_capacities
+        )
         self.smoke = bool(smoke)
         if smoke:
             self.hlt_encoder = NativeStagewiseParticleTransformer(
@@ -1110,6 +1120,7 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
             blocks_per_level=(1 if smoke else 4),
             dropout=(0.0 if smoke else 0.10),
             attention_dropout=(0.0 if smoke else 0.10),
+            level_capacities=self.decoder_capacities,
             root_semantic_dim=256,
             latent_dim=64,
         )
@@ -1118,7 +1129,7 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
             for decoder in decoders.values():
                 shared_level = decoder.levels[0]
                 decoder.levels = torch.nn.ModuleList(
-                    [shared_level for _ in ABPH_LEVEL_CAPACITIES]
+                    [shared_level for _ in self.decoder_capacities]
                 )
         self.hierarchy_reconstructor = MultiHypothesisHierarchyReconstructor(decoders)
         self.direct_set_decoder = (
@@ -1137,7 +1148,7 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
                     torch.nn.GELU(),
                     torch.nn.Linear(1024, 2 * (len(ROOT_FEATURE_NAMES) + 1)),
                 )
-                for _ in ABPH_LEVEL_CAPACITIES
+                for _ in self.decoder_capacities
             )
         renderer_config = ParticleRendererConfig(
             hlt_input_dims=(model_dim,),
@@ -1249,22 +1260,29 @@ class AdaptiveBinaryReconstructorModel(require_torch().nn.Module):
             parameters = list(take(
                 parameter
                 for decoder in decoders
+                if index < len(decoder.levels)
                 for parameter in decoder.levels[index].parameters()
             ))
             if self.direct_set_decoder is not None and int(capacity) == 8:
                 parameters.extend(take(self.direct_set_decoder.parameters()))
             if self.unconstrained_child_heads:
-                parameters.extend(take(self.unconstrained_child_heads[index].parameters()))
+                if index < len(self.unconstrained_child_heads):
+                    parameters.extend(
+                        take(self.unconstrained_child_heads[index].parameters())
+                    )
             groups[f"hierarchy_{capacity}"] = _ParameterGroup(
                 f"hierarchy_{capacity}",
                 tuple(parameters),
                 allow_empty=(
-                    not bool(
+                    capacity not in self.hierarchy_capacities
+                    or (
+                        not bool(
                         self.resolved_variant["model"]["hierarchy"].get(
                             "level_specific_weights", True
                         )
                     )
-                    and index > 0
+                        and index > 0
+                    )
                 ),
             )
             if (
@@ -2021,13 +2039,13 @@ def reconstructor_step(
     if context.curriculum.phase >= 2:
         depth_count = sum(
             int(capacity) <= int(context.curriculum.active_capacity)
-            for capacity in ABPH_LEVEL_CAPACITIES
+            for capacity in model.hierarchy_capacities
         )
         decoder = model.hierarchy_reconstructor.decoders[hierarchy_name]
         with profile_span(runtime_profiler, "matching_loss_construction"):
             teachers = build_teacher_parent_frontiers(
                 target_tensors, d_model=decoder.config.d_model
-            )
+            )[: len(model.decoder_capacities)]
         with profile_span(runtime_profiler, "teacher_forced_hierarchy_decode"):
             supervised = decoder(
                 root_state,
@@ -2235,8 +2253,10 @@ def reconstructor_step(
         if context.curriculum.phase >= 3:
             if rollout is None or active_rollout is None or rollout_alignment is None:
                 raise RuntimeError("renderer supervision requires an active rollout")
-            if depth_count != len(ABPH_LEVEL_CAPACITIES):
-                raise RuntimeError("renderer phase requires the complete depth-32 hierarchy")
+            if depth_count != len(model.hierarchy_capacities):
+                raise RuntimeError(
+                    "renderer phase requires the complete configured hierarchy"
+                )
             render_hierarchy = (
                 active_rollout
                 if model.oracle_groups or model.oracle_parent_rollout
@@ -2349,7 +2369,7 @@ def reconstructor_step(
                     mask,
                 )
                 posterior = model.hierarchy_reconstructor.latent_model.training_posterior_sample(
-                    latent_context, target_tensors, seed=stochastic_seed
+                    latent_context, active_targets, seed=stochastic_seed
                 )
                 observables = _distribution_observables(rendered_hypotheses[1:])
                 with profile_span(runtime_profiler, "matching_loss_construction"):
@@ -2380,7 +2400,7 @@ def reconstructor_step(
         raw_groups, raw_topology = _unconstrained_level_losses(
             model, supervised_outputs, target_tensors
         )
-        for capacity, loss in zip(ABPH_LEVEL_CAPACITIES, raw_groups):
+        for capacity, loss in zip(model.hierarchy_capacities, raw_groups):
             terms[f"group_{capacity}"] = loss
         terms["topology"] = torch.stack(raw_topology).mean()
         if context.mode == "rollout":
