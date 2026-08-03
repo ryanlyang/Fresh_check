@@ -265,9 +265,20 @@ def _derived_infrastructure(
             "--relation-normalizer", str(hlt_relation),
         ]
     if node_id in {"target_controls", "target_audit"}:
+        label_roles = (
+            (
+                "model_train",
+                "val_stop",
+                "val_design",
+                "design_select",
+                "design_confirm",
+            )
+            if node_id == "target_controls"
+            else ("model_train", "val_stop", "val_design")
+        )
         return [
             item
-            for split in ("model_train", "val_stop", "val_design")
+            for split in label_roles
             for item in ("--label-manifest", f"{split}={support / 'labels' / f'{split}.json'}")
         ]
     if node_id in {"baseline_train", "probe_tap_capture"}:

@@ -733,6 +733,19 @@ from .streamed_execution import (
     validate_streamed_storage_projection,
     validate_task_lifecycle_receipt,
 )
+from .stage_d_matrix_smoke import (
+    STAGE_D_MATRIX_SMOKE_COUNTS,
+    STAGE_D_MATRIX_SMOKE_LEDGER_CONTRACT,
+    STAGE_D_MATRIX_SMOKE_REPORT_CONTRACT,
+    STAGE_D_MATRIX_SMOKE_SCOPE_CONTRACT,
+    STAGE_D_MATRIX_SMOKE_TERMINAL_NODE,
+    build_stage_d_matrix_smoke_ledger,
+    build_stage_d_matrix_smoke_scope,
+    publish_stage_d_matrix_smoke_scope,
+    stage_d_matrix_smoke_node_ids,
+    summarize_stage_d_matrix,
+    validate_stage_d_matrix_smoke_scope,
+)
 from .step15 import (
     STEP15_PREFLIGHT_REPORT_CONTRACT,
     build_step15_contract_bundle,
@@ -742,6 +755,11 @@ from .step15 import (
 )
 
 __all__ = [
+    "STAGE_D_MATRIX_SMOKE_COUNTS",
+    "STAGE_D_MATRIX_SMOKE_LEDGER_CONTRACT",
+    "STAGE_D_MATRIX_SMOKE_REPORT_CONTRACT",
+    "STAGE_D_MATRIX_SMOKE_SCOPE_CONTRACT",
+    "STAGE_D_MATRIX_SMOKE_TERMINAL_NODE",
     "FULL_STREAMED_PROFILE",
     "STREAMED_SMOKE_PROFILE",
     "STREAMED_EXECUTION_CONTRACT",
@@ -773,6 +791,8 @@ __all__ = [
     "STAGE_A_TREE_INDEX_CONTRACT",
     "STEP1_REPORT_CONTRACT",
     "build_global_determinism",
+    "build_stage_d_matrix_smoke_ledger",
+    "build_stage_d_matrix_smoke_scope",
     "build_streamed_execution_profile",
     "build_streamed_smoke_plan",
     "build_streamed_storage_projection",
@@ -792,10 +812,14 @@ __all__ = [
     "build_stage_a_tree_index",
     "load_authenticated_tree_selection",
     "publish_stage_a_contract_bundle",
+    "publish_stage_d_matrix_smoke_scope",
+    "stage_d_matrix_smoke_node_ids",
+    "summarize_stage_d_matrix",
     "validate_stage_a_contract_bundle",
     "validate_stage_a_input_audit",
     "validate_stage_a_normalizer_bundle",
     "validate_stage_a_tree_index",
+    "validate_stage_d_matrix_smoke_scope",
     "aggregate_optimization_candidate_metrics",
     "build_attachment_pretraining_record",
     "build_expert_loss_registry",

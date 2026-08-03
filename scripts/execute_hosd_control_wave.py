@@ -32,7 +32,9 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  #
 )
 
 
-SPLITS = ("model_train", "val_stop", "val_design")
+SOURCE_SPLITS = ("model_train", "val_stop", "val_design")
+DESIGN_SUBROLES = ("design_select", "design_confirm")
+LABEL_ROLES = (*SOURCE_SPLITS, *DESIGN_SUBROLES)
 CONTROL_SOURCES = ("physical", "O_BASE", "O_FULLREL")
 
 
@@ -43,7 +45,7 @@ def _labels(values: list[str]) -> dict[str, Path]:
         if not separator or split in result:
             raise ValueError("--label-manifest requires unique SPLIT=PATH")
         result[split] = Path(raw)
-    if set(result) != set(SPLITS):
+    if set(result) != set(LABEL_ROLES):
         raise ValueError("--label-manifest split coverage differs")
     return result
 
@@ -62,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         root / "normalization" / "target_500k" / "normalizer_manifest.json"
     )
     hashes = {}
-    for split in SPLITS:
+    for split in SOURCE_SPLITS:
         source_roots = {
             "physical": root / "targets" / "canonical" / split,
             "O_BASE": root / "teachers" / "outputs" / split / "O_BASE",
@@ -194,13 +196,66 @@ def main(argv: list[str] | None = None) -> int:
                 hashes[
                     f"cache::{split}::{control}::{source_name}"
                 ] = manifest["content_hash"]
+    val_design_cache = load_target_cache(
+        root / "targets" / "canonical" / "val_design",
+        cache_spec=load_hashed_json(
+            root / "targets" / "canonical" / "val_design" / "cache_spec.json",
+            expected_contract=TARGET_CACHE_SPEC_CONTRACT,
+        ),
+    )
+    for split in DESIGN_SUBROLES:
+        raw_labels = json.loads(labels[split].read_text(encoding="utf-8"))
+        identity_to_label = raw_labels.get("identity_to_label")
+        if not isinstance(identity_to_label, dict):
+            raise ValueError("design-subrole control labels lack identity_to_label")
+        identities = [
+            identity
+            for identity in val_design_cache.identities
+            if identity in identity_to_label
+        ]
+        if set(identities) != set(identity_to_label) or not identities:
+            raise ValueError("design-subrole control identity coverage differs")
+        label_values = [int(identity_to_label[identity]) for identity in identities]
+        label_hash = raw_labels.get("content_hash") or canonical_sha256(raw_labels)
+        for shuffle_kind in ("global", "within_class"):
+            plan_dir = (
+                root
+                / "targets"
+                / "controls"
+                / "plans"
+                / split
+                / shuffle_kind
+            )
+            for target_id in (
+                "T_HLT_TRACK_PAIR_13",
+                "T_HLT_REGION_PAIR_8",
+            ):
+                plan = build_target_shuffle_plan(
+                    identities,
+                    labels=label_values,
+                    target_id=target_id,
+                    split=split,
+                    shuffle_kind=shuffle_kind,
+                    label_manifest_sha256=label_hash,
+                    canonical_cache_manifest_sha256=(
+                        val_design_cache.manifest["content_hash"]
+                    ),
+                    source=campaign["source"],
+                )
+                path = plan_dir / f"{target_id}.json"
+                write_immutable_json(path, plan)
+                hashes[
+                    f"plan::{split}::{shuffle_kind}::{target_id}"
+                ] = plan["content_hash"]
     artifact = with_content_hash(
         {
             "contract": TARGET_CONTROL_WAVE_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
-            "splits": list(SPLITS),
+            "source_splits": list(SOURCE_SPLITS),
+            "design_subroles": list(DESIGN_SUBROLES),
+            "splits": list(LABEL_ROLES),
             "control_kinds": [
                 "target_mean",
                 "global_shuffle",

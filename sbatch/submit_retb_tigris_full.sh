@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/retb_common.sh"
 : "${RETB_GPU_PREDICTOR_CONCURRENCY:=64}"
 : "${RETB_GPU_SCALE_CONCURRENCY:=64}"
 : "${RETB_GPU_FINAL_CONCURRENCY:=64}"
+: "${RETB_STAGE_D_MATRIX_CONCURRENCY:=128}"
 export RETB_CPU_CACHE_CONCURRENCY
 export RETB_GPU_EXPERT_CONCURRENCY
 export RETB_GPU_PREDICTOR_CONCURRENCY
@@ -53,6 +54,12 @@ case "${1:-}" in
     RETB_MINIATURE=1
     RETB_SUBMISSION_SCOPE="streamed_smoke"
     ;;
+  --stage-d-matrix-smoke-submit)
+    mode="submit"
+    RETB_MINIATURE=1
+    RETB_SUBMISSION_SCOPE="stage_d_matrix_smoke"
+    RETB_GPU_EXPERT_CONCURRENCY="${RETB_STAGE_D_MATRIX_CONCURRENCY}"
+    ;;
   --resume)
     echo "Use scripts/plan_retb_resume.py with authenticated completed-node outputs, then resubmit only its ready nodes." >&2
     echo "Automatic state guessing is intentionally disabled." >&2
@@ -61,7 +68,7 @@ case "${1:-}" in
   "")
     ;;
   *)
-    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--offline-streamed-submit|--streamed-submit|--streamed-smoke-submit|--resume CAMPAIGN_ROOT]" >&2
+    echo "Usage: $0 [--dry-run|--smoke-simulate|--smoke-submit|--offline-submit|--offline-streamed-submit|--streamed-submit|--streamed-smoke-submit|--stage-d-matrix-smoke-submit|--resume CAMPAIGN_ROOT]" >&2
     exit 2
     ;;
 esac
@@ -105,6 +112,12 @@ if [[ "${mode}" == "submit" && "${RETB_FROZEN_REENTRY:-0}" != "1" ]]; then
     RETB_SMOKE_GPU_MEM="${RETB_SMOKE_GPU_MEM}" \
     RETB_SMOKE_CPU_CPUS_PER_TASK="${RETB_SMOKE_CPU_CPUS_PER_TASK}" \
     RETB_SMOKE_CPU_MEM="${RETB_SMOKE_CPU_MEM}" \
+    RETB_CPU_CACHE_CONCURRENCY="${RETB_CPU_CACHE_CONCURRENCY}" \
+    RETB_GPU_EXPERT_CONCURRENCY="${RETB_GPU_EXPERT_CONCURRENCY}" \
+    RETB_GPU_PREDICTOR_CONCURRENCY="${RETB_GPU_PREDICTOR_CONCURRENCY}" \
+    RETB_GPU_SCALE_CONCURRENCY="${RETB_GPU_SCALE_CONCURRENCY}" \
+    RETB_GPU_FINAL_CONCURRENCY="${RETB_GPU_FINAL_CONCURRENCY}" \
+    RETB_STAGE_D_MATRIX_CONCURRENCY="${RETB_STAGE_D_MATRIX_CONCURRENCY}" \
     RETB_DEVICE="${RETB_DEVICE}" \
     RETB_MINIATURE="${RETB_MINIATURE}" \
     RETB_SUBMISSION_SCOPE="${RETB_SUBMISSION_SCOPE}" \
@@ -246,7 +259,7 @@ submit_node() {
   local memory="${CPU_MEM}"
   local gpu_cpu_count="${GPU_CPUS_PER_TASK}"
   local gpu_memory="${GPU_MEM}"
-  if [[ "${RETB_SUBMISSION_SCOPE}" == "streamed_smoke" ]]; then
+  if [[ "${RETB_SUBMISSION_SCOPE}" =~ ^(streamed_smoke|stage_d_matrix_smoke)$ ]]; then
     cpu_count="${RETB_SMOKE_CPU_CPUS_PER_TASK}"
     memory="${RETB_SMOKE_CPU_MEM}"
     gpu_cpu_count="${RETB_SMOKE_GPU_CPUS_PER_TASK}"
@@ -370,6 +383,30 @@ while IFS='|' read -r node_id stage dependencies resource worker is_array alias 
 done < <(python scripts/print_retb_submission_plan.py \
   --production-graph "${graph}" \
   --submission-scope "${RETB_SUBMISSION_SCOPE}")
+
+if [[ "${RETB_SUBMISSION_SCOPE}" == "stage_d_matrix_smoke" ]]; then
+  report_job="$(submit_node \
+    stage_d_matrix_smoke_report \
+    "${jobs[native_hlt_fusion_training]}" \
+    cpu run_finalize_retb_stage_d_matrix_smoke.sh 0 direct_worker)"
+  stage_d_ledger_arguments=()
+  for name in "${!jobs[@]}"; do
+    stage_d_ledger_arguments+=(--job "${name}=${jobs[${name}]}")
+  done
+  python scripts/write_retb_stage_d_matrix_smoke_ledger.py \
+    --production-graph "${graph}" \
+    "${stage_d_ledger_arguments[@]}" \
+    --report-job-id "${report_job}" \
+    --output "${campaign_root}/job_ledgers/stage_d_matrix_smoke_submission_ledger.json"
+  printf 'campaign root: %s\n' "${campaign_root}"
+  printf 'submission scope: complete Stage A-D miniature matrix\n'
+  printf 'native HLT expert/control rows: 541\nnative fusion rows: 30\n'
+  printf 'array concurrency ceiling: %s\n' "${RETB_STAGE_D_MATRIX_CONCURRENCY}"
+  printf 'authenticated report job: %s\n' "${report_job}"
+  printf 'report: %s/evaluations/stage_d_matrix_smoke/report.json\n' "${campaign_root}"
+  printf 'monitor: squeue -u "$USER" -o "%%i %%j %%T %%R" | grep %q\n' "${campaign_id}"
+  exit 0
+fi
 
 ledger_arguments=()
 binding_strings=()

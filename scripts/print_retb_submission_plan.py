@@ -17,6 +17,9 @@ from teacher_logit_reco.relation_expert_token_bridge import (  # noqa: E402
     offline_submission_node_ids,
     validate_production_graph,
 )
+from teacher_logit_reco.relation_expert_token_bridge.stage_d_matrix_smoke import (  # noqa: E402
+    stage_d_matrix_smoke_node_ids,
+)
 
 
 def main() -> int:
@@ -26,7 +29,7 @@ def main() -> int:
         "--submission-scope",
         choices=(
             "complete", "offline_abc", "offline_abc_streamed",
-            "full_streamed", "streamed_smoke",
+            "full_streamed", "streamed_smoke", "stage_d_matrix_smoke",
         ),
         default="complete",
     )
@@ -39,11 +42,12 @@ def main() -> int:
         row["node_id"]: row
         for row in graph["node_execution_registry"]["entries"]
     }
-    selected = (
-        set(offline_submission_node_ids(graph))
-        if args.submission_scope in {"offline_abc", "offline_abc_streamed"}
-        else {str(node["node_id"]) for node in graph["nodes"]}
-    )
+    if args.submission_scope in {"offline_abc", "offline_abc_streamed"}:
+        selected = set(offline_submission_node_ids(graph))
+    elif args.submission_scope == "stage_d_matrix_smoke":
+        selected = set(stage_d_matrix_smoke_node_ids(graph))
+    else:
+        selected = {str(node["node_id"]) for node in graph["nodes"]}
     for node in graph["nodes"]:
         if node["node_id"] not in selected:
             continue

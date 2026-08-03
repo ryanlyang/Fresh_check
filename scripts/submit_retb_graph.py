@@ -45,6 +45,10 @@ from teacher_logit_reco.relation_expert_token_bridge.streamed_execution import (
     STREAMED_SMOKE_PROFILE,
     build_streamed_execution_profile,
 )
+from teacher_logit_reco.relation_expert_token_bridge.stage_d_matrix_smoke import (  # noqa: E402
+    publish_stage_d_matrix_smoke_scope,
+    stage_d_matrix_smoke_node_ids,
+)
 
 
 def _campaign_id(source: dict[str, object]) -> str:
@@ -84,7 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         "--submission-scope",
         choices=(
             "complete", "offline_abc", "offline_abc_streamed",
-            "full_streamed", "streamed_smoke",
+            "full_streamed", "streamed_smoke", "stage_d_matrix_smoke",
         ),
         default="complete",
     )
@@ -103,10 +107,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--dry-run may not write campaign artifacts")
     if args.smoke_simulate and not args.miniature:
         raise ValueError("--smoke-simulate requires --miniature")
-    if args.submission_scope not in {"complete", "streamed_smoke"} and args.miniature:
+    if args.submission_scope not in {
+        "complete", "streamed_smoke", "stage_d_matrix_smoke"
+    } and args.miniature:
         raise ValueError("offline A-C submission requires real production data")
     if args.submission_scope == "streamed_smoke" and not args.miniature:
         raise ValueError("streamed smoke submission requires miniature data")
+    if args.submission_scope == "stage_d_matrix_smoke" and not args.miniature:
+        raise ValueError("Stage-D matrix smoke requires miniature data")
     if (
         args.miniature_split_profile == HOSD_MINIATURE_SPLIT_PROFILE
         and not args.miniature
@@ -211,6 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "split_build", "campaign_bootstrap",
             *[str(row["phase_id"]) for row in SMOKE_PHASES],
         ]
+    elif args.submission_scope == "stage_d_matrix_smoke":
+        submission_node_ids = stage_d_matrix_smoke_node_ids(graph)
     else:
         submission_node_ids = [str(node["node_id"]) for node in graph["nodes"]]
     offline_scope = (
@@ -286,6 +296,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 write_immutable_json(
                     campaign_root / "job_ledgers" / "streamed_execution_profile.json",
                     streamed_profile,
+                )
+            )
+        if args.submission_scope == "stage_d_matrix_smoke":
+            result["stage_d_matrix_smoke_scope_publication"] = (
+                publish_stage_d_matrix_smoke_scope(
+                    campaign_root=campaign_root,
+                    production_graph=graph,
                 )
             )
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -908,6 +908,33 @@ def test_dynamic_stage_plans_are_published_by_completed_predecessors():
             assert token in source
 
 
+def test_stage_d_boundary_contracts_cover_current_wave_and_design_subroles():
+    trainer = (REPO_ROOT / "scripts" / "train_hosd_auxiliary.py").read_text(
+        encoding="utf-8"
+    )
+    assert "AUXILIARY_COMPLETION_CONTRACT" in trainer
+    assert 'expected_contract="hosd_auxiliary_completion_v1"' not in trainer
+
+    runtime = (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "node_runtime.py"
+    ).read_text(encoding="utf-8")
+    controls = (
+        REPO_ROOT / "scripts" / "execute_hosd_control_wave.py"
+    ).read_text(encoding="utf-8")
+    for role in ("design_select", "design_confirm"):
+        assert role in runtime
+        assert role in controls
+    assert "hosd_target_control_wave_v2" in (
+        REPO_ROOT
+        / "teacher_logit_reco"
+        / "hlt_offline_structure_distillation"
+        / "contracts.py"
+    ).read_text(encoding="utf-8")
+
+
 def test_stage_j_tree_and_target_producers_are_bounded_resident():
     tree_source = (REPO_ROOT / "scripts" / "build_hosd_scale_tree.py").read_text(
         encoding="utf-8"

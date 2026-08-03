@@ -30,14 +30,23 @@ fi
 array_spec="${resolved[0]}"
 manifest_sha="${resolved[1]}"
 dependency="${SLURM_JOB_ID:-}"
+resolved_cpu_count="${CPU_CPUS_PER_TASK}"
+resolved_cpu_mem="${CPU_MEM}"
+resolved_gpu_count="${GPU_CPUS_PER_TASK}"
+resolved_gpu_mem="${GPU_MEM}"
+if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "stage_d_matrix_smoke" ]]; then
+  resolved_cpu_count="${RETB_SMOKE_CPU_CPUS_PER_TASK}"
+  resolved_cpu_mem="${RETB_SMOKE_CPU_MEM}"
+  resolved_gpu_count="${RETB_SMOKE_GPU_CPUS_PER_TASK}"
+  resolved_gpu_mem="${RETB_SMOKE_GPU_MEM}"
+fi
 resource_arguments=(
   --account="${SBATCH_ACCOUNT}"
   --partition="${SBATCH_PARTITION}"
-  --cpus-per-task="${CPU_CPUS_PER_TASK}"
-  --mem="${CPU_MEM}"
+  --cpus-per-task="${resolved_cpu_count}"
+  --mem="${resolved_cpu_mem}"
 )
 if [[ "${RETB_NODE_RESOURCE:-cpu}" == "gpu" ]]; then
-  resolved_gpu_mem="${GPU_MEM}"
   if [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "full_streamed" ]]; then
     resolved_gpu_mem="${RETB_STREAMED_GPU_MEM}"
   elif [[ "${RETB_SUBMISSION_SCOPE:-complete}" == "offline_abc_streamed" && "${RETB_NODE_ID}" == "offline_fusion_cache" ]]; then
@@ -45,7 +54,7 @@ if [[ "${RETB_NODE_RESOURCE:-cpu}" == "gpu" ]]; then
   fi
   resource_arguments+=(
     --gres="${GPU_GRES}"
-    --cpus-per-task="${GPU_CPUS_PER_TASK}"
+    --cpus-per-task="${resolved_gpu_count}"
     --mem="${resolved_gpu_mem}"
   )
 fi

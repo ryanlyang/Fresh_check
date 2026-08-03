@@ -5755,3 +5755,46 @@ bundle-selection, semantic-evidence, confirmation, and scale phases add their
 own deterministic lock/evidence hashes. Restart re-derives these records and
 rejects a content-hashed phase whose transition or two-lock final-test record
 has drifted.
+
+## Complete Stage-D matrix miniature campaign amendment (2026-08-03)
+
+The compact A--N smoke proves one real coordinate in every execution family,
+but it cannot expose a command, cache-policy, checkpoint-reload, or output-
+schema defect confined to one of the unexecuted Stage-D coordinates. The
+launcher therefore additionally supports `--stage-d-matrix-smoke-submit`.
+This mode submits the exact dependency-closed production graph prefix through
+`native_hlt_fusion_training`, using miniature populations and miniature fixed
+epoch budgets. It is deeper than the compact smoke and narrower than the full
+A--N miniature: it executes the actual Stage-A inputs, all Stage-B/C parents
+and selectors, every one of the 541 registered native-HLT expert/control rows,
+and all 30 native-HLT fusion rows.
+
+The scope contract is `retb_stage_d_matrix_smoke_scope_v1`. It requires the
+ordinary static experiment plan and exact task counts: 147 offline expert
+training rows, 147 confirmation rows, 63 frozen-token cache rows, 49 offline
+fusion rows, 541 native-HLT expert/control rows, and 30 native-fusion rows.
+The Stage-D coverage audit requires every expert identity, evidence mode,
+realization policy, selected shape, measurement-embedding value, dual-
+objective weight, matched monolithic control, and native-fusion variant. No
+row may be omitted because of a metric or because an earlier model performs
+poorly.
+
+Every trainable native row must complete the two-epoch miniature budget and
+must publish its ordinary checkpoint registration. Array launchers attest the
+complete authenticated task manifest, reload every expected output, and bind
+its byte hash. The terminal report independently reloads every A--D manifest-
+completion receipt, rehashes every expected output, validates all content-
+hashed JSON evidence, rejects nonfinite values, and requires exact 541/30
+coverage before publishing
+`retb_stage_d_matrix_smoke_report_v1` at
+`evaluations/stage_d_matrix_smoke/report.json`.
+
+This profile defaults to a 128-way Stage-B--D array ceiling and the compact-
+smoke CPU/GPU resource requests; both remain operational parameters and do
+not change any scientific coordinate. The report is explicitly ineligible as
+production evidence and makes no performance claim. Scientific
+underperformance is recorded and never blocks continuation. Missing lineage,
+missing rows, invalid masks or identities, checkpoint incompatibility,
+nonfinite evidence, runtime failure, and output/hash drift fail closed. A
+passing report is the high-coverage runtime prerequisite recommended before
+the real campaign; it supplements rather than replaces the compact A--N smoke.

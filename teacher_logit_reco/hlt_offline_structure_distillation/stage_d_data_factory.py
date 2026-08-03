@@ -40,6 +40,7 @@ LOADER_MANIFEST_CONTRACT_V3 = "hosd_stage_d_loader_manifest_v3"
 LOADER_MANIFEST_CONTRACT_V4 = "hosd_stage_d_loader_manifest_v4"
 LOADER_MANIFEST_CONTRACT_V5 = "hosd_stage_d_loader_manifest_v5"
 LOADER_MANIFEST_CONTRACT_V6 = "hosd_stage_d_loader_manifest_v6"
+LOADER_MANIFEST_CONTRACT_V7 = "hosd_stage_d_loader_manifest_v7"
 DATA_ORDER_CONTRACT = "hosd_data_order_v2"
 ROLES = ("model_train", "val_stop", "design_select")
 
@@ -179,18 +180,24 @@ def build_default_stage_d_role_definitions(
                 "GLOBAL_SHUFFLE",
                 "WITHIN_CLASS_SHUFFLE",
             }:
+                shuffle_split = (
+                    role
+                    if role in {"design_select", "design_confirm"}
+                    else split
+                )
                 target["shuffle_plan"] = str(
                     root
                     / "targets"
                     / "controls"
                     / "plans"
-                    / split
+                    / shuffle_split
                     / {
                         "GLOBAL_SHUFFLE": "global",
                         "WITHIN_CLASS_SHUFFLE": "within_class",
                     }[row["row_kind"]]
                     / f"{row['target_id']}.json"
                 )
+                target["shuffle_split"] = shuffle_split
         elif row["row_kind"] in {
             "TARGET_MEAN",
             "GLOBAL_SHUFFLE",
@@ -224,6 +231,17 @@ def build_default_stage_d_role_definitions(
                 ),
                 "control_kind": control_kind,
             }
+            if row["target_id"] == "T_OFFLINE_POOLED_LATENT":
+                target["whitening"] = str(
+                    root
+                    / "normalization"
+                    / (
+                        "target_scale"
+                        if training_role == "scale_train"
+                        else "target_500k"
+                    )
+                    / "latent_whitening.json"
+                )
         elif row["parameterization"] == "RES":
             target = {
                 "mode": "static_cache",
@@ -380,15 +398,15 @@ def build_stage_d_loader_manifest(
         if (
             row["row_kind"] in {"GLOBAL_SHUFFLE", "WITHIN_CLASS_SHUFFLE"}
             and target["mode"] == "stream_same_view"
-            and "shuffle_plan" not in target
+            and not {"shuffle_plan", "shuffle_split"}.issubset(target)
         ):
             raise ValueError("streamed Stage-D shuffle lacks its plan")
         definition["target"] = target
         checked[role] = definition
     return with_content_hash(
         {
-            "contract": LOADER_MANIFEST_CONTRACT_V6,
-            "schema_version": 6,
+            "contract": LOADER_MANIFEST_CONTRACT_V7,
+            "schema_version": 7,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -844,7 +862,7 @@ def load_stage_d_loaders_from_manifest(
 ) -> dict[str, Any]:
     del campaign_root, target_registry
     manifest = load_hashed_json(Path(manifest_path))
-    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V6:
+    if manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V7:
         raise ValueError("Stage-D loader manifest contract differs")
     evaluation_role = str(manifest.get("evaluation_role", "design_select"))
     if evaluation_role not in {"design_select", "design_confirm"}:
@@ -1101,6 +1119,8 @@ def load_stage_d_loaders_from_manifest(
                     shuffle.get("source") != campaign["source"]
                     or shuffle.get("target_id") != row["target_id"]
                     or shuffle.get("shuffle_kind") != expected_kind
+                    or shuffle.get("split")
+                    != target_definition.get("shuffle_split")
                     or shuffle.get("canonical_identity_order_sha256")
                     != identity_order_sha256(identities)
                 ):
@@ -1172,6 +1192,7 @@ __all__ = [
     "LOADER_MANIFEST_CONTRACT_V4",
     "LOADER_MANIFEST_CONTRACT_V5",
     "LOADER_MANIFEST_CONTRACT_V6",
+    "LOADER_MANIFEST_CONTRACT_V7",
     "DATA_ORDER_CONTRACT",
     "data_order_seed",
     "sampler_contract",

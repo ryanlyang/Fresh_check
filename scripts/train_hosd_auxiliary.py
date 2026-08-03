@@ -28,6 +28,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (  # noqa: E40
     component_seed,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (  # noqa: E402
+    AUXILIARY_COMPLETION_CONTRACT,
     SINGLE_FAMILY_PHASE_LOCK_CONTRACT,
     load_hashed_json,
     write_immutable_json,
@@ -294,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             for item in expected
         },
-        expected_contract="hosd_auxiliary_completion_v1",
+        expected_contract=AUXILIARY_COMPLETION_CONTRACT,
         parent_hashes={"stage_d_plan": plan["content_hash"]},
         source=campaign["source"],
         output=args.campaign_root / "auxiliary" / filename,

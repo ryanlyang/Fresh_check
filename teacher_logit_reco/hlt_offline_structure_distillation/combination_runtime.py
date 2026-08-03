@@ -38,7 +38,7 @@ from .contracts import (
 from .heads import GlobalTargetHead
 from .stage_c_training import _balanced_metrics, _move, _restore_rng_state, _rng_state
 from .stage_d_data_factory import (
-    LOADER_MANIFEST_CONTRACT_V6,
+    LOADER_MANIFEST_CONTRACT_V7,
     load_stage_d_loaders_from_manifest,
 )
 from .target_schemas import (
@@ -314,7 +314,7 @@ def build_combination_loader_manifest(
         path = Path(raw_path).resolve()
         digest = _sha256_file(path)
         member_manifest = load_hashed_json(
-            path, expected_contract=LOADER_MANIFEST_CONTRACT_V6
+            path, expected_contract=LOADER_MANIFEST_CONTRACT_V7
         )
         if (
             member_manifest.get("source") != dict(source)
@@ -474,7 +474,7 @@ def load_combination_loaders(
             ),
         }
         if (
-            member_manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V6
+            member_manifest.get("contract") != LOADER_MANIFEST_CONTRACT_V7
             or member_manifest.get("content_hash")
             != definition.get("artifact_sha256")
             or member_order_attestation != order_attestation

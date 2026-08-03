@@ -184,6 +184,48 @@ def test_pair_target_roles_bind_the_authenticated_hlt_relation_normalizer(tmp_pa
         for definition in roles_scale.values()
     } == {str(expected_scale)}
 
+    shuffled_pair = {
+        **row,
+        "row_kind": "GLOBAL_SHUFFLE",
+    }
+    shuffled_roles = build_default_stage_d_role_definitions(
+        row=shuffled_pair,
+        campaign_root=tmp_path,
+        base_role_definitions=base_roles("model_train", "design_select"),
+    )
+    design_target = shuffled_roles["design_select"]["target"]
+    assert design_target["shuffle_split"] == "design_select"
+    assert Path(design_target["shuffle_plan"]).parts[-3:] == (
+        "design_select",
+        "global",
+        "T_HLT_TRACK_PAIR_13.json",
+    )
+
+
+def test_latent_null_controls_retain_the_required_whitening_parent(tmp_path):
+    row = {
+        "target_id": "T_OFFLINE_POOLED_LATENT",
+        "parameterization": "WHITENED_ABS",
+        "row_kind": "TARGET_MEAN",
+    }
+    roles = {
+        role: {
+            "labels": str(tmp_path / f"{role}.npz"),
+            "hlt_caches": {"0": str(tmp_path / f"{role}-hlt")},
+        }
+        for role in ("model_train", "val_stop", "design_select")
+    }
+    definitions = build_default_stage_d_role_definitions(
+        row=row,
+        campaign_root=tmp_path,
+        base_role_definitions=roles,
+    )
+    expected = tmp_path / "normalization" / "target_500k" / "latent_whitening.json"
+    assert {
+        definition["target"].get("whitening")
+        for definition in definitions.values()
+    } == {str(expected)}
+
 
 class _TinyClassifier(torch.nn.Module):
     def __init__(self):
