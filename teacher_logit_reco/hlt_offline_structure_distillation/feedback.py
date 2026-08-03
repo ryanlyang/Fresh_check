@@ -164,6 +164,7 @@ class ExactHLTPairFeatureBuilder(
         mask: Any,
         lorentz_vectors: Any,
         region_trees: Sequence[Mapping[str, Any]] | None = None,
+        particle_indices: Any | None = None,
     ) -> Any:
         from .extractors import ExtractorResources, extract_registered_target
         from .normalization import NORMALIZED_CLIP
@@ -187,6 +188,25 @@ class ExactHLTPairFeatureBuilder(
         device, dtype = raw_tokens.device, raw_tokens.dtype
         values = target.values.to(device=device, dtype=dtype)
         valid = target.loss_mask.to(device=device)
+        if particle_indices is not None:
+            indices = particle_indices.to(device=device, dtype=torch.long)
+            if (
+                indices.ndim != 2
+                or int(indices.shape[0]) != int(values.shape[0])
+                or bool((indices < 0).any())
+                or bool((indices >= values.shape[-1]).any())
+            ):
+                raise ValueError("exact HLT particle-index trace differs")
+            row_indices = indices[:, None, :, None].expand(
+                -1, values.shape[1], -1, values.shape[-1]
+            )
+            values = values.gather(2, row_indices)
+            valid = valid.gather(2, row_indices)
+            column_indices = indices[:, None, None, :].expand(
+                -1, values.shape[1], values.shape[2], -1
+            )
+            values = values.gather(3, column_indices)
+            valid = valid.gather(3, column_indices)
         shape = (1, -1, 1, 1)
         centers = self.centers.to(device=device, dtype=dtype).view(shape)
         scales = self.scales.to(device=device, dtype=dtype).view(shape)
@@ -232,7 +252,7 @@ def feedback_interface_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": FEEDBACK_INTERFACE_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "tap": "post_block_4",
             "consumer_blocks": [5, 6, 7, 8],
             "token": {
@@ -255,6 +275,9 @@ def feedback_interface_contract() -> dict[str, Any]:
                 "warmup": "min(T,max(1,ceil(0.05*T)))",
                 "invalid_and_diagonal": 0.0,
                 "offline_pair_feedback_allowed": False,
+                "particle_alignment": (
+                    "official_weaver_trimmer_identity_trace_v1"
+                ),
             },
             "gradient_paths": ["END_TO_END", "DETACHED", "AUX_ONLY"],
             "probabilistic_feedback": {
@@ -1236,7 +1259,9 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                 later_block_transform=film_transform,
             )
         else:
-            def pair_bias(state: Any, active_mask: Any) -> Any:
+            def pair_bias(
+                state: Any, active_mask: Any, particle_indices: Any
+            ) -> Any:
                 exact_mask = direct_pair_mask
                 if self.control == "EXACT_HLT" and direct_pair_features is None:
                     direct, exact_mask = self.exact_pair_builder(
@@ -1244,6 +1269,7 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                         mask,
                         lorentz_vectors,
                         region_trees,
+                        particle_indices,
                     )
                 else:
                     direct = (

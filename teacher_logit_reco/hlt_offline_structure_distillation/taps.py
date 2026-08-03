@@ -28,7 +28,7 @@ def split_forward_contract() -> dict[str, Any]:
     return with_content_hash(
         {
             "contract": SPLIT_FORWARD_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "block_numbering": "one_based",
             "taps": dict(TAP_BLOCKS),
             "execution": "temporary_hooks_around_unmodified_weaver_forward",
@@ -40,6 +40,9 @@ def split_forward_contract() -> dict[str, Any]:
             "tap_state_layout": "batch_particle_channel",
             "tap_mask_layout": "batch_particle_boolean",
             "feedback_insertion": "post_block_4_only_when_explicitly_supplied",
+            "pair_feedback_particle_alignment": (
+                "identity_marker_passed_through_official_weaver_trimmer_v1"
+            ),
             "authoritative_parity": {
                 "precision": "FP32_mixed_precision_disabled",
                 "logits": {"absolute": 1e-6, "relative": 1e-5},
@@ -96,7 +99,7 @@ class WeaverSplitForwardAdapter:
         capture: Sequence[str] = tuple(TAP_BLOCKS),
         post_mid_transform: Callable[[Any, Any], Any] | None = None,
         later_block_transform: Callable[[int, Any, Any], Any] | None = None,
-        later_pair_bias: Callable[[Any, Any], Any] | None = None,
+        later_pair_bias: Callable[[Any, Any, Any], Any] | None = None,
     ) -> SplitForwardResult:
         requested = tuple(str(value) for value in capture)
         unknown = sorted(set(requested) - set(TAP_BLOCKS))
@@ -130,7 +133,50 @@ class WeaverSplitForwardAdapter:
         masks: dict[str, Any] = {}
         padding_by_block: dict[int, Any] = {}
         feedback_pair_bias: list[Any | None] = [None]
+        particle_indices: list[Any | None] = [
+            torch.arange(valid.shape[-1], device=valid.device)
+            .view(1, -1)
+            .expand(valid.shape[0], -1)
+        ]
         handles = []
+        trimmer = getattr(self.model.mod, "trimmer", None)
+        original_trimmer_forward = None
+
+        if later_pair_bias is not None and callable(trimmer):
+            original_trimmer_forward = trimmer.forward
+
+            def traced_trimmer(x, v=None, mask=None, uu=None):
+                batch, length = int(x.shape[0]), int(x.shape[-1])
+                marker = (
+                    torch.arange(length, device=x.device, dtype=x.dtype)
+                    .view(1, 1, length, 1)
+                    .expand(batch, 1, length, length)
+                )
+                original_channels = None if uu is None else int(uu.shape[1])
+                traced_uu = marker if uu is None else torch.cat((uu, marker), dim=1)
+                trimmed_x, trimmed_v, trimmed_mask, trimmed_uu = (
+                    original_trimmer_forward(x, v, mask, traced_uu)
+                )
+                if trimmed_uu is None or int(trimmed_uu.shape[1]) < 1:
+                    raise RuntimeError("Weaver trimmer discarded particle trace")
+                observed = trimmed_uu[:, -1, :, 0]
+                rounded = observed.round().to(torch.long)
+                if (
+                    not bool(torch.isfinite(observed).all())
+                    or not bool(torch.equal(observed, rounded.to(observed.dtype)))
+                    or bool((rounded < 0).any())
+                    or bool((rounded >= length).any())
+                ):
+                    raise RuntimeError("Weaver trimmer particle trace differs")
+                particle_indices[0] = rounded
+                restored_uu = (
+                    None
+                    if original_channels is None
+                    else trimmed_uu[:, :original_channels]
+                )
+                return trimmed_x, trimmed_v, trimmed_mask, restored_uu
+
+            trimmer.forward = traced_trimmer
 
         def pre_hook(index: int):
             def hook(_module: Any, args: tuple[Any, ...], kwargs: dict[str, Any]):
@@ -219,7 +265,9 @@ class WeaverSplitForwardAdapter:
                             "post-mid transform must preserve state shape/dtype/device"
                         )
                 if tap_id == "TAP_MID" and later_pair_bias is not None:
-                    bias = later_pair_bias(captured, active_mask)
+                    bias = later_pair_bias(
+                        captured, active_mask, particle_indices[0]
+                    )
                     if (
                         not isinstance(bias, torch.Tensor)
                         or bias.ndim != 4
@@ -272,6 +320,8 @@ class WeaverSplitForwardAdapter:
         finally:
             for handle in reversed(handles):
                 handle.remove()
+            if original_trimmer_forward is not None:
+                trimmer.forward = original_trimmer_forward
         if set(states) != set(requested) or set(masks) != set(requested):
             raise RuntimeError("Weaver forward did not execute every requested tap")
         return SplitForwardResult(logits=logits, states=states, masks=masks)
@@ -294,7 +344,7 @@ class HBaseParticleTransformer(RelationalParticleTransformer):
         capture: Sequence[str] = tuple(TAP_BLOCKS),
         post_mid_transform: Callable[[Any, Any], Any] | None = None,
         later_block_transform: Callable[[int, Any, Any], Any] | None = None,
-        later_pair_bias: Callable[[Any, Any], Any] | None = None,
+        later_pair_bias: Callable[[Any, Any, Any], Any] | None = None,
     ) -> SplitForwardResult:
         return self._hosd_split_adapter.forward(
             points,

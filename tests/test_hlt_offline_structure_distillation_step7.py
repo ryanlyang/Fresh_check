@@ -243,6 +243,9 @@ class _Transformer(torch.nn.Module):
         return self.input(features.transpose(1, 2))
 
     def forward(self, features, v=None, mask=None, uu=None):
+        trimmer = getattr(self, "trimmer", None)
+        if trimmer is not None:
+            features, v, mask, uu = trimmer(features, v, mask, uu)
         x = self.embed(features)
         padding = ~mask[:, 0].bool()
         bias = self.pair_embed(v, uu=uu, mask=mask)
@@ -252,6 +255,30 @@ class _Transformer(torch.nn.Module):
         for block in self.cls_blocks:
             cls = block(x, x_cls=cls, padding_mask=padding)
         return self.fc(self.norm(cls).squeeze(1))
+
+
+class _DeterministicTrainingTrimmer(torch.nn.Module):
+    """Official-Weaver-shaped valid permutation followed by width trimming."""
+
+    def forward(self, x, v=None, mask=None, uu=None):
+        length = int(mask.shape[-1])
+        rank = torch.arange(length, device=mask.device).view(1, 1, -1)
+        rank = rank.expand(mask.shape[0], 1, -1).masked_fill(~mask.bool(), -1)
+        permutation = rank.argsort(dim=-1, descending=True)
+        mask = mask.gather(-1, permutation)
+        x = x.gather(-1, permutation.expand_as(x))
+        if v is not None:
+            v = v.gather(-1, permutation.expand_as(v))
+        if uu is not None:
+            uu = uu.gather(-2, permutation.unsqueeze(-1).expand_as(uu))
+            uu = uu.gather(-1, permutation.unsqueeze(-2).expand_as(uu))
+        maximum = int(mask.sum(dim=-1).max().item())
+        return (
+            x[..., :maximum],
+            None if v is None else v[..., :maximum],
+            mask[..., :maximum],
+            None if uu is None else uu[..., :maximum, :maximum],
+        )
 
 
 def _weaver():
@@ -378,9 +405,13 @@ def test_later_feedback_hooks_reach_every_block_and_change_logits():
 
     pair_calls = []
 
-    def bias(state, active):
+    def bias(state, active, particle_indices):
         del state
         pair_calls.append(True)
+        assert torch.equal(
+            particle_indices,
+            torch.arange(active.shape[1]).view(1, -1).expand(active.shape[0], -1),
+        )
         valid = active.unsqueeze(1) & active.unsqueeze(2)
         return valid.unsqueeze(1).expand(-1, 8, -1, -1).float() * 0.5
 
@@ -401,6 +432,33 @@ def test_later_feedback_hooks_reach_every_block_and_change_logits():
         not torch.equal(block.observed_attention_masks[-1], reference_mask)
         for block in blocks[4:8]
     )
+
+
+def test_pair_feedback_receives_official_trimmer_particle_correspondence():
+    batch = _batch()
+    classifier = HBaseParticleTransformer(weaver_module=_weaver()).train()
+    classifier.mod.trimmer = _DeterministicTrainingTrimmer()
+    observed = []
+
+    def bias(state, active, particle_indices):
+        del state
+        observed.append(particle_indices.detach().clone())
+        valid = active.unsqueeze(1) & active.unsqueeze(2)
+        return valid.unsqueeze(1).expand(-1, 8, -1, -1).float()
+
+    result = classifier.forward_with_taps(
+        **batch,
+        capture=("TAP_MID",),
+        later_pair_bias=bias,
+    )
+    assert result.logits.shape == (2, 10)
+    assert len(observed) == 1
+    assert torch.equal(
+        observed[0],
+        torch.tensor([[2, 1, 0], [1, 0, 2]]),
+    )
+    # The temporary trace wrapper must not remain installed after the forward.
+    assert "traced_trimmer" not in classifier.mod.trimmer.forward.__qualname__
 
 
 def test_feedback_packing_gates_values_and_keeps_availability_and_het():
@@ -1210,6 +1268,13 @@ def test_exact_hlt_reference_rebuilds_from_raw_inputs_and_survives_state_reload(
     clone.set_update(2, 2)
     cloned_logits = clone(**batch, raw_tokens=raw)
     torch.testing.assert_close(cloned_logits, logits)
+    clone.classifier.mod.trimmer = _DeterministicTrainingTrimmer()
+    trimmed_logits, trimmed_prediction = clone.forward_with_feedback(
+        **batch, raw_tokens=raw
+    )
+    assert trimmed_logits.shape == (2, 10)
+    assert trimmed_prediction["value"].shape == (2, 3, 3, 13)
+    assert trimmed_prediction["pair_mask"].shape == (2, 3, 3)
     with pytest.raises(ValueError, match="raw HLT tokens"):
         clone(**batch)
 
