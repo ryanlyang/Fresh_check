@@ -761,7 +761,7 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
         for record in materialized["publications"].values()
     )
     assert materialized["receipt"]["contract"] == (
-        "retb_manifest_producer_receipt_v5"
+        "retb_manifest_producer_receipt_v6"
     )
 
 
@@ -842,7 +842,7 @@ def test_streamed_a_c_manifest_hooks_exclude_deferred_stage_n_targets(
     )
     assert materialized["target_count"] == 0
     receipt = materialized["receipt"]
-    assert receipt["contract"] == "retb_manifest_producer_receipt_v5"
+    assert receipt["contract"] == "retb_manifest_producer_receipt_v6"
     assert receipt["submission_scope"] == "offline_abc_streamed"
     assert receipt["registered_target_node_order"] == [
         "prelock_final_inputs"

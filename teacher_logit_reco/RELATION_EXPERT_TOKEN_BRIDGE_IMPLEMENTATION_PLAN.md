@@ -5626,7 +5626,7 @@ registry with the authenticated submission scope before invoking a plan
 factory or materializer. In particular, streamed A--C `input_audit` excludes
 the deferred Stage-N `prelock_final_inputs` target and campaign bootstrap
 excludes the unused Stage-D/E task manifests. The versioned
-`retb_manifest_producer_receipt_v5` records the registered, active, and
+`retb_manifest_producer_receipt_v6` records the registered, active, and
 scope-excluded target orders plus the exact submission-scope hash. Complete
 A--N execution continues to require every globally registered target.
 
@@ -5636,8 +5636,8 @@ The full streamed execution profile is `full_streamed` and is launched with
 `--streamed-submit`. It preserves the complete A--N scientific graph, split
 sizes, run identities, seeds, selectors, two-lock final-test sequence, and
 non-blocking scientific-underperformance policy. Its versioned control plane
-is `retb_tigris_production_graph_v39` schema 36 and
-`retb_step15_production_bundle_v36` schema 32.
+is `retb_tigris_production_graph_v40` schema 37 and
+`retb_step15_production_bundle_v37` schema 33.
 
 `retb_streamed_execution_profile_v1` divides execution material into three
 classes. Durable artifacts are selected checkpoints, compact deployable

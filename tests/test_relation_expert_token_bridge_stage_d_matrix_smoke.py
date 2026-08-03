@@ -11,11 +11,15 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 from teacher_logit_reco.relation_expert_token_bridge.production import (
     build_production_graph,
 )
+from teacher_logit_reco.relation_expert_token_bridge.manifest_orchestration import (  # noqa: E501
+    producer_targets_for_submission,
+)
 from teacher_logit_reco.relation_expert_token_bridge.stage_d_matrix_smoke import (
     STAGE_D_MATRIX_SMOKE_COUNTS,
     STAGE_D_MATRIX_SMOKE_TERMINAL_NODE,
     build_stage_d_matrix_smoke_ledger,
     build_stage_d_matrix_smoke_scope,
+    publish_stage_d_matrix_smoke_scope,
     stage_d_matrix_smoke_node_ids,
     summarize_stage_d_matrix,
     validate_stage_d_matrix_smoke_scope,
@@ -123,6 +127,27 @@ def test_stage_d_matrix_ledger_requires_every_exact_graph_binding(
         )
 
 
+def test_stage_d_matrix_scope_filters_future_manifest_targets(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "scoped-manifests"
+    _, graph = _campaign_and_graph(root)
+    publish_stage_d_matrix_smoke_scope(
+        campaign_root=root, production_graph=graph
+    )
+    selected = set(stage_d_matrix_smoke_node_ids(graph))
+    for producer in ("campaign_bootstrap", "input_audit"):
+        resolution = producer_targets_for_submission(
+            campaign_root=root,
+            production_graph=graph,
+            producer_node_id=producer,
+        )
+        assert resolution["submission_scope"] == "stage_d_matrix_smoke"
+        assert resolution["scope_filter_applied"] is True
+        assert set(resolution["active_targets"]).issubset(selected)
+        assert set(resolution["excluded_targets"]).isdisjoint(selected)
+
+
 def test_stage_d_matrix_summary_covers_all_real_static_coordinates(
     tmp_path: Path,
 ) -> None:
@@ -143,7 +168,8 @@ def test_stage_d_matrix_summary_covers_all_real_static_coordinates(
     assert summary["all_rows_non_performance_gated"] is True
 
 
-def test_stage_d_matrix_submission_shell_uses_full_matrix_and_smoke_resources() -> None:
+def test_stage_d_matrix_submission_shell_uses_full_matrix_and_smoke_resources(
+) -> None:
     launcher = Path("sbatch/submit_retb_tigris_full.sh").read_text(
         encoding="utf-8"
     )

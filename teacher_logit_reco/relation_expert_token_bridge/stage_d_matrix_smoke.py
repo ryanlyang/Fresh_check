@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import math
 import hashlib
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 

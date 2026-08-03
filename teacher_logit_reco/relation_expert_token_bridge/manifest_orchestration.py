@@ -46,12 +46,16 @@ from .production import (
     validate_streamed_offline_submission_scope,
     validate_task_manifest_for_graph,
 )
+from .stage_d_matrix_smoke import (
+    STAGE_D_MATRIX_SMOKE_SCOPE_CONTRACT,
+    validate_stage_d_matrix_smoke_scope,
+)
 
 
 MANIFEST_MATERIALIZATION_PLAN_CONTRACT = (
     "retb_manifest_materialization_plan_v2"
 )
-MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v5"
+MANIFEST_PRODUCER_RECEIPT_CONTRACT = "retb_manifest_producer_receipt_v6"
 
 
 def manifest_plan_path(
@@ -106,9 +110,16 @@ def producer_targets_for_submission(
     streamed_path = (
         root / "job_ledgers" / "streamed_offline_submission_scope.json"
     )
-    present = [path for path in (offline_path, streamed_path) if path.is_file()]
+    stage_d_matrix_path = (
+        root / "job_ledgers" / "stage_d_matrix_smoke_scope.json"
+    )
+    present = [
+        path
+        for path in (offline_path, streamed_path, stage_d_matrix_path)
+        if path.is_file()
+    ]
     if len(present) > 1:
-        raise ValueError("campaign has conflicting offline submission scopes")
+        raise ValueError("campaign has conflicting submission scopes")
 
     execution_profile = str(
         production_graph.get("execution_profile", "standard")
@@ -120,6 +131,8 @@ def producer_targets_for_submission(
         )
     if streamed_path.is_file() and execution_profile != "offline_abc_streamed":
         raise ValueError("streamed A-C scope and execution profile disagree")
+    if stage_d_matrix_path.is_file() and execution_profile != "standard":
+        raise ValueError("Stage-D matrix scope and execution profile disagree")
 
     scope: Mapping[str, Any] | None = None
     scope_name = "complete"
@@ -132,6 +145,15 @@ def producer_targets_for_submission(
             scope, production_graph=production_graph
         )
         scope_name = "offline_abc_streamed"
+    elif stage_d_matrix_path.is_file():
+        scope = load_hashed_json(
+            stage_d_matrix_path,
+            expected_contract=STAGE_D_MATRIX_SMOKE_SCOPE_CONTRACT,
+        )
+        validate_stage_d_matrix_smoke_scope(
+            scope, production_graph=production_graph
+        )
+        scope_name = "stage_d_matrix_smoke"
     elif offline_path.is_file():
         scope = load_hashed_json(
             offline_path,
@@ -599,7 +621,7 @@ def materialize_downstream_manifests(
     receipt = with_content_hash(
         {
             "contract": MANIFEST_PRODUCER_RECEIPT_CONTRACT,
-            "schema_version": 5,
+            "schema_version": 6,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": production_graph["content_hash"],
             "producer_node_id": str(producer_node_id),

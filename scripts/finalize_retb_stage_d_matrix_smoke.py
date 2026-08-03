@@ -7,7 +7,10 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -24,6 +27,9 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_controls import (  # no
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
     HLT_EXPERT_REGISTRATION_CONTRACT,
+)
+from teacher_logit_reco.relation_expert_token_bridge.native_fusion import (  # noqa: E402
+    NATIVE_FUSION_REGISTRATION_CONTRACT,
 )
 from teacher_logit_reco.relation_expert_token_bridge.production import (  # noqa: E402
     PRODUCTION_GRAPH_CONTRACT,
@@ -57,21 +63,83 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _native_registration_budget(payload: dict[str, Any]) -> bool:
-    if payload.get("contract") not in {
+def _registration_budget(payload: dict[str, Any]) -> str | None:
+    contract = payload.get("contract")
+    if contract in {
         HLT_EXPERT_REGISTRATION_CONTRACT,
         HLT_CONTROL_REGISTRATION_CONTRACT,
     }:
-        return False
-    if (
-        int(payload.get("epochs_completed", -1)) != 2
-        or payload.get("fixed_epoch_budget_completed") is not True
-        or payload.get("performance_based_termination") is not False
-    ):
-        raise ValueError("Stage-D deep-sentinel epoch budget differs")
-    if payload.get("evaluation_realization_policy") != "R_FIXED":
-        raise ValueError("Stage-D evaluation realization policy differs")
-    return True
+        if (
+            int(payload.get("epochs_completed", -1)) != 2
+            or payload.get("fixed_epoch_budget_completed") is not True
+            or payload.get("performance_based_termination") is not False
+        ):
+            raise ValueError("Stage-D deep-sentinel epoch budget differs")
+        if payload.get("evaluation_realization_policy") != "R_FIXED":
+            raise ValueError("Stage-D evaluation realization policy differs")
+        return "native_expert_or_control"
+    if contract == NATIVE_FUSION_REGISTRATION_CONTRACT:
+        expected_epochs = (
+            0
+            if payload.get("variant")
+            in {"HF_LOGIT_MEAN", "HF_7X_UNBIASED_LOGIT_MEAN"}
+            else 2
+        )
+        if (
+            int(payload.get("epochs_completed", -1)) != expected_epochs
+            or payload.get("fixed_epoch_budget_completed") is not True
+            or payload.get("performance_based_termination") is not False
+            or payload.get("realization_policy") != "R_MULTI"
+        ):
+            raise ValueError("Stage-D native-fusion miniature budget differs")
+        return "native_fusion"
+    return None
+
+
+def _assert_finite_loaded(value: Any, *, path: str) -> None:
+    if isinstance(value, torch.Tensor):
+        if (value.is_floating_point() or value.is_complex()) and not bool(
+            torch.isfinite(value).all()
+        ):
+            raise ValueError(f"nonfinite checkpoint tensor at {path}")
+        return
+    if isinstance(value, np.ndarray):
+        if np.issubdtype(value.dtype, np.inexact) and not bool(
+            np.isfinite(value).all()
+        ):
+            raise ValueError(f"nonfinite array at {path}")
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _assert_finite_loaded(child, path=f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _assert_finite_loaded(child, path=f"{path}[{index}]")
+        return
+    if isinstance(value, float) and not np.isfinite(value):
+        raise ValueError(f"nonfinite scalar at {path}")
+
+
+def _reload_semantic_output(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        validate_content_hash(payload)
+        assert_finite_json(payload, path=str(path))
+        return "json"
+    if suffix == ".pt":
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        _assert_finite_loaded(payload, path=str(path))
+        return "checkpoint"
+    if suffix == ".npz":
+        with np.load(path, allow_pickle=False) as payload:
+            for name in payload.files:
+                _assert_finite_loaded(
+                    np.asarray(payload[name]), path=f"{path}:{name}"
+                )
+        return "npz"
+    raise ValueError(f"unsupported Stage-D expected-output type: {path}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -109,7 +177,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_completions: dict[str, str] = {}
     manifest_task_counts: dict[str, int] = {}
     json_evidence_count = 0
+    checkpoint_reload_count = 0
+    npz_reload_count = 0
     deep_sentinel_count = 0
+    native_fusion_registration_count = 0
+    native_registration_run_ids: set[str] = set()
+    native_fusion_registration_run_ids: set[str] = set()
     deep_sentinel_contract_counts: dict[str, int] = {}
     for node in graph["nodes"]:
         node_id = str(node["node_id"])
@@ -147,18 +220,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         for row in completion["rows"]:
             for raw_path in row["output_hashes"]:
                 path = Path(raw_path)
-                if path.suffix.lower() != ".json":
-                    continue
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                validate_content_hash(payload)
-                assert_finite_json(payload, path=str(path))
-                json_evidence_count += 1
-                if _native_registration_budget(payload):
-                    deep_sentinel_count += 1
-                    contract = str(payload["contract"])
-                    deep_sentinel_contract_counts[contract] = (
-                        deep_sentinel_contract_counts.get(contract, 0) + 1
-                    )
+                output_kind = _reload_semantic_output(path)
+                if output_kind == "checkpoint":
+                    checkpoint_reload_count += 1
+                elif output_kind == "npz":
+                    npz_reload_count += 1
+                else:
+                    json_evidence_count += 1
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    registration_kind = _registration_budget(payload)
+                    if registration_kind == "native_expert_or_control":
+                        deep_sentinel_count += 1
+                        run_id = str(payload["run_id"])
+                        if run_id in native_registration_run_ids:
+                            raise ValueError(
+                                "Stage-D native registration is duplicated"
+                            )
+                        native_registration_run_ids.add(run_id)
+                        contract = str(payload["contract"])
+                        deep_sentinel_contract_counts[contract] = (
+                            deep_sentinel_contract_counts.get(contract, 0) + 1
+                        )
+                    elif registration_kind == "native_fusion":
+                        native_fusion_registration_count += 1
+                        run_id = str(payload["run_id"])
+                        if run_id in native_fusion_registration_run_ids:
+                            raise ValueError(
+                                "Stage-D fusion registration is duplicated"
+                            )
+                        native_fusion_registration_run_ids.add(run_id)
 
     for name, count in matrix["static_matrix_counts"].items():
         if manifest_task_counts.get(name) != int(count):
@@ -167,6 +257,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     if deep_sentinel_count != 541:
         raise ValueError("Stage-D deep-sentinel registration coverage differs")
+    if deep_sentinel_contract_counts != {
+        HLT_CONTROL_REGISTRATION_CONTRACT: 2,
+        HLT_EXPERT_REGISTRATION_CONTRACT: 539,
+    }:
+        raise ValueError("Stage-D native registration contract coverage differs")
+    if native_fusion_registration_count != 30:
+        raise ValueError("Stage-D native-fusion registration coverage differs")
+    expected_native_run_ids = {
+        str(row["run_id"])
+        for row in plan["groups"]["native_hlt_expert_training"]
+    }
+    expected_fusion_run_ids = {
+        str(row["run_id"])
+        for row in plan["groups"]["native_hlt_fusion_training"]
+    }
+    if native_registration_run_ids != expected_native_run_ids:
+        raise ValueError("Stage-D native registration identities differ")
+    if native_fusion_registration_run_ids != expected_fusion_run_ids:
+        raise ValueError("Stage-D fusion registration identities differ")
+    if checkpoint_reload_count <= 0:
+        raise ValueError("Stage-D matrix reloaded no checkpoints")
     expected_array_nodes = {
         str(node["node_id"])
         for node in graph["nodes"]
@@ -191,7 +302,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "task_manifest_counts": dict(sorted(manifest_task_counts.items())),
             "completed_array_node_count": len(manifest_completions),
             "authenticated_json_evidence_count": json_evidence_count,
+            "semantically_reloaded_checkpoint_count": checkpoint_reload_count,
+            "semantically_reloaded_npz_count": npz_reload_count,
             "deep_two_epoch_native_registration_count": deep_sentinel_count,
+            "native_fusion_registration_count": (
+                native_fusion_registration_count
+            ),
             "deep_sentinel_contract_counts": dict(
                 sorted(deep_sentinel_contract_counts.items())
             ),

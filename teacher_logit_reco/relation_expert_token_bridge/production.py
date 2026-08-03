@@ -37,7 +37,7 @@ from .streamed_execution import (
 )
 
 
-PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v39"
+PRODUCTION_GRAPH_CONTRACT = "retb_tigris_production_graph_v40"
 NODE_EXECUTION_REGISTRY_CONTRACT = (
     "retb_production_node_execution_registry_v17"
 )
@@ -51,7 +51,7 @@ RESOURCE_PROBE_CONTRACT = "retb_tigris_resource_probe_v1"
 TARGET_SHARD_PLAN_CONTRACT = "retb_target_shard_execution_plan_v1"
 TASK_MANIFEST_CONTRACT = "retb_tigris_task_manifest_v1"
 RESUME_PLAN_CONTRACT = "retb_tigris_resume_plan_v1"
-STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v36"
+STEP15_BUNDLE_CONTRACT = "retb_step15_production_bundle_v37"
 
 TIGRIS_DEFAULTS = {
     "submission_project_dir": "/home/ryreu/atlas/Fresh_check",
@@ -1674,7 +1674,7 @@ def build_production_graph(
     artifact = with_content_hash(
         {
             "contract": PRODUCTION_GRAPH_CONTRACT,
-            "schema_version": 36,
+            "schema_version": 37,
             "campaign_id": str(campaign_id),
             "campaign_root": str(Path(campaign_root)),
             "campaign_profile": profile,
@@ -2782,7 +2782,7 @@ def build_step15_bundle(
     return with_content_hash(
         {
             "contract": STEP15_BUNDLE_CONTRACT,
-            "schema_version": 32,
+            "schema_version": 33,
             "production_graph_sha256": graph_sha,
             "dry_run_job_ledger_sha256": ledger_sha,
             "stage_coverage": list("ABCDEFGHIJKLMN"),
@@ -2915,7 +2915,7 @@ def build_step15_bundle(
                 "materialization_plan": (
                     "retb_manifest_materialization_plan_v2"
                 ),
-                "producer_receipt": "retb_manifest_producer_receipt_v5",
+                "producer_receipt": "retb_manifest_producer_receipt_v6",
                 "plan_factory_registry": (
                     MANIFEST_PLAN_FACTORY_REGISTRY_CONTRACT
                 ),
