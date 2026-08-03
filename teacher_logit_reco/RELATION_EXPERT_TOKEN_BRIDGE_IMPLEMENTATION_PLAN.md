@@ -5727,8 +5727,8 @@ Step-3 through Step-6 architecture bundles, checking the GPU resource probe,
 and byte-authenticating the smoke-only selected-parent alias. Native-HLT
 training CLI cache arguments are graph-bound cache directories, while their
 deferred lineage inputs bind the contained `hlt_v3_metadata.json` artifacts;
-this distinction is frozen by `retb_static_experiment_plan_v9` and
-`retb_static_experiment_bundle_v9`, schema 8. Native-HLT expert and matched
+this distinction is frozen by `retb_static_experiment_plan_v10` and
+`retb_static_experiment_bundle_v10`, schema 9. Native-HLT expert and matched
 control training use their registered `R_MULTI`, `R_FIXED`, or `R_RANDOM`
 policy only on `model_train`; `val_stop` and every other evaluation role are
 always bound to the replica-zero `R_FIXED` cache. The corrected distinction is
@@ -5738,6 +5738,18 @@ registered RETB token-only expert head, token-transformer fusion, A1
 token predictor, and unrestricted HLT consumer rather than a generic
 stand-in; these form the one-shape/one-seed compact expert, reconstruction,
 fusion, semantic-control, confirmation, scale, and sealed-final path.
+
+Stage A serializes that physical policy coverage in
+`retb_stage_a_inherited_contract_bundle_v3`,
+`retb_stage_a_region_tree_index_v3`, and `retb_stage_a_input_audit_v3`, all
+schema 3. Its persistent HLT surface contains the eight nominal `R_MULTI`
+training views, five additional policy-specific `model_train` views (one
+`R_FIXED` plus four `R_RANDOM`), and four replica-zero `R_FIXED` evaluation
+views. The five additional views have policy-qualified REGION tree paths, so
+replica-zero trees cannot collide across policies. No policy-specific
+`scale_train` copies are materialized: Stage M is globally fixed to
+`R_MULTI`, and unused 3M views would consume persistent storage without a
+scientific consumer.
 
 The smoke plan and physical ledger are respectively
 `retb_compact_streamed_smoke_plan_v1` and

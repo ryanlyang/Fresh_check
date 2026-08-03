@@ -482,6 +482,11 @@ def _raw_view(
         logical_role=split,
         replicas=replicas,
         identities=tuple(str(value) for value in identities),
+        realization_policy=(
+            "R_MULTI"
+            if split in {"model_train", "scale_train"}
+            else "R_FIXED"
+        ),
     )
     return (
         {

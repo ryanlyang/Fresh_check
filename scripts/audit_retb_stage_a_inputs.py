@@ -81,15 +81,7 @@ OFFLINE_ROLES = (
     "final_test",
     "scale_train",
 )
-HLT_VIEWS = (
-    *(("model_train", replica, "R_MULTI") for replica in range(4)),
-    *(("scale_train", replica, "R_MULTI") for replica in range(4)),
-    *((
-        role,
-        0,
-        "R_FIXED",
-    ) for role in ("val_stop", "val_design", "stack_val", "final_test")),
-)
+HLT_VIEWS = STAGE_A_HLT_TREE_VIEWS
 RELATION_AUDIT_JET_LIMIT = 32
 
 
@@ -330,7 +322,7 @@ def _build_degradation_audit(
         / (
             "hlt_streamed_normalizer_sample" if streamed_abc else "hlt"
         )
-        / "model_train_r0_exclusive_ca_v1",
+        / "model_train_r0_R_MULTI_exclusive_ca_v1",
         identities,
     )
     offline_relations = _relation_owner_views(

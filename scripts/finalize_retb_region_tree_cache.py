@@ -119,7 +119,7 @@ def _hlt_view(
         "cache_metadata_sha256": metadata["content_hash"],
         "tree_dir": (
             root / "inputs" / "region_tree" / tree_namespace
-            / f"{role}_r{replica}_exclusive_ca_v1"
+            / f"{role}_r{replica}_{policy}_exclusive_ca_v1"
         ),
     }
 

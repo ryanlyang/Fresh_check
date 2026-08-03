@@ -58,17 +58,7 @@ ROLES = (
     "final_test",
     "scale_train",
 )
-HLT_VIEWS = (
-    *(
-        (role, replica, "R_MULTI")
-        for role in ("model_train", "scale_train")
-        for replica in range(4)
-    ),
-    *(
-        (role, 0, "R_FIXED")
-        for role in ("val_stop", "val_design", "stack_val", "final_test")
-    ),
-)
+HLT_VIEWS = STAGE_A_HLT_TREE_VIEWS
 REGION_TREE_SHARD_SIZE = 10_000
 
 
@@ -299,7 +289,7 @@ def build_stage_a_task_manifests(
                     if streamed
                     else "hlt"
                 )
-                / f"{role}_r{replica}_exclusive_ca_v1"
+                / f"{role}_r{replica}_{policy}_exclusive_ca_v1"
             )
         view_count = (
             STREAMED_HLT_NORMALIZER_JETS_PER_REPLICA

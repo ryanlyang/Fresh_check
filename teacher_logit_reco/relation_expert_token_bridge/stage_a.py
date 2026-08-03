@@ -41,10 +41,10 @@ from .hlt_v3 import (
 )
 
 
-STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v2"
-STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v2"
+STAGE_A_CONTRACT_BUNDLE = "retb_stage_a_inherited_contract_bundle_v3"
+STAGE_A_TREE_INDEX_CONTRACT = "retb_stage_a_region_tree_index_v3"
 STAGE_A_NORMALIZER_BUNDLE_CONTRACT = "retb_stage_a_normalizer_bundle_v1"
-STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v2"
+STAGE_A_INPUT_AUDIT_CONTRACT = "retb_stage_a_input_audit_v3"
 STAGE_A_NORMALIZER_POPULATION_FILENAME = (
     "stage_a_normalizer_population_registry.json"
 )
@@ -61,6 +61,11 @@ STAGE_A_HLT_TREE_VIEWS = (
     *(
         (role, replica, "R_MULTI")
         for role in ("model_train", "scale_train")
+        for replica in range(4)
+    ),
+    ("model_train", 0, "R_FIXED"),
+    *(
+        ("model_train", replica, "R_RANDOM")
         for replica in range(4)
     ),
     *(
@@ -151,7 +156,7 @@ def build_stage_a_contract_bundle(
         with_content_hash(
             {
                 "contract": STAGE_A_CONTRACT_BUNDLE,
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign_spec_sha256": campaign_spec["content_hash"],
                 "retb_raw_input_schema_sha256": parents["raw_input_schema"],
                 "artifact_hashes": {
@@ -168,6 +173,14 @@ def build_stage_a_contract_bundle(
                 ],
                 "offline_and_hlt_normalizers_separate": True,
                 "shared_hlt_replica_weighting": "equal_identity_replica_weight",
+                "required_hlt_views": [
+                    {
+                        "logical_role": role,
+                        "replica_id": replica,
+                        "realization_policy": policy,
+                    }
+                    for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+                ],
                 "normalizer_sampling": {
                     "maximum_fitted_views": 50_000,
                     "offline_500k": (
@@ -227,10 +240,19 @@ def validate_stage_a_contract_bundle(
     }
     if (
         artifact["campaign_spec_sha256"] != campaign_spec["content_hash"]
-        or int(artifact.get("schema_version", -1)) != 2
+        or int(artifact.get("schema_version", -1)) != 3
         or artifact["retb_raw_input_schema_sha256"]
         != campaign_spec["parent_artifact_hashes"]["raw_input_schema"]
         or artifact["artifact_hashes"] != expected_hashes
+        or artifact.get("required_hlt_views")
+        != [
+            {
+                "logical_role": role,
+                "replica_id": replica,
+                "realization_policy": policy,
+            }
+            for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+        ]
         or artifact.get("normalizer_sampling")
         != {
             "maximum_fitted_views": 50_000,
@@ -530,7 +552,7 @@ def build_stage_a_tree_index(
         with_content_hash(
             {
                 "contract": STAGE_A_TREE_INDEX_CONTRACT,
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign_spec_sha256": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
                 ),
@@ -566,7 +588,7 @@ def validate_stage_a_tree_index(payload: Mapping[str, Any]) -> str:
         require_sha256(payload.get(name), name=name)
     views = payload.get("views")
     if (
-        int(payload.get("schema_version", -1)) != 2
+        int(payload.get("schema_version", -1)) != 3
         or not isinstance(views, list)
         or len(views) != int(payload.get("view_count", -1))
         or len({row.get("view_id") for row in views}) != len(views)
@@ -628,11 +650,25 @@ def build_stage_a_input_audit(
             or row.get("identities_unique") is not True
         ):
             raise ValueError("Stage-A audited view invariants differ")
+    expected_offline_ids = {
+        f"offline:{role}" for role in STAGE_A_OFFLINE_TREE_ROLES
+    }
+    expected_hlt_ids = {
+        f"hlt:{role}:r{replica}:{policy}"
+        for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+    }
+    if (
+        {row.get("view_id") for row in offline} != expected_offline_ids
+        or len(offline) != len(expected_offline_ids)
+        or {row.get("view_id") for row in hlt} != expected_hlt_ids
+        or len(hlt) != len(expected_hlt_ids)
+    ):
+        raise ValueError("Stage-A input audit view coverage differs")
     artifact = bind_source(
         with_content_hash(
             {
                 "contract": STAGE_A_INPUT_AUDIT_CONTRACT,
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign_spec_sha256": require_sha256(
                     campaign_spec_sha256, name="campaign_spec_sha256"
                 ),
@@ -685,11 +721,15 @@ def validate_stage_a_input_audit(payload: Mapping[str, Any]) -> str:
     ):
         require_sha256(payload.get(name), name=name)
     if (
-        int(payload.get("schema_version", -1)) != 2
+        int(payload.get("schema_version", -1)) != 3
         or int(payload.get("offline_view_count", -1))
         != len(payload.get("offline_views", ()))
+        or len(payload.get("offline_views", ()))
+        != len(STAGE_A_OFFLINE_TREE_ROLES)
         or int(payload.get("hlt_view_count", -1))
         != len(payload.get("hlt_views", ()))
+        or len(payload.get("hlt_views", ()))
+        != len(STAGE_A_HLT_TREE_VIEWS)
         or payload.get("constituent_matching_fields_present") is not False
         or payload.get("offline_labels_authenticated") is not True
         or payload.get("hlt_cache_contains_labels") is not False
@@ -697,6 +737,13 @@ def validate_stage_a_input_audit(payload: Mapping[str, Any]) -> str:
         is not False
         or payload.get("identity_alignment_exact") is not True
         or payload.get("ok") is not True
+        or {row.get("view_id") for row in payload.get("offline_views", ())}
+        != {f"offline:{role}" for role in STAGE_A_OFFLINE_TREE_ROLES}
+        or {row.get("view_id") for row in payload.get("hlt_views", ())}
+        != {
+            f"hlt:{role}:r{replica}:{policy}"
+            for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+        }
     ):
         raise ValueError("Stage-A input audit differs")
     return digest

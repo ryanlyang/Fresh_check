@@ -40,6 +40,8 @@ from teacher_logit_reco.relation_expert_token_bridge.production import (
     HOSD_MINIATURE_SPLIT_PROFILE,
 )
 from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
+    STAGE_A_HLT_TREE_VIEWS,
+    STAGE_A_OFFLINE_TREE_ROLES,
     STAGE_A_REQUIRED_TREE_VIEW_IDS,
     bind_fitted_normalizer,
     bind_fitted_region_normalizer,
@@ -269,7 +271,7 @@ def test_stage_a_contracts_and_numeric_normalizers_are_domain_bound() -> None:
     assert bundle["offline_and_hlt_interchangeable"] is False
 
 
-def test_stage_a_tree_index_requires_all_eighteen_declared_views() -> None:
+def test_stage_a_tree_index_requires_all_twenty_three_declared_views() -> None:
     campaign = _campaign(miniature=True)
     rows = [
         {
@@ -282,7 +284,7 @@ def test_stage_a_tree_index_requires_all_eighteen_declared_views() -> None:
         }
         for index, view_id in enumerate(STAGE_A_REQUIRED_TREE_VIEW_IDS)
     ]
-    assert len(rows) == 18
+    assert len(rows) == 23
     artifact = build_stage_a_tree_index(
         campaign_spec_sha256=campaign["content_hash"],
         backend_manifest_sha256="d" * 64,
@@ -473,10 +475,10 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
             "input_audit",
         }
         assert manifests["offline_input_cache"]["task_count"] == 6
-        assert manifests["hlt_v3_cache"]["task_count"] == 12
+        assert manifests["hlt_v3_cache"]["task_count"] == 17
         assert (
             manifests["region_tree_cache"]["task_count"]
-            == 18
+            == 23
         )
         assert all(
             manifests[name]["task_count"] == 1
@@ -497,6 +499,15 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
             row["argv"] for row in manifests["hlt_v3_cache"]["rows"]
         ]
         assert all("--realization-policy" in argv for argv in hlt_commands)
+        hlt_coordinates = {
+            (
+                argv[argv.index("--logical-role") + 1],
+                int(argv[argv.index("--replica-id") + 1]),
+                argv[argv.index("--realization-policy") + 1],
+            )
+            for argv in hlt_commands
+        }
+        assert hlt_coordinates == set(STAGE_A_HLT_TREE_VIEWS)
         tree_commands = [
             row["argv"] for row in manifests["region_tree_cache"]["rows"]
             if "--replica-id" in row["argv"]
@@ -507,7 +518,7 @@ def test_stage_a_bootstrap_builds_complete_production_and_miniature_manifests(
             for row in manifests["region_tree_cache"]["rows"]
         )
         assert production_tree_outputs == (
-            36 if miniature else 3680
+            46 if miniature else 4180
         )
         if miniature:
             expected_stops = {
@@ -677,7 +688,7 @@ def test_stage_a_bootstrap_cli_dry_run_resolves_every_manifest(
     ]
     assert bootstrap_main([*arguments, "--dry-run"]) == 0
     output = capsys.readouterr().out
-    assert '"region_tree_cache": 18' in output
+    assert '"region_tree_cache": 23' in output
     assert '"input_audit": 1' in output
     assert not (campaign_root / "job_ledgers" / "tasks").exists()
     assert bootstrap_main(arguments) == 0
@@ -975,17 +986,28 @@ def test_stage_a_input_audit_contract_requires_exact_safe_views() -> None:
         "valid_particle_count": 3,
         "all_empty_jet_count": 0,
     }
+    offline_rows = [
+        {
+            **row,
+            "view_id": f"offline:{role}",
+            "logical_role": role,
+        }
+        for role in STAGE_A_OFFLINE_TREE_ROLES
+    ]
+    hlt_rows = [
+        {
+            **row,
+            "view_id": f"hlt:{role}:r{replica}:{policy}",
+            "logical_role": role,
+            "replica_id": replica,
+            "realization_policy": policy,
+        }
+        for role, replica, policy in STAGE_A_HLT_TREE_VIEWS
+    ]
     audit = build_stage_a_input_audit(
         campaign_spec_sha256="4" * 64,
-        offline_views=[row],
-        hlt_views=[
-            {
-                **row,
-                "view_id": "hlt:model_train:r0:R_MULTI",
-                "replica_id": 0,
-                "realization_policy": "R_MULTI",
-            }
-        ],
+        offline_views=offline_rows,
+        hlt_views=hlt_rows,
         tree_index_sha256="5" * 64,
         normalizer_bundle_sha256="6" * 64,
         hlt_v3_degradation_audit_sha256="7" * 64,
@@ -994,6 +1016,7 @@ def test_stage_a_input_audit_contract_requires_exact_safe_views() -> None:
     validate_stage_a_input_audit(audit)
     assert audit["identity_alignment_exact"] is True
     assert audit["validation_or_test_statistics_used_for_normalization"] is False
+    assert audit["hlt_view_count"] == 17
 
 
 def test_authenticated_tree_selection_revalidates_npz_bytes(

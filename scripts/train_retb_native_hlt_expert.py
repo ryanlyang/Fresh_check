@@ -155,6 +155,7 @@ def _trees(
     logical_role: str,
     replicas: Sequence[int],
     identities: tuple[str, ...],
+    realization_policy: str,
 ) -> dict[int, list[Mapping[str, Any]]] | None:
     if root is None:
         return None
@@ -162,7 +163,10 @@ def _trees(
     for replica in replicas:
         shard_root = (
             root
-            / f"{logical_role}_r{replica}_exclusive_ca_v1"
+            / (
+                f"{logical_role}_r{replica}_"
+                f"{realization_policy}_exclusive_ca_v1"
+            )
             / "shards"
         )
         shards = sorted(shard_root.glob("shard_*.npz"))
@@ -377,6 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             logical_role=args.training_role,
             replicas=sorted(train_paths),
             identities=train_ids,
+            realization_policy=configuration["realization_policy"],
         ),
     )
     val_dataset = NativeHLTExpertDataset(
@@ -394,6 +399,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             logical_role="val_stop",
             replicas=sorted(val_paths),
             identities=val_ids,
+            realization_policy="R_FIXED",
         ),
     )
     design_dataset = (
@@ -414,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 logical_role="val_design",
                 replicas=sorted(design_paths),
                 identities=design_ids,
+                realization_policy="R_FIXED",
             ),
         )
     )

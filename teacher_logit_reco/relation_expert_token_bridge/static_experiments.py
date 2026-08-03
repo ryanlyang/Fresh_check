@@ -26,6 +26,7 @@ from .production import (
     validate_task_manifest_for_graph,
     task_manifest_path_for_graph,
 )
+from .replicas import REALIZATION_POLICIES
 from .step4 import (
     build_stage_b_run_registry,
     resolve_stage_b_run,
@@ -48,8 +49,8 @@ from .step7 import (
 )
 
 
-STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v9"
-STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v9"
+STATIC_EXPERIMENT_PLAN_CONTRACT = "retb_static_experiment_plan_v10"
+STATIC_EXPERIMENT_BUNDLE_CONTRACT = "retb_static_experiment_bundle_v10"
 
 STATIC_MANIFEST_NODES = (
     "offline_expert_training",
@@ -1042,8 +1043,30 @@ def _stage_c_streamed_verification_records(
     return output
 
 
-def _hlt_cache(root: Path, role: str, replica: int) -> str:
-    policy = "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
+def _hlt_cache(
+    root: Path,
+    role: str,
+    replica: int,
+    *,
+    realization_policy: str | None = None,
+) -> str:
+    training_role = role in {"model_train", "scale_train"}
+    policy = (
+        str(realization_policy)
+        if realization_policy is not None
+        else ("R_MULTI" if training_role else "R_FIXED")
+    )
+    if policy not in REALIZATION_POLICIES:
+        raise ValueError("unknown HLT realization policy")
+    expected_replicas = (
+        tuple(REALIZATION_POLICIES[policy]["training_replicas"])
+        if training_role
+        else (0,)
+    )
+    if not training_role and policy != "R_FIXED":
+        raise ValueError("evaluation HLT caches must use R_FIXED")
+    if int(replica) not in expected_replicas:
+        raise ValueError("HLT cache replica is incompatible with policy")
     return _path(
         root,
         "inputs",
@@ -1055,9 +1078,23 @@ def _hlt_cache(root: Path, role: str, replica: int) -> str:
     )
 
 
-def _hlt_cache_metadata(root: Path, role: str, replica: int) -> str:
+def _hlt_cache_metadata(
+    root: Path,
+    role: str,
+    replica: int,
+    *,
+    realization_policy: str | None = None,
+) -> str:
     return _path(
-        Path(_hlt_cache(root, role, replica)), "hlt_v3_metadata.json"
+        Path(
+            _hlt_cache(
+                root,
+                role,
+                replica,
+                realization_policy=realization_policy,
+            )
+        ),
+        "hlt_v3_metadata.json",
     )
 
 
@@ -1117,12 +1154,24 @@ def _stage_d_expert_records(
                 "--run-id",
                 run_id,
             ]
-            for replica in range(4):
+            realization_policy = str(config["realization_policy"])
+            training_replicas = tuple(
+                int(value)
+                for value in REALIZATION_POLICIES[realization_policy][
+                    "training_replicas"
+                ]
+            )
+            for replica in training_replicas:
+                train_cache = _hlt_cache(
+                    root,
+                    "model_train",
+                    replica,
+                    realization_policy=realization_policy,
+                )
                 argv.extend(
                     [
                         "--train-cache",
-                        f"{replica}="
-                        f"{_hlt_cache(root, 'model_train', replica)}",
+                        f"{replica}={train_cache}",
                     ]
                 )
             argv.extend(
@@ -1217,6 +1266,23 @@ def _stage_d_expert_records(
                 str(run_root / "best_model_val.pt"),
                 str(run_root / "native_output_manifest.json"),
             ]
+            deferred_hlt_inputs = [
+                _deferred(
+                    _hlt_cache_metadata(
+                        root,
+                        "model_train",
+                        replica,
+                        realization_policy=realization_policy,
+                    ),
+                    contract="retb_hlt_v3_cache_v1",
+                    producer="hlt_v3_cache",
+                    role=(
+                        f"{realization_policy}_HLT_training_"
+                        f"replica_{replica}"
+                    ),
+                )
+                for replica in training_replicas
+            ]
         else:
             control = str(config["control_id"])
             run_root = (
@@ -1276,6 +1342,20 @@ def _stage_d_expert_records(
                     else []
                 ),
             ]
+            deferred_hlt_inputs = [
+                _deferred(
+                    _hlt_cache_metadata(
+                        root,
+                        "model_train",
+                        replica,
+                        realization_policy="R_MULTI",
+                    ),
+                    contract="retb_hlt_v3_cache_v1",
+                    producer="hlt_v3_cache",
+                    role=f"R_MULTI_HLT_training_replica_{replica}",
+                )
+                for replica in range(4)
+            ]
         output.append(
             _record(
                 node_id="native_hlt_expert_training",
@@ -1288,14 +1368,7 @@ def _stage_d_expert_records(
                 registry_sha256=registry["content_hash"],
                 argv=argv,
                 expected_artifacts=expected,
-                deferred_inputs=[
-                    _deferred(
-                        _hlt_cache_metadata(root, "model_train", 0),
-                        contract="retb_hlt_v3_cache_v1",
-                        producer="hlt_v3_cache",
-                        role="nominal_HLT_training_replica_zero",
-                    )
-                ],
+                deferred_inputs=deferred_hlt_inputs,
                 registry_memberships=row.get("registry_memberships", ()),
             )
         )
@@ -1666,7 +1739,7 @@ def build_static_experiment_bundle(
     plan = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_PLAN_CONTRACT,
-            "schema_version": 8,
+            "schema_version": 9,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "campaign_profile": campaign["campaign_profile"],
@@ -1726,7 +1799,7 @@ def build_static_experiment_bundle(
     bundle = with_content_hash(
         {
             "contract": STATIC_EXPERIMENT_BUNDLE_CONTRACT,
-            "schema_version": 8,
+            "schema_version": 9,
             "campaign_spec_sha256": campaign["content_hash"],
             "production_graph_sha256": graph_sha,
             "static_experiment_plan_sha256": plan["content_hash"],

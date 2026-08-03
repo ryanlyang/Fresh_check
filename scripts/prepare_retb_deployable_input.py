@@ -87,6 +87,7 @@ def build_hlt_only_inference_inputs(
         logical_role=split,
         replicas=(0,),
         identities=tuple(identities),
+        realization_policy="R_FIXED",
     )[0]
     hlt_inputs = {
         "replica_ids": torch.zeros(len(identities), dtype=torch.int64),

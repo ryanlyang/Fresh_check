@@ -101,10 +101,11 @@ def _labels_npz(root: Path, role: str) -> Path:
 
 
 def _tree(root: Path, view: str, role: str, replica: int | None = None) -> Path:
+    policy = "R_MULTI" if role in {"model_train", "scale_train"} else "R_FIXED"
     name = (
         f"{role}_exclusive_ca_v1"
         if replica is None
-        else f"{role}_r{replica}_exclusive_ca_v1"
+        else f"{role}_r{replica}_{policy}_exclusive_ca_v1"
     )
     return _shared_root(root) / "inputs" / "region_tree" / view / name
 

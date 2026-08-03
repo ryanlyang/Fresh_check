@@ -85,10 +85,10 @@ def test_full_static_matrix_is_exact_deduplicated_and_fully_bound(
         python_executable=sys.executable,
     )
     plan = bundle["static_experiment_plan"]
-    assert STATIC_EXPERIMENT_PLAN_CONTRACT == "retb_static_experiment_plan_v9"
-    assert STATIC_EXPERIMENT_BUNDLE_CONTRACT == "retb_static_experiment_bundle_v9"
-    assert plan["schema_version"] == 8
-    assert bundle["static_experiment_bundle"]["schema_version"] == 8
+    assert STATIC_EXPERIMENT_PLAN_CONTRACT == "retb_static_experiment_plan_v10"
+    assert STATIC_EXPERIMENT_BUNDLE_CONTRACT == "retb_static_experiment_bundle_v10"
+    assert plan["schema_version"] == 9
+    assert bundle["static_experiment_bundle"]["schema_version"] == 9
     assert tuple(plan["groups"]) == STATIC_MANIFEST_NODES
     assert plan["full_matrix_counts"] == {
         "offline_expert_training": 147,
@@ -375,6 +375,37 @@ def test_static_rows_route_controls_fusions_and_deferred_pilots(
             Path(value["path"]).name == "hlt_v3_metadata.json"
             for value in row["deferred_inputs"]
             if value["producer"] == "hlt_v3_cache"
+        )
+        train_bindings = [
+            row["argv"][index + 1]
+            for index, flag in enumerate(row["argv"][:-1])
+            if flag == "--train-cache"
+        ]
+        train_caches = [value.split("=", 1)[1] for value in train_bindings]
+        if row["configuration"]["kind"] == "NATIVE_HLT_EXPERT":
+            policy = row["configuration"]["realization_policy"]
+            expected_replicas = [0] if policy == "R_FIXED" else list(range(4))
+        else:
+            policy = "R_MULTI"
+            expected_replicas = list(range(4))
+        assert [
+            int(value.split("=", 1)[0])
+            for value in train_bindings
+        ] == expected_replicas
+        assert len(train_caches) == len(expected_replicas)
+        assert all(
+            f"/{policy}/D_NOMINAL" in path.replace("\\", "/")
+            for path in train_caches
+        )
+        hlt_evidence = [
+            value
+            for value in row["deferred_inputs"]
+            if value["producer"] == "hlt_v3_cache"
+        ]
+        assert len(hlt_evidence) == len(expected_replicas)
+        assert all(
+            f"/{policy}/D_NOMINAL/" in value["path"].replace("\\", "/")
+            for value in hlt_evidence
         )
     assert len(plan["groups"]["native_hlt_fusion_training"]) == 30
 

@@ -426,7 +426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.streamed_abc
                 else "hlt"
             )
-            / f"{training_role}_r{replica}_exclusive_ca_v1",
+            / f"{training_role}_r{replica}_R_MULTI_exclusive_ca_v1",
             selected_base_ids,
         )
         trees_by_replica.append(trees)
