@@ -686,6 +686,29 @@ def test_e7_target_provenance_selects_and_binds_both_hierarchies(tmp_path):
     )
 
 
+def test_supplemental_kt8_target_provenance_uses_its_own_report(tmp_path):
+    provenance = _target_report_provenance(
+        target_hash="kt8-target", grouping_hash="kt8-grouping"
+    )
+    path = (
+        tmp_path
+        / "runs"
+        / "D7_kt8_mh4_particles_screen"
+        / "run_report.json"
+    )
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"provenance": {"model_val": provenance}}),
+        encoding="utf-8",
+    )
+
+    selected = _selected_target_provenance(
+        tmp_path, ("D7_kt8_mh4_particles_screen",)
+    )
+    assert selected["hierarchy_target_content_hash"] == "kt8-target"
+    assert selected["grouping_algorithm_hash"] == "kt8-grouping"
+
+
 def test_dual_target_provenance_rejects_conflicting_offline_cache():
     kt = _target_report_provenance(
         target_hash="kt-target", grouping_hash="kt-grouping"

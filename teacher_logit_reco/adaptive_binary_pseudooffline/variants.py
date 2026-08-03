@@ -437,6 +437,13 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
             "data": {"input_view": "hlt_plus_offline_particles", "requires_offline_targets": True},
             "model": {"renderer": {"kind": "oracle_offline_particles"}},
         }, oracle_eval), dependencies=("A4_offline_part_ceiling", "D1_kt32_mh4_particles")),
+        _spec("D7", "D7_kt8_mh4_particles_screen", "supplemental kT8 multi-hypothesis renderer", {
+            "model": {"hierarchy": {"capacities": [2, 4, 8]}},
+            "evaluation": {
+                "final_test_eligible": False,
+                "supplemental_screen": True,
+            },
+        }, dependencies=("C3_kt_8",)),
         _spec("E0", "E0_pseudo_only", "pseudo-particle-only ParT", {
             "model": {"hlt_part": {"enabled": False}, "fusion": {"enabled": False}},
         }, dependencies=("D1_kt32_mh4_particles",)),
@@ -482,6 +489,14 @@ def _registry_rows() -> tuple[AdaptiveBinaryVariantSpec, ...]:
             },
             "evaluation": {"deployable": False, "diagnostic_only": True, "final_test_eligible": False},
         }),
+        _spec("E12", "E12_kt8_mh4_dualcross_screen", "supplemental HLT plus kT8 dual-cross tagger", {
+            "data": {"pseudo_sources": ["D7_kt8_mh4_particles_screen"]},
+            "model": {"hierarchy": {"capacities": [2, 4, 8]}},
+            "evaluation": {
+                "final_test_eligible": False,
+                "supplemental_screen": True,
+            },
+        }, dependencies=("A0_hlt_part", "D7_kt8_mh4_particles_screen")),
         _spec("F0", "F0_ce_reco_primary", "primary dual-hierarchy CE plus maintained reconstruction", {
             "model": {
                 "fusion": {
@@ -550,6 +565,14 @@ ABPH_NON_GATING_VARIANT_REASONS: Mapping[str, str] = MappingProxyType(
             "real JetClass L5 oracle ledgers can have fixed PID minimum-mass "
             "budgets above their measured invariant masses, so no exact N-body "
             "renderer can satisfy the diagnostic's simultaneous oracle constraints"
+        ),
+        "D7_kt8_mh4_particles_screen": (
+            "supplemental early-signal renderer attached to the completed C3 kT8 "
+            "checkpoint; it is not part of the canonical A0-G5 claim matrix"
+        ),
+        "E12_kt8_mh4_dualcross_screen": (
+            "supplemental early-signal tagger for the C3-derived kT8 renderer; "
+            "it is not part of the canonical A0-G5 claim matrix"
         ),
     }
 )

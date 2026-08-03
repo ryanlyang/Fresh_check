@@ -58,6 +58,7 @@ from .tagger import (
     load_dual_stream_warm_starts,
 )
 from .tagging_objectives import compute_tagging_objective, tagging_objective_config
+from .variants import variant_spec
 from .training import (
     CurriculumState,
     ReconstructionLossWeights,
@@ -93,6 +94,13 @@ from .tagger_distributed import (
 
 
 ABPH_TAGGER_RUNTIME_CONTRACT = "adaptive_binary_pseudooffline_tagger_runtime_v1"
+ABPH_FROZEN_SINGLE_PSEUDO_SOURCES = frozenset(
+    {
+        "D1_kt32_mh4_particles",
+        "D2_ca32_mh4_particles",
+        "D7_kt8_mh4_particles_screen",
+    }
+)
 
 
 def _binary_auc(scores: np.ndarray, positive: np.ndarray) -> float | None:
@@ -909,11 +917,7 @@ def _selected_target_provenance(root: Path, cache_names: Sequence[str]) -> Mappi
                 raise ValueError(f"{run_name} lacks model_val target provenance")
             branches[hierarchy_name] = provenance
         return _combine_report_target_provenance(branches)
-    recognized = tuple(
-        name
-        for name in names
-        if name in {"D1_kt32_mh4_particles", "D2_ca32_mh4_particles"}
-    )
+    recognized = tuple(name for name in names if name in ABPH_FROZEN_SINGLE_PSEUDO_SOURCES)
     if len(recognized) != 1:
         raise ValueError(
             f"cannot select target provenance from pseudo caches {list(names)}"
@@ -955,7 +959,7 @@ def build_frozen_pseudo_generators(
                 device=device,
             ),
         )
-    allowed = {"D1_kt32_mh4_particles", "D2_ca32_mh4_particles"}
+    allowed = ABPH_FROZEN_SINGLE_PSEUDO_SOURCES
     if not names or any(name not in allowed for name in names):
         raise ValueError(f"unsupported frozen pseudo source family: {names}")
     result = []
@@ -1121,6 +1125,15 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
         cache_names = (pseudo_variant,)
     elif independent:
         cache_names = ("D1_kt32_mh4_particles", "D2_ca32_mh4_particles")
+    elif resolved["data"].get("pseudo_sources"):
+        cache_names = tuple(str(name) for name in resolved["data"]["pseudo_sources"])
+        if len(cache_names) != 1:
+            raise ValueError("single-hierarchy supplemental taggers require one pseudo source")
+        source_spec = variant_spec(cache_names[0])
+        if source_spec.tier != "D" or cache_names[0] not in ABPH_FROZEN_SINGLE_PSEUDO_SOURCES:
+            raise ValueError(
+                f"unsupported configured pseudo source for {variant_name}: {cache_names[0]}"
+            )
     elif str(resolved["model"]["hierarchy"].get("grouping")) == "cambridge_aachen":
         cache_names = ("D2_ca32_mh4_particles",)
     else:

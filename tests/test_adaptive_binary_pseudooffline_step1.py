@@ -181,7 +181,7 @@ def test_input_config_locks_pilot_and_highdata_contracts():
 
 
 def test_complete_registry_resolves_every_short_and_full_name():
-    assert len(ABPH_EXPECTED_VARIANT_NAMES) == 57
+    assert len(ABPH_EXPECTED_VARIANT_NAMES) == 59
     assert set(ABPH_EXPECTED_VARIANT_NAMES) == set(ABPH_VARIANT_REGISTRY)
     hashes = set()
     for name, spec in ABPH_VARIANT_REGISTRY.items():
@@ -221,6 +221,25 @@ def test_registry_encodes_shared_root_oracle_and_kd_safety():
     assert b4["evaluation"]["final_test_eligible"] is False
     assert f4["data"]["requires_teacher_logits"] is True
     assert f4["data"]["final_test_teacher_free"] is True
+
+
+def test_supplemental_kt8_screen_is_explicit_and_non_gating():
+    d7 = resolve_variant_config("D7_kt8_mh4_particles_screen")
+    e12 = resolve_variant_config("E12_kt8_mh4_dualcross_screen")
+
+    assert d7["variant"]["dependencies"] == ["C3_kt_8"]
+    assert d7["model"]["hierarchy"]["capacities"] == [2, 4, 8]
+    assert d7["model"]["renderer"]["enabled"] is True
+    assert d7["model"]["distribution"]["stochastic_views"] == 4
+    assert d7["evaluation"]["supplemental_screen"] is True
+
+    assert e12["variant"]["dependencies"] == [
+        "A0_hlt_part",
+        "D7_kt8_mh4_particles_screen",
+    ]
+    assert e12["data"]["pseudo_sources"] == ["D7_kt8_mh4_particles_screen"]
+    assert e12["model"]["hierarchy"]["capacities"] == [2, 4, 8]
+    assert e12["evaluation"]["supplemental_screen"] is True
 
 
 def test_manifest_and_views_fail_closed_on_contract_drift():

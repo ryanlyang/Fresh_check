@@ -40,6 +40,25 @@ HLT_EXPERT_REGISTRATION_CONTRACT = "retb_native_hlt_expert_registration_v2"
 HLT_MODES = ("HE_SCRATCH_CE", "HE_OFFLINE_INIT", "HE_DUAL_OBJECTIVE")
 DUAL_WEIGHTS = ((0.10, 0.25), (0.25, 0.25), (0.25, 0.50))
 HLT_EVALUATION_REALIZATION_POLICY = "R_FIXED"
+HLT_TRAINING_LOGICAL_ROLES = frozenset({"model_train", "scale_train"})
+HLT_EVALUATION_LOGICAL_ROLES = frozenset(
+    {"val_stop", "val_design", "stack_val", "final_test"}
+)
+
+
+def native_hlt_realization_policy_for_role(
+    logical_role: str,
+    *,
+    training_realization_policy: str,
+) -> str:
+    """Resolve the frozen training/evaluation cache policy for an HLT role."""
+    if training_realization_policy not in REALIZATION_POLICIES:
+        raise ValueError("native HLT training realization policy is not registered")
+    if logical_role in HLT_TRAINING_LOGICAL_ROLES:
+        return str(training_realization_policy)
+    if logical_role in HLT_EVALUATION_LOGICAL_ROLES:
+        return HLT_EVALUATION_REALIZATION_POLICY
+    raise ValueError("native HLT logical role has no realization-policy contract")
 
 
 def _require_torch() -> Any:
@@ -1112,5 +1131,6 @@ __all__ = [
     "make_native_hlt_expert_loader",
     "native_hlt_expert_objective",
     "native_hlt_parameter_groups",
+    "native_hlt_realization_policy_for_role",
     "train_native_hlt_expert",
 ]

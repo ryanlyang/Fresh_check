@@ -17,6 +17,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (
     copy_offline_expert_initialization,
     infer_native_hlt_expert_replica,
     make_native_hlt_expert_loader,
+    native_hlt_realization_policy_for_role,
     native_hlt_expert_objective,
     native_hlt_parameter_groups,
     train_native_hlt_expert,
@@ -148,6 +149,24 @@ def test_native_hlt_replica_cycle_and_evaluation_freeze() -> None:
     for epoch in (1, 2, 40):
         validation.set_epoch(epoch)
         assert validation[3]["replica_id"] == 0
+
+
+def test_native_hlt_role_policy_resolver_cannot_swap_training_and_evaluation() -> None:
+    for training_policy in ("R_FIXED", "R_MULTI", "R_RANDOM"):
+        assert native_hlt_realization_policy_for_role(
+            "model_train", training_realization_policy=training_policy
+        ) == training_policy
+        assert native_hlt_realization_policy_for_role(
+            "scale_train", training_realization_policy=training_policy
+        ) == training_policy
+        for role in ("val_stop", "val_design", "stack_val", "final_test"):
+            assert native_hlt_realization_policy_for_role(
+                role, training_realization_policy=training_policy
+            ) == "R_FIXED"
+    with pytest.raises(ValueError, match="logical role"):
+        native_hlt_realization_policy_for_role(
+            "model_val", training_realization_policy="R_MULTI"
+        )
 
 
 def test_native_hlt_dataset_supports_authenticated_logical_subroles() -> None:

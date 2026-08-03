@@ -28,9 +28,9 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_controls import (  # no
     train_native_hlt_control,
 )
 from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noqa: E402
-    HLT_EVALUATION_REALIZATION_POLICY,
     NativeHLTExpertDataset,
     make_native_hlt_expert_loader,
+    native_hlt_realization_policy_for_role,
 )
 from teacher_logit_reco.relation_expert_token_bridge.step6 import (  # noqa: E402
     resolve_stage_d_confirmation_run,
@@ -109,7 +109,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=train_labels,
         identities=train_ids,
         logical_role="model_train",
-        realization_policy="R_MULTI",
+        realization_policy=native_hlt_realization_policy_for_role(
+            "model_train", training_realization_policy="R_MULTI"
+        ),
     )
     val_dataset = NativeHLTExpertDataset(
         replica_arrays=val_arrays,
@@ -117,7 +119,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=val_labels,
         identities=val_ids,
         logical_role="val_stop",
-        realization_policy=HLT_EVALUATION_REALIZATION_POLICY,
+        realization_policy=native_hlt_realization_policy_for_role(
+            "val_stop", training_realization_policy="R_MULTI"
+        ),
     )
     miniature = campaign["campaign_profile"] == "miniature_test"
     config = NativeHLTControlTrainingConfig(

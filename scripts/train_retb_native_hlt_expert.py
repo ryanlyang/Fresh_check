@@ -39,6 +39,7 @@ from teacher_logit_reco.relation_expert_token_bridge.hlt_experts import (  # noq
     NativeHLTExpertTrainingConfig,
     infer_native_hlt_expert_replica,
     make_native_hlt_expert_loader,
+    native_hlt_realization_policy_for_role,
     train_native_hlt_expert,
 )
 from teacher_logit_reco.relation_expert_token_bridge.step6 import (  # noqa: E402
@@ -365,7 +366,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=train_labels,
         identities=train_ids,
         logical_role=args.training_role,
-        realization_policy=configuration["realization_policy"],
+        realization_policy=native_hlt_realization_policy_for_role(
+            args.training_role,
+            training_realization_policy=configuration["realization_policy"],
+        ),
         offline_target_tokens=target_tokens,
         offline_target_logits=target_logits,
         region_trees_by_replica=_trees(
@@ -381,7 +385,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         labels=val_labels,
         identities=val_ids,
         logical_role="val_stop",
-        realization_policy=HLT_EVALUATION_REALIZATION_POLICY,
+        realization_policy=native_hlt_realization_policy_for_role(
+            "val_stop",
+            training_realization_policy=configuration["realization_policy"],
+        ),
         region_trees_by_replica=_trees(
             args.region_tree_root,
             logical_role="val_stop",
@@ -398,7 +405,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             labels=design_labels,
             identities=design_ids,
             logical_role="val_design",
-            realization_policy="R_FIXED",
+            realization_policy=native_hlt_realization_policy_for_role(
+                "val_design",
+                training_realization_policy=configuration["realization_policy"],
+            ),
             region_trees_by_replica=_trees(
                 args.region_tree_root,
                 logical_role="val_design",
