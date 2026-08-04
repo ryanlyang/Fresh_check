@@ -185,6 +185,8 @@ def evaluate_auxiliary(
     split: str,
     device: Any,
 ) -> dict[str, Any]:
+    resolved_device = torch.device(device)
+    model.to(resolved_device)
     was_training = bool(model.training)
     model.eval()
     logits, labels = [], []
@@ -192,7 +194,7 @@ def evaluate_auxiliary(
     try:
         with torch.no_grad():
             for raw in loader:
-                batch = _move(raw, device)
+                batch = _move(raw, resolved_device)
                 _, pieces, value = _loss_for_batch(
                     model=model,
                     batch=batch,

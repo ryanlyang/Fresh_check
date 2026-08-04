@@ -48,6 +48,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
     with_content_hash,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_d_training import (
+    evaluate_auxiliary,
     train_stage_d_auxiliary,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.stage_d_data_factory import (
@@ -1055,6 +1056,57 @@ def test_wrong_event_posthoc_contract_is_deployable_but_oracle_is_not(
     assert shuffled["schema_version"] == 4
     oracle = run("ORACLE_SUB")
     assert oracle["deployable"] is False
+
+
+@pytest.mark.parametrize(
+    "device_type",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is unavailable"
+            ),
+        ),
+    ],
+)
+def test_auxiliary_evaluation_moves_model_and_batch_to_declared_device(
+    monkeypatch, device_type
+):
+    from teacher_logit_reco.hlt_offline_structure_distillation import (
+        stage_d_training,
+    )
+
+    model = torch.nn.Linear(1, 1)
+    observed = {}
+
+    def fake_loss_for_batch(*, model, batch, **kwargs):
+        del kwargs
+        observed["model_device"] = next(model.parameters()).device.type
+        observed["batch_device"] = batch["labels"].device.type
+        logits = torch.zeros(
+            int(batch["labels"].numel()), 10, device=batch["labels"].device
+        )
+        return (
+            logits.sum(),
+            {"auxiliary_loss": logits.sum()},
+            logits,
+        )
+
+    monkeypatch.setattr(stage_d_training, "_loss_for_batch", fake_loss_for_batch)
+    result = evaluate_auxiliary(
+        model,
+        [{"labels": torch.tensor([0, 1], dtype=torch.long)}],
+        row={"target_id": "T_OFFLINE_TRACK_32"},
+        component_group_ids=("track",),
+        split="val_stop",
+        device=device_type,
+    )
+    assert observed == {
+        "model_device": device_type,
+        "batch_device": device_type,
+    }
+    assert result["event_count"] == 2
 
 
 def _single_family_lock():
