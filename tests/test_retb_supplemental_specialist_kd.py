@@ -103,6 +103,19 @@ def test_submission_maximizes_safe_parallelism_without_performance_gates() -> No
     assert "final_test" not in text
 
 
+def test_slurm_workers_source_common_runtime_from_frozen_project() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for name in (
+        "run_retb_specialist_kd_bootstrap.sh",
+        "run_retb_specialist_teacher.sh",
+        "run_retb_specialist_kd_student.sh",
+        "run_retb_specialist_kd_finalize.sh",
+    ):
+        text = (root / "sbatch" / name).read_text()
+        assert 'source "${PROJECT_DIR}/sbatch/retb_common.sh"' in text
+        assert 'dirname "${BASH_SOURCE[0]}"' not in text
+
+
 class _TinyDataset(Dataset):
     def __len__(self) -> int:
         return 4
