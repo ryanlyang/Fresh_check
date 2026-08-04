@@ -1594,14 +1594,40 @@ def build_feedback_selection(
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
     validate_content_hash(stage_e_plan, expected_contract=STAGE_E_PLAN_CONTRACT)
+    plan_by_id = {
+        str(row["row_id"]): row for row in stage_e_plan["all_rows"]
+    }
     by_id = {str(row["row_id"]): row for row in results}
-    required = {str(row["row_id"]) for row in stage_e_plan["all_rows"]}
-    if set(by_id) != required:
+    required = set(plan_by_id)
+    if len(by_id) != len(results) or set(by_id) != required:
         raise ValueError("feedback selection requires complete Stage-E coverage")
-    for result in by_id.values():
+    result_semantic_fields = (
+        "target_id",
+        "parameterization",
+        "auxiliary_weight",
+        "row_kind",
+        "selection_eligible",
+        "interface",
+        "gradient_path",
+        "control",
+        "deployable",
+    )
+    for row_id, result in by_id.items():
         validate_content_hash(result, expected_contract=FEEDBACK_RESULT_CONTRACT)
-        if result.get("source") != dict(source):
-            raise ValueError("feedback result source differs")
+        if (
+            result.get("source") != dict(source)
+            or result.get("stage_e_plan_sha256")
+            != stage_e_plan["content_hash"]
+            or result.get("campaign_spec_sha256")
+            != stage_e_plan["campaign_spec_sha256"]
+        ):
+            raise ValueError("feedback result lineage differs")
+        expected = plan_by_id[row_id]
+        if any(
+            result.get(key) != expected.get(key)
+            for key in result_semantic_fields
+        ):
+            raise ValueError("feedback result semantics differ")
     scientific = [
         by_id[row["row_id"]] for row in stage_e_plan["scientific_rows"]
     ]
@@ -1623,14 +1649,33 @@ def build_feedback_selection(
         if candidates:
             by_interface[interface] = select_utility_row(candidates)["row_id"]
     reference_definitions = {}
+    definition_fields = (
+        "row_id",
+        "target_id",
+        "interface",
+        "gradient_path",
+        "parameterization",
+        "auxiliary_weight",
+        "control",
+        "deployable",
+        "head_type",
+        "row_kind",
+        "configuration_role",
+        "semantic_loss_enabled",
+        "selected_auxiliary_row_id",
+        "selected_auxiliary_result_sha256",
+        "selected_auxiliary_parameterization",
+        "selected_auxiliary_weight",
+    )
     for result in references:
+        definition = plan_by_id[str(result["row_id"])]
         if (
             result.get("row_kind") != "REFERENCE_BASELINE"
             or result.get("control") != "EXACT_HLT"
             or not bool(result.get("deployable"))
         ):
             raise ValueError("feedback reference baseline semantics differ")
-        target = str(result["target_id"])
+        target = str(definition["target_id"])
         role = {
             "T_HLT_TRACK_PAIR_13": "REFERENCE_EXACT_TRACK",
             "T_HLT_REGION_PAIR_8": "REFERENCE_EXACT_REGION",
@@ -1638,25 +1683,7 @@ def build_feedback_selection(
         if role is None or role in reference_definitions:
             raise ValueError("feedback reference baseline coverage differs")
         reference_definitions[role] = {
-            key: result[key]
-            for key in (
-                "row_id",
-                "target_id",
-                "interface",
-                "gradient_path",
-                "parameterization",
-                "auxiliary_weight",
-                "control",
-                "deployable",
-                "head_type",
-                "row_kind",
-                "configuration_role",
-                "semantic_loss_enabled",
-                "selected_auxiliary_row_id",
-                "selected_auxiliary_result_sha256",
-                "selected_auxiliary_parameterization",
-                "selected_auxiliary_weight",
-            )
+            key: definition[key] for key in definition_fields
         }
     if set(reference_definitions) != {
         "REFERENCE_EXACT_TRACK",
@@ -1674,25 +1701,8 @@ def build_feedback_selection(
             },
             "selected_feedback_row_id": winner["row_id"],
             "selected_feedback_definition": {
-                key: winner[key]
-                for key in (
-                    "row_id",
-                    "target_id",
-                    "interface",
-                    "gradient_path",
-                    "parameterization",
-                    "auxiliary_weight",
-                    "control",
-                    "deployable",
-                    "head_type",
-                    "row_kind",
-                    "configuration_role",
-                    "semantic_loss_enabled",
-                    "selected_auxiliary_row_id",
-                    "selected_auxiliary_result_sha256",
-                    "selected_auxiliary_parameterization",
-                    "selected_auxiliary_weight",
-                )
+                key: plan_by_id[str(winner["row_id"])][key]
+                for key in definition_fields
             },
             "selected_by_interface": by_interface,
             "reference_graph_definitions": reference_definitions,

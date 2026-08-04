@@ -1243,10 +1243,25 @@ def test_stage_e_exact_bound_and_all_negative_selection_complete():
         with_content_hash(
             {
                 "contract": FEEDBACK_RESULT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 4,
                 "source": SOURCE,
-                **row,
                 "stage_e_plan_sha256": plan["content_hash"],
+                "campaign_spec_sha256": plan["campaign_spec_sha256"],
+                **{
+                    key: row[key]
+                    for key in (
+                        "row_id",
+                        "target_id",
+                        "parameterization",
+                        "auxiliary_weight",
+                        "row_kind",
+                        "selection_eligible",
+                        "interface",
+                        "gradient_path",
+                        "control",
+                        "deployable",
+                    )
+                },
                 "design_select": {
                     "classification_metrics": (
                         perfect if row.get("control") == "EXACT_HLT" else metrics
@@ -1271,6 +1286,10 @@ def test_stage_e_exact_bound_and_all_negative_selection_complete():
     assert lock["negative_gain_can_still_win"] is True
     assert lock["selected_feedback_row_id"]
     assert lock["selected_feedback_definition"].get("control") != "EXACT_HLT"
+    assert lock["selected_feedback_definition"]["head_type"] in {
+        "global",
+        "pair",
+    }
     assert set(lock["reference_graph_definitions"]) == {
         "REFERENCE_EXACT_TRACK",
         "REFERENCE_EXACT_REGION",
