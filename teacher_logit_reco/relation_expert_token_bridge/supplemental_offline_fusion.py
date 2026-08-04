@@ -8,7 +8,6 @@ making the parent artifacts appear interchangeable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import math
 from pathlib import Path
@@ -74,21 +73,6 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _all_stage_b_rows(registry: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [
-        row
-        for section in (
-            "primary_shape_screen",
-            "tokenizer_controls",
-            "dual_topology_controls",
-            "representative_expert_loss_rows",
-            "full_optimization_grid",
-            "fixed_followup_references",
-        )
-        for row in registry[section]
-    ]
-
-
 def resolve_bank_parent(
     registry: Mapping[str, Any], *, expert_id: str, loss_id: str
 ) -> dict[str, Any]:
@@ -99,8 +83,13 @@ def resolve_bank_parent(
         raise ValueError("supplemental bank names an unknown expert")
     if loss_id not in {"ELOSS_CE", "ELOSS_KD_DOMINANT"}:
         raise ValueError("supplemental bank names an unsupported loss")
+    section = (
+        "primary_shape_screen"
+        if loss_id == "ELOSS_CE"
+        else "representative_expert_loss_rows"
+    )
     matches: dict[str, Mapping[str, Any]] = {}
-    for row in _all_stage_b_rows(registry):
+    for row in registry[section]:
         configuration = row["configuration"]
         if (
             configuration.get("expert_id") == expert_id
@@ -122,6 +111,7 @@ def _parent_record(
     *,
     expert_id: str,
     loss_id: str,
+    parent_source: Mapping[str, Any],
 ) -> dict[str, Any]:
     row = resolve_bank_parent(
         registry, expert_id=expert_id, loss_id=loss_id
@@ -145,6 +135,7 @@ def _parent_record(
         or registration.get("shape_id") != "S8_128"
         or int(registration.get("seed", -1)) != 101
         or registration.get("fixed_epoch_budget_completed") is not True
+        or registration.get("source") != parent_source
         or registration.get("checkpoint_sha256")
         != file_sha256(checkpoint_path)
     ):
@@ -183,8 +174,41 @@ def build_supplemental_plan(
                     registry,
                     expert_id=expert_id,
                     loss_id=loss_id,
+                    parent_source=campaign["source"],
                 ),
             )
+    parent_artifacts = {}
+    for role in ("model_train", "val_stop", "val_design"):
+        manifest_path = (
+            root / "inputs" / "offline" / role / "offline_input_manifest.json"
+        )
+        manifest = load_hashed_json(manifest_path)
+        npz_path = manifest_path.parent / str(manifest["npz_filename"])
+        if manifest.get("npz_sha256") != file_sha256(npz_path):
+            raise ValueError(f"{role} offline input bytes differ")
+        parent_artifacts[f"offline_{role}"] = {
+            "manifest_path": str(manifest_path.resolve()),
+            "manifest_sha256": manifest["content_hash"],
+            "npz_path": str(npz_path.resolve()),
+            "npz_sha256": manifest["npz_sha256"],
+        }
+    audit_path = root / "inputs/input_audit.json"
+    if not audit_path.is_file():
+        audit_path = root / "inputs/input_audit_streamed_abc.json"
+    for name, path in {
+        "relation_normalization": "inputs/normalization/offline_500k/relation.json",
+        "region_normalization": "inputs/normalization/offline_500k/region.json",
+        "input_audit": str(audit_path),
+    }.items():
+        path = Path(path)
+        if not path.is_absolute():
+            path = root / path
+        artifact = load_hashed_json(path)
+        parent_artifacts[name] = {
+            "path": str(path.resolve()),
+            "content_hash": artifact["content_hash"],
+            "file_sha256": file_sha256(path),
+        }
     banks = {
         bank_id: {
             "bank_id": bank_id,
@@ -204,6 +228,7 @@ def build_supplemental_plan(
             "parent_campaign_spec_sha256": campaign["content_hash"],
             "parent_source": campaign["source"],
             "parent_stage_b_registry_sha256": registry_sha,
+            "parent_artifacts": parent_artifacts,
             "training_split": "model_train",
             "checkpoint_selection_split": "val_stop",
             "comparison_split": "val_design",
@@ -211,6 +236,17 @@ def build_supplemental_plan(
             "shape_id": "S8_128",
             "pipeline_seed": 101,
             "banks": banks,
+            "fusion_training_protocol": {
+                "maximum_epochs": 40,
+                "batch_size": 512,
+                "learning_rate": 1.0e-3,
+                "minimum_learning_rate": 1.0e-5,
+                "weight_decay": 1.0e-4,
+                "gradient_clip": 1.0,
+                "warmup": "repository_global_integer_update_rule",
+                "schedule": "linear_warmup_then_cosine",
+                "checkpoint_accuracy_window": 0.0001,
+            },
             "obase7": {
                 "control_id": "OBASE7_MEAN_LOGITS",
                 "member_model": "ordinary_O_BASE_RelationalParticleTransformer",
@@ -243,6 +279,27 @@ def validate_supplemental_plan(
         raise ValueError("supplemental plan may not access final_test")
     if payload.get("performance_based_termination") is not False:
         raise ValueError("supplemental plan may not stop on performance")
+    if payload.get("fusion_training_protocol") != {
+        "maximum_epochs": 40,
+        "batch_size": 512,
+        "learning_rate": 1.0e-3,
+        "minimum_learning_rate": 1.0e-5,
+        "weight_decay": 1.0e-4,
+        "gradient_clip": 1.0,
+        "warmup": "repository_global_integer_update_rule",
+        "schedule": "linear_warmup_then_cosine",
+        "checkpoint_accuracy_window": 0.0001,
+    }:
+        raise ValueError("supplemental fusion training protocol differs")
+    if set(payload.get("parent_artifacts", {})) != {
+        "offline_model_train",
+        "offline_val_stop",
+        "offline_val_design",
+        "relation_normalization",
+        "region_normalization",
+        "input_audit",
+    }:
+        raise ValueError("supplemental parent artifact coverage differs")
     obase = payload.get("obase7", {})
     if (
         obase.get("member_seeds") != list(SEVEN_SEEDS)
@@ -265,19 +322,44 @@ def validate_supplemental_plan(
                 if (
                     registration["content_hash"]
                     != row["registration_sha256"]
+                    or registration.get("source") != payload["parent_source"]
+                    or registration.get("checkpoint_sha256")
+                    != row["checkpoint_sha256"]
                     or file_sha256(row["checkpoint_path"])
                     != row["checkpoint_sha256"]
                 ):
                     raise ValueError("supplemental parent bytes drifted")
+    if check_parent_bytes:
+        parent_root = Path(payload["parent_campaign_root"])
+        campaign = load_hashed_json(parent_root / "campaign_spec.json")
+        registry = load_hashed_json(
+            parent_root / "registry/retb_stage_b_runs.json"
+        )
+        if (
+            campaign["content_hash"]
+            != payload["parent_campaign_spec_sha256"]
+            or campaign.get("campaign_id") != payload["parent_campaign_id"]
+            or campaign.get("source") != payload["parent_source"]
+            or validate_stage_b_run_registry(registry)
+            != payload["parent_stage_b_registry_sha256"]
+        ):
+            raise ValueError("supplemental parent campaign lineage drifted")
+        for name, row in payload.get("parent_artifacts", {}).items():
+            if "manifest_path" in row:
+                manifest = load_hashed_json(row["manifest_path"])
+                if (
+                    manifest["content_hash"] != row["manifest_sha256"]
+                    or file_sha256(row["npz_path"]) != row["npz_sha256"]
+                ):
+                    raise ValueError(f"supplemental parent {name} drifted")
+            else:
+                artifact = load_hashed_json(row["path"])
+                if (
+                    artifact["content_hash"] != row["content_hash"]
+                    or file_sha256(row["path"]) != row["file_sha256"]
+                ):
+                    raise ValueError(f"supplemental parent {name} drifted")
     return digest
-
-
-def mean_logits(logit_banks: Sequence[Any]) -> Any:
-    if not logit_banks:
-        raise ValueError("mean-logit fusion requires at least one member")
-    first = logit_banks[0]
-    return first.__class__.stack(logit_banks, dim=0).mean(dim=0) \
-        if hasattr(first.__class__, "stack") else None
 
 
 def set_deterministic_seed(seed: int) -> None:

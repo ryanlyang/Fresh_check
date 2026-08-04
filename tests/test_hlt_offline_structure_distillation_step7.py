@@ -23,6 +23,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     data_order_seed,
     feedback_interface_contract,
     gate_warmup_updates,
+    global_auxiliary_loss,
     global_feedback_layout,
     pack_global_feedback,
     initialize_feedback_from_auxiliary_checkpoint,
@@ -899,6 +900,24 @@ def test_unrestricted_feedback_is_direct_token_and_exact_capacity_matched():
     logits, prediction = unrestricted.forward_with_feedback(**_batch())
     assert logits.shape == (2, 10)
     assert prediction["tokens"].shape == (2, 4, 128)
+    layout = global_feedback_layout("T_OFFLINE_TRACK_32", "ABS")
+    assert prediction["availability_logits"].shape == (
+        2,
+        len(layout["availability_group_order"]),
+    )
+    unrestricted_loss, unrestricted_pieces = global_auxiliary_loss(
+        prediction,
+        torch.zeros(2, 32),
+        torch.ones(2, 32, dtype=torch.bool),
+        parameterization="ABS",
+        component_group_ids=layout["component_group_ids"],
+        target_id="T_OFFLINE_TRACK_32",
+    )
+    assert torch.isfinite(unrestricted_loss)
+    assert unrestricted_pieces["availability_group_order"] == (
+        "track_availability_observation",
+        "has_valid_track",
+    )
     plan = build_stage_e_plan(
         single_family_selection=_single_family_lock(),
         campaign_spec_sha256="c" * 64,

@@ -93,6 +93,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_suffix=f"member_seed_{args.seed}",
         output_root=args.output_root,
     )
+    # The immutable registration/checkpoint/metrics are sufficient for reuse.
+    # Successful optimizer recovery state is intentionally not durable in this
+    # storage-constrained supplemental campaign.
+    resume = (
+        args.output_root
+        / "OBASE7_MEAN_LOGITS"
+        / f"member_seed_{args.seed}"
+        / "resume_state.pt"
+    )
+    resume.unlink(missing_ok=True)
     print(json.dumps({"training": training, "profile": profile}, indent=2, sort_keys=True))
     return 0
 

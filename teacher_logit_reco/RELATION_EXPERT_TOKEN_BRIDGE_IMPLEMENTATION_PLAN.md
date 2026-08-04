@@ -5810,3 +5810,55 @@ missing rows, invalid masks or identities, checkpoint incompatibility,
 nonfinite evidence, runtime failure, and output/hash drift fail closed. A
 passing report is the high-coverage runtime prerequisite recommended before
 the real campaign; it supplements rather than replaces the compact A--N smoke.
+
+## Supplemental Stage-B fusion fast track (2026-08-04)
+
+After the production Stage-B screen completed substantially before the
+exhaustive three-seed Stage-C confirmation matrix, a separate supplemental
+experiment was added to answer the immediate frozen-token fusion question
+without changing any original run ID, selector, or artifact.  It consumes
+only completed `S8_128`, seed-101 Stage-B checkpoints and trains these exact
+banks:
+
+- `CE4`: CE BASE4, PT, TRACK, and REGION;
+- `CE7`: CE versions of all seven experts;
+- `KD3`: `ELOSS_KD_DOMINANT` BASE4, PT, and TRACK;
+- `KD4`: `ELOSS_KD_DOMINANT` BASE4, PT, TRACK, and REGION;
+- `MIXED7`: the four KD4 members plus CE PID, CHARGE, and DENSITY.
+
+Every bank evaluates arithmetic mean logits, a trained linear logit head, a
+pooled-token MLP, and the frozen-expert token transformer.  The three learned
+heads use a fixed 40-epoch budget, select their retained checkpoint using
+`val_stop`, and compare on `val_design`.  Underperformance is recorded and is
+never an execution gate.  `final_test` is inaccessible.  Expert inference
+banks live only inside the fusion allocation and are not published as durable
+campaign caches.
+Successful fusion and OBASE optimizer-resume files are removed only after
+their immutable checkpoint, metrics, and registration have been published;
+interrupted jobs retain recovery state until a successful retry.
+
+The companion `OBASE7_MEAN_LOGITS` control trains seven fresh ordinary O_BASE
+models with seeds 101, 202, 303, 404, 505, 606, and 707 under the same fixed
+40-epoch CE capacity protocol, then averages their logits.  It deliberately
+does not reuse the Stage-A seed-101 teacher, so all seven members share one
+training implementation and the ensemble is the declared
+`O_7X_UNBIASED_ENSEMBLE` comparison rather than a mixture of historical and
+new training paths.
+
+`retb_supplemental_offline_fusion_plan_v1` byte-binds the parent campaign,
+Stage-B registry, exact checkpoint registrations/checkpoint bytes, three
+offline input caches, normalizers, and input audit while binding the
+supplemental source separately.  Thus unrelated later commits cannot make the
+old and supplemental artifacts appear interchangeable.  The five bank jobs
+and seven OBASE jobs are submitted as unthrottled parallel arrays; the REGION
+KD array element may be an explicit Slurm dependency when it is not yet
+complete.  The final report covers exactly 21 `val_design` candidates (five
+banks times four fusion variants plus OBASE7 mean logits).
+
+Submit with:
+
+```bash
+export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge/retb_relation_expert_bridge_20260802T011953Z_1353c881c2_3a9457902f
+export RETB_REGION_KD_JOB_ID=34884_110  # omit after its registration exists
+bash sbatch/submit_retb_supplemental_offline_fusion.sh
+```

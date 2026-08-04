@@ -30,6 +30,10 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (  # noqa:
 from teacher_logit_reco.relation_expert_token_bridge.evaluation import (  # noqa: E402
     evaluate_classification,
 )
+from teacher_logit_reco.relation_expert_token_bridge.determinism import (  # noqa: E402
+    optimizer_update_counts,
+    scheduled_learning_rate,
+)
 from teacher_logit_reco.relation_expert_token_bridge.fusion import (  # noqa: E402
     BankProjection,
     FusionTransformerBlock,
@@ -289,6 +293,13 @@ def _train_variant(
         candidates: dict[int, Mapping[str, Any]] = {}
         resume_path = variant_root / "resume_state.pt"
         start_epoch = 1
+        update = 0
+        counts = optimizer_update_counts(
+            training_event_count=len(train_loader.dataset),
+            maximum_epochs=40,
+            microbatch_size=batch_size,
+            gradient_accumulation_steps=1,
+        )
         if resume_path.is_file():
             resume = torch.load(resume_path, map_location=device, weights_only=False)
             if (
@@ -302,6 +313,7 @@ def _train_variant(
             rows = list(resume["rows"])
             candidates = dict(resume["candidates"])
             start_epoch = int(resume["next_epoch"])
+            update = int(resume["optimizer_updates_completed"])
         for epoch in range(start_epoch, 41):
             model.train()
             objective, count = 0.0, 0
@@ -316,6 +328,16 @@ def _train_variant(
                 norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 if not bool(torch.isfinite(norm)):
                     raise FloatingPointError("supplemental fusion gradient is nonfinite")
+                update += 1
+                learning_rate = scheduled_learning_rate(
+                    update_ordinal=update,
+                    total_optimizer_updates=counts["total_optimizer_updates"],
+                    warmup_updates=counts["warmup_updates"],
+                    base_learning_rate=1.0e-3,
+                    minimum_learning_rate=1.0e-5,
+                )
+                for group in optimizer.param_groups:
+                    group["lr"] = learning_rate
                 optimizer.step()
                 size = int(batch["labels"].numel())
                 objective += float(loss.detach().cpu()) * size
@@ -330,6 +352,8 @@ def _train_variant(
             rows.append(
                 {
                     "epoch": epoch,
+                    "optimizer_updates_completed": update,
+                    "learning_rate": learning_rate,
                     "train_cross_entropy": objective / count,
                     "val_stop": {
                         "accuracy": metrics["accuracy"],
@@ -354,12 +378,17 @@ def _train_variant(
                     "bank_id": bank_id,
                     "variant": variant,
                     "next_epoch": epoch + 1,
+                    "optimizer_updates_completed": update,
                     "rows": rows,
                     "candidates": candidates,
                     "model_state_dict": copy.deepcopy(model.state_dict()),
                     "optimizer_state_dict": optimizer.state_dict(),
                 },
                 resume_path,
+            )
+        if update != counts["total_optimizer_updates"]:
+            raise RuntimeError(
+                "supplemental fusion fixed optimizer-update budget was incomplete"
             )
         selected_epoch = select_fixed_budget_checkpoint(rows)
         model.load_state_dict(candidates[selected_epoch], strict=True)
@@ -385,8 +414,19 @@ def _train_variant(
         checkpoint_sha = file_sha256(checkpoint)
         resume_path.unlink(missing_ok=True)
     predictions = variant_root / "val_design_predictions.npz"
-    with predictions.open("xb") as handle:
-        np.savez_compressed(handle, logits=scores, labels=truth)
+    if predictions.is_file():
+        with np.load(predictions, allow_pickle=False) as prior:
+            if not (
+                set(prior.files) == {"logits", "labels"}
+                and np.array_equal(prior["logits"], scores)
+                and np.array_equal(prior["labels"], truth)
+            ):
+                raise FileExistsError(
+                    "supplemental fusion predictions differ on restart"
+                )
+    else:
+        with predictions.open("xb") as handle:
+            np.savez_compressed(handle, logits=scores, labels=truth)
     result = bind_source(
         with_content_hash(
             {
@@ -398,6 +438,9 @@ def _train_variant(
                 "expert_order": list(order),
                 "selected_epoch": selected_epoch,
                 "epochs_completed": len(rows),
+                "optimizer_update_counts": (
+                    None if variant == "MEAN_LOGITS" else counts
+                ),
                 "fixed_budget_completed": variant == "MEAN_LOGITS" or len(rows) == 40,
                 "performance_based_termination": False,
                 "checkpoint_sha256": checkpoint_sha,
@@ -424,6 +467,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "retb_supplemental_offline_fusion_plan_v1"
     ))
     validate_supplemental_plan(plan)
+    if args.batch_size != int(plan["fusion_training_protocol"]["batch_size"]):
+        raise ValueError("supplemental fusion batch size differs from its plan")
     if args.bank_id not in plan["banks"]:
         raise ValueError("unknown supplemental fusion bank")
     bank = plan["banks"][args.bank_id]

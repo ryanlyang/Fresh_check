@@ -929,6 +929,7 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
         self.allow_oracle = bool(allow_oracle)
         self.capacity_padding = None
         self.capacity_ledger = None
+        self.global_availability_group_count = 0
         declarations = {row.target_id: row for row in target_declarations()}
         declaration = declarations[target_id]
         dimension = len(declaration.components)
@@ -952,6 +953,9 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
         else:
             self.exact_pair_builder = None
             layout = global_feedback_layout(target_id, parameterization)
+            self.global_availability_group_count = len(
+                layout["availability_group_order"]
+            )
             consumer_heteroscedastic_mask = (
                 layout["heteroscedastic_component_mask"]
                 if heteroscedastic
@@ -1186,7 +1190,9 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                     "value": tokens.new_zeros(tokens.shape[0], _target_dimension(
                         self.target_id
                     )),
-                    "availability_logits": tokens.new_zeros(tokens.shape[0], 1),
+                    "availability_logits": tokens.new_zeros(
+                        tokens.shape[0], self.global_availability_group_count
+                    ),
                 }
             else:
                 predicted = self.global_predictor(state, active_mask)
