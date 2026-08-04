@@ -25,7 +25,7 @@ from .registry import EXPERT_ORDER
 from .step4 import resolve_stage_b_run, validate_stage_b_run_registry
 
 
-SUPPLEMENTAL_PLAN_CONTRACT = "retb_supplemental_offline_fusion_plan_v2"
+SUPPLEMENTAL_PLAN_CONTRACT = "retb_supplemental_offline_fusion_plan_v3"
 SUPPLEMENTAL_BANK_RESULT_CONTRACT = (
     "retb_supplemental_offline_fusion_bank_result_v1"
 )
@@ -126,7 +126,6 @@ def _parent_record(
     *,
     expert_id: str,
     loss_id: str,
-    parent_source: Mapping[str, Any],
 ) -> dict[str, Any]:
     row = resolve_bank_parent(
         registry, expert_id=expert_id, loss_id=loss_id
@@ -147,10 +146,10 @@ def _parent_record(
     if (
         registration.get("run_id") != row["run_id"]
         or registration.get("expert_id") != expert_id
+        or registration.get("loss_id") != loss_id
         or registration.get("shape_id") != "S8_128"
         or int(registration.get("seed", -1)) != 101
         or registration.get("fixed_epoch_budget_completed") is not True
-        or registration.get("source") != parent_source
         or registration.get("checkpoint_sha256")
         != file_sha256(checkpoint_path)
     ):
@@ -162,6 +161,7 @@ def _parent_record(
         "configuration": dict(row["configuration"]),
         "registration_path": str(registration_path.resolve()),
         "registration_sha256": registration["content_hash"],
+        "registration_source": registration.get("source"),
         "checkpoint_path": str(checkpoint_path.resolve()),
         "checkpoint_sha256": registration["checkpoint_sha256"],
     }
@@ -194,7 +194,6 @@ def build_supplemental_plan(
                     registry,
                     expert_id=expert_id,
                     loss_id=loss_id,
-                    parent_source=campaign["source"],
                 ),
             )
     parent_artifacts = {}
@@ -242,7 +241,7 @@ def build_supplemental_plan(
     payload = with_content_hash(
         {
             "contract": SUPPLEMENTAL_PLAN_CONTRACT,
-            "schema_version": 2,
+            "schema_version": 3,
             "supplemental_id": str(supplemental_id),
             "plan_role": plan_role,
             "bank_order": list(bank_order),
@@ -357,7 +356,14 @@ def validate_supplemental_plan(
                 if (
                     registration["content_hash"]
                     != row["registration_sha256"]
-                    or registration.get("source") != payload["parent_source"]
+                    or registration.get("source")
+                    != row.get("registration_source")
+                    or registration.get("run_id") != row.get("run_id")
+                    or registration.get("expert_id") != row.get("expert_id")
+                    or registration.get("loss_id") != row.get("loss_id")
+                    or registration.get("shape_id") != payload["shape_id"]
+                    or int(registration.get("seed", -1))
+                    != int(payload["pipeline_seed"])
                     or registration.get("checkpoint_sha256")
                     != row["checkpoint_sha256"]
                     or file_sha256(row["checkpoint_path"])

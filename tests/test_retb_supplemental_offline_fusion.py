@@ -13,6 +13,7 @@ from scripts.run_retb_supplemental_offline_fusion_bank import (
 )
 
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
+    source_record,
     with_content_hash,
     write_immutable_json,
 )
@@ -36,6 +37,14 @@ SOURCE = {
     "source_dirty": False,
     "source_status_sha256": "2" * 64,
 }
+CAMPAIGN_SOURCE = source_record(SOURCE)
+PARENT_REGISTRATION_SOURCE = source_record(
+    {
+        "source_commit": "3" * 40,
+        "source_dirty": False,
+        "source_status_sha256": "4" * 64,
+    }
+)
 
 
 def _fixture_parent(root: Path) -> Path:
@@ -45,7 +54,7 @@ def _fixture_parent(root: Path) -> Path:
             "contract": "fixture_campaign",
             "campaign_id": "fixture-production",
             "campaign_profile": "production_500k_scale3m",
-            "source": SOURCE,
+            "source": CAMPAIGN_SOURCE,
         }
     )
     write_immutable_json(parent / "campaign_spec.json", campaign)
@@ -91,11 +100,12 @@ def _fixture_parent(root: Path) -> Path:
                     "contract": "retb_offline_expert_registration_v1",
                     "run_id": row["run_id"],
                     "expert_id": expert_id,
+                    "loss_id": loss_id,
                     "shape_id": "S8_128",
                     "seed": 101,
                     "fixed_epoch_budget_completed": True,
                     "checkpoint_sha256": file_sha256(checkpoint),
-                    "source": SOURCE,
+                    "source": PARENT_REGISTRATION_SOURCE,
                 }
             ),
         )
@@ -134,6 +144,11 @@ def test_plan_byte_binds_parent_and_rejects_drift(tmp_path: Path) -> None:
     assert plan["final_test_access"] is False
     assert plan["scientific_underperformance_blocks_execution"] is False
     assert plan["obase7"]["reuse_stage_a_seed_101"] is False
+    assert (
+        plan["banks"]["CE4"]["members"][0]["registration_source"]
+        == PARENT_REGISTRATION_SOURCE
+    )
+    assert plan["parent_source"] == CAMPAIGN_SOURCE
     checkpoint = Path(plan["banks"]["KD4"]["members"][-1]["checkpoint_path"])
     checkpoint.write_bytes(b"drift")
     with pytest.raises(ValueError, match="parent bytes drifted"):

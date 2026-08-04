@@ -5845,14 +5845,18 @@ training implementation and the ensemble is the declared
 `O_7X_UNBIASED_ENSEMBLE` comparison rather than a mixture of historical and
 new training paths.
 
-`retb_supplemental_offline_fusion_plan_v2` publishes two complementary,
+`retb_supplemental_offline_fusion_plan_v3` publishes two complementary,
 source-identical immutable seals.  The `ready` seal byte-binds CE4, CE7, KD3,
 and OBASE7; the `late` seal byte-binds KD4 and MIXED7.  Together they bind the
 parent campaign,
 Stage-B registry, exact checkpoint registrations/checkpoint bytes, three
 offline input caches, normalizers, and input audit while binding the
-supplemental source separately.  Thus unrelated later commits cannot make the
-old and supplemental artifacts appear interchangeable.  CE4, CE7, KD3, and
+supplemental source separately.  Each expert registration's actual source
+record is serialized independently rather than being required to equal the
+campaign-bootstrap source; this supports authenticated continuation/recovery
+artifacts without obscuring their provenance.  Thus unrelated later commits
+cannot make old and supplemental artifacts appear interchangeable.  CE4,
+CE7, KD3, and
 all seven OBASE members are submitted immediately as unthrottled parallel
 arrays.  Only the late seal and its KD4/MIXED7 array wait for the REGION-KD
 array element when it is not yet complete.  The final report waits for both
