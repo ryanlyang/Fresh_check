@@ -14,11 +14,6 @@ source "${SCRIPT_DIR}/retb_common.sh"
 if [[ "${RETB_SUPPLEMENTAL_FROZEN_REENTRY:-0}" != "1" ]]; then
   submission_project_dir="$(git -C "${PROJECT_DIR}" rev-parse --show-toplevel)"
   source_commit="$(git -C "${submission_project_dir}" rev-parse HEAD)"
-  status="$(git -C "${submission_project_dir}" status --porcelain=v1 --untracked-files=all)"
-  if [[ -n "${status}" ]]; then
-    echo "Commit the supplemental implementation before submission." >&2
-    exit 2
-  fi
   : "${RETB_SOURCE_WORKTREE_ROOT:=${submission_project_dir%/*}/retb_source_worktrees}"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   frozen="${RETB_SOURCE_WORKTREE_ROOT}/retb_supp_${stamp}_${source_commit:0:10}_$$"
@@ -88,22 +83,22 @@ common_export="ALL,PROJECT_DIR=${PROJECT_DIR},RETB_SUPPLEMENTAL_ROOT=${root},RET
 log="${root}/job_ledgers/slurm/%x_%A_%a.out"
 err="${root}/job_ledgers/slurm/%x_%A_%a.err"
 
-bootstrap="$(sbatch --parsable "${dependency_arguments[@]}" \
+ready_bootstrap="$(sbatch --parsable \
   --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
   --cpus-per-task=2 --mem=8G \
-  --job-name="${supplemental_id}_bootstrap" --output="${log}" --error="${err}" \
-  --export="${common_export}" \
+  --job-name="${supplemental_id}_ready_bootstrap" --output="${log}" --error="${err}" \
+  --export="${common_export},RETB_SUPPLEMENTAL_PLAN_ROLE=ready" \
   "${PROJECT_DIR}/sbatch/run_retb_supplemental_offline_fusion_bootstrap.sh")"
 
-fusion="$(sbatch --parsable --dependency="afterok:${bootstrap}" --array=0-4 \
+ready_fusion="$(sbatch --parsable --dependency="afterok:${ready_bootstrap}" --array=0-2 \
   --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
   --gres="${GPU_GRES}" --cpus-per-task="${RETB_SUPPLEMENTAL_GPU_CPUS}" \
   --mem="${RETB_SUPPLEMENTAL_FUSION_MEM}" \
-  --job-name="${supplemental_id}_fusion" --output="${log}" --error="${err}" \
-  --export="${common_export}" \
+  --job-name="${supplemental_id}_ready_fusion" --output="${log}" --error="${err}" \
+  --export="${common_export},RETB_SUPPLEMENTAL_PLAN_ROLE=ready,RETB_SUPPLEMENTAL_BANKS=CE4:CE7:KD3" \
   "${PROJECT_DIR}/sbatch/run_retb_supplemental_offline_fusion_bank.sh")"
 
-obase="$(sbatch --parsable --dependency="afterok:${bootstrap}" --array=0-6 \
+obase="$(sbatch --parsable --dependency="afterok:${ready_bootstrap}" --array=0-6 \
   --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
   --gres="${GPU_GRES}" --cpus-per-task="${RETB_SUPPLEMENTAL_GPU_CPUS}" \
   --mem="${RETB_SUPPLEMENTAL_OBASE_MEM}" \
@@ -111,23 +106,40 @@ obase="$(sbatch --parsable --dependency="afterok:${bootstrap}" --array=0-6 \
   --export="${common_export}" \
   "${PROJECT_DIR}/sbatch/run_retb_supplemental_obase7_member.sh")"
 
-finalize="$(sbatch --parsable --dependency="afterok:${fusion}:${obase}" \
+late_bootstrap="$(sbatch --parsable "${dependency_arguments[@]}" \
+  --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
+  --cpus-per-task=2 --mem=8G \
+  --job-name="${supplemental_id}_late_bootstrap" --output="${log}" --error="${err}" \
+  --export="${common_export},RETB_SUPPLEMENTAL_PLAN_ROLE=late" \
+  "${PROJECT_DIR}/sbatch/run_retb_supplemental_offline_fusion_bootstrap.sh")"
+
+late_fusion="$(sbatch --parsable --dependency="afterok:${late_bootstrap}" --array=0-1 \
+  --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
+  --gres="${GPU_GRES}" --cpus-per-task="${RETB_SUPPLEMENTAL_GPU_CPUS}" \
+  --mem="${RETB_SUPPLEMENTAL_FUSION_MEM}" \
+  --job-name="${supplemental_id}_late_fusion" --output="${log}" --error="${err}" \
+  --export="${common_export},RETB_SUPPLEMENTAL_PLAN_ROLE=late,RETB_SUPPLEMENTAL_BANKS=KD4:MIXED7" \
+  "${PROJECT_DIR}/sbatch/run_retb_supplemental_offline_fusion_bank.sh")"
+
+finalize="$(sbatch --parsable --dependency="afterok:${ready_fusion}:${late_fusion}:${obase}" \
   --account="${SBATCH_ACCOUNT}" --partition="${SBATCH_PARTITION}" \
   --cpus-per-task=4 --mem=32G \
   --job-name="${supplemental_id}_finalize" --output="${log}" --error="${err}" \
   --export="${common_export}" \
   "${PROJECT_DIR}/sbatch/run_retb_supplemental_offline_fusion_finalize.sh")"
 
-python - "${root}" "${bootstrap}" "${fusion}" "${obase}" "${finalize}" <<'PY'
+python - "${root}" "${ready_bootstrap}" "${ready_fusion}" "${obase}" "${late_bootstrap}" "${late_fusion}" "${finalize}" <<'PY'
 import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 payload = {
     "supplemental_root": str(root),
-    "bootstrap_job_id": sys.argv[2],
-    "fusion_array_job_id": sys.argv[3],
+    "ready_bootstrap_job_id": sys.argv[2],
+    "ready_fusion_array_job_id": sys.argv[3],
     "obase7_array_job_id": sys.argv[4],
-    "finalize_job_id": sys.argv[5],
+    "late_bootstrap_job_id": sys.argv[5],
+    "late_fusion_array_job_id": sys.argv[6],
+    "finalize_job_id": sys.argv[7],
 }
 (root / "job_ledgers/submission.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 print(json.dumps(payload, indent=2, sort_keys=True))

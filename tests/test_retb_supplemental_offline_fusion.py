@@ -140,6 +140,32 @@ def test_plan_byte_binds_parent_and_rejects_drift(tmp_path: Path) -> None:
         validate_supplemental_plan(plan)
 
 
+def test_ready_and_late_plans_split_dependencies_without_overlap(
+    tmp_path: Path,
+) -> None:
+    parent = _fixture_parent(tmp_path)
+    ready = build_supplemental_plan(
+        parent_root=parent,
+        supplemental_id="supplemental-fixture",
+        source_snapshot=SOURCE,
+        plan_role="ready",
+    )
+    late = build_supplemental_plan(
+        parent_root=parent,
+        supplemental_id="supplemental-fixture",
+        source_snapshot=SOURCE,
+        plan_role="late",
+    )
+    validate_supplemental_plan(ready)
+    validate_supplemental_plan(late)
+    assert ready["bank_order"] == ["CE4", "CE7", "KD3"]
+    assert late["bank_order"] == ["KD4", "MIXED7"]
+    assert ready["obase7"]["member_seeds"] == list(SEVEN_SEEDS)
+    assert late["obase7"] is None
+    assert set(ready["banks"]).isdisjoint(late["banks"])
+    assert set(ready["banks"]) | set(late["banks"]) == set(BANK_DEFINITIONS)
+
+
 def test_fixed_budget_selection_uses_accuracy_window_then_ce_then_epoch() -> None:
     rows = [
         {"epoch": 1, "val_stop": {"accuracy": 0.8000, "cross_entropy": 0.50}},
@@ -151,14 +177,16 @@ def test_fixed_budget_selection_uses_accuracy_window_then_ce_then_epoch() -> Non
 
 def test_submission_has_unthrottled_parallel_arrays_and_dependency() -> None:
     text = Path("sbatch/submit_retb_supplemental_offline_fusion.sh").read_text()
-    assert "--array=0-4" in text
+    assert "--array=0-2" in text
+    assert "--array=0-1" in text
     assert "--array=0-6" in text
     assert "%" not in "\n".join(
         line for line in text.splitlines() if "--array=" in line
     )
     assert "RETB_REGION_KD_JOB_ID" in text
     assert 'afterok:${RETB_REGION_KD_JOB_ID}' in text
-    assert 'afterok:${fusion}:${obase}' in text
+    assert 'afterok:${ready_fusion}:${late_fusion}:${obase}' in text
+    assert "status --porcelain" not in text
     assert "resume.unlink(missing_ok=True)" in Path(
         "scripts/train_retb_supplemental_obase7_member.py"
     ).read_text()

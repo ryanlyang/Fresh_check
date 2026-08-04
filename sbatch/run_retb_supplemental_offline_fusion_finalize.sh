@@ -6,5 +6,6 @@ source "${PROJECT_DIR}/sbatch/retb_common.sh"
 retb_activate
 : "${RETB_SUPPLEMENTAL_ROOT:?RETB_SUPPLEMENTAL_ROOT is required}"
 python scripts/finalize_retb_supplemental_offline_fusion.py \
-  --plan "${RETB_SUPPLEMENTAL_ROOT}/registry/supplemental_plan.json" \
+  --ready-plan "${RETB_SUPPLEMENTAL_ROOT}/registry/ready_plan.json" \
+  --late-plan "${RETB_SUPPLEMENTAL_ROOT}/registry/late_plan.json" \
   --supplemental-root "${RETB_SUPPLEMENTAL_ROOT}"

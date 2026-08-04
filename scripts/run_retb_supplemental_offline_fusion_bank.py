@@ -45,6 +45,7 @@ from teacher_logit_reco.relation_expert_token_bridge.provenance import (  # noqa
 from teacher_logit_reco.relation_expert_token_bridge.supplemental_offline_fusion import (  # noqa: E402
     FUSION_VARIANTS,
     SUPPLEMENTAL_BANK_RESULT_CONTRACT,
+    SUPPLEMENTAL_PLAN_CONTRACT,
     file_sha256,
     select_fixed_budget_checkpoint,
     set_deterministic_seed,
@@ -463,9 +464,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args(argv)
-    plan = load_hashed_json(args.plan, expected_contract=(
-        "retb_supplemental_offline_fusion_plan_v1"
-    ))
+    plan = load_hashed_json(
+        args.plan, expected_contract=SUPPLEMENTAL_PLAN_CONTRACT
+    )
     validate_supplemental_plan(plan)
     if args.batch_size != int(plan["fusion_training_protocol"]["batch_size"]):
         raise ValueError("supplemental fusion batch size differs from its plan")

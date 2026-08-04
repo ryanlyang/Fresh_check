@@ -29,12 +29,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parent-campaign-root", required=True, type=Path)
     parser.add_argument("--supplemental-id", required=True)
+    parser.add_argument(
+        "--plan-role", choices=("ready", "late", "complete"), default="complete"
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     plan = build_supplemental_plan(
         parent_root=args.parent_campaign_root,
         supplemental_id=args.supplemental_id,
         source_snapshot=source_snapshot(REPO_ROOT),
+        plan_role=args.plan_role,
     )
     validate_supplemental_plan(plan)
     publication = write_immutable_json(args.output, plan)

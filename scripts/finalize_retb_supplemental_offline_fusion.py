@@ -116,15 +116,28 @@ def _obase7(root: Path, plan: dict) -> dict:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--plan", required=True, type=Path)
+    parser.add_argument("--ready-plan", required=True, type=Path)
+    parser.add_argument("--late-plan", required=True, type=Path)
     parser.add_argument("--supplemental-root", required=True, type=Path)
     args = parser.parse_args(argv)
-    plan = load_hashed_json(args.plan)
-    validate_supplemental_plan(plan)
+    ready_plan = load_hashed_json(args.ready_plan)
+    late_plan = load_hashed_json(args.late_plan)
+    validate_supplemental_plan(ready_plan)
+    validate_supplemental_plan(late_plan)
+    if (
+        ready_plan.get("plan_role") != "ready"
+        or late_plan.get("plan_role") != "late"
+        or ready_plan.get("supplemental_id") != late_plan.get("supplemental_id")
+        or ready_plan.get("parent_campaign_spec_sha256")
+        != late_plan.get("parent_campaign_spec_sha256")
+        or ready_plan.get("source") != late_plan.get("source")
+    ):
+        raise ValueError("supplemental ready/late plan lineage differs")
     root = args.supplemental_root.resolve()
-    obase = _obase7(root, plan)
+    obase = _obase7(root, ready_plan)
     rows = []
     for bank_id in BANK_DEFINITIONS:
+        plan = ready_plan if bank_id in ready_plan["banks"] else late_plan
         for variant in FUSION_VARIANTS:
             path = root / "runs/fusion_banks" / bank_id / variant / "result.json"
             result = load_hashed_json(
@@ -170,8 +183,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with_content_hash(
             {
                 "contract": SUPPLEMENTAL_REPORT_CONTRACT,
-                "schema_version": 1,
-                "plan_sha256": plan["content_hash"],
+                "schema_version": 2,
+                "ready_plan_sha256": ready_plan["content_hash"],
+                "late_plan_sha256": late_plan["content_hash"],
                 "comparison_split": "val_design",
                 "rows": ranked,
                 "best_available": ranked[0]["candidate_id"],

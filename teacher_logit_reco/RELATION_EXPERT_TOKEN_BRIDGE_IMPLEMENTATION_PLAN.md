@@ -5845,15 +5845,22 @@ training implementation and the ensemble is the declared
 `O_7X_UNBIASED_ENSEMBLE` comparison rather than a mixture of historical and
 new training paths.
 
-`retb_supplemental_offline_fusion_plan_v1` byte-binds the parent campaign,
+`retb_supplemental_offline_fusion_plan_v2` publishes two complementary,
+source-identical immutable seals.  The `ready` seal byte-binds CE4, CE7, KD3,
+and OBASE7; the `late` seal byte-binds KD4 and MIXED7.  Together they bind the
+parent campaign,
 Stage-B registry, exact checkpoint registrations/checkpoint bytes, three
 offline input caches, normalizers, and input audit while binding the
 supplemental source separately.  Thus unrelated later commits cannot make the
-old and supplemental artifacts appear interchangeable.  The five bank jobs
-and seven OBASE jobs are submitted as unthrottled parallel arrays; the REGION
-KD array element may be an explicit Slurm dependency when it is not yet
-complete.  The final report covers exactly 21 `val_design` candidates (five
-banks times four fusion variants plus OBASE7 mean logits).
+old and supplemental artifacts appear interchangeable.  CE4, CE7, KD3, and
+all seven OBASE members are submitted immediately as unthrottled parallel
+arrays.  Only the late seal and its KD4/MIXED7 array wait for the REGION-KD
+array element when it is not yet complete.  The final report waits for both
+seals and covers exactly 21 `val_design` candidates (five banks times four
+fusion variants plus OBASE7 mean logits).  Submission freezes committed
+`HEAD` in a detached worktree without requiring the user's main checkout to
+be clean; unrelated dirty-worktree changes therefore neither enter the
+scientific source snapshot nor block submission.
 
 Submit with:
 

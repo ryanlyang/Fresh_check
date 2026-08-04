@@ -9,7 +9,7 @@ retb_activate
 seeds=(101 202 303 404 505 606 707)
 seed="${seeds[SLURM_ARRAY_TASK_ID]}"
 python scripts/train_retb_supplemental_obase7_member.py \
-  --plan "${RETB_SUPPLEMENTAL_ROOT}/registry/supplemental_plan.json" \
+  --plan "${RETB_SUPPLEMENTAL_ROOT}/registry/ready_plan.json" \
   --seed "${seed}" \
   --output-root "${RETB_SUPPLEMENTAL_ROOT}/runs/obase7" \
   --device auto

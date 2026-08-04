@@ -25,12 +25,12 @@ from .registry import EXPERT_ORDER
 from .step4 import resolve_stage_b_run, validate_stage_b_run_registry
 
 
-SUPPLEMENTAL_PLAN_CONTRACT = "retb_supplemental_offline_fusion_plan_v1"
+SUPPLEMENTAL_PLAN_CONTRACT = "retb_supplemental_offline_fusion_plan_v2"
 SUPPLEMENTAL_BANK_RESULT_CONTRACT = (
     "retb_supplemental_offline_fusion_bank_result_v1"
 )
 SUPPLEMENTAL_OBASE7_RESULT_CONTRACT = "retb_supplemental_obase7_result_v1"
-SUPPLEMENTAL_REPORT_CONTRACT = "retb_supplemental_offline_fusion_report_v1"
+SUPPLEMENTAL_REPORT_CONTRACT = "retb_supplemental_offline_fusion_report_v2"
 
 SEVEN_SEEDS = (101, 202, 303, 404, 505, 606, 707)
 FUSION_VARIANTS = (
@@ -62,6 +62,21 @@ BANK_DEFINITIONS: dict[str, tuple[tuple[str, str], ...]] = {
         (expert, "ELOSS_CE")
         for expert in ("PID", "CHARGE", "DENSITY")
     ),
+}
+
+PLAN_ROLES = {
+    "ready": {
+        "bank_order": ("CE4", "CE7", "KD3"),
+        "include_obase7": True,
+    },
+    "late": {
+        "bank_order": ("KD4", "MIXED7"),
+        "include_obase7": False,
+    },
+    "complete": {
+        "bank_order": tuple(BANK_DEFINITIONS),
+        "include_obase7": True,
+    },
 }
 
 
@@ -157,6 +172,7 @@ def build_supplemental_plan(
     parent_root: str | Path,
     supplemental_id: str,
     source_snapshot: Mapping[str, Any],
+    plan_role: str = "complete",
 ) -> dict[str, Any]:
     root = Path(parent_root).resolve()
     campaign = load_hashed_json(root / "campaign_spec.json")
@@ -164,8 +180,12 @@ def build_supplemental_plan(
     registry_sha = validate_stage_b_run_registry(registry)
     if campaign.get("campaign_profile") != "production_500k_scale3m":
         raise ValueError("supplemental fusion requires a production 500k parent")
+    if plan_role not in PLAN_ROLES:
+        raise ValueError("supplemental plan role differs")
+    bank_order = PLAN_ROLES[plan_role]["bank_order"]
     records: dict[tuple[str, str], dict[str, Any]] = {}
-    for definition in BANK_DEFINITIONS.values():
+    for bank_id in bank_order:
+        definition = BANK_DEFINITIONS[bank_id]
         for expert_id, loss_id in definition:
             records.setdefault(
                 (expert_id, loss_id),
@@ -216,13 +236,16 @@ def build_supplemental_plan(
             "members": [records[item] for item in definition],
             "fusion_variants": list(FUSION_VARIANTS),
         }
-        for bank_id, definition in BANK_DEFINITIONS.items()
+        for bank_id in bank_order
+        for definition in (BANK_DEFINITIONS[bank_id],)
     }
     payload = with_content_hash(
         {
             "contract": SUPPLEMENTAL_PLAN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "supplemental_id": str(supplemental_id),
+            "plan_role": plan_role,
+            "bank_order": list(bank_order),
             "parent_campaign_root": str(root),
             "parent_campaign_id": campaign["campaign_id"],
             "parent_campaign_spec_sha256": campaign["content_hash"],
@@ -247,7 +270,7 @@ def build_supplemental_plan(
                 "schedule": "linear_warmup_then_cosine",
                 "checkpoint_accuracy_window": 0.0001,
             },
-            "obase7": {
+            "obase7": ({
                 "control_id": "OBASE7_MEAN_LOGITS",
                 "member_model": "ordinary_O_BASE_RelationalParticleTransformer",
                 "member_objective": "unweighted_offline_cross_entropy",
@@ -256,7 +279,7 @@ def build_supplemental_plan(
                 "combiner": "arithmetic_mean_logits",
                 "learned_combiner": False,
                 "reuse_stage_a_seed_101": False,
-            },
+            } if PLAN_ROLES[plan_role]["include_obase7"] else None),
             "performance_based_termination": False,
             "scientific_underperformance_blocks_execution": False,
             "temporary_bank_policy": (
@@ -273,7 +296,14 @@ def validate_supplemental_plan(
     digest = validate_content_hash(
         payload, expected_contract=SUPPLEMENTAL_PLAN_CONTRACT
     )
-    if set(payload.get("banks", {})) != set(BANK_DEFINITIONS):
+    plan_role = payload.get("plan_role")
+    if plan_role not in PLAN_ROLES:
+        raise ValueError("supplemental plan role differs")
+    expected_bank_order = list(PLAN_ROLES[plan_role]["bank_order"])
+    if (
+        payload.get("bank_order") != expected_bank_order
+        or list(payload.get("banks", {})) != expected_bank_order
+    ):
         raise ValueError("supplemental bank coverage differs")
     if payload.get("final_test_access") is not False:
         raise ValueError("supplemental plan may not access final_test")
@@ -300,14 +330,19 @@ def validate_supplemental_plan(
         "input_audit",
     }:
         raise ValueError("supplemental parent artifact coverage differs")
-    obase = payload.get("obase7", {})
-    if (
-        obase.get("member_seeds") != list(SEVEN_SEEDS)
-        or obase.get("combiner") != "arithmetic_mean_logits"
-        or obase.get("reuse_stage_a_seed_101") is not False
-    ):
-        raise ValueError("OBASE7 control differs")
-    for bank_id, definition in BANK_DEFINITIONS.items():
+    obase = payload.get("obase7")
+    if PLAN_ROLES[plan_role]["include_obase7"]:
+        if (
+            not isinstance(obase, Mapping)
+            or obase.get("member_seeds") != list(SEVEN_SEEDS)
+            or obase.get("combiner") != "arithmetic_mean_logits"
+            or obase.get("reuse_stage_a_seed_101") is not False
+        ):
+            raise ValueError("OBASE7 control differs")
+    elif obase is not None:
+        raise ValueError("late supplemental plan may not declare OBASE7")
+    for bank_id in expected_bank_order:
+        definition = BANK_DEFINITIONS[bank_id]
         bank = payload["banks"][bank_id]
         if (
             bank.get("expert_order") != [item[0] for item in definition]
@@ -403,6 +438,7 @@ def select_fixed_budget_checkpoint(
 __all__ = [
     "BANK_DEFINITIONS",
     "FUSION_VARIANTS",
+    "PLAN_ROLES",
     "SEVEN_SEEDS",
     "SUPPLEMENTAL_BANK_RESULT_CONTRACT",
     "SUPPLEMENTAL_OBASE7_RESULT_CONTRACT",
