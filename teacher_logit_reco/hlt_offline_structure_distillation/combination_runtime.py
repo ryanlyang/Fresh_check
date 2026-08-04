@@ -66,6 +66,9 @@ COMBINATION_LOADER_MANIFEST_CONTRACT_V4 = (
 COMBINATION_LOADER_MANIFEST_CONTRACT_V5 = (
     "hosd_combination_loader_manifest_v5"
 )
+COMBINATION_LOADER_MANIFEST_CONTRACT_V6 = (
+    "hosd_combination_loader_manifest_v6"
+)
 COMBINATION_CHECKPOINT_CONTRACT = "hosd_combination_checkpoint_v1"
 COMBINATION_COMPLETION_CONTRACT = "hosd_combination_completion_v1"
 
@@ -125,20 +128,35 @@ class CombinationDataset(torch.utils.data.Dataset if torch is not None else obje
             }
         )
         if self.native_relation_targets is not None:
-            expected_shapes = {
-                "targets": (len(self.identities), 545),
-                "target_mask": (len(self.identities), 545),
-                "availability": (len(self.identities), 7),
-            }
             replicas = set(first.base_dataset.replicas)
-            if set(self.native_relation_targets) != replicas or any(
-                any(
-                    key not in fields or fields[key].shape != shape
-                    for key, shape in expected_shapes.items()
-                )
-                for fields in self.native_relation_targets.values()
-            ):
+            if set(self.native_relation_targets) != replicas:
                 raise ValueError("native relation combination targets differ")
+            for fields in self.native_relation_targets.values():
+                if not {"targets", "target_mask", "availability"}.issubset(fields):
+                    raise ValueError("native relation combination targets differ")
+                source_count = int(fields["targets"].shape[0])
+                if (
+                    fields["targets"].shape != (source_count, 545)
+                    or fields["target_mask"].shape != (source_count, 545)
+                    or fields["availability"].shape != (source_count, 7)
+                ):
+                    raise ValueError("native relation combination targets differ")
+                source_indices = fields.get("source_indices")
+                if source_indices is None:
+                    if source_count != len(self.identities):
+                        raise ValueError("native relation combination targets differ")
+                elif (
+                    source_indices.shape != (len(self.identities),)
+                    or source_indices.dtype.kind not in {"i", "u"}
+                    or (
+                        len(source_indices)
+                        and (
+                            int(source_indices.min()) < 0
+                            or int(source_indices.max()) >= source_count
+                        )
+                    )
+                ):
+                    raise ValueError("native relation source indices differ")
 
     def __len__(self) -> int:
         return len(next(iter(self.datasets.values())))
@@ -180,10 +198,14 @@ class CombinationDataset(torch.utils.data.Dataset if torch is not None else obje
         if self.native_relation_targets is not None:
             replica = int(first["replica_id"])
             native = self.native_relation_targets[replica]
+            source_indices = native.get("source_indices")
+            native_index = (
+                index if source_indices is None else int(source_indices[index])
+            )
             first["native_relation_target"] = {
-                "target": native["targets"][index],
-                "target_mask": native["target_mask"][index],
-                "availability": native["availability"][index],
+                "target": native["targets"][native_index],
+                "target_mask": native["target_mask"][native_index],
+                "availability": native["availability"][native_index],
             }
         return first
 
@@ -288,6 +310,40 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _identity_text(value: Any) -> str:
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    return str(value)
+
+
+def _native_relation_identity_indices(
+    source_identities: Sequence[Any],
+    requested_identities: Sequence[Any],
+) -> np.ndarray:
+    """Map an authenticated validation subset into its full val_design store."""
+
+    lookup: dict[str, int] = {}
+    for index, raw_identity in enumerate(source_identities):
+        identity = _identity_text(raw_identity)
+        if identity in lookup:
+            raise ValueError("native relation source identities are duplicated")
+        lookup[identity] = index
+    indices = np.empty(len(requested_identities), dtype=np.int64)
+    seen = set()
+    for index, raw_identity in enumerate(requested_identities):
+        identity = _identity_text(raw_identity)
+        if identity in seen:
+            raise ValueError("native relation requested identities are duplicated")
+        seen.add(identity)
+        try:
+            indices[index] = lookup[identity]
+        except KeyError as error:
+            raise ValueError(
+                "native relation requested identity is absent from val_design"
+            ) from error
+    return indices
 
 
 def build_combination_loader_manifest(
@@ -395,8 +451,8 @@ def build_combination_loader_manifest(
         raise ValueError("ordinary combinations cannot bind native relation targets")
     return with_content_hash(
         {
-            "contract": COMBINATION_LOADER_MANIFEST_CONTRACT_V5,
-            "schema_version": 5,
+            "contract": COMBINATION_LOADER_MANIFEST_CONTRACT_V6,
+            "schema_version": 6,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -407,7 +463,9 @@ def build_combination_loader_manifest(
             "evaluation_role": evaluation_role,
             "training_role": training_role,
             **order_attestation,
-            "identity_join": "exact_before_batching",
+            "identity_join": (
+                "exact_identity_or_authenticated_val_design_subset_lookup_v2"
+            ),
         }
     )
 
@@ -421,7 +479,7 @@ def load_combination_loaders(
     target_registry: Mapping[str, Any],
 ) -> dict[str, Any]:
     if (
-        manifest.get("contract") != COMBINATION_LOADER_MANIFEST_CONTRACT_V5
+        manifest.get("contract") != COMBINATION_LOADER_MANIFEST_CONTRACT_V6
         or manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("graph_id") != graph["graph_id"]
@@ -601,20 +659,40 @@ def load_combination_loaders(
                     mapped[name] = value
                 expected_dataset = next(iter(datasets.values()))
                 expected_ids = expected_dataset.identities
+                source_count = int(mapped["identities"].shape[0])
                 if (
-                    mapped["identities"].shape != (len(expected_ids),)
-                    or artifact.get("identity_order_sha256")
-                    != getattr(
-                        expected_dataset.base_dataset,
-                        "identity_order_sha256",
-                        None,
-                    )
+                    mapped["identities"].shape != (source_count,)
+                    or mapped["targets"].shape != (source_count, 545)
+                    or mapped["target_mask"].shape != (source_count, 545)
+                    or mapped["availability"].shape != (source_count, 7)
+                    or int(artifact.get("event_count", -1)) != source_count
                 ):
                     raise ValueError("native relation target identities differ")
+                expected_identity_hash = getattr(
+                    expected_dataset.base_dataset,
+                    "identity_order_sha256",
+                    None,
+                )
+                source_indices = None
+                if not (
+                    source_count == len(expected_ids)
+                    and artifact.get("identity_order_sha256")
+                    == expected_identity_hash
+                ):
+                    if (
+                        role not in {"design_select", "design_confirm"}
+                        or artifact.get("split") != "val_design"
+                    ):
+                        raise ValueError("native relation target identities differ")
+                    source_indices = _native_relation_identity_indices(
+                        mapped["identities"], expected_ids
+                    )
                 native_targets[replica] = {
                     name: mapped[name]
                     for name in ("targets", "target_mask", "availability")
                 }
+                if source_indices is not None:
+                    native_targets[replica]["source_indices"] = source_indices
                 lineage[
                     f"native_relation_targets_{role}_{replica}"
                 ] = definition["sha256"]
@@ -1152,6 +1230,7 @@ __all__ = [
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V3",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V4",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V5",
+    "COMBINATION_LOADER_MANIFEST_CONTRACT_V6",
     "CombinationDataset",
     "CombinationHBaseClassifier",
     "build_combination_loader_manifest",

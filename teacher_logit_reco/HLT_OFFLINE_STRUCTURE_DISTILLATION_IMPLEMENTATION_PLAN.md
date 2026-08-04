@@ -3310,8 +3310,11 @@ measured `hosd_exact_hlt_builder_timing_v1` evidence before production
 selection lineage is complete.
 Stage-D loader manifests are version 6 and serialize the pipeline seed plus
 the exact role seed, sampler, and seed-derivation maps. Combination-loader
-version 5 requires every member manifest to declare identical maps and passes
-the authenticated role seed to its loader; confirmation and scale member
+version 6 requires every member manifest to declare identical maps, passes
+the authenticated role seed to its loader, and joins `design_select` or
+`design_confirm` lazily by exact identity into the authenticated full
+`val_design` native-relation store without copying its 545-channel matrix;
+confirmation and scale member
 reconstruction may not substitute a default seed. Every Stage-J graph kind,
 including ordinary/KD/native-relation baselines, uses the scale shard-aware
 sampler for training while model initialization remains on its independent

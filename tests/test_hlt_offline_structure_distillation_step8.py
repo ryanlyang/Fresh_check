@@ -30,6 +30,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.contracts import (
 from teacher_logit_reco.hlt_offline_structure_distillation.combination_runtime import (
     CombinationDataset,
     CombinationHBaseClassifier,
+    _native_relation_identity_indices,
     combination_losses,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.auxiliary_data import (
@@ -50,6 +51,61 @@ SOURCE = {
     "dirty": True,
     "status_hash_policy": "test",
 }
+
+
+def test_native_relation_val_design_store_is_lazily_joined_to_design_subset():
+    class Base:
+        logical_role = "design_select"
+        identities = ("jet-c", "jet-a")
+        identity_order_sha256 = "c" * 64
+        replicas = {0: None}
+
+        def __getitem__(self, index):
+            return {
+                "event_identity": self.identities[index],
+                "replica_id": 0,
+            }
+
+    class Target:
+        def __init__(self):
+            self.base_dataset = Base()
+            self.identities = self.base_dataset.identities
+            self.target_stores = ()
+
+        def __len__(self):
+            return len(self.identities)
+
+        def attach_target(self, index, sample):
+            return {
+                **sample,
+                "target": np.zeros(1, dtype=np.float32),
+                "target_mask": np.ones(1, dtype=bool),
+            }
+
+    source_ids = np.asarray(["jet-a", "jet-b", "jet-c"])
+    source_indices = _native_relation_identity_indices(
+        source_ids, Base.identities
+    )
+    targets = np.zeros((3, 545), dtype=np.float32)
+    targets[:, 0] = (10.0, 20.0, 30.0)
+    dataset = CombinationDataset(
+        {"T_TEST": Target()},
+        native_relation_targets={
+            0: {
+                "targets": targets,
+                "target_mask": np.ones((3, 545), dtype=bool),
+                "availability": np.ones((3, 7), dtype=np.float32),
+                "source_indices": source_indices,
+            }
+        },
+    )
+    assert source_indices.tolist() == [2, 0]
+    assert dataset[0]["native_relation_target"]["target"][0] == 30.0
+    assert dataset[1]["native_relation_target"]["target"][0] == 10.0
+    with pytest.raises(ValueError, match="absent from val_design"):
+        _native_relation_identity_indices(source_ids, ("jet-missing",))
+    with pytest.raises(ValueError, match="source identities are duplicated"):
+        _native_relation_identity_indices(("jet-a", "jet-a"), ("jet-a",))
 
 
 def test_eight_member_scale_combination_never_materializes_identity_population():
@@ -331,7 +387,7 @@ def test_combination_manifest_loads_authenticated_nondefault_role_seed(
         evaluation_role=evaluation_role,
         training_role=training_role,
     )
-    assert manifest["contract"] == "hosd_combination_loader_manifest_v5"
+    assert manifest["contract"] == "hosd_combination_loader_manifest_v6"
     assert manifest["pipeline_seed"] == pipeline_seed
     assert manifest["sampler_seed_by_role"][training_role] == data_order_seed(
         pipeline_seed, training_role
