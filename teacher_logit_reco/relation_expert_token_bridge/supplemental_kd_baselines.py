@@ -11,9 +11,11 @@ from .expert_training import validate_expert_loss_registry, validate_teacher_log
 from .offline_capacity_models import FAMILIES
 
 
-KD_BASELINE_PLAN_CONTRACT = "retb_supplemental_kd_baseline_plan_v1"
-KD_BASELINE_RESULT_CONTRACT = "retb_supplemental_kd_baseline_result_v1"
-KD_BASELINE_REPORT_CONTRACT = "retb_supplemental_kd_baseline_report_v1"
+KD_BASELINE_PLAN_CONTRACT_V1 = "retb_supplemental_kd_baseline_plan_v1"
+KD_BASELINE_PLAN_CONTRACT = "retb_supplemental_kd_baseline_plan_v2"
+KD_BASELINE_RESULT_CONTRACT_V1 = "retb_supplemental_kd_baseline_result_v1"
+KD_BASELINE_RESULT_CONTRACT = "retb_supplemental_kd_baseline_result_v2"
+KD_BASELINE_REPORT_CONTRACT = "retb_supplemental_kd_baseline_report_v2"
 KD_BASELINE_ARCHITECTURES = ("O_BASE", "O_FULLREL")
 KD_BASELINE_SEEDS = (101, 202, 303)
 KD_BASELINE_COORDINATES = tuple(
@@ -172,6 +174,14 @@ def build_kd_baseline_plan(
         "val_stop_teacher_inputs": _file_record(stop_npz),
         "val_design_manifest": _json_record(design_manifest_path),
         "val_design_inputs": _file_record(design_npz),
+        **{
+            f"region_tree_{split}_manifest": _json_record(
+                root
+                / "inputs/region_tree/offline"
+                / f"{split}_exclusive_ca_v1/manifest.json"
+            )
+            for split in ("model_train", "val_stop", "val_design")
+        },
         "relation_normalization": _json_record(
             root / "inputs/normalization/offline_500k/relation.json"
         ),
@@ -182,7 +192,7 @@ def build_kd_baseline_plan(
     payload = with_content_hash(
         {
             "contract": KD_BASELINE_PLAN_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "supplemental_id": str(supplemental_id),
             "parent_campaign_root": str(root),
             "parent_campaign_spec_sha256": campaign["content_hash"],
@@ -228,7 +238,13 @@ def build_kd_baseline_plan(
 def validate_kd_baseline_plan(
     payload: Mapping[str, Any], *, check_parent_bytes: bool = True
 ) -> str:
-    digest = validate_content_hash(payload, expected_contract=KD_BASELINE_PLAN_CONTRACT)
+    contract = payload.get("contract")
+    if contract not in {
+        KD_BASELINE_PLAN_CONTRACT_V1,
+        KD_BASELINE_PLAN_CONTRACT,
+    }:
+        raise ValueError("supplemental KD plan contract differs")
+    digest = validate_content_hash(payload, expected_contract=str(contract))
     if (
         payload.get("loss_id") != "ELOSS_KD_DOMINANT"
         or payload.get("teacher_id") != "O_FULLREL"
@@ -249,6 +265,20 @@ def validate_kd_baseline_plan(
         for name in KD_BASELINE_ARCHITECTURES
     }:
         raise ValueError("supplemental KD architectures differ")
+    if contract == KD_BASELINE_PLAN_CONTRACT:
+        expected_tree_artifacts = {
+            f"region_tree_{split}_manifest"
+            for split in ("model_train", "val_stop", "val_design")
+        }
+        if (
+            int(payload.get("schema_version", -1)) != 2
+            or not expected_tree_artifacts.issubset(
+                payload.get("parent_artifacts", {})
+            )
+        ):
+            raise ValueError("supplemental KD v2 tree evidence differs")
+    elif int(payload.get("schema_version", -1)) != 1:
+        raise ValueError("supplemental KD legacy plan schema differs")
     if check_parent_bytes:
         for name, row in payload["parent_artifacts"].items():
             path = Path(row["path"])
@@ -284,8 +314,10 @@ __all__ = [
     "KD_BASELINE_ARCHITECTURES",
     "KD_BASELINE_COORDINATES",
     "KD_BASELINE_PLAN_CONTRACT",
+    "KD_BASELINE_PLAN_CONTRACT_V1",
     "KD_BASELINE_REPORT_CONTRACT",
     "KD_BASELINE_RESULT_CONTRACT",
+    "KD_BASELINE_RESULT_CONTRACT_V1",
     "KD_BASELINE_SEEDS",
     "build_kd_baseline_plan",
     "conventional_kd_configuration",

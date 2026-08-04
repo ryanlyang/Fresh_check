@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from teacher_logit_reco.relation_expert_token_bridge.expert_training import (
@@ -17,12 +18,14 @@ from teacher_logit_reco.relation_expert_token_bridge.contracts import (
 from teacher_logit_reco.relation_expert_token_bridge.supplemental_kd_baselines import (
     KD_BASELINE_ARCHITECTURES,
     KD_BASELINE_COORDINATES,
+    KD_BASELINE_PLAN_CONTRACT_V1,
     KD_BASELINE_SEEDS,
     build_kd_baseline_plan,
     conventional_kd_configuration,
     file_sha256,
     validate_kd_baseline_plan,
 )
+from scripts import train_retb_supplemental_kd_baseline as kd_worker
 
 
 SOURCE = {
@@ -118,6 +121,15 @@ def _parent_fixture(tmp_path: Path) -> Path:
             root / f"inputs/normalization/offline_500k/{name}.json",
             with_content_hash({"contract": f"fixture_{name}"}),
         )
+    for split in ("model_train", "val_stop", "val_design"):
+        write_immutable_json(
+            root
+            / "inputs/region_tree/offline"
+            / f"{split}_exclusive_ca_v1/manifest.json",
+            with_content_hash(
+                {"contract": "fixture_tree_manifest", "split": split}
+            ),
+        )
     return root
 
 
@@ -159,6 +171,12 @@ def test_plan_binds_teacher_caches_and_conventional_baselines(
         "kl_direction": "teacher_probability_to_student_probability",
     }
     assert set(plan["baseline_registrations"]) == set(KD_BASELINE_ARCHITECTURES)
+    assert int(plan["schema_version"]) == 2
+    assert {
+        "region_tree_model_train_manifest",
+        "region_tree_val_stop_manifest",
+        "region_tree_val_design_manifest",
+    }.issubset(plan["parent_artifacts"])
     teacher = Path(plan["parent_artifacts"]["teacher_checkpoint"]["path"])
     teacher.write_bytes(b"drift")
     try:
@@ -190,6 +208,71 @@ def test_dominant_kd_objective_is_the_existing_exact_objective() -> None:
     assert torch.allclose(loss.detach(), expected)
 
 
+def test_legacy_v1_plan_remains_valid_only_for_targeted_recovery(
+    tmp_path: Path,
+) -> None:
+    plan = build_kd_baseline_plan(
+        parent_root=_parent_fixture(tmp_path),
+        supplemental_id="legacy-recovery",
+        source_snapshot=SOURCE,
+    )
+    legacy = dict(plan)
+    legacy.pop("content_hash")
+    legacy["contract"] = KD_BASELINE_PLAN_CONTRACT_V1
+    legacy["schema_version"] = 1
+    legacy["parent_artifacts"] = {
+        name: row
+        for name, row in legacy["parent_artifacts"].items()
+        if not name.startswith("region_tree_")
+    }
+    legacy = with_content_hash(legacy)
+    validate_kd_baseline_plan(legacy)
+
+
+def test_fullrel_worker_loads_identity_aligned_authenticated_region_trees(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    parent = tmp_path / "parent"
+    tree_root = (
+        parent
+        / "inputs/region_tree/offline/model_train_exclusive_ca_v1"
+    )
+    manifest = with_content_hash(
+        {"contract": "fixture_tree_manifest", "split": "model_train"}
+    )
+    write_immutable_json(tree_root / "manifest.json", manifest)
+    requested = {}
+
+    def fake_loader(root: Path, identities: list[str]):
+        requested["root"] = root
+        requested["identities"] = identities
+        return ([{"identity": value} for value in identities], manifest)
+
+    monkeypatch.setattr(
+        kd_worker, "load_authenticated_tree_selection", fake_loader
+    )
+    plan = {
+        "parent_artifacts": {
+            "region_tree_model_train_manifest": {
+                "content_hash": manifest["content_hash"],
+                "file_sha256": file_sha256(tree_root / "manifest.json"),
+            }
+        }
+    }
+    trees, manifest_sha256 = kd_worker._region_trees(
+        parent=parent,
+        plan=plan,
+        split="model_train",
+        arrays={"identities": np.asarray(["jet-2", "jet-1"])},
+    )
+    assert requested == {
+        "root": tree_root,
+        "identities": ["jet-2", "jet-1"],
+    }
+    assert trees == [{"identity": "jet-2"}, {"identity": "jet-1"}]
+    assert manifest_sha256 == manifest["content_hash"]
+
+
 def test_submission_is_unthrottled_six_job_array() -> None:
     submit = Path("sbatch/submit_retb_supplemental_kd_baselines.sh").read_text()
     row = Path("sbatch/run_retb_supplemental_kd_baseline_row.sh").read_text()
@@ -200,6 +283,19 @@ def test_submission_is_unthrottled_six_job_array() -> None:
     assert "status --porcelain" not in submit
     assert "architectures=(O_BASE O_BASE O_BASE O_FULLREL O_FULLREL O_FULLREL)" in row
     assert "seeds=(101 202 303 101 202 303)" in row
+    assert 'output_namespace="runs_recovery"' in row
     assert "performance_based_termination" in Path(
         "teacher_logit_reco/relation_expert_token_bridge/supplemental_kd_baselines.py"
     ).read_text()
+
+
+def test_recovery_replays_only_fullrel_and_waits_for_original_obase() -> None:
+    recovery = Path(
+        "sbatch/submit_retb_supplemental_kd_recovery.sh"
+    ).read_text()
+    assert "--array=3-5" in recovery
+    assert "afterany:${RETB_SUPP_KD_ORIGINAL_ARRAY_JOB_ID}" in recovery
+    assert "afterok:${recovery}" in recovery
+    assert '"reused_original_task_ids": [0, 1, 2]' in recovery
+    assert '"replayed_task_ids": [3, 4, 5]' in recovery
+    assert "RETB_SUPP_KD_RECOVERY_MODE=1" in recovery

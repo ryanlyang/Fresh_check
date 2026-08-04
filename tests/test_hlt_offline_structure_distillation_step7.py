@@ -494,13 +494,21 @@ def test_feedback_packing_gates_values_and_keeps_availability_and_het():
     )
 
 
-def test_feedback_initialization_loads_locked_classifier_and_target_head(tmp_path):
+@pytest.mark.parametrize(
+    ("selected_parameterization", "control"),
+    (("ABS", None), ("ABS", "MEAN_ONLY"), ("HET", "MEAN_ONLY")),
+)
+def test_feedback_initialization_loads_locked_classifier_and_target_head(
+    tmp_path, selected_parameterization, control
+):
     auxiliary = AuxiliaryHBaseClassifier(
         HBaseParticleTransformer(weaver_module=_weaver()),
         target_id="T_OFFLINE_TRACK_32",
         target_dimension=32,
         input_dimension=16,
         availability_group_count=2,
+        parameterization=selected_parameterization,
+        heteroscedastic_components=(True,) * 32,
     )
     with torch.no_grad():
         for ordinal, parameter in enumerate(auxiliary.parameters(), start=1):
@@ -524,7 +532,7 @@ def test_feedback_initialization_loads_locked_classifier_and_target_head(tmp_pat
             "schema_version": 2,
             "row_id": "selected-A-t",
             "target_id": "T_OFFLINE_TRACK_32",
-            "parameterization": "ABS",
+            "parameterization": selected_parameterization,
             "auxiliary_weight": 0.3,
             "checkpoint_sha256": checkpoint_sha,
             "stage_d_plan_sha256": "d" * 64,
@@ -546,7 +554,7 @@ def test_feedback_initialization_loads_locked_classifier_and_target_head(tmp_pat
     row = {
         "selected_auxiliary_row_id": "selected-A-t",
         "selected_auxiliary_result_sha256": result["content_hash"],
-        "selected_auxiliary_parameterization": "ABS",
+        "selected_auxiliary_parameterization": selected_parameterization,
         "selected_auxiliary_weight": 0.3,
         "target_id": "T_OFFLINE_TRACK_32",
     }
@@ -554,7 +562,9 @@ def test_feedback_initialization_loads_locked_classifier_and_target_head(tmp_pat
         HBaseParticleTransformer(weaver_module=_weaver()),
         target_id=row["target_id"],
         interface="FB_TOKEN",
+        parameterization="HET" if control == "MEAN_ONLY" else "ABS",
         particle_dimension=16,
+        control=control,
     )
     lineage = initialize_feedback_from_auxiliary_checkpoint(
         feedback,
@@ -570,7 +580,19 @@ def test_feedback_initialization_loads_locked_classifier_and_target_head(tmp_pat
     for key, value in auxiliary.classifier.state_dict().items():
         torch.testing.assert_close(feedback.classifier.state_dict()[key], value)
     for key, value in auxiliary.target_head.state_dict().items():
-        torch.testing.assert_close(feedback.global_predictor.state_dict()[key], value)
+        observed = feedback.global_predictor.state_dict()[key]
+        if (
+            selected_parameterization == "HET"
+            and control == "MEAN_ONLY"
+            and key in {"output.weight", "output.bias"}
+        ):
+            value = value[: observed.shape[0]]
+        torch.testing.assert_close(observed, value)
+    if control == "MEAN_ONLY":
+        assert feedback.global_predictor.heteroscedastic is False
+        _, prediction = feedback.forward_with_feedback(**_batch())
+        assert not bool(prediction["heteroscedastic_component_mask"].any())
+        assert bool((prediction["log_variance"] == 0).all())
 
 
 def test_track_pair_is_directed_and_region_pair_is_exactly_symmetric():
@@ -955,8 +977,14 @@ def test_mean_only_is_exactly_parameter_matched_to_het(interface):
     )
     validate_content_hash(mean_only.capacity_ledger)
     assert mean_only.capacity_ledger["contract"] == (
-        "hosd_mean_only_capacity_ledger_v1"
+        "hosd_mean_only_capacity_ledger_v2"
     )
+    assert mean_only.capacity_ledger["schema_version"] == 2
+    assert mean_only.capacity_padding.count > 0
+    assert mean_only.global_predictor.heteroscedastic is False
+    _, prediction = mean_only.forward_with_feedback(**_batch())
+    assert not bool(prediction["heteroscedastic_component_mask"].any())
+    assert bool((prediction["log_variance"] == 0).all())
     assert mean_only.capacity_ledger["reference_control"] == "HET"
 
 

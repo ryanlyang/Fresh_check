@@ -21,6 +21,7 @@ from scripts.train_retb_offline_expert import _dataset, _load_npz
 from teacher_logit_reco.relation_expert_token_bridge.contracts import (
     bind_source,
     load_hashed_json,
+    validate_content_hash,
     with_content_hash,
     write_immutable_json,
 )
@@ -41,6 +42,10 @@ from teacher_logit_reco.relation_expert_token_bridge.offline_capacity_training i
     build_capacity_profile,
 )
 from teacher_logit_reco.relation_expert_token_bridge.provenance import source_snapshot
+from teacher_logit_reco.relation_expert_token_bridge.stage_a import (
+    load_authenticated_tree_selection,
+    validate_stage_a_tree_index,
+)
 from teacher_logit_reco.relation_expert_token_bridge.supplemental_kd_baselines import (
     KD_BASELINE_ARCHITECTURES,
     KD_BASELINE_RESULT_CONTRACT,
@@ -48,6 +53,9 @@ from teacher_logit_reco.relation_expert_token_bridge.supplemental_kd_baselines i
     conventional_kd_configuration,
     file_sha256,
     validate_kd_baseline_plan,
+)
+from teacher_logit_reco.relation_expert_token_bridge.streamed_abc import (
+    STREAMED_ABC_TREE_INDEX_CONTRACT,
 )
 from teacher_logit_reco.relational_part.capacity import pair_encoder_flops
 from teacher_logit_reco.relational_part.model import (
@@ -85,6 +93,77 @@ def _load_selected_checkpoint(model: Any, path: Path) -> None:
     if not isinstance(state, Mapping):
         raise ValueError("supplemental KD checkpoint lacks model state")
     model.load_state_dict(state, strict=True)
+
+
+def _region_trees(
+    *,
+    parent: Path,
+    plan: Mapping[str, Any],
+    split: str,
+    arrays: Mapping[str, np.ndarray],
+) -> tuple[list[Mapping[str, Any]], str]:
+    tree_root = (
+        parent / "inputs/region_tree/offline" / f"{split}_exclusive_ca_v1"
+    )
+    trees, manifest = load_authenticated_tree_selection(
+        tree_root,
+        [str(value) for value in arrays["identities"].tolist()],
+    )
+    key = f"region_tree_{split}_manifest"
+    expected = plan["parent_artifacts"].get(key)
+    if expected is not None:
+        if (
+            manifest["content_hash"] != expected["content_hash"]
+            or file_sha256(tree_root / "manifest.json")
+            != expected["file_sha256"]
+        ):
+            raise ValueError(
+                f"supplemental KD {split} REGION tree lineage differs"
+            )
+    else:
+        # Recovery compatibility for the already-published v1 plan.  The v1
+        # plan predates direct tree-manifest binding, so authenticate it
+        # through the parent campaign's immutable Stage-A tree index.
+        standard_index = parent / "inputs/region_tree/tree_cache_index.json"
+        streamed_index = (
+            parent / "inputs/region_tree/tree_cache_index_streamed_abc.json"
+        )
+        index_path = standard_index if standard_index.is_file() else streamed_index
+        tree_index = load_hashed_json(index_path)
+        if tree_index.get("contract") == STREAMED_ABC_TREE_INDEX_CONTRACT:
+            validate_content_hash(
+                tree_index,
+                expected_contract=STREAMED_ABC_TREE_INDEX_CONTRACT,
+            )
+            if (
+                int(tree_index.get("schema_version", -1)) != 1
+                or int(tree_index.get("view_count", -1))
+                != len(tree_index.get("views", ()))
+                or tree_index.get("view_ids")
+                != [str(row["view_id"]) for row in tree_index["views"]]
+            ):
+                raise ValueError("supplemental KD streamed tree index differs")
+        else:
+            validate_stage_a_tree_index(tree_index)
+        campaign = load_hashed_json(parent / "campaign_spec.json")
+        rows = {
+            str(row["view_id"]): row for row in tree_index["views"]
+        }
+        row = rows.get(f"offline:{split}")
+        if (
+            row is None
+            or row.get("tree_manifest_sha256")
+            != manifest["content_hash"]
+            or tree_index.get("campaign_spec_sha256")
+            != campaign["content_hash"]
+            or tree_index.get("source") != campaign.get("source")
+            or plan.get("parent_campaign_spec_sha256")
+            != campaign["content_hash"]
+        ):
+            raise ValueError(
+                f"supplemental KD legacy {split} REGION tree lineage differs"
+            )
+    return trees, str(manifest["content_hash"])
 
 
 def main() -> int:
@@ -129,9 +208,44 @@ def main() -> int:
     train_path = parent / "inputs/teacher_logits/ELOSS_KD_DOMINANT/model_train.npz"
     stop_path = parent / "inputs/teacher_logits/ELOSS_KD_DOMINANT/val_stop.npz"
     design_path = Path(plan["parent_artifacts"]["val_design_inputs"]["path"])
-    train_dataset = _dataset(_load_npz(train_path), region_trees=None)
-    stop_dataset = _dataset(_load_npz(stop_path), region_trees=None)
-    design_dataset = _dataset(_load_npz(design_path), region_trees=None)
+    train_arrays = _load_npz(train_path)
+    stop_arrays = _load_npz(stop_path)
+    design_arrays = _load_npz(design_path)
+    needs_region_trees = args.architecture == "O_FULLREL"
+    tree_manifest_hashes: dict[str, str] = {}
+    if needs_region_trees:
+        train_trees, tree_manifest_hashes["model_train"] = _region_trees(
+            parent=parent,
+            plan=plan,
+            split="model_train",
+            arrays=train_arrays,
+        )
+        stop_trees, tree_manifest_hashes["val_stop"] = _region_trees(
+            parent=parent,
+            plan=plan,
+            split="val_stop",
+            arrays=stop_arrays,
+        )
+        design_trees, tree_manifest_hashes["val_design"] = _region_trees(
+            parent=parent,
+            plan=plan,
+            split="val_design",
+            arrays=design_arrays,
+        )
+    else:
+        train_trees = stop_trees = design_trees = None
+    train_dataset = _dataset(
+        train_arrays,
+        region_trees=train_trees,
+    )
+    stop_dataset = _dataset(
+        stop_arrays,
+        region_trees=stop_trees,
+    )
+    design_dataset = _dataset(
+        design_arrays,
+        region_trees=design_trees,
+    )
     train_loader = make_offline_expert_loader(
         train_dataset, seed=args.seed, training=True, batch_size=64
     )
@@ -235,7 +349,7 @@ def main() -> int:
         with_content_hash(
             {
                 "contract": KD_BASELINE_RESULT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "plan_sha256": plan["content_hash"],
                 "architecture": args.architecture,
                 "seed": args.seed,
@@ -243,6 +357,7 @@ def main() -> int:
                 "loss_id": "ELOSS_KD_DOMINANT",
                 "teacher_id": "O_FULLREL",
                 "teacher_checkpoint_sha256": teacher_sha,
+                "region_tree_manifest_sha256s": tree_manifest_hashes,
                 "checkpoint_registration_sha256": registration["content_hash"],
                 "checkpoint_sha256": registration["checkpoint_sha256"],
                 "selected_epoch": registration["selected_epoch"],

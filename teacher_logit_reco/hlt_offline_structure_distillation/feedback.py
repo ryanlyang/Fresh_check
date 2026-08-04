@@ -868,14 +868,36 @@ def initialize_feedback_from_auxiliary_checkpoint(
                 copied_predictor += 1
         if destination_key is None:
             continue
-        if (
-            destination_key not in destination
-            or tuple(destination[destination_key].shape) != tuple(value.shape)
-        ):
+        if destination_key not in destination:
             raise ValueError(
                 f"auxiliary/feedback state shape differs: {destination_key}"
             )
-        destination[destination_key] = value
+        destination_value = destination[destination_key]
+        if tuple(destination_value.shape) == tuple(value.shape):
+            destination[destination_key] = value
+        elif (
+            model.control == "MEAN_ONLY"
+            and row.get("selected_auxiliary_parameterization") == "HET"
+            and destination_key
+            in {
+                "global_predictor.output.weight",
+                "global_predictor.output.bias",
+            }
+            and value.ndim == destination_value.ndim
+            and tuple(value.shape[1:]) == tuple(destination_value.shape[1:])
+            and int(value.shape[0]) > int(destination_value.shape[0])
+        ):
+            # GlobalTargetHead packs means first and HET log variances last.
+            # MEAN_ONLY inherits the exact mean projection and deliberately
+            # drops the variance rows; its capacity ledger replaces them with
+            # inert trainable padding.
+            destination[destination_key] = value[
+                : int(destination_value.shape[0])
+            ]
+        else:
+            raise ValueError(
+                f"auxiliary/feedback state shape differs: {destination_key}"
+            )
     if copied_classifier == 0:
         raise ValueError("auxiliary checkpoint contains no classifier state")
     predictor_expected = (
@@ -1041,7 +1063,7 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                     dimension,
                     input_dimension=particle_dimension,
                     availability_groups=len(layout["availability_group_order"]),
-                    heteroscedastic=parameterization == "HET",
+                    heteroscedastic=heteroscedastic,
                     heteroscedastic_components=layout[
                         "heteroscedastic_component_mask"
                     ],
@@ -1111,8 +1133,8 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                     self.capacity_padding = TrainableParameterPadding(difference)
                     self.capacity_ledger = with_content_hash(
                         {
-                            "contract": "hosd_mean_only_capacity_ledger_v1",
-                            "schema_version": 1,
+                            "contract": "hosd_mean_only_capacity_ledger_v2",
+                            "schema_version": 2,
                             "target_id": self.target_id,
                             "interface": self.interface,
                             "reference_control": "HET",
@@ -1196,6 +1218,16 @@ class FeedbackHBaseClassifier(torch.nn.Module if torch is not None else object):
                 }
             else:
                 predicted = self.global_predictor(state, active_mask)
+                if self.control == "MEAN_ONLY":
+                    mean = predicted["value"]
+                    predicted = {
+                        **predicted,
+                        "mean": mean,
+                        "log_variance": torch.zeros_like(mean),
+                        "heteroscedastic_component_mask": (
+                            self.consumer.feedback_heteroscedastic_component_mask
+                        ),
+                    }
             prediction_box.update(predicted)
             consumed = (
                 oracle_feedback

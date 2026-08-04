@@ -5897,3 +5897,24 @@ Submit with:
 export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge/retb_relation_expert_bridge_20260802T011953Z_1353c881c2_3a9457902f
 bash sbatch/submit_retb_supplemental_kd_baselines.sh
 ```
+
+`retb_supplemental_kd_baseline_plan_v2` additionally byte-binds the
+`model_train`, `val_stop`, and `val_design` offline REGION-tree manifests.
+O_FULLREL workers load those trees through the authenticated shard validator
+in exact offline-NPZ identity order and publish all three manifest hashes in
+`retb_supplemental_kd_baseline_result_v2`.  O_BASE consumes no REGION trees.
+The recovery launcher for the original v1 wave reuses completed O_BASE tasks
+0--2, authenticates the previously frozen trees through the parent Stage-A
+tree index, and replays only O_FULLREL tasks 3--5.  Corrected outputs are
+written under `runs_recovery/`; failed v1 partial artifacts remain untouched.
+The v2 report explicitly records each result contract, source, path, and tree
+lineage, so legacy O_BASE and corrected O_FULLREL evidence cannot appear
+interchangeable.
+
+Recover the original six-task wave with:
+
+```bash
+export RETB_SUPP_KD_RECOVERY_ROOT=/path/to/failed/supplemental/root
+export RETB_SUPP_KD_ORIGINAL_ARRAY_JOB_ID=original_array_job_id
+bash sbatch/submit_retb_supplemental_kd_recovery.sh
+```
