@@ -38,7 +38,11 @@ SOURCE_SPLITS = ("model_train", "val_stop", "val_design")
 DESIGN_SUBROLES = ("design_select", "design_confirm")
 LABEL_ROLES = (*SOURCE_SPLITS, *DESIGN_SUBROLES)
 CONTROL_SOURCES = ("physical", "O_BASE", "O_FULLREL")
-FEEDBACK_SHUFFLE_TARGETS = ("T_OFFLINE_TRACK_32",)
+FEEDBACK_SHUFFLE_TARGETS = (
+    "T_OFFLINE_TRACK_32",
+    "T_HLT_TRACK_PAIR_13",
+    "T_HLT_REGION_PAIR_8",
+)
 
 
 def _ordered_label_population(
@@ -334,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     artifact = with_content_hash(
         {
             "contract": TARGET_CONTROL_WAVE_CONTRACT,
-            "schema_version": 4,
+            "schema_version": 5,
             "source": dict(campaign["source"]),
             "campaign_spec_sha256": campaign["content_hash"],
             "source_splits": list(SOURCE_SPLITS),

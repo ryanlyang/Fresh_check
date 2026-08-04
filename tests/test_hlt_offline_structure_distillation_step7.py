@@ -11,6 +11,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation import (
     BoundedFeaturewiseConditioning,
     AuxiliaryHBaseClassifier,
     FeedbackHBaseClassifier,
+    FeedbackInterventionDataset,
     HBaseParticleTransformer,
     HOSDTrainingProtocol,
     PredictedPairAttentionBias,
@@ -1292,6 +1293,61 @@ def test_exact_hlt_loader_contract_has_no_materialized_pair_intervention(tmp_pat
     assert manifest["contract"] == "hosd_stage_e_loader_manifest_v2"
     assert manifest["schema_version"] == 2
     assert manifest["intervention_sources"] == {}
+
+
+def test_feedback_intervention_joins_scalar_sample_identity():
+    class _Base(torch.utils.data.Dataset):
+        identities = ("jet-a", "jet-b")
+
+        def __len__(self):
+            return len(self.identities)
+
+        def __getitem__(self, index):
+            return {"identity": self.identities[index], "payload": index}
+
+    values = {
+        "jet-a": {"value": np.asarray([1.0], dtype=np.float32)},
+        "jet-b": {"value": np.asarray([2.0], dtype=np.float32)},
+    }
+    dataset = FeedbackInterventionDataset(
+        _Base(),
+        intervention="predicted_feedback_override",
+        values_by_identity=values,
+        donor_identity_by_identity={"jet-a": "jet-b", "jet-b": "jet-a"},
+        parent_hashes={"intervention": "a" * 64},
+    )
+    assert dataset[0]["identity"] == "jet-a"
+    np.testing.assert_array_equal(
+        dataset[0]["predicted_feedback_override"]["value"],
+        values["jet-b"]["value"],
+    )
+    np.testing.assert_array_equal(
+        dataset[1]["predicted_feedback_override"]["value"],
+        values["jet-a"]["value"],
+    )
+
+
+def test_feedback_intervention_fails_closed_without_scalar_identity():
+    class _Base(torch.utils.data.Dataset):
+        identities = ("jet-a", "jet-b")
+
+        def __len__(self):
+            return len(self.identities)
+
+        def __getitem__(self, index):
+            return {"payload": index}
+
+    dataset = FeedbackInterventionDataset(
+        _Base(),
+        intervention="oracle_feedback",
+        values_by_identity={
+            identity: {"value": np.asarray([index], dtype=np.float32)}
+            for index, identity in enumerate(_Base.identities)
+        },
+        parent_hashes={"intervention": "b" * 64},
+    )
+    with pytest.raises(ValueError, match="scalar event identity"):
+        dataset[0]
 
 
 def test_stage_e_controls_inherit_locked_a_t_semantics():

@@ -936,7 +936,7 @@ def test_stage_d_boundary_contracts_cover_current_wave_and_design_subroles():
     for role in ("design_select", "design_confirm"):
         assert role in runtime
         assert role in controls
-    assert "hosd_target_control_wave_v4" in (
+    assert "hosd_target_control_wave_v5" in (
         REPO_ROOT
         / "teacher_logit_reco"
         / "hlt_offline_structure_distillation"
@@ -957,7 +957,15 @@ def test_feedback_shuffle_plans_are_role_specific_and_runtime_ordered():
         / "hlt_offline_structure_distillation"
         / "mechanism_execution.py"
     ).read_text(encoding="utf-8")
-    assert 'FEEDBACK_SHUFFLE_TARGETS = ("T_OFFLINE_TRACK_32",)' in control_wave
+    for target_id in (
+        "T_OFFLINE_TRACK_32",
+        "T_HLT_TRACK_PAIR_13",
+        "T_HLT_REGION_PAIR_8",
+    ):
+        target_block = control_wave.split(
+            "FEEDBACK_SHUFFLE_TARGETS = (", 1
+        )[1].split(")", 1)[0]
+        assert target_id in target_block
     assert '"feedback_shuffle_plan_order": "runtime_label_identity_order"' in control_wave
     assert '/ "feedback"' in trainer
     assert '"design_select": "design_select"' in trainer

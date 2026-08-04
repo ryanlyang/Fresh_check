@@ -448,7 +448,12 @@ class FeedbackInterventionDataset(
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = dict(self.base_dataset[index])
-        identity = str(sample.get("identities", sample.get("event_identity")))
+        raw_identity = sample.get("identity", sample.get("event_identity"))
+        if raw_identity is None:
+            raise ValueError("Stage-E base sample lacks its scalar event identity")
+        identity = str(raw_identity)
+        if identity not in self.donors:
+            raise ValueError("Stage-E sample identity is outside intervention lineage")
         donor = self.donors[identity]
         fields = self.values[donor]
         if self.intervention == "direct_pair_features":
