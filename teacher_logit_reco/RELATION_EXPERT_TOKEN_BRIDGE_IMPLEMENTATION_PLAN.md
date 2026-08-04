@@ -5876,3 +5876,24 @@ export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relat
 export RETB_REGION_KD_JOB_ID=34884_110  # omit after its registration exists
 bash sbatch/submit_retb_supplemental_offline_fusion.sh
 ```
+
+### Supplemental conventional-model dominant-KD controls
+
+To determine whether the Stage-B dominant-KD gain is specific to summary-token
+compression, a separate authenticated wave trains ordinary `O_BASE` and
+monolithic `O_FULLREL` students at seeds 101, 202, and 303.  All six students
+start from scratch and use the exact existing `ELOSS_KD_DOMINANT` implementation:
+`0.25 * CE + 1.0 * KL`, temperature 2, with the locked Stage-A O_FULLREL
+checkpoint as `SELECTED_STRONGEST`.  These controls use `TOK_WEAVER_CLASS` and
+have no summary-token bottleneck.  They retain the fixed 40-epoch, effective
+batch-128 expert protocol, select checkpoints only on `val_stop`, compare on
+`val_design`, never access `final_test`, and never terminate because of
+underperformance.  The unthrottled six-element array allows the two
+architecture-by-three-seed blocks to run concurrently.
+
+Submit with:
+
+```bash
+export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge/retb_relation_expert_bridge_20260802T011953Z_1353c881c2_3a9457902f
+bash sbatch/submit_retb_supplemental_kd_baselines.sh
+```
