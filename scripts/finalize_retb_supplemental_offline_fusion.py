@@ -40,7 +40,7 @@ from teacher_logit_reco.relation_expert_token_bridge.supplemental_offline_fusion
 
 
 def _obase7(root: Path, plan: dict) -> dict:
-    member_root = root / "runs/obase7/OBASE7_MEAN_LOGITS"
+    member_root = root / "runs/obase7/O_BASE"
     logits = []
     labels = None
     identities = None
@@ -49,7 +49,7 @@ def _obase7(root: Path, plan: dict) -> dict:
         current = member_root / f"member_seed_{seed}"
         registration = load_hashed_json(current / "training_registration.json")
         if (
-            registration.get("source") != plan.get("source")
+            registration.get("control_id") != "O_BASE"
             or registration.get("lineage_hashes", {}).get(
                 "supplemental_plan"
             )
@@ -77,6 +77,7 @@ def _obase7(root: Path, plan: dict) -> dict:
                 "training_registration_sha256": registration["content_hash"],
                 "checkpoint_sha256": registration["checkpoint_sha256"],
                 "prediction_sha256": file_sha256(prediction),
+                "registration_source": registration.get("source"),
             }
         )
     scores = np.mean(np.stack(logits, axis=0), axis=0, dtype=np.float64).astype(
@@ -95,7 +96,7 @@ def _obase7(root: Path, plan: dict) -> dict:
         with_content_hash(
             {
                 "contract": SUPPLEMENTAL_OBASE7_RESULT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "plan_sha256": plan["content_hash"],
                 "control_id": "OBASE7_MEAN_LOGITS",
                 "member_seeds": list(SEVEN_SEEDS),

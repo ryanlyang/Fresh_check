@@ -205,6 +205,28 @@ def test_submission_has_unthrottled_parallel_arrays_and_dependency() -> None:
     assert "resume.unlink(missing_ok=True)" in Path(
         "scripts/train_retb_supplemental_obase7_member.py"
     ).read_text()
+    member = Path("scripts/train_retb_supplemental_obase7_member.py").read_text()
+    finalizer = Path(
+        "scripts/finalize_retb_supplemental_offline_fusion.py"
+    ).read_text()
+    assert 'control_id="O_BASE"' in member
+    assert '/ "O_BASE"' in member
+    assert 'runs/obase7/O_BASE' in finalizer
+
+
+def test_obase7_recovery_resubmits_only_members_and_finalizer() -> None:
+    text = Path(
+        "sbatch/submit_retb_supplemental_obase7_recovery.sh"
+    ).read_text()
+    assert "--array=0-6" in text
+    assert "%" not in "\n".join(
+        line for line in text.splitlines() if "--array=" in line
+    )
+    assert "RETB_READY_FUSION_JOB_ID" in text
+    assert "RETB_LATE_FUSION_JOB_ID" in text
+    assert "run_retb_supplemental_offline_fusion_bank.sh" not in text
+    assert "run_retb_supplemental_obase7_member.sh" in text
+    assert "run_retb_supplemental_offline_fusion_finalize.sh" in text
 
 
 def test_workers_never_reference_final_test() -> None:

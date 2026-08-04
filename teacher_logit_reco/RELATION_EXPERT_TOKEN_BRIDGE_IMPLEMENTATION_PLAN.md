@@ -5843,7 +5843,10 @@ models with seeds 101, 202, 303, 404, 505, 606, and 707 under the same fixed
 does not reuse the Stage-A seed-101 teacher, so all seven members share one
 training implementation and the ensemble is the declared
 `O_7X_UNBIASED_ENSEMBLE` comparison rather than a mixture of historical and
-new training paths.
+new training paths.  `O_BASE` is the registered member-training control ID;
+`OBASE7_MEAN_LOGITS` names only the seven-member ensemble.  A failed member
+wave may be recovered independently and joined to already-running fusion
+arrays without retraining those fusion candidates.
 
 `retb_supplemental_offline_fusion_plan_v3` publishes two complementary,
 source-identical immutable seals.  The `ready` seal byte-binds CE4, CE7, KD3,

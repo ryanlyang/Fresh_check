@@ -76,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     training, profile = _train(
         root=parent,
         campaign=campaign,
-        control_id="OBASE7_MEAN_LOGITS",
+        control_id="O_BASE",
         model=model,
         flops=(
             analytical_particle_transformer_flops(
@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # storage-constrained supplemental campaign.
     resume = (
         args.output_root
-        / "OBASE7_MEAN_LOGITS"
+        / "O_BASE"
         / f"member_seed_{args.seed}"
         / "resume_state.pt"
     )

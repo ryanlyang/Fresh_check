@@ -29,7 +29,7 @@ SUPPLEMENTAL_PLAN_CONTRACT = "retb_supplemental_offline_fusion_plan_v3"
 SUPPLEMENTAL_BANK_RESULT_CONTRACT = (
     "retb_supplemental_offline_fusion_bank_result_v1"
 )
-SUPPLEMENTAL_OBASE7_RESULT_CONTRACT = "retb_supplemental_obase7_result_v1"
+SUPPLEMENTAL_OBASE7_RESULT_CONTRACT = "retb_supplemental_obase7_result_v2"
 SUPPLEMENTAL_REPORT_CONTRACT = "retb_supplemental_offline_fusion_report_v2"
 
 SEVEN_SEEDS = (101, 202, 303, 404, 505, 606, 707)
