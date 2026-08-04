@@ -2107,8 +2107,12 @@ this explicitly reduced-budget proxy; no claim is made that proxy and
 full-budget rankings are identical. Complete candidates that duplicate
 mandatory combinations are reused only after hash validation.
 
-The top four complete beam candidates receive full 500k training. Mandatory
-Section-14 combinations run even if absent from the top four.
+The top four nonempty complete beam candidates receive full 500k training.
+The zero-member `H_BASE_BEAM_BUDGET` reference remains eligible in every beam
+ranking wave, but if it survives in the final top ranks it is recorded as the
+separately trained baseline and does not consume a full-fit combination
+promotion slot. Mandatory Section-14 combinations run even if absent from the
+top four.
 
 ### 17.4 Three-seed confirmation
 

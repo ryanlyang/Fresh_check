@@ -89,7 +89,9 @@ def normalize_combination_weights(
     weights: Mapping[str, float],
 ) -> dict[str, float]:
     checked = {str(key): float(value) for key, value in weights.items()}
-    if not checked or any(not math.isfinite(value) or value < 0 for value in checked.values()):
+    if not checked:
+        raise ValueError("combination must contain at least one weighted member")
+    if any(not math.isfinite(value) or value < 0 for value in checked.values()):
         raise ValueError("combination weights must be finite and nonnegative")
     total = math.fsum(checked.values())
     if total <= 0:
@@ -611,9 +613,21 @@ def promote_combination_beam_winners(
         or int(final_wave.get("family_ordinal", -1)) != len(FAMILY_ORDER) - 1
     ):
         raise ValueError("beam promotion requires the complete final wave")
-    reduced = list(final_wave["surviving_candidates"])[
-        : int(stage_f_plan["top_beam_winners_full_fit"])
+    survivors = list(final_wave["surviving_candidates"])
+    excluded_baselines = [
+        candidate for candidate in survivors if not candidate.get("members")
     ]
+    if any(
+        candidate.get("graph_id") != "H_BASE_BEAM_BUDGET"
+        for candidate in excluded_baselines
+    ) or len(excluded_baselines) > 1:
+        raise ValueError("beam contains an unknown empty-member candidate")
+    # H_BASE_BEAM_BUDGET is the separately trained reduced-budget reference.
+    # It participates in every add/omit ranking wave, but it is not a
+    # combination and therefore cannot consume one of the four full-fit
+    # combination promotion slots.
+    eligible = [candidate for candidate in survivors if candidate.get("members")]
+    reduced = eligible[: int(stage_f_plan["top_beam_winners_full_fit"])]
     promoted = []
     for rank, candidate in enumerate(reduced, 1):
         graph = _combination(
@@ -633,7 +647,7 @@ def promote_combination_beam_winners(
     return with_content_hash(
         {
             "contract": COMBINATION_BEAM_PROMOTION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(stage_f_plan["source"]),
             "stage_f_plan_sha256": stage_f_plan["content_hash"],
             "final_wave_sha256": final_wave["content_hash"],
@@ -642,6 +656,12 @@ def promote_combination_beam_winners(
             "reduced_budget_graph_ids": [
                 row["reduced_budget_graph_id"] for row in promoted
             ],
+            "excluded_baseline_graph_ids": [
+                str(row["graph_id"]) for row in excluded_baselines
+            ],
+            "baseline_exclusion_rule": (
+                "zero_member_H_BASE_BEAM_BUDGET_is_ranked_but_not_promoted_v1"
+            ),
             "winner_count": len(promoted),
             "full_fit_required": True,
             "performance_can_omit_or_cancel": False,
@@ -709,7 +729,7 @@ def build_combination_beam_completion(
     return with_content_hash(
         {
             "contract": COMBINATION_BEAM_COMPLETION_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "source": dict(stage_f_plan["source"]),
             "stage_f_plan_sha256": stage_f_plan["content_hash"],
             "family_order": list(FAMILY_ORDER),

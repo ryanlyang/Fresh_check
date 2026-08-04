@@ -5918,3 +5918,34 @@ export RETB_SUPP_KD_RECOVERY_ROOT=/path/to/failed/supplemental/root
 export RETB_SUPP_KD_ORIGINAL_ARRAY_JOB_ID=original_array_job_id
 bash sbatch/submit_retb_supplemental_kd_recovery.sh
 ```
+
+### Supplemental relation-matched and hybrid-teacher KD
+
+This diagnostic separates the strength benefit of distillation from the loss
+of ensemble diversity caused by giving every compact expert the same teacher.
+It trains three missing ordinary, uncompressed, relation-specialist teachers
+(`PT`, `TRACK`, and `REGION`) with the fixed 40-epoch CE protocol.  The existing
+ordinary `O_BASE` checkpoint is the BASE4 specialist and the existing ordinary
+`O_FULLREL` checkpoint remains the common teacher.
+
+Eight fresh `S8_128` compact students are then trained from scratch.  The four
+`MATCHED_KD` students use `0.25 CE + 1.0 KL(matched specialist)` at temperature
+2.  The four `HYBRID_KD` students use
+`0.25 CE + 0.5 KL(O_FULLREL) + 0.5 KL(matched specialist)` at temperature 2.
+All runs use seed 101, the campaign's fixed 40-epoch optimizer schedule, and
+val-stop checkpoint selection.  Arithmetic mean logits are evaluated on
+val-stop and val-design and compared with the already completed CE4 and
+common-teacher KD4 mean-logit controls.  The report also records all six
+pairwise prediction/correctness disagreements, double-fault rates, centered
+logit correlations, and the ensemble bonus above the best member.  No final
+test data are read and underperformance never stops any run.
+
+The three teachers are unthrottled and concurrent.  The two BASE4 student
+conditions start immediately after bootstrap while the six relation students
+wait only for the specialist teachers, then run concurrently.  Submit with:
+
+```bash
+export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge/retb_relation_expert_bridge_20260802T011953Z_1353c881c2_3a9457902f
+export RETB_COMMON_FUSION_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge_supplemental/retb_supplemental_offline_fusion_20260804T153211Z_046f619cd6
+bash sbatch/submit_retb_specialist_kd.sh
+```

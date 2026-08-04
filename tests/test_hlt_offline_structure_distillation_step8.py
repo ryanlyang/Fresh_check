@@ -705,6 +705,36 @@ def test_complete_beam_attests_all_eight_waves_and_promotes_distinct_full_fits()
         set(promotion["promoted_graph_ids"])
         & set(promotion["reduced_budget_graph_ids"])
     )
+    nonempty = [
+        candidate
+        for candidate in waves[-1]["surviving_candidates"]
+        if candidate.get("members")
+    ]
+    final_with_winning_base = with_content_hash(
+        {
+            key: value
+            for key, value in waves[-1].items()
+            if key != "content_hash"
+        }
+        | {
+            "surviving_graph_ids": [
+                "H_BASE_BEAM_BUDGET",
+                *[row["graph_id"] for row in nonempty[:4]],
+            ],
+            "surviving_candidates": [plan["beam_root"], *nonempty[:4]],
+        }
+    )
+    promotion_with_winning_base = promote_combination_beam_winners(
+        stage_f_plan=plan,
+        final_wave=final_with_winning_base,
+    )
+    assert promotion_with_winning_base["winner_count"] == 4
+    assert promotion_with_winning_base["excluded_baseline_graph_ids"] == [
+        "H_BASE_BEAM_BUDGET"
+    ]
+    assert all(
+        row["members"] for row in promotion_with_winning_base["promoted_graphs"]
+    )
     completion = build_combination_beam_completion(
         stage_f_plan=plan,
         expansions=expansions,
