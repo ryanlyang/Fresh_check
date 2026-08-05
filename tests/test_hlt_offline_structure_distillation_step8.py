@@ -31,6 +31,7 @@ from teacher_logit_reco.hlt_offline_structure_distillation.combination_runtime i
     CombinationDataset,
     CombinationHBaseClassifier,
     _native_relation_identity_indices,
+    _native_relation_join_indices,
     combination_losses,
 )
 from teacher_logit_reco.hlt_offline_structure_distillation.auxiliary_data import (
@@ -106,6 +107,51 @@ def test_native_relation_val_design_store_is_lazily_joined_to_design_subset():
         _native_relation_identity_indices(source_ids, ("jet-missing",))
     with pytest.raises(ValueError, match="source identities are duplicated"):
         _native_relation_identity_indices(("jet-a", "jet-a"), ("jet-a",))
+
+
+def test_native_relation_join_reorders_discovery_roles_but_not_scale():
+    reordered = _native_relation_join_indices(
+        source_identities=("jet-b", "jet-a"),
+        requested_identities=("jet-a", "jet-b"),
+        role="model_train",
+        training_role="model_train",
+        artifact_split="model_train",
+        source_identity_hash="a" * 64,
+        requested_identity_hash="b" * 64,
+    )
+    assert reordered.tolist() == [1, 0]
+    assert (
+        _native_relation_join_indices(
+            source_identities=("jet-a", "jet-b"),
+            requested_identities=("jet-a", "jet-b"),
+            role="val_stop",
+            training_role="model_train",
+            artifact_split="val_stop",
+            source_identity_hash="c" * 64,
+            requested_identity_hash="c" * 64,
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="source differs for role val_stop"):
+        _native_relation_join_indices(
+            source_identities=("jet-b", "jet-a"),
+            requested_identities=("jet-a", "jet-b"),
+            role="val_stop",
+            training_role="model_train",
+            artifact_split="model_train",
+            source_identity_hash="a" * 64,
+            requested_identity_hash="b" * 64,
+        )
+    with pytest.raises(ValueError, match="exact authenticated order"):
+        _native_relation_join_indices(
+            source_identities=("jet-b", "jet-a"),
+            requested_identities=("jet-a", "jet-b"),
+            role="scale_train",
+            training_role="scale_train",
+            artifact_split="scale_train",
+            source_identity_hash="a" * 64,
+            requested_identity_hash="b" * 64,
+        )
 
 
 def test_eight_member_scale_combination_never_materializes_identity_population():
@@ -387,7 +433,7 @@ def test_combination_manifest_loads_authenticated_nondefault_role_seed(
         evaluation_role=evaluation_role,
         training_role=training_role,
     )
-    assert manifest["contract"] == "hosd_combination_loader_manifest_v6"
+    assert manifest["contract"] == "hosd_combination_loader_manifest_v7"
     assert manifest["pipeline_seed"] == pipeline_seed
     assert manifest["sampler_seed_by_role"][training_role] == data_order_seed(
         pipeline_seed, training_role

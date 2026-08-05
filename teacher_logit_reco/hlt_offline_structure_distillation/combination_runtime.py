@@ -69,6 +69,9 @@ COMBINATION_LOADER_MANIFEST_CONTRACT_V5 = (
 COMBINATION_LOADER_MANIFEST_CONTRACT_V6 = (
     "hosd_combination_loader_manifest_v6"
 )
+COMBINATION_LOADER_MANIFEST_CONTRACT_V7 = (
+    "hosd_combination_loader_manifest_v7"
+)
 COMBINATION_CHECKPOINT_CONTRACT = "hosd_combination_checkpoint_v1"
 COMBINATION_COMPLETION_CONTRACT = "hosd_combination_completion_v1"
 
@@ -346,6 +349,40 @@ def _native_relation_identity_indices(
     return indices
 
 
+def _native_relation_join_indices(
+    *,
+    source_identities: Sequence[Any],
+    requested_identities: Sequence[Any],
+    role: str,
+    training_role: str,
+    artifact_split: str,
+    source_identity_hash: str,
+    requested_identity_hash: str,
+) -> np.ndarray | None:
+    if (
+        len(source_identities) == len(requested_identities)
+        and source_identity_hash == requested_identity_hash
+    ):
+        return None
+    expected_split = {
+        training_role: training_role,
+        "val_stop": "val_stop",
+        "design_select": "val_design",
+        "design_confirm": "val_design",
+    }.get(role)
+    if expected_split is None or artifact_split != expected_split:
+        raise ValueError(
+            f"native relation target identity source differs for role {role}"
+        )
+    if role == "scale_train":
+        raise ValueError(
+            "scale native relation targets must retain exact authenticated order"
+        )
+    return _native_relation_identity_indices(
+        source_identities, requested_identities
+    )
+
+
 def build_combination_loader_manifest(
     *,
     graph: Mapping[str, Any],
@@ -451,8 +488,8 @@ def build_combination_loader_manifest(
         raise ValueError("ordinary combinations cannot bind native relation targets")
     return with_content_hash(
         {
-            "contract": COMBINATION_LOADER_MANIFEST_CONTRACT_V6,
-            "schema_version": 6,
+            "contract": COMBINATION_LOADER_MANIFEST_CONTRACT_V7,
+            "schema_version": 7,
             "source": dict(source),
             "campaign_spec_sha256": require_sha256(
                 campaign_spec_sha256, name="campaign_spec_sha256"
@@ -464,7 +501,7 @@ def build_combination_loader_manifest(
             "training_role": training_role,
             **order_attestation,
             "identity_join": (
-                "exact_identity_or_authenticated_val_design_subset_lookup_v2"
+                "exact_role_identity_lookup_with_val_design_subsets_v3"
             ),
         }
     )
@@ -479,7 +516,7 @@ def load_combination_loaders(
     target_registry: Mapping[str, Any],
 ) -> dict[str, Any]:
     if (
-        manifest.get("contract") != COMBINATION_LOADER_MANIFEST_CONTRACT_V6
+        manifest.get("contract") != COMBINATION_LOADER_MANIFEST_CONTRACT_V7
         or manifest.get("source") != campaign["source"]
         or manifest.get("campaign_spec_sha256") != campaign["content_hash"]
         or manifest.get("graph_id") != graph["graph_id"]
@@ -673,20 +710,17 @@ def load_combination_loaders(
                     "identity_order_sha256",
                     None,
                 )
-                source_indices = None
-                if not (
-                    source_count == len(expected_ids)
-                    and artifact.get("identity_order_sha256")
-                    == expected_identity_hash
-                ):
-                    if (
-                        role not in {"design_select", "design_confirm"}
-                        or artifact.get("split") != "val_design"
-                    ):
-                        raise ValueError("native relation target identities differ")
-                    source_indices = _native_relation_identity_indices(
-                        mapped["identities"], expected_ids
-                    )
+                source_indices = _native_relation_join_indices(
+                    source_identities=mapped["identities"],
+                    requested_identities=expected_ids,
+                    role=role,
+                    training_role=training_role,
+                    artifact_split=str(artifact.get("split", "")),
+                    source_identity_hash=str(
+                        artifact.get("identity_order_sha256", "")
+                    ),
+                    requested_identity_hash=str(expected_identity_hash or ""),
+                )
                 native_targets[replica] = {
                     name: mapped[name]
                     for name in ("targets", "target_mask", "availability")
@@ -1231,6 +1265,7 @@ __all__ = [
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V4",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V5",
     "COMBINATION_LOADER_MANIFEST_CONTRACT_V6",
+    "COMBINATION_LOADER_MANIFEST_CONTRACT_V7",
     "CombinationDataset",
     "CombinationHBaseClassifier",
     "build_combination_loader_manifest",
