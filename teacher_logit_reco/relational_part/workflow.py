@@ -227,11 +227,18 @@ def resolve_model_contract_path(
         ) != row.get("sha256"):
             raise ValueError(f"recovered model contract differs for {run_id}")
         return path
-    candidates = [
-        root / "registry" / "model_contracts" / f"{run_id}.json",
-        root / "registry" / "confirmation_model_contracts" / f"{run_id}.json",
-        root / "selection" / "semantic_controls" / "unary_model_contract.json",
-    ]
+    if run_id == "RPT_SELECTED_UNARY":
+        candidates = [
+            root
+            / "selection"
+            / "semantic_controls"
+            / "unary_model_contract.json"
+        ]
+    else:
+        candidates = [
+            root / "registry" / "model_contracts" / f"{run_id}.json",
+            root / "registry" / "confirmation_model_contracts" / f"{run_id}.json",
+        ]
     matches = [path for path in candidates if path.is_file()]
     if len(matches) != 1:
         raise FileNotFoundError(

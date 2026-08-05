@@ -43,6 +43,7 @@ from teacher_logit_reco.relational_part import (
     build_tree_probe_artifact,
     select_raw_audit_identities,
     select_tree_probe,
+    resolve_model_contract_path,
     validate_existing_tree_shard,
     validate_campaign_source,
     validate_content_hash,
@@ -52,6 +53,52 @@ from teacher_logit_reco.relational_part import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_model_contract_resolution_keeps_unary_contract_run_scoped(
+    tmp_path: Path,
+) -> None:
+    ordinary_path = (
+        tmp_path / "registry" / "model_contracts" / "RPT_REGION.json"
+    )
+    unary_path = (
+        tmp_path
+        / "selection"
+        / "semantic_controls"
+        / "unary_model_contract.json"
+    )
+    ordinary_path.parent.mkdir(parents=True)
+    unary_path.parent.mkdir(parents=True)
+    ordinary_path.write_text(
+        json.dumps(
+            with_content_hash(
+                {
+                    "contract": "ordinary_test_contract",
+                    "schema_version": 1,
+                    "run_id": "RPT_REGION",
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    unary_path.write_text(
+        json.dumps(
+            with_content_hash(
+                {
+                    "contract": "unary_test_contract",
+                    "schema_version": 1,
+                    "run_id": "RPT_SELECTED_UNARY",
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert resolve_model_contract_path(tmp_path, "RPT_REGION") == ordinary_path
+    assert (
+        resolve_model_contract_path(tmp_path, "RPT_SELECTED_UNARY")
+        == unary_path
+    )
 
 
 def test_parity_consumption_requires_exact_source_and_active_trim_fixture() -> None:
