@@ -5949,3 +5949,39 @@ export RETB_PARENT_CAMPAIGN_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relat
 export RETB_COMMON_FUSION_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge_supplemental/retb_supplemental_offline_fusion_20260804T153211Z_046f619cd6
 bash sbatch/submit_retb_specialist_kd.sh
 ```
+
+### Supplemental ordinary-head specialist-KD decomposition
+
+The completed compact specialist wave changes both the training objective and
+the student readout relative to each ordinary CE teacher.  A separate
+authenticated control therefore trains the exact two-by-four matched/hybrid
+matrix again with ordinary, uncompressed Particle Transformer heads.  Each
+student sees the same full offline particles, uses the same BASE4, PT, TRACK,
+or REGION attention relation as its matched teacher, starts from scratch at
+seed 101, and retains the same 40-epoch optimizer schedule and val-stop-only
+checkpoint selection.  The only architectural change from the completed
+compact counterpart is `TOK_WEAVER_CLASS` with no `S8_128` summary-token
+bottleneck.
+
+`MATCHED_KD` remains `0.25 CE + 1.0 KL(matched specialist)` and `HYBRID_KD`
+remains `0.25 CE + 0.5 KL(O_FULLREL) + 0.5 KL(matched specialist)`, all at
+temperature 2.  All eight ordinary students launch concurrently without an
+array throttle because their ordinary specialist teachers and compact
+counterparts are already immutable.  Underperformance never changes the
+execution graph, and final-test access remains forbidden.
+
+`retb_ordinary_specialist_kd_plan_v1` byte-binds the completed compact plan,
+compact report, all ordinary specialist teacher manifests and training/stop
+logit caches, all eight compact student results, and their validation
+predictions.  Ordinary checkpoints use distinct checkpoint and resume
+contracts, so they cannot alias compact token-bottleneck artifacts.  The final
+report publishes member and four-expert mean-logit metrics, diversity, the
+ordinary KD gain above each ordinary CE teacher where that split is available,
+and the compression effect defined globally as compact KD minus ordinary KD.
+
+Submit with:
+
+```bash
+export RETB_COMPACT_SPECIALIST_KD_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge_supplemental/retb_specialist_kd_20260804T202302Z_996f78ff0b
+bash sbatch/submit_retb_ordinary_specialist_kd.sh
+```

@@ -35,6 +35,8 @@ def train_specialist_kd_student(
     plan_sha256: str,
     device: Any,
     maximum_epochs: int = 40,
+    checkpoint_contract: str = "retb_specialist_kd_checkpoint_v1",
+    resume_contract: str = "retb_specialist_kd_resume_v1",
 ) -> dict[str, Any]:
     """Run every planned update and select only with authenticated val-stop."""
 
@@ -59,7 +61,7 @@ def train_specialist_kd_student(
     if last_path.is_file():
         resume = torch.load(last_path, map_location="cpu", weights_only=False)
         expected = {
-            "contract": "retb_specialist_kd_resume_v1",
+            "contract": resume_contract,
             "run_id": run_id,
             "condition": condition,
             "plan_sha256": plan_sha256,
@@ -180,7 +182,7 @@ def train_specialist_kd_student(
         )
         _atomic_torch_save(
             {
-                "contract": "retb_specialist_kd_checkpoint_v1",
+                "contract": checkpoint_contract,
                 "run_id": run_id,
                 "condition": condition,
                 "plan_sha256": plan_sha256,
@@ -194,7 +196,7 @@ def train_specialist_kd_student(
         current = _cpu_state(model)
         _atomic_torch_save(
             {
-                "contract": "retb_specialist_kd_resume_v1",
+                "contract": resume_contract,
                 "run_id": run_id,
                 "condition": condition,
                 "plan_sha256": plan_sha256,
