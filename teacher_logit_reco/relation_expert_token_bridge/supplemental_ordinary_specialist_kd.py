@@ -30,7 +30,7 @@ ORDINARY_SPECIALIST_PLAN_CONTRACT = "retb_ordinary_specialist_kd_plan_v1"
 ORDINARY_SPECIALIST_STUDENT_CONTRACT = (
     "retb_ordinary_specialist_kd_student_v1"
 )
-ORDINARY_SPECIALIST_REPORT_CONTRACT = "retb_ordinary_specialist_kd_report_v1"
+ORDINARY_SPECIALIST_REPORT_CONTRACT = "retb_ordinary_specialist_kd_report_v2"
 ORDINARY_SPECIALIST_CHECKPOINT_CONTRACT = (
     "retb_ordinary_specialist_kd_checkpoint_v1"
 )

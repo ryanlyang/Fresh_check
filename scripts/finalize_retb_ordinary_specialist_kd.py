@@ -55,6 +55,22 @@ def _prediction(record: dict[str, Any]) -> dict[str, np.ndarray]:
         return {name: np.asarray(payload[name]) for name in payload.files}
 
 
+def _compact_mean_logits(
+    logits_by_expert: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Reproduce the compact v1 finalizer's exact float32 reduction."""
+
+    ordered = [
+        np.asarray(logits_by_expert[expert]) for expert in SPECIALIST_EXPERTS
+    ]
+    if any(value.dtype != np.float32 for value in ordered):
+        raise ValueError("compact specialist logits are not float32")
+    # Do not pass dtype=float64 here.  The authenticated compact report was
+    # produced by numpy's float32 accumulation, so even a more accurate
+    # reduction would create different logits and cross entropy.
+    return np.mean(np.stack(ordered), axis=0).astype(np.float32)
+
+
 def _teacher_metrics(compact_plan: dict[str, Any]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     base_registration = load_hashed_json(
@@ -77,23 +93,46 @@ def main() -> int:
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--student-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument(
+        "--corrective-source-recovery",
+        action="store_true",
+        help=(
+            "Permit a finalizer-only source change while preserving the "
+            "original plan and completed student lineage."
+        ),
+    )
     args = parser.parse_args()
 
     plan = load_hashed_json(args.plan)
     validate_ordinary_specialist_kd_plan(plan, check_parent_bytes=False)
     source = source_snapshot(REPO_ROOT)
-    if plan.get("source") != source_record(source):
+    finalizer_source = source_record(source)
+    source_matches_plan = plan.get("source") == finalizer_source
+    if not source_matches_plan and not args.corrective_source_recovery:
         raise ValueError("ordinary specialist KD finalizer source differs")
     report_path = args.output_root / "ordinary_specialist_kd_report.json"
     if report_path.is_file():
         report = load_hashed_json(
             report_path, expected_contract=ORDINARY_SPECIALIST_REPORT_CONTRACT
         )
+        finalization = report.get("source_finalization")
         if (
             report.get("plan_sha256") != plan["content_hash"]
-            or report.get("source") != plan.get("source")
+            or not isinstance(finalization, dict)
+            or finalization.get("training_and_plan_source")
+            != plan.get("source")
+            or finalization.get("report_finalizer_source")
+            != report.get("source")
+            or bool(finalization.get("source_matches_plan"))
+            != (report.get("source") == plan.get("source"))
+            or finalization.get("scientific_training_artifacts_modified")
+            is not False
         ):
             raise ValueError("reusable ordinary specialist KD report differs")
+        if report.get("source") != finalizer_source:
+            raise ValueError(
+                "reusable ordinary specialist KD report finalizer source differs"
+            )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
 
@@ -313,18 +352,36 @@ def main() -> int:
         compact_condition = compact_report["conditions"][condition]
         ensemble_effects = {}
         for split in ("val_stop", "val_design"):
-            compact_logits = np.mean(
-                np.stack(
-                    [
-                        compact_arrays_by_split[split][expert]
-                        for expert in SPECIALIST_EXPERTS
-                    ]
-                ),
-                axis=0,
-                dtype=np.float64,
-            ).astype(np.float32)
+            compact_logits = _compact_mean_logits(
+                compact_arrays_by_split[split]
+            )
+            compact_ensemble = compact_condition["ensemble"][split]
+            published_compact = _prediction(
+                {
+                    "path": compact_ensemble["prediction_path"],
+                    "file_sha256": compact_ensemble[
+                        "prediction_file_sha256"
+                    ],
+                }
+            )
+            if (
+                not np.array_equal(
+                    published_compact["identities"], identities_by_split[split]
+                )
+                or not np.array_equal(
+                    published_compact["labels"], labels_by_split[split]
+                )
+                or not np.array_equal(
+                    published_compact["logits"], compact_logits
+                )
+            ):
+                raise ValueError(
+                    "ordinary specialist KD compact ensemble bytes differ"
+                )
             compact_metrics = evaluate_classification(
-                compact_logits, labels_by_split[split], split=split
+                published_compact["logits"],
+                published_compact["labels"],
+                split=split,
             )
             compact_recorded = compact_condition["ensemble"][split]["metrics"]
             if (
@@ -354,7 +411,7 @@ def main() -> int:
         with_content_hash(
             {
                 "contract": ORDINARY_SPECIALIST_REPORT_CONTRACT,
-                "schema_version": 1,
+                "schema_version": 2,
                 "plan_sha256": plan["content_hash"],
                 "compact_plan_sha256": compact_plan["content_hash"],
                 "compact_report_sha256": compact_report["content_hash"],
@@ -370,6 +427,20 @@ def main() -> int:
                     "descriptive_not_final_claim": True,
                 },
                 "all_eight_ordinary_students_complete": True,
+                "source_finalization": {
+                    "training_and_plan_source": plan.get("source"),
+                    "report_finalizer_source": finalizer_source,
+                    "source_matches_plan": source_matches_plan,
+                    "corrective_source_recovery": bool(
+                        args.corrective_source_recovery
+                    ),
+                    "correction": (
+                        None
+                        if source_matches_plan
+                        else "compact_v1_float32_mean_logit_reproduction"
+                    ),
+                    "scientific_training_artifacts_modified": False,
+                },
                 "performance_based_termination": False,
                 "scientific_underperformance_blocks_execution": False,
                 "final_test_accessed": False,

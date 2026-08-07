@@ -220,6 +220,43 @@ def test_submission_runs_all_eight_students_without_array_throttle() -> None:
     assert "final_test" not in text
 
 
+def test_compact_ensemble_reproduction_preserves_float32_reduction() -> None:
+    import pytest
+
+    np = pytest.importorskip("numpy")
+    from scripts.finalize_retb_ordinary_specialist_kd import (
+        _compact_mean_logits,
+    )
+
+    generator = np.random.default_rng(20260807)
+    stacked = None
+    legacy = None
+    upcast = None
+    for _ in range(100):
+        candidate = generator.normal(size=(4, 32, 10)).astype(np.float32)
+        candidate *= np.float32(
+            10.0 ** int(generator.integers(-4, 5))
+        )
+        candidate_legacy = np.mean(candidate, axis=0).astype(np.float32)
+        candidate_upcast = np.mean(
+            candidate, axis=0, dtype=np.float64
+        ).astype(np.float32)
+        if not np.array_equal(candidate_legacy, candidate_upcast):
+            stacked = candidate
+            legacy = candidate_legacy
+            upcast = candidate_upcast
+            break
+    assert stacked is not None
+    result = _compact_mean_logits(
+        {
+            expert: stacked[index]
+            for index, expert in enumerate(SPECIALIST_EXPERTS)
+        }
+    )
+    assert np.array_equal(result, legacy)
+    assert not np.array_equal(result, upcast)
+
+
 def test_workers_use_the_frozen_project_runtime() -> None:
     root = Path(__file__).resolve().parents[1]
     for name in (
@@ -230,3 +267,16 @@ def test_workers_use_the_frozen_project_runtime() -> None:
         text = (root / "sbatch" / name).read_text()
         assert 'source "${PROJECT_DIR}/sbatch/retb_common.sh"' in text
         assert 'dirname "${BASH_SOURCE[0]}"' not in text
+
+    finalizer = (
+        root / "sbatch/run_retb_ordinary_specialist_kd_finalize.sh"
+    ).read_text()
+    assert "RETB_ORDINARY_SPECIALIST_KD_FINALIZER_RECOVERY" in finalizer
+    recovery = (
+        root / "sbatch/submit_retb_ordinary_specialist_kd_finalize_recovery.sh"
+    ).read_text()
+    assert 'source "${SCRIPT_DIR}/retb_common.sh"' in recovery
+    assert "worktree add --detach" in recovery
+    assert "--array=" not in recovery
+    assert "run_retb_ordinary_specialist_kd_finalize.sh" in recovery
+    assert "RETB_ORDINARY_SPECIALIST_KD_FINALIZER_RECOVERY=1" in recovery

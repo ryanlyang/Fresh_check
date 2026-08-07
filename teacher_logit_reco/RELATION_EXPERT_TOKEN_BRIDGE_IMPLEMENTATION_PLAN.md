@@ -5985,3 +5985,20 @@ Submit with:
 export RETB_COMPACT_SPECIALIST_KD_ROOT=/home/ryreu/atlas/Fresh_check/checkpoints/relation_expert_token_bridge_supplemental/retb_specialist_kd_20260804T202302Z_996f78ff0b
 bash sbatch/submit_retb_ordinary_specialist_kd.sh
 ```
+
+The ordinary-head report contract is
+`retb_ordinary_specialist_kd_report_v2`.  Its compact comparison reproduces
+the already authenticated compact-v1 mean-logit reduction in FP32 and checks
+the recomputed identities, labels, and logits byte-for-byte against the
+published compact ensemble before comparing metrics.  If all eight ordinary
+students were produced by an older frozen source but only aggregation failed,
+the finalizer may be recovered without retraining:
+
+```bash
+export RETB_ORDINARY_SPECIALIST_KD_ROOT=/path/to/completed/ordinary_specialist_kd/root
+bash sbatch/submit_retb_ordinary_specialist_kd_finalize_recovery.sh
+```
+
+That recovery submits only the CPU finalizer.  The v2 report separately binds
+the original training/plan source and the corrective finalizer source, and
+attests that no scientific training artifact was modified.
