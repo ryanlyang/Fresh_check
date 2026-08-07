@@ -275,6 +275,9 @@ def test_workers_use_the_frozen_project_runtime() -> None:
     recovery = (
         root / "sbatch/submit_retb_ordinary_specialist_kd_finalize_recovery.sh"
     ).read_text()
+    assert 'git -C "${SCRIPT_DIR}/.." rev-parse --show-toplevel' in recovery
+    assert 'PROJECT_DIR="${SCRIPT_PROJECT_DIR}"' in recovery
+    assert 'git -C "${PROJECT_DIR}" rev-parse --show-toplevel' not in recovery
     assert 'source "${SCRIPT_DIR}/retb_common.sh"' in recovery
     assert "worktree add --detach" in recovery
     assert "--array=" not in recovery

@@ -3,12 +3,17 @@ set -euo pipefail
 IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PROJECT_DIR="$(git -C "${SCRIPT_DIR}/.." rev-parse --show-toplevel)"
+# Submission shells may retain PROJECT_DIR from an unrelated frozen campaign.
+# This launcher must freeze the checkout that actually contains this script.
+PROJECT_DIR="${SCRIPT_PROJECT_DIR}"
+export PROJECT_DIR
 source "${SCRIPT_DIR}/retb_common.sh"
 
 : "${RETB_ORDINARY_SPECIALIST_KD_ROOT:?Set the completed ordinary specialist-KD root}"
 
 if [[ "${RETB_ORDINARY_SPECIALIST_KD_RECOVERY_FROZEN_REENTRY:-0}" != "1" ]]; then
-  submission_project_dir="$(git -C "${PROJECT_DIR}" rev-parse --show-toplevel)"
+  submission_project_dir="${SCRIPT_PROJECT_DIR}"
   source_commit="$(git -C "${submission_project_dir}" rev-parse HEAD)"
   : "${RETB_SOURCE_WORKTREE_ROOT:=${submission_project_dir%/*}/retb_source_worktrees}"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
