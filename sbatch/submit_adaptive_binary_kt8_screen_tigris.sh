@@ -109,17 +109,28 @@ if [[ -f "${ABPH_KT8_MANIFEST}" ]]; then
     }
   fi
   mkdir -p "${archive_root}"
-  for artifact_kind in runtime_batch_measurements runtime_batch_contracts; do
-    previous="${ABPH_ROOT}/${artifact_kind}/${renderer_variant}"
-    if [[ -e "${previous}" ]]; then
-      [[ ! -L "${previous}" ]] || {
-        echo "Refusing to archive symlinked kT8 evidence: ${previous}" >&2
-        exit 2
-      }
-      mkdir -p "${archive_root}/${artifact_kind}"
-      mv -- "${previous}" "${archive_root}/${artifact_kind}/"
-    fi
-  done
+  if [[ ! -f "${renderer_checkpoint}" ]]; then
+    for artifact_kind in runtime_batch_measurements runtime_batch_contracts; do
+      previous="${ABPH_ROOT}/${artifact_kind}/${renderer_variant}"
+      if [[ -e "${previous}" ]]; then
+        [[ ! -L "${previous}" ]] || {
+          echo "Refusing to archive symlinked kT8 evidence: ${previous}" >&2
+          exit 2
+        }
+        mkdir -p "${archive_root}/${artifact_kind}"
+        mv -- "${previous}" "${archive_root}/${artifact_kind}/"
+      fi
+    done
+  fi
+  failed_tagger_run="${ABPH_ROOT}/runs/${tagger_variant}"
+  if [[ -d "${failed_tagger_run}" && ! -f "${tagger_report}" ]]; then
+    [[ ! -L "${failed_tagger_run}" ]] || {
+      echo "Refusing to archive symlinked failed tagger run: ${failed_tagger_run}" >&2
+      exit 2
+    }
+    mkdir -p "${archive_root}/runs"
+    mv -- "${failed_tagger_run}" "${archive_root}/runs/"
+  fi
   mv -- "${ABPH_KT8_MANIFEST}" "${archive_root}/"
   echo "Archived superseded kT8 evidence under ${archive_root}"
 fi

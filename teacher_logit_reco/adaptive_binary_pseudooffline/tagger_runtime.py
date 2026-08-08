@@ -9,7 +9,7 @@ import math
 import os
 from pathlib import Path
 import time
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -101,6 +101,89 @@ ABPH_FROZEN_SINGLE_PSEUDO_SOURCES = frozenset(
         "D7_kt8_mh4_particles_screen",
     }
 )
+
+
+def _uninitialized_state_names(module: Any) -> tuple[str, ...]:
+    """Return lazy parameter/buffer names that cannot yet be hashed or wrapped."""
+
+    torch = require_torch()
+    lazy_types = tuple(
+        value
+        for value in (
+            getattr(torch.nn.parameter, "UninitializedParameter", None),
+            getattr(torch.nn.parameter, "UninitializedBuffer", None),
+        )
+        if value is not None
+    )
+    rows = (
+        *(
+            f"parameter:{name}"
+            for name, value in module.named_parameters()
+            if isinstance(value, lazy_types)
+        ),
+        *(
+            f"buffer:{name}"
+            for name, value in module.named_buffers()
+            if isinstance(value, lazy_types)
+        ),
+    )
+    return tuple(sorted(rows))
+
+
+def _materialize_tagger_dynamic_state(
+    module: Any,
+    forward_once: Callable[[], Any],
+    *,
+    distributed_runtime: Any,
+    seed: int,
+) -> dict[str, Any]:
+    """Materialize input-shaped tagger state before hashing, AdamW, or DDP."""
+
+    torch = require_torch()
+    before = _uninitialized_state_names(module)
+    local_error: BaseException | None = None
+    was_training = bool(module.training)
+    try:
+        if before:
+            module.eval()
+            with torch.no_grad():
+                forward_once()
+    except BaseException as exc:  # synchronized below before any DDP collective
+        local_error = exc
+    finally:
+        module.train(was_training)
+
+    after = _uninitialized_state_names(module)
+    if local_error is None and after:
+        local_error = RuntimeError(
+            "tagger representative forward left uninitialized state: "
+            + ", ".join(after)
+        )
+    summaries = gather_error_summaries(
+        distributed_runtime,
+        phase="tagger_dynamic_state_materialization",
+        error=local_error,
+        structural=True,
+    )
+    failures = [row for row in summaries if row.get("error_type") is not None]
+    if failures:
+        raise RuntimeError(
+            "tagger dynamic-state materialization failed across ranks: "
+            + json.dumps(failures, sort_keys=True)
+        ) from local_error
+
+    # Materialization consumes initialization/dropout RNG. Restore the declared
+    # training seed so the first optimizer update keeps its reproducible stream.
+    set_training_seed(int(seed))
+    return {
+        "required": bool(before),
+        "materialized_state_names": list(before),
+        "materialized_state_count": len(before),
+        "remaining_uninitialized_state_names": list(after),
+        "representative_forward_mode": "eval_no_grad",
+        "training_seed_restored": True,
+        "completed_on_all_ranks": True,
+    }
 
 
 def _binary_auc(scores: np.ndarray, positive: np.ndarray) -> float | None:
@@ -1402,6 +1485,31 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
         compute_tagging_objective,
         objective_config,
     ).to(device)
+
+    def materialize_dynamic_state() -> Any:
+        if joint:
+            representative_batch = next(iter(joint_train.iter_epoch()))
+        else:
+            representative_batch = next(
+                frozen_train.iter_batches(shuffle=False, seed=seed)
+            )
+        return forward_tagger_step(
+            model,
+            reconstructor,
+            representative_batch,
+            "model_train",
+            True,
+        )
+
+    dynamic_state_materialization = _materialize_tagger_dynamic_state(
+        training_module,
+        materialize_dynamic_state,
+        distributed_runtime=distributed_runtime,
+        seed=seed,
+    )
+    initial_parameter_state_hash = verify_common_parameter_state(
+        distributed_runtime, training_module
+    )
     parameters = list(training_module.parameters())
     optimizer = torch.optim.AdamW(
         parameters, lr=2.0e-4, betas=(0.9, 0.95), weight_decay=0.01
@@ -1411,9 +1519,6 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
     )
     ddp_wrapper: Any = build_tagger_ddp_wrapper(
         training_module, distributed_runtime, device=device
-    )
-    initial_parameter_state_hash = verify_common_parameter_state(
-        distributed_runtime, training_module
     )
 
     ddp_trainability_signature = tuple(
@@ -1927,6 +2032,7 @@ def train_tagger_variant(args: Any, resolved: Mapping[str, Any], output_dir: Pat
             "local_batch_size": local_batch_size,
             "training_wall_seconds": training_wall_seconds,
             "initial_parameter_state_hash": initial_parameter_state_hash,
+            "dynamic_state_materialization": dynamic_state_materialization,
             "global_batch_plan_ledger": global_batch_plan_ledger,
             "validation_coverage_hash": best_val_metrics.get(
                 "validation_reduction", {}

@@ -29,6 +29,14 @@ from teacher_logit_reco.adaptive_binary_pseudooffline.pseudo_consumer import (
     consumer_pseudo_array_names,
     renderer_only_array_names,
 )
+from teacher_logit_reco.adaptive_binary_pseudooffline.distributed import (
+    DistributedRuntime,
+    parameter_state_hash,
+)
+from teacher_logit_reco.adaptive_binary_pseudooffline.tagger_runtime import (
+    _materialize_tagger_dynamic_state,
+    _uninitialized_state_names,
+)
 
 
 def _synthetic_inputs(*, dual: bool = False, views: int = 3, latent_dim: int = 4):
@@ -163,6 +171,39 @@ def _model(*, dual: bool = False, independent_roots: bool = False):
         dual_hierarchy=dual,
         independent_roots=independent_roots,
     )
+
+
+def test_e12_materializes_dynamic_pseudo_projections_before_state_hashing():
+    seed = 24731
+    hlt, hlt_mask, pseudo = _synthetic_inputs(views=5, latent_dim=64)
+    model = build_variant_hierarchy_aware_tagger(
+        "E12_kt8_mh4_dualcross_screen", smoke=True
+    )
+    before = _uninitialized_state_names(model)
+    assert before
+
+    runtime = DistributedRuntime(
+        rank=0,
+        world_size=1,
+        local_rank=0,
+        backend="none",
+        device_type="cpu",
+    )
+    report = _materialize_tagger_dynamic_state(
+        model,
+        lambda: model(hlt, hlt_mask, pseudo),
+        distributed_runtime=runtime,
+        seed=seed,
+    )
+
+    assert report["required"] is True
+    assert report["materialized_state_count"] == len(before)
+    assert report["remaining_uninitialized_state_names"] == []
+    assert _uninitialized_state_names(model) == ()
+    assert len(parameter_state_hash(model)) == 64
+
+    expected = torch.rand(4, generator=torch.Generator().manual_seed(seed))
+    torch.testing.assert_close(torch.rand(4), expected, rtol=0.0, atol=0.0)
 
 
 def _differentiable_copy(pseudo):
