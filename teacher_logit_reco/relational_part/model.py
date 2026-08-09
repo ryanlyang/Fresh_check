@@ -1646,15 +1646,21 @@ def build_confirmation_architecture_model(
 
     from .attention import ConfirmationArchitectureParticleTransformer
 
+    offline_aliases = {
+        "OFF_RPT_BASE_EDGEVALUE": "RPT_BASE_EDGEVALUE",
+        "OFF_RPT_SELECTED_LAYERWISE": "RPT_SELECTED_LAYERWISE",
+        "OFF_RPT_SELECTED_EDGEVALUE": "RPT_SELECTED_EDGEVALUE",
+    }
+    architecture_run_id = offline_aliases.get(run_id, run_id)
     allowed = {
         "RPT_BASE_LAYERWISE": (False, True),
         "RPT_BASE_EDGEVALUE": (True, True),
         "RPT_SELECTED_LAYERWISE": (False, False),
         "RPT_SELECTED_EDGEVALUE": (True, False),
     }
-    if run_id not in allowed:
+    if architecture_run_id not in allowed:
         raise ValueError(f"{run_id!r} is not a Step-6 architecture run")
-    edge_value, base_control = allowed[run_id]
+    edge_value, base_control = allowed[architecture_run_id]
     families = (
         () if base_control else canonical_supported_families(selected_families)
     )

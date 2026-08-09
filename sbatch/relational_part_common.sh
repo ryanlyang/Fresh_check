@@ -87,6 +87,31 @@ rpt_setup() {
   python -c "import sys; print(sys.executable)"
 }
 
+rpt_offline_setup() {
+  rpt_require_campaign_root
+  local conda_hook="${CONDA_BASE}/etc/profile.d/conda.sh"
+  if [[ ! -f "${conda_hook}" ]]; then
+    echo "Conda activation hook is absent: ${conda_hook}" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  source "${conda_hook}"
+  conda activate "${CONDA_ENV}"
+  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  cd "${PROJECT_DIR}"
+  local expected_commit
+  expected_commit="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source"]["commit"])' "${CAMPAIGN_ROOT}/campaign_spec.json")"
+  if [[ "$(git rev-parse HEAD)" != "${expected_commit}" ]]; then
+    echo "Offline campaign worker commit differs from its immutable spec." >&2
+    exit 2
+  fi
+  if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+    echo "Pinned offline campaign source worktree is dirty." >&2
+    exit 2
+  fi
+  python -c "import sys; print(sys.executable)"
+}
+
 rpt_field() {
   python scripts/query_relational_part_artifact.py "$1" "$2"
 }

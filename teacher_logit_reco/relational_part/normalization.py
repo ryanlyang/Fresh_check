@@ -25,6 +25,9 @@ NORMALIZATION_CONTRACT = "relational_part_normalization_contract_v3"
 RELATION_NORMALIZATION_ARTIFACT_CONTRACT = (
     "relational_part_relation_normalization_v2"
 )
+RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3 = (
+    "relational_part_relation_normalization_v3"
+)
 GLOBAL_EPSILON = 1.0e-6
 NORMALIZATION_JET_SALT = "relational_part_normalization_jets_v1"
 NORMALIZATION_PAIR_SALT = "relational_part_normalization_pairs_v1"
@@ -705,9 +708,12 @@ def fit_relation_normalization(
     normalization_contract: Mapping[str, Any],
     relation_registry: Mapping[str, Any],
     raw_input_schema: Mapping[str, Any],
-    hlt_binding_sha256: str,
     source_manifest_sha256: str,
-    hlt_model_train_content_sha256: str,
+    hlt_binding_sha256: str | None = None,
+    hlt_model_train_content_sha256: str | None = None,
+    input_view: str = "fixed_hlt",
+    input_binding_sha256: str | None = None,
+    model_train_content_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Fit every non-tree relation scaler from locked model-train populations."""
 
@@ -720,18 +726,18 @@ def fit_relation_normalization(
     array = np.asarray(tokens)
     raw_mask = np.asarray(mask)
     if array.dtype != np.float32:
-        raise TypeError("HLT normalization tokens must use float32")
+        raise TypeError("relation-normalization tokens must use float32")
     if raw_mask.dtype != np.bool_:
-        raise TypeError("HLT normalization mask must use bool")
+        raise TypeError("relation-normalization mask must use bool")
     valid = raw_mask
     if array.ndim != 3 or int(array.shape[2]) != 14:
-        raise ValueError("HLT tokens must have shape [jets,particles,14]")
+        raise ValueError("relation tokens must have shape [jets,particles,14]")
     if valid.shape != array.shape[:2]:
-        raise ValueError("HLT mask shape does not match tokens")
+        raise ValueError("relation mask shape does not match tokens")
     if len(identities) != int(array.shape[0]):
-        raise ValueError("jet identity count does not match HLT tokens")
+        raise ValueError("jet identity count does not match relation tokens")
     if not np.isfinite(array[valid]).all():
-        raise FloatingPointError("valid HLT tokens contain NaN or infinity")
+        raise FloatingPointError("valid relation tokens contain NaN or infinity")
 
     pid = np.asarray(array[:, :, 5:10], dtype=np.float64)
     pid_distance = np.minimum(np.abs(pid), np.abs(pid - 1.0))
@@ -931,23 +937,47 @@ def fit_relation_normalization(
             "sample_identity_sha256": _identity_sequence_hash(density_node_keys),
         },
     }
+    if input_view == "fixed_hlt":
+        binding_sha = require_sha256(
+            hlt_binding_sha256, name="hlt_binding_sha256"
+        )
+        content_sha = require_sha256(
+            hlt_model_train_content_sha256,
+            name="hlt_model_train_content_sha256",
+        )
+        view_lineage = {
+            "hlt_binding_sha256": binding_sha,
+            "hlt_model_train_content_sha256": content_sha,
+        }
+        artifact_contract = RELATION_NORMALIZATION_ARTIFACT_CONTRACT
+        schema_version = 2
+    elif input_view == "offline":
+        binding_sha = require_sha256(
+            input_binding_sha256, name="input_binding_sha256"
+        )
+        content_sha = require_sha256(
+            model_train_content_sha256, name="model_train_content_sha256"
+        )
+        view_lineage = {
+            "input_view": "offline",
+            "input_binding_sha256": binding_sha,
+            "model_train_content_sha256": content_sha,
+        }
+        artifact_contract = RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3
+        schema_version = 3
+    else:
+        raise ValueError("relation normalization input_view differs")
     artifact = with_content_hash(
         {
-            "contract": RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
-            "schema_version": 2,
+            "contract": artifact_contract,
+            "schema_version": schema_version,
             "fit_split": "model_train",
             "normalization_contract_sha256": normalization_sha,
             "relation_registry_sha256": relation_sha,
             "raw_input_schema_sha256": raw_input_schema_sha,
-            "hlt_binding_sha256": require_sha256(
-                hlt_binding_sha256, name="hlt_binding_sha256"
-            ),
+            **view_lineage,
             "source_manifest_sha256": require_sha256(
                 source_manifest_sha256, name="source_manifest_sha256"
-            ),
-            "hlt_model_train_content_sha256": require_sha256(
-                hlt_model_train_content_sha256,
-                name="hlt_model_train_content_sha256",
             ),
             "fit_families": ["PT", "TRACK", "CHARGE", "DENSITY"],
             "selected_jet_count": int(selected.size),
@@ -1012,14 +1042,21 @@ def validate_relation_normalization_artifact(
     relation_registry_sha256: str | None = None,
     raw_input_schema_sha256: str | None = None,
 ) -> str:
-    digest = validate_content_hash(
-        artifact, expected_contract=RELATION_NORMALIZATION_ARTIFACT_CONTRACT
-    )
+    contract = artifact.get("contract")
+    if contract not in {
+        RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
+        RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3,
+    }:
+        raise ValueError("relation normalizer contract differs")
+    digest = validate_content_hash(artifact)
     if artifact.get("fit_split") != "model_train":
         raise ValueError("relation normalizer was not fitted on model_train")
     if artifact.get("quantile_method") != NORMALIZATION_QUANTILE_METHOD:
         raise ValueError("relation normalizer uses an unsupported quantile method")
-    if int(artifact.get("schema_version", 0)) != 2:
+    expected_schema = (
+        2 if contract == RELATION_NORMALIZATION_ARTIFACT_CONTRACT else 3
+    )
+    if int(artifact.get("schema_version", 0)) != expected_schema:
         raise ValueError("relation normalizer schema version differs")
     if artifact.get("fit_families") != ["PT", "TRACK", "CHARGE", "DENSITY"]:
         raise ValueError("relation normalizer has unsupported family coverage")
@@ -1027,13 +1064,19 @@ def validate_relation_normalization_artifact(
         "normalization_contract_sha256",
         "relation_registry_sha256",
         "raw_input_schema_sha256",
-        "hlt_binding_sha256",
         "source_manifest_sha256",
-        "hlt_model_train_content_sha256",
         "selected_jet_identity_sha256",
         "selected_directed_pair_identity_sha256",
     ):
         require_sha256(artifact.get(field), name=field)
+    if contract == RELATION_NORMALIZATION_ARTIFACT_CONTRACT:
+        for field in ("hlt_binding_sha256", "hlt_model_train_content_sha256"):
+            require_sha256(artifact.get(field), name=field)
+    else:
+        if artifact.get("input_view") != "offline":
+            raise ValueError("v3 relation normalizer input view differs")
+        for field in ("input_binding_sha256", "model_train_content_sha256"):
+            require_sha256(artifact.get(field), name=field)
     selected_jets = int(artifact.get("selected_jet_count", 0))
     selected_pairs = int(artifact.get("selected_directed_pair_count", 0))
     if (
@@ -1269,6 +1312,7 @@ __all__ = [
     "PT_RAW_FEATURE_NAMES",
     "PT_ROBUST_FEATURE_NAMES",
     "RELATION_NORMALIZATION_ARTIFACT_CONTRACT",
+    "RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3",
     "TRACK_COMPATIBILITY_FEATURE_NAMES",
     "TRACK_COMPATIBILITY_ROBUST_NAMES",
     "TRACK_NODE_CONTINUOUS_NAMES",

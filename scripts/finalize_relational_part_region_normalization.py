@@ -27,6 +27,12 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     validate_region_normalization,
     write_immutable_json,
 )
+from teacher_logit_reco.relational_part.ca_tree import (  # noqa: E402
+    VIEW_TREE_SPLIT_MANIFEST_CONTRACT,
+)
+from teacher_logit_reco.relational_part.normalization import (  # noqa: E402
+    RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3,
+)
 from teacher_logit_reco.relational_part import (  # noqa: E402
     REGION_NORMALIZATION_PARTIAL_CONTRACT,
     REGION_NORMALIZATION_PLAN_CONTRACT,
@@ -53,15 +59,18 @@ def main() -> int:
 
     campaign = load_hashed_json(args.campaign_spec)
     current_source = validate_campaign_source(campaign, repo_root=REPO_ROOT)
-    plan = load_hashed_json(
-        args.plan, expected_contract=REGION_NORMALIZATION_PLAN_CONTRACT
-    )
+    plan = load_hashed_json(args.plan)
     validate_region_normalization_plan(plan)
     if plan.get("source") != campaign.get("source"):
         raise ValueError("REGION map plan source differs from campaign")
+    offline = plan["parents"].get("input_view") == "offline"
     relation = load_hashed_json(
         args.relation_normalization,
-        expected_contract=RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
+        expected_contract=(
+            RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3
+            if offline
+            else RELATION_NORMALIZATION_ARTIFACT_CONTRACT
+        ),
     )
     if relation["content_hash"] != plan["parents"][
         "relation_normalization_sha256"
@@ -69,7 +78,11 @@ def main() -> int:
         raise ValueError("REGION reducer base normalizer differs from plan")
     manifest = load_hashed_json(
         args.tree_dir / "manifest.json",
-        expected_contract=ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
+        expected_contract=(
+            VIEW_TREE_SPLIT_MANIFEST_CONTRACT
+            if offline
+            else ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT
+        ),
     )
     if (
         manifest["content_hash"] != plan["parents"]["tree_manifest_sha256"]
@@ -118,10 +131,7 @@ def main() -> int:
         sample_path = (
             args.partials_dir / f"shard_{shard_index:05d}.samples.npz"
         )
-        metadata = load_hashed_json(
-            metadata_path,
-            expected_contract=REGION_NORMALIZATION_PARTIAL_CONTRACT,
-        )
+        metadata = load_hashed_json(metadata_path)
         validate_region_normalization_partial(
             metadata, plan=plan, shard_index=shard_index
         )

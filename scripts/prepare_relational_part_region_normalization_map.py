@@ -17,6 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from jetclass_fresh.hlt_cache import load_cached_hlt_view  # noqa: E402
+from teacher_logit_reco.architecture_view_part.train import (  # noqa: E402
+    load_cached_offline_view,
+)
 from teacher_logit_reco.relational_part import (  # noqa: E402
     ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
     RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
@@ -28,7 +31,11 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     write_immutable_bytes,
     write_immutable_json,
 )
+from teacher_logit_reco.relational_part.ca_tree import (  # noqa: E402
+    VIEW_TREE_SPLIT_MANIFEST_CONTRACT,
+)
 from teacher_logit_reco.relational_part.normalization import (  # noqa: E402
+    RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3,
     _identity_key,
     _identity_sequence_hash,
 )
@@ -52,31 +59,57 @@ def main() -> int:
     parser.add_argument("--tree-dir", type=Path, required=True)
     parser.add_argument("--relation-normalization", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--input-view", choices=("fixed_hlt", "offline"), default="fixed_hlt"
+    )
     args = parser.parse_args()
 
     campaign = load_hashed_json(args.campaign_spec)
     current_source = validate_campaign_source(campaign, repo_root=REPO_ROOT)
     relation = load_hashed_json(
         args.relation_normalization,
-        expected_contract=RELATION_NORMALIZATION_ARTIFACT_CONTRACT,
+        expected_contract=(
+            RELATION_NORMALIZATION_ARTIFACT_CONTRACT
+            if args.input_view == "fixed_hlt"
+            else RELATION_NORMALIZATION_ARTIFACT_CONTRACT_V3
+        ),
     )
     manifest = load_hashed_json(
         args.tree_dir / "manifest.json",
-        expected_contract=ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
+        expected_contract=(
+            ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT
+            if args.input_view == "fixed_hlt"
+            else VIEW_TREE_SPLIT_MANIFEST_CONTRACT
+        ),
     )
     if manifest.get("split") != "model_train":
         raise ValueError("REGION normalization map may only access model_train")
-    view = load_cached_hlt_view(args.cache_dir, "model_train", verify_hash=True)
-    hlt_sha = str(view.metadata["hlt_content_hash"])
-    if manifest["parents"]["hlt_content_sha256"] != hlt_sha:
-        raise ValueError("REGION tree manifest belongs to another HLT cache")
+    view = (
+        load_cached_hlt_view(args.cache_dir, "model_train", verify_hash=True)
+        if args.input_view == "fixed_hlt"
+        else load_cached_offline_view(
+            args.cache_dir, "model_train", verify_hash=True
+        )
+    )
+    hlt_sha = str(
+        view.metadata[
+            "hlt_content_hash"
+            if args.input_view == "fixed_hlt"
+            else "offline_content_hash"
+        ]
+    )
+    manifest_content_key = (
+        "hlt_content_sha256"
+        if args.input_view == "fixed_hlt"
+        else "input_content_sha256"
+    )
+    if manifest["parents"][manifest_content_key] != hlt_sha:
+        raise ValueError("REGION tree manifest belongs to another input cache")
 
     plan_path = args.output_dir / "plan.json"
     input_dir = args.output_dir / "selected_inputs"
     if plan_path.is_file():
-        plan = load_hashed_json(
-            plan_path, expected_contract=REGION_NORMALIZATION_PLAN_CONTRACT
-        )
+        plan = load_hashed_json(plan_path)
         validate_region_normalization_plan(plan)
         if plan.get("source") != campaign.get("source"):
             raise ValueError("reusable REGION map plan source differs")
@@ -86,7 +119,14 @@ def main() -> int:
                 "tree_resource_sha256"
             ],
             "relation_normalization_sha256": relation["content_hash"],
-            "hlt_content_sha256": hlt_sha,
+            **(
+                {"hlt_content_sha256": hlt_sha}
+                if args.input_view == "fixed_hlt"
+                else {
+                    "input_view": "offline",
+                    "input_content_sha256": hlt_sha,
+                }
+            ),
         }
         if plan["parents"] != expected_parents:
             raise ValueError("reusable REGION map plan parents differ")
@@ -200,6 +240,7 @@ def main() -> int:
         tree_resource_sha256=manifest["parents"]["tree_resource_sha256"],
         relation_normalization_sha256=relation["content_hash"],
         hlt_content_sha256=hlt_sha,
+        input_view=args.input_view,
         selected_identities=selected_identities,
         shard_rows=rows,
     )

@@ -20,8 +20,14 @@ from .region_normalization import _REGION_DOMAIN_FEATURE_NAMES
 REGION_NORMALIZATION_PLAN_CONTRACT = (
     "relational_part_region_normalization_plan_v1"
 )
+REGION_NORMALIZATION_PLAN_CONTRACT_V2 = (
+    "relational_part_region_normalization_plan_v2"
+)
 REGION_NORMALIZATION_PARTIAL_CONTRACT = (
     "relational_part_region_normalization_partial_v1"
+)
+REGION_NORMALIZATION_PARTIAL_CONTRACT_V2 = (
+    "relational_part_region_normalization_partial_v2"
 )
 REGION_SAMPLE_DOMAINS = tuple(_REGION_DOMAIN_FEATURE_NAMES)
 _PLAN_ROW_KEYS = {
@@ -45,6 +51,7 @@ def build_region_normalization_plan(
     tree_resource_sha256: str,
     relation_normalization_sha256: str,
     hlt_content_sha256: str,
+    input_view: str = "fixed_hlt",
     selected_identities: Sequence[Any],
     shard_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -101,10 +108,29 @@ def build_region_normalization_plan(
             row.get("tree_shard_metadata_sha256"),
             name="tree_shard_metadata_sha256",
         )
+    if input_view == "fixed_hlt":
+        plan_contract = REGION_NORMALIZATION_PLAN_CONTRACT
+        schema_version = 1
+        input_parent = {
+            "hlt_content_sha256": require_sha256(
+                hlt_content_sha256, name="hlt_content_sha256"
+            )
+        }
+    elif input_view == "offline":
+        plan_contract = REGION_NORMALIZATION_PLAN_CONTRACT_V2
+        schema_version = 2
+        input_parent = {
+            "input_view": "offline",
+            "input_content_sha256": require_sha256(
+                hlt_content_sha256, name="input_content_sha256"
+            ),
+        }
+    else:
+        raise ValueError("REGION plan input view differs")
     return with_content_hash(
         {
-            "contract": REGION_NORMALIZATION_PLAN_CONTRACT,
-            "schema_version": 1,
+            "contract": plan_contract,
+            "schema_version": schema_version,
             "fit_split": "model_train",
             "selection_policy": {
                 "jet_limit": NORMALIZATION_JET_LIMIT,
@@ -123,9 +149,7 @@ def build_region_normalization_plan(
                     relation_normalization_sha256,
                     name="relation_normalization_sha256",
                 ),
-                "hlt_content_sha256": require_sha256(
-                    hlt_content_sha256, name="hlt_content_sha256"
-                ),
+                **input_parent,
             },
             "selected_jet_count": selected_count,
             "selected_jet_identity_sha256": _identity_sequence_hash(
@@ -140,10 +164,15 @@ def build_region_normalization_plan(
 def validate_region_normalization_plan(
     artifact: Mapping[str, Any],
 ) -> str:
-    digest = validate_content_hash(
-        artifact, expected_contract=REGION_NORMALIZATION_PLAN_CONTRACT
-    )
-    if int(artifact.get("schema_version", -1)) != 1:
+    contract = artifact.get("contract")
+    if contract not in {
+        REGION_NORMALIZATION_PLAN_CONTRACT,
+        REGION_NORMALIZATION_PLAN_CONTRACT_V2,
+    }:
+        raise ValueError("REGION plan contract differs")
+    digest = validate_content_hash(artifact)
+    expected_schema = 1 if contract == REGION_NORMALIZATION_PLAN_CONTRACT else 2
+    if int(artifact.get("schema_version", -1)) != expected_schema:
         raise ValueError("REGION plan schema version differs")
     expected_keys = {
         "contract",
@@ -159,12 +188,17 @@ def validate_region_normalization_plan(
     }
     if "source" in artifact:
         expected_keys.add("source")
-    if set(artifact) != expected_keys or set(artifact.get("parents", ())) != {
+    expected_parent_keys = {
         "tree_manifest_sha256",
         "tree_resource_sha256",
         "relation_normalization_sha256",
-        "hlt_content_sha256",
-    }:
+    }
+    expected_parent_keys.update(
+        {"hlt_content_sha256"}
+        if expected_schema == 1
+        else {"input_view", "input_content_sha256"}
+    )
+    if set(artifact) != expected_keys or set(artifact.get("parents", ())) != expected_parent_keys:
         raise ValueError("REGION plan fields differ")
     if artifact.get("fit_split") != "model_train":
         raise ValueError("REGION plan fit split differs")
@@ -182,7 +216,10 @@ def validate_region_normalization_plan(
         relation_normalization_sha256=artifact["parents"][
             "relation_normalization_sha256"
         ],
-        hlt_content_sha256=artifact["parents"]["hlt_content_sha256"],
+        hlt_content_sha256=artifact["parents"].get(
+            "hlt_content_sha256", artifact["parents"].get("input_content_sha256")
+        ),
+        input_view=("fixed_hlt" if expected_schema == 1 else "offline"),
         selected_identities=[
             f"rank-{index}"
             for index in range(int(artifact.get("selected_jet_count", -1)))
@@ -238,10 +275,16 @@ def build_region_normalization_partial(
     )
     if tree_metadata_sha != plan_row["tree_shard_metadata_sha256"]:
         raise ValueError("REGION partial tree shard parent differs from plan")
+    partial_contract = (
+        REGION_NORMALIZATION_PARTIAL_CONTRACT
+        if plan.get("contract") == REGION_NORMALIZATION_PLAN_CONTRACT
+        else REGION_NORMALIZATION_PARTIAL_CONTRACT_V2
+    )
+    partial_schema = 1 if partial_contract == REGION_NORMALIZATION_PARTIAL_CONTRACT else 2
     return with_content_hash(
         {
-            "contract": REGION_NORMALIZATION_PARTIAL_CONTRACT,
-            "schema_version": 1,
+            "contract": partial_contract,
+            "schema_version": partial_schema,
             "fit_split": "model_train",
             "shard_index": shard_index,
             "selected_count": int(selected_count),
@@ -269,10 +312,14 @@ def validate_region_normalization_partial(
     plan: Mapping[str, Any],
     shard_index: int,
 ) -> str:
-    digest = validate_content_hash(
-        artifact, expected_contract=REGION_NORMALIZATION_PARTIAL_CONTRACT
+    expected_contract = (
+        REGION_NORMALIZATION_PARTIAL_CONTRACT
+        if plan.get("contract") == REGION_NORMALIZATION_PLAN_CONTRACT
+        else REGION_NORMALIZATION_PARTIAL_CONTRACT_V2
     )
-    if int(artifact.get("schema_version", -1)) != 1:
+    digest = validate_content_hash(artifact, expected_contract=expected_contract)
+    expected_schema = 1 if expected_contract == REGION_NORMALIZATION_PARTIAL_CONTRACT else 2
+    if int(artifact.get("schema_version", -1)) != expected_schema:
         raise ValueError("REGION partial schema version differs")
     expected_keys = {
         "contract",
@@ -484,7 +531,9 @@ def assemble_region_normalization_partials(
 
 __all__ = [
     "REGION_NORMALIZATION_PARTIAL_CONTRACT",
+    "REGION_NORMALIZATION_PARTIAL_CONTRACT_V2",
     "REGION_NORMALIZATION_PLAN_CONTRACT",
+    "REGION_NORMALIZATION_PLAN_CONTRACT_V2",
     "REGION_SAMPLE_DOMAINS",
     "assemble_region_normalization_partials",
     "build_region_normalization_partial",

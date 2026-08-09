@@ -28,6 +28,10 @@ from teacher_logit_reco.relational_part import (  # noqa: E402
     write_immutable_bytes,
     write_immutable_json,
 )
+from teacher_logit_reco.relational_part.ca_tree import (  # noqa: E402
+    VIEW_TREE_SHARD_CONTRACT,
+    VIEW_TREE_SPLIT_MANIFEST_CONTRACT,
+)
 from teacher_logit_reco.relational_part.normalization import (  # noqa: E402
     _identity_sequence_hash,
 )
@@ -70,9 +74,7 @@ def main() -> int:
 
     campaign = load_hashed_json(args.campaign_spec)
     current_source = validate_campaign_source(campaign, repo_root=REPO_ROOT)
-    plan = load_hashed_json(
-        args.plan, expected_contract=REGION_NORMALIZATION_PLAN_CONTRACT
-    )
+    plan = load_hashed_json(args.plan)
     validate_region_normalization_plan(plan)
     if plan.get("source") != campaign.get("source"):
         raise ValueError("REGION map plan source differs from campaign")
@@ -84,10 +86,7 @@ def main() -> int:
     sample_path = args.output_dir / f"shard_{shard_index:05d}.samples.npz"
     metadata_path = args.output_dir / f"shard_{shard_index:05d}.metadata.json"
     if sample_path.is_file() and metadata_path.is_file():
-        metadata = load_hashed_json(
-            metadata_path,
-            expected_contract=REGION_NORMALIZATION_PARTIAL_CONTRACT,
-        )
+        metadata = load_hashed_json(metadata_path)
         validate_region_normalization_partial(
             metadata, plan=plan, shard_index=shard_index
         )
@@ -143,9 +142,14 @@ def main() -> int:
     ):
         raise ValueError("REGION selected input layout differs from plan")
 
+    offline = plan["parents"].get("input_view") == "offline"
     manifest = load_hashed_json(
         args.tree_dir / "manifest.json",
-        expected_contract=ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT,
+        expected_contract=(
+            VIEW_TREE_SPLIT_MANIFEST_CONTRACT
+            if offline
+            else ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT
+        ),
     )
     if manifest["content_hash"] != plan["parents"]["tree_manifest_sha256"]:
         raise ValueError("REGION worker tree manifest differs from plan")
@@ -154,7 +158,9 @@ def main() -> int:
         args.tree_dir
         / "shards"
         / f"shard_{shard_index:05d}.metadata.json",
-        expected_contract=ANGULAR_TREE_SHARD_CONTRACT,
+        expected_contract=(
+            VIEW_TREE_SHARD_CONTRACT if offline else ANGULAR_TREE_SHARD_CONTRACT
+        ),
     )
     if (
         metadata["content_hash"] != plan_row["tree_shard_metadata_sha256"]
@@ -185,7 +191,7 @@ def main() -> int:
         or mask.shape != tokens.shape[:2]
         or tokens.shape[2] != 14
     ):
-        raise ValueError("REGION selected HLT arrays differ")
+        raise ValueError("REGION selected input arrays differ")
     samples, hashes, layout = _collect_region_domain_samples(
         tokens,
         mask,

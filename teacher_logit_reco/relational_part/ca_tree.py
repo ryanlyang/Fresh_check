@@ -23,6 +23,7 @@ from .contracts import (
     sha256_file,
     validate_content_hash,
     with_content_hash,
+    write_immutable_json,
 )
 from .region_tree import (
     EXCLUSIVE_RESOLUTIONS,
@@ -37,6 +38,8 @@ ANGULAR_TREE_BACKEND_CONTRACT = "relational_ca_tree_v1"
 ANGULAR_TREE_BACKEND_MANIFEST_CONTRACT = "relational_ca_tree_backend_manifest_v3"
 ANGULAR_TREE_SHARD_CONTRACT = "relational_ca_tree_shard_v1"
 ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT = "relational_ca_tree_split_manifest_v1"
+VIEW_TREE_SHARD_CONTRACT = "relational_ca_tree_view_shard_v2"
+VIEW_TREE_SPLIT_MANIFEST_CONTRACT = "relational_ca_tree_view_split_manifest_v2"
 ANGULAR_TREE_PROBE_CONTRACT = "relational_ca_tree_throughput_probe_v2"
 TREE_SHARD_MAX_JETS = 10_000
 _TREE_CONTINUOUS_FIELDS = {
@@ -599,6 +602,142 @@ def write_tree_shard(
     return {"reused": False, "metadata": metadata}
 
 
+def write_view_tree_shard(
+    output_path: Path,
+    trees: Sequence[Mapping[str, Any]],
+    identities: Sequence[Any],
+    *,
+    input_view: str,
+    input_content_sha256: str,
+    tree_resource_sha256: str,
+    backend_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Publish a tree shard whose parent view is explicitly non-HLT-capable."""
+
+    if input_view not in {"fixed_hlt", "offline"}:
+        raise ValueError("tree shard input_view differs")
+    output_path = output_path.resolve()
+    metadata_path = output_path.with_suffix(".metadata.json")
+    identity_keys = [_identity_key(value) for value in identities]
+    parents = {
+        "input_view": input_view,
+        "input_content_sha256": require_sha256(
+            input_content_sha256, name="input_content_sha256"
+        ),
+        "tree_resource_sha256": require_sha256(
+            tree_resource_sha256, name="tree_resource_sha256"
+        ),
+        "backend_manifest_sha256": require_sha256(
+            backend_manifest_sha256, name="backend_manifest_sha256"
+        ),
+    }
+    if output_path.exists() or metadata_path.exists():
+        if not (output_path.is_file() and metadata_path.is_file()):
+            raise FileExistsError("view tree shard is partial or unsafe")
+        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        validate_content_hash(existing, expected_contract=VIEW_TREE_SHARD_CONTRACT)
+        if (
+            existing.get("parents") == parents
+            and existing.get("identity_sha256") == _identity_hash(identity_keys)
+            and existing.get("npz_sha256") == sha256_file(output_path)
+            and int(existing.get("jet_count", -1)) == len(identity_keys)
+        ):
+            return {"reused": True, "metadata": existing}
+        raise FileExistsError("existing view tree shard is stale")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    packed = pack_tree_shard(trees, identities)
+    with tempfile.NamedTemporaryFile(
+        dir=output_path.parent, suffix=".npz", delete=False
+    ) as handle:
+        temporary_npz = Path(handle.name)
+    temporary_metadata = metadata_path.with_name(
+        f".{metadata_path.name}.{os.getpid()}.tmp"
+    )
+    try:
+        np.savez_compressed(temporary_npz, **packed)
+        metadata = with_content_hash(
+            {
+                "contract": VIEW_TREE_SHARD_CONTRACT,
+                "schema_version": 2,
+                "tree_schema": TREE_SCHEMA_CONTRACT,
+                "parents": parents,
+                "jet_count": len(identity_keys),
+                "identity_sha256": _identity_hash(identity_keys),
+                "tree_content_sha256": _identity_hash(
+                    [tree_content_sha256(tree) for tree in trees]
+                ),
+                "npz_sha256": sha256_file(temporary_npz),
+                "storage_precision": "ieee_float32",
+                "topology_dtype": "int32",
+            }
+        )
+        temporary_metadata.write_bytes(canonical_json_bytes(metadata) + b"\n")
+        os.replace(temporary_npz, output_path)
+        os.replace(temporary_metadata, metadata_path)
+    finally:
+        temporary_npz.unlink(missing_ok=True)
+        temporary_metadata.unlink(missing_ok=True)
+    return {"reused": False, "metadata": metadata}
+
+
+def finalize_view_tree_split(
+    output_path: Path,
+    shard_metadata_paths: Sequence[Path],
+    *,
+    split: str,
+    expected_jet_count: int,
+    input_view: str,
+    input_content_sha256: str,
+    tree_resource_sha256: str,
+    backend_manifest_sha256: str,
+) -> dict[str, Any]:
+    """Finalize an ordered generic-view tree split."""
+
+    parents = {
+        "input_view": input_view,
+        "input_content_sha256": require_sha256(
+            input_content_sha256, name="input_content_sha256"
+        ),
+        "tree_resource_sha256": require_sha256(
+            tree_resource_sha256, name="tree_resource_sha256"
+        ),
+        "backend_manifest_sha256": require_sha256(
+            backend_manifest_sha256, name="backend_manifest_sha256"
+        ),
+    }
+    rows = []
+    total = 0
+    for index, path in enumerate(shard_metadata_paths):
+        row = json.loads(path.read_text(encoding="utf-8"))
+        validate_content_hash(row, expected_contract=VIEW_TREE_SHARD_CONTRACT)
+        if row.get("parents") != parents:
+            raise ValueError("view tree shard parent differs")
+        total += int(row["jet_count"])
+        rows.append(
+            {
+                "shard_index": index,
+                "metadata_sha256": row["content_hash"],
+                "jet_count": row["jet_count"],
+                "identity_sha256": row["identity_sha256"],
+                "npz_sha256": row["npz_sha256"],
+            }
+        )
+    if total != int(expected_jet_count):
+        raise ValueError("view tree split shard coverage differs")
+    artifact = with_content_hash(
+        {
+            "contract": VIEW_TREE_SPLIT_MANIFEST_CONTRACT,
+            "schema_version": 2,
+            "split": str(split),
+            "jet_count": total,
+            "maximum_jets_per_shard": TREE_SHARD_MAX_JETS,
+            "parents": parents,
+            "shards": rows,
+        }
+    )
+    return write_immutable_json(output_path, artifact)
+
+
 def validate_existing_tree_shard(
     output_path: Path,
     identities: Sequence[Any],
@@ -1028,12 +1167,15 @@ __all__ = [
     "ANGULAR_TREE_RESOURCE_CONTRACT",
     "ANGULAR_TREE_SHARD_CONTRACT",
     "ANGULAR_TREE_SPLIT_MANIFEST_CONTRACT",
+    "VIEW_TREE_SHARD_CONTRACT",
+    "VIEW_TREE_SPLIT_MANIFEST_CONTRACT",
     "TREE_PROBE_STRATA",
     "TREE_SHARD_MAX_JETS",
     "build_angular_tree_resource_contract",
     "build_compiled_tree",
     "build_tree_probe_artifact",
     "finalize_tree_split",
+    "finalize_view_tree_split",
     "load_tree_backend",
     "pack_tree_shard",
     "select_tree_probe",
@@ -1041,4 +1183,5 @@ __all__ = [
     "validate_existing_tree_shard",
     "validate_backend_manifest",
     "write_tree_shard",
+    "write_view_tree_shard",
 ]

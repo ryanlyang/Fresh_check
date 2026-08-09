@@ -1,4 +1,4 @@
-"""Identity-preserving cached-HLT datasets for Step-6 training/evaluation."""
+"""Identity-preserving relational datasets for HLT and offline views."""
 
 from __future__ import annotations
 
@@ -31,11 +31,17 @@ class RelationalJetDataset(torch.utils.data.Dataset if torch is not None else ob
         self.labels = np.asarray(view.labels, dtype=np.int64)
         self.identities = tuple(view.jet_ids)
         self.split = str(view.split)
+        metadata = getattr(view, "metadata", {})
+        self.source_view = str(metadata.get("view", "fixed_hlt"))
+        if self.source_view not in {"fixed_hlt", "offline"}:
+            raise ValueError(
+                "relational datasets require an explicit fixed_hlt or offline view"
+            )
         self.region_trees = (
             None if region_trees is None else tuple(region_trees)
         )
         if self.region_trees is not None and len(self.region_trees) != len(self.labels):
-            raise ValueError("REGION tree count differs from cached HLT jet count")
+            raise ValueError("REGION tree count differs from cached view jet count")
 
     def __len__(self) -> int:
         return int(len(self.labels))
@@ -46,6 +52,7 @@ class RelationalJetDataset(torch.utils.data.Dataset if torch is not None else ob
             "mask": self.mask[index],
             "label": self.labels[index],
             "identity": self.identities[index].key(),
+            "source_view": self.source_view,
             "region_tree": (
                 None if self.region_trees is None else self.region_trees[index]
             ),
@@ -58,8 +65,12 @@ def collate_relational_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, 
     tokens = np.stack([sample["tokens"] for sample in samples])
     mask = np.stack([sample["mask"] for sample in samples])
     labels = np.asarray([sample["label"] for sample in samples], dtype=np.int64)
+    source_views = {str(sample["source_view"]) for sample in samples}
+    if len(source_views) != 1:
+        raise ValueError("a batch cannot mix source views")
+    source_view = source_views.pop()
     inputs = build_particle_transformer_inputs_from_tokens(
-        tokens, mask, labels=labels, source_view="fixed_hlt"
+        tokens, mask, labels=labels, source_view=source_view
     )
     output = {
         "points": torch.from_numpy(inputs.pf_points).float(),
@@ -69,6 +80,7 @@ def collate_relational_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, 
         "labels": torch.from_numpy(labels).long(),
         "raw_tokens": torch.from_numpy(tokens).float(),
         "event_identities": [sample["identity"] for sample in samples],
+        "source_view": source_view,
     }
     trees = [sample["region_tree"] for sample in samples]
     if any(tree is not None for tree in trees):

@@ -35,6 +35,9 @@ TRAINING_CONTRACT = "relational_part_training_v1"
 TRAINING_CURVES_CONTRACT = "relational_part_training_curves_v1"
 CHECKPOINT_CONTRACT = "relational_part_checkpoint_v1"
 CHECKPOINT_REGISTRATION_CONTRACT = "relational_part_checkpoint_registration_v2"
+CHECKPOINT_REGISTRATION_CONTRACT_V3 = (
+    "relational_part_checkpoint_registration_v3"
+)
 
 
 @dataclass(frozen=True)
@@ -651,7 +654,11 @@ def train_relational_model(
     if torch is None:
         raise RuntimeError("PyTorch is required for training")
     config.validate()
-    if inference_input_role not in {"hlt_only", "offline_teacher"}:
+    if inference_input_role not in {
+        "hlt_only",
+        "offline_teacher",
+        "offline_tagger",
+    }:
         raise ValueError("unknown relational training inference_input_role")
     if resource_profile is None and config.campaign_profile == "production":
         raise ValueError("production training requires a parameter/FLOP profile")
@@ -979,10 +986,15 @@ def train_relational_model(
     write_immutable_json(root / "val_stop_metrics.json", selected["val_stop"])
     write_immutable_json(root / "val_select_metrics.json", val_select)
     checkpoint_sha = sha256_file(best_path)
+    offline_tagger = inference_input_role == "offline_tagger"
     registration = with_content_hash(
         {
-            "contract": CHECKPOINT_REGISTRATION_CONTRACT,
-            "schema_version": 2,
+            "contract": (
+                CHECKPOINT_REGISTRATION_CONTRACT_V3
+                if offline_tagger
+                else CHECKPOINT_REGISTRATION_CONTRACT
+            ),
+            "schema_version": 3 if offline_tagger else 2,
             "run_id": run_id,
             "configuration_role": (
                 "reference_baseline"
@@ -1036,6 +1048,11 @@ def train_relational_model(
             "inference_input_role": inference_input_role,
             "hlt_only_inference": inference_input_role == "hlt_only",
             "offline_or_teacher_required": inference_input_role != "hlt_only",
+            **(
+                {"offline_tagger_inference": True}
+                if offline_tagger
+                else {}
+            ),
         }
     )
     write_immutable_json(registration_path, registration)
@@ -1047,6 +1064,7 @@ def train_relational_model(
 __all__ = [
     "CHECKPOINT_CONTRACT",
     "CHECKPOINT_REGISTRATION_CONTRACT",
+    "CHECKPOINT_REGISTRATION_CONTRACT_V3",
     "DeterministicEpochSampler",
     "TRAINING_CONTRACT",
     "TRAINING_CURVES_CONTRACT",
