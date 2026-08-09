@@ -43,6 +43,12 @@ bash sbatch/submit_relational_part_offline_transfer.sh --dry-run
 bash sbatch/submit_relational_part_offline_transfer.sh
 ```
 
+The launcher verifies that committed source contains the complete offline
+workflow before it creates a campaign. If another process changes the shared
+checkout between pull and submission, set `RPT_OFFLINE_SOURCE_COMMIT` to the
+full committed object ID containing this implementation; the launcher also
+checks that its own bytes match that commit.
+
 Concurrency can be changed before submission with `RPT_OFFLINE_TREE_CONCURRENCY`, `RPT_OFFLINE_TRAIN_CONCURRENCY`, and `RPT_OFFLINE_FINAL_CONCURRENCY`. This affects scheduling only, not scientific meaning.
 
 The final artifacts are `reports/offline_transfer_report.json` and `reports/offline_transfer_report.md` under the printed campaign root.

@@ -75,6 +75,9 @@ def test_submission_graph_contains_lock_before_final_and_no_metric_gate():
     assert "run_evaluate_relational_part_offline_final.sh" in source
     assert source.index("jobs[validation_lock]") < source.index("jobs[final_test]")
     assert "performance_gate" not in source.lower() or "performance gate: disabled" in source.lower()
+    assert "RPT_OFFLINE_SOURCE_COMMIT" in source
+    assert 'cat-file -e "${source_commit}:${relative}"' in source
+    assert "executing offline submitter differs" in source
 
 
 def test_offline_region_plan_uses_generic_input_lineage():

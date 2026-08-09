@@ -10,11 +10,42 @@ source "${SCRIPT_DIR}/relational_part_common.sh"
 : "${RPT_OFFLINE_TRAIN_CONCURRENCY:=4}"
 : "${RPT_OFFLINE_FINAL_CONCURRENCY:=4}"
 : "${RPT_OFFLINE_REGION_CONCURRENCY:=16}"
+: "${RPT_OFFLINE_SOURCE_COMMIT:=}"
+
+launch_root="$(git -C "${SCRIPT_DIR}/.." rev-parse --show-toplevel)"
+source_commit="$(
+  git -C "${launch_root}" rev-parse \
+    "${RPT_OFFLINE_SOURCE_COMMIT:-HEAD}^{commit}"
+)"
+required_source_files=(
+  sbatch/submit_relational_part_offline_transfer.sh
+  scripts/prepare_relational_part_offline_transfer.py
+  scripts/run_relational_part_offline_training_task.py
+  scripts/run_relational_part_offline_final_task.py
+  teacher_logit_reco/relational_part/offline_transfer.py
+)
+for relative in "${required_source_files[@]}"; do
+  if ! git -C "${launch_root}" cat-file -e "${source_commit}:${relative}"; then
+    echo "Pinned source commit lacks offline campaign file: ${relative}" >&2
+    echo "Pinned commit: ${source_commit}" >&2
+    echo "Set RPT_OFFLINE_SOURCE_COMMIT to the committed offline implementation." >&2
+    exit 2
+  fi
+done
+if ! cmp -s \
+  <(git -C "${launch_root}" show "${source_commit}:sbatch/submit_relational_part_offline_transfer.sh") \
+  "${BASH_SOURCE[0]}"; then
+  echo "The executing offline submitter differs from its pinned source commit." >&2
+  echo "Pinned commit: ${source_commit}" >&2
+  echo "Pull/checkout that commit, or set RPT_OFFLINE_SOURCE_COMMIT correctly." >&2
+  exit 2
+fi
 
 if [[ "${1:-}" == "--dry-run" ]]; then
   printf 'parent campaign: %s\n' "${RPT_OFFLINE_PARENT_ROOT}"
   printf 'models: 4; seeds: 3; training tasks: 12; final tasks: 12\n'
   printf 'performance gate: disabled\n'
+  printf 'pinned source commit: %s\n' "${source_commit}"
   exit 0
 elif [[ -n "${1:-}" ]]; then
   echo "Usage: $0 [--dry-run]" >&2
@@ -41,7 +72,6 @@ if [[ ! -d "${DATA_DIR}" ]]; then
   exit 2
 fi
 
-source_commit="$(git rev-parse HEAD)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 campaign_id="rpt_offline_transfer_${timestamp}_${source_commit:0:10}"
 worktree_parent="$(dirname "${PROJECT_DIR}")/.rpt_worktrees"
