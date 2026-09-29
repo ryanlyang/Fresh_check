@@ -1,0 +1,24 @@
+% AUC is first averaged over classes per seed, then over seeds.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}Xrrr@{}}
+\toprule
+Configuration & Accuracy (\%) & $\Delta$ (pp) & Macro AUC \\
+\midrule
+Standard: shared & $74.3744 \pm 0.0617$ & --- & $0.964941 \pm 0.000091$ \\ % data:hlt_arch:RPT_BASE
+Standard: layerwise & $74.3919 \pm 0.0784$ & +0.0175 & $0.964931 \pm 0.000156$ \\ % data:hlt_arch:RPT_BASE_LAYERWISE
+Standard: layerwise + EV & $74.7008 \pm 0.0929$ & +0.3264 & $0.965549 \pm 0.000285$ \\ % data:hlt_arch:RPT_BASE_EDGEVALUE
+Selected: shared & $74.6366 \pm 0.0355$ & +0.2622 & $0.965375 \pm 0.000161$ \\ % data:hlt_arch:RPT_PT_TRACK_REGION
+Selected: layerwise & $74.8353 \pm 0.0856$ & +0.4609 & $0.965846 \pm 0.000216$ \\ % data:hlt_arch:RPT_SELECTED_LAYERWISE
+Selected: layerwise + EV & $75.0987 \pm 0.0438$ & +0.7243 & $0.966508 \pm 0.000126$ \\ % data:hlt_arch:RPT_SELECTED_EDGEVALUE
+\bottomrule
+\end{tabularx}
+\caption{Six HLT-like architecture comparisons on the 500,000-jet final test.
+Accuracy and macro AUC are three-seed means with sample standard deviations;
+AUC uses the 0--1 scale. Selected features are standard features plus PT,
+TRACK, and REGION. EV denotes EdgeValue; rows without EV use bias only.
+Differences are relative to the standard shared-bias baseline.}
+\label{tab:hlt-architecture-results}
+\end{table}

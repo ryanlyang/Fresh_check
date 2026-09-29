@@ -1,0 +1,40 @@
+\section{Offline evaluation details}
+\label{sec:offline-details}
+
+\noindent\textbf{Draft: all numerical offline details in this appendix are
+provisional placeholders from the 500,000-jet test, not the pending 20M
+evaluation.} They support the single offline comparison in
+Section~\ref{sec:offline-full-test-results} and will be replaced together
+with its main tables.
+
+The same-seed baseline comparisons use paired event identities. The current
+placeholder 95\% class-stratified event-bootstrap intervals for selected
+layerwise bias with EdgeValue minus the baseline
+are $[0.8730,1.0202]$, $[1.0974,1.2454]$, and $[0.8542,1.0004]$
+percentage points for replicas A, B, and C, respectively, in the same
+order as Table~\ref{tab:offline-seeds}. Each excludes
+zero for its fixed pair of trained checkpoints. These intervals do not
+measure variability over new training seeds, and the original report does
+not provide the analogous direct paired interval against the selected
+layerwise model without EdgeValue.
+
+\input{tables/results_offline_seeds}
+
+The rejection placeholders use the same checkpoints and achieved efficiencies
+of exactly 30\% and 50\% at the recorded operating points. SAT denotes at
+least one seed with zero passing QCD jets; no finite-seed-only average is
+substituted. For $H\to b\bar b$ at 30\%, the baseline QCD counts are
+$(2,3,2)$ and selected EdgeValue counts are $(1,2,0)$. For
+$t\to bq\bar q'$ at 30\%, they are $(0,2,1)$ and $(2,1,0)$,
+respectively. For both lepton-containing classes, $H\to q\bar q\ell\nu$ and
+$t\to b\ell\nu$, every checkpoint passes zero QCD events at both reported
+efficiencies. These counts explain the saturated entries; they do not
+establish zero underlying background probability.
+
+The rejection comparison appears in the main text,
+Tables~\ref{tab:offline-rejection-30} and~\ref{tab:offline-rejection-50}.
+
+No rejection confidence intervals are stored in the placeholder source
+metrics. Conditional Wilson intervals are pending from the official
+full-test evaluation and must use that evaluation's passing counts and
+background support, not the counts quoted here.

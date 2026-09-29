@@ -1,0 +1,37 @@
+% AUC is first averaged over classes per seed, then over seeds.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}Xrrr@{}}
+\toprule
+Configuration & Accuracy (\%) & $\Delta$ (pp) & Macro AUC \\
+\midrule
+Selected + layerwise + EV & $75.0987 \pm 0.0438$ & +0.7243 & $0.966508 \pm 0.000126$ \\ % data:hlt_all:RPT_SELECTED_EDGEVALUE
+Selected + layerwise & $74.8353 \pm 0.0856$ & +0.4609 & $0.965846 \pm 0.000216$ \\ % data:hlt_all:RPT_SELECTED_LAYERWISE
+Base + layerwise + EV & $74.7008 \pm 0.0929$ & +0.3264 & $0.965549 \pm 0.000285$ \\ % data:hlt_all:RPT_BASE_EDGEVALUE
+TRACK+PID & $74.6444 \pm 0.0232$ & +0.2700 & $0.965442 \pm 0.000057$ \\ % data:hlt_all:RPT_TRACK_PID
+PT+TRACK+REGION & $74.6366 \pm 0.0355$ & +0.2622 & $0.965375 \pm 0.000161$ \\ % data:hlt_all:RPT_PT_TRACK_REGION
+All six families & $74.6228 \pm 0.0489$ & +0.2484 & $0.965339 \pm 0.000130$ \\ % data:hlt_all:RPT_FULL_ALL
+TRACK & $74.5694 \pm 0.1267$ & +0.1950 & $0.965403 \pm 0.000257$ \\ % data:hlt_all:RPT_TRACK
+TRACK+CHARGE & $74.5590 \pm 0.1062$ & +0.1846 & $0.965358 \pm 0.000191$ \\ % data:hlt_all:RPT_TRACK_CHARGE
+Zero relations & $74.4831 \pm 0.1077$ & +0.1087 & $0.964942 \pm 0.000267$ \\ % data:hlt_all:RPT_FULL_ZERO_REL
+DENSITY & $74.4821 \pm 0.0270$ & +0.1077 & $0.964958 \pm 0.000018$ \\ % data:hlt_all:RPT_DENSITY
+Selected unary & $74.4713 \pm 0.0716$ & +0.0969 & $0.964969 \pm 0.000185$ \\ % data:hlt_all:RPT_SELECTED_UNARY
+CHARGE & $74.4705 \pm 0.0910$ & +0.0961 & $0.965114 \pm 0.000233$ \\ % data:hlt_all:RPT_CHARGE
+REGION & $74.4575 \pm 0.0690$ & +0.0831 & $0.965046 \pm 0.000096$ \\ % data:hlt_all:RPT_REGION
+PT & $74.4521 \pm 0.0499$ & +0.0777 & $0.965104 \pm 0.000087$ \\ % data:hlt_all:RPT_PT
+Wide base & $74.4213 \pm 0.0881$ & +0.0469 & $0.964848 \pm 0.000130$ \\ % data:hlt_all:RPT_BASE_WIDE_MAX
+PID & $74.4167 \pm 0.1103$ & +0.0423 & $0.965075 \pm 0.000276$ \\ % data:hlt_all:RPT_PID
+Base + layerwise & $74.3919 \pm 0.0784$ & +0.0175 & $0.964931 \pm 0.000156$ \\ % data:hlt_all:RPT_BASE_LAYERWISE
+Base & $74.3744 \pm 0.0617$ & --- & $0.964941 \pm 0.000091$ \\ % data:hlt_all:RPT_BASE
+\bottomrule
+\end{tabularx}
+\caption{All 18 HLT-like final-test configurations on 500,000 jets, with three
+matched training seeds. Accuracy and macro AUC are means with sample standard
+deviations; macro AUC is on the 0--1 scale. Selected means PT+TRACK+REGION.
+Selected unary is a separately trained endpoint-feature control.
+These rows overlap with 13 initial screening configurations; they are
+not 18 additional models.}
+\label{tab:hlt-complete-results}
+\end{table}

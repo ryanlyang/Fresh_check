@@ -1,0 +1,41 @@
+% Complete HLT rejection coverage, grouped by signal class for readability.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabularx}{\linewidth}{@{}Xrrrrrr@{}}
+\toprule
+Configuration & \multicolumn{2}{c}{$H\to gg$} & \multicolumn{2}{c}{$H\to q\bar q\ell\nu$} & \multicolumn{2}{c}{$t\to b\ell\nu$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+ & 30\% & 50\% & 30\% & 50\% & 30\% & 50\% \\
+\midrule
+PT+TRACK+REGION & 130.21 & 43.55 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_TRACK_REGION
+TRACK & 126.26 & 45.79 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_TRACK
+CHARGE & 128.87 & 45.45 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_CHARGE
+TRACK+PID & 137.36 & 45.62 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_TRACK_PID
+PT & 113.64 & 45.13 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT
+TRACK+PID+CHARGE & 120.19 & 45.79 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_TRACK_PID_CHARGE
+All six families & 131.58 & 47.53 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_FULL_ALL
+PT+REGION & 127.55 & 45.13 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_REGION
+PT+TRACK & 123.76 & 44.80 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_TRACK
+PID+CHARGE & 130.21 & 44.33 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PID_CHARGE
+PID & 128.87 & 45.13 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PID
+PT+TRACK+DENSITY & 126.26 & 42.81 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_TRACK_DENSITY
+TRACK+REGION & 131.58 & 45.45 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_TRACK_REGION
+TRACK+CHARGE & 120.19 & 44.01 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_TRACK_CHARGE
+DENSITY & 126.26 & 46.13 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_DENSITY
+REGION & 142.05 & 45.62 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_REGION
+PT+DENSITY & 126.26 & 43.10 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_DENSITY
+PT+TRACK+PID+CHARGE & 115.74 & 44.80 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_PT_TRACK_PID_CHARGE
+Zero relations & 123.76 & 42.81 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_FULL_ZERO_REL
+Wide base & 117.92 & 44.80 & SAT & 12500.00 & SAT & SAT \\ % data:rejection_screen_g2:RPT_BASE_WIDE_MAX
+Base & 132.98 & 45.45 & SAT & SAT & SAT & SAT \\ % data:rejection_screen_g2:RPT_BASE
+\bottomrule
+\end{tabularx}
+\caption{Complete HLT-like screening validation rejection (panel 2 of 3),
+on 125,000 jets including 12,500 QCD jets. These are single-seed validation measurements, not final-test results.
+SAT means zero passing QCD for that checkpoint.
+The 30\% and 50\% columns refer to signal efficiency, not background
+efficiency. Configuration names match the corresponding accuracy table.}
+\label{tab:hlt-screen-rejection-2}
+\end{table}

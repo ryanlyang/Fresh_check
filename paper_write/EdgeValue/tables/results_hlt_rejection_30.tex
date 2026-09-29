@@ -1,0 +1,28 @@
+% Six core HLT architectures, original final test; all nine signals.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabularx}{\linewidth}{@{}Xrrrrrrr@{}}
+\toprule
+Signal & B & BL & BE & S & SL & SE & SE/B change \\
+\midrule
+$H\to4q$ & 1062.72 & 1207.12 & 1308.06 & 1251.53 & 1293.30 & 1365.24 & +28.47\% \\ % data:rejection_hlt_core_30:H4q
+$H\to b\bar b$ & 13055.56 & 11269.84 & 13888.89 & 9880.95 & 8492.06 & 11111.11 & -14.89\% \\ % data:rejection_hlt_core_30:Hbb
+$H\to c\bar c$ & 1482.20 & 1608.55 & 1631.94 & 1525.72 & 1546.72 & 1924.98 & +29.87\% \\ % data:rejection_hlt_core_30:Hcc
+$H\to gg$ & 142.77 & 144.69 & 145.28 & 153.34 & 153.73 & 154.08 & +7.92\% \\ % data:rejection_hlt_core_30:Hgg
+$H\to q\bar q\ell\nu$ & 50000.00 & 50000.00 & 50000.00 & 50000.00 & SAT & SAT & --- \\ % data:rejection_hlt_core_30:Hqql
+$t\to b\ell\nu$ & SAT & SAT & SAT & SAT & SAT & SAT & --- \\ % data:rejection_hlt_core_30:Tbl
+$t\to bq\bar q'$ & 33333.33 & 24166.67 & 19444.44 & 41666.67 & 41666.67 & 22222.22 & -33.33\% \\ % data:rejection_hlt_core_30:Tbqq
+$W\to q\bar q'$ & 519.04 & 534.83 & 599.25 & 520.63 & 509.29 & 594.67 & +14.57\% \\ % data:rejection_hlt_core_30:Wqq
+$Z\to q\bar q$ & 537.68 & 479.27 & 470.39 & 489.08 & 460.81 & 522.85 & -2.76\% \\ % data:rejection_hlt_core_30:Zqq
+\bottomrule
+\end{tabularx}
+\caption{HLT-like final-test QCD rejection at 30\% signal efficiency,
+with 50,000 QCD jets and three seeds. B/BL/BE use standard features with
+shared bias, layerwise bias, or layerwise bias plus EdgeValue; S/SL/SE
+use the corresponding selected-feature configurations. Entries average
+per-seed rejections. SAT means at least one seed passes zero QCD jets,
+so no finite three-seed mean is reported. Changes use unrounded means.}
+\label{tab:hlt-rejection-30}
+\end{table}

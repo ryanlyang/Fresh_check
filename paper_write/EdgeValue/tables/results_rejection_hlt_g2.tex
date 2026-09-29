@@ -1,0 +1,38 @@
+% Complete HLT rejection coverage, grouped by signal class for readability.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabularx}{\linewidth}{@{}Xrrrrrr@{}}
+\toprule
+Configuration & \multicolumn{2}{c}{$H\to gg$} & \multicolumn{2}{c}{$H\to q\bar q\ell\nu$} & \multicolumn{2}{c}{$t\to b\ell\nu$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+ & 30\% & 50\% & 30\% & 50\% & 30\% & 50\% \\
+\midrule
+Selected + layerwise + EV & 154.08 & 54.46 & SAT & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_SELECTED_EDGEVALUE
+Selected + layerwise & 153.73 & 52.81 & SAT & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_SELECTED_LAYERWISE
+Base + layerwise + EV & 145.28 & 53.68 & 50000.00 & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_BASE_EDGEVALUE
+TRACK+PID & 142.78 & 52.28 & SAT & 50000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_TRACK_PID
+PT+TRACK+REGION & 153.34 & 53.48 & 50000.00 & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_PT_TRACK_REGION
+All six families & 145.93 & 52.41 & SAT & 19444.44 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_FULL_ALL
+TRACK & 150.47 & 52.22 & SAT & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_TRACK
+TRACK+CHARGE & 150.42 & 53.01 & SAT & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_TRACK_CHARGE
+Zero relations & 140.20 & 51.79 & SAT & 22222.22 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_FULL_ZERO_REL
+DENSITY & 145.37 & 52.23 & SAT & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_DENSITY
+Selected unary & 148.04 & 50.91 & 50000.00 & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_SELECTED_UNARY
+CHARGE & 151.67 & 52.62 & SAT & 41666.67 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_CHARGE
+REGION & 150.45 & 52.25 & 50000.00 & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_REGION
+PT & 146.45 & 51.95 & 50000.00 & 41666.67 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_PT
+Wide base & 144.28 & 50.19 & SAT & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_BASE_WIDE_MAX
+PID & 144.70 & 52.58 & SAT & 33333.33 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_PID
+Base + layerwise & 144.69 & 52.22 & 50000.00 & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_BASE_LAYERWISE
+Base & 142.77 & 52.46 & 50000.00 & 25000.00 & SAT & SAT \\ % data:rejection_hlt_g2:RPT_BASE
+\bottomrule
+\end{tabularx}
+\caption{Complete HLT-like final test rejection (panel 2 of 3),
+on 500,000 jets including 50,000 QCD jets. Entries are three-seed means of per-seed rejections, not pooled counts.
+SAT means at least one zero-background seed and hence no finite mean.
+The 30\% and 50\% columns refer to signal efficiency, not background
+efficiency. Configuration names match the corresponding accuracy table.}
+\label{tab:hlt-hlt-rejection-2}
+\end{table}

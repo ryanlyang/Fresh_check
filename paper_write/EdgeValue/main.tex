@@ -1,0 +1,40 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{tabularx}
+\usepackage[hidelinks]{hyperref}
+
+% Draft only: borrowed 500k-test values carry a dagger; unavailable rows stay TBD.
+% Replace borrowed values and their markers only after verifying 20M artifacts.
+\newcommand{\pendingresult}{\textit{TBD}}
+\newcommand{\provisionalresult}[1]{#1\textsuperscript{$\dagger$}}
+
+\title{EdgeValue}
+\author{ryan\_l\_yang }
+\date{September 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+% Introduction and related work to be developed with the supervising author.
+
+\input{sections/experimental_design}
+
+\input{sections/results}
+
+\clearpage
+\appendix
+\input{sections/results_appendix}
+
+\clearpage
+\input{sections/supporting_hlt}
+
+\clearpage
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

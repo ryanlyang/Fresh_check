@@ -1,0 +1,29 @@
+% Draft 20M table: numerical placeholders come from the original 500k test.
+% Replace every provisional cell from authenticated 20M artifacts.
+% AUC is first averaged over classes per seed, then over seeds.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\linewidth}{@{}Xrrr@{}}
+\toprule
+Configuration & Accuracy (\%) & $\Delta$ (pp) & Macro AUC \\
+\midrule
+Standard: shared & \provisionalresult{$82.8519 \pm 0.0982$} & --- & \provisionalresult{$0.982317 \pm 0.000190$} \\ % data:offline_placeholder_500k:OFF_RPT_BASE
+Standard: layerwise & \pendingresult & \pendingresult & \pendingresult \\
+Standard: shared + EV & \pendingresult & \pendingresult & \pendingresult \\
+Standard: layerwise + EV & \provisionalresult{$83.4722 \pm 0.0510$} & \provisionalresult{+0.6203} & \provisionalresult{$0.983325 \pm 0.000039$} \\ % data:offline_placeholder_500k:OFF_RPT_BASE_EDGEVALUE
+Selected: layerwise & \provisionalresult{$83.5152 \pm 0.0885$} & \provisionalresult{+0.6633} & \provisionalresult{$0.983464 \pm 0.000118$} \\ % data:offline_placeholder_500k:OFF_RPT_SELECTED_LAYERWISE
+Selected: shared + EV & \pendingresult & \pendingresult & \pendingresult \\
+Selected: layerwise + EV & \provisionalresult{$83.8670 \pm 0.0385$} & \provisionalresult{+1.0151} & \provisionalresult{$0.984010 \pm 0.000130$} \\ % data:offline_placeholder_500k:OFF_RPT_SELECTED_EDGEVALUE
+\bottomrule
+\end{tabularx}
+\caption{Offline comparison intended for the official 20M test.
+\textbf{Draft: daggered values are 500k-test placeholders, not 20M results.}
+TBD denotes the three additional, untrained ablations. All models use one
+million training jets and three seeds. Accuracy and macro AUC are means
+with sample standard deviations; AUC uses the 0--1 scale and differences
+are relative to the standard shared-bias baseline. Selected means standard
+features plus PT, TRACK, and REGION; EV denotes EdgeValue.}
+\label{tab:offline-full-test}
+\end{table}

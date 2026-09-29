@@ -1,0 +1,268 @@
+\section{Supporting synthetic reduced-view study}
+\label{sec:hlt-support}
+\label{sec:supporting-results}
+
+This appendix documents the exploratory experiments that preceded the
+offline study. The broad relation screen characterizes performance under
+one specified synthetic degradation and fixes the selected relation set;
+the architecture comparisons provide supporting evidence about value
+messages and bias sharing. They are not measurements of real trigger
+performance or a substitute for the offline architectural ablations.
+
+\subsection{Synthetic input definition and scope}
+\label{sec:hlt-inputs}
+
+The reduced view, called HLT-like for continuity with the original
+campaign, is generated from the offline constituents using the
+repository's \texttt{fixed\_hlt\_v1} profile at strength 0.6. It applies
+constituent thresholding, local angular merging, kinematics- and
+density-dependent inefficiency, momentum and angular smearing, and local
+angular reassignment. The constituent $p_T$ threshold is
+$0.78\,\mathrm{GeV}$ and the merging radius is 0.0081. One cached
+realization per split, generated with a fixed random seed, is shared by all
+configurations and is not resampled during training.
+
+This is a controlled input perturbation, not a simulation of a particular
+experiment's trigger reconstruction. Surviving particles retain their
+supplied identification, charge, impact parameters, and uncertainties;
+merged particles inherit the dominant constituent's nonkinematic entries.
+Tracking and identification resolutions are not independently resimulated.
+
+The study uses the development and earlier-test split sizes in
+Table~\ref{tab:experimental-splits}, with the same underlying jet identities
+as the original offline campaign. Particle features, axes, four-vectors,
+and pair descriptors are computed from the reduced view; normalization is
+fitted only on its training sample. No privileged offline features or
+teacher predictions are supplied to the reduced-view classifier.
+The backbone and training protocol follow Sections~\ref{sec:experimental-models}
+and~\ref{sec:training-protocol}; the initial screen uses one common seed,
+and architecture confirmation uses three matched seeds.
+
+\subsection{Relation-family screening protocol}
+\label{sec:hlt-screen}
+
+The initial screen contains 21 configurations trained with one common random seed. All use
+shared pair bias without EdgeValue. Three are controls: the standard
+baseline; a widened standard-feature pair encoder matched as closely as
+possible to the largest incremental relation-encoder parameter budget; and
+a full-relation input-shape control whose additional relation channels are
+zero. These controls examine additional capacity and the presence of the
+expanded input structure, without supplying the corresponding relation
+information.
+
+The remaining 18 configurations comprise six individual relation families
+(Table~\ref{tab:relation-families}) and twelve predetermined combinations.
+The seven pairs are PT+TRACK, TRACK+PID, TRACK+CHARGE, PID+CHARGE,
+PT+DENSITY, PT+REGION, and TRACK+REGION. Higher-order combinations are
+TRACK+PID+CHARGE, PT+TRACK+DENSITY, PT+TRACK+REGION,
+PT+TRACK+PID+CHARGE, and all six families together. Every such configuration
+retains the standard four pair features.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}lXr@{}}
+\toprule
+Family & Additional particle-pair information & Channels \\
+\midrule
+PT & Endpoint momentum fractions and ranks, with directed differences and asymmetry. & 8 \\
+TRACK & Impact parameters, uncertainties and significances, with pair compatibility and directed differences. & 12 \\
+PID & Ordered pairs of particle-identification categories. & 8 \\
+CHARGE & Ordered charge states, products, and comparison indicators. & 6 \\
+DENSITY & Multiscale local multiplicity, momentum activity and composition around the endpoints. & 12 \\
+REGION & Shared cluster membership, common-ancestor descriptors, and endpoint cluster properties at $K=2,4,8$. & 12 \\
+\bottomrule
+\end{tabularx}
+\caption{Relation families considered in the HLT-like screen. Channel counts
+refer to their encoded outputs before concatenation with the standard four
+pair features, not their raw descriptor dimensions. REGION uses a
+deterministic beam-free angular clustering tree, not generator ancestry.}
+\label{tab:relation-families}
+\end{table}
+
+Screening uses the comparison-validation split, not the test set. Among
+eligible scientific configurations, candidates within $10^{-4}$ absolute
+accuracy (0.01 percentage points) of the highest validation accuracy are
+ordered by lower cross-entropy, then fewer parameters, then run identifier.
+The same rule generates the ranking used for follow-up selection. This
+procedure selects PT+TRACK+REGION; this feature set is fixed before the
+offline campaign. The resulting selected pair input has
+$4+8+12+12=36$ channels. Its clustering descriptors are reconstructed from
+the available input particles and do not supply truth decay or vertex
+information.
+
+\subsection{Multi-seed architecture and control protocol}
+\label{sec:hlt-confirmation}
+
+Follow-up comparisons use three matched training seeds. The central architectural
+comparison is standard versus selected pair features, each with (i) shared
+bias and no EdgeValue, (ii) layerwise bias and no EdgeValue, or (iii)
+layerwise bias with EdgeValue. This gives six configurations and isolates
+the addition of EdgeValue within each layerwise-bias feature setting. The
+HLT-like campaign does not contain shared-bias-plus-EdgeValue models, so it
+does not establish that layerwise bias is necessary for value messages.
+
+The broader confirmation includes the baseline and capacity controls, every
+single family, the all-family model, selected combinations, and the four
+new architecture variants. A separately trained unary control supplies
+endpoint information through particle embeddings without the explicit
+pair-only descriptors. In total, 18 configurations receive three-seed final
+test evaluation, covering 13 of the original screening configurations and
+five additional configurations. The complete campaign therefore contains
+26 distinct trained configurations, not 21 three-seed test configurations.
+The screening seed is included in the three-seed comparison. Its checkpoint
+is reused only when it matches the confirmation configuration; all other
+seed/configuration instances are trained from random initialization.
+
+Additional relation shuffling, wrong-event substitution, directional swaps,
+and family or clustering-resolution removal are evaluated on comparison
+validation. These are perturbations of trained models, not independently
+retrained ablations. They test sensitivity to relation inputs and are not
+interpreted as unbiased measures of each family's causal contribution.
+Final-test metrics are reserved for reporting after checkpoint locking.
+
+\subsection{HLT-like screening selects a compact relation set}
+\label{sec:hlt-screening-results}
+
+Table~\ref{tab:hlt-screening-results} reports every initial screening
+configuration on comparison validation with one common training seed. PT+TRACK+REGION has the
+highest observed accuracy, 74.6496\%, compared with 74.2008\% for the
+standard baseline. It is the relation set selected by the prespecified
+validation rule. TRACK and CHARGE give the largest single-family accuracy
+estimates, at 74.5848\% and 74.5752\%, respectively. Their close values also
+illustrate why the selection rule matters: CHARGE precedes TRACK under the
+accuracy-window and cross-entropy ranking, although TRACK has the larger
+accuracy point estimate.
+
+\input{tables/results_hlt_screening}
+
+The selected configuration has macro AUC 0.965217, compared with 0.964617
+for the baseline. TRACK has the largest screening macro AUC, 0.965276,
+so the configuration with highest accuracy is not also the best on every
+metric. Macro AUC and classwise rejection are reported descriptively;
+they do not replace the original accuracy/cross-entropy selection rule.
+Appendix~\ref{sec:hlt-screening-rejection-complete} reports rejection at
+30\% and 50\% signal efficiency for every screening configuration and
+every signal class on this same validation split.
+
+Adding every relation family does not maximize validation accuracy: the
+all-family configuration reaches 74.4792\%, below PT+TRACK+REGION. Conversely,
+the relatively small standalone REGION improvement does not preclude its
+presence in the selected combination. The selected combination exceeds the
+best single-family accuracy by only 0.0648 percentage points in this screen.
+We therefore use this experiment to choose a candidate representation, not
+as conclusive evidence of feature complementarity or a universally optimal
+relation set. The single-seed validation comparisons motivate the subsequent
+multi-seed architecture study; they are not presented as final-test gains.
+
+\subsection{HLT-like confirmation supports using relations in the value path}
+\label{sec:hlt-architecture-results}
+
+The six core architecture comparisons are shown in
+Table~\ref{tab:hlt-architecture-results}. With standard pair features,
+changing shared bias to layerwise bias produces a small mean test-accuracy
+increase of 0.0175 percentage points. With the selected relations, the same
+change increases accuracy by 0.1987 percentage points. Layerwise bias is
+therefore not uniformly associated with a large gain across the two feature
+settings.
+
+\input{tables/results_hlt_architecture}
+
+Adding EdgeValue to an already-layerwise model increases mean accuracy by
+0.3089 percentage points with standard features and 0.2633 percentage points
+with selected features. The combined selected-relation, layerwise-bias,
+EdgeValue model achieves a mean accuracy of 75.0987\% (seed SD 0.0438
+percentage points), compared with 74.3744\% (SD 0.0617) for the baseline,
+a mean improvement of 0.7243 percentage points. Its matched improvements are
+positive at every seed, ranging from 0.6432 to 0.8060 percentage points.
+These comparisons support the value-path modification within the tested
+layerwise architectures; they do not test EdgeValue with shared bias.
+
+Macro AUC increases from $0.964941\pm0.000091$ for the baseline to
+$0.966508\pm0.000126$ for selected EdgeValue. The baseline layerwise-only
+variant instead has macro AUC $0.964931\pm0.000156$, slightly below the
+baseline mean despite its small increase in accuracy. The added AUC
+comparison therefore also argues against treating the effect of layerwise
+bias as uniformly favorable across metrics.
+
+Appendix~\ref{sec:complete-hlt-results} reports all 18 three-seed final-test
+configurations. The widened baseline and zero-relation controls improve
+over the baseline by 0.0469 and 0.1087 percentage points, respectively,
+while the trained selected-unary control improves by 0.0969 percentage
+points. These particular controls do not reproduce the combined model's
+accuracy gain. They do not, however, exclude all explanations involving
+additional parameters or computation, because the architectural variants
+are not all matched in both respects. The full results retain the relation
+variants and controls even when their gains are small.
+
+\subsection{HLT-like background rejection at fixed signal efficiency}
+\label{sec:hlt-rejection-results}
+
+Tables~\ref{tab:hlt-rejection-30} and~\ref{tab:hlt-rejection-50} compare
+all nine signal classes for the six core HLT-like architectures at 30\%
+and 50\% signal efficiency. These use the three-seed final-test
+measurements, with 50,000 QCD jets per checkpoint. Complete rejection
+tables for all 18 final-test configurations are provided in
+Appendix~\ref{sec:hlt-test-rejection-complete}.
+
+\input{tables/results_hlt_rejection_30}
+\input{tables/results_hlt_rejection_50}
+
+The selected EdgeValue model's higher accuracy and macro AUC do not imply
+uniformly higher rejection. At 30\% signal efficiency it increases mean
+rejection over baseline by 28.47\% for $H\to4q$ and 29.87\% for
+$H\to c\bar c$, but decreases it by 14.89\% for $H\to b\bar b$,
+33.33\% for $t\to bq\bar q'$, and 2.76\% for $Z\to q\bar q$.
+At 50\% efficiency its mean rejection is higher at each operating point
+where both means are finite. Saturated entries remain explicit, and
+low-background-count operating points should not be interpreted as precise
+population-level estimates. The screening rejection tables have still
+smaller background support, 12,500 QCD jets, and remain labeled as
+single-seed validation measurements rather than test results.
+
+\clearpage
+\subsection{Full HLT-like final-test comparison}
+\label{sec:complete-hlt-results}
+
+Table~\ref{tab:hlt-complete-results} retains every configuration in the
+HLT-like final-test report. All rows use the same 500,000 test identities
+and three training seeds. The 21 initial validation-screening rows are
+reported separately in Table~\ref{tab:hlt-screening-results}. Together the
+two tables cover all 26 distinct trained HLT-like configurations; they
+should not be combined into a single ranking across validation and test.
+
+\input{tables/results_hlt_complete}
+
+\clearpage
+\subsection{Complete HLT-like screening rejection}
+\label{sec:hlt-screening-rejection-complete}
+
+Tables~\ref{tab:hlt-screen-rejection-1}--\ref{tab:hlt-screen-rejection-3}
+give rejection at both 30\% and 50\% signal efficiency for all 21 initial
+configurations. These are single-seed comparison-validation measurements on
+125,000 jets, including 12,500 QCD jets. Signal classes are divided among
+three panels for readability; every configuration appears in every panel.
+All use shared bias without EdgeValue. SAT indicates zero observed QCD
+background for the single checkpoint and does not establish infinite
+population rejection.
+
+\input{tables/results_rejection_screen_g1}
+\input{tables/results_rejection_screen_g2}
+\input{tables/results_rejection_screen_g3}
+
+\clearpage
+\subsection{Complete HLT-like final-test rejection}
+\label{sec:hlt-test-rejection-complete}
+
+Tables~\ref{tab:hlt-hlt-rejection-1}--\ref{tab:hlt-hlt-rejection-3} cover
+all 18 three-seed final-test configurations and all nine signal classes.
+Each checkpoint sees 500,000 test jets, including 50,000 QCD jets. Entries
+are arithmetic means of separately measured seed-level rejections, not
+rejections obtained by pooling counts or ensembling predictions. A SAT
+entry means at least one seed passes no QCD jets; finite seeds alone are
+not averaged to fill such cells. These test tables must not be merged with
+the smaller single-seed validation sample above.
+
+\input{tables/results_rejection_hlt_g1}
+\input{tables/results_rejection_hlt_g2}
+\input{tables/results_rejection_hlt_g3}
