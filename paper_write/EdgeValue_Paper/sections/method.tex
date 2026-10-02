@@ -1,0 +1,177 @@
+\section{Method}
+\label{sec:method}
+
+We study \emph{ParT-EV}, a family of Particle Transformer extensions with
+edge-conditioned value messages. We use \emph{EdgeValue} for the message
+mechanism and \emph{ParT-EV} for models that include it. The relation feature
+set and the choice of shared or layerwise bias are specified separately;
+the baseline and bias-only ablations are comparison models, not ParT-EV variants.
+
+\subsection{Particle attention and pair information}
+
+The Particle Transformer (ParT) backbone~\cite{Qu2022ParticleTransformer} has a
+particle embedding with widths $(128,512,128)$, eight particle self-attention
+blocks with eight heads, and two class-attention blocks followed by the
+classifier. The attention width is $128$, giving head dimension $d_h=16$.
+Our question is whether additional relation descriptors, layer-dependent
+interaction biases, or relation-conditioned value messages improve this baseline.
+
+For a valid query particle $i$ and context particle $j$, the baseline supplies four kinematic pair features,
+\begin{equation}
+ r^{\mathrm{std}}_{ij}
+ = \bigl(\Lambda(k_{t,ij}),\Lambda(\zeta_{ij}),
+          \Lambda(\Delta_{ij}),\Lambda(m^2_{ij})\bigr),
+ \label{eq:standard-pairs}
+\end{equation}
+where $\Lambda(x)=\log(\max\{x,10^{-8}\})$. Here $\Delta$ is separation in
+rapidity--azimuth space, $k_t$ the relative transverse-momentum scale,
+$\zeta$ the smaller transverse-momentum share, and $m^2$ the pair invariant
+mass squared. The rapidity used here is distinct from the pseudorapidity
+used in the TRACK and REGION descriptors below. The baseline therefore already
+incorporates pairwise kinematics within global attention.
+
+Writing $\ell$ for the layer and $h$ for the head, biased scaled dot-product attention~\cite{Vaswani2017Attention,Qu2022ParticleTransformer} is
+\begin{equation}
+ \begin{aligned}
+ L^{\ell h}_{ij}
+ &=\frac{(q_i^{\ell h})^{\mathsf T}k_j^{\ell h}}{\sqrt{d_h}}
+       +b^{\ell h}_{ij},\\
+ a^{\ell h}_{ij}
+ &=\frac{\exp L^{\ell h}_{ij}}
+        {\sum_{k\in\mathcal V}\exp L^{\ell h}_{ik}},
+ \qquad i,j\in\mathcal V.
+ \end{aligned}
+ \label{eq:biased-attention}
+\end{equation}
+Here $\mathcal V$ is the set of valid constituents, so the normalization excludes
+padded keys and permits self-attention ($j=i$). We write
+$\widetilde a=\operatorname{Dropout}(a)$ for the attention weights after
+training-time dropout; at evaluation $\widetilde a=a$.
+Bias-only attention aggregates $\sum_{j\in\mathcal V}\widetilde a^{\ell h}_{ij}v_j^{\ell h}$:
+relations affect the weights, while each context value remains independent of its query.
+
+\subsection{Selected relation descriptors}
+
+The selected input concatenates the standard four channels with learned PT, TRACK, and REGION embeddings of dimensions $8$, $12$, and $12$, respectively, giving $r_{ij}\in\mathbb R^{36}$. Throughout, $i$ denotes the query and $j$ the context, and directional features are not symmetrized.
+
+\paragraph{PT.}
+Let $S_T=\sum_{k\in\mathcal V}p_{T,k}$ be the scalar constituent-$p_T$ sum
+and $\epsilon=10^{-6}$ the numerical safeguard used by the added relation
+families. Each endpoint supplies $p_{T,i}/(S_T+\epsilon)$, the safeguarded
+log-fraction $\log[(p_{T,i}+\epsilon)/(S_T+\epsilon)]$, and its descending
+normalized $p_T$ rank. The remaining four channels are the context-minus-query
+log-fraction and rank differences, the pair log-fraction
+$\log[(p_{T,i}+p_{T,j})/(S_T+\epsilon)+\epsilon]$, and
+$(p_{T,j}-p_{T,i})/(p_{T,j}+p_{T,i}+\epsilon)$. Tied ranks are averaged.
+A $10\!\to\!32\!\to\!8$ network embeds these ten quantities.
+
+\paragraph{TRACK.}
+Each endpoint supplies $d_0$, $d_z$, logarithmic effective uncertainties, inverse-hyperbolic-sine impact-parameter significances, and a validity flag. Validity requires charged-hadron, electron, or muon identification, finite, nonmissing measurements, and positive uncertainties. Effective errors satisfy $\sigma_{u,\mathrm{eff}}^2=\sigma_u^2+f_u^2$ for $u\in\{d_0,d_z\}$, with floors $f_u$ fitted on training data. Shared endpoint weights produce $g_i,g_j\in\mathbb R^{16}$ using a $7\!\to\!32\!\to\!16$ network. The pair encoder receives
+\begin{equation}
+ [g_i,g_j,g_j-g_i,g_i\odot g_j,s_{ij},c_{ij}]\in\mathbb R^{81},
+ \label{eq:track-pairs}
+\end{equation}
+where $s_{ij}$ is a four-component one-hot encoding of the ordered endpoint
+validity states and $c_{ij}$ contains 13 compatibility channels. These comprise
+uncertainty-normalized context-minus-query displacement differences, their
+squared-sum $\chi^2$ through $\log(1+\chi^2)$ and
+$\exp[-\min(\chi^2,25)/2]$, extrema of absolute transformed significances and
+their signed products, and angular descriptors $\sin\Delta\phi$,
+$\cos\Delta\phi$, and $\log(\Delta R+\epsilon)$, with
+$\Delta\phi=\phi_i-\phi_j$ wrapped periodically and $\Delta R$ measured in
+pseudorapidity--azimuth space. Compatibility channels vanish unless both
+tracks are valid. The resulting $81\!\to\!48\!\to\!12$ network retains
+missing-measurement information through the validity states.
+
+\paragraph{REGION.}
+A deterministic, beam-free angular tree repeatedly merges the closest pair in $(\eta,\phi)$ using four-vector addition. It follows the angular-clustering motivation of Cambridge/Aachen~\cite{Dokshitzer1997Cambridge,Wobisch1999Cambridge}, with the explicit pseudorapidity-based prescription above. Exclusive partitions at $K=2,4,8$ clusters, capped by constituent multiplicity, provide 41 features: three same-cluster indicators; five lowest-common-ancestor descriptors (normalized depth, merge angle, $k_t$, momentum sharing, and mass); 18 endpoint cluster $p_T$, mass, and multiplicity fractions; six constituent shares within those clusters; six constituent-to-cluster-axis distances; and three context-minus-query cluster-$p_T$ rank differences. Angles use reference radius $R_{\mathrm{ref}}=0.8$, merge $k_t$ uses $p_{T,\mathrm{jet}}R_{\mathrm{ref}}$, and mass uses jet mass. Cluster $p_T$ and mass fractions, and merge angle, $k_t$, and mass descriptors use logarithms. Undefined diagonal merge quantities are zeroed. A $41\!\to\!32\!\to\!12$ network embeds the result. These descriptors are supplied for every valid pair, while attention remains global.
+
+Here jet $p_T$ and mass are obtained from the summed constituent four-vector,
+not the scalar sum $S_T$ used by PT. Ancestor depth is divided by the maximum
+leaf depth, with the denominator bounded below by one.
+
+All family networks use GELU and RMS normalization between their two linear
+maps and are trained jointly with the classifier. Before entering these
+networks, designated continuous features are centered and rescaled using
+statistics from a fixed subset of 50,000 training jets. This subset is used
+only to estimate preprocessing constants; the classifier is trained on the
+full one-million-jet training sample. For each feature, we subtract its median,
+divide by a robust measure of its spread, and clip extreme values:
+\begin{equation}
+ \widehat x=\operatorname{clip}_{[-8,8]}
+ \left(\frac{x-\operatorname{median}(x)}
+ {\max[(Q_{75}-Q_{25})/1.349,10^{-6}]}\right).
+ \label{eq:relation-normalization}
+\end{equation}
+Here $Q_{25}$ and $Q_{75}$ are the training-sample quartiles; the resulting
+scale is less sensitive to outliers than a standard deviation. Track
+uncertainty floors are also estimated from training data. Binary and
+designated fixed-scale features are left unchanged. These preprocessing
+constants remain fixed during validation and testing, and padded pair
+embeddings are zeroed.
+
+\subsection{Shared and layerwise interaction biases}
+
+A three-stage, width-64 pair network maps either input set to a common relation stem $z_{ij}=\phi(r_{ij})\in\mathbb R^{64}$. Shared bias uses one head-output map $\beta$ in all particle layers, $b^{\ell h}_{ij}=\beta_h(z_{ij})$. Layerwise bias uses independently trainable maps $\beta_\ell$, so $b^{\ell h}_{ij}=\beta_{\ell h}(z_{ij})$, while retaining the common stem. The layerwise maps, including their output normalization, have identical initial parameters.
+
+\subsection{Relation-conditioned value messages}
+\label{sec:edgevalue}
+
+Pairwise attention bias and pairwise message content play different roles.
+In bias-only ParT, the relation between particles $i$ and $j$ affects the scalar
+attention weight, but the value vector $v_j^{\ell h}$ is the same for every
+query receiving information from $j$ within that layer and head. EdgeValue
+provides an additional route for relation information to enter the particle
+representation: it augments the value with a vector that depends on both
+endpoints. The same context particle can therefore contribute different message
+content to different queries, rather than differing only in its attention weight.
+Building on relation-aware value messages~\cite{Shaw2018Relative}, ParT-EV uses
+\begin{align}
+ y_i^{\ell h}
+ &=\sum_{j\in\mathcal V}\widetilde a^{\ell h}_{ij}
+   \left(v_j^{\ell h}+U_{\ell h}z_{ij}\right),
+ \label{eq:edgevalue}\\
+ \delta_i^{\ell h}
+ &=\sum_{j\in\mathcal V}\widetilde a^{\ell h}_{ij}U_{\ell h}z_{ij},
+ \qquad U_{\ell h}\in\mathbb R^{16\times64}.
+ \label{eq:edgevalue-message}
+\end{align}
+Here $y_i^{\ell h}$ is the head aggregate before the existing output projection,
+and $\delta_i^{\ell h}$ is the addition to the ordinary weighted value sum.
+Both terms use the same attention weights $\widetilde a$ and the same
+training-time attention-dropout realization.
+
+The shared relation stem $z_{ij}=\phi(r_{ij})$ supplies both the bias and
+value-message branches. Encoded from the input pair descriptors, it is shared
+across the particle-attention layers rather than updated from their evolving
+particle states. Its encoder is trained jointly with the classifier.
+Each layer and head has its own projection $U_{\ell h}$, so this common representation can contribute
+differently at different depths and through different heads. The mechanism
+applies both to the standard four-feature input and to the selected relation
+input, and does not require layerwise attention bias. For example, an encoded
+track-compatibility or regional relationship can influence both the weight and
+the vector content of a message.
+
+The value-message projections are bias-free. Within each layer, their stacked
+$8\times16\times64$ parameter tensor is initialized with Xavier-uniform
+initialization and optimized jointly with the rest of the network. Setting all
+$U_{\ell h}=0$ removes the additional term and recovers the corresponding
+bias-only attention operation for fixed remaining parameters. Invalid pair
+stems and padded-query edge contributions are zeroed. The head outputs are
+concatenated and passed through the existing output projection, with the
+surrounding transformer block unchanged. EdgeValue is applied to all eight
+particle self-attention blocks, while the two class-attention blocks remain
+unchanged. Its projections add $8\times8\times16\times64=65{,}536$ trainable
+parameters relative to the matching bias-only path, separately from any
+parameters added by selected relation encoders or layerwise bias projections.
+
+Because $U_{\ell h}$ is linear and independent of $i$ and $j$, the relation
+aggregation can precede projection:
+\begin{equation}
+ \delta_i^{\ell h}
+ =U_{\ell h}\left(\sum_{j\in\mathcal V}
+   \widetilde a^{\ell h}_{ij}z_{ij}\right).
+ \label{eq:edgevalue-efficient}
+\end{equation}
+This rearrangement avoids explicit per-head pair-value vectors, while pair
+features and attention weights still require quadratic storage.

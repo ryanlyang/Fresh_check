@@ -1,0 +1,116 @@
+\section{Experimental Setup}
+\label{sec:experiments}
+
+\subsection{Data and study design}
+We study ten-class jet tagging using the offline constituent view of the
+JetClass dataset~\citep{JetClass}, introduced with Particle Transformer
+(ParT)~\citep{Qu2022ParticleTransformer}.
+The classes are QCD jets and nine signal categories:
+$H\to b\bar b$, $H\to c\bar c$, $H\to gg$, $H\to4q$, $H\to q\bar q\ell\nu$,
+$Z\to q\bar q$, $W\to q\bar q'$, fully hadronic top decay ($t\to bqq'$),
+and leptonic top decay ($t\to b\ell\nu$).
+All models receive the same reconstructed offline information.
+
+The training population contains $1{,}000{,}000$ jets, balanced across the ten
+classes. A disjoint, likewise balanced validation population contains
+$125{,}000$ jets and controls stopping and checkpoint selection.
+These populations are sampled without replacement from a 10M-event portion
+of the training release. Evaluation uses the official
+\emph{20-million-jet JetClass test sample}: $2{,}000{,}000$ jets per class, including
+$2{,}000{,}000$ QCD jets, disjoint from the training and validation samples.
+
+We organize the study as an eight-configuration matrix: standard versus selected
+pair features, shared versus layerwise attention bias, and absence versus presence
+of EdgeValue messages.
+In configuration labels, \texttt{Std} denotes standard pair inputs and
+\texttt{Sel} denotes standard inputs plus PT, TRACK, and REGION.
+The following \texttt{S} or \texttt{L} denotes shared or layerwise bias,
+and the suffix \texttt{+EV} identifies ParT-EV variants. Thus,
+\texttt{Std-S} is the shared-bias baseline without EdgeValue.
+Every configuration is trained with three random seeds, matched across
+configurations, with the same training-event order for a given seed and epoch.
+All gains are measured relative to the \texttt{Std-S} baseline trained under
+the same protocol.
+
+\subsection{Inputs and training}
+Each jet is represented by at most 128 constituents in their original order,
+with padding masked. The common 17-dimensional particle input
+contains log transverse momentum and energy, their log fractions relative to
+the jet, radial and signed angular offsets, charge, five
+particle-identification indicators, and transverse/longitudinal impact parameters
+with their uncertainties. Jet-relative quantities are calculated from the
+constituent four-vectors. The selected relations use these same constituents
+and their track measurements, without additional detector information.
+Normalization constants are fitted on training data and shared across
+configurations. Apart from the three factors under study, the backbone
+architecture in Section~\ref{sec:method} is held fixed.
+
+All models are trained from scratch with unweighted ten-class cross-entropy and
+AdamW~\citep{Loshchilov2019AdamW}, using $(\beta_1,\beta_2)=(0.9,0.999)$,
+weight decay $10^{-4}$, and a gradient-norm clipping threshold of 1.
+Gradients are accumulated over two microbatches of 64 jets, giving an effective
+batch size of 128. Training uses BF16 mixed precision; test inference uses FP32.
+
+The training budget is 40 epochs, with a minimum of 12 epochs and an early-stopping
+patience of eight epochs. The learning rate increases linearly to $10^{-3}$ and
+then follows a cosine decay toward $10^{-5}$. Warm-up spans the first 5\% of
+the planned optimizer updates; the schedule is fixed to the full 40-epoch
+budget regardless of early stopping.
+
+Checkpoints are selected by validation accuracy, using lower cross-entropy
+to distinguish epochs within 0.01 percentage points of the best accuracy.
+The same selection criterion governs early stopping for every configuration.
+
+The comparison matches data, backbone dimensions, loss, optimizer, and training
+budget, but does not impose equal parameter counts or equal training time.
+Shared-bias models use sequence trimming, whereas layerwise-bias models do not;
+their pair-processing paths also yield different BatchNorm populations.
+Shared-versus-layerwise differences therefore cannot be attributed solely to
+bias sharing. We assess EdgeValue by comparing models with the same feature
+set and bias scheme, which retain the same trimming and pair-processing choices.
+
+\subsection{Classification and background-rejection metrics}
+We summarize classification performance with multiclass accuracy and macro
+one-versus-rest area under the ROC curve (macro AUROC)~\citep{Fawcett2006ROC}.
+For each trained model, class AUCs rank events by the corresponding softmax
+probability; macro AUROC is their unweighted mean over the ten classes.
+We report means and sample standard deviations across the three independently
+trained models, rather than combining their predictions into an ensemble.
+Accuracy and macro-AUROC differences from baseline are expressed in percentage
+points.
+
+Background rejection is measured separately for each signal class $s$ against
+QCD. If $\ell_c(x)$ denotes the classifier logit for class $c$, we use
+\begin{equation}
+ \begin{aligned}
+ D_s(x)&=\ell_s(x)-\ell_{\QCD}(x),\\
+ \widehat\epsilon_{\QCD,s}(t)
+   &=\frac{1}{n_{\QCD}}\sum_{x\in\mathcal Q}
+      \mathbf{1}\!\left[D_s(x)\geq t\right],\\
+ R_s(\epsilon_s)&=\frac{1}{\widehat\epsilon_{\QCD,s}(t_s)},
+ \qquad \widehat\epsilon_{\QCD,s}(t_s)>0.
+ \end{aligned}
+ \label{eq:rejection}
+\end{equation}
+Here $\mathcal Q$ is the set of test QCD jets, $n_{\QCD}=|\mathcal Q|$,
+and $\mathbf{1}[\cdot]$ is the indicator function; $t_s$ is the threshold at
+target signal efficiency $\epsilon_s$, defined below.
+The main rejection table follows the JetClass benchmark operating points:
+50\% signal efficiency for the seven hadronic signal classes, 99\% for
+$H\to q\bar q\ell\nu$, and 99.5\% for $t\to b\ell\nu$
+\citep{Qu2022ParticleTransformer}. Each row states its signal efficiency;
+the class-specific choices are the same for every configuration and seed.
+A separate table reports rejection at 30\% efficiency for the seven hadronic
+classes. All operating points use the same checkpoints and test predictions.
+
+The discriminant is monotonic in $p_s/(p_s+p_{\QCD})$. At target efficiency
+$\epsilon_s$, $t_s$ is the
+$\lceil\epsilon_s n_s\rceil$-th largest score among the $n_s$ true signal events.
+All events with $D_s\geq t_s$ pass, including ties; the achieved signal efficiency
+can therefore exceed the target because of integer rounding or tied scores.
+Thresholds are determined separately for each signal and trained model from
+the full test sample.
+
+Tables give the arithmetic mean and sample standard deviation of rejection
+across the three training seeds. These standard deviations describe training
+variability, not confidence intervals.
