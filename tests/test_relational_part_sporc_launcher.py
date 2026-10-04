@@ -29,7 +29,9 @@ def executable(path, contents):
 
 
 @pytest.fixture
-def launcher(tmp_path):
+def launcher(tmp_path, request):
+    unified = getattr(request, "param", None) == "unified"
+    submitter = REPO / "sbatch/submit_relational_part_sporc_unified.sh" if unified else SUBMITTER
     if os.name == "nt":
         bash = Path("C:/Program Files/Git/bin/bash.exe")
         if not bash.is_file():
@@ -42,7 +44,7 @@ def launcher(tmp_path):
     helper = tmp_path / "fake_python.py"
     # Execute actual embedded config/discovery programs. Only the remote driver
     # and x86/platform smoke check are mocked; never import torch or contact Slurm.
-    executable(helper, r'''import contextlib, io, json, os, pathlib, sys
+    helper_source = r'''import contextlib, io, json, os, pathlib, sys
 sys.stdout.reconfigure(newline="\n")
 args = sys.argv[1:]
 def shell(value):
@@ -98,7 +100,11 @@ else:
         assert (root / "sporc_campaign.json").is_file()
     else:
         raise AssertionError("Launcher must not run a worker phase locally: " + phase)
-''')
+'''
+    if unified:
+        helper_source = (helper_source.replace("RPT_SPORC_PHASE", "RPT_UNIFIED_PHASE")
+            .replace("sporc_inference", "sporc_unified").replace("sporc_campaign.json", "unified_campaign.json"))
+    executable(helper, helper_source)
     wrapper = '#!/usr/bin/env bash\nexec "$RPT_TEST_PYTHON" "$RPT_TEST_HELPER" "$@"\n'
     executable(bin_dir / "python", wrapper)
     for command in ("mkdir", "realpath"):
@@ -120,7 +126,7 @@ else:
            if not key.startswith(("RPT_", "SBATCH_")) and key not in ("GPU_GRES", "CONDA_BASE", "CONDA_ENV")}
     env.update(CONDA_BASE=shell_path(conda), CONDA_ENV="atlas_kd_sporc",
                RPT_TEST_BIN=shell_path(bin_dir), RPT_TEST_PYTHON=shell_path(sys.executable),
-               RPT_TEST_HELPER=shell_path(helper), RPT_TEST_SUBMITTER=shell_path(SUBMITTER),
+               RPT_TEST_HELPER=shell_path(helper), RPT_TEST_SUBMITTER=shell_path(submitter),
                RPT_TEST_CALLS=str(calls))
 
     def run(*arguments, extra_env=None):
