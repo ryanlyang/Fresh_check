@@ -176,6 +176,18 @@ def test_sbatch_failure_stops_graph_and_preserves_partial_ledger(launcher):
     assert (output / "submitted_job_ids.txt").read_text().splitlines() == ["build 700001", "validate 700002"]
 
 
+def test_fresh_tier3_graph_keeps_parity_dependency_and_cannot_relabel_debug_resume(launcher):
+    run, source, output, calls = launcher
+    result = run(*fresh_args(source, output), extra_env={"SBATCH_PARTITION": "tier3"})
+    assert result.returncode == 0, result.stderr
+    records = calls()
+    assert all("--partition=tier3" in row["arguments"] for row in records)
+    assert "--dependency=afterok:700002" in records[2]["arguments"]
+    changed = run("--resume", shell_path(output), extra_env={"SBATCH_PARTITION": "debug"})
+    assert changed.returncode != 0 and "Cannot change frozen partition" in changed.stderr
+    assert len(calls()) == 5
+
+
 def test_resume_rejects_live_jobs_and_changed_jobs_then_can_restart(launcher):
     run, source, output, calls = launcher
     assert run(*fresh_args(source, output)).returncode == 0
