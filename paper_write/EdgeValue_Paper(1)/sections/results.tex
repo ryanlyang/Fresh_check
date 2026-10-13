@@ -1,0 +1,102 @@
+\section{Results}
+\label{sec:results}
+
+We first compare standard shared-bias ParT with and without edge-conditioned
+value messages, then examine the bias scheme and class-wise background
+rejection. The main comparisons retain standard ParT pair features.
+All results use the same official 20M-jet test sample and are averaged
+over three independently trained models per configuration. Reported spreads
+are sample standard deviations across training seeds, not confidence intervals
+or ensemble results.
+
+\subsection{EdgeValue with standard shared bias}
+\label{sec:results-simple-ev}
+
+Table~\ref{tab:edgevalue-baseline} compares the baseline with its direct
+EdgeValue extension, retaining the standard four pair features and shared
+attention bias. Accuracy increases from $82.819\pm0.100\%$ to
+$83.474\pm0.047\%$, a gain of $0.655$ percentage points (pp).
+Macro AUROC increases from $98.229\%$ to $98.342\%$, a gain of $0.113$ pp.
+The accuracy improvement is positive for each matched seed, ranging from
+$0.597$ to $0.726$ pp.
+
+\input{tables/edgevalue_baseline}
+
+This comparison demonstrates that additional pair descriptors and layerwise
+bias are not required to obtain an improvement in this setting. The existing
+kinematic pair representation becomes more useful when it can contribute to
+the vector content of messages as well as their attention weights. The
+comparison holds the inputs and bias scheme fixed, but adds the EdgeValue
+projections described in Section~\ref{sec:edgevalue}; it is not a
+parameter-matched test against a larger bias-only model.
+
+\subsection{Shared versus layerwise bias}
+\label{sec:results-bias}
+
+Table~\ref{tab:factorial} compares the four standard-feature configurations
+under shared and layerwise bias. Each row compares otherwise matched models
+with and without EdgeValue; comparisons between rows measure differences
+associated with the bias scheme and its implementation.
+
+\input{tables/factorial}
+
+With standard pair features, moving from shared to layerwise bias changes the
+mean accuracy by only $+0.040$ pp without EdgeValue. With EdgeValue, the
+layerwise configuration reaches $83.438\%$, slightly below the shared-bias
+model's $83.474\%$ ($-0.036$ pp). Neither ordering holds for all three seeds:
+layerwise bias improves accuracy in two seeds without EdgeValue and in one
+seed with EdgeValue. These small mean differences do not show a consistent
+advantage for the layerwise configuration with standard inputs.
+
+By contrast, adding EdgeValue improves accuracy under both bias schemes:
+$+0.655$ pp with shared bias and $+0.579$ pp with layerwise bias. Both
+comparisons improve in all three seeds. The benefit of edge-conditioned
+messages therefore persists across these two implementations rather than
+depending on the layerwise bias choice. As discussed in
+Section~\ref{sec:training}, shared-versus-layerwise comparisons also change
+trimming and pair-normalization handling, so they should not be interpreted
+as isolating bias sharing alone.
+
+\subsection{Class-wise background rejection}
+\label{sec:results-rejection}
+
+Table~\ref{tab:rejection-main} compares the four standard-feature
+configurations at the JetClass benchmark operating points. The columns
+pair each ParT-EV variant with its corresponding bias-only control,
+retaining the same pair inputs and bias scheme within each comparison.
+Complete numerical results are provided in
+Appendix~\ref{sec:complete-results}.
+
+\input{tables/rejection_main}
+
+The standard shared-bias EdgeValue extension increases the mean background
+rejection for all nine signal classes at these operating points. Among the
+hadronic classes at 50\% signal efficiency, the relative increases range
+from $4.2\%$ for $H\to gg$ to $26.8\%$ for fully hadronic top jets.
+For $H\to4q$, rejection rises from $665.0$ to $813.5$ ($+22.3\%$),
+while for $H\to b\bar b$ it rises from $5271$ to $5674$ ($+7.6\%$).
+Thus, the improvement observed in multiclass accuracy is accompanied by
+better signal-versus-QCD discrimination across the benchmark categories.
+
+With layerwise bias, adding EdgeValue likewise improves mean benchmark
+rejection in all nine classes relative to its matching bias-only control.
+The gains include $15.4\%$ for $H\to4q$ and $23.2\%$ for fully
+hadronic top jets at 50\% efficiency. Thus, the class-wise improvements
+also persist under both bias schemes, although their sizes differ by class.
+
+At the stricter 30\% operating point
+(Table~\ref{tab:rejection-30}), the standard shared-bias EdgeValue
+model improves mean rejection over baseline in all seven hadronic classes,
+including $28.1\%$ for $H\to4q$ and $35.6\%$ for fully hadronic top jets.
+These comparisons show that the benefits extend to a lower-efficiency regime.
+All rejection gains quoted here are relative changes in mean rejection,
+distinct from the percentage-point changes used for accuracy and macro
+AUROC; point-estimate differences alone do not establish statistical
+significance.
+
+\paragraph{Beyond standard pair features.}
+Appendix~\ref{sec:richer-relations} examines richer physics-inspired pair
+representations and finds positive EdgeValue accuracy gains under both bias
+schemes. These supplementary results motivate a broader study of which
+relations best complement edge-conditioned value messages, without requiring
+those additional descriptors for the gains demonstrated in the main study.

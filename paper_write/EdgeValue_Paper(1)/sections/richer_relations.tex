@@ -1,0 +1,170 @@
+\section{Extension to richer pair representations}
+\label{sec:richer-relations}
+
+The main study uses only the four standard ParT pair features. Here we
+extend that representation with three physics-inspired relation families
+and examine whether the EdgeValue gains persist. This supplementary study
+varies the pair representation while retaining the attention and value-message
+mechanisms described in Section~\ref{sec:method}.
+
+\subsection{Additional relation descriptors}
+\label{sec:selected-descriptors}
+
+For the comparison in this appendix, we denote the main study's four-feature
+pair input $r_{ij}$ by $r^{\mathrm{std}}_{ij}$.
+The selected input concatenates these standard channels with learned PT,
+TRACK, and REGION embeddings of dimensions $8$, $12$, and $12$, respectively,
+giving $r^{\mathrm{sel}}_{ij}\in\mathbb R^{36}$. The common width-64 stem now
+receives $r^{\mathrm{sel}}_{ij}$ instead of $r^{\mathrm{std}}_{ij}$.
+Throughout, $i$ denotes the query and $j$ the context, and directional features
+are not symmetrized. TRACK and REGION use pseudorapidity for angular
+separations, whereas the standard ParT pair features use rapidity.
+
+\paragraph{PT.}
+Let $S_T=\sum_{k\in\mathcal V}p_{T,k}$ be the scalar constituent-$p_T$ sum
+and $\epsilon=10^{-6}$ the numerical safeguard used by the added relation
+families. Each endpoint supplies $p_{T,i}/(S_T+\epsilon)$, the safeguarded
+log-fraction $\log[(p_{T,i}+\epsilon)/(S_T+\epsilon)]$, and its descending
+normalized $p_T$ rank. The remaining four channels are the context-minus-query
+log-fraction and rank differences, the pair log-fraction
+$\log[(p_{T,i}+p_{T,j})/(S_T+\epsilon)+\epsilon]$, and
+$(p_{T,j}-p_{T,i})/(p_{T,j}+p_{T,i}+\epsilon)$. Tied ranks are averaged.
+A $10\!\to\!32\!\to\!8$ network embeds these ten quantities.
+
+\paragraph{TRACK.}
+Each endpoint supplies $d_0$, $d_z$, logarithmic effective uncertainties,
+inverse-hyperbolic-sine impact-parameter significances, and a validity flag.
+Validity requires charged-hadron, electron, or muon identification, finite,
+nonmissing measurements, and positive uncertainties. Effective errors satisfy
+$\sigma_{u,\mathrm{eff}}^2=\sigma_u^2+f_u^2$ for $u\in\{d_0,d_z\}$, with
+floors $f_u$ fitted on training data. Shared endpoint weights produce
+$g_i,g_j\in\mathbb R^{16}$ using a $7\!\to\!32\!\to\!16$ network.
+The pair encoder receives
+\begin{equation}
+ [g_i,g_j,g_j-g_i,g_i\odot g_j,s_{ij},c_{ij}]\in\mathbb R^{81},
+ \label{eq:track-pairs}
+\end{equation}
+where $s_{ij}$ is a four-component one-hot encoding of the ordered endpoint
+validity states and $c_{ij}$ contains 13 compatibility channels. These comprise
+uncertainty-normalized context-minus-query displacement differences, their
+squared-sum $\chi^2$ through $\log(1+\chi^2)$ and
+$\exp[-\min(\chi^2,25)/2]$, extrema of absolute transformed significances and
+their signed products, and angular descriptors $\sin\Delta\phi$,
+$\cos\Delta\phi$, and $\log(\Delta R+\epsilon)$, with
+$\Delta\phi=\phi_i-\phi_j$ wrapped periodically and $\Delta R$ measured in
+pseudorapidity--azimuth space. Compatibility channels vanish unless both
+tracks are valid. The resulting $81\!\to\!48\!\to\!12$ network retains
+missing-measurement information through the validity states.
+
+\paragraph{REGION.}
+A deterministic, beam-free angular tree repeatedly merges the closest pair
+in $(\eta,\phi)$ using four-vector addition. It follows the angular-clustering
+motivation of Cambridge/Aachen~\cite{Dokshitzer1997Cambridge,Wobisch1999Cambridge},
+with the explicit pseudorapidity-based prescription above. Exclusive partitions
+at $K=2,4,8$ clusters, capped by constituent multiplicity, provide 41 features:
+three same-cluster indicators; five lowest-common-ancestor descriptors
+(normalized depth, merge angle, $k_t$, momentum sharing, and mass); 18 endpoint
+cluster $p_T$, mass, and multiplicity fractions; six constituent shares within
+those clusters; six constituent-to-cluster-axis distances; and three
+context-minus-query cluster-$p_T$ rank differences. Angles use reference radius
+$R_{\mathrm{ref}}=0.8$, merge $k_t$ uses $p_{T,\mathrm{jet}}R_{\mathrm{ref}}$,
+and mass uses jet mass. Cluster $p_T$ and mass fractions, and merge angle,
+$k_t$, and mass descriptors use logarithms. Undefined diagonal merge quantities
+are zeroed. A $41\!\to\!32\!\to\!12$ network embeds the result. These descriptors
+are supplied for every valid pair, while attention remains global.
+
+Here jet $p_T$ and mass are obtained from the summed constituent four-vector,
+not the scalar sum $S_T$ used by PT. Ancestor depth is divided by the maximum
+leaf depth, with the denominator bounded below by one.
+
+\subsection{Preprocessing and experimental design}
+\label{sec:richer-setup}
+
+All family networks use GELU and RMS normalization between their two linear
+maps and are trained jointly with the classifier. Before entering these
+networks, designated continuous features are centered and rescaled using
+statistics from a fixed subset of 50,000 training jets. This subset is used
+only to estimate preprocessing constants; the classifier is trained on the
+full one-million-jet training sample. For each feature, we subtract its median,
+divide by a robust measure of its spread, and clip extreme values:
+\begin{equation}
+ \widehat x=\operatorname{clip}_{[-8,8]}
+ \left(\frac{x-\operatorname{median}(x)}
+ {\max[(Q_{75}-Q_{25})/1.349,10^{-6}]}\right).
+ \label{eq:relation-normalization}
+\end{equation}
+Here $Q_{25}$ and $Q_{75}$ are the training-sample quartiles; the resulting
+scale is less sensitive to outliers than a standard deviation. Track
+uncertainty floors are also estimated from training data. Binary and
+designated fixed-scale features are left unchanged. These preprocessing
+constants remain fixed during validation and testing and are shared across
+the selected-input configurations. Padded pair embeddings are zeroed.
+
+The supplementary study repeats the shared/layerwise bias and EdgeValue
+off/on comparisons with the richer representation, giving four additional
+configurations. For the appendix comparisons, \texttt{Std} denotes the
+standard pair inputs used in the main study and \texttt{Sel} denotes the
+richer input. The following \texttt{S} or \texttt{L} denotes shared or
+layerwise bias, and \texttt{+EV} indicates EdgeValue. Thus, \texttt{Std-S}
+is the main-study ParT baseline, while \texttt{Sel-L+EV} uses the added
+relations, layerwise bias, and EdgeValue.
+All four additional configurations use the same data splits, three matched random seeds,
+training protocol, and checkpoint-selection rule as the main study.
+The selected relations use the same constituents and track measurements,
+without additional detector information. Their encoders add trainable
+parameters, so comparisons with standard inputs are not capacity matched.
+The complete eight-configuration results appear in
+Appendix~\ref{sec:complete-results}.
+
+\subsection{Results with richer pair representations}
+\label{sec:results-relations}
+
+Table~\ref{tab:overview} includes the four selected-input configurations.
+At fixed bias scheme and EdgeValue setting, adding these relations improves
+mean accuracy in every comparison. The gains are $0.400$ pp for shared bias
+without EdgeValue and $0.130$ pp for shared bias with EdgeValue. For layerwise
+bias, the corresponding gains are $0.654$ and $0.409$ pp. All four
+selected-versus-standard comparisons improve accuracy in each of the three
+matched seeds.
+
+The bias-scheme comparison also changes with the richer relation input:
+the selected-relation layerwise configuration exceeds its shared counterpart
+by $0.294$ pp without EdgeValue and $0.243$ pp with EdgeValue, consistently
+across seeds. Additional relation information thus has a larger measured
+benefit in the layerwise implementations. This is an empirical comparison of
+the complete configurations, subject to the trimming and pair-processing
+differences noted in Section~\ref{sec:training}, rather than a causal
+attribution to separate layerwise bias maps.
+
+EdgeValue remains beneficial after adding the selected relations, contributing
+$0.385$ pp with shared bias and $0.334$ pp with layerwise bias, again with
+positive gains in all three seeds. The improvements are not simply additive:
+the marginal EdgeValue gain is smaller with the selected features than with
+the standard features. Nevertheless, the selected-relation layerwise
+ParT-EV achieves the highest mean accuracy and macro AUROC among the eight
+configurations: $83.847\pm0.042\%$ and $98.399\pm0.014\%$, respectively.
+Relative to baseline, these are improvements of $1.028$ pp in accuracy and
+$0.170$ pp in macro AUROC. These total gains combine the change in pair
+representation, bias scheme, and value messages; they do not measure
+EdgeValue alone.
+
+Class-wise gains are not uniform (Table~\ref{tab:rejection-benchmark}).
+Relative to baseline, selected-relation layerwise ParT-EV increases mean
+rejection at 50\% signal efficiency by $28.3\%$ for $H\to c\bar c$,
+$30.8\%$ for $H\to4q$, and $37.1\%$ for fully hadronic top jets.
+At the leptonic benchmark efficiencies, the gains are $23.5\%$ for
+$H\to q\bar q'\ell\nu$ and $21.9\%$ for $t\to b\ell\nu$.
+The matched comparison with the selected-relation layerwise model without
+EdgeValue improves mean rejection in eight of the nine classes.
+The exception is $H\to b\bar b$: rejection is $5253$, compared with $5271$
+for baseline, and below the standard shared-bias EdgeValue model. The small
+$-0.3\%$ difference from baseline does not by itself establish a degradation.
+At 30\% efficiency (Table~\ref{tab:rejection-30}), gains over baseline
+include $42.9\%$ for $H\to4q$ and $56.2\%$ for fully hadronic top jets.
+
+These results show that EdgeValue can also exploit a richer pair
+representation, but do not identify an optimal set of relations. PT, TRACK,
+and REGION are added together, so their individual contributions and
+interactions remain unresolved. A broader study of which physics-inspired
+relations most benefit ParT-EV, including individual-family ablations and
+capacity-matched controls, is an important direction for future work.

@@ -1,0 +1,20 @@
+\section{Complete numerical results}
+\label{sec:complete-results}
+
+Table~\ref{tab:overview} lists accuracy and macro AUROC for all eight
+configurations, with differences measured against the shared-bias standard
+ParT baseline. Tables~\ref{tab:rejection-benchmark} and
+\ref{tab:rejection-30} give the complete class-wise rejection results at
+the benchmark efficiencies and at 30\% signal efficiency, respectively.
+The appendix configuration labels are defined in Appendix~\ref{sec:richer-setup}:
+\texttt{Std} uses standard pair inputs, \texttt{Sel} adds PT, TRACK, and
+REGION, \texttt{S}/\texttt{L} identifies shared/layerwise bias, and
+\texttt{+EV} denotes edge-conditioned value messages. Every configuration
+uses three independently trained models evaluated on the same 20M test
+jets; the reported spreads are sample standard deviations across seeds.
+
+\input{tables/overview}
+\clearpage
+\input{tables/rejection_50}
+\clearpage
+\input{tables/rejection_30}

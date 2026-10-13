@@ -1,0 +1,10 @@
+# Use an existing CUDA-enabled PyTorch environment. This file does not replace
+# its site-specific CUDA/PyTorch installation. Actual versions are frozen by prepare.
+weaver-core==0.4.17
+numpy>=1.24,<2
+awkward>=2,<3
+uproot>=5,<5.2
+PyYAML>=6
+scipy>=1.10
+scikit-learn>=1.3
+tqdm>=4.64
