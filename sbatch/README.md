@@ -119,6 +119,48 @@ Estimates exclude checkpoint validation, restart I/O, and scheduler delays.
 These jobs exercise real data loading, forward/backward, Ranger and (where
 applicable) multi-node DDP. CPU unit tests do not replace this GPU check.
 
+### Optional sustained walltime check (existing campaign stays unchanged)
+
+The short 200-step benchmark can fit inside the first prefetched data slice.
+To check whether the three-day training allocation has enough headroom without
+changing an already queued training array, submit an independent diagnostic:
+
+```bash
+bash sbatch/submit_part_fullscale_timing.sh --campaign "${CAMPAIGN}"
+```
+
+This requests one GH200, 8 CPUs, 128G, and **two hours**, with a 100-minute soft
+execution budget. It measures both architectures sequentially using the existing
+campaign's frozen Python, model, optimizer, preprocessing, and loader. Targets
+are 10,000 training minibatches and one full 1.28M-event validation pass per
+architecture. Both data loaders stay alive together, as in production. Actual
+full-state and best-model checkpoint writes are timed on the campaign filesystem;
+the diagnostic's temporary checkpoint probes are then removed. There are no
+model updates or writes to production checkpoints.
+
+The submitter prints a unique `diagnostics/timing.*/report.md` and `report.json`
+path, plus job/log paths. It freezes its own diagnostic scripts independently of
+the campaign source. It never changes `submitted_job_ids.tsv`, `training_runtime.json`,
+the original GPU benchmark JSONs, production walltimes, dependencies, or jobs.
+Updating the main checkout to obtain this launcher does not alter queued jobs'
+frozen source. Maintenance may still prevent the diagnostic from starting.
+
+Projections include repeated ROOT fetches, validation, 1,100 full checkpoint
+writes, and up to 50 best-checkpoint writes over the full run. The report shows
+both whole-window and first-window-excluded projections and uses the larger for
+planning. A 25% slowdown scenario illustrates headroom; it is **not** a confidence
+interval or a bound on six concurrent jobs' filesystem contention. Queue waiting,
+maintenance, and resume data replay are excluded. Too little training data, an
+incomplete validation pass, or any probe error makes the estimate inconclusive.
+`complete` records whether all requested targets finished; `usable` can be true
+after a budget-limited run only if sufficient repeated-fetch timing and the full
+validation pass were collected. Progress is saved during execution. A hard Slurm
+kill may leave an unfinished report (and diagnostic-only temporary checkpoints);
+never interpret that as a successful duration check. No automatic resource
+changes are made from the results.
+
+### Production training and testing
+
 Multi-GPU execution uses one GH200/rank per node, with local batch 256 on two
 GPUs or 128 on four. Unlike upstream's local-batch scaling, our adapter preserves
 the single-GPU global batch and 1M-step budget. It retains the upstream DDP
