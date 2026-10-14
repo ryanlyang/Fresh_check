@@ -255,13 +255,15 @@ def driver():
     return module
 
 
-@pytest.fixture
-def cpu_orchestration(monkeypatch, driver):
+@pytest.fixture(params=["standard", "plain"])
+def cpu_orchestration(monkeypatch, driver, request):
     """Exercise the real train/replay/checkpoint loop; replace only GPU/data work."""
     from part_ev_fullscale import data
 
     stats = {"loaders": [], "updates": 0, "validations": 0}
-    campaign = {"content_hash": "cpu-orchestration-campaign", "inventory": {}}
+    campaign = {"content_hash": "cpu-orchestration-campaign", "inventory": {},
+                "tasks": P.tasks_for(request.param)}
+    stats["tasks"] = campaign["tasks"]
     runtime = {"world_size": 1, "local_batch_size": 512, "gpu": "CPU test fixture",
                "campaign_sha256": campaign["content_hash"]}
 
@@ -368,7 +370,7 @@ def test_train_orchestration_restarts_before_or_after_validation_exactly(
     driver.train(SimpleNamespace(output=baseline_output, task_index=0))
     assert stats["updates"] == 4 and stats["validations"] == 2
     assert [value.consumed for value in stats["loaders"]] == [4, 2]
-    baseline_dir = P.task_directory(baseline_output, 0)
+    baseline_dir = P.task_directory(baseline_output, 0, tasks=stats["tasks"])
     expected_last = trusted_load(baseline_dir / "last.pt")
     expected_best = trusted_load(baseline_dir / "best_model_val.pt")
     assert expected_last["state"]["step"] == 4
@@ -393,7 +395,7 @@ def test_train_orchestration_restarts_before_or_after_validation_exactly(
     monkeypatch.setattr(driver, "save_checkpoint", save_and_interrupt)
     with pytest.raises(SimulatedInterruption):
         driver.train(SimpleNamespace(output=resumed_output, task_index=0))
-    resumed_dir = P.task_directory(resumed_output, 0)
+    resumed_dir = P.task_directory(resumed_output, 0, tasks=stats["tasks"])
     interrupted = trusted_load(resumed_dir / "last.pt")
     assert interrupted["state"]["step"] == 2
     assert interrupted["state"]["validated_epochs"] == interrupt_checkpoint - 1

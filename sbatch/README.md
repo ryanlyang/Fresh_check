@@ -218,3 +218,82 @@ away. The report requires all six complete, same-population results.
 Use `--help` for resource overrides and `--dry-run` to inspect requests without
 creating files or submitting anything. These launchers do not delete datasets,
 cancel other campaigns, or submit testing implicitly during training.
+
+### Additional comparison: ParT (plain) versus ParT (plain) + EdgeValue
+
+Use a **new campaign** with `--comparison plain` during preparation. The original
+shared-bias campaign and its six running jobs are left unchanged. This comparison
+uses `part_plain` and `part_plain_ev`, each with the same three seeds, train/validation
+populations, optimizer, batch size, training budget, and checkpoint-selection rule
+described above. Neither model adds a physics-derived pairwise bias to its attention
+logits. The EdgeValue model still uses the standard pair features to construct its
+value messages; "plain + EV" does not mean removing pair information from EV.
+
+The comparison is frozen in `launch.env` and `campaign.json`. Only `prepare` accepts
+`--comparison`; all subsequent phases infer it from that campaign. Do not point this
+new comparison at the existing `part_ev_100m_20261013T044756Z` directory. Existing
+campaigns without a comparison field retain their original standard/shared-bias
+interpretation. Plain jobs have names beginning `parte_plain_`.
+
+After committing/pushing the updated setup and pulling it on **Tigris**, this queues
+the new preflight, a one-GPU benchmark, then the six one-GPU training runs. Training
+waits for the benchmark's successful completion and verifies its passing result.
+No testing is submitted by this block. It reuses the existing environment and
+uploaded train/validation files; no new upload or dependency installation is needed.
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+PLAIN_CAMPAIGN="/home/ryreu/atlas/Fresh_check/checkpoints/part_fullscale/part_plain_ev_100m_$(date -u +%Y%m%dT%H%M%SZ)"
+(
+  set -euo pipefail
+  bash sbatch/submit_part_fullscale.sh \
+    --mode prepare --comparison plain --output "${PLAIN_CAMPAIGN}"
+  PREPARE_JOB="$(awk -F '\t' '$1 == "prepare" {id=$2} END {print id}' \
+    "${PLAIN_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${PREPARE_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh \
+    --mode benchmark --output "${PLAIN_CAMPAIGN}" --gpus 1 \
+    --dependency "${PREPARE_JOB}"
+  BENCHMARK_JOB="$(awk -F '\t' '$1 == "benchmark1gpu" {id=$2} END {print id}' \
+    "${PLAIN_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${BENCHMARK_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh \
+    --mode train --output "${PLAIN_CAMPAIGN}" --gpus 1 --concurrency 6 \
+    --time 4-00:00:00 --dependency "${BENCHMARK_JOB}"
+
+  printf '\nSave this campaign path for results/testing: %s\n' "${PLAIN_CAMPAIGN}"
+  cat "${PLAIN_CAMPAIGN}/submitted_job_ids.tsv"
+)
+```
+
+Preparation requests two hours and the benchmark one hour, both below six hours.
+The production jobs request four days. Concurrent new and existing training runs
+can increase shared filesystem load; the two campaigns have independent outputs
+and neither submitter changes the other's jobs. The one-GPU benchmark is a launch
+check, not a guarantee that training will fit within its requested walltime.
+
+Later, once the full test data have been staged, keep `PLAIN_CAMPAIGN` set to the
+printed path (restore it explicitly in a new login session). To queue six test jobs
+behind this campaign's training array, plus their dependent report:
+
+```bash
+(
+  set -euo pipefail
+  : "${PLAIN_CAMPAIGN:?Set this to the new plain campaign path}"
+  TRAIN_JOB="$(awk -F '\t' '$1 == "train" {id=$2} END {print id}' \
+    "${PLAIN_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${TRAIN_JOB}" =~ ^[0-9]+$ ]]
+  bash sbatch/submit_part_fullscale.sh --mode test --output "${PLAIN_CAMPAIGN}" \
+    --test-data /home/ryreu/atlas/datasets/JetClass/Pythia/test_20M \
+    --gpus 1 --concurrency 6 --time 1-00:00:00 --dependency "${TRAIN_JOB}"
+)
+```
+
+If training is already complete and no longer known to the scheduler, omit the
+dependency after confirming all six `training_complete.json` markers exist.
+The test driver also checks completion and locks the validation-selected models.
+Test data are not needed to prepare, benchmark, or train this campaign.

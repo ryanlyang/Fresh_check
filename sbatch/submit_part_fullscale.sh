@@ -3,6 +3,7 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode= output= dependency= test_data= resume=0 dry_run=0
+comparison=standard comparison_explicit=0
 data_root=/home/ryreu/atlas/datasets/JetClass
 python_path=/home/ryreu/miniforge3-aarch64/envs/part_ev_fullscale/bin/python
 account=reu-aisocial partition=tigris gpus=1 concurrency=2 cpus=8 memory=128G
@@ -14,11 +15,12 @@ Usage: bash sbatch/submit_part_fullscale.sh --mode MODE [options]
 Modes (none submits another training phase implicitly):
   prepare    Freeze committed source; queue a CPU dataset/environment preflight.
   benchmark  Compare both architectures on --gpus 1, 2, or 4 (one GPU per node).
-  train      Queue six trainings: ParT/ParT-EV, three matched seeds each.
+  train      Queue the campaign's two architectures, three matched seeds each.
   test       Explicitly queue six 1-GPU test evaluations, then their report.
 
 Options:
   --output DIR         New campaign directory for prepare; existing for other modes.
+  --comparison NAME    prepare only: standard (default) or plain (no pairwise bias).
   --data-root DIR      JetClass parent containing Pythia/train_100M and Pythia/val_5M.
   --test-data DIR      Required for test; staged directory of 200 test ROOT files.
   --gpus 1|2|4         Training/benchmark ranks; global batch remains 512.
@@ -38,6 +40,9 @@ Options:
 Run prepare only after the train/validation upload has finished. Benchmark before
 choosing the production GPU count. Source is pinned once; unrelated repository
 commits cannot change a campaign. All six trainings must use the same GPU count.
+The comparison is frozen at prepare. Plain compares ParT (plain) with ParT
+(plain) + EdgeValue; both omit pairwise attention-logit bias. Benchmark/train/test
+read this choice from the campaign; they cannot switch an existing comparison.
 Test data need not be present for prepare, benchmark, or train. To queue testing
 ahead of training completion, explicitly use --mode test --dependency TRAIN_JOB
 and --test-data DIR. Training checkpoints and models are never deleted here.
@@ -58,10 +63,11 @@ while (( $# )); do
     --help|-h) usage; exit 0 ;;
     --resume) resume=1; shift ;;
     --dry-run) dry_run=1; shift ;;
-    --mode|--output|--data-root|--test-data|--gpus|--concurrency|--cpus|--mem|--time|--python|--account|--partition|--dependency|--steps|--warmup)
+    --mode|--output|--comparison|--data-root|--test-data|--gpus|--concurrency|--cpus|--mem|--time|--python|--account|--partition|--dependency|--steps|--warmup)
       (( $# >= 2 )) || fail "Missing value for $1"
       case "$1" in
         --mode) mode=$2 ;; --output) output=$2 ;; --data-root) data_root=$2 ;;
+        --comparison) comparison=$2; comparison_explicit=1 ;;
         --test-data) test_data=$2 ;; --gpus) gpus=$2 ;; --concurrency) concurrency=$2 ;;
         --cpus) cpus=$2 ;; --mem) memory=$2 ;; --time) time_limit=$2 ;;
         --python) python_path=$2 ;; --account) account=$2 ;; --partition) partition=$2 ;;
@@ -72,6 +78,8 @@ while (( $# )); do
   esac
 done
 case "$mode" in prepare|benchmark|train|test) ;; *) fail 'Specify --mode prepare|benchmark|train|test' ;; esac
+case "$comparison" in standard|plain) ;; *) fail '--comparison must be standard or plain' ;; esac
+[[ "$comparison_explicit" == 0 || "$mode" == prepare ]] || fail '--comparison is prepare-only; later phases use the frozen campaign choice'
 case "$gpus" in 1|2|4) ;; *) fail '--gpus must be 1, 2, or 4' ;; esac
 for value in "$concurrency" "$cpus" "$benchmark_steps" "$benchmark_warmup"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail 'Concurrency, CPUs, steps, and warmup must be positive integers'
@@ -83,7 +91,9 @@ done
 [[ "$memory" =~ ^[1-9][0-9]*[KMGTP]?$ ]] || fail 'Invalid --mem value'
 [[ "$time_limit" =~ ^([0-9]+-)?[0-9]+:[0-9]{2}:[0-9]{2}$ ]] || fail 'Use a Slurm time such as 3-00:00:00'
 if [[ "$mode" == prepare && -z "$output" ]]; then
-  output="$repo_root/checkpoints/part_fullscale/part_ev_$(date -u +%Y%m%dT%H%M%SZ)"
+  campaign_prefix=part_ev
+  [[ "$comparison" != plain ]] || campaign_prefix=part_plain_ev
+  output="$repo_root/checkpoints/part_fullscale/${campaign_prefix}_$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 [[ -n "$output" ]] || fail '--output is required for an existing campaign'
 [[ "$mode" != test || -n "$test_data" ]] || fail 'Test submission requires explicit --test-data'
@@ -91,6 +101,7 @@ fi
 if (( dry_run )); then
   printf 'Dry run: mode=%s output=%s account=%s partition=%s\n' "$mode" "$output" "$account" "$partition"
   if [[ "$mode" == prepare ]]; then
+    printf 'Comparison for a new campaign: %s (resume retains the existing frozen choice).\n' "$comparison"
     printf 'CPU preflight: --nodes=1 --cpus-per-task=4 --mem=16G --time=02:00:00\n'
   else
     printf 'GPU allocation per run: --nodes=%s --ntasks-per-node=1 --gpus-per-node=1 --cpus-per-task=%s --mem=%s\n' "$gpus" "$cpus" "$memory"
@@ -131,6 +142,7 @@ if [[ "$mode" == prepare && ! -e "$output" ]]; then
   {
     printf 'PART_FULLSCALE_PYTHON=%q\n' "$python_path"
     printf 'PART_FULLSCALE_DATA_ROOT=%q\n' "$data_root"
+    printf 'PART_FULLSCALE_COMPARISON=%q\n' "$comparison"
   } > "$output/launch.env"
 elif [[ "$mode" == prepare && "$resume" == 0 ]]; then
   fail 'Campaign already exists; use --resume only after inspecting its previous prepare job'
@@ -139,7 +151,11 @@ else
 fi
 [[ -f "$output/launch.env" && -f "$output/source.sha256" ]] || fail 'Missing frozen campaign source/launch configuration'
 # shellcheck disable=SC1090
+unset PART_FULLSCALE_COMPARISON
 source "$output/launch.env"
+PART_FULLSCALE_COMPARISON="${PART_FULLSCALE_COMPARISON:-standard}"
+case "$PART_FULLSCALE_COMPARISON" in standard|plain) ;; *) fail 'Invalid frozen campaign comparison' ;; esac
+[[ "$comparison_explicit" == 0 || "$comparison" == "$PART_FULLSCALE_COMPARISON" ]] || fail 'Requested comparison differs from the frozen campaign; use a new output directory'
 [[ -x "$PART_FULLSCALE_PYTHON" ]] || fail 'Pinned Python environment no longer exists'
 [[ "$mode" == prepare || -f "$output/campaign.json" || -n "$dependency" ]] || fail 'Prepare must finish first, or supply its --dependency job ID'
 if [[ "$mode" == test ]]; then
@@ -166,6 +182,8 @@ fi
 export PART_FULLSCALE_OUTPUT="$output" PART_FULLSCALE_TEST_DATA="$test_data"
 export PART_FULLSCALE_STEPS="$benchmark_steps" PART_FULLSCALE_WARMUP="$benchmark_warmup"
 worker="$output/source/sbatch/run_part_fullscale.sh"
+job_prefix=parte
+[[ "$PART_FULLSCALE_COMPARISON" != plain ]] || job_prefix=parte_plain
 submit() {
   local phase=$1 depends=$2 key=$3 response job
   shift 3
@@ -173,7 +191,7 @@ submit() {
   [[ -z "$depends" ]] || deps=("--dependency=afterok:$depends" --kill-on-invalid-dep=yes)
   export PART_FULLSCALE_PHASE="$phase"
   response="$(sbatch --parsable "--account=$account" "--partition=$partition" \
-    "--job-name=parte_${phase}" "--output=$output/logs/%x_%A_%a.out" \
+    "--job-name=${job_prefix}_${phase}" "--output=$output/logs/%x_%A_%a.out" \
     "--error=$output/logs/%x_%A_%a.err" --export=ALL "${deps[@]}" "$@" "$worker")"
   job="${response%%;*}"
   [[ "$job" =~ ^[0-9]+$ ]] || fail "Invalid sbatch response: $response. Inspect the queue before retrying"
@@ -190,4 +208,4 @@ case "$mode" in
     report="$(submit report "$job" report --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=16G --time=01:00:00)"
     printf 'Report job: %s\n' "$report" ;;
 esac
-printf 'Campaign: %s\n%s job: %s\nQueue: squeue -j %s\n' "$output" "$mode" "$job" "$job"
+printf 'Campaign: %s\nComparison: %s\n%s job: %s\nQueue: squeue -j %s\n' "$output" "$PART_FULLSCALE_COMPARISON" "$mode" "$job" "$job"

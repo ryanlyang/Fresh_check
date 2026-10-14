@@ -296,7 +296,12 @@ def main(argv=None):
     if rank != 0 or world != 1:
         raise RuntimeError("Timing diagnostic requires one GPU and one rank")
     args.runtime = driver.runtime_contract(spec, rank, world, args.device)
-    driver.require_benchmark(args.campaign, args.runtime)
+    architectures = tuple(dict.fromkeys(task["architecture"] for task in spec["tasks"]))
+    if spec.get("comparison", "standard") == "plain":
+        driver.require_benchmark(args.campaign, args.runtime, architectures)
+    else:
+        # Old frozen standard-campaign drivers accept only these two arguments.
+        driver.require_benchmark(args.campaign, args.runtime)
     report = {"schema": "part_fullscale_sustained_timing_v1", "campaign": str(args.campaign),
               "campaign_sha256": spec["content_hash"], "runtime": args.runtime,
               "recipe": spec["recipe"], "models": {}, "finished": False,
@@ -308,7 +313,7 @@ def main(argv=None):
     persist()
     start = time.monotonic()
     deadline = start + args.budget_minutes * 60
-    for index, architecture in enumerate(("part", "part_ev")):
+    for index, architecture in enumerate(architectures):
         if driver.STOP_REQUESTED or time.monotonic() >= deadline:
             break
         row = {"training_windows": [], "full_checkpoint_seconds": [],

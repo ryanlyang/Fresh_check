@@ -235,3 +235,200 @@ def test_runtime_metadata_and_amp_setting():
     with pytest.raises(ValueError, match="architecture"):
         M.build_model("selected")
 
+
+def test_plain_matches_native_bias_free_configuration_and_has_no_pair_parameters():
+    from weaver.nn.model.ParticleTransformer import ParticleTransformer
+
+    plain = seeded_model("part_plain", trim=False).eval()
+    config = M.reference_config(trim=False)
+    config.update(pair_input_dim=0, pair_embed_dims=None)
+    native = ParticleTransformer(**config).eval()
+    native.load_state_dict(plain.mod.state_dict(), strict=True)
+    assert plain.mod.pair_embed is None
+    assert not any("pair_embed" in key for key in plain.state_dict())
+    points, features, vectors, mask = inputs()
+    with torch.no_grad():
+        torch.testing.assert_close(
+            plain(points, features, vectors, mask),
+            native(features, v=vectors, mask=mask), rtol=0, atol=0,
+        )
+    # Only the learned particle inputs matter in plain attention. Changing the
+    # independent four-vector argument must not change its predictions.
+    changed = vectors.clone()
+    changed[:, :3] *= 1.3
+    changed[:, 3:] = (changed[:, :3].square().sum(1, keepdim=True) + 0.5).sqrt() * mask
+    with torch.no_grad():
+        torch.testing.assert_close(
+            plain(points, features, vectors, mask),
+            plain(points, features, changed, mask), rtol=0, atol=0,
+        )
+
+
+def test_plain_shared_backbone_initialization_and_rng_match_all_four_arms():
+    baseline = seeded_model("part", trim=False)
+    expected_rng = torch.random.get_rng_state().clone()
+    for architecture in ("part_plain", "part_plain_ev"):
+        model = seeded_model(architecture, trim=False)
+        assert torch.equal(torch.random.get_rng_state(), expected_rng)
+        for key, value in model.mod.state_dict().items():
+            native_key = "mod." + key.replace(".attn.reference.", ".attn.")
+            if not key.endswith("edge_projection"):
+                torch.testing.assert_close(
+                    value, baseline.state_dict()[native_key], rtol=0, atol=0,
+                )
+        assert all(type(block.attn) is nn.MultiheadAttention for block in model.mod.cls_blocks)
+    biased_ev = seeded_model("part_ev", trim=False)
+    plain_ev = seeded_model("part_plain_ev", trim=False)
+    for left, right in zip(biased_ev.mod.blocks, plain_ev.mod.blocks):
+        torch.testing.assert_close(left.attn.edge_projection, right.attn.edge_projection, rtol=0, atol=0)
+    biased_stem = biased_ev.mod.pair_embed.reference.embed.prefix.state_dict()
+    plain_stem = plain_ev.edge_pair_values.reference.embed.state_dict()
+    assert biased_stem.keys() == plain_stem.keys()
+    for key in biased_stem:
+        torch.testing.assert_close(biased_stem[key], plain_stem[key], rtol=0, atol=0)
+    # Plain+EV removes the entire final 64->8 Conv/BN head rather than retaining
+    # dormant trainable weights (which would also break default DDP reduction).
+    assert plain_ev.mod.pair_embed is None
+    assert plain_ev.edge_pair_values.reference.out_dim == 64
+    assert not any("projection" in key for key in plain_stem)
+    head_params = sum(p.numel() for p in biased_ev.mod.pair_embed.reference.embed.projection.parameters())
+    assert sum(p.numel() for p in biased_ev.parameters()) - sum(p.numel() for p in plain_ev.parameters()) == head_params
+
+
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("trim", [False, True])
+def test_zero_plain_ev_matches_plain_including_dropout_and_trimming(training, trim):
+    plain = seeded_model("part_plain", trim=trim).train(training)
+    ev = seeded_model("part_plain_ev", trim=trim).train(training)
+    plain.mod.trimmer._counter = ev.mod.trimmer._counter = 5
+    plain.mod.trimmer.target = ev.mod.trimmer.target = (0.5, 0.5)
+    observed = []
+
+    def observe_attention(module, args, kwargs):
+        assert kwargs.get("attn_mask") is None
+        stem, valid = module._relation_stem, module._query_valid
+        mask = valid[:, None, :, None] & valid[:, None, None, :]
+        assert torch.count_nonzero(stem.masked_select(~mask)) == 0
+        observed.append(stem.shape[-1])
+
+    handles = [
+        block.attn.register_forward_pre_hook(observe_attention, with_kwargs=True)
+        for block in ev.mod.blocks
+    ]
+    with torch.no_grad():
+        for block in ev.mod.blocks:
+            block.attn.edge_projection.zero_()
+        torch.manual_seed(812)
+        random.seed(812)
+        expected = plain(*inputs())
+        torch.manual_seed(812)
+        random.seed(812)
+        actual = ev(*inputs())
+    for handle in handles:
+        handle.remove()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert len(observed) == 8
+    if trim and training:
+        assert observed == [9] * 8
+    assert ev.edge_pair_values._trimmed_vectors is None
+    assert ev.edge_pair_values._trimmed_mask is None
+    assert all(block.attn._relation_stem is None for block in ev.mod.blocks)
+
+
+def test_plain_ev_uses_pair_features_only_in_value_messages():
+    ev = seeded_model("part_plain_ev", trim=False).eval()
+    points, features, vectors, mask = inputs()
+    changed = vectors.clone()
+    changed[:, :3] *= 1.3
+    changed[:, 3:] = (changed[:, :3].square().sum(1, keepdim=True) + 0.5).sqrt() * mask
+    first_attention_outputs = []
+
+    def observe_native_attention(module, args, kwargs, output):
+        assert kwargs.get("attn_mask") is None
+        first_attention_outputs.append(output[0].detach().clone())
+
+    handle = ev.mod.blocks[0].attn.reference.register_forward_hook(
+        observe_native_attention, with_kwargs=True,
+    )
+    with torch.no_grad():
+        original = ev(points, features, vectors, mask)
+        modified = ev(points, features, changed, mask)
+    handle.remove()
+    # The first block's ordinary attention has identical Q/K/V and no pairwise
+    # bias; later blocks may change because their previous EV messages changed.
+    torch.testing.assert_close(first_attention_outputs[0], first_attention_outputs[1], rtol=0, atol=0)
+    assert not torch.allclose(original, modified)
+
+
+@pytest.mark.parametrize("architecture", ["part_plain", "part_plain_ev"])
+def test_plain_arms_have_no_unused_trainable_parameters(architecture):
+    model = seeded_model(architecture, trim=False).train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    for _ in range(2):
+        optimizer.zero_grad(set_to_none=True)
+        loss = F.cross_entropy(model(*inputs()), torch.tensor([1, 4, 8]))
+        loss.backward()
+        missing = [name for name, parameter in model.named_parameters() if parameter.grad is None]
+        assert not missing, missing
+        assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters())
+        if architecture == "part_plain_ev":
+            assert any(torch.count_nonzero(p.grad) for p in model.edge_pair_values.parameters())
+        optimizer.step()
+
+
+def test_plain_ev_syncbn_roundtrip_and_error_cleanup(monkeypatch):
+    original = seeded_model("part_plain_ev", trim=True).eval()
+    restored = seeded_model("part_plain_ev", trim=True).eval()
+    restored.load_state_dict(original.state_dict(), strict=True)
+    copied = copy.deepcopy(original)
+    assert copied.edge_pair_values is not original.edge_pair_values
+    assert all(
+        bound is block.attn
+        for bound, block in zip(copied.edge_pair_values._edges, copied.mod.blocks)
+    )
+    with torch.no_grad():
+        torch.testing.assert_close(original(*inputs()), restored(*inputs()), rtol=0, atol=0)
+        torch.testing.assert_close(original(*inputs()), copied(*inputs()), rtol=0, atol=0)
+    count = sum(isinstance(module, nn.BatchNorm1d) for module in restored.modules())
+    converted = nn.SyncBatchNorm.convert_sync_batchnorm(restored)
+    assert sum(isinstance(module, nn.SyncBatchNorm) for module in converted.modules()) == count
+    assert not any(isinstance(module, nn.BatchNorm1d) for module in converted.modules())
+    with torch.no_grad():
+        torch.testing.assert_close(original(*inputs()), converted(*inputs()), rtol=0, atol=0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected plain attention failure")
+
+    monkeypatch.setattr(original.mod.blocks[2], "forward", fail)
+    with pytest.raises(RuntimeError, match="injected plain"):
+        original(*inputs())
+    assert original.edge_pair_values._trimmed_vectors is None
+    assert original.edge_pair_values._trimmed_mask is None
+    assert all(block.attn._relation_stem is None for block in original.mod.blocks)
+
+
+@pytest.mark.skipif(
+    not torch.distributed.is_available() or not torch.distributed.is_gloo_available(),
+    reason="CPU Gloo distributed runtime unavailable",
+)
+@pytest.mark.parametrize("architecture", ["part_plain", "part_plain_ev"])
+def test_plain_arms_default_ddp_complete_two_iterations(architecture, tmp_path):
+    from datetime import timedelta
+    from torch.nn.parallel import DistributedDataParallel
+
+    if torch.distributed.is_initialized():
+        pytest.skip("An external process group already owns the test runtime")
+    torch.distributed.init_process_group(
+        backend="gloo", init_method=(tmp_path / "rendezvous").as_uri(),
+        rank=0, world_size=1, timeout=timedelta(seconds=30),
+    )
+    try:
+        # The second forward checks that the previous gradient reduction
+        # finished without find_unused_parameters or static-graph workarounds.
+        model = DistributedDataParallel(seeded_model(architecture, trim=False).train())
+        for _ in range(2):
+            model.zero_grad(set_to_none=True)
+            F.cross_entropy(model(*inputs()), torch.tensor([1, 4, 8])).backward()
+    finally:
+        torch.distributed.destroy_process_group()
+

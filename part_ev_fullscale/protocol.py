@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib.metadata
 import json
@@ -12,6 +13,10 @@ import tempfile
 
 SCHEMA = "part_ev_jetclass100m_v1"
 SEEDS = (101, 202, 303)
+COMPARISONS = {
+    "standard": ("part", "part_ev"),
+    "plain": ("part_plain", "part_plain_ev"),
+}
 TASKS = [{"architecture": architecture, "seed": seed}
          for architecture in ("part", "part_ev") for seed in SEEDS]
 CLASS_NAMES = ("QCD", "Hbb", "Hcc", "Hgg", "H4q", "Hqql", "Zqq", "Wqq", "Tbqq", "Tbl")
@@ -44,6 +49,21 @@ RECIPE = {
     "validation_stream": "separate_continuous_rank0_stream",
     "weaver_version": "0.4.17",
 }
+
+
+def tasks_for(comparison="standard"):
+    if comparison not in COMPARISONS:
+        raise ValueError("Unknown comparison; choose standard or plain")
+    return [{"architecture": architecture, "seed": seed}
+            for architecture in COMPARISONS[comparison] for seed in SEEDS]
+
+
+def recipe_for(comparison="standard"):
+    tasks_for(comparison)  # Reject unknown comparisons before constructing a recipe.
+    recipe = copy.deepcopy(RECIPE)
+    if comparison == "plain":
+        recipe["pair_bias"] = "none"
+    return recipe
 
 
 def digest(payload):
@@ -146,7 +166,9 @@ def load_campaign(output, *, check_environment=True):
     if digest(spec) != content_hash or spec.get("schema") != SCHEMA:
         raise ValueError("Campaign metadata was changed or is incompatible")
     spec["content_hash"] = content_hash
-    if spec["recipe"] != RECIPE or spec["tasks"] != TASKS:
+    # Existing campaigns predate this field and remain the standard comparison.
+    comparison = spec.get("comparison", "standard")
+    if spec["recipe"] != recipe_for(comparison) or spec["tasks"] != tasks_for(comparison):
         raise ValueError("Campaign differs from the frozen two-model/three-seed protocol")
     config = Path(__file__).resolve().parents[1] / "particle_transformer/data/JetClass/JetClass_full.yaml"
     if spec["data_config_sha256"] != file_sha256(config):
@@ -156,8 +178,9 @@ def load_campaign(output, *, check_environment=True):
     return spec
 
 
-def task_directory(output, task_index):
-    if not 0 <= task_index < len(TASKS):
+def task_directory(output, task_index, *, tasks=None):
+    tasks = TASKS if tasks is None else tasks
+    if not 0 <= task_index < len(tasks):
         raise ValueError("Task index must be 0..5")
-    task = TASKS[task_index]
+    task = tasks[task_index]
     return Path(output) / "runs" / task["architecture"] / f"seed_{task['seed']}"

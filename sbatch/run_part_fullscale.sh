@@ -7,7 +7,10 @@ set -euo pipefail
 source_root="$PART_FULLSCALE_OUTPUT/source"
 [[ -f "$PART_FULLSCALE_OUTPUT/launch.env" ]] || { echo 'Pinned launch environment missing' >&2; exit 2; }
 # shellcheck disable=SC1090
+unset PART_FULLSCALE_COMPARISON
 source "$PART_FULLSCALE_OUTPUT/launch.env"
+PART_FULLSCALE_COMPARISON="${PART_FULLSCALE_COMPARISON:-standard}"
+case "$PART_FULLSCALE_COMPARISON" in standard|plain) ;; *) echo 'Invalid frozen comparison' >&2; exit 2 ;; esac
 [[ "$(uname -m)" == aarch64 ]] || { echo 'This worker requires Tigris aarch64; cross-platform execution is not authorized' >&2; exit 2; }
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 export PYTHONPATH="$source_root"
@@ -19,7 +22,7 @@ sha256sum --quiet -c "$PART_FULLSCALE_OUTPUT/source.sha256"
 driver="$source_root/scripts/run_part_fullscale.py"
 args=("$PART_FULLSCALE_PHASE" --output "$PART_FULLSCALE_OUTPUT")
 case "$PART_FULLSCALE_PHASE" in
-  prepare) args+=(--data-root "$PART_FULLSCALE_DATA_ROOT") ;;
+  prepare) args+=(--data-root "$PART_FULLSCALE_DATA_ROOT" --comparison "$PART_FULLSCALE_COMPARISON") ;;
   benchmark) args+=(--steps "${PART_FULLSCALE_STEPS:-200}" --warmup "${PART_FULLSCALE_WARMUP:-20}") ;;
   train|test)
     : "${SLURM_ARRAY_TASK_ID:?An array task index is required}"

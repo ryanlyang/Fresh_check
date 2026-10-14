@@ -229,3 +229,90 @@ def test_distinct_gpu_benchmarks_are_not_duplicate_phases(launcher):
     result = run("--mode", "benchmark", "--gpus", "2", extra_env={"TEST_LIVE_JOBS": "700002"})
     assert result.returncode == 0, result.stderr
     assert len(calls.read_text().splitlines()) == 3
+
+
+def test_plain_prepare_freezes_comparison_and_worker_passes_it(launcher):
+    run, _, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "plain")
+    assert result.returncode == 0, result.stderr
+    assert "PART_FULLSCALE_COMPARISON=plain" in (output / "launch.env").read_text()
+    assert "--job-name=parte_plain_prepare" in calls.read_text()
+    assert "--time=02:00:00" in calls.read_text()
+    result = run(worker=True, extra_env={
+        "PART_FULLSCALE_OUTPUT": shell_path(output), "PART_FULLSCALE_PHASE": "prepare",
+        "PART_FULLSCALE_COMPARISON": "standard",  # inherited shell cannot change it
+    })
+    assert result.returncode == 0, result.stderr
+    assert "--comparison plain" in result.stdout
+
+
+def test_plain_defaults_to_a_distinct_output_directory_without_writes(launcher):
+    run, source, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "plain", "--output", "", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    assert "/checkpoints/part_fullscale/part_plain_ev_" in result.stdout
+    assert "Comparison for a new campaign: plain" in result.stdout
+    assert not output.exists() and not calls.exists() and not (source / "checkpoints").exists()
+
+
+@pytest.mark.parametrize("mode", ["benchmark", "train", "test"])
+def test_comparison_cannot_be_selected_after_prepare(launcher, mode):
+    run, _, output, calls, _ = launcher
+    result = run("--mode", mode, "--comparison", "plain", "--dry-run")
+    assert result.returncode != 0 and "prepare-only" in result.stderr
+    assert not output.exists() and not calls.exists()
+
+
+def test_invalid_comparison_creates_nothing(launcher):
+    run, _, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "typo")
+    assert result.returncode != 0 and "standard or plain" in result.stderr
+    assert not output.exists() and not calls.exists()
+
+
+def test_prepare_resume_cannot_change_the_frozen_comparison(launcher):
+    run, _, output, calls, _ = launcher
+    prepare(launcher)
+    original_env = (output / "launch.env").read_bytes()
+    result = run("--mode", "prepare", "--comparison", "plain", "--resume")
+    assert result.returncode != 0 and "differs from the frozen campaign" in result.stderr
+    assert len(calls.read_text().splitlines()) == 1
+    assert (output / "launch.env").read_bytes() == original_env
+
+
+def test_plain_training_uses_frozen_choice_with_six_tasks_and_four_days(launcher):
+    run, _, output, calls, _ = launcher
+    assert run("--mode", "prepare", "--comparison", "plain").returncode == 0
+    (output / "campaign.json").write_text("{}\n")
+    result = run("--mode", "benchmark", "--gpus", "1", "--dependency", "700001")
+    assert result.returncode == 0, result.stderr
+    benchmark = calls.read_text().splitlines()[-1]
+    assert "--job-name=parte_plain_benchmark" in benchmark and "--time=01:00:00" in benchmark
+    result = run("--mode", "train", "--gpus", "1", "--concurrency", "6",
+                 "--time", "4-00:00:00", "--dependency", "700002",
+                 extra_env={"PART_FULLSCALE_COMPARISON": "standard"})
+    assert result.returncode == 0, result.stderr
+    training = calls.read_text().splitlines()[-1]
+    assert "--job-name=parte_plain_train" in training
+    assert "--array=0-5%6" in training and "--time=4-00:00:00" in training
+    assert "--dependency=afterok:700002" in training
+    assert "Comparison: plain" in result.stdout
+
+
+def test_legacy_launch_environment_defaults_to_standard_despite_inherited_value(launcher):
+    run, _, output, calls, _ = launcher
+    prepare(launcher)
+    env_path = output / "launch.env"
+    env_path.write_text("\n".join(
+        line for line in env_path.read_text().splitlines()
+        if not line.startswith("PART_FULLSCALE_COMPARISON=")
+    ) + "\n")
+    result = run("--mode", "benchmark", extra_env={"PART_FULLSCALE_COMPARISON": "plain"})
+    assert result.returncode == 0, result.stderr
+    assert "--job-name=parte_benchmark" in calls.read_text().splitlines()[-1]
+    result = run(worker=True, extra_env={
+        "PART_FULLSCALE_OUTPUT": shell_path(output), "PART_FULLSCALE_PHASE": "prepare",
+        "PART_FULLSCALE_COMPARISON": "plain",
+    })
+    assert result.returncode == 0, result.stderr
+    assert "--comparison standard" in result.stdout

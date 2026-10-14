@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Full JetClass ParT / shared-bias ParT-EV: prepare, benchmark, train, test.
+"""Full JetClass ParT / ParT-EV comparisons: prepare, benchmark, train, test.
 
 Run through sbatch/submit_part_fullscale.sh on Tigris. No phase submits jobs.
 The test phase is deliberately opt-in and cannot select training checkpoints.
+The plain comparison removes the attention bias; its training recipe is unchanged.
 """
 from __future__ import annotations
 
@@ -38,16 +39,20 @@ def prepare(args):
     from part_ev_fullscale.data import inspect_dataset
     from part_ev_fullscale.model import reference_metadata
     output = args.output.resolve()
+    comparison = getattr(args, "comparison", None) or "standard"
+    tasks, recipe = P.tasks_for(comparison), P.recipe_for(comparison)
     with P.file_lock(output / ".prepare.lock", blocking=False):
         if (output / "campaign.json").exists():
-            P.load_campaign(output)
+            existing = P.load_campaign(output)
+            if existing.get("comparison", "standard") != comparison:
+                raise ValueError("Existing campaign uses another comparison; choose a new output directory")
             progress("already_prepared", output=str(output))
             return
         env = P.environment()
         reference_metadata()
         progress("inspecting_dataset_headers", data_root=str(args.data_root))
         inventory = inspect_dataset(args.data_root, check_entries=True)
-        spec = {"schema": P.SCHEMA, "recipe": P.RECIPE, "tasks": P.TASKS,
+        spec = {"schema": P.SCHEMA, "comparison": comparison, "recipe": recipe, "tasks": tasks,
                 "environment": env, "inventory": inventory,
                 "data_config_sha256": P.file_sha256(REPO / "particle_transformer/data/JetClass/JetClass_full.yaml"),
                 "reference": {"paper": "https://arxiv.org/abs/2202.03772",
@@ -56,7 +61,7 @@ def prepare(args):
                 "test_is_opt_in": True}
         spec["content_hash"] = P.digest(spec)
         P.write_json(output / "campaign.json", spec)
-        progress("prepared", campaign_sha256=spec["content_hash"], training_runs=len(P.TASKS),
+        progress("prepared", campaign_sha256=spec["content_hash"], comparison=comparison, training_runs=len(tasks),
                  training_events=inventory["splits"]["train"]["event_count"],
                  validation_events=inventory["splits"]["val"]["event_count"],
                  test_submitted=False)
@@ -224,13 +229,13 @@ def freeze_runtime(output, runtime):
             P.write_json(path, runtime)
 
 
-def require_benchmark(output, runtime):
+def require_benchmark(output, runtime, architectures=("part", "part_ev")):
     path = output / "benchmarks" / f"gpus_{runtime['world_size']}.json"
     if not path.is_file():
         raise RuntimeError("Complete and review the GPU benchmark for this world size before production training")
     result = P.read_json(path)
     if (result.get("runtime") != runtime or result.get("passed") is not True
-            or set(result.get("models", {})) != {"part", "part_ev"}):
+            or set(result.get("models", {})) != set(architectures)):
         raise ValueError("Successful benchmark from this exact campaign/runtime is required")
 
 
@@ -241,12 +246,12 @@ def train(args):
     from part_ev_fullscale.optimizer import Ranger
     output = args.output.resolve()
     spec = P.load_campaign(output)
-    task_dir = P.task_directory(output, args.task_index)
-    task = P.TASKS[args.task_index]
+    task_dir = P.task_directory(output, args.task_index, tasks=spec["tasks"])
+    task = spec["tasks"][args.task_index]
     rank, world, device = distributed_setup()
     runtime = runtime_contract(spec, rank, world, device)
     if rank == 0:
-        require_benchmark(output, runtime)
+        require_benchmark(output, runtime, {task["architecture"] for task in spec["tasks"]})
         freeze_runtime(output, runtime)
     barrier(world)
     # Only one job may write this seed. Other ranks wait until rank0 has the lock.
@@ -354,7 +359,7 @@ def benchmark(args):
     spec = P.load_campaign(args.output)
     rank, world, device = distributed_setup()
     result = {"runtime": runtime_contract(spec, rank, world, device), "models": {}}
-    for architecture in ("part", "part_ev"):
+    for architecture in dict.fromkeys(task["architecture"] for task in spec["tasks"]):
         base, model = make_model(architecture, 101, device, world)
         optimizer = Ranger(base.parameters())
         scaler = torch.amp.GradScaler("cuda")
@@ -439,8 +444,8 @@ def test(args):
     from part_ev_fullscale.model import build_model
     output = args.output.resolve()
     spec = P.load_campaign(output)
-    task_dir = P.task_directory(output, args.task_index)
-    task = P.TASKS[args.task_index]
+    task_dir = P.task_directory(output, args.task_index, tasks=spec["tasks"])
+    task = spec["tasks"][args.task_index]
     rank, world, device = distributed_setup()
     if world != 1:
         raise ValueError("Each of the six final-test tasks uses one GPU")
@@ -448,14 +453,14 @@ def test(args):
     with P.file_lock(output / ".finalists.lock"):
         finalists = []
         for index in range(6):
-            directory = P.task_directory(output, index)
+            directory = P.task_directory(output, index, tasks=spec["tasks"])
             done = P.read_json(directory / "training_complete.json")
             if done["campaign_sha256"] != spec["content_hash"] or done["step"] != 1000000 or done["validated_epochs"] != 50:
                 raise ValueError("All six training runs must finish before final testing")
             sha = P.file_sha256(directory / "best_model_val.pt")
             if sha != done["best_checkpoint_sha256"]:
                 raise ValueError("Best checkpoint changed after training completion")
-            finalists.append({"task": P.TASKS[index], "sha256": sha, "step": done["best_step"]})
+            finalists.append({"task": spec["tasks"][index], "sha256": sha, "step": done["best_step"]})
         path = output / "locked_finalists.json"
         if path.exists() and P.read_json(path) != finalists:
             raise ValueError("Finalists were changed after the test lock")
@@ -531,15 +536,15 @@ def test(args):
 def report(args):
     spec = P.load_campaign(args.output)
     results = []
-    for index, task in enumerate(P.TASKS):
-        result = P.read_json(P.task_directory(args.output, index) / "test/metrics.json")
+    for index, task in enumerate(spec["tasks"]):
+        result = P.read_json(P.task_directory(args.output, index, tasks=spec["tasks"]) / "test/metrics.json")
         if result["campaign_sha256"] != spec["content_hash"] or result["task"] != task or result["metrics"]["events"] != 20000000:
             raise ValueError("Report needs all six full-population final-test results")
         results.append(result)
     if len({r["inventory_sha256"] for r in results}) != 1:
         raise ValueError("Results use different test populations")
     models = {}
-    for architecture in ("part", "part_ev"):
+    for architecture in dict.fromkeys(task["architecture"] for task in spec["tasks"]):
         rows = [r["metrics"] for r in results if r["task"]["architecture"] == architecture]
         models[architecture] = {key: {"mean": statistics.mean(r[key] for r in rows),
                                "seed_std": statistics.stdev(r[key] for r in rows)}
@@ -568,12 +573,16 @@ def main():
     parser.add_argument("phase", choices=("prepare", "benchmark", "train", "test", "report"))
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--comparison", choices=tuple(P.COMPARISONS),
+                        help="Prepare only: standard (default) or plain attention, each with/without EV")
     parser.add_argument("--test-data", type=Path, help="Directory containing the 200 official test ROOT files")
     parser.add_argument("--task-index", type=int)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=20)
     args = parser.parse_args()
     args.output = args.output.resolve()
+    if args.comparison is not None and args.phase != "prepare":
+        parser.error("--comparison is prepare-only; other phases use the frozen campaign")
     if args.phase == "prepare" and args.data_root is None:
         parser.error("prepare requires --data-root")
     if args.phase in ("train", "test") and (args.task_index is None or not 0 <= args.task_index < 6):

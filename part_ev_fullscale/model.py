@@ -1,10 +1,12 @@
-"""Official JetClass ParT and its isolated shared-bias EdgeValue extension.
+"""Official JetClass ParT, its plain ablation, and EdgeValue extensions.
 
 The baseline is the original ParticleTransformer wrapper, using the pinned
 Weaver 0.4.17 implementation. The extension changes only particle-attention
 value messages: pair features, triangular packing, shared attention bias,
 normalizations, sequence trimming and the class-token readout remain native.
 No previous campaign artifacts or relational-model packages are imported.
+The plain arms remove the additive pair bias entirely. Plain+EV retains only
+the native pair stem for value messages; no unused bias head is registered.
 """
 
 import hashlib
@@ -19,7 +21,7 @@ from torch.nn import functional as F
 
 WEAVER_VERSION = "0.4.17"
 WEAVER_SOURCE_SHA256 = "246be11c969fabf87a94fa2f68522da82a7f002069b370f4e4d7e3030fab1ce2"
-ARCHITECTURES = ("part", "part_ev")
+ARCHITECTURES = ("part", "part_ev", "part_plain", "part_plain_ev")
 
 
 def reference_metadata():
@@ -169,18 +171,58 @@ the added message only; we do not alter the reference PairEmbed BN population.
         return packed[:, :8].contiguous()
 
 
+class _PlainPairValues(_SharedPairValues):
+    """Native pair stem for messages, without a scalar attention-bias head.
+
+The native forward skips pair bias because ``mod.pair_embed`` is None. The
+trimmer hook only captures its outputs (it runs under no_grad); the embedding
+pre-hook computes the learned stem later, inside the native autocast context
+and with ordinary autograd enabled. Thus its parameters remain trainable.
+"""
+
+    def __init__(self, reference, edges):
+        super().__init__(reference, edges)
+        self.reference.embed = self.reference.embed.prefix
+        self.reference.out_dim = 64
+        self._trimmed_vectors = None
+
+    def capture_mask(self, module, inputs, output):
+        super().capture_mask(module, inputs, output)
+        self._trimmed_vectors = output[1]
+
+    def prepare_values(self, module, inputs):
+        if self._trimmed_vectors is None:
+            raise RuntimeError("Plain+EV requires the native trimmed four-vectors")
+        self(self._trimmed_vectors)
+
+    def forward(self, vectors, uu=None):
+        stem = self.reference(vectors, uu=uu)
+        mask = self._trimmed_mask
+        if mask is None or mask.shape != (stem.shape[0], 1, stem.shape[-1]):
+            raise RuntimeError("Native sequence trimmer did not provide the matching pair mask")
+        valid = mask.bool()
+        pair_valid = valid.unsqueeze(-1) & valid.unsqueeze(-2)
+        stem = stem.masked_fill(~pair_valid, 0)
+        for edge in self._edges:
+            edge.bind(stem, valid[:, 0])
+
+    def clear(self):
+        super().clear()
+        self._trimmed_vectors = None
+
+
 class ParticleTransformerWrapper(nn.Module):
     """Original four-input interface; `part` state_dict names match the reference."""
 
     def __init__(self, architecture="part", *, trim=True, use_amp=False):
         super().__init__()
         if architecture not in ARCHITECTURES:
-            raise ValueError("architecture must be 'part' or 'part_ev'")
+            raise ValueError("architecture must be one of {}".format(ARCHITECTURES))
         reference_metadata()
         reference = importlib.import_module("weaver.nn.model.ParticleTransformer")
         self.architecture = architecture
         self.mod = reference.ParticleTransformer(**reference_config(trim=trim, use_amp=use_amp))
-        if architecture == "part_ev":
+        if architecture in ("part_ev", "part_plain_ev"):
             # Construct EVERY native weight first: the same global seed gives
             # identical shared initial weights in the two architectures. Restore
             # the CPU RNG after the new projections so training RNG also starts
@@ -190,9 +232,20 @@ class ParticleTransformerWrapper(nn.Module):
                 for block in self.mod.blocks:
                     block.attn = EdgeValueAttention(block.attn)
                     edges.append(block.attn)
-            pair = _SharedPairValues(self.mod.pair_embed, edges)
-            self.mod.pair_embed = pair
+            if architecture == "part_ev":
+                pair = _SharedPairValues(self.mod.pair_embed, edges)
+                self.mod.pair_embed = pair
+            else:
+                pair = _PlainPairValues(self.mod.pair_embed, edges)
+                self.mod.pair_embed = None
+                self.edge_pair_values = pair
+                self.mod.embed.register_forward_pre_hook(pair.prepare_values)
             self.mod.trimmer.register_forward_hook(pair.capture_mask)
+        elif architecture == "part_plain":
+            # Initialize the same backbone as all other arms before removing
+            # the pair encoder, so neither initialization nor training RNG is
+            # shifted by this ablation. The removed parameters never train.
+            self.mod.pair_embed = None
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -205,6 +258,8 @@ class ParticleTransformerWrapper(nn.Module):
         finally:
             if self.architecture == "part_ev":
                 self.mod.pair_embed.clear()
+            elif self.architecture == "part_plain_ev":
+                self.edge_pair_values.clear()
 
 
 def build_model(architecture, *, trim=True, use_amp=False):
