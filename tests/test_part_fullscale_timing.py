@@ -98,6 +98,71 @@ def test_partial_report_does_not_claim_both_models_are_measured(tmp_path):
     assert report["usable"] and report["complete"]
 
 
+def test_matched_control_report_needs_only_its_declared_architecture(tmp_path):
+    from part_ev_fullscale import protocol
+
+    driver = SimpleNamespace(P=protocol)
+    report = {"recipe": RECIPE, "architectures": ["part_matched"], "models": {}}
+    timing.write_report(driver, tmp_path, report)
+    assert not report["complete"] and not report["usable"]
+
+    report["models"]["part_matched"] = measured()
+    timing.write_report(driver, tmp_path, report)
+    assert report["complete"] and report["usable"]
+    stored = protocol.read_json(tmp_path / "report.json")
+    assert stored["architectures"] == ["part_matched"]
+    assert set(stored["models"]) == {"part_matched"}
+    assert stored["models"]["part_matched"]["projection"]["usable"]
+
+    # A successful measurement of a different architecture cannot substitute.
+    report["models"] = {"part": measured()}
+    timing.write_report(driver, tmp_path, report)
+    assert not report["complete"] and not report["usable"]
+
+
+def test_matched_control_main_probes_one_architecture_with_full_budget(tmp_path, monkeypatch):
+    from part_ev_fullscale import protocol
+
+    output = tmp_path / "diagnostics/timing.matched"
+    output.mkdir(parents=True)
+    spec = {"content_hash": "matched-campaign", "comparison": "parameter_matched",
+            "training_recipe": "original", "recipe": protocol.recipe_for("parameter_matched"),
+            "tasks": protocol.tasks_for("parameter_matched")}
+    runtime = {"world_size": 1, "campaign_sha256": spec["content_hash"]}
+    benchmark_calls, probes = [], []
+
+    def require_benchmark(campaign, actual_runtime, architectures):
+        benchmark_calls.append((campaign, actual_runtime, architectures))
+
+    driver = SimpleNamespace(
+        P=SimpleNamespace(load_campaign=lambda campaign: spec,
+                          write_json=protocol.write_json, file_sha256=protocol.file_sha256),
+        distributed_setup=lambda: (0, 1, "cpu"), runtime_contract=lambda *args: runtime,
+        require_benchmark=require_benchmark, STOP_REQUESTED=False,
+        progress=lambda *args, **kwargs: None)
+
+    def probe(actual_driver, actual_spec, args, architecture, deadline, row, persist):
+        assert actual_driver is driver and actual_spec is spec
+        assert args.output == output and args.runtime is runtime
+        probes.append((architecture, deadline))
+        row.update(measured())
+        persist()
+
+    monkeypatch.setattr(timing, "load_driver", lambda campaign: driver)
+    monkeypatch.setattr(timing, "probe_model", probe)
+    monkeypatch.setattr(timing, "time", SimpleNamespace(monotonic=lambda: 100.0))
+
+    assert timing.main(["--campaign", str(tmp_path), "--output", str(output),
+                        "--budget-minutes", "10"]) == 0
+    assert benchmark_calls == [(tmp_path, runtime, ("part_matched",))]
+    assert probes == [("part_matched", 700.0)]  # Entire ten-minute budget, not half.
+    report = protocol.read_json(output / "report.json")
+    assert report["architectures"] == ["part_matched"]
+    assert set(report["models"]) == {"part_matched"}
+    assert report["finished"] and report["complete"] and report["usable"]
+    assert report["changes_production"] is False and report["authorizes_training"] is False
+
+
 @pytest.mark.parametrize("args", [
     ["--budget-minutes", "101"], ["--train-steps", "0"], ["--validation-steps", "2501"]])
 def test_cli_rejects_unbounded_diagnostics_before_touching_output(tmp_path, args):

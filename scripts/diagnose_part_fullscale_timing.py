@@ -93,9 +93,10 @@ def project(model, recipe):
 def write_report(driver, output, report):
     for model in report["models"].values():
         model["projection"] = project(model, report["recipe"])
-    report["complete"] = (len(report["models"]) == 2
+    expected = set(report.get("architectures", ("part", "part_ev")))
+    report["complete"] = (set(report["models"]) == expected
                           and all(row.get("complete", False) for row in report["models"].values()))
-    report["usable"] = (len(report["models"]) == 2
+    report["usable"] = (set(report["models"]) == expected
                         and all(row["projection"]["usable"] for row in report["models"].values()))
     driver.P.write_json(output / "report.json", report)
     lines = ["# Full-scale runtime diagnostic", "",
@@ -112,7 +113,7 @@ def write_report(driver, output, report):
                      f"{model.get('validation', {}).get('events', 0)} | {' | '.join(values)} |")
     lines.extend(["", "These are projections, not guarantees or confidence intervals. The probe does not "
                   "measure concurrent-job filesystem contention, queue delays, or restart data replay.",
-                  "Planning uses the larger of the two projections. The 25% slowdown is illustrative, not a bound.",
+                  "Planning uses the largest architecture-specific projection. The 25% slowdown is illustrative, not a bound.",
                   "A failed probe or one without enough training/validation data is inconclusive. A probe can "
                   "miss its full training target yet still collect enough repeated-fetch windows; see complete "
                   "and usable separately in the JSON report.", ""])
@@ -305,14 +306,14 @@ def main(argv=None):
         raise RuntimeError("Timing diagnostic requires one GPU and one rank")
     args.runtime = driver.runtime_contract(spec, rank, world, args.device)
     architectures = tuple(dict.fromkeys(task["architecture"] for task in spec["tasks"]))
-    if spec.get("comparison", "standard") == "plain":
+    if spec.get("comparison", "standard") != "standard":
         driver.require_benchmark(args.campaign, args.runtime, architectures)
     else:
         # Old frozen standard-campaign drivers accept only these two arguments.
         driver.require_benchmark(args.campaign, args.runtime)
     report = {"schema": "part_fullscale_sustained_timing_v1", "campaign": str(args.campaign),
               "campaign_sha256": spec["content_hash"], "runtime": args.runtime,
-              "recipe": spec["recipe"], "models": {}, "finished": False,
+              "recipe": spec["recipe"], "architectures": list(architectures), "models": {}, "finished": False,
               "changes_production": False, "authorizes_training": False,
               "targets": {"train_steps": args.train_steps, "validation_steps": args.validation_steps,
                           "budget_minutes": args.budget_minutes},
@@ -327,7 +328,7 @@ def main(argv=None):
         row = {"training_windows": [], "full_checkpoint_seconds": [],
                "best_checkpoint_seconds": [], "complete": False}
         report["models"][architecture] = row
-        model_deadline = time.monotonic() + (deadline - time.monotonic()) / (2 - index)
+        model_deadline = time.monotonic() + (deadline - time.monotonic()) / (len(architectures) - index)
         try:
             probe_model(driver, spec, args, architecture, model_deadline, row, persist)
         except Exception as exc:

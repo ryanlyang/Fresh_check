@@ -15,13 +15,13 @@ Usage: bash sbatch/submit_part_fullscale.sh --mode MODE [options]
 
 Modes (none submits another training phase implicitly):
   prepare    Freeze committed source; queue a CPU dataset/environment preflight.
-  benchmark  Compare both architectures on --gpus 1, 2, or 4 (one GPU per node).
-  train      Queue the campaign's two architectures and frozen seed list.
+  benchmark  Check the campaign's architectures on --gpus 1, 2, or 4 (one per node).
+  train      Queue the campaign's architectures and frozen seed list.
   test       Explicitly queue one 1-GPU evaluation per task, then their report.
 
 Options:
   --output DIR         New campaign directory for prepare; existing for other modes.
-  --comparison NAME    prepare only: standard (default) or plain (no pairwise bias).
+  --comparison NAME    prepare only: standard (default), plain, or parameter_matched.
   --training-recipe NAME prepare only: original (default) or adamw (standard only).
   --data-root DIR      JetClass parent containing Pythia/train_100M and Pythia/val_5M.
   --test-data DIR      Required for test; staged directory of 200 test ROOT files.
@@ -45,7 +45,10 @@ commits cannot change a campaign. All trainings must use the same GPU count.
 The comparison is frozen at prepare. Plain compares ParT (plain) with ParT
 (plain) + EdgeValue; both omit pairwise attention-logit bias. Benchmark/train/test
 read this choice from the campaign; they cannot switch an existing comparison.
-Original uses three matched seeds (six tasks). The separate AdamW pilot uses
+Original standard/plain use three matched seeds (six tasks). The parameter_matched
+control uses the original recipe and three seeds of widened ParT (three tasks),
+with shared pairwise bias and no EV; existing comparison models are not rerun.
+The separate AdamW pilot uses
 standard shared-bias ParT/ParT-EV with one matched seed, 101 (two tasks).
 The training recipe is also frozen at prepare and cannot change on resume.
 Test data need not be present for prepare, benchmark, or train. To queue testing
@@ -64,10 +67,11 @@ USAGE
 }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 validate_profile() {
-  case "$1" in standard|plain) ;; *) fail 'Invalid frozen campaign comparison' ;; esac
+  case "$1" in standard|plain|parameter_matched) ;; *) fail 'Invalid frozen campaign comparison' ;; esac
   case "$2" in original|adamw) ;; *) fail 'Invalid frozen training recipe' ;; esac
   [[ "$2" != adamw || "$1" == standard ]] || fail 'The AdamW pilot requires --comparison standard'
   task_count=6
+  [[ "$1" != parameter_matched ]] || task_count=3
   [[ "$2" != adamw ]] || task_count=2
 }
 load_frozen_profile() {
@@ -102,7 +106,7 @@ while (( $# )); do
   esac
 done
 case "$mode" in prepare|benchmark|train|test) ;; *) fail 'Specify --mode prepare|benchmark|train|test' ;; esac
-case "$comparison" in standard|plain) ;; *) fail '--comparison must be standard or plain' ;; esac
+case "$comparison" in standard|plain|parameter_matched) ;; *) fail '--comparison must be standard or plain or parameter_matched' ;; esac
 case "$training_recipe" in original|adamw) ;; *) fail '--training-recipe must be original or adamw' ;; esac
 [[ "$comparison_explicit" == 0 || "$mode" == prepare ]] || fail '--comparison is prepare-only; later phases use the frozen campaign choice'
 [[ "$training_recipe_explicit" == 0 || "$mode" == prepare ]] || fail '--training-recipe is prepare-only; later phases use the frozen campaign choice'
@@ -119,6 +123,7 @@ done
 if [[ "$mode" == prepare && -z "$output" ]]; then
   campaign_prefix=part_ev
   [[ "$comparison" != plain ]] || campaign_prefix=part_plain_ev
+  [[ "$comparison" != parameter_matched ]] || campaign_prefix=part_matched
   [[ "$training_recipe" != adamw ]] || campaign_prefix=part_ev_adamw
   output="$repo_root/checkpoints/part_fullscale/${campaign_prefix}_$(date -u +%Y%m%dT%H%M%SZ)"
 fi
@@ -226,6 +231,7 @@ export PART_FULLSCALE_STEPS="$benchmark_steps" PART_FULLSCALE_WARMUP="$benchmark
 worker="$output/source/sbatch/run_part_fullscale.sh"
 job_prefix=parte
 [[ "$PART_FULLSCALE_COMPARISON" != plain ]] || job_prefix=parte_plain
+[[ "$PART_FULLSCALE_COMPARISON" != parameter_matched ]] || job_prefix=parte_matched
 [[ "$PART_FULLSCALE_TRAINING_RECIPE" != adamw ]] || job_prefix=parte_adamw
 submit() {
   local phase=$1 depends=$2 key=$3 response job

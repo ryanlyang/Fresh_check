@@ -473,3 +473,109 @@ def test_legacy_environment_defaults_to_original_despite_inherited_adamw(launche
     })
     assert result.returncode == 0, result.stderr
     assert "--training-recipe original" in result.stdout
+
+
+def test_parameter_matched_prepare_freezes_control_and_worker_passes_it(launcher):
+    run, _, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "parameter_matched")
+    assert result.returncode == 0, result.stderr
+    environment = (output / "launch.env").read_text()
+    assert "PART_FULLSCALE_COMPARISON=parameter_matched" in environment
+    assert "PART_FULLSCALE_TRAINING_RECIPE=original" in environment
+    assert "--job-name=parte_matched_prepare" in calls.read_text()
+    assert "--time=02:00:00" in calls.read_text()
+    result = run(worker=True, extra_env={
+        "PART_FULLSCALE_OUTPUT": shell_path(output), "PART_FULLSCALE_PHASE": "prepare",
+        "PART_FULLSCALE_COMPARISON": "standard", "PART_FULLSCALE_TRAINING_RECIPE": "adamw",
+    })
+    assert result.returncode == 0, result.stderr
+    assert "--comparison parameter_matched --training-recipe original" in result.stdout
+
+
+def test_parameter_matched_default_campaign_path_is_distinct_and_dry(launcher):
+    run, source, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "parameter_matched",
+                 "--output", "", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    assert "/checkpoints/part_fullscale/part_matched_" in result.stdout
+    assert "training recipe: original; tasks: 3" in result.stdout
+    assert not output.exists() and not calls.exists() and not (source / "checkpoints").exists()
+
+
+def test_parameter_matched_queues_exactly_three_trainings_before_prepare_finishes(launcher):
+    run, _, output, calls, _ = launcher
+    assert run("--mode", "prepare", "--comparison", "parameter_matched").returncode == 0
+    assert not (output / "campaign.json").exists()
+    result = run("--mode", "benchmark", "--gpus", "1", "--dependency", "700001")
+    assert result.returncode == 0, result.stderr
+    benchmark = calls.read_text().splitlines()[-1]
+    assert "--job-name=parte_matched_benchmark" in benchmark
+    assert "--time=01:00:00" in benchmark and "--dependency=afterok:700001" in benchmark
+    result = run("--mode", "train", "--gpus", "1", "--concurrency", "3",
+                 "--time", "4-00:00:00", "--dependency", "700002")
+    assert result.returncode == 0, result.stderr
+    training = calls.read_text().splitlines()[-1]
+    assert "--job-name=parte_matched_train" in training
+    assert "--array=0-2%3" in training and "--time=4-00:00:00" in training
+    assert "--nodes=1 --ntasks-per-node=1 --gpus-per-node=1" in training
+    assert "--dependency=afterok:700002" in training
+    assert "Training recipe: original (3 tasks)" in result.stdout
+    original_calls = calls.read_bytes()
+    result = run("--mode", "train", "--concurrency", "3", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    assert "Frozen comparison: parameter_matched; training recipe: original; tasks: 3" in result.stdout
+    assert "--array=0-2%3" in result.stdout
+    assert calls.read_bytes() == original_calls
+
+
+@pytest.mark.parametrize("args", [
+    ("--training-recipe", "adamw"), ("--concurrency", "4"),
+])
+def test_parameter_matched_rejects_wrong_recipe_or_excess_tasks(launcher, args):
+    run, _, output, calls, _ = launcher
+    result = run("--mode", "prepare", "--comparison", "parameter_matched", *args)
+    assert result.returncode != 0
+    assert not output.exists() and not calls.exists()
+
+
+@pytest.mark.parametrize("old_comparison", ["standard", "plain"])
+def test_parameter_matched_cannot_replace_an_existing_campaign(launcher, old_comparison):
+    run, _, output, calls, _ = launcher
+    assert run("--mode", "prepare", "--comparison", old_comparison).returncode == 0
+    original_env = (output / "launch.env").read_bytes()
+    result = run("--mode", "prepare", "--comparison", "parameter_matched", "--resume")
+    assert result.returncode != 0 and "differs from the frozen campaign" in result.stderr
+    assert (output / "launch.env").read_bytes() == original_env
+    assert len(calls.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("index, valid", [("0", True), ("1", True), ("2", True), ("3", False)])
+def test_parameter_matched_worker_validates_three_task_indices(launcher, index, valid):
+    run, _, output, _, _ = launcher
+    assert run("--mode", "prepare", "--comparison", "parameter_matched").returncode == 0
+    result = run(worker=True, extra_env={
+        "PART_FULLSCALE_OUTPUT": shell_path(output), "PART_FULLSCALE_PHASE": "train",
+        "SLURM_ARRAY_TASK_ID": index, "SLURM_JOB_NODELIST": "gh-a-001",
+        "SLURM_JOB_ID": "12345", "SLURM_NTASKS": "1", "SLURM_NNODES": "1",
+    })
+    if valid:
+        assert result.returncode == 0, result.stderr
+        assert f"--task-index {index}" in result.stdout
+    else:
+        assert result.returncode != 0 and "Task index must be 0..2" in result.stderr
+        assert "PYTHON" not in result.stdout
+
+
+def test_parameter_matched_test_array_has_three_tasks_and_dependent_report(launcher):
+    run, _, output, calls, data = launcher
+    assert run("--mode", "prepare", "--comparison", "parameter_matched").returncode == 0
+    (output / "campaign.json").write_text("{}\n")
+    (data / "ZJetsToNuNu_100.root").write_bytes(b"fixture ROOT placeholder")
+    result = run("--mode", "test", "--test-data", shell_path(data),
+                 "--concurrency", "3", "--dependency", "12345")
+    assert result.returncode == 0, result.stderr
+    rows = calls.read_text().splitlines()
+    assert [r.split("|", 1)[0] for r in rows] == ["prepare", "test", "report"]
+    assert "--job-name=parte_matched_test" in rows[1] and "--array=0-2%3" in rows[1]
+    assert "--dependency=afterok:12345" in rows[1]
+    assert "--job-name=parte_matched_report" in rows[2] and "--dependency=afterok:700002" in rows[2]

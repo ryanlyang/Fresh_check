@@ -11,10 +11,11 @@ unset PART_FULLSCALE_COMPARISON PART_FULLSCALE_TRAINING_RECIPE
 source "$PART_FULLSCALE_OUTPUT/launch.env"
 PART_FULLSCALE_COMPARISON="${PART_FULLSCALE_COMPARISON:-standard}"
 PART_FULLSCALE_TRAINING_RECIPE="${PART_FULLSCALE_TRAINING_RECIPE:-original}"
-case "$PART_FULLSCALE_COMPARISON" in standard|plain) ;; *) echo 'Invalid frozen comparison' >&2; exit 2 ;; esac
+case "$PART_FULLSCALE_COMPARISON" in standard|plain|parameter_matched) ;; *) echo 'Invalid frozen comparison' >&2; exit 2 ;; esac
 case "$PART_FULLSCALE_TRAINING_RECIPE" in original|adamw) ;; *) echo 'Invalid frozen training recipe' >&2; exit 2 ;; esac
 [[ "$PART_FULLSCALE_TRAINING_RECIPE" != adamw || "$PART_FULLSCALE_COMPARISON" == standard ]] || { echo 'AdamW requires standard comparison' >&2; exit 2; }
 last_task=5
+[[ "$PART_FULLSCALE_COMPARISON" != parameter_matched ]] || last_task=2
 [[ "$PART_FULLSCALE_TRAINING_RECIPE" != adamw ]] || last_task=1
 [[ "$(uname -m)" == aarch64 ]] || { echo 'This worker requires Tigris aarch64; cross-platform execution is not authorized' >&2; exit 2; }
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

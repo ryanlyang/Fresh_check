@@ -255,7 +255,7 @@ def driver():
     return module
 
 
-@pytest.fixture(params=["standard", "plain", "adamw"])
+@pytest.fixture(params=["standard", "plain", "adamw", "parameter_matched"])
 def cpu_orchestration(monkeypatch, driver, request):
     """Exercise the real train/replay/checkpoint loop; replace only GPU/data work."""
     from part_ev_fullscale import data
@@ -267,6 +267,12 @@ def cpu_orchestration(monkeypatch, driver, request):
                 "comparison": comparison, "training_recipe": training_recipe,
                 "recipe": P.recipe_for(comparison, training_recipe),
                 "tasks": P.tasks_for(comparison, training_recipe)}
+    if comparison == "parameter_matched":
+        from part_ev_fullscale import model as model_module
+        # This orchestration test uses TinyModel's eight parameters; the real
+        # 2.2M-parameter architecture/count is checked in the model tests.
+        campaign["parameter_match"] = {"matched_parameters": 8}
+        monkeypatch.setattr(model_module, "parameter_match_metadata", lambda: {"matched_parameters": 8})
     stats["tasks"] = campaign["tasks"]
     runtime = {"world_size": 1, "local_batch_size": 512, "gpu": "CPU test fixture",
                "campaign_sha256": campaign["content_hash"]}

@@ -5,6 +5,7 @@ Run through sbatch/submit_part_fullscale.sh on Tigris. No phase submits jobs.
 The test phase is deliberately opt-in and cannot select training checkpoints.
 The plain comparison removes the attention bias; its training recipe is unchanged.
 The AdamW pilot uses the shared-bias models and one matched seed in a new campaign.
+The parameter-matched control trains only the wider shared-bias ParT at three seeds.
 """
 from __future__ import annotations
 
@@ -36,6 +37,17 @@ def request_stop(signum, frame):
     STOP_REQUESTED = True
 
 
+def validate_parameter_match(spec, base=None):
+    if spec.get("comparison") != "parameter_matched":
+        return
+    from part_ev_fullscale.model import parameter_match_metadata
+    expected = parameter_match_metadata()
+    if spec.get("parameter_match") != expected:
+        raise ValueError("Parameter-matched architecture audit differs from the frozen campaign")
+    if base is not None and sum(p.numel() for p in base.parameters()) != expected["matched_parameters"]:
+        raise ValueError("Built parameter-matched model has an unexpected parameter count")
+
+
 def prepare(args):
     from part_ev_fullscale.data import inspect_dataset
     from part_ev_fullscale.model import reference_metadata
@@ -51,6 +63,7 @@ def prepare(args):
                 raise ValueError("Existing campaign uses another comparison; choose a new output directory")
             if existing.get("training_recipe", "original") != training_recipe:
                 raise ValueError("Existing campaign uses another training recipe; choose a new output directory")
+            validate_parameter_match(existing)
             progress("already_prepared", output=str(output))
             return
         env = P.environment()
@@ -65,6 +78,9 @@ def prepare(args):
                               "launcher": "particle_transformer/train_JetClass.sh",
                               "weaver_tag": "v0.4.17"},
                 "test_is_opt_in": True}
+        if comparison == "parameter_matched":
+            from part_ev_fullscale.model import parameter_match_metadata
+            spec["parameter_match"] = parameter_match_metadata()
         spec["content_hash"] = P.digest(spec)
         P.write_json(output / "campaign.json", spec)
         progress("prepared", campaign_sha256=spec["content_hash"], comparison=comparison,
@@ -263,6 +279,7 @@ def train(args):
     from part_ev_fullscale.optimizer import build_optimizer, optimizer_metadata
     output = args.output.resolve()
     spec = P.load_campaign(output)
+    validate_parameter_match(spec)
     recipe = spec["recipe"]
     task_dir = P.task_directory(output, args.task_index, tasks=spec["tasks"])
     task = spec["tasks"][args.task_index]
@@ -281,6 +298,7 @@ def train(args):
                 progress("training_already_complete", **task)
             return
         base, model = make_model(task["architecture"], task["seed"], device, world)
+        validate_parameter_match(spec, base)
         optimizer = build_optimizer(base, recipe)
         if rank == 0 and recipe["optimizer"] == "AdamW":
             audit = {"campaign_sha256": spec["content_hash"], "task": task,
@@ -394,11 +412,13 @@ def benchmark(args):
     from part_ev_fullscale.data import build_loader, shutdown_loader
     from part_ev_fullscale.optimizer import build_optimizer
     spec = P.load_campaign(args.output)
+    validate_parameter_match(spec)
     recipe = spec["recipe"]
     rank, world, device = distributed_setup()
     result = {"runtime": runtime_contract(spec, rank, world, device), "models": {}}
     for architecture in dict.fromkeys(task["architecture"] for task in spec["tasks"]):
         base, model = make_model(architecture, 101, device, world)
+        validate_parameter_match(spec, base)
         optimizer = build_optimizer(base, recipe)
         scaler = torch.amp.GradScaler("cuda")
         loader, _ = build_loader("train", spec["inventory"], P.local_batch_size(world),
@@ -509,6 +529,7 @@ def test(args):
     from part_ev_fullscale.model import build_model
     output = args.output.resolve()
     spec = P.load_campaign(output)
+    validate_parameter_match(spec)
     task_dir = P.task_directory(output, args.task_index, tasks=spec["tasks"])
     task = spec["tasks"][args.task_index]
     rank, world, device = distributed_setup()
@@ -541,6 +562,7 @@ def test(args):
             return
         checkpoint = trusted_load(task_dir / "best_model_val.pt")
         base = build_model(task["architecture"], use_amp=True).to(device)
+        validate_parameter_match(spec, base)
         base.load_state_dict(checkpoint["model"], strict=True)
         base.eval()
         # Set warmed evaluation trim behavior consistently; training checkpoints
@@ -602,6 +624,7 @@ def test(args):
 
 def report(args):
     spec = P.load_campaign(args.output)
+    validate_parameter_match(spec)
     results = []
     for index, task in enumerate(spec["tasks"]):
         result = P.read_json(P.task_directory(args.output, index, tasks=spec["tasks"]) / "test/metrics.json")
@@ -631,15 +654,22 @@ def report(args):
                     "seed_std": statistics.stdev(values) if finite and len(values) > 1 else None,
                     "zero_background_seeds": sum(v is None for v in values)}
         models[architecture]["qcd_rejection"] = rejections
-    baseline, ev = P.COMPARISONS[spec.get("comparison", "standard")]
+    architectures = P.COMPARISONS[spec.get("comparison", "standard")]
+    baseline = architectures[0]
     by_task = {(r["task"]["architecture"], r["task"]["seed"]): r["metrics"] for r in results}
     seeds = [task["seed"] for task in spec["tasks"] if task["architecture"] == baseline]
-    paired_deltas = [by_task[ev, seed]["accuracy"] - by_task[baseline, seed]["accuracy"] for seed in seeds]
+    paired_deltas = ([by_task[architectures[1], seed]["accuracy"] - by_task[baseline, seed]["accuracy"]
+                      for seed in seeds] if len(architectures) == 2 else [])
     summary = {"campaign_sha256": spec["content_hash"], "models": models, "per_seed_results": results,
                "training_recipe": spec.get("training_recipe", "original"),
                "exploratory_single_seed": len(seeds) == 1,
-               "paired_seeds": seeds,
-               "paired_seed_accuracy_gains": paired_deltas, "mean_accuracy_gain": statistics.mean(paired_deltas)}
+               "paired_seeds": seeds if len(architectures) == 2 else [],
+               "paired_seed_accuracy_gains": paired_deltas,
+               "mean_accuracy_gain": statistics.mean(paired_deltas) if paired_deltas else None}
+    if spec.get("comparison") == "parameter_matched":
+        summary.update(comparison="parameter_matched", control_only=True, seeds=seeds,
+                       parameter_match=spec["parameter_match"],
+                       comparison_status="Control-only campaign; baseline and EV results are in the original campaign")
     P.write_json(args.output / "reports/fullscale_report.json", summary)
     progress("report_complete", models=models, mean_accuracy_gain=summary["mean_accuracy_gain"])
 
@@ -650,7 +680,7 @@ def main(argv=None):
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--comparison", choices=tuple(P.COMPARISONS),
-                        help="Prepare only: standard (default) or plain attention, each with/without EV")
+                        help="Prepare only: standard/plain with and without EV, or parameter_matched control only")
     parser.add_argument("--training-recipe", choices=P.TRAINING_RECIPES,
                         help="Prepare only: original (default, three seeds) or adamw (shared-bias, seed 101)")
     parser.add_argument("--test-data", type=Path, help="Directory containing the 200 official test ROOT files")

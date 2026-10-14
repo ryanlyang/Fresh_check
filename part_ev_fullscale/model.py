@@ -7,6 +7,7 @@ normalizations, sequence trimming and the class-token readout remain native.
 No previous campaign artifacts or relational-model packages are imported.
 The plain arms remove the additive pair bias entirely. Plain+EV retains only
 the native pair stem for value messages; no unused bias head is registered.
+The parameter-matched arm keeps shared pair bias and widens only particle FFNs.
 """
 
 import hashlib
@@ -21,7 +22,54 @@ from torch.nn import functional as F
 
 WEAVER_VERSION = "0.4.17"
 WEAVER_SOURCE_SHA256 = "246be11c969fabf87a94fa2f68522da82a7f002069b370f4e4d7e3030fab1ce2"
-ARCHITECTURES = ("part", "part_ev", "part_plain", "part_plain_ev")
+ARCHITECTURES = ("part", "part_ev", "part_plain", "part_plain_ev", "part_matched")
+MATCHED_PARTICLE_FFN_HIDDEN_DIM = 544
+
+
+def parameter_match_metadata():
+    """Frozen, count-tested FFN capacity control for the pinned reference.
+
+Each extra particle-FFN unit adds 128 input weights, one input bias, two
+LayerNorm parameters and 128 output weights. Width 544 is the closest uniform
+integer width to ParT-EV's parameter count, not an exactly equal count.
+"""
+    baseline = 2143486
+    edgevalue = baseline + 8 * 8 * 16 * 64
+    matched = baseline + 8 * (MATCHED_PARTICLE_FFN_HIDDEN_DIM - 512) * (2 * 128 + 3)
+    return {
+        "baseline_parameters": baseline,
+        "edgevalue_parameters": edgevalue,
+        "matched_parameters": matched,
+        "particle_ffn_hidden_dim": MATCHED_PARTICLE_FFN_HIDDEN_DIM,
+        "class_ffn_hidden_dim": 512,
+        "delta_vs_edgevalue_parameters": matched - edgevalue,
+        "relative_delta_vs_edgevalue": (matched - edgevalue) / edgevalue,
+    }
+
+
+def _widen_particle_ffns(model):
+    """Replace only native particle FFN layers, preserving all other weights.
+
+The pinned Block multiplies its expansion ratio without an integer cast, so
+passing a fractional ratio directly would produce invalid Linear dimensions.
+Use the same Linear/LayerNorm modules and initialization as native Block.
+"""
+    width = MATCHED_PARTICLE_FFN_HIDDEN_DIM
+    with torch.random.fork_rng(devices=[]):
+        for block in model.blocks:
+            if (block.embed_dim != 128 or block.ffn_dim != 512
+                    or type(block.fc1) is not nn.Linear or type(block.fc2) is not nn.Linear
+                    or type(block.post_fc_norm) is not nn.LayerNorm
+                    or block.post_fc_norm.normalized_shape != (512,)):
+                raise ValueError("Reference particle FFN differs from the pinned capacity-control design")
+            factory = {"device": block.fc1.weight.device, "dtype": block.fc1.weight.dtype}
+            block.ffn_dim = width
+            block.fc1 = nn.Linear(128, width, bias=block.fc1.bias is not None, **factory)
+            block.post_fc_norm = nn.LayerNorm(
+                width, eps=block.post_fc_norm.eps,
+                elementwise_affine=block.post_fc_norm.elementwise_affine, **factory,
+            )
+            block.fc2 = nn.Linear(width, 128, bias=block.fc2.bias is not None, **factory)
 
 
 def reference_metadata():
@@ -246,6 +294,10 @@ class ParticleTransformerWrapper(nn.Module):
             # the pair encoder, so neither initialization nor training RNG is
             # shifted by this ablation. The removed parameters never train.
             self.mod.pair_embed = None
+        elif architecture == "part_matched":
+            # Shared attention bias, attention dimensions, particle embedding,
+            # class blocks and readout are unchanged; only eight FFNs widen.
+            _widen_particle_ffns(self.mod)
 
     @torch.jit.ignore
     def no_weight_decay(self):

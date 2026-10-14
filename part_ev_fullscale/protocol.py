@@ -17,6 +17,7 @@ SEEDS = (101, 202, 303)
 COMPARISONS = {
     "standard": ("part", "part_ev"),
     "plain": ("part_plain", "part_plain_ev"),
+    "parameter_matched": ("part_matched",),
 }
 TRAINING_RECIPES = ("original", "adamw")
 TASKS = [{"architecture": architecture, "seed": seed}
@@ -55,7 +56,7 @@ RECIPE = {
 
 def tasks_for(comparison="standard", training_recipe="original"):
     if comparison not in COMPARISONS:
-        raise ValueError("Unknown comparison; choose standard or plain")
+        raise ValueError("Unknown comparison; choose " + ", ".join(COMPARISONS))
     if training_recipe not in TRAINING_RECIPES:
         raise ValueError("Unknown training recipe; choose original or adamw")
     if training_recipe == "adamw" and comparison != "standard":
@@ -70,6 +71,8 @@ def recipe_for(comparison="standard", training_recipe="original"):
     recipe = copy.deepcopy(RECIPE)
     if comparison == "plain":
         recipe["pair_bias"] = "none"
+    elif comparison == "parameter_matched":
+        recipe.update({"particle_ffn_ratio": 4.25, "class_ffn_ratio": 4.0})
     if training_recipe == "adamw":
         recipe.update({
             "optimizer": "AdamW",

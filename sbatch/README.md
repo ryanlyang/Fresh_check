@@ -390,3 +390,86 @@ As for the original campaigns, omit the training dependency only after confirmin
 both tasks completed if that job ID is no longer known to the scheduler. This is
 one seed per architecture; any pilot difference is not a three-seed uncertainty
 estimate. The original and plain comparisons keep their existing result reports.
+
+### Near-parameter-matched control: wider ParT without EdgeValue
+
+Use `--comparison parameter_matched` during preparation to add **only three new
+training runs**: `part_matched` at seeds 101, 202, and 303. The existing ParT and
+ParT-EV models are not rerun. This control retains standard shared pairwise
+attention bias and has **no EdgeValue messages**. Only the eight particle-attention
+blocks' feed-forward hidden widths increase from 512 to 544. The class-attention
+feed-forward widths remain 512; the attention/embedding widths and all input
+features stay unchanged.
+
+The resulting model has **2,209,790** trainable parameters, versus **2,209,022** for
+ParT-EV and **2,143,486** for baseline ParT. It exceeds ParT-EV by just **768
+parameters (0.035%)**, so it is a near-parameter-matched rather than mathematically
+identical-size control. All added parameters participate in the forward pass; no
+unused padding parameters are added. Matching parameter counts does not imply
+matching FLOPs, memory use, or runtime.
+
+The control uses the **original** recipe: the same training/validation data,
+three matched seeds, Ranger optimizer, learning-rate schedule, global batch 512,
+FP16 AMP, full training budget, and validation checkpoint selection. Combining
+`parameter_matched` with the AdamW pilot is rejected. The control has its own frozen
+source, profile, outputs, and `parte_matched_*` Slurm jobs; existing standard, plain,
+and AdamW campaigns are not modified.
+
+After committing/pushing the setup and pulling it on **Tigris**, this queues the
+preflight, a benchmark of the control architecture, and three one-GPU training jobs
+with `afterok` dependencies. No test jobs are submitted yet:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+MATCHED_CAMPAIGN="/home/ryreu/atlas/Fresh_check/checkpoints/part_fullscale/part_matched_100m_$(date -u +%Y%m%dT%H%M%SZ)"
+(
+  set -euo pipefail
+  bash sbatch/submit_part_fullscale.sh --mode prepare \
+    --comparison parameter_matched --output "${MATCHED_CAMPAIGN}"
+  PREPARE_JOB="$(awk -F '\t' '$1 == "prepare" {id=$2} END {print id}' \
+    "${MATCHED_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${PREPARE_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh --mode benchmark \
+    --output "${MATCHED_CAMPAIGN}" --gpus 1 --dependency "${PREPARE_JOB}"
+  BENCHMARK_JOB="$(awk -F '\t' '$1 == "benchmark1gpu" {id=$2} END {print id}' \
+    "${MATCHED_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${BENCHMARK_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh --mode train \
+    --output "${MATCHED_CAMPAIGN}" --gpus 1 --concurrency 3 \
+    --time 4-00:00:00 --dependency "${BENCHMARK_JOB}"
+
+  printf '\nSave this control path for results/testing: %s\n' "${MATCHED_CAMPAIGN}"
+  cat "${MATCHED_CAMPAIGN}/submitted_job_ids.tsv"
+)
+```
+
+Preparation requests two hours, the benchmark one hour, and each training job four
+days. Training requires the control campaign's own successful benchmark; the
+existing baseline/EV benchmark is not reused. `--dry-run` on the prepared campaign
+resolves the three-task array even before its CPU preflight finishes. A resume
+cannot switch an existing standard/plain/AdamW campaign to this control.
+
+Later, after staging the full test data, restore `MATCHED_CAMPAIGN` to the printed
+path if needed. This queues **three test jobs**, followed by their control report:
+
+```bash
+(
+  set -euo pipefail
+  : "${MATCHED_CAMPAIGN:?Set this to the new parameter-matched control path}"
+  TRAIN_JOB="$(awk -F '\t' '$1 == "train" {id=$2} END {print id}' \
+    "${MATCHED_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${TRAIN_JOB}" =~ ^[0-9]+$ ]]
+  bash sbatch/submit_part_fullscale.sh --mode test --output "${MATCHED_CAMPAIGN}" \
+    --test-data /home/ryreu/atlas/datasets/JetClass/Pythia/test_20M \
+    --gpus 1 --concurrency 3 --time 1-00:00:00 --dependency "${TRAIN_JOB}"
+)
+```
+
+Omit the dependency only after confirming all three trainings completed if their
+job ID is no longer known to the scheduler. Compare the control's results with the
+existing original-recipe ParT/ParT-EV results on the same test population and seeds;
+the control campaign does not silently import or replace those external results.
