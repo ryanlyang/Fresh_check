@@ -166,6 +166,75 @@ def test_probe_uses_isolated_checkpoints_and_cleans_them(tmp_path, monkeypatch, 
     assert len(shutdown) == 2 and all(loader.timeout == 300 for loader in loaders)
 
 
+@pytest.mark.parametrize("architecture", ["part", "part_ev"])
+def test_adamw_probe_uses_frozen_optimizer_schedule_and_clipping(tmp_path, monkeypatch, architecture):
+    import torch
+    from part_ev_fullscale import data, optimizer, protocol
+
+    model = torch.nn.Linear(1, 10)
+    batch = (torch.ones(512, 1), torch.zeros(512, dtype=torch.long))
+    recipe = protocol.recipe_for(training_recipe="adamw")
+    spec = {"content_hash": "frozen_adamw", "inventory": {},
+            "training_recipe": "adamw", "recipe": recipe}
+    original_spec = copy.deepcopy(spec)
+    selected_optimizer = SimpleNamespace(param_groups=[{}, {}])
+    selected_scaler = object()
+    factory_calls, schedule_steps, training_calls = [], [], []
+
+    class Loader:
+        def __iter__(self):
+            return repeat(batch)
+
+    monkeypatch.setattr(data, "build_loader", lambda *args, **kwargs: (Loader(), None))
+    monkeypatch.setattr(data, "shutdown_loader", lambda loader: None)
+    monkeypatch.setattr(optimizer, "Ranger", lambda *args: pytest.fail("AdamW must not use Ranger"))
+
+    def build_optimizer(base, frozen_recipe):
+        assert base is model and frozen_recipe is recipe
+        factory_calls.append((base, frozen_recipe))
+        return selected_optimizer
+
+    monkeypatch.setattr(optimizer, "build_optimizer", build_optimizer)
+    monkeypatch.setattr(torch.amp, "GradScaler", lambda *args: selected_scaler)
+    for method in ("synchronize", "reset_peak_memory_stats", "empty_cache"):
+        monkeypatch.setattr(torch.cuda, method, lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+
+    def learning_rate(step, frozen_recipe):
+        assert frozen_recipe is recipe
+        schedule_steps.append(step)
+        return protocol.learning_rate(step, frozen_recipe)
+
+    def train_step(actual_model, actual_optimizer, scaler, actual_batch, device, *, gradient_clipping):
+        assert actual_model is model and actual_optimizer is selected_optimizer
+        assert scaler is selected_scaler and actual_batch is batch
+        assert device.type == "cpu" and gradient_clipping == recipe["gradient_clipping"] == 1.0
+        expected_lr = protocol.learning_rate(len(training_calls), recipe)
+        assert [group["lr"] for group in actual_optimizer.param_groups] == [expected_lr, expected_lr]
+        training_calls.append(expected_lr)
+        return 1.0, False
+
+    driver = SimpleNamespace(
+        make_model=lambda *args: (model, model), train_step=train_step,
+        inputs_and_labels=lambda actual_batch, device: ([actual_batch[0]], actual_batch[1]),
+        save_checkpoint=lambda path, *args: path.write_bytes(b"diagnostic only"),
+        STOP_REQUESTED=False, P=SimpleNamespace(learning_rate=learning_rate),
+        progress=lambda *args, **kwargs: None)
+    args = SimpleNamespace(output=tmp_path, device=torch.device("cpu"), runtime={},
+                           train_steps=3, validation_steps=1)
+    row = {"training_windows": [], "full_checkpoint_seconds": [], "best_checkpoint_seconds": []}
+
+    timing.probe_model(driver, spec, args, architecture, timing.time.monotonic() + 600,
+                       row, lambda: None)
+
+    assert len(factory_calls) == 1
+    assert schedule_steps == [step for step in range(3) for _ in selected_optimizer.param_groups]
+    assert training_calls == [protocol.learning_rate(step, recipe) for step in range(3)]
+    assert row["complete"] and row["validation"]["events"] == 512
+    assert spec == original_spec
+    assert not list(tmp_path.glob("*.pt"))
+
+
 def test_preexisting_checkpoint_is_neither_overwritten_nor_deleted(tmp_path):
     checkpoint = tmp_path / "part_timing_checkpoint.pt"
     checkpoint.write_bytes(b"untouched")

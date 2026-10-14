@@ -297,3 +297,96 @@ If training is already complete and no longer known to the scheduler, omit the
 dependency after confirming all six `training_complete.json` markers exist.
 The test driver also checks completion and locks the validation-selected models.
 Test data are not needed to prepare, benchmark, or train this campaign.
+
+### Separate AdamW pilot: standard shared-bias ParT versus ParT-EV
+
+The prepare-only flag `--training-recipe adamw` creates a **separate two-task
+pilot**, not a continuation or optimizer change to any existing run. It compares
+`part` and `part_ev` at the same matched seed, **101**. Both retain the standard
+shared pairwise bias; `--comparison plain` is deliberately unsupported for this
+pilot. Original-recipe standard and plain campaigns still have three seeds and
+six tasks. The pilot is exploratory and does not replace the three-seed original-
+recipe comparison.
+
+The pilot keeps the full 1M-update budget, global batch 512, FP16 AMP, and validation
+checkpoint selection. It uses AdamW with betas `(0.9, 0.999)`, epsilon `1e-8`, and
+weight decay `1e-4` on weight matrices (including the 3-D EV projection tensors),
+excluding biases, normalization parameters, the class token, and scalar/vector
+parameters. The learning rate increases linearly over updates 1--50,000 to `1e-3`,
+then follows cosine decay over the remaining 950,000 updates to `1e-5` at update
+1,000,000. The global gradient norm is clipped at 1 **after** AMP unscaling.
+
+Its optimizer/schedule profile is frozen into `campaign.json`, alongside the data
+inventory and environment. `launch.env` records `PART_FULLSCALE_TRAINING_RECIPE`;
+old launch environments without this field default to `original`. After prepare,
+benchmark/training/testing infer the frozen profile, including when they are queued
+before preparation completes. A resume cannot switch profiles. AdamW campaign names
+default to `part_ev_adamw_*` and Slurm job names begin `parte_adamw_`.
+
+On **Tigris**, after committing/pushing the code and pulling it into the main
+checkout, this prepares the pilot and queues its one-GPU benchmark plus **two
+one-GPU training jobs** behind successful preparation/benchmark dependencies. It
+uses the existing `part_ev_fullscale` environment and the already staged training
+and validation populations. No existing campaign is modified or cancelled.
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+ADAMW_CAMPAIGN="/home/ryreu/atlas/Fresh_check/checkpoints/part_fullscale/part_ev_adamw_100m_$(date -u +%Y%m%dT%H%M%SZ)"
+(
+  set -euo pipefail
+  bash sbatch/submit_part_fullscale.sh --mode prepare \
+    --comparison standard --training-recipe adamw --output "${ADAMW_CAMPAIGN}"
+  PREPARE_JOB="$(awk -F '\t' '$1 == "prepare" {id=$2} END {print id}' \
+    "${ADAMW_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${PREPARE_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh --mode benchmark \
+    --output "${ADAMW_CAMPAIGN}" --gpus 1 --dependency "${PREPARE_JOB}"
+  BENCHMARK_JOB="$(awk -F '\t' '$1 == "benchmark1gpu" {id=$2} END {print id}' \
+    "${ADAMW_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${BENCHMARK_JOB}" =~ ^[0-9]+$ ]]
+
+  bash sbatch/submit_part_fullscale.sh --mode train \
+    --output "${ADAMW_CAMPAIGN}" --gpus 1 --concurrency 2 \
+    --time 4-00:00:00 --dependency "${BENCHMARK_JOB}"
+
+  printf '\nSave this pilot path for results/testing: %s\n' "${ADAMW_CAMPAIGN}"
+  cat "${ADAMW_CAMPAIGN}/submitted_job_ids.tsv"
+)
+```
+
+The preflight requests **two hours**, the benchmark **one hour**, and each training
+job **four days**. The benchmark checks the pilot's actual optimizer/model profile;
+it does not reuse a benchmark from an original-recipe campaign. Training validates
+the benchmark's passing result before starting. The benchmark follows the actual
+production learning-rate schedule for 20 computational warmup steps and 200 measured
+steps. These 220 updates cover only the beginning of the 50,000-update learning-rate
+warmup: this is a short throughput/numerical smoke test, not a convergence or
+peak-learning-rate validation. It records gradient clipping and rejects more than
+5% skipped AMP updates in the measured window. The launch chain submits no testing.
+Use `--dry-run` on an existing campaign to display its resolved two-task resources
+without submitting. A dry run against a missing campaign explicitly labels its
+default original-recipe preview as unresolved.
+
+After staging the 20M test data, restore `ADAMW_CAMPAIGN` to the printed path if in
+a new login session. This queues **two test jobs**, followed by their report:
+
+```bash
+(
+  set -euo pipefail
+  : "${ADAMW_CAMPAIGN:?Set this to the new AdamW pilot campaign path}"
+  TRAIN_JOB="$(awk -F '\t' '$1 == "train" {id=$2} END {print id}' \
+    "${ADAMW_CAMPAIGN}/submitted_job_ids.tsv")"
+  [[ "${TRAIN_JOB}" =~ ^[0-9]+$ ]]
+  bash sbatch/submit_part_fullscale.sh --mode test --output "${ADAMW_CAMPAIGN}" \
+    --test-data /home/ryreu/atlas/datasets/JetClass/Pythia/test_20M \
+    --gpus 1 --concurrency 2 --time 1-00:00:00 --dependency "${TRAIN_JOB}"
+)
+```
+
+As for the original campaigns, omit the training dependency only after confirming
+both tasks completed if that job ID is no longer known to the scheduler. This is
+one seed per architecture; any pilot difference is not a three-seed uncertainty
+estimate. The original and plain comparisons keep their existing result reports.

@@ -255,14 +255,18 @@ def driver():
     return module
 
 
-@pytest.fixture(params=["standard", "plain"])
+@pytest.fixture(params=["standard", "plain", "adamw"])
 def cpu_orchestration(monkeypatch, driver, request):
     """Exercise the real train/replay/checkpoint loop; replace only GPU/data work."""
     from part_ev_fullscale import data
 
     stats = {"loaders": [], "updates": 0, "validations": 0}
+    comparison = "standard" if request.param == "adamw" else request.param
+    training_recipe = "adamw" if request.param == "adamw" else "original"
     campaign = {"content_hash": "cpu-orchestration-campaign", "inventory": {},
-                "tasks": P.tasks_for(request.param)}
+                "comparison": comparison, "training_recipe": training_recipe,
+                "recipe": P.recipe_for(comparison, training_recipe),
+                "tasks": P.tasks_for(comparison, training_recipe)}
     stats["tasks"] = campaign["tasks"]
     runtime = {"world_size": 1, "local_batch_size": 512, "gpu": "CPU test fixture",
                "campaign_sha256": campaign["content_hash"]}
@@ -307,12 +311,16 @@ def cpu_orchestration(monkeypatch, driver, request):
         model = TinyModel()
         return model, model
 
-    def train_step(model, optimizer, scaler, batch, device):
+    def train_step(model, optimizer, scaler, batch, device, *, gradient_clipping=None, diagnostics=None):
         stats["updates"] += 1
         values, targets = batch
         optimizer.zero_grad(set_to_none=True)
         loss = torch.nn.functional.cross_entropy(model(values), targets)
         loss.backward()
+        if gradient_clipping is not None:
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+            diagnostics.update(grad_norm_before_clip=float(norm),
+                               gradient_clipped=float(norm) > gradient_clipping, nonfinite_grad_norm=False)
         optimizer.step()
         return float(loss.detach()), False
 
@@ -329,10 +337,11 @@ def cpu_orchestration(monkeypatch, driver, request):
     scaler_class = torch.amp.GradScaler
     monkeypatch.setattr(torch.amp, "GradScaler", lambda *args, **kwargs: scaler_class("cpu", enabled=False))
     monkeypatch.setattr(P, "load_campaign", lambda output: copy.deepcopy(campaign))
-    monkeypatch.setattr(P, "learning_rate", lambda step: 1e-3)
+    monkeypatch.setattr(P, "learning_rate", lambda step, recipe=None: 1e-3)
     for key, value in {"epochs": 2, "steps_per_epoch": 2, "total_steps": 4,
                        "validation_events_per_epoch": 512}.items():
         monkeypatch.setitem(P.RECIPE, key, value)
+        campaign["recipe"][key] = value
     monkeypatch.setattr(driver, "distributed_setup", lambda: (0, 1, torch.device("cpu")))
     monkeypatch.setattr(driver, "runtime_contract", lambda *args: copy.deepcopy(runtime))
     monkeypatch.setattr(driver, "require_benchmark", lambda *args: None)

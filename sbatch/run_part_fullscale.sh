@@ -7,10 +7,15 @@ set -euo pipefail
 source_root="$PART_FULLSCALE_OUTPUT/source"
 [[ -f "$PART_FULLSCALE_OUTPUT/launch.env" ]] || { echo 'Pinned launch environment missing' >&2; exit 2; }
 # shellcheck disable=SC1090
-unset PART_FULLSCALE_COMPARISON
+unset PART_FULLSCALE_COMPARISON PART_FULLSCALE_TRAINING_RECIPE
 source "$PART_FULLSCALE_OUTPUT/launch.env"
 PART_FULLSCALE_COMPARISON="${PART_FULLSCALE_COMPARISON:-standard}"
+PART_FULLSCALE_TRAINING_RECIPE="${PART_FULLSCALE_TRAINING_RECIPE:-original}"
 case "$PART_FULLSCALE_COMPARISON" in standard|plain) ;; *) echo 'Invalid frozen comparison' >&2; exit 2 ;; esac
+case "$PART_FULLSCALE_TRAINING_RECIPE" in original|adamw) ;; *) echo 'Invalid frozen training recipe' >&2; exit 2 ;; esac
+[[ "$PART_FULLSCALE_TRAINING_RECIPE" != adamw || "$PART_FULLSCALE_COMPARISON" == standard ]] || { echo 'AdamW requires standard comparison' >&2; exit 2; }
+last_task=5
+[[ "$PART_FULLSCALE_TRAINING_RECIPE" != adamw ]] || last_task=1
 [[ "$(uname -m)" == aarch64 ]] || { echo 'This worker requires Tigris aarch64; cross-platform execution is not authorized' >&2; exit 2; }
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 export PYTHONPATH="$source_root"
@@ -22,11 +27,11 @@ sha256sum --quiet -c "$PART_FULLSCALE_OUTPUT/source.sha256"
 driver="$source_root/scripts/run_part_fullscale.py"
 args=("$PART_FULLSCALE_PHASE" --output "$PART_FULLSCALE_OUTPUT")
 case "$PART_FULLSCALE_PHASE" in
-  prepare) args+=(--data-root "$PART_FULLSCALE_DATA_ROOT" --comparison "$PART_FULLSCALE_COMPARISON") ;;
+  prepare) args+=(--data-root "$PART_FULLSCALE_DATA_ROOT" --comparison "$PART_FULLSCALE_COMPARISON" --training-recipe "$PART_FULLSCALE_TRAINING_RECIPE") ;;
   benchmark) args+=(--steps "${PART_FULLSCALE_STEPS:-200}" --warmup "${PART_FULLSCALE_WARMUP:-20}") ;;
   train|test)
     : "${SLURM_ARRAY_TASK_ID:?An array task index is required}"
-    [[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-5]$ ]] || { echo 'Task index must be 0..5' >&2; exit 2; }
+    [[ "$SLURM_ARRAY_TASK_ID" =~ ^[0-5]$ && "$SLURM_ARRAY_TASK_ID" -le "$last_task" ]] || { echo "Task index must be 0..$last_task" >&2; exit 2; }
     args+=(--task-index "$SLURM_ARRAY_TASK_ID")
     [[ "$PART_FULLSCALE_PHASE" != test ]] || args+=(--test-data "${PART_FULLSCALE_TEST_DATA:?Explicit test data path required}") ;;
   report) ;;

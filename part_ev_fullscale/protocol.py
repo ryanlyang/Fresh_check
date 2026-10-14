@@ -6,6 +6,7 @@ import copy
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -17,6 +18,7 @@ COMPARISONS = {
     "standard": ("part", "part_ev"),
     "plain": ("part_plain", "part_plain_ev"),
 }
+TRAINING_RECIPES = ("original", "adamw")
 TASKS = [{"architecture": architecture, "seed": seed}
          for architecture in ("part", "part_ev") for seed in SEEDS]
 CLASS_NAMES = ("QCD", "Hbb", "Hcc", "Hgg", "H4q", "Hqql", "Zqq", "Wqq", "Tbqq", "Tbl")
@@ -51,18 +53,33 @@ RECIPE = {
 }
 
 
-def tasks_for(comparison="standard"):
+def tasks_for(comparison="standard", training_recipe="original"):
     if comparison not in COMPARISONS:
         raise ValueError("Unknown comparison; choose standard or plain")
+    if training_recipe not in TRAINING_RECIPES:
+        raise ValueError("Unknown training recipe; choose original or adamw")
+    if training_recipe == "adamw" and comparison != "standard":
+        raise ValueError("The AdamW pilot is defined only for the standard comparison")
+    seeds = (101,) if training_recipe == "adamw" else SEEDS
     return [{"architecture": architecture, "seed": seed}
-            for architecture in COMPARISONS[comparison] for seed in SEEDS]
+            for architecture in COMPARISONS[comparison] for seed in seeds]
 
 
-def recipe_for(comparison="standard"):
-    tasks_for(comparison)  # Reject unknown comparisons before constructing a recipe.
+def recipe_for(comparison="standard", training_recipe="original"):
+    tasks_for(comparison, training_recipe)  # Reject unsupported combinations first.
     recipe = copy.deepcopy(RECIPE)
     if comparison == "plain":
         recipe["pair_bias"] = "none"
+    if training_recipe == "adamw":
+        recipe.update({
+            "optimizer": "AdamW",
+            "betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 1e-4,
+            "lookahead_k": None, "lookahead_alpha": None,
+            "lr_decay_epochs": [],
+            "lr_schedule": "linear_warmup_then_cosine", "warmup_steps": 50000,
+            "gradient_clipping": 1.0,
+            "weight_decay_policy": "exclude_bias_normalization_and_cls_token_include_edge_projection",
+        })
     return recipe
 
 
@@ -132,13 +149,30 @@ def local_batch_size(world_size):
     return RECIPE["global_batch_size"] // world_size
 
 
-def learning_rate(step):
-    """Match Weaver's MultiStepLR milestones at epoch starts, zero indexed."""
-    if not 0 <= step < RECIPE["total_steps"]:
+def learning_rate(step, recipe=None):
+    """LR for a zero-indexed update; preserve the original milestone arithmetic.
+
+    The AdamW pilot uses one-based update ordinals for its warm-up/cosine
+    schedule: update 50,000 reaches the peak and update 1,000,000 the floor.
+    """
+    recipe = RECIPE if recipe is None else recipe
+    if not 0 <= step < recipe["total_steps"]:
         raise ValueError("Training step outside the frozen budget")
-    epoch = step // RECIPE["steps_per_epoch"]
-    decays = sum(epoch >= milestone for milestone in RECIPE["lr_decay_epochs"])
-    return RECIPE["start_lr"] * (0.01 ** (1 / 15)) ** decays
+    if recipe.get("lr_schedule") == "linear_warmup_then_cosine":
+        ordinal = step + 1
+        warmup = recipe["warmup_steps"]
+        if not 0 < warmup < recipe["total_steps"]:
+            raise ValueError("Warm-up must be positive and shorter than the training budget")
+        if ordinal <= warmup:
+            return recipe["start_lr"] * ordinal / warmup
+        progress = (ordinal - warmup) / (recipe["total_steps"] - warmup)
+        return recipe["final_lr"] + 0.5 * (recipe["start_lr"] - recipe["final_lr"]) * (
+            1 + math.cos(math.pi * progress))
+    if "lr_schedule" in recipe:
+        raise ValueError("Unknown learning-rate schedule")
+    epoch = step // recipe["steps_per_epoch"]
+    decays = sum(epoch >= milestone for milestone in recipe["lr_decay_epochs"])
+    return recipe["start_lr"] * (0.01 ** (1 / 15)) ** decays
 
 
 def environment():
@@ -166,10 +200,13 @@ def load_campaign(output, *, check_environment=True):
     if digest(spec) != content_hash or spec.get("schema") != SCHEMA:
         raise ValueError("Campaign metadata was changed or is incompatible")
     spec["content_hash"] = content_hash
-    # Existing campaigns predate this field and remain the standard comparison.
+    # Existing campaigns predate these fields; never insert defaults into their
+    # metadata, since doing so would change their frozen content hashes.
     comparison = spec.get("comparison", "standard")
-    if spec["recipe"] != recipe_for(comparison) or spec["tasks"] != tasks_for(comparison):
-        raise ValueError("Campaign differs from the frozen two-model/three-seed protocol")
+    training_recipe = spec.get("training_recipe", "original")
+    if (spec["recipe"] != recipe_for(comparison, training_recipe)
+            or spec["tasks"] != tasks_for(comparison, training_recipe)):
+        raise ValueError("Campaign differs from the frozen comparison/training-recipe protocol")
     config = Path(__file__).resolve().parents[1] / "particle_transformer/data/JetClass/JetClass_full.yaml"
     if spec["data_config_sha256"] != file_sha256(config):
         raise ValueError("Official input preprocessing YAML changed after preparation")
@@ -181,6 +218,6 @@ def load_campaign(output, *, check_environment=True):
 def task_directory(output, task_index, *, tasks=None):
     tasks = TASKS if tasks is None else tasks
     if not 0 <= task_index < len(tasks):
-        raise ValueError("Task index must be 0..5")
+        raise ValueError(f"Task index must be 0..{len(tasks) - 1}")
     task = tasks[task_index]
     return Path(output) / "runs" / task["architecture"] / f"seed_{task['seed']}"

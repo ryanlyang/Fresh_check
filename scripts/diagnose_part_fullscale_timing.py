@@ -84,7 +84,7 @@ def project(model, recipe):
             "One complete validation pass is scaled to all reporting epochs",
             "All epochs are conservatively allowed a best-checkpoint write",
             "25 percent slowdown is a sensitivity scenario, not a statistical interval",
-            "Six simultaneous jobs' storage contention is not measured",
+            "Concurrent training jobs' storage contention is not measured",
             "No queue waiting, maintenance, or restart data replay is included",
         ],
     }
@@ -111,7 +111,7 @@ def write_report(driver, output, report):
         lines.append(f"| {name} | {sum(w['steps'] for w in model['training_windows'])} | "
                      f"{model.get('validation', {}).get('events', 0)} | {' | '.join(values)} |")
     lines.extend(["", "These are projections, not guarantees or confidence intervals. The probe does not "
-                  "measure six-job filesystem contention, queue delays, or restart data replay.",
+                  "measure concurrent-job filesystem contention, queue delays, or restart data replay.",
                   "Planning uses the larger of the two projections. The 25% slowdown is illustrative, not a bound.",
                   "A failed probe or one without enough training/validation data is inconclusive. A probe can "
                   "miss its full training target yet still collect enough repeated-fetch windows; see complete "
@@ -135,7 +135,13 @@ def probe_model(driver, spec, args, architecture, deadline, model_report, persis
     base = model = optimizer = scaler = None
     try:
         base, model = driver.make_model(architecture, 101, args.device, 1)
-        optimizer = Ranger(base.parameters())
+        adamw = spec.get("training_recipe", "original") == "adamw"
+        if adamw:
+            from part_ev_fullscale.optimizer import build_optimizer
+            optimizer = build_optimizer(base, spec["recipe"])
+        else:
+            # Historical frozen campaigns predate the optimizer factory.
+            optimizer = Ranger(base.parameters())
         scaler = torch.amp.GradScaler("cuda")
         train_loader, _ = build_loader("train", spec["inventory"], 512, seed=101)
         loaders.append(train_loader)
@@ -175,13 +181,15 @@ def probe_model(driver, spec, args, architecture, deadline, model_report, persis
         model.train()
         while state["step"] < args.train_steps and not stopping(train_deadline):
             for group in optimizer.param_groups:
-                group["lr"] = driver.P.learning_rate(state["step"])
+                group["lr"] = (driver.P.learning_rate(state["step"], spec["recipe"]) if adamw
+                               else driver.P.learning_rate(state["step"]))
             before_batch = time.monotonic()
             batch = next(train_iter)
             batch_wait += time.monotonic() - before_batch
             if stopping(train_deadline):
                 break
-            loss, skip = driver.train_step(model, optimizer, scaler, batch, args.device)
+            options = {"gradient_clipping": spec["recipe"]["gradient_clipping"]} if adamw else {}
+            loss, skip = driver.train_step(model, optimizer, scaler, batch, args.device, **options)
             state["step"] += 1
             state["amp_skipped_steps"] += int(skip)
             skipped += int(skip)
