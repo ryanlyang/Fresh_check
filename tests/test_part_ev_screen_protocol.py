@@ -43,8 +43,14 @@ def benchmark_files(tmp_path):
     for task in P.TASKS:
         P.write_json(tmp_path/'benchmarks'/f"{task['run_id']}.json", dict(task=task, passed=True,
             campaign_sha256='test', runtime=runtime, input_fingerprints={'0':'same'}, projected_training_hours=10,
-            initial_parity={'passed':True}))
+            initial_parity={'passed':True}, training_precision=precision_record('torch.float16'),
+            validation={'precision':precision_record('torch.float32')}))
     return spec, runtime
+
+
+def precision_record(dtype):
+    return dict(passed=True, expected_activation_dtype=dtype, parameter_dtypes=['torch.float32'],
+                observed_activations={'mod.blocks.0.fc1':dtype})
 
 
 @pytest.mark.parametrize('failure', ['missing','failed','runtime','fingerprint','task','campaign'])
@@ -72,3 +78,30 @@ def test_manifest_mutation_rejected(tmp_path, monkeypatch):
     spec['content_hash'] = P.digest({k:v for k,v in spec.items() if k!='content_hash'})
     P.write_json(tmp_path/'campaign.json',spec)
     with pytest.raises(ValueError,match='protocol'): P.load_campaign(tmp_path)
+
+
+@pytest.mark.parametrize('field', ['training_precision', 'validation'])
+@pytest.mark.parametrize('failure', ['missing', 'failed', 'unobserved', 'wrong_dtype', 'half_parameters'])
+def test_precision_evidence_is_required_before_production(tmp_path, field, failure):
+    spec, runtime = benchmark_files(tmp_path)
+    path = tmp_path/'benchmarks/EV_RANGER.json'
+    row = P.read_json(path)
+    if failure == 'missing':
+        row.pop(field)
+    else:
+        audit = row[field] if field == 'training_precision' else row[field]['precision']
+        if failure == 'failed': audit['passed'] = False
+        if failure == 'unobserved': audit['observed_activations'] = {}
+        if failure == 'wrong_dtype': audit['observed_activations']['mod.blocks.0.fc1'] = 'torch.float64'
+        if failure == 'half_parameters': audit['parameter_dtypes'] = ['torch.float16']
+    P.write_json(path, row)
+    with pytest.raises(ValueError, match='precision'): P.benchmark_summary(tmp_path, spec, runtime)
+
+
+def test_v1_campaign_cannot_resume_as_corrected_precision(tmp_path):
+    spec = P.create_spec({}, P.Path(__file__).resolve().parents[1], {})
+    assert spec['precision'] == P.PRECISION_POLICY
+    spec['schema'] = 'part_ev_context_gate_screen_v1'
+    spec['content_hash'] = P.digest({k:v for k,v in spec.items() if k!='content_hash'})
+    P.write_json(tmp_path/'campaign.json',spec)
+    with pytest.raises(ValueError, match='schema'): P.load_campaign(tmp_path)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import numpy as np
 import torch
 from part_ev_screen import protocol as P
 from part_ev_screen.model import build_model, diagnostic_mode, diagnostics
+from part_ev_screen.precision import model_precision, audit_precision, POLICY as PRECISION_POLICY
 from part_ev_screen.data import (build_loader, finite_validation_loader, batch_fingerprint,
                                  shutdown_loader)
 from part_ev_fullscale.checkpoint import (atomic_torch_save, trusted_load, seed_everything,
@@ -57,12 +59,13 @@ def gpu_setup(spec):
     device = torch.device("cuda:0")
     runtime = dict(gpu=torch.cuda.get_device_name(0), gpu_memory_bytes=torch.cuda.get_device_properties(0).total_memory,
         world_size=1, batch_size=512, workers=2, batchnorm="native", tf32=False,
-        cudnn_benchmark=False, campaign_sha256=spec["content_hash"])
+        cudnn_benchmark=False, precision=PRECISION_POLICY, campaign_sha256=spec["content_hash"])
     return device, runtime
 
 
 def make_model(task, device):
     seed_everything(task["seed"])
+    # Default to FP32 for evaluation; training scopes BOTH native and outer AMP.
     return build_model(task["architecture"], seed=task["seed"], trim=True, use_amp=False).to(device)
 
 
@@ -80,7 +83,7 @@ def initial_parity(model, task, batch, device):
                 raise ValueError(f"Initial native/EV parameter mismatch: {key}")
         model.eval()
         values, _ = tensors(batch, device)
-        with torch.no_grad():
+        with torch.no_grad(), model_precision(model, device, training=False):
             expected = reference(*(v[:8] for v in values))
             actual = model(*(v[:8] for v in values))
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
@@ -97,7 +100,8 @@ def tensors(batch, device):
             labels["_label_"].to(device, non_blocking=True).long())
 
 
-def training_step(model, optimizer, scaler, batch, device, recipe, step, *, full_length=False):
+def training_step(model, optimizer, scaler, batch, device, recipe, step, *, full_length=False,
+                  check_precision=False):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     lr = P.learning_rate(step, recipe)
@@ -112,7 +116,9 @@ def training_step(model, optimizer, scaler, batch, device, recipe, step, *, full
         if values[-1].shape[-1] != 128:
             raise ValueError("Full-length benchmark requires 128 particle slots")
     old_scale = scaler.get_scale()
-    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+    expected = torch.float16 if device.type == "cuda" else torch.float32
+    audit = audit_precision(model, expected_dtype=expected) if check_precision else nullcontext()
+    with model_precision(model, device, training=True), audit as precision:
         logits = model(*values)
         loss = torch.nn.functional.cross_entropy(logits, truth)
     if not bool(torch.isfinite(loss)):
@@ -127,9 +133,12 @@ def training_step(model, optimizer, scaler, batch, device, recipe, step, *, full
     skipped = scaler.get_scale() < old_scale
     if not finite and not skipped:
         raise FloatingPointError("Nonfinite gradients without an AMP-skipped update")
-    return dict(loss=float(loss.detach()), lr=lr, amp_skipped=skipped,
-                gradient_norm=float(norm) if finite else None,
-                clipped=bool(finite and limit is not None and float(norm) > limit))
+    result = dict(loss=float(loss.detach()), lr=lr, amp_skipped=skipped,
+                  gradient_norm=float(norm) if finite else None,
+                  clipped=bool(finite and limit is not None and float(norm) > limit))
+    if check_precision:
+        result["precision"] = precision
+    return result
 
 
 def classification_metrics(logits, labels, *, rejection=False):
@@ -177,7 +186,7 @@ def context_diagnostic(model, batch, device):
                 hooks.append(module.register_forward_hook(ev_hook))
         model.eval()
         diagnostic_mode(model, True)
-        with torch.no_grad():
+        with torch.no_grad(), model_precision(model, device, training=False):
             values, _ = tensors(batch, device)
             model(*values)
         return dict(input_fingerprint=batch_fingerprint(batch), layers={**control_records, **diagnostics(model)})
@@ -189,17 +198,23 @@ def context_diagnostic(model, batch, device):
         model.train(was_training)
 
 
-def validate(model, iterator, device, events, batch_size=512):
+def validate(model, iterator, device, events, batch_size=512, *, check_precision=False):
     model.eval()
     logits = np.empty((events, 10), np.float32)
     labels = np.empty(events, np.int64)
     offset = 0
     started = time.monotonic()
-    with torch.no_grad():
-        for _ in range(events // batch_size):
+    precision = None
+    with torch.no_grad(), model_precision(model, device, training=False):
+        for index in range(events // batch_size):
             check_stop()
             values, truth = tensors(next(iterator), device)
-            prediction = model(*values).float().cpu().numpy()
+            audit = (audit_precision(model, expected_dtype=torch.float32)
+                     if check_precision and index == 0 else nullcontext())
+            with audit as observed:
+                prediction = model(*values).float().cpu().numpy()
+            if observed is not None:
+                precision = observed
             n = len(truth)
             logits[offset:offset+n] = prediction
             labels[offset:offset+n] = truth.cpu().numpy()
@@ -209,6 +224,10 @@ def validate(model, iterator, device, events, batch_size=512):
     inference_seconds = time.monotonic() - started
     result = classification_metrics(logits, labels)
     result.update(inference_seconds=inference_seconds, seconds=time.monotonic() - started)
+    if check_precision:
+        if precision is None:
+            raise RuntimeError("Validation precision audit did not run")
+        result["precision"] = precision
     return result
 
 
@@ -266,6 +285,7 @@ def benchmark(args):
             windows, skipped = [], 0
             torch.cuda.reset_peak_memory_stats()
             warmup, measured = limits["warmup_steps"], limits["measured_steps"]
+            progress("benchmark_training_start", **task, batch_size=512, precision=PRECISION_POLICY)
             for index in range(warmup + measured):
                 check_stop()
                 batch = first if index == 0 else next(iterator)
@@ -273,7 +293,14 @@ def benchmark(args):
                     fingerprints[str(index)] = batch_fingerprint(batch)
                 # Benchmark actual early schedule; separate full-length probe
                 # below also tests the peak AdamW LR.
-                row = training_step(model, optimizer, scaler, batch, device, recipe, index)
+                row = training_step(model, optimizer, scaler, batch, device, recipe, index,
+                                    check_precision=index == 0)
+                if index == 0:
+                    training_precision = row["precision"]
+                    progress("benchmark_precision", **task, passed=training_precision["passed"],
+                             activation_dtype=training_precision["expected_activation_dtype"],
+                             observed_modules=len(training_precision["observed_activations"]),
+                             peak_allocated_bytes=torch.cuda.max_memory_allocated())
                 if index >= warmup:
                     skipped += row["amp_skipped"]
                 if index + 1 == warmup:
@@ -309,16 +336,18 @@ def benchmark(args):
             checkpoint_seconds = time.monotonic() - checkpoint_clock
             val_loader, _ = build_loader("val", spec["inventory"], 512, seed=task["seed"])
             torch.cuda.reset_peak_memory_stats()
-            val = validate(model, iter(val_loader), device, limits["validation_events"])
+            val = validate(model, iter(val_loader), device, limits["validation_events"], check_precision=True)
             validation_memory = torch.cuda.max_memory_allocated()
             # Use the slowest complete fetch window, not just a warm cached batch.
             per_step = max(w["seconds"]/w["steps"] for w in windows)
             projected = (per_step*recipe["total_steps"] + val["seconds"] * 10 * recipe["validation_events_per_epoch"]/val["events"] + 220*checkpoint_seconds + cold) / 3600
             passed = (skipped / measured < limits["max_skip_fraction"] and full_skips == 0
+                      and training_precision["passed"] and val["precision"]["passed"]
                       and max(native_memory, full_memory, validation_memory) < runtime["gpu_memory_bytes"] * limits["memory_fraction_limit"])
             result = dict(passed=passed, task=task, campaign_sha256=spec["content_hash"], runtime=runtime,
                 input_fingerprints=fingerprints, cold_fetch_seconds=cold, measured_steps=measured,
                 initial_parity=parity,
+                training_precision=training_precision,
                 seconds=seconds, jets_per_second=512*measured/seconds, amp_skipped_steps=skipped,
                 checkpoint_seconds=checkpoint_seconds,
                 full_length_amp_skips=full_skips, native_peak_bytes=native_memory, full_length_peak_bytes=full_memory,
@@ -502,7 +531,7 @@ def evaluate(args):
             else:
                 loader = finite_validation_loader(spec["inventory"], record)
                 predictions, labels = [], []
-                with torch.no_grad():
+                with torch.no_grad(), model_precision(model, device, training=False):
                     for batch in loader:
                         check_stop()
                         values, truth = tensors(batch, device)

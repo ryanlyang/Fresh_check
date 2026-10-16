@@ -9,8 +9,9 @@ from part_ev_fullscale.protocol import (CLASS_NAMES, digest, environment, file_l
     file_sha256, read_json, write_json, recipe_for)
 from part_ev_fullscale.data import DATA_CONFIG
 from .model import CONFIG, COUNTS
+from .precision import POLICY as PRECISION_POLICY
 
-SCHEMA = "part_ev_context_gate_screen_v1"
+SCHEMA = "part_ev_context_gate_screen_v2"
 TASKS = [dict(run_id=name, architecture=architecture, recipe=recipe, seed=101)
     for name, architecture, recipe in (
         ("PART_RANGER", "part", "ranger_short_v1"),
@@ -80,7 +81,7 @@ def source_manifest(root):
 
 def create_spec(inventory, source_root, launch):
     spec = dict(schema=SCHEMA, tasks=copy.deepcopy(TASKS), recipes=recipes(),
-                model=CONFIG, parameters=COUNTS, benchmark=BENCHMARK,
+                model=CONFIG, parameters=COUNTS, benchmark=BENCHMARK, precision=PRECISION_POLICY,
                 inventory=inventory, environment=runtime_environment(), launch=launch,
                 source=source_manifest(source_root), data_config_sha256=file_sha256(DATA_CONFIG))
     spec["content_hash"] = digest(spec)
@@ -93,7 +94,8 @@ def load_campaign(output, *, check_environment=True):
     if digest(payload) != spec.get("content_hash") or spec.get("schema") != SCHEMA:
         raise ValueError("Screen campaign metadata hash/schema mismatch")
     if (spec["tasks"] != TASKS or spec["recipes"] != recipes() or spec["model"] != CONFIG
-            or spec["parameters"] != COUNTS or spec["benchmark"] != BENCHMARK):
+            or spec["parameters"] != COUNTS or spec["benchmark"] != BENCHMARK
+            or spec.get("precision") != PRECISION_POLICY):
         raise ValueError("Frozen screen protocol differs")
     if spec["source"] != source_manifest(Path(__file__).resolve().parents[1]):
         raise ValueError("Frozen campaign source differs; do not patch active campaigns")
@@ -111,6 +113,13 @@ def benchmark_summary(output, spec, runtime=None):
         if (row.get("passed") is not True or row.get("campaign_sha256") != spec["content_hash"]
                 or row.get("task") != task or row.get("initial_parity", {}).get("passed") is not True):
             raise ValueError("All seven exact-campaign benchmarks must pass before training")
+        for audit, expected in ((row.get("training_precision", {}), "torch.float16"),
+                                (row.get("validation", {}).get("precision", {}), "torch.float32")):
+            observed = audit.get("observed_activations", {})
+            if (audit.get("passed") is not True or audit.get("expected_activation_dtype") != expected
+                    or audit.get("parameter_dtypes") != ["torch.float32"]
+                    or not observed or any(dtype != expected for dtype in observed.values())):
+                raise ValueError("Training AMP and FP32 validation must pass observed precision audits")
         rows.append(row)
     expected = runtime or rows[0]["runtime"]
     if any(row["runtime"] != expected for row in rows):

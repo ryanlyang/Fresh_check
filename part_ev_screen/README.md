@@ -93,6 +93,44 @@ AMP behavior, peak-LR execution, checkpoint-write time, and validation AUC cost.
 An AdamW peak-LR probe checks execution, not mature optimizer-state behavior.
 Benchmark weights are separate artifacts and are never used for training.
 
+### Recovery from the first 40-GB A100 out-of-memory probes
+
+The `context_gate_20261016T204528Z` benchmarks used the v1 screen driver. That
+driver enabled outer FP16 autocast but built Weaver with `use_amp=False`;
+Weaver's inner autocast context disabled it again. The transformer therefore ran
+in FP32. Both ordinary ParT probes completed, but all five EV probes exhausted
+the approximately 39.52-GiB GPU. Those probes do **not** establish the memory fit
+or throughput of the intended mixed-precision recipe.
+
+The v2 driver scopes both native and outer AMP to the training forward, retains
+FP32 parameters/GradScaler, and explicitly uses FP32 for validation, diagnostics,
+and initial parity. The first benchmark training and validation forwards audit
+actual Linear/Conv1d output dtypes. Their evidence is saved in the benchmark JSON
+and required before production. Batch 512, all seven architectures, initialization,
+optimizers, and data/exposure budgets are unchanged. No gradient accumulation or
+additional activation checkpointing was introduced by this fix.
+
+After committing/pushing the fix locally, run on **sporcsubmit**:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+# NEW campaign: do not --resume the v1 snapshot or edit its frozen source.
+SCREEN_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_screen/context_gate_ampfix_$(date -u +%Y%m%dT%H%M%SZ)"
+bash sbatch/submit_part_ev_screen_sporc.sh \
+  --mode prepare --output "$SCREEN_ROOT" --partition tier3 --concurrency 2
+printf 'Save this campaign path: %s\n' "$SCREEN_ROOT"
+```
+
+The existing dedicated environment and staged data are reused without modifying
+them. All seven probes must be rerun, including the two controls, because their
+timings used the old precision behavior. This queues only the two-hour prepare
+and benchmark phases, not training. Keep the original campaign for its logs.
+Actual GPU fit still needs these new measurements; CPU regression tests do not
+prove a 512-jet batch fits. If it still fails, inspect the new traceback before
+choosing targeted recomputation, a larger-memory GPU, or a common smaller batch.
+
 All seven probes must finish successfully. A timeout or missing output is not a
 pass. Defaults require <5% measured skipped updates, no skipped full-length probe
 updates, and peak allocated memory below 90% of the GPU capacity. Native and

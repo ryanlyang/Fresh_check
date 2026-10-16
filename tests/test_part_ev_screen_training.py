@@ -119,6 +119,7 @@ def test_factorial_and_optimizer_interactions():
 
 @pytest.mark.parametrize('memory,skipped,passes',[(100,False,True),(950,False,False),(100,True,False)])
 def test_benchmark_records_validation_memory_and_rejects_bad_probes(tmp_path,monkeypatch,memory,skipped,passes):
+    from tests.test_part_ev_screen_protocol import precision_record
     task = P.TASKS[0]
     limits = dict(P.BENCHMARK, warmup_steps=2,measured_steps=4,window_steps=2,full_length_steps=1)
     spec = dict(tasks=P.TASKS,recipes=P.recipes(),content_hash='probe',inventory={},benchmark=limits)
@@ -127,11 +128,13 @@ def test_benchmark_records_validation_memory_and_rejects_bad_probes(tmp_path,mon
     monkeypatch.setattr(D,'make_model',lambda *a:torch.nn.Linear(2,2))
     monkeypatch.setattr(D,'build_loader',lambda *a,**kw: ([batch()]*20,None))
     monkeypatch.setattr(D,'initial_parity',lambda *a:dict(passed=True))
-    monkeypatch.setattr(D,'validate',lambda *a:dict(accuracy=.6,seconds=2,events=128000))
-    monkeypatch.setattr(D,'training_step',lambda *a,**kw:dict(loss=1.,amp_skipped=skipped))
+    monkeypatch.setattr(D,'validate',lambda *a,**kw:dict(accuracy=.6,seconds=2,events=128000,
+                                                     precision=precision_record('torch.float32')))
+    monkeypatch.setattr(D,'training_step',lambda *a,**kw:dict(loss=1.,amp_skipped=skipped,
+                                                            precision=precision_record('torch.float16')))
     monkeypatch.setattr(torch.cuda,'reset_peak_memory_stats',lambda:None)
     monkeypatch.setattr(torch.cuda,'synchronize',lambda:None)
-    peaks = iter([100,100,memory])
+    peaks = iter([50,100,100,memory])
     monkeypatch.setattr(torch.cuda,'max_memory_allocated',lambda:next(peaks))
     args = SimpleNamespace(output=tmp_path,task_index=0)
     if passes: D.benchmark(args)
@@ -139,6 +142,8 @@ def test_benchmark_records_validation_memory_and_rejects_bad_probes(tmp_path,mon
         with pytest.raises(RuntimeError,match='Benchmark'): D.benchmark(args)
     row = P.read_json(tmp_path/'benchmarks/PART_RANGER.json')
     assert row['passed'] == passes and row['validation_peak_bytes'] == memory
+    assert row['training_precision']['expected_activation_dtype'] == 'torch.float16'
+    assert row['validation']['precision']['expected_activation_dtype'] == 'torch.float32'
     assert row['measured_steps'] == 4 and len(row['windows']) == 2
     assert (tmp_path/'benchmarks/PART_RANGER_probe.pt').is_file()
     assert not (P.task_directory(tmp_path,0)/'last.pt').exists()
