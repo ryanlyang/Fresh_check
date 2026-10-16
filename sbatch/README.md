@@ -473,3 +473,12 @@ Omit the dependency only after confirming all three trainings completed if their
 job ID is no longer known to the scheduler. Compare the control's results with the
 existing original-recipe ParT/ParT-EV results on the same test population and seeds;
 the control campaign does not silently import or replace those external results.
+
+## SPORC context/gating EdgeValue screen
+
+The separate seven-run, seed-101, 200k-update screen is documented in
+[`part_ev_screen/README.md`](../part_ev_screen/README.md). Its launcher is
+`submit_part_ev_screen_sporc.sh`: preparation and seven two-hour GPU probes come
+first; after review, it queues training, dependent full-5M-validation evaluations,
+and reporting. It uses a dedicated x86 environment and does not alter the Tigris
+full-scale campaigns or consume the 20M test set.
