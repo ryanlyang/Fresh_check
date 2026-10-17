@@ -234,6 +234,69 @@ long-run stability or authorize production: the original all-seven benchmark
 gate remains unchanged. Review the numerical records before deciding how to
 proceed. Missing/failed tasks are not silently treated as passing.
 
+### Launch production after reviewed AMP recovery
+
+After reviewing passing recovery records for **all seven** models, use the
+recovery-aware submitter instead of the original `--mode train` command. Commit
+and push the new approval scripts locally, then on **sporcsubmit**:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check &&
+git pull --ff-only &&
+bash sbatch/submit_part_ev_screen_after_recovery.sh \
+  --campaign /home/ryreu/atlas/Fresh_check/checkpoints/part_ev_screen/context_gate_ampfix_20261016T215608Z \
+  --recovery-job 21904258 \
+  --reviewed --concurrency 2
+```
+
+`--recovery-job` identifies the exact diagnostic via its submission ledger;
+`--recovery /absolute/diagnostic/directory` is an alternative. `--dry-run` previews
+requests without approving evidence, creating files, or submitting jobs.
+
+The submitter freezes a separate `production_approval/` wrapper. It validates the
+original benchmark/checkpoint hashes, precision/parity/memory/input contracts,
+every recovery attempt, the matching per-step logs, and all seven model identities.
+The original failed benchmark JSONs, diagnostic results, `campaign.json`, and
+frozen `source/` are **not edited**. Approval records the reviewed basis and exact
+evidence hashes; each worker verifies them again and checks the actual GPU/runtime.
+This is an explicit admission decision based on the original benchmarks plus the
+short recovery check, not a claim that the original benchmarks passed.
+
+Production uses the **unchanged frozen trainer**, with only its admission check
+replaced for that invocation. All seven runs start from their original seed-101
+initialization with fresh optimizers and the normal fresh GradScaler. **No probe
+weights, optimizer state, or diagnostic scaler settings enter production.** Data,
+batch 512, AMP, model architectures, schedules, and the 200,000-update budget stay
+unchanged. Existing production files block a first launch rather than silently
+resuming or overwriting them.
+
+The submission graph is `train[7] -> full-validation[7] -> report`, using `afterok`
+dependencies on SPORC and two concurrent GPU tasks per array by default. Training
+and evaluation walltimes use the original measured projections plus 30%; the
+report requests two hours. `--train-hours N` can increase, but cannot decrease,
+the training estimate. The short recovery loop is **not** used for throughput
+estimates. No new benchmark or 20M-test jobs are submitted. The measured margin
+is not a guarantee under filesystem contention or restart replay.
+
+The printed job IDs are also appended to the campaign's existing
+`submitted_job_ids.tsv`. Monitor those IDs and the normal `logs/evscr_train_*`
+files; training logs retain cumulative AMP skip counts and validation progress.
+
+```bash
+# Read-only approval/timing review, including while production is running:
+bash sbatch/submit_part_ev_screen_after_recovery.sh \
+  --campaign "$SCREEN_ROOT" --mode review
+
+# Only after inspecting terminal failures and any stale dependent jobs:
+bash sbatch/submit_part_ev_screen_after_recovery.sh \
+  --campaign "$SCREEN_ROOT" --reviewed --resume
+```
+
+Use this same submitter for subsequent `--mode evaluate --resume` or
+`--mode report --resume` recovery. Active jobs from the campaign or its AMP
+diagnostics block duplicate submission. Resume uses only ordinary production
+checkpoints; the approval never grants permission to load probe weights.
+
 ### Ordinary training and evaluation monitoring
 
 ```bash
