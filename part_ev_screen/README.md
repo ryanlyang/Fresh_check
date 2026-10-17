@@ -177,6 +177,65 @@ are performed by this launcher.
 
 ## Monitoring and safe recovery
 
+### Short AMP recovery check after a completed probe
+
+If the v2 benchmarks completed training/validation and passed memory, precision,
+and initial parity checks, but failed only because a full-length stress update
+was AMP-skipped, use the separate recovery diagnostic. Do not rerun the long
+benchmark or edit its failed report. Commit/push these diagnostic scripts locally,
+then pull them on **sporcsubmit** and run:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+SCREEN_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_screen/context_gate_ampfix_20261016T215608Z"
+
+bash sbatch/submit_part_ev_screen_amp_recovery.sh \
+  --campaign "$SCREEN_ROOT" --concurrency 2
+```
+
+Add `--dry-run` to inspect the requests without creating files/jobs. The launcher
+queues seven **one-hour, one-GPU** tasks on the original partition/resources,
+followed by a **10-minute CPU summary** using `afterany` so failures are included.
+It refuses active original/recovery jobs for this campaign. A unique
+`diagnostics/amp_recovery.XXXXXX` directory holds frozen diagnostic code, an input
+manifest, per-step JSONL, and one JSON result per model. The launcher prints the
+directory, job IDs, and summary log path. It does not submit training.
+
+Each task restores its saved `benchmarks/RUN_ID_probe.pt`, including weights,
+optimizer/Lookahead state, GradScaler, and RNGs. These checkpoints were saved
+**after** the original three full-length stress attempts; they cannot reconstruct
+which of those attempts skipped. The original benchmark source and environment
+are reused without editing them. Checkpoint/report hashes and the recreated first
+training-batch fingerprint must match.
+
+The check uses the original synthetic stress input: batch 512, all 128 particle
+slots active, padding filled with the first real particle, and trimming disabled.
+It holds the original recipe's peak LR constant for 8 calibration attempts, then
+requires 10 consecutive finite, non-skipped optimizer updates. This is a bounded
+stress continuation, **not** a training resume or a performance measurement.
+The scaler is restored, never manually reset or lowered. Calibration may back off
+the scale but must end with a successful update. A confirmation skip, nonfinite
+loss/state, missing optimizer step, or original memory-limit violation fails.
+Every attempt logs the scale before/after, loss, unscaled gradient norm, actual
+optimizer step count, and allocated/reserved peak memory. No weights are saved.
+
+After completion, read the printed summary log, or rerun this read-only summary
+with the **exact diagnostic directory printed by the launcher**:
+
+```bash
+RECOVERY="/absolute/path/printed/by/the/launcher/amp_recovery.XXXXXX"
+/home/ryreu/miniconda3/envs/part_ev_screen_sporc/bin/python \
+  "$RECOVERY/check_part_ev_screen_amp_recovery.py" --phase summary --output "$RECOVERY"
+```
+
+Passing means only that this short synthetic check recovered. It does not prove
+long-run stability or authorize production: the original all-seven benchmark
+gate remains unchanged. Review the numerical records before deciding how to
+proceed. Missing/failed tasks are not silently treated as passing.
+
+### Ordinary training and evaluation monitoring
+
 ```bash
 cat "$SCREEN_ROOT/submitted_job_ids.tsv"
 squeue --me -o '%.18i %.25j %.2t %.10M %.12l %R'
