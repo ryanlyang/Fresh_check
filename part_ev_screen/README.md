@@ -5,8 +5,10 @@ This is the seven-run, single-seed experiment in
 For future experiments using this shortened schedule and its existing controls,
 see the [reusable screen protocol](REUSABLE_SCREEN_PROTOCOL.md).
 The proposed next architectural study is described in the
-[state-conditioned EV and separate-encoder plan](STATE_AND_SEPARATE_ENCODER_PLAN.md)
-(design only; not an implemented launcher).
+[five-run EV message study](STATE_AND_SEPARATE_ENCODER_PLAN.md).
+Its implementation and tier3 commands are in the
+[message-study queue guide](../part_ev_message_study/README.md); GPU preflight
+is required before its five new variants can train with reused controls.
 It is separate from the existing full-scale campaigns. Nothing here changes or
 submits their jobs. The implementation is locally tested; GPU fit, throughput,
 and numerical checks still run on SPORC before production is authorized.

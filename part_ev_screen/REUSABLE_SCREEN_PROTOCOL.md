@@ -10,6 +10,11 @@ template. The generic control registry and launcher described below are a design
 for a follow-up implementation, not commands already supported by the current
 seven-task launcher. No active campaign needs to be changed.
 
+The specific five-run Ranger follow-up now implements these reuse checks in
+[part_ev_message_study](../part_ev_message_study/README.md), with a separate
+tier3 launcher. The arbitrary-model/AdamW template below remains a design,
+not a claim that the five-run launcher accepts arbitrary tasks.
+
 ## 1. The exact reduced training budget
 
 | Setting | Short-budget screen |

@@ -1,11 +1,15 @@
-# Next EdgeValue study: particle-state messages and a separate value encoder
+# Five-run EdgeValue study: message content, routing, and aggregation
 
-Status: proposed study and implementation specification; no models implemented
-or jobs submitted by this document. Richer TRACK/PT/REGION relations are deferred.
+Status: implemented as a separate five-run study; see the
+[tier3 queue guide](../part_ev_message_study/README.md). Models and launchers are
+locally tested; GPU admission still requires cluster preflight. No jobs have
+been submitted here. Richer TRACK/PT/REGION relations are deferred.
 
 ## Recommendation
 
-Test two changes separately and together:
+Run exactly **five new seed-101 models**, all with the same shortened Ranger
+recipe. Reuse the existing ParT and ordinary-EV controls; those are not two
+additional training runs.
 
 1. **State-conditioned EV:** make the added pair message depend nonlinearly on
    the current representations of both particles, not just their fixed pair
@@ -15,10 +19,16 @@ Test two changes separately and together:
    existing scalar-bias pathway.
 3. **Their combination:** use the separate pair representation in both ordinary
    EV and its state-conditioned residual.
+4. **EV-specific routing:** let EV messages use their own corrected attention
+   weights, while native particle values retain ordinary ParT attention.
+5. **Variance-augmented EV:** retain ordinary EV and add the attention-weighted
+   spread of pair features, rather than only their weighted average.
 
 My higher-upside architectural hypothesis is (1); (2) is a particularly clean,
 small-parameter test of representation sharing. Their combination is worth a
-prespecified run, not an assumed winner. None has demonstrated gains yet.
+prespecified run, not an assumed winner. The last two runs test different
+mechanisms, rather than additional combinations or optimizer choices. None has
+demonstrated gains yet.
 
 Use the [reusable short-budget protocol](REUSABLE_SCREEN_PROTOCOL.md), existing
 `PART_RANGER` and `EV_RANGER` controls, and fresh seed-101 initialization. Start
@@ -38,6 +48,10 @@ z_{ij}=\phi(e_{ij}),\qquad
 m_{ij}^{\ell h}=W_{\ell h}z_{ij},\qquad
 \Delta y_i^{\ell h}=\sum_j a_{ij}^{\ell h}m_{ij}^{\ell h}.
 \]
+
+Here `a` denotes native per-head attention weights **after attention dropout**.
+At evaluation it equals the softmax probabilities; during training its row sums
+need not be one.
 
 The native attention weights `a` already depend on evolving particle states and
 the scalar pair bias. The limitation is specifically the **added message's
@@ -244,25 +258,184 @@ The combination tests whether a specialized pair representation is especially
 useful for state-dependent messages. A positive interaction is possible, not
 guaranteed; report the individual arms even if the combined run wins.
 
-## 5. Proposed run matrix and capacity control
+## 5. Two additional architectural hypotheses
+
+These arms start from ordinary EV, not from the combined model in Section 4.
+Keep the shared native pair encoder and existing four kinematic relations in
+both. This makes each result interpretable as one new mechanism.
+
+### 5.1 EV-specific routing
+
+Hypothesis: the neighbors worth borrowing particle features from need not have
+the same importance as the pair relationships worth summarizing. Ordinary EV
+forces both pathways to use one attention map.
+
+Let `s_ij^lh` be the native logits, including scaled Q/K products, scalar pair
+bias, and key masking. Define pre-dropout probabilities:
+
+\[
+\alpha_{ij}^{\ell h}=\operatorname{softmax}_j(s_{ij}^{\ell h}),\qquad
+\delta_{ij}^{\ell h}
+  =2\tanh\!\left(R_{\ell h}\operatorname{LN}_{64}(z_{ij})\right),
+\]
+\[
+\beta_{ij}^{\ell h}
+  =\operatorname{softmax}_j(s_{ij}^{\ell h}+\delta_{ij}^{\ell h}).
+\]
+
+Use `alpha` for native particle values and `beta` for existing EV messages
+`W_lh z_ij`. The correction has a separate bias-free `64 -> 8` projection in
+each block, non-affine LayerNorm with epsilon `1e-5`, and no new Q/K projections.
+Initialize every `R` to zero. The bounded correction is in `[-2,2]` logit units;
+this is a fixed initial design choice, not a tuned optimum.
+
+This adds 4,096 parameters overall. It changes **where EV aggregates from**,
+not the information supplied to its message encoder. It is different from the
+previous relation gate, which modulates sender values without introducing a
+separately normalized EV attention distribution. The two maps still share
+native logits, so they are not fully independent attention networks.
+
+Preserve the existing native MHA call and its realized dropout mask. With
+`a = dropout(alpha)`, the EV post-dropout weights can be computed as:
+
+\[
+Z_i^{\ell h}=\sum_j\alpha_{ij}^{\ell h}\exp(\delta_{ij}^{\ell h}),\qquad
+\widetilde\beta_{ij}^{\ell h}
+  =a_{ij}^{\ell h}\frac{\exp(\delta_{ij}^{\ell h})}{Z_i^{\ell h}}.
+\]
+
+This is exactly `dropout(beta)` using the same mask and scaling. In particular,
+do **not** treat post-dropout weights as softmax probabilities when computing
+`Z`, renormalize dropped weights, or recover logits with a clipped logarithm.
+
+Obtain `alpha` from the actual native Q/K projections, scale, bias and masks,
+without a second stochastic attention call. Query-chunk the extra pre-dropout
+score calculation; use FP32 for the correction exponentials and normalization.
+Do not detach either distribution. Compare against an explicit tiny
+`softmax(s + delta)` reference, including gradients and a fixed dropout mask.
+Matching native softmax precision is an acceptance requirement, not an excuse
+to relax parity tolerances or replace the baseline attention implementation.
+
+At zero correction the EV path must match ordinary EV within the frozen
+numerical tolerances, in training as well as evaluation. Mask padded query
+corrections as usual. The original output projection and all particle-value
+operations remain unchanged. Added Q/K-score recomputation costs time and memory
+despite the small parameter count; benchmark it.
+
+Implementation detail: native pre-dropout softmax probabilities are converted
+to FP32 and row-normalized to remove FP16 row-sum rounding. The denominator is
+evaluated as `1 + sum(alpha * expm1(delta))`, so a zero correction is exactly
+identity even with quantized native weights. This is algebraically equivalent
+in exact arithmetic; reference and mixed-precision parity checks guard it.
+
+### 5.2 Variance-augmented EV
+
+Hypothesis: two sets of relationships can have similar weighted means but
+different spreads. For example, a mixture of very similar and very dissimilar
+neighbors can average to the same feature value as uniformly intermediate
+neighbors. Exposing dispersion may help distinguish them.
+
+Ordinary EV already averages **learned nonlinear features**, and the backbone
+has multiple heads and layers. It is not inherently incapable of representing
+such distinctions. This arm tests an explicit aggregation bias, not a proof
+that the baseline lacks the information.
+
+Keep the ordinary EV correction unchanged. For the new branch alone, set
+`zbar_ij = LN64(z_ij)`, using non-affine feature-channel normalization with
+epsilon `1e-5`. For each head and valid query, normalize the existing
+post-dropout weights over valid keys **only to compute these statistics**:
+
+\[
+S_i^h=\sum_j a_{ij}^h,\qquad
+\pi_{ij}^h=
+\begin{cases}
+a_{ij}^h/S_i^h,&S_i^h>0,\\
+0,&S_i^h=0.
+\end{cases}
+\]
+\[
+\mu_i^h=\sum_j\pi_{ij}^h\bar z_{ij},\qquad
+\nu_i^h=\max\!\left(
+  \sum_j\pi_{ij}^h(\bar z_{ij}\odot\bar z_{ij})
+  -\mu_i^h\odot\mu_i^h,\;0\right),
+\]
+\[
+\Delta y_i^{\ell h}
+  =W_{\ell h}\sum_j a_{ij}^{\ell h}z_{ij}
+   +U_{\ell h}\nu_i^{\ell h}.
+\]
+
+The max is elementwise. `U_lh: 64 -> 16` is bias-free and zero-initialized,
+with independent parameters for every head and block. This adds 65,536
+parameters and starts at the ordinary-EV function. Do not add endpoint
+conditioning, a private encoder, or the routing correction in this arm.
+
+Accumulate moments in FP32 and clamp roundoff-negative variances to zero.
+Use an explicit safe denominator for zero-weight rows before division, then
+force their statistics to zero; evaluating `0/0` and masking afterward is not
+safe for autograd. Retain self-pairs and mask invalid queries. Use variance,
+not a square root, to avoid introducing a near-zero square-root derivative.
+
+During training this is the variance of the **dropout-surviving weighted
+neighbors**, not an unbiased estimate of pre-dropout variance. At evaluation it
+uses the full native attention distribution. The original EV term never gets
+renormalized, and no additional dropout draw is introduced.
+
+Compute first and second moments in query chunks of 16 and checkpoint the
+stateless chunk calculation. Aggregate the shared 64-channel features into
+per-head moments before applying `U`; do not materialize per-head pair-value
+tensors or a full channel-by-channel covariance matrix. Use the same native
+output projection once for the combined head correction.
+
+The variance describes feature dispersion, not calibrated model uncertainty.
+Multiple neighborhood aggregators have precedent in graph learning; this is a
+targeted EV experiment, not a claim to invent moment aggregation.
+[Principal Neighbourhood Aggregation](https://arxiv.org/abs/2004.05718)
+
+## 6. Exactly five new runs
 
 Reuse the verified donor `PART_RANGER` and `EV_RANGER` results. The recommended
-first screen adds **four** single-seed runs: three hypothesis models and one
-control for extra pair-network capacity. These are proposed future tasks, not
-additions to the active seven-run array.
+first screen adds **five** single-seed runs. All five are architecture experiments;
+the previously suggested static-MLP capacity control is deferred, not a sixth
+run. These are proposed future tasks, not additions to the active seven-run array.
 
-| Proposed run ID | State residual | Separate value stem | Expected parameters |
-|---|---|---|---:|
-| `EV_STATE_RANGER` | Yes | No | 2,323,710 |
-| `EV_SEPARATE_RANGER` | No | Yes | 2,218,054 |
-| `EV_STATE_SEPARATE_RANGER` | Yes | Yes | 2,332,742 |
-| `EV_STATIC_MLP_RANGER` | Edge-only capacity control | No | 2,323,966 |
+| Proposed run ID | New mechanism relative to ordinary EV | Expected parameters |
+|---|---|---:|
+| `EV_STATE_RANGER` | Nonlinear message from both current particle states | 2,323,710 |
+| `EV_SEPARATE_RANGER` | Separate pair encoder for value messages | 2,218,054 |
+| `EV_STATE_SEPARATE_RANGER` | Both of the above | 2,332,742 |
+| `EV_ROUTING_RANGER` | EV-specific attention distribution | 2,213,118 |
+| `EV_VARIANCE_RANGER` | Weighted pair-feature variance alongside ordinary EV | 2,274,558 |
 
 The state residual adds `128*32 + 128*32 + 64*32 + 8*16*32 = 14,336`
 parameters per block, or 114,688 overall. Count instantiated models in tests;
 these totals assume the bias-free projections and non-affine LayerNorms above.
 
-For the edge-only control, retain ordinary EV and add the same zero-output
+For routing, the addition is `8 blocks * 8 heads * 64 = 4,096`; for variance it
+is `8 * 8 * 16 * 64 = 65,536`. Ordinary EV has 2,209,022 parameters and the
+reused ParT control has 2,143,486. Different overheads are part of the comparison.
+
+Primary contrasts on the same full-validation population:
+
+- Each of the five models minus `EV_RANGER`; also report each minus `PART_RANGER`.
+- Combined minus state-only, and combined minus separate-only.
+- Factorial interaction: `combined - state - separate + ordinary_EV`.
+- Routing versus ordinary EV isolates its routing modification; variance versus
+  ordinary EV isolates its aggregation modification, including added capacity.
+
+The interaction is a descriptive single-seed difference, not a significance test.
+Do not compare a new model's best intermediate check with an old model's final
+full-validation metric. Use the same reporting convention for every arm,
+including unsuccessful ones.
+
+### Deferred capacity controls, outside this five-run budget
+
+This first stage prioritizes exploring mechanisms. It does not fully separate
+their effects from extra trainable capacity. If a model wins, choose a targeted
+control and additional matched seeds before making a causal mechanism claim.
+
+Retain the following specification for a possible `EV_STATIC_MLP_RANGER`
+follow-up: keep ordinary EV and add the same zero-output
 residual structure, but without either particle state:
 
 ```text
@@ -276,25 +449,16 @@ chunking/recomputation scheme. Width 107 is the nearest integer width matching
 the state branch's parameter count: the control adds only 256 more parameters
 over the whole model. Its FLOPs are not matched; report timing separately.
 
-This tests whether endpoint states improve upon simply making the geometry-only
+This would test whether endpoint states improve upon simply making the geometry-only
 message network more expressive. It does not fully resolve every capacity
 confound for the separate encoder. If untying wins, a follow-up should compare
 against a similarly sized widened **shared** stem before attributing all of the
 gain specifically to separation. If the combined model is the winner, also add
 the static-MLP-plus-separate-stem control before claiming special synergy.
+Routing and variance winners likewise need targeted capacity/aggregation
+controls; do not describe their first single-seed gains as proof of mechanism.
 
-Primary contrasts on the same full-validation population:
-
-- Each new model minus `EV_RANGER`; also report each minus `PART_RANGER`.
-- State residual minus static-MLP control.
-- Combined minus state-only, and combined minus separate-only.
-- Factorial interaction: `combined - state - separate + ordinary_EV`.
-
-The interaction is a descriptive single-seed difference, not a significance test.
-Do not compare a new model's best intermediate check with an old model's final
-full-validation metric.
-
-## 6. Training and execution contract
+## 7. Training and execution contract
 
 Inherit, without tuning, the donor's `ranger_short_v1` recipe: full 100M training
 population, batch 512, seed 101, 200,000 attempted updates, validation every 20,000
@@ -320,7 +484,7 @@ Every pre-production allocation must be under six hours. Set training walltime
 from measured sustained throughput, validation costs, and headroom. The old AMP
 recovery approval does not authorize these new architectures.
 
-## 7. Diagnostics that distinguish success from unused capacity
+## 8. Diagnostics that distinguish success from unused capacity
 
 Use a fixed diagnostic validation sample and restore RNG/trimmer state afterward.
 Collect summaries, not full population-sized pair tensors:
@@ -339,6 +503,12 @@ Collect summaries, not full population-sized pair tensors:
 - After training, temporarily disable the new state residual on the same small
   validation sample to measure reliance. This is a diagnostic ablation, not a
   substitute for training the proper control.
+- For routing, compare pre-dropout alpha/beta entropies and their mean
+  total-variation distance on valid queries; record correction magnitudes and
+  saturation of tanh. Temporarily set delta to zero to measure reliance.
+- For variance, record valid-query variance magnitudes, zero-weight-row counts,
+  and the projected variance term's norm relative to ordinary EV. Temporarily
+  disable only that term to measure reliance. Do not interpret it as uncertainty.
 - Report parameters, peak memory, sustained jets/s, total training time, and
   cumulative skipped updates alongside accuracy, AUC, and all class rejections.
 
@@ -346,11 +516,12 @@ Similar representations do not by themselves prove redundancy; a large residual
 does not prove usefulness; zero-initialization makes early small residuals expected.
 The full-validation comparison remains the primary screen.
 
-## 8. Implementation and acceptance tests
+## 9. Implementation and acceptance tests
 
-Suggested future package: `part_ev_message_study/`, separate from the existing
+Implementation package: `part_ev_message_study/`, separate from the existing
 `part_ev_screen/` implementation. Build reusable control validation first, then
-the separate stem, then state residual, combined arm, and static capacity control.
+the separate stem, then state residual, combined arm, routing arm, and variance
+arm. The deferred static control is not required for this five-run launcher.
 Use the existing [backbone/EV implementation](../part_ev_fullscale/model.py),
 [precision policy](precision.py), and [screen trainer](../scripts/run_part_ev_screen.py)
 as references; do not copy their fixed seven-task assumptions into a generic API.
@@ -364,9 +535,14 @@ Required tests before queue readiness:
 2. **Gradient paths:** first-step `D` gradients are finite/nonzero on a
    nondegenerate fixture; new input projections learn after `D` is nonzero.
    Separate encoders have independent gradients and no optimizer duplication.
+   Test first-step routing `R` and variance `U` gradients on nondegenerate
+   fixtures, and moment/encoder gradients after `U` becomes nonzero.
 3. **Math reference:** chunked and projected-after-aggregation results and
    gradients match an explicitly materialized tiny all-pairs reference. Use
    fixed nonzero `D`; an all-zero residual is not a useful equivalence test.
+   Compare routing against explicit shifted-logit softmax with the same dropout
+   mask. Compare variance against weighted squared deviations around the mean;
+   check constant features, one valid key, and fully dropped rows.
 4. **Symmetries/masks:** permutation equivariance, padded outputs, one-particle
    jets, self-pairs, and consistent trimming; include a nonsymmetric state-pair
    fixture to catch accidental triangular mirroring. Preserve native bias/BN
@@ -380,24 +556,29 @@ Required tests before queue readiness:
 7. **Resource checks:** assert counts above and profile real GPU peak memory;
    no full per-head pair-value tensor or per-layer retained pair-state history.
 8. **Launcher:** mock the dependency graph; submit only new runs, never reused
-   control training; protect against active duplicate submissions.
+   control training; protect against active duplicate submissions. Assert
+   exactly the five IDs in Section 6, each once with seed 101.
 
 An inference-only comparison across changed hardware/software does not establish
 matched training. Use the same-runtime controls unless comparability is reviewed.
 
-## 9. Decision rules and scope of conclusions
+## 10. Decision rules and scope of conclusions
 
 Keep overall full-5M accuracy as the primary metric; report macro OVO/OVR AUC and
 the existing complete set of classwise QCD rejections as secondary metrics.
 Assess these alongside runtime, not just the largest favorable number. Choose
 any numerical practical-gain threshold before submission, not after seeing results.
 
-- If the state arm beats ordinary EV but not the static control, the evidence
-  favors extra message capacity, not specifically particle-state conditioning.
+- If the state arm wins, test it against the deferred static control next.
+  A win over ordinary EV alone does not establish that particle-state
+  conditioning, rather than added message capacity, caused the improvement.
 - If separation wins, verify the gain across matched seeds and the shared-stem
   capacity follow-up before claiming the sharing constraint was causal.
 - If the combination wins, quantify both individual contributions and its cost;
   do not omit unsuccessful individual arms.
+- If routing or variance wins, inspect whether the relevant mechanism was used
+  and replicate the result before extending it with the other mechanisms.
+  A one-seed winner is a candidate, not a reason to launch every combination.
 - If none improve meaningfully, do not automatically launch a rank/width/optimizer
   sweep. Inspect whether the branches learned and consider stopping this direction.
 
@@ -407,7 +588,7 @@ matched additional seeds and, later, independent test evaluation with the design
 fixed. More repeated validation experiments do not turn a tiny gain into evidence
 of generalization.
 
-## 10. Prior work and novelty boundaries
+## 11. Prior work and novelty boundaries
 
 ParT already introduces pair interactions into attention; keep that baseline and
 its recipe explicit. [ParT](https://arxiv.org/abs/2202.03772)
@@ -418,8 +599,13 @@ adds low-rank value messages; it does not implement ParticleNet's dynamic k-near
 neighbor graph. [ParticleNet](https://arxiv.org/pdf/1902.08570)
 
 MIParT explores richer interaction embeddings and interaction-based attention.
-It is relevant prior work, not evidence that these particular two modifications
+It is relevant prior work, not evidence that these particular modifications
 will work or that they are novel. [MIParT](https://arxiv.org/html/2407.08682v2)
+
+PNA combines multiple neighborhood aggregators and degree scalers. It motivates
+testing aggregation beyond a single weighted mean, but is not the same as our
+attention-weighted variance branch and does not establish its effectiveness in
+jet tagging. [PNA](https://arxiv.org/abs/2004.05718)
 
 The immediate aim is a well-controlled empirical test. A novelty claim requires
 a broader literature review once the mechanism and evidence are established.
