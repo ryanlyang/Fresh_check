@@ -2,6 +2,8 @@
 
 This is the seven-run, single-seed experiment in
 [the agreed plan](../part_ev_fullscale/CONTEXT_GATING_SCREEN_PLAN.md).
+For future experiments using this shortened schedule and its existing controls,
+see the [reusable screen protocol](REUSABLE_SCREEN_PROTOCOL.md).
 It is separate from the existing full-scale campaigns. Nothing here changes or
 submits their jobs. The implementation is locally tested; GPU fit, throughput,
 and numerical checks still run on SPORC before production is authorized.
