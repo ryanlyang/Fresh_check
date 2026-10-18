@@ -168,6 +168,22 @@ pT share, and bounded assignment examples. Diagnostics do not select checkpoints
 
 ## Pending controls and recovery
 
+If preparation fails with `Invalid metadata hash/schema` for the donor's
+`production_approval/approval.json`, first inspect the prepare stderr. The original
+grouped reader incorrectly used the compact campaign JSON hash encoding for a v1
+recovery approval, whose producer uses default (spaced) JSON separators. The reader
+now validates that approval with its producer's encoding; campaign hashes and all
+approval policy/source/evidence checks remain enforced. Regression coverage uses
+the real approval writer and rejects tampered and wrongly encoded approvals.
+
+For a campaign frozen with the old reader, commit/push the fix and pull it on RC,
+then run `--mode prepare` with a **new output path** after the failed campaign's
+dependent jobs are terminal. `--resume` on the old path still runs the old frozen
+reader. Preserve the old logs; do not rehash donor files, remove its approval, or
+edit either frozen source snapshot. Preparation failure before
+`experiment_spec.json` means `--mode review` cannot run yet; inspect the prepare
+logs instead. No grouped training has started at that stage.
+
 If required controls are still pending when the report starts, it writes
 `reports/progress.json`, exits with code 3, and does not publish a completed
 comparison. Once their own workflow has finished, and no grouped jobs are active:

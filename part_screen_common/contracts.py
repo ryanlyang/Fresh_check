@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
 from part_ev_fullscale.protocol import digest, read_json, file_sha256
@@ -25,13 +27,23 @@ def hashed(payload):
     return dict(payload, content_hash=digest(payload))
 
 
-def checked_json(path, schema=None):
+def checked_json(path, schema=None, *, hash_function=digest):
     row = read_json(path)
-    if (not isinstance(row, dict) or row.get("content_hash") != digest(
+    if (not isinstance(row, dict) or row.get("content_hash") != hash_function(
             {k: v for k, v in row.items() if k != "content_hash"})
             or (schema is not None and row.get("schema") != schema)):
         raise ValueError(f"Invalid metadata hash/schema: {path}")
     return row
+
+
+def _recovery_approval_digest(payload):
+    """Match the v1 approval producer, not the compact campaign JSON encoding.
+
+    scripts/check_part_ev_screen_amp_recovery.py uses JSON's default separators;
+    run_part_ev_screen_after_recovery.py hashes approvals with that helper. Keep
+    this format-specific and do not import/execute a donor's frozen source.
+    """
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def child(root, relative):
@@ -125,7 +137,8 @@ def donor_contract(root, controls, *, local_source=None):
         raise ValueError("Requested donor controls differ in runtime/input stream")
     approval_path = root / "production_approval/approval.json"
     if approval_path.is_file():
-        approval = checked_json(approval_path, "part_ev_screen_reviewed_recovery_approval_v1")
+        approval = checked_json(approval_path, "part_ev_screen_reviewed_recovery_approval_v1",
+                                hash_function=_recovery_approval_digest)
         if (approval.get("campaign_sha256") != spec["content_hash"]
                 or Path(approval["campaign"]).resolve() != root
                 or approval.get("basis") != "original_memory_precision_parity_throughput_plus_bounded_amp_recovery"

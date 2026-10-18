@@ -1,5 +1,7 @@
 import copy
 from pathlib import Path
+import shutil
+from types import SimpleNamespace
 import numpy as np
 import pytest
 from part_ev_fullscale.protocol import write_json, read_json, file_sha256, digest, CLASS_NAMES
@@ -7,6 +9,7 @@ from part_ev_screen import protocol as S
 from part_ev_screen.precision import POLICY
 from part_screen_common import contracts as C, controls as R
 from scripts.run_part_ev_screen import classification_metrics
+from scripts import run_part_ev_screen_after_recovery as approval_writer
 
 
 def precision(dtype):
@@ -149,7 +152,9 @@ def test_source_path_escape_rejected(donor):
     with pytest.raises(ValueError,match='Unsafe'): C.child(donor,donor.resolve())
 
 
-def test_reviewed_donor_recovery_is_reused_not_new_model_admission(donor):
+@pytest.fixture
+def reviewed_donor(donor, monkeypatch):
+    """Use the real approval writer; only expensive numerical evidence is stubbed."""
     spec = read_json(donor / 'campaign.json')
     path = donor / 'benchmarks/PART_RANGER.json'
     original = read_json(path)
@@ -164,20 +169,63 @@ def test_reviewed_donor_recovery_is_reused_not_new_model_admission(donor):
         hashes[target.name] = file_sha256(target)
     approval_dir = donor / 'production_approval'
     approval_dir.mkdir()
-    source = {}
-    for key,name in (('driver_sha256','run_part_ev_screen_after_recovery.py'),
-                     ('helper_sha256','check_part_ev_screen_amp_recovery.py'),('launch_sha256','launch.env')):
-        target = approval_dir / name; target.write_text('fixture\n')
-        source[key] = file_sha256(target)
-    approval = C.hashed(dict(schema='part_ev_screen_reviewed_recovery_approval_v1',
-        campaign=str(donor.resolve()),campaign_sha256=spec['content_hash'],
-        recovery=str(recovery.resolve()),recovery_plan_sha256=file_sha256(recovery/'recovery.json'),
-        recovery_results_sha256=hashes,authorizes_training=True,reviewed=True,
-        basis='original_memory_precision_parity_throughput_plus_bounded_amp_recovery',
-        initialization='fresh_original_seed_model_optimizer_and_grad_scaler',
-        runtime=original['runtime'],summary=dict(passed=True,models=[original]),**source))
-    write_json(approval_dir / 'approval.json', approval)
+    for source in (approval_writer.__file__, approval_writer.R.__file__):
+        shutil.copyfile(source, approval_dir / Path(source).name)
+    (approval_dir / 'launch.env').write_text('fixture\n')
+    launch = {'fixture': True}
+    write_json(approval_dir / 'launch.json', launch)
+    driver = SimpleNamespace(P=SimpleNamespace(load_campaign=lambda _: dict(spec, launch=launch)))
+    plan = dict(runtime=original['runtime'], launch_sha256=file_sha256(approval_dir / 'launch.env'))
+    summary = dict(passed=True, models=[original])
+    monkeypatch.setattr(approval_writer.R, 'frozen_driver', lambda _: driver)
+    monkeypatch.setattr(approval_writer, 'evidence', lambda *args: (plan, hashes, summary))
+    approval_writer.approve(donor.resolve(), recovery.resolve(), approval_dir.resolve(), reviewed=True)
+    return donor
+
+
+def test_reviewed_donor_recovery_is_reused_not_new_model_admission(reviewed_donor):
+    donor = reviewed_donor
+    before = {str(p): file_sha256(p) for p in donor.rglob('*') if p.is_file()}
+    approval = read_json(donor / 'production_approval/approval.json')
+    payload = {k: v for k, v in approval.items() if k != 'content_hash'}
+    # This producer uses default JSON separators, unlike campaign metadata.
+    assert approval['content_hash'] == approval_writer.R.digest(payload)
+    assert approval['content_hash'] != digest(payload)
     assert C.donor_contract(donor,['PART_RANGER'])['evidence']['production_approval/approval.json']
+    assert before == {str(p): file_sha256(p) for p in donor.rglob('*') if p.is_file()}
+    recovery = Path(approval['recovery'])
     (recovery/'PART_RANGER.steps.jsonl').write_text('changed')
     with pytest.raises(ValueError,match='recovery evidence changed'):
         C.donor_contract(donor,['PART_RANGER'])
+
+
+@pytest.mark.parametrize('mutation', ['payload', 'hash', 'schema', 'compact_hash', 'reviewed', 'source'])
+def test_reviewed_approval_still_rejects_tampering(reviewed_donor, mutation):
+    path = reviewed_donor / 'production_approval/approval.json'
+    row = read_json(path)
+    if mutation == 'payload':
+        row['summary']['passed'] = False  # Keep the original hash.
+    elif mutation == 'hash':
+        row['content_hash'] = '0' * 64
+    elif mutation in ('schema', 'reviewed'):
+        if mutation == 'schema':
+            row['schema'] = 'unknown_approval_v2'
+        else:
+            row['reviewed'] = False
+        row['content_hash'] = approval_writer.R.digest({k: v for k, v in row.items() if k != 'content_hash'})
+    elif mutation == 'compact_hash':
+        row['content_hash'] = digest({k: v for k, v in row.items() if k != 'content_hash'})
+    else:
+        (path.parent / 'launch.env').write_text('changed')
+    write_json(path, row)
+    with pytest.raises(ValueError):
+        C.donor_contract(reviewed_donor, ['PART_RANGER'])
+
+
+def test_campaign_metadata_still_requires_compact_hash(donor):
+    path = donor / 'campaign.json'
+    row = read_json(path)
+    row['content_hash'] = approval_writer.R.digest({k: v for k, v in row.items() if k != 'content_hash'})
+    write_json(path, row)
+    with pytest.raises(ValueError, match='Invalid metadata hash/schema'):
+        C.donor_contract(donor, ['PART_RANGER'])
