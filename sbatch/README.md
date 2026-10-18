@@ -474,6 +474,88 @@ job ID is no longer known to the scheduler. Compare the control's results with t
 existing original-recipe ParT/ParT-EV results on the same test population and seeds;
 the control campaign does not silently import or replace those external results.
 
+### Full-validation metrics for the completed original Ranger comparison
+
+`submit_part_fullscale_validation.sh` is a **separate inference-only workflow** for
+the six original standard shared-bias ParT/ParT-EV checkpoints (seeds 101, 202, 303).
+It evaluates each existing validation-selected checkpoint once over all **5M
+official validation jets**, 500,000 per class. It does not retrain, choose new
+checkpoints, modify original weights, or read the training or test populations.
+These are validation results, not independent final-test results: validation was
+already used to select the checkpoints. This does not recover historical AUC at
+every training check; it computes AUC for the six saved best-accuracy checkpoints.
+
+The new output must be a **separate sibling** of the training campaign. The current
+evaluation driver/helper/worker are copied and checksummed there independently;
+the model, data preprocessing, metrics code, and Python environment come from the
+original campaign's frozen source and `launch.env`. Every phase authenticates the
+new snapshot, original campaign metadata, and original source manifest. The native
+inference AMP behavior is preserved from the original evaluator; predictions are
+stored as float32, which is not a claim of FP32-only inference.
+
+On Tigris, after obtaining the new evaluation scripts:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+
+RANGER_CAMPAIGN="/home/ryreu/atlas/Fresh_check/checkpoints/part_fullscale/part_ev_100m_20261013T044756Z"
+VALIDATION_OUTPUT="${RANGER_CAMPAIGN}_validation_$(date -u +%Y%m%dT%H%M%SZ)"
+
+bash sbatch/submit_part_fullscale_validation.sh \
+  --campaign "${RANGER_CAMPAIGN}" --output "${VALIDATION_OUTPUT}" --dry-run
+
+bash sbatch/submit_part_fullscale_validation.sh \
+  --campaign "${RANGER_CAMPAIGN}" --output "${VALIDATION_OUTPUT}"
+```
+
+The launcher submits only this dependency chain:
+
+1. CPU preparation: 30 minutes, 4 CPUs, 16G. Confirms all six training-complete
+   markers, freezes checkpoint identities, and hashes the 50 validation ROOT files.
+2. Six single-GPU evaluations, at most three concurrent by default: 4 hours each,
+   8 CPUs and 32G host memory per task.
+3. CPU report: 1 hour, 4 CPUs and 32G, dependent on every evaluation succeeding.
+
+Every requested walltime is below six hours. If training is not yet complete,
+explicitly add `--dependency TRAIN_ARRAY_ID` to the real submission; otherwise
+prepare refuses incomplete checkpoints. This workflow is intentionally restricted
+to the original six-model standard/Ranger campaign and its original one-GPU runtime,
+not the plain, AdamW, or parameter-matched campaigns. All original production jobs
+and ledgers remain untouched.
+
+Results are `reports/validation_report.json` and `reports/validation_report.md` under
+the printed output. They contain accuracy, macro OVO/OVR AUC, and QCD rejection at
+30% and 50% signal efficiency for seven hadronic classes, plus 99% for Hqql and
+99.5% for Tbl. Reports retain individual seeds, mean/sample standard deviation,
+matched-seed gains, and clearly separated ratio-of-means rejection gains. Zero-QCD
+acceptance counts are retained rather than dropped from averages. No bootstrap
+intervals or statistical-significance claims are added.
+
+Per-file predictions remain in the new evaluation output for diagnostics and
+resuming: approximately **1.23 GB** total for six models. Preparation requires this
+space plus 2 GiB headroom (about 3.15 GiB free). This does not duplicate the dataset
+or model checkpoints. Original training source, environment, data, and checkpoints
+must remain available and unchanged until evaluation and reporting finish.
+
+After a failure, inspect `logs/` and the new output's `submitted_job_ids.tsv`. The
+resume command below refuses to proceed while **any** previously recorded job
+remains queued or running; it never cancels jobs automatically. Do not cancel the
+unrelated production arrays. Once only this evaluation's jobs are terminal:
+
+```bash
+bash sbatch/submit_part_fullscale_validation.sh --resume "${VALIDATION_OUTPUT}"
+```
+
+Resume keeps the exact frozen evaluation source, campaign, and resources. Completed
+authenticated prediction files are reused; an uncommitted file from an interrupted
+write can be recomputed. It resubmits the prepare/evaluate/report chain, not training
+or final-test inference. A failed or ambiguous scheduler response leaves
+`submission_uncertain` and blocks a blind retry: inspect the scheduler and that
+marker before requesting manual recovery. A fresh `--dependency` may be supplied
+for a retry, but no previous training dependency is silently reused. Use the same
+output path in later sessions; rerunning a timestamp assignment creates a different
+evaluation instead of resuming the first one.
+
 ## SPORC context/gating EdgeValue screen
 
 The separate seven-run, seed-101, 200k-update screen is documented in
