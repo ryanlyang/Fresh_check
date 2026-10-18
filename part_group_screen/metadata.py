@@ -14,7 +14,10 @@ def canonical_order(features, vectors, valid):
     for column in reversed(range(values.shape[-1])):
         keys = values[..., column].gather(1, order)
         order = order.gather(1, torch.argsort(keys, dim=1, stable=True))
-    return order.gather(1, torch.argsort(~valid.gather(1, order), dim=1, stable=True))
+    # The SPORC CUDA build cannot sort bool tensors. Integer 0/1 keys preserve
+    # valid-before-padding order and, with a stable sort, every lexical tie.
+    padding_key = (~valid.gather(1, order)).to(torch.int64)
+    return order.gather(1, torch.argsort(padding_key, dim=1, stable=True))
 
 
 @torch.no_grad()

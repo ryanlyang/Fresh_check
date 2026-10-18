@@ -184,6 +184,17 @@ edit either frozen source snapshot. Preparation failure before
 `experiment_spec.json` means `--mode review` cannot run yet; inspect the prepare
 logs instead. No grouped training has started at that stage.
 
+If fixed/random GPU benchmarks fail in `metadata.canonical_order` with
+`Sort currently does not support bool dtype on CUDA`, the mask-ordering key needs
+the integer-cast fix in `metadata.py`. The stable sort now uses integer 0/1 instead
+of Boolean keys, preserving valid-before-padding order, lexical ties, group
+memberships, and random seeds. Learned/hybrid routing does not call this path.
+Tests simulate the unsupported Boolean sort on CPU and additionally exercise both
+hard assignments on CUDA when available. Actual SPORC admission must still pass.
+Commit/push/pull the fix and prepare a new campaign, leaving the old results intact;
+the new frozen snapshot benchmarks all four arms again. Do not copy passing
+benchmark records between campaigns or edit the old snapshot for `--resume`.
+
 If required controls are still pending when the report starts, it writes
 `reports/progress.json`, exits with code 3, and does not publish a completed
 comparison. Once their own workflow has finished, and no grouped jobs are active:
@@ -307,7 +318,7 @@ the subsequent protocol recheck. This is local evidence, not a claim that the
 SPORC production Python/CUDA stack has already passed.
 
 ```bash
-python -m pytest tests/test_part_group_model.py tests/test_part_group_training.py \
+python -m pytest tests/test_part_group_metadata.py tests/test_part_group_model.py tests/test_part_group_training.py \
   tests/test_part_group_protocol.py tests/test_part_group_reporting.py \
   tests/test_part_screen_controls.py tests/test_part_group_launcher.py -q
 ```
