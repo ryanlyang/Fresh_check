@@ -173,6 +173,47 @@ This remains a single-seed validation screen; the evaluation overlaps checkpoint
 validation. It does not establish independent test performance or across-seed
 significance. Capacity-matched controls and extra seeds follow promising results.
 
+## Initialization-parity diagnostic
+
+Use this **diagnostic only** if a new model fails the initial comparison with
+ordinary EV. It does not change model source, tolerance, benchmark evidence,
+training approval or checkpoints. It performs no optimizer steps.
+
+After committing/pushing the diagnostic and pulling on sporcsubmit:
+
+```bash
+bash sbatch/submit_part_ev_message_parity.sh \
+  --campaign /home/ryreu/atlas/Fresh_check/checkpoints/part_ev_message_study/messages_20261018T232003Z \
+  --task-index 0
+```
+
+This requests **one GPU for one hour**, using that campaign's frozen tier3
+resources and environment. Task 0 is state-conditioned EV. Other original
+benchmarks may continue; the diagnostic only reads their frozen campaign.
+Use `--dry-run` to inspect the request without writing or submitting anything.
+
+The launcher prints a unique `diagnostics/message_parity.*` directory, job ID,
+logs and report paths. Read `parity_report.md` and `parity_report.json` afterward.
+The check reconstructs the original first batch and compares its fingerprint
+against the donor EV benchmark, then examines the same first eight events.
+
+- Reproduce the frozen original parity check, retaining any assertion failure.
+- Compare FP32 evaluation, FP32 training mode, and FP16 training mode separately.
+- Repeat ordinary-EV and new-model forwards to measure repeatability.
+- Compare the new model with its added branch enabled versus disabled.
+- Trace embeddings, native attention outputs/weights, EV projection inputs/
+  outputs, particle blocks and class blocks to locate the first discrepancy.
+- Record dtypes, tensor layouts, zero-branch checks and CPU/CUDA RNG equality.
+- Compare traced and untraced outputs to check instrumentation effects.
+
+The original `rtol=1e-5`, `atol=1e-6` remains unchanged in every comparison.
+For separate-encoder variants, disabling means disabling added state/routing/
+variance branches, not removing their separate pair encoder. Logits are saved
+in a small `logits.npz`; full activation tensors are not persisted.
+
+**A completed diagnostic means evidence was collected, not that admission passed.**
+Inspect the results before considering any implementation or tolerance change.
+
 ## Local checks
 
 ```powershell
