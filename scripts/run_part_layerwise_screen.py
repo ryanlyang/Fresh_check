@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Two fresh layerwise Ranger runs, with read-only shared-bias controls."""
 import argparse
-import gc
-import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 from part_layerwise_screen import protocol as P
 from part_layerwise_screen.model import build_model, BASE
 from part_screen_common.engine import ScreenEngine, training_step, tensors, progress
-from part_screen_common.contracts import runtime_identity
 from part_ev_screen.data import build_loader, shutdown_loader, batch_fingerprint
 from part_ev_screen.precision import model_precision, audit_precision
 from part_ev_fullscale.model import build_model as reference_model
@@ -96,21 +94,28 @@ class DirectEngine(ScreenEngine):
                         raise FloatingPointError("Nonfinite FP32 startup logits")
                 record = dict(task=task, campaign_sha256=spec["content_hash"], runtime=runtime,
                     input_fingerprint=fingerprint, initial_parity=parity, training=step, validation_precision=fp32,
-                    probe_discarded=True, sustained_benchmark=False)
+                    probe_discarded=True, sustained_benchmark=False,
+                    environment_changes_after_probe=P.environment_differences(
+                        spec["environment"], P.runtime_environment()))
                 P.write_json(run / "startup.json", record)
                 progress("startup_checked", **record)
             finally:
                 shutdown_loader(loader)
 
     def train(self, args):
-        spec = prepare(args.output)
-        self.startup(args.output, spec, args.task_index)
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        prepare(args.output)
+        self.startup_subprocess(args)
         # The shared engine seeds and constructs fresh model/optimizer/scaler,
         # or restores last.pt. The probe is never used to initialize training.
+        # Its lazy imports, sys.path changes, GPU context and allocator state
+        # now also die with the child. Keep load_campaign's full environment
+        # recheck in this untouched parent; do not cache or bypass that guard.
         super().train(args)
+
+    def startup_subprocess(self, args):
+        subprocess.run([sys.executable, "-u", str(Path(__file__).resolve()),
+            "--phase", "startup", "--output", str(args.output),
+            "--task-index", str(args.task_index)], check=True)
 
 
 ENGINE = DirectEngine(P, build_model, initial_parity, diagnostics)
@@ -132,12 +137,17 @@ def status(output):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("train", "lock", "evaluate", "report", "status"), required=True)
+    parser.add_argument("--phase", choices=("startup", "train", "lock", "evaluate", "report", "status"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--task-index", type=int)
     args = parser.parse_args(argv)
     args.output = args.output.resolve()
-    if args.phase in ("train", "evaluate"):
+    if args.phase == "startup":
+        # Internal child process inside the existing training allocation, not
+        # another Slurm job or an extra manual preflight stage.
+        P.task_directory(args.output, args.task_index)
+        ENGINE.startup(args.output, P.load_campaign(args.output), args.task_index)
+    elif args.phase in ("train", "evaluate"):
         P.task_directory(args.output, args.task_index)
         getattr(ENGINE, args.phase)(args)
     elif args.phase == "lock":

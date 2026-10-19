@@ -1,5 +1,6 @@
 """Direct-submit protocol; no invented benchmark or reviewed admission evidence."""
 import copy
+import json
 from pathlib import Path
 from part_ev_fullscale.protocol import read_json, write_json, file_sha256, file_lock
 from part_ev_screen.protocol import recipes, runtime_environment
@@ -17,6 +18,29 @@ CONFIG = dict(pair_stem="native_shared_64", bias_heads="eight_independent_native
 ADMISSION = dict(mode="direct_training_without_separate_preflight", benchmark_performed=False,
     startup_checks="fresh_discarded_probe_input_identity_initial_parity_fp16_step_fp32_forward",
     production_initialization="fresh_seeded_model_optimizer_scaler")
+
+
+def environment_differences(expected, actual, prefix=""):
+    """Describe mismatches without dropping any part of the donor contract."""
+    differences = []
+    for key in sorted(set(expected) | set(actual)):
+        field = prefix + key
+        if key not in expected or key not in actual:
+            differences.append(dict(field=field, expected=expected.get(key, "<missing>"),
+                                    actual=actual.get(key, "<missing>")))
+        elif isinstance(expected[key], dict) and isinstance(actual[key], dict):
+            differences.extend(environment_differences(expected[key], actual[key], field + "."))
+        elif expected[key] != actual[key]:
+            differences.append(dict(field=field, expected=expected[key], actual=actual[key]))
+    return differences
+
+
+def require_environment(expected):
+    differences = environment_differences(expected, runtime_environment())
+    if differences:
+        details = json.dumps(differences[:20], sort_keys=True)
+        raise ValueError(f"Environment differs from the donor ({len(differences)} fields): {details}. "
+                         "Use the unchanged donor-matched SPORC Python environment.")
 
 
 def task_directory(output, index):
@@ -39,8 +63,7 @@ def source_manifest(root):
 
 def create_spec(source, launch):
     contract = donor_contract(launch["donor"], CONTROLS, local_source=source)
-    if contract["environment"] != runtime_environment():
-        raise ValueError("Use the donor-matched SPORC Python environment")
+    require_environment(contract["environment"])
     verify_dataset_metadata(contract["inventory"])
     return hashed(dict(schema=SCHEMA, tasks=copy.deepcopy(TASKS), model=CONFIG, parameters=COUNTS,
         recipes={"ranger_short_v1": contract["recipes"]["ranger_short_v1"]}, donor=contract,
@@ -57,8 +80,8 @@ def load_campaign(output, *, check_environment=True):
         raise ValueError("Frozen layerwise protocol differs")
     if spec["source"] != source_manifest(Path(__file__).resolve().parents[1]):
         raise ValueError("Use the unchanged frozen source snapshot")
-    if check_environment and spec["environment"] != runtime_environment():
-        raise ValueError("Environment differs from the donor")
+    if check_environment:
+        require_environment(spec["environment"])
     return spec
 
 

@@ -73,12 +73,12 @@ def test_direct_startup_is_discarded_before_training(monkeypatch, tmp_path):
     runner = D.DirectEngine(P, D.build_model, D.initial_parity, D.diagnostics)
     calls = []
     monkeypatch.setattr(D, "prepare", lambda output: {"fixture": True})
-    monkeypatch.setattr(runner, "startup", lambda *a: calls.append("startup"))
+    monkeypatch.setattr(runner, "startup_subprocess", lambda *a: calls.append("startup"))
     monkeypatch.setattr(E.ScreenEngine, "train", lambda *a: calls.append("fresh_common_engine"))
     runner.train(SimpleNamespace(output=tmp_path, task_index=0))
     assert calls == ["startup", "fresh_common_engine"]
     def fail(*args): raise RuntimeError("startup failed")
-    monkeypatch.setattr(runner, "startup", fail)
+    monkeypatch.setattr(runner, "startup_subprocess", fail)
     with pytest.raises(RuntimeError, match="startup failed"): runner.train(SimpleNamespace(output=tmp_path, task_index=0))
     assert calls == ["startup", "fresh_common_engine"]
 
@@ -87,18 +87,133 @@ def test_startup_real_cpu_probe_and_bad_input_rejection(tmp_path, monkeypatch):
     task = P.TASKS[0]
     first = batch()
     spec = dict(tasks=P.TASKS, content_hash="fixture", inventory={}, parameters=P.COUNTS,
-        recipes=recipes(), donor=dict(input_fingerprints={"0": D.batch_fingerprint(first)}))
+        recipes=recipes(), environment={"fixture": True},
+        donor=dict(input_fingerprints={"0": D.batch_fingerprint(first)}))
     runner = D.DirectEngine(P, D.build_model, D.initial_parity, D.diagnostics)
     monkeypatch.setattr(runner, "gpu_setup", lambda spec: (torch.device("cpu"), {}))
     monkeypatch.setattr(D, "build_loader", lambda *a, **kw: ([first], None))
+    monkeypatch.setattr(P, "runtime_environment", lambda: {"fixture": True})
     runner.startup(tmp_path, spec, 0)
     record = P.read_json(P.task_directory(tmp_path, 0)/"startup.json")
     assert record["probe_discarded"] and not record["sustained_benchmark"]
     assert record["initial_parity"]["passed"] and record["training"]["precision"]["passed"]
     assert record["validation_precision"]["passed"]
+    assert record["environment_changes_after_probe"] == []
     assert not (P.task_directory(tmp_path, 0)/"last.pt").exists()
     spec["donor"]["input_fingerprints"]["0"] = "wrong"
     with pytest.raises(ValueError, match="batch differs"): runner.startup(tmp_path/"bad", spec, 0)
+
+
+def test_environment_error_lists_actual_changed_fields(monkeypatch):
+    expected = dict(packages={"torch": "2.5.1"}, installed_distributions={"example": "1"})
+    actual = dict(packages={"torch": "2.5.1"}, installed_distributions={"example": "2", "new": "3"})
+    differences = P.environment_differences(expected, actual)
+    assert differences == [
+        dict(field="installed_distributions.example", expected="1", actual="2"),
+        dict(field="installed_distributions.new", expected="<missing>", actual="3")]
+    monkeypatch.setattr(P, "runtime_environment", lambda: actual)
+    with pytest.raises(ValueError, match="installed_distributions.example") as error:
+        P.require_environment(expected)
+    assert "2 fields" in str(error.value) and '"actual": "2"' in str(error.value)
+    # Core versions and source hashes remain enforced, not just distributions.
+    for field in ("packages", "weaver_sources", "python", "architecture", "torch_cuda"):
+        monkeypatch.setattr(P, "runtime_environment", lambda: {field: "changed"})
+        with pytest.raises(ValueError, match=field): P.require_environment({field: "original"})
+
+
+def test_probe_runs_in_child_and_parent_environment_is_rechecked(tmp_path, monkeypatch):
+    import json
+    import os
+    import sys
+    import importlib.metadata
+    # Model a lazy import exposing additional distribution metadata via sys.path.
+    vendor = tmp_path / "vendor"
+    info = vendor / "layerwise_probe_only-9.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: layerwise-probe-only\nVersion: 9.0\n")
+    driver = tmp_path / "frozen driver.py"
+    record = tmp_path / "child.json"
+    driver.write_text('''import importlib.metadata, json, os, sys
+from pathlib import Path
+root = Path(__file__).parent
+sys.path.insert(0, str(root / "vendor"))
+os.environ["LAYERWISE_PROBE_TEST_ONLY"] = "child"
+(root / "child.json").write_text(json.dumps(dict(pid=os.getpid(), executable=sys.executable,
+    args=sys.argv[1:], version=importlib.metadata.version("layerwise-probe-only"))))
+''')
+    monkeypatch.setattr(D, "__file__", str(driver))
+    def inventory():
+        return {"installed_distributions": {d.metadata["Name"].lower(): d.version
+                for d in importlib.metadata.distributions() if d.metadata["Name"] == "layerwise-probe-only"}}
+    monkeypatch.setattr(P, "runtime_environment", inventory)
+    expected = inventory()
+    assert expected == {"installed_distributions": {}}
+    monkeypatch.delenv("LAYERWISE_PROBE_TEST_ONLY", raising=False)
+    paths = list(sys.path)
+    calls = []
+    def prepare(output):
+        P.require_environment(expected)
+        calls.append("prepare")
+    def production(self, args):
+        P.require_environment(expected)
+        calls.append("production_rechecked")
+        assert sys.path == paths and "LAYERWISE_PROBE_TEST_ONLY" not in os.environ
+    monkeypatch.setattr(D, "prepare", prepare)
+    monkeypatch.setattr(E.ScreenEngine, "train", production)
+    runner = D.DirectEngine(P, D.build_model, D.initial_parity, D.diagnostics)
+    runner.train(SimpleNamespace(output=tmp_path, task_index=1))
+    child = json.loads(record.read_text())
+    assert child["pid"] != os.getpid() and child["executable"] == sys.executable
+    assert child["version"] == "9.0"
+    assert child["args"] == ["--phase", "startup", "--output", str(tmp_path), "--task-index", "1"]
+    assert calls == ["prepare", "production_rechecked"]
+
+
+def test_failed_child_never_starts_production(tmp_path, monkeypatch):
+    import subprocess
+    driver = tmp_path / "failed_probe.py"
+    driver.write_text("raise SystemExit(7)\n")
+    monkeypatch.setattr(D, "__file__", str(driver))
+    monkeypatch.setattr(D, "prepare", lambda _: None)
+    production = []
+    monkeypatch.setattr(E.ScreenEngine, "train", lambda *a: production.append(True))
+    runner = D.DirectEngine(P, D.build_model, D.initial_parity, D.diagnostics)
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        runner.train(SimpleNamespace(output=tmp_path, task_index=0))
+    assert error.value.returncode == 7 and production == []
+
+
+def test_internal_startup_phase_checks_campaign_and_does_not_recurse(tmp_path, monkeypatch):
+    calls = []
+    spec = {"fixture": True}
+    def load(output):
+        calls.append(("load", output))
+        return spec
+    monkeypatch.setattr(P, "load_campaign", load)
+    monkeypatch.setattr(D.ENGINE, "startup", lambda output, loaded, index:
+                        calls.append(("startup", loaded, index)))
+    monkeypatch.setattr(D.ENGINE, "train", lambda *a: pytest.fail("Child must not call production train"))
+    assert D.main(["--phase", "startup", "--output", str(tmp_path), "--task-index", "1"]) == 0
+    assert calls == [("load", tmp_path.resolve()), ("startup", spec, 1)]
+
+
+def test_actual_environment_change_after_child_is_not_cached_or_ignored(tmp_path, monkeypatch):
+    current = {"packages": {"torch": "original"}}
+    monkeypatch.setattr(P, "runtime_environment", lambda: current)
+    expected = copy.deepcopy(current)
+    monkeypatch.setattr(D, "prepare", lambda _: P.require_environment(expected))
+    runner = D.DirectEngine(P, D.build_model, D.initial_parity, D.diagnostics)
+    def child(args):
+        current["packages"]["torch"] = "changed"
+    monkeypatch.setattr(runner, "startup_subprocess", child)
+    production = []
+    def parent_train(*args):
+        P.require_environment(expected)
+        production.append(True)
+    monkeypatch.setattr(E.ScreenEngine, "train", parent_train)
+    with pytest.raises(ValueError, match="packages.torch"):
+        runner.train(SimpleNamespace(output=tmp_path, task_index=0))
+    assert not production
 
 
 def test_pending_control_report_is_not_complete(tmp_path, monkeypatch):

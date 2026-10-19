@@ -57,8 +57,12 @@ There is **no separate prepare/preflight/benchmark job or manual review step**.
 Each training task creates/validates shared campaign metadata under a lock,
 then performs a small startup check: first real-batch identity, initial FP32
 parity against the appropriate shared model, one FP16 training step and an FP32
-forward. The probe model, optimizer, scaler and loader are discarded. Production
-training creates fresh seeded state (or restores `last.pt` on resume).
+forward. The probe runs in a **child Python process inside the same training
+allocation**, with the same frozen script and interpreter. The child exits before
+production starts, discarding its model, optimizer, scaler, loader, lazy imports,
+module search-path changes and GPU context. The parent still strictly rechecks
+the donor environment, then creates fresh seeded training state (or restores
+`last.pt` on resume). No environment check is cached, disabled or relaxed.
 The initial AMP step may be skipped while the fresh scaler adjusts; it is
 recorded and is not represented as sustained numerical validation.
 
@@ -128,3 +132,18 @@ Use `--mode evaluate --resume` instead if training and selection are complete.
 The launcher refuses live duplicates; it never cancels stale jobs automatically.
 Existing valid checkpoints/prediction chunks are reused with identity checks.
 Code changes require a new frozen campaign, not patching old snapshots.
+
+### Startup-to-training environment-check failure
+
+Jobs `21921608_0` and `_1` in `layerwise_20261019T083422Z` completed the startup
+probe but failed the environment recheck before the production training loop.
+The old launcher ran both stages in one process; the inventory matched before
+the probe and differed afterward. The old exception did not name the differing
+field, so the exact remote package/source discrepancy is not established.
+
+The probe is now process-isolated as described above. `startup.json` records
+`environment_changes_after_probe`, and any remaining environment failure lists
+the differing fields and expected/actual values. Real environment changes still
+block training. The model, optimizer, data, schedule and control contracts are
+unchanged. After committing/pushing/pulling this fix, submit a **new campaign**
+with the default command; do not `--resume` the old frozen source. Keep its logs.
