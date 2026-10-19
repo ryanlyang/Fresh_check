@@ -15,6 +15,14 @@ The specific five-run Ranger follow-up now implements these reuse checks in
 tier3 launcher. The arbitrary-model/AdamW template below remains a design,
 not a claim that the five-run launcher accepts arbitrary tasks.
 
+The two-run [layerwise-bias Ranger screen](../part_layerwise_screen/README.md)
+also reuses `PART_RANGER` and `EV_RANGER`. It keeps the shared pair stem and
+existing per-layer EV projections, adding independent per-layer bias heads.
+At the user's request, that study supports a one-command direct submission with
+small checks inside training instead of separate preflight/review jobs. Its
+metadata records that no sustained benchmark was performed; this is a
+study-specific exception, not a change to other campaigns' admission policies.
+
 ## 1. The exact reduced training budget
 
 | Setting | Short-budget screen |

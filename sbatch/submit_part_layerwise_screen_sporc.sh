@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# One submission: two training tasks -> lock -> two 5M-val tasks -> joined report.
+set -euo pipefail
+layer_repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+mode=train output= resume=0 dry=0 concurrency=2 train_hours=48 evaluate_hours=4
+layer_python=/home/ryreu/miniconda3/envs/part_ev_screen_sporc/bin/python
+donor=/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_screen/context_gate_ampfix_20261016T215608Z
+account=reu-aisocial partition=tier3 gpu=a100 cpus=8 memory=64G
+explicit=()
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
+usage() {
+  cat <<'USAGE'
+Usage: bash sbatch/submit_part_layerwise_screen_sporc.sh [options]
+Default: immediately queue train[2] -> lock -> evaluate[2] -> report on tier3.
+No separate prepare/benchmark job or manual review. Startup checks run inside
+the training tasks and discard probe state before fresh production training.
+  --mode train|evaluate|report|status   Default train; status is read-only.
+  --output DIR --donor DIR --python PATH
+  --partition NAME --account NAME --gpu TYPE --cpus N --mem SIZE
+  --concurrency 1|2                    Default 2.
+  --train-hours N --evaluate-hours N   Default 48 / 4 (not measured guarantees).
+  --resume                            Retry only after previous jobs terminate.
+  --dry-run                           Print plan without files or submission.
+Only two NEW seed-101 Ranger models train. PART_RANGER and EV_RANGER are reused.
+Evaluation is official 5M validation, not 20M test. No installation, cancellation
+or deletion is performed. Commit/push/pull relevant code before submitting.
+USAGE
+}
+while (( $# )); do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --resume) resume=1; shift ;; --dry-run) dry=1; shift ;;
+    --mode|--output|--donor|--python|--partition|--account|--gpu|--cpus|--mem|--concurrency|--train-hours|--evaluate-hours)
+      (( $# >= 2 )) || fail "Missing $1 value"
+      case "$1" in --donor|--python|--partition|--account|--gpu|--cpus|--mem) explicit+=("$1" "$2") ;; esac
+      case "$1" in
+        --mode) mode=$2 ;; --output) output=$2 ;; --donor) donor=$2 ;; --python) layer_python=$2 ;;
+        --partition) partition=$2 ;; --account) account=$2 ;; --gpu) gpu=$2 ;; --cpus) cpus=$2 ;;
+        --mem) memory=$2 ;; --concurrency) concurrency=$2 ;; --train-hours) train_hours=$2 ;;
+        --evaluate-hours) evaluate_hours=$2 ;;
+      esac
+      shift 2 ;;
+    *) fail "Unknown option: $1" ;;
+  esac
+done
+case "$mode" in train|evaluate|report|status) ;; *) fail 'Unknown mode; see --help' ;; esac
+[[ "$concurrency" =~ ^[12]$ && "$cpus" =~ ^[1-9][0-9]*$ ]] || fail 'Invalid concurrency/CPU count'
+[[ "$memory" =~ ^[1-9][0-9]*[MGT]$ ]] || fail 'Invalid memory'
+[[ "$train_hours" =~ ^[1-9][0-9]*$ && "$evaluate_hours" =~ ^[1-9][0-9]*$ ]] || fail 'Invalid walltime'
+for value in "$partition" "$account" "$gpu"; do [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]] || fail 'Invalid resource name'; done
+if [[ -z "$output" && "$mode" == train && "$resume" == 0 ]]; then
+  output="$layer_repo/checkpoints/part_layerwise_screen/layerwise_$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+[[ "$output" == /* && "$donor" == /* && "$layer_python" == /* ]] || fail 'Use absolute paths; --resume needs --output'
+if (( dry )); then
+  printf 'Mode: %s\nCampaign: %s\nDonor (read-only): %s\n' "$mode" "$output" "$donor"
+  printf 'New models: --array=0-1%%%s --gres=gpu:%s:1 --cpus-per-task=%s --mem=%s --partition=%s --account=%s\n' "$concurrency" "$gpu" "$cpus" "$memory" "$partition" "$account"
+  printf 'train[2] %sh -> lock 2h -> evaluate[2] %sh -> report 2h\n' "$train_hours" "$evaluate_hours"
+  echo 'No separate preflight/benchmark. No donor training or inference. No files or jobs changed.'
+  exit 0
+fi
+[[ "$(uname -m)" == x86_64 ]] || fail 'Run on sporcsubmit using the donor x86 environment'
+for command in git tar sha256sum find sort xargs realpath flock sbatch squeue scontrol; do
+  command -v "$command" >/dev/null || fail "Missing command: $command"
+done
+for option_name in ${!SBATCH_@}; do unset "$option_name"; done
+if [[ ! -f "$output/launch.env" ]]; then
+  [[ "$mode" == train && "$resume" == 0 ]] || fail 'Frozen campaign missing'
+  [[ ! -e "$output" && ! -L "$output" ]] || fail 'Output exists; refusing overwrite'
+  [[ -x "$layer_python" && -f "$donor/campaign.json" ]] || fail 'Missing donor-matched Python or campaign'
+  donor="$(realpath -e -- "$donor")"
+  candidate="$(realpath -m -- "$output")"
+  case "$candidate/" in "$donor/"*) fail 'Output must not be inside donor' ;; esac
+  case "$donor/" in "$candidate/"*) fail 'Output must not contain donor' ;; esac
+  for name in part_layerwise_screen/model.py part_layerwise_screen/reporting.py scripts/run_part_layerwise_screen.py sbatch/run_part_layerwise_screen_sporc.sh; do
+    git -C "$layer_repo" cat-file -e "HEAD:$name" || fail 'Commit/push/pull implementation before queueing'
+  done
+  [[ -z "$(git -C "$layer_repo" status --porcelain -- part_layerwise_screen part_screen_common part_ev_screen part_ev_fullscale scripts/run_part_layerwise_screen.py scripts/run_part_ev_screen.py sbatch/*part_layerwise_screen* particle_transformer/data/JetClass/JetClass_full.yaml)" ]] || fail 'Commit relevant source changes before queueing'
+  layer_parent="$(dirname -- "$output")"
+  [[ -d "$layer_parent" ]] || mkdir -p -- "$layer_parent"
+  mkdir -- "$output" || fail 'Concurrent submission; refusing overwrite'
+  output="$(realpath -e -- "$output")"
+  mkdir -- "$output/source" "$output/logs"
+  git -C "$layer_repo" rev-parse HEAD > "$output/source_commit.txt"
+  git -C "$layer_repo" archive HEAD | tar -xf - -C "$output/source"
+  (cd -- "$output/source"; find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$output/source.sha256"
+  printf 'LAYER_PYTHON=%q\nLAYER_DONOR=%q\nLAYER_ACCOUNT=%q\nLAYER_PARTITION=%q\nLAYER_GPU=%q\nLAYER_CPUS=%q\nLAYER_MEMORY=%q\n' \
+    "$layer_python" "$donor" "$account" "$partition" "$gpu" "$cpus" "$memory" > "$output/launch.env"
+  "$layer_python" - "$output/launch.json" "$donor" "$layer_python" "$account" "$partition" "$gpu" "$cpus" "$memory" <<'PY'
+import json, sys
+from pathlib import Path
+keys = ('donor', 'python', 'account', 'partition', 'gpu', 'cpus', 'memory')
+row = dict(zip(keys, sys.argv[2:]))
+row['controls'] = ['PART_RANGER', 'EV_RANGER']
+row['submission_policy'] = 'direct_no_separate_preflight'
+Path(sys.argv[1]).write_text(json.dumps(row, indent=2) + '\n')
+PY
+elif [[ "$mode" == train && "$resume" == 0 ]]; then
+  fail 'Existing campaign: inspect state then explicitly --resume; no duplicate submission'
+fi
+output="$(realpath -e -- "$output")"
+source "$output/launch.env"
+for ((i=0; i<${#explicit[@]}; i+=2)); do
+  case "${explicit[i]}" in
+    --python) frozen=$LAYER_PYTHON ;; --donor) frozen=$LAYER_DONOR ;; --partition) frozen=$LAYER_PARTITION ;;
+    --account) frozen=$LAYER_ACCOUNT ;; --gpu) frozen=$LAYER_GPU ;; --cpus) frozen=$LAYER_CPUS ;; --mem) frozen=$LAYER_MEMORY ;;
+  esac
+  [[ "${explicit[i+1]}" == "$frozen" ]] || fail "${explicit[i]} differs from frozen campaign"
+done
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+export PYTHONPATH="$output/source"
+export PATH="$(dirname -- "$LAYER_PYTHON"):$PATH"
+export LD_LIBRARY_PATH="$(dirname -- "$LAYER_PYTHON")/../lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+(cd -- "$output/source"; sha256sum --quiet -c "$output/source.sha256")
+if [[ "$mode" == status ]]; then
+  if [[ ! -f "$output/experiment_spec.json" ]]; then
+    echo 'Training has not prepared the campaign yet (possibly still queued).'
+    [[ ! -f "$output/submitted_job_ids.tsv" ]] || cat "$output/submitted_job_ids.tsv"
+    exit 0
+  fi
+  exec "$LAYER_PYTHON" "$output/source/scripts/run_part_layerwise_screen.py" --phase status --output "$output"
+fi
+exec 9>"$output/.submission.lock"
+flock -n 9 || fail 'Concurrent submitter'
+ledger="$output/submitted_job_ids.tsv"
+if [[ -s "$ledger" ]]; then
+  live="$(squeue -h -u "$(id -un)" -o '%i' | sed 's/_.*//' | sort -u)"
+  while read -r phase job; do
+    if grep -qx "$job" <<< "$live"; then fail "Campaign job $job ($phase) is active; no duplicates queued"; fi
+  done < "$ledger"
+  (( resume )) || fail 'Use --resume only after prior jobs terminate'
+fi
+scontrol show partition "$LAYER_PARTITION" >/dev/null || fail 'Requested partition unavailable'
+submit() {
+  local phase=$1 dependency=$2 hours=$3 result
+  local request=(--parsable --job-name="lw_${phase}" --account="$LAYER_ACCOUNT" --partition="$LAYER_PARTITION"
+    --nodes=1 --ntasks=1 --cpus-per-task="$LAYER_CPUS" --mem="$LAYER_MEMORY" --time="${hours}:00:00"
+    --output="$output/logs/%x_%A_%a.out" --error="$output/logs/%x_%A_%a.err" --export=ALL --signal=B:USR1@180)
+  case "$phase" in train|evaluate) request+=(--array="0-1%$concurrency" --gres="gpu:$LAYER_GPU:1") ;; esac
+  [[ -z "$dependency" ]] || request+=(--dependency="afterok:$dependency" --kill-on-invalid-dep=yes)
+  result="$(PART_LAYERWISE_OUTPUT="$output" PART_LAYERWISE_PHASE="$phase" sbatch "${request[@]}" "$output/source/sbatch/run_part_layerwise_screen_sporc.sh")"
+  result="${result%%;*}"
+  [[ "$result" =~ ^[0-9]+$ ]] || fail "Unexpected Slurm response: $result; inspect scheduler before retrying"
+  printf '%s\t%s\n' "$phase" "$result" >> "$ledger"
+  printf '%s job: %s\n' "$phase" "$result" >&2
+  printf '%s' "$result"
+}
+printf 'Campaign: %s\n' "$output"
+if [[ "$mode" == report ]]; then
+  report_id="$(submit report '' 2)"
+else
+  dependency=
+  if [[ "$mode" == train ]]; then dependency="$(submit train '' "$train_hours")"; fi
+  lock_id="$(submit lock "$dependency" 2)"
+  eval_id="$(submit evaluate "$lock_id" "$evaluate_hours")"
+  report_id="$(submit report "$eval_id" 2)"
+fi
+printf 'Job ledger: %s\nNo separate preflight or manual review is needed.\n' "$ledger"
