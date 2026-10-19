@@ -94,8 +94,8 @@ def test_training_loop_first_tie_and_completion_unchanged(tmp_path,monkeypatch):
     assert checksum == P.file_sha256(run/"best_model_val.pt")
 
 
-@pytest.mark.parametrize("failure",[None,"confirmation_skip","validation_memory","nonfinite_state"])
-def test_new_benchmark_records_calibration_and_never_writes_production(tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize("failure",[None,"confirmation_skip","validation_memory","nonfinite_state","parity"])
+def test_new_benchmark_records_calibration_and_never_writes_production(tmp_path,monkeypatch,capsys,failure):
     from tests.test_part_ev_screen_protocol import precision_record
     limits = dict(P.BENCHMARK,warmup_steps=2,measured_steps=4,window_steps=2,
                   calibration_attempts=2,confirmation_attempts=3)
@@ -105,12 +105,17 @@ def test_new_benchmark_records_calibration_and_never_writes_production(tmp_path,
     monkeypatch.setattr(P,"verify_inventory_metadata",lambda _:None)
     monkeypatch.setattr(M,"gpu_setup",lambda _: (torch.device("cpu"),dict(gpu_memory_bytes=1000)))
     monkeypatch.setattr(M,"initial_parity",lambda *a:dict(passed=True))
+    if failure == "parity":
+        def rejected(*_):
+            raise M.ParityError("train_fp16 new_first mismatch", dict(passed=False, error="fixture"))
+        monkeypatch.setattr(M,"initial_parity",rejected)
     monkeypatch.setattr(M.D,"make_model",lambda *a:torch.nn.Linear(2,2))
     monkeypatch.setattr(M.D,"build_loader",lambda *a,**kw:([batch()]*20,None))
     monkeypatch.setattr(M.D,"validate",lambda *a,**kw:dict(accuracy=.6,seconds=2,events=128000,
                                                        precision=precision_record("torch.float32")))
     full = []
     def step(*args,**kwargs):
+        assert failure != "parity", "No optimizer updates after failed parity"
         if kwargs.get("full_length"):
             full.append(True)
         skipped = kwargs.get("full_length") and (len(full) == 1 or failure == "confirmation_skip")
@@ -123,6 +128,14 @@ def test_new_benchmark_records_calibration_and_never_writes_production(tmp_path,
     peaks = iter([50,100,950 if failure == "validation_memory" else 200])
     monkeypatch.setattr(torch.cuda,"max_memory_allocated",lambda:next(peaks))
     args = SimpleNamespace(output=tmp_path,task_index=0)
+    if failure == "parity":
+        with pytest.raises(M.ParityError,match="train_fp16 new_first"):
+            M.benchmark(args)
+        assert "initial_parity_failed" in capsys.readouterr().out
+        assert not list((tmp_path/"benchmarks").glob("*.json"))
+        assert not list((tmp_path/"benchmarks").glob("*.pt"))
+        assert not (tmp_path/"runs").exists()
+        return
     if failure:
         with pytest.raises(RuntimeError,match="admission"):
             M.benchmark(args)

@@ -5,6 +5,19 @@ from part_ev_screen import protocol as S
 from tests.test_part_ev_screen_protocol import precision_record
 
 
+def parity_fixture():
+    comparison = dict(passed=True, exact=True, maximum_absolute_error=0.)
+    return dict(passed=True, policy=copy.deepcopy(P.PARITY_POLICY), device_type="cuda", events=8,
+                optimizer_steps=0, initial_backbone_exact=True, modes={mode: dict(
+                    warmup=[dict(pair=i+1, comparison=copy.deepcopy(comparison), rng_matches=True)
+                            for i in range(P.PARITY_POLICY["warmup_pairs_per_mode"])],
+                    measured=[dict(order=order, dtype="torch.float16" if mode == "train_fp16" else "torch.float32",
+                                   rng_matches=True, **{k: copy.deepcopy(comparison) for k in
+                                       ("comparison", "reference_repeat", "new_repeat")})
+                              for order in P.PARITY_POLICY["measured_orders"]])
+                    for mode in P.PARITY_POLICY["modes"]})
+
+
 def test_five_fresh_tasks_exact_donor_recipe_and_no_original_mutation():
     before = copy.deepcopy(S.TASKS)
     assert len(P.TASKS) == len({t["run_id"] for t in P.TASKS}) == 5
@@ -27,7 +40,7 @@ def benchmark_fixture(root):
     P.write_json(donor/"benchmarks/EV_RANGER.json",dict(input_fingerprints={"0":"same","20":"same20"}))
     for task in P.TASKS:
         row = dict(task=task,campaign_sha256="campaign",runtime=runtime,passed=True,
-            measured_steps=4200,amp_skipped_steps=2, initial_parity=dict(passed=True),
+            measured_steps=4200,amp_skipped_steps=2, initial_parity=parity_fixture(),
             training_precision=precision_record("torch.float16"),
             validation=dict(precision=precision_record("torch.float32"),events=128000,seconds=100),
             input_fingerprints={"0":"same","20":"same20"},
@@ -42,7 +55,8 @@ def benchmark_fixture(root):
 
 @pytest.mark.parametrize("failure",["missing","hash","task","runtime","donor_runtime","input","donor_input",
     "precision","val_precision","parameters","memory","confirm_skip","cal_last_skip","state_nan",
-    "incomplete","skip_rate","time","val_events"])
+    "incomplete","skip_rate","time","val_events","parity_missing","parity_failed","parity_policy",
+    "parity_warmup","parity_order","parity_repeat","parity_dtype","parity_rng","parity_cpu"])
 def test_benchmark_evidence_fail_closed(tmp_path,failure):
     spec,runtime = benchmark_fixture(tmp_path)
     assert P.benchmark_summary(tmp_path,spec,runtime)["recommended_train_hours"] == 13
@@ -68,6 +82,15 @@ def test_benchmark_evidence_fail_closed(tmp_path,failure):
         if failure == "skip_rate": row["amp_skipped_steps"] = 210
         if failure == "time": row["projected_training_hours"] = -1
         if failure == "val_events": row["validation"]["events"] = 100
+        if failure == "parity_missing": row["initial_parity"] = dict(passed=True)
+        if failure == "parity_failed": row["initial_parity"]["passed"] = False
+        if failure == "parity_policy": row["initial_parity"]["policy"]["atol"] = .1
+        if failure == "parity_warmup": row["initial_parity"]["modes"]["eval_fp32"]["warmup"].pop()
+        if failure == "parity_order": row["initial_parity"]["modes"]["eval_fp32"]["measured"].pop()
+        if failure == "parity_repeat": row["initial_parity"]["modes"]["eval_fp32"]["measured"][1]["new_repeat"]["passed"] = False
+        if failure == "parity_dtype": row["initial_parity"]["modes"]["train_fp16"]["measured"][0]["dtype"] = "torch.float32"
+        if failure == "parity_rng": row["initial_parity"]["modes"]["eval_fp32"]["measured"][0]["rng_matches"] = False
+        if failure == "parity_cpu": row["initial_parity"]["device_type"] = "cpu"
         row["content_hash"] = P.digest({k:v for k,v in row.items() if k != "content_hash"})
         if failure == "hash": row["passed"] = False
         P.write_json(path,row)
@@ -105,6 +128,8 @@ def test_campaign_source_recipe_data_environment_and_launch_are_frozen(tmp_path)
     P.write_json(tmp_path/"launch.json",launch)
     P.write_json(tmp_path/"data_contents.json",contents)
     assert P.load_campaign(tmp_path)["tasks"] == P.TASKS
+    assert spec["parity_policy"] == P.PARITY_POLICY
+    assert "part_ev_message_study/parity.py" in spec["source"]
     spec["tasks"][0]["seed"] = 202
     spec["content_hash"] = P.digest({k:v for k,v in spec.items() if k != "content_hash"})
     P.write_json(tmp_path/"campaign.json",spec)

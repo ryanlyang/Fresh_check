@@ -78,7 +78,7 @@ if [[ "$mode" == prepare && ! -f "$output/launch.env" ]]; then
   [[ ! -e "$output" ]] || fail 'New campaign path must not already exist'
   [[ -f "$donor/campaign.json" ]] || fail "Missing donor campaign"
   [[ -x "$screen_python" && -d "$screen_data/Pythia/train_100M" && -d "$screen_data/Pythia/val_5M" ]] || fail 'Missing environment or train/validation directories'
-  for name in part_ev_message_study/model.py part_ev_message_study/controls.py part_ev_message_study/engine.py part_ev_message_study/protocol.py part_ev_message_study/reporting.py scripts/run_part_ev_message_study.py sbatch/run_part_ev_message_study.sh; do
+  for name in part_ev_message_study/model.py part_ev_message_study/controls.py part_ev_message_study/engine.py part_ev_message_study/protocol.py part_ev_message_study/parity.py part_ev_message_study/reporting.py scripts/run_part_ev_message_study.py sbatch/run_part_ev_message_study.sh; do
     git -C "$screen_repo" cat-file -e "HEAD:$name" || fail 'Commit and push the screen implementation first'
   done
   [[ -z "$(git -C "$screen_repo" status --porcelain -- part_ev_message_study part_ev_screen part_ev_fullscale scripts/run_part_ev_message_study.py scripts/run_part_ev_screen.py scripts/run_part_ev_screen_after_recovery.py scripts/check_part_ev_screen_amp_recovery.py sbatch/*part_ev_message_study* particle_transformer/data/JetClass/JetClass_full.yaml)" ]] || fail 'Commit relevant source changes before preparing'

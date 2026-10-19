@@ -2,7 +2,6 @@
 """Five-model SPORC study, with independently verified reused controls."""
 from __future__ import annotations
 import argparse
-import copy
 import json
 from pathlib import Path
 import platform
@@ -16,55 +15,16 @@ from part_ev_message_study import protocol as P, controls as C
 from part_ev_message_study.engine import create_engine
 from part_ev_message_study.model import build_model
 from part_ev_fullscale.data import inspect_dataset
-from part_ev_fullscale.checkpoint import seed_everything, capture_rank_state, restore_rank_state
+from part_ev_fullscale.checkpoint import seed_everything
 from part_ev_fullscale.model import build_model as reference_model
+from part_ev_message_study.parity import initial_parity as isolated_parity, ParityError
 from scripts.check_part_ev_screen_amp_recovery import finite_state
 
 D = create_engine()
 
 
 def initial_parity(model, task, batch, device):
-    rng, original = capture_rank_state(model), copy.deepcopy(model.state_dict())
-    training = model.training
-    trimmers = [(m, m.enabled) for m in model.modules() if type(m).__name__ == "SequenceTrimmer"]
-    try:
-        seed_everything(task["seed"])
-        reference = reference_model("part_ev", trim=False, use_amp=False).to(device)
-        for name, tensor in reference.state_dict().items():
-            if not torch.equal(model.state_dict()[name], tensor):
-                raise ValueError(f"Changed initial EV/backbone parameter: {name}")
-        for module, _ in trimmers:
-            module.enabled = False
-        values, _ = D.tensors(batch, device)
-        values = [v[:8] for v in values]
-        errors = {}
-        for mode in (False, True):
-            # Isolate BN changes in this diagnostic. All initial buffers as well
-            # as weights are restored before the actual benchmark starts.
-            model.load_state_dict(original)
-            reference.load_state_dict({k: original[k] for k in reference.state_dict()})
-            model.train(mode)
-            reference.train(mode)
-            seed_everything(task["seed"] + 771)
-            with torch.no_grad(), D.model_precision(reference, device, training=mode):
-                expected = reference(*values)
-            after_reference = capture_rank_state(reference)
-            seed_everything(task["seed"] + 771)
-            with torch.no_grad(), D.model_precision(model, device, training=mode):
-                actual = model(*values)
-            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-            after_model = capture_rank_state(model)
-            if (not torch.equal(after_model["torch"], after_reference["torch"])
-                    or any(not torch.equal(a,b) for a,b in zip(after_model["cuda"], after_reference["cuda"]))):
-                raise ValueError("New mechanism consumes extra dropout/training RNG")
-            errors["train" if mode else "eval"] = float((actual-expected).abs().max())
-        return dict(passed=True, maximum_absolute_errors=errors, events=len(actual))
-    finally:
-        model.load_state_dict(original)
-        for module, enabled in trimmers:
-            module.enabled = enabled
-        restore_rank_state(model, rng)
-        model.train(training)
+    return isolated_parity(D, model, task, batch, device, reference_model)
 
 
 def gpu_setup(spec):
@@ -131,7 +91,13 @@ def benchmark(args):
             cold_start = time.monotonic()
             first = next(iterator)
             cold = time.monotonic() - cold_start
-            parity = initial_parity(model, task, first, device)
+            try:
+                parity = initial_parity(model, task, first, device)
+            except ParityError as error:
+                # Separate evidence: never turn a failed probe into an admitted benchmark.
+                D.progress("initial_parity_failed", **task, evidence=error.report)
+                raise
+            D.progress("initial_parity_complete", **task, evidence=parity)
             fingerprints = {"0": D.batch_fingerprint(first)}
             windows, skipped = [], 0
             warmup, measured = limits["warmup_steps"], limits["measured_steps"]

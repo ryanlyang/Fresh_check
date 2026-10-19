@@ -80,9 +80,15 @@ bash sbatch/submit_part_ev_message_study.sh \
   --mode review --output "${MESSAGE_ROOT}"
 ```
 
-Checks cover initial EV parity in evaluation and training, unchanged backbone
-and dropout RNG, observed FP16 training/FP32 validation with FP32 parameters,
-and matching donor input fingerprints across repeated fetch windows.
+Checks cover initial EV parity in FP32 evaluation, FP32 training mode and FP16
+training mode, unchanged backbone and dropout RNG, observed FP16 training/FP32
+validation with FP32 parameters, and matching donor input fingerprints across
+repeated fetch windows. The parity probe restores each model's initial weights,
+buffers, RNG and flags independently for every forward. Each mode has two fixed
+warm-up pairs, followed by strict comparisons in both execution orders and
+repeatability checks. Warm-up differences are recorded; every measured comparison
+must pass the original `rtol=1e-5`, `atol=1e-6`. Warm-up is never extended until a
+comparison passes. Nonfinite outputs and RNG mismatches fail even during warm-up.
 
 Timing uses 4,200 updates after 20 warmup updates. Full-128-particle testing uses
 eight bounded AMP calibration attempts followed by ten finite, non-skipped
@@ -172,6 +178,49 @@ separation, routing changes/entropies and weighted variance.
 This remains a single-seed validation screen; the evaluation overlaps checkpoint
 validation. It does not establish independent test performance or across-seed
 significance. Capacity-matched controls and extra seeds follow promising results.
+
+## Parity-check fix: queue fresh benchmarks, not another diagnostic
+
+The A100 diagnostic for `messages_20261018T232003Z` reproduced the old parity
+failure, then obtained exact matches in all three separately restored comparison
+modes. The new probe uses that state-isolated structure with bounded warm-up and
+both execution orders. This is a candidate fix for an order/state-dependent
+check, **not a demonstrated explanation of the original GPU discrepancy**.
+Its A100 behavior must still be verified by the benchmarks.
+
+Architectures, parameter initialization, optimizer, data, batch size, training
+schedule and production precision are unchanged. The new branch remains enabled
+throughout parity. All probe weights, BN buffers, RNG, trimmer counters and flags
+are restored; no optimizer steps are taken by parity. Warm-up changes only runtime
+caches, not persistent training state. Production starts with a fresh seeded
+model, optimizer and scaler, as before.
+
+The check policy is frozen in the new campaign and its complete measured evidence
+is required at review. `initial_parity_complete` or `initial_parity_failed` in the
+benchmark stdout includes warm-up measurements and any mode/order-specific error.
+Passing benchmarks also retain this evidence in their JSON files. Do not edit or
+delete the failed campaign's frozen source, logs or diagnostic evidence.
+
+After committing/pushing the fix, run on **sporcsubmit**:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+MESSAGE_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_message_study/messages_parityfix_$(date -u +%Y%m%dT%H%M%SZ)"
+
+bash sbatch/submit_part_ev_message_study.sh \
+  --mode prepare --output "${MESSAGE_ROOT}" \
+  --partition tier3 --concurrency 2
+```
+
+This queues prepare, then five benchmarks (five-hour limits, at most two GPU
+tasks together), **not training**. Save the new path. Using `--resume` on the old
+directory would execute its old frozen probe, even after `git pull`.
+
+When all five finish, use `--mode review --output "${MESSAGE_ROOT}"`. Any measured
+parity failure still blocks production. No additional diagnostic job is required
+before attempting these fixed benchmarks; no jobs are cancelled automatically.
 
 ## Initialization-parity diagnostic
 

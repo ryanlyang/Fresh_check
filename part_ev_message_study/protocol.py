@@ -9,6 +9,7 @@ from part_ev_fullscale.protocol import (CLASS_NAMES, digest, file_lock, file_sha
                                         read_json, write_json)
 from .model import CONFIG, COUNTS
 from .controls import checked_hash, runtime_identity
+from .parity import POLICY as PARITY_POLICY, validate_report as validate_parity
 
 SCHEMA = "part_ev_message_study_v1"
 PRECISION_POLICY = S.PRECISION_POLICY
@@ -51,6 +52,7 @@ def source_manifest(root):
 def create_spec(inventory, launch, donor, data_contents):
     spec = dict(schema=SCHEMA, tasks=copy.deepcopy(TASKS), recipes=recipes(),
                 parameters=COUNTS, model=CONFIG, benchmark=BENCHMARK, precision=PRECISION_POLICY,
+                parity_policy=copy.deepcopy(PARITY_POLICY),
                 inventory=inventory, launch=launch, environment=runtime_environment(),
                 source=source_manifest(ROOT), data_config_sha256=file_sha256(S.DATA_CONFIG),
                 donor=donor, data_contents_sha256=digest(data_contents))
@@ -63,8 +65,9 @@ def load_campaign(output, *, check_environment=True):
     spec = checked_hash(read_json(output / "campaign.json"))
     for key, expected in dict(schema=SCHEMA, tasks=TASKS, recipes=recipes(), parameters=COUNTS,
                               model=CONFIG, benchmark=BENCHMARK, precision=PRECISION_POLICY,
+                              parity_policy=PARITY_POLICY,
                               source=source_manifest(ROOT)).items():
-        if spec[key] != expected:
+        if spec.get(key) != expected:
             raise ValueError(f"Frozen message study {key} differs; use a new campaign")
     if (spec["data_config_sha256"] != file_sha256(S.DATA_CONFIG)
             or spec["launch"] != read_json(output / "launch.json")
@@ -100,6 +103,7 @@ def benchmark_summary(output, spec, runtime=None):
     for task in TASKS:
         path = Path(output) / "benchmarks" / (task["run_id"] + ".json")
         row = checked_hash(read_json(path))
+        validate_parity(row.get("initial_parity", {}))
         if (row["task"] != task or row["campaign_sha256"] != spec["content_hash"]
                 or row.get("passed") is not True or row["initial_parity"].get("passed") is not True
                 or row["measured_steps"] != BENCHMARK["measured_steps"]

@@ -18,7 +18,7 @@ def launcher(tmp_path):
     for name in ('submit_part_ev_message_study.sh','run_part_ev_message_study.sh'):
         shutil.copyfile(REPO/'sbatch'/name,source/'sbatch'/name)
     (source/'scripts/run_part_ev_message_study.py').write_text('# fixture\n')
-    for name in ('model.py','controls.py','engine.py','protocol.py','reporting.py'):
+    for name in ('model.py','controls.py','engine.py','protocol.py','parity.py','reporting.py'):
         (source/'part_ev_message_study'/name).write_text('# fixture\n')
     donor = tmp_path/'donor'
     donor.mkdir()
