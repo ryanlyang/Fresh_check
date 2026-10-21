@@ -76,6 +76,67 @@ def test_stream_parity_and_resume_even_with_raw_features(tmp_path, workers):
         assert [data.batch_fingerprint(next(it)) for _ in range(4)] == expected[5:]
     finally:
         data.shutdown_loader(again)
+    bounded, _ = data.build_loader('val', inventory, 4, config=config, workers=workers, max_batches=9)
+    assert not bounded.persistent_workers
+    iterator = iter(bounded)
+    assert [data.batch_fingerprint(batch) for batch in iterator] == expected
+    # Natural exhaustion must join successful workers, not silently suppress an
+    # abort in _shutdown_workers. This also exercises an odd two-worker quota.
+    assert all(not worker.is_alive() and worker.exitcode == 0
+               for worker in getattr(iterator, '_workers', []))
+    data.shutdown_loader(bounded)
+
+
+@pytest.mark.parametrize('batches', [1, 5, 6, 98])
+def test_prefix_assigns_whole_batches_without_extra_reads(monkeypatch, batches):
+    from types import SimpleNamespace
+    for workers in (1, 2, 4):
+        observed = []
+        for worker in range(workers):
+            monkeypatch.setattr(data, 'get_worker_info',
+                lambda: SimpleNamespace(id=worker, num_workers=workers))
+            quota = batches // workers + int(worker < batches % workers)
+            class ExactPrefix:
+                def __iter__(self):
+                    for i in range(quota * 3):
+                        yield (worker, i)
+                    raise AssertionError('Read past worker quota')
+            values = list(data._BatchPrefix(ExactPrefix(), 3, batches))
+            assert len(values) == quota * 3
+            observed.append([values[i:i+3] for i in range(0, len(values), 3)])
+        actual = [observed[index % workers][index // workers] for index in range(batches)]
+        assert len(actual) == batches
+    monkeypatch.setattr(data, 'get_worker_info', lambda: None)
+    with pytest.raises(RuntimeError, match='ended before'):
+        list(data._BatchPrefix([], 3, batches))
+
+
+def test_finite_training_prefix_matches_native_two_worker_stream(tmp_path):
+    from part_ev_fullscale.data import build_loader as original, CLASSES
+    files = [tmp_path/f'train_100M/{label}_{index:03d}.root'
+             for label in CLASSES for index in (0, 1)]
+    for path in files:
+        write_root(path, 20)
+    inventory = fixture_inventory('train', files)
+    config = tmp_path/'selected.yaml'
+    data.write_config(config)
+    native, _ = original('train', inventory, 4, workers=2)
+    finite, _ = data.build_loader('train', inventory, 4, config=config, workers=2, max_batches=6)
+    try:
+        native_iterator = iter(native)
+        expected = [data.native_fingerprint(next(native_iterator)) for _ in range(6)]
+        finite_iterator = iter(finite)
+        assert [data.batch_fingerprint(b) for b in finite_iterator] == expected
+        assert all(not worker.is_alive() and worker.exitcode == 0 for worker in finite_iterator._workers)
+    finally:
+        data.shutdown_loader(native)
+        data.shutdown_loader(finite)
+
+
+@pytest.mark.parametrize('limit', [0, -1, True, 1.5])
+def test_bad_prefix_limit_rejected_before_io(limit):
+    with pytest.raises(ValueError, match='max_batches'):
+        data.build_loader('train', {}, 512, config='not_read', max_batches=limit)
 
 
 def parent_walk(tree, i, j):
@@ -210,21 +271,46 @@ def test_training_only_normalization_fit_and_reuse(tmp_path, monkeypatch):
     calls = []
     def loader(split, *a, **kw):
         calls.append(split)
-        return [batch], None
+        assert kw['max_batches'] == 1
+        def finite():
+            yield batch
+            calls.append('naturally_exhausted')
+        return finite(), None
     monkeypatch.setattr(norm, 'build_loader', loader)
     monkeypatch.setattr(norm, 'shutdown_loader', lambda loader: None)
     monkeypatch.setattr(norm, 'SETTINGS', dict(norm.SETTINGS, jets=3))
     donor = dict(inventory={'inventory_sha256': 'train'}, input_fingerprints={'0': data.batch_fingerprint(batch)})
     result = norm.fit(tmp_path, donor, 'reference_for_tests')
-    assert calls == ['train'] and result['population'] == 'training_only'
+    assert calls == ['train', 'naturally_exhausted'] and result['population'] == 'training_only'
     assert result['floors']['d0'] == pytest.approx(.03)
     for family in result['families']:
         Normalizer(family, result)
     before = (tmp_path/'inputs/normalization.json').read_bytes()
     assert norm.fit(tmp_path, donor, 'reference_for_tests') == result
-    assert calls == ['train'] and before == (tmp_path/'inputs/normalization.json').read_bytes()
+    assert calls == ['train', 'naturally_exhausted'] and before == (tmp_path/'inputs/normalization.json').read_bytes()
     donor['inventory']['inventory_sha256'] = 'different'
     with pytest.raises(ValueError): norm.fit(tmp_path, donor, 'reference_for_tests')
+
+
+@pytest.mark.parametrize('failure', ['short', 'worker_error', 'extra'])
+def test_normalization_collection_errors_never_publish_constants(tmp_path, monkeypatch, failure):
+    from part_selected_screen import normalization as norm
+    p, f, v, m = selected_inputs()
+    batch = ({'pf_points': p, 'pf_features': f, 'pf_vectors': v, 'pf_mask': m},
+             {'_label_': torch.tensor([0, 1, 2])}, {})
+    def batches():
+        yield batch
+        if failure == 'worker_error':
+            raise RuntimeError('worker read failure')
+        if failure == 'extra':
+            yield batch
+    monkeypatch.setattr(norm, 'build_loader', lambda *a, **kw: (batches(), None))
+    monkeypatch.setattr(norm, 'shutdown_loader', lambda loader: None)
+    monkeypatch.setattr(norm, 'SETTINGS', dict(norm.SETTINGS, jets=4 if failure == 'short' else 3))
+    donor = dict(inventory={'inventory_sha256': 'train'}, input_fingerprints={'0': data.batch_fingerprint(batch)})
+    with pytest.raises(RuntimeError):
+        norm.fit(tmp_path, donor, 'reference_for_tests')
+    assert not (tmp_path/'inputs/normalization.json').exists()
 
 
 def test_cleanup_after_failed_forward_and_directionality():

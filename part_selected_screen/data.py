@@ -9,7 +9,7 @@ import copy
 from pathlib import Path
 import torch
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from part_ev_fullscale.data import (DATA_CONFIG, _SeededDataset, _stream_seed,
     _seed_worker, _file_entry_counts, rank_file_dict, shutdown_loader)
 from part_ev_screen.data import batch_fingerprint as native_fingerprint
@@ -56,8 +56,38 @@ def batch_fingerprint(batch):
     return native_fingerprint(standard_batch(batch))
 
 
-def build_loader(split, inventory, batch_size, *, config, workers=2, seed=101):
+class _BatchPrefix(IterableDataset):
+    """Finite prefix of the SAME round-robin worker/batch stream.
+
+    A per-worker quota in whole batches preserves native file sharding, seeds,
+    preprocessing and interleaving. Exhausting this dataset lets every worker
+    finish instead of interrupting infinite prefetched reads at shutdown. This
+    is used only for normalization collection, never for production training.
+    """
+    def __init__(self, dataset, batch_size, batches):
+        self.dataset, self.batch_size, self.batches = dataset, batch_size, batches
+
+    def __iter__(self):
+        worker = get_worker_info()
+        workers, index = (worker.num_workers, worker.id) if worker is not None else (1, 0)
+        batches = self.batches // workers + int(index < self.batches % workers)
+        if batches == 0:
+            return
+        source = iter(self.dataset)
+        for _ in range(batches * self.batch_size):
+            try:
+                item = next(source)
+            except StopIteration as exc:
+                raise RuntimeError('Training stream ended before its normalization prefix') from exc
+            yield item
+
+
+def build_loader(split, inventory, batch_size, *, config, workers=2, seed=101, max_batches=None):
     from weaver.utils.dataset import SimpleIterDataset
+    if type(batch_size) is not int or batch_size <= 0 or type(workers) is not int or workers < 0:
+        raise ValueError('batch_size must be positive and workers nonnegative')
+    if max_batches is not None and (type(max_batches) is not int or max_batches <= 0):
+        raise ValueError('max_batches must be a positive integer or None')
     if split not in ('train', 'val'):
         raise ValueError('This screen never opens a test population')
     config = validate_config(config)
@@ -73,9 +103,12 @@ def build_loader(split, inventory, batch_size, *, config, workers=2, seed=101):
         raise ValueError('Expected manual unweighted preprocessing')
     stream_seed = _stream_seed(seed, split, 0, 0)
     entries = _file_entry_counts(inventory, split, files)
-    return DataLoader(_SeededDataset(dataset, options, entries, stream_seed, True),
+    stream = _SeededDataset(dataset, options, entries, stream_seed, True)
+    if max_batches is not None:
+        stream = _BatchPrefix(stream, batch_size, max_batches)
+    return DataLoader(stream,
         batch_size=batch_size, drop_last=True, pin_memory=True, num_workers=workers,
-        persistent_workers=bool(workers), multiprocessing_context='spawn' if workers else None,
+        persistent_workers=bool(workers and max_batches is None), multiprocessing_context='spawn' if workers else None,
         worker_init_fn=_seed_worker, generator=torch.Generator().manual_seed(stream_seed)), dataset.config
 
 

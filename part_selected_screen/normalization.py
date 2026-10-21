@@ -30,26 +30,36 @@ def fit(output, donor, backend):
         if row['settings'] != SETTINGS or row['inventory_sha256'] != donor['inventory']['inventory_sha256']:
             raise ValueError('Training normalization belongs to another population')
         return row
-    loader, _ = build_loader('train', donor['inventory'], 512,
-        config=output/'inputs/selected.yaml', seed=101)
+    batch_size = 512
+    batches = (SETTINGS['jets'] + batch_size - 1) // batch_size
+    loader, _ = build_loader('train', donor['inventory'], batch_size,
+        config=output/'inputs/selected.yaml', seed=101, max_batches=batches)
     features, vectors, masks = [], [], []
     digest = hashlib.sha256()
     count = 0
     try:
         for batch in loader:
+            if count >= SETTINGS['jets']:
+                raise RuntimeError('Normalization loader exceeded its bounded prefix')
             fingerprint = batch_fingerprint(batch)
             if count == 0 and fingerprint != donor['input_fingerprints']['0']:
                 raise ValueError('Extended loader changed the donor training stream')
             digest.update(fingerprint.encode())
-            take = min(512, SETTINGS['jets']-count)
+            take = min(len(batch[0]['pf_features']), SETTINGS['jets']-count)
             features.append(batch[0]['pf_features'][:take].clone())
             vectors.append(batch[0]['pf_vectors'][:take].clone())
             masks.append(batch[0]['pf_mask'][:take].clone())
             count += take
-            if count == SETTINGS['jets']:
-                break
+            if count % (10 * batch_size) == 0 or count == SETTINGS['jets']:
+                print(f'Normalization collection: {count}/{SETTINGS["jets"]} training examples', flush=True)
+        # Do not break at 50k: consume the bounded iterator to StopIteration so
+        # workers report completion before PyTorch joins them. No extra batches
+        # are yielded; only the final batch is sliced (98*512 -> 50,000).
+        if count != SETTINGS['jets']:
+            raise RuntimeError(f'Incomplete normalization prefix: {count}/{SETTINGS["jets"]}')
     finally:
         shutdown_loader(loader)
+    print('Normalization collection complete; data workers have exited.', flush=True)
     f, v, m = map(torch.cat, (features, vectors, masks))
     del features, vectors, masks
     r = raw_tokens(f, v, m)

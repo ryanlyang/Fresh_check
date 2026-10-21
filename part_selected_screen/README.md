@@ -68,6 +68,12 @@ valid positive errors in this same training subset, with minimum 1e-6.
 Freeze and share these constants across all four runs. This is a new,
 training-only fit, not reused statistics from the earlier 1M campaign.
 
+Normalization collection uses a finite 98-batch prefix of that same two-worker
+stream (50,176 events transported, last batch sliced to exactly 50,000).
+Whole-batch quotas preserve native worker interleaving and allow natural worker
+completion before shutdown. Production training/benchmark streams remain
+infinite and unchanged. Collection errors remain fatal; none are suppressed.
+
 Important differences from the standard controls / historical implementation:
 
 - Directional features require directed pair processing. Pair BatchNorm sees
@@ -149,3 +155,14 @@ failed recorded benchmark requires a fresh campaign, preserving old evidence.
 
 Local tests use the CPU tree oracle. Actual CUDA capacity, compiled-backend ABI
 and runtime/data agreement are checked by the queued jobs, not asserted locally.
+
+### Recovery from preparation job 21939901
+
+The C++ backend compiled and passed parity. Preparation then failed during
+early shutdown of the infinite normalization DataLoader (`worker ... Aborted`).
+The finite-prefix fix changes only normalization collection lifetime, not its
+sampling or model/optimizer recipe. Commit/push/pull the fix and submit a fresh
+campaign using the normal command above, **without `--resume`**: the failed
+campaign has frozen the old implementation. Preserve it as diagnostic evidence.
+Inspect its job ledger and cancel only any still-active jobs from that failed
+chain before replacing it; the launcher normally cancels invalid dependencies.
