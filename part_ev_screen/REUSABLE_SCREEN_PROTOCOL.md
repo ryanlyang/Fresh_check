@@ -23,6 +23,15 @@ small checks inside training instead of separate preflight/review jobs. Its
 metadata records that no sustained benchmark was performed; this is a
 study-specific exception, not a change to other campaigns' admission policies.
 
+The four-run [selected-relations screen](../part_selected_screen/README.md)
+adds PT, TRACK, and REGION under shared/layerwise bias with EV off/on. It reuses
+both shared controls above and the completed layerwise controls, with the same
+seed-101 Ranger budget. Its launcher automatically queues preparation and GPU
+benchmark gates before training; it does not inherit the layerwise study's
+no-separate-preflight exception. See its README for raw-track transport,
+training-only normalization, directed pair processing, and the corrected REGION
+ancestor lookup relative to the legacy helper.
+
 ## 1. The exact reduced training budget
 
 | Setting | Short-budget screen |
