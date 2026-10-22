@@ -53,13 +53,14 @@ def benchmark_fixture(tmp_path):
     for task in P.TASKS:
         row = dict(passed=True, task=task, campaign_sha256='selected', runtime=runtime,
             input_fingerprints={'0': 'same'}, projected_training_hours=20.,
+            initial_parity=dict(memory_execution=dict(passed=True, execution=P.EXECUTION, policy=P.PARITY)),
             validation=dict(events=131072, seconds=20.))
         rows.append(row)
         P.write_json(tmp_path/'benchmarks'/f"{task['run_id']}.json", row)
     return spec, rows
 
 
-@pytest.mark.parametrize('change', ['failed', 'wrong_seed', 'wrong_runtime', 'wrong_stream', 'too_slow', 'nan', 'eval_nan'])
+@pytest.mark.parametrize('change', ['failed', 'wrong_seed', 'wrong_runtime', 'wrong_stream', 'too_slow', 'nan', 'eval_nan', 'no_parity', 'failed_parity', 'wrong_parity'])
 def test_gate_checks_all_four_models_and_runtime_budget(tmp_path, change):
     spec, rows = benchmark_fixture(tmp_path)
     assert len(P.require_approval(tmp_path, spec, {'gpu': 'A100'})) == 4
@@ -71,6 +72,9 @@ def test_gate_checks_all_four_models_and_runtime_budget(tmp_path, change):
     if change == 'too_slow': row['projected_training_hours'] = 100
     if change == 'nan': row['projected_training_hours'] = float('nan')
     if change == 'eval_nan': row['validation']['seconds'] = float('nan')
+    if change == 'no_parity': row.pop('initial_parity')
+    if change == 'failed_parity': row['initial_parity']['memory_execution']['passed'] = False
+    if change == 'wrong_parity': row['initial_parity']['memory_execution']['policy'] = {}
     # JSON writer correctly rejects NaN; exercise the gate against an untrusted reader fixture.
     if 'nan' in change:
         from unittest.mock import patch

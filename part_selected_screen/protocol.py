@@ -6,6 +6,7 @@ from part_ev_fullscale.protocol import read_json, write_json, file_sha256, file_
 from part_ev_screen.protocol import recipes
 from part_ev_screen.precision import POLICY
 from part_layerwise_screen.protocol import require_environment
+from .memory import EXECUTION, PARITY
 from part_screen_common.contracts import (hashed, checked_json, donor_contract,
     verify_source, runtime_identity, verify_dataset_metadata)
 
@@ -25,7 +26,8 @@ CONFIG = dict(families=['PT', 'TRACK', 'REGION'], encoded_dimensions=[8, 12, 12]
     particle_inputs='unchanged_native_17', extra_inputs='four_unclipped_track_measurements',
     trimming='unchanged_native_trim_then_recompute_relations_on_retained_particles',
     ev='unchanged_independent_per_layer_projections',
-    initialization='native_backbone_then_rng_isolated_added_parameters')
+    initialization='native_backbone_then_rng_isolated_added_parameters',
+    memory_execution=EXECUTION, memory_parity=PARITY)
 BENCHMARK = dict(warmup_steps=20, measured_steps=5000, window_steps=1000,
     full_length_steps=4, validation_events=131072, max_skip_fraction=.01, memory_fraction_limit=.9)
 
@@ -118,6 +120,10 @@ def require_approval(output, spec, runtime=None):
                 or runtime_identity(row.get('runtime', {})) != spec['donor']['runtime']
                 or row.get('input_fingerprints') != spec['donor']['input_fingerprints']):
             raise ValueError('All four new models must pass their matched GPU checks')
+        parity = row.get('initial_parity', {}).get('memory_execution', {})
+        if (parity.get('passed') is not True or parity.get('execution') != EXECUTION
+                or parity.get('policy') != PARITY):
+            raise ValueError('Missing/mismatched memory execution parity check')
         hours = row['projected_training_hours']*1.3
         eval_hours = row['validation']['seconds']*5000000/row['validation']['events']/3600*1.3
         if (not math.isfinite(hours) or hours <= 0 or not math.isfinite(eval_hours) or eval_hours <= 0

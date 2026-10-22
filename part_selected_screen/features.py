@@ -55,8 +55,9 @@ def raw_features(vectors, raw, mask, floors, backend):
 
 
 class Relations(nn.Module):
-    def __init__(self, normalization, backend):
+    def __init__(self, normalization, backend, *, memory_optimized=True):
         super().__init__()
+        self.memory_optimized = memory_optimized
         self.normalizers = nn.ModuleDict({k: Normalizer(k, normalization) for k in CHANNELS})
         self.pt = mlp(10, 32, 8)
         self.track_node = mlp(7, 32, 16)
@@ -67,7 +68,8 @@ class Relations(nn.Module):
             raise ValueError('Invalid training-only uncertainty floors')
         object.__setattr__(self, 'backend', backend)
 
-    def forward(self, vectors, raw, mask):
+    def _forward_reference(self, vectors, raw, mask):
+        """Original execution order, retained as a numerical/profiling oracle."""
         values, track = raw_features(vectors, raw, mask, self.floors, self.backend)
         pair_mask = valid_pair_mask(mask)
         pt = self.normalizers['PT'](values['PT'], pair_mask)
@@ -81,5 +83,47 @@ class Relations(nn.Module):
         pair = torch.cat((left, right, right-left, left*right, track['validity_one_hot'], compatibility), 1)
         pair = self.track_pair(pair.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         region = self.normalizers['REGION'](values['REGION'], pair_mask)
+        region = self.region(region.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        return torch.cat((pt, pair, region), 1).masked_fill(~pair_mask, 0)
+
+    def forward(self, vectors, raw, mask):
+        if not self.memory_optimized:
+            return self._forward_reference(vectors, raw, mask)
+        pair_mask = valid_pair_mask(mask)
+        # These descriptors are not differentiated. Materialize one family at a
+        # time instead of retaining all three large raw pair tables together.
+        with torch.no_grad(), torch.autocast(device_type=vectors.device.type, enabled=False):
+            pt_raw = build_pt_raw_features(vectors.float(), mask)
+        pt = self.normalizers['PT'](pt_raw, pair_mask)
+        del pt_raw
+        pt = self.pt(pt.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+        with torch.no_grad(), torch.autocast(device_type=vectors.device.type, enabled=False):
+            track = build_track_compatibility(raw.float(), mask,
+                d0_uncertainty_floor=self.floors['d0'], dz_uncertainty_floor=self.floors['dz'])
+        node = self.normalizers['TRACK_NODE'](track['continuous'], track['track_valid'][:, None])
+        node = torch.cat((node, track['track_valid'][:, None].float()), 1)
+        node = self.track_node(node.transpose(1, 2)).transpose(1, 2).masked_fill(~mask.bool(), 0)
+        compatibility = self.normalizers['TRACK_PAIR'](track['compatibility'], track['both_tracks_valid'])
+        validity = track['validity_one_hot']
+        del track
+        # In AMP the following Linear already casts the concatenation to the
+        # autocast dtype. Cast ONLY its fixed descriptors before concatenating:
+        # same effective Linear input, no full FP32 81-channel temporary. Node
+        # subtraction/product retain their original evaluation dtype/order.
+        if torch.is_autocast_enabled(vectors.device.type):
+            dtype = torch.get_autocast_dtype(vectors.device.type)
+            if node.dtype == dtype:
+                compatibility, validity = compatibility.to(dtype), validity.to(dtype)
+        n = node.shape[-1]
+        left, right = node[:, :, :, None].expand(-1, -1, -1, n), node[:, :, None, :].expand(-1, -1, n, -1)
+        pair = torch.cat((left, right, right-left, left*right, validity, compatibility), 1)
+        del left, right, node, compatibility, validity
+        pair = self.track_pair(pair.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+        with torch.no_grad(), torch.autocast(device_type=vectors.device.type, enabled=False):
+            region_raw = region_features(trees_for(vectors, raw, mask, self.backend), raw.float(), mask)
+        region = self.normalizers['REGION'](region_raw, pair_mask)
+        del region_raw
         region = self.region(region.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         return torch.cat((pt, pair, region), 1).masked_fill(~pair_mask, 0)

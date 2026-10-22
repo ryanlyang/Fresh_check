@@ -13,6 +13,7 @@ from part_selected_screen import protocol as P, data
 from part_selected_screen.model import build_model, CONFIGS
 from part_selected_screen.region import load_backend
 from part_selected_screen.normalization import fit
+from part_selected_screen.memory import execution_parity
 from part_ev_fullscale.model import build_model as reference_model
 from part_ev_fullscale.checkpoint import seed_everything, capture_rank_state, restore_rank_state
 from part_screen_common.contracts import donor_contract, verify_dataset_metadata
@@ -36,7 +37,11 @@ def initial_parity(model, task, batch, device):
                 other_key = key.replace('attn.attention.', 'attn.', 1) if key.startswith('attn.attention.') else key
                 torch.testing.assert_close(value, b.state_dict()[other_key], rtol=0, atol=0)
                 count += 1
-        return dict(passed=True, kind='unchanged_backbone_weights_exact_not_equal_logits', tensors=count)
+        del reference
+        result = dict(passed=True, kind='unchanged_backbone_weights_exact_not_equal_logits', tensors=count)
+        if batch is not None:
+            result['memory_execution'] = execution_parity(model, batch, device)
+        return result
     finally:
         restore_rank_state(model, rng)
 

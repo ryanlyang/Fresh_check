@@ -17,9 +17,26 @@ CONFIGS = {'selected_shared': (False, False), 'selected_shared_ev': (False, True
            'selected_layerwise': (True, False), 'selected_layerwise_ev': (True, True)}
 
 
+def packed_ev_stem(stem, valid):
+    """One [B,I,J,D] allocation, exposed as the native logical [B,D,I,J].
+
+    einsum('bhij,bdij->bhid') flattens the B,I axes for its batched GEMM.
+    A contiguous B,D,I,J input requires a fresh saved D-wide copy in EACH
+    particle block. Pack exactly the layout that einsum otherwise copies to:
+    its [B*I,J,D] operand now has identical strides but shares this allocation.
+    Mask only our fresh copy in place; the bias stem/BatchNorm are untouched.
+    """
+    b, d = stem.shape[:2]
+    n = valid.shape[1]
+    packed = stem.reshape(b, d, n, n).permute(0, 2, 3, 1).clone(memory_format=torch.contiguous_format)
+    packed.masked_fill_(~(valid[:, :, None, None] & valid[:, None, :, None]), 0)
+    return packed.permute(0, 3, 1, 2)
+
+
 class SelectedPairs(nn.Module):
-    def __init__(self, native, attentions, normalization, backend, layerwise, ev):
+    def __init__(self, native, attentions, normalization, backend, layerwise, ev, *, memory_optimized=True):
         super().__init__()
+        self.memory_optimized = memory_optimized
         split = native.embed if isinstance(native.embed, _BiasAndStem) else _BiasAndStem(native.embed)
         self.prefix = split.prefix
         self.heads = nn.ModuleList([split.projection] +
@@ -37,7 +54,7 @@ class SelectedPairs(nn.Module):
             self.prefix[0].num_batches_tracked.copy_(old_bn.num_batches_tracked)
             self.prefix[1].weight[:, :4].copy_(old_conv.weight)
             self.prefix[1].bias.copy_(old_conv.bias)
-        self.relations = Relations(normalization, backend)
+        self.relations = Relations(normalization, backend, memory_optimized=memory_optimized)
         object.__setattr__(self, '_attentions', tuple(attentions))
         self._raw = self._mask = None
 
@@ -57,9 +74,12 @@ class SelectedPairs(nn.Module):
             standard = self.pair_features(vectors.float().unsqueeze(-1), vectors.float().unsqueeze(-2))
         extra = self.relations(vectors, self._raw, self._mask)
         stem = self.prefix(torch.cat((standard, extra), 1).reshape(b, 36, n*n))
+        del standard, extra
         biases = [head(stem).reshape(b*8, n, n) for head in self.heads]
         valid = self._mask[:, 0].bool()
-        message = stem.reshape(b, 64, n, n).masked_fill(~(valid[:, None, :, None] & valid[:, None, None, :]), 0)
+        if self.ev or not self.memory_optimized:
+            message = (packed_ev_stem(stem, valid) if self.memory_optimized else
+                stem.reshape(b, 64, n, n).masked_fill(~(valid[:, None, :, None] & valid[:, None, None, :]), 0))
         for i, attention in enumerate(self._attentions):
             attention._bias = biases[i if self.layerwise else 0]
             if self.ev:
@@ -75,7 +95,7 @@ class SelectedPairs(nn.Module):
 
 
 class SelectedParT(ParticleTransformerWrapper):
-    def __init__(self, architecture, normalization, backend, *, seed=101, trim=True, use_amp=False):
+    def __init__(self, architecture, normalization, backend, *, seed=101, trim=True, use_amp=False, memory_optimized=True):
         layerwise, ev = CONFIGS[architecture]
         super().__init__('part_ev' if ev else 'part', trim=trim, use_amp=use_amp)
         if ev:
@@ -93,7 +113,8 @@ class SelectedParT(ParticleTransformerWrapper):
         with torch.random.fork_rng(devices=[]):
             # CPU construction only: do not reset an already initialized CUDA RNG.
             torch.random.default_generator.manual_seed(seed + 71031)
-            self.mod.pair_embed = SelectedPairs(native, attentions, normalization, backend, layerwise, ev)
+            self.mod.pair_embed = SelectedPairs(native, attentions, normalization, backend, layerwise, ev,
+                                               memory_optimized=memory_optimized)
         self.mod.trimmer.register_forward_hook(self.mod.pair_embed.capture)
 
     def forward(self, points, features, vectors, mask):
@@ -103,7 +124,8 @@ class SelectedParT(ParticleTransformerWrapper):
             self.mod.pair_embed.clear()
 
 
-def build_model(architecture, *, normalization, backend, seed=101, trim=True, use_amp=False):
+def build_model(architecture, *, normalization, backend, seed=101, trim=True, use_amp=False, memory_optimized=True):
     if architecture not in CONFIGS:
         raise ValueError(f'Unknown selected configuration: {architecture}')
-    return SelectedParT(architecture, normalization, backend, seed=seed, trim=trim, use_amp=use_amp)
+    return SelectedParT(architecture, normalization, backend, seed=seed, trim=trim, use_amp=use_amp,
+                        memory_optimized=memory_optimized)

@@ -97,6 +97,42 @@ campaign. Trees and pairs are built on demand, with no persistent 100M-jet
 tree/pair cache. Preparation/GPU benchmarking may be materially slower than
 standard ParT; resource feasibility is measured before production starts.
 
+## Memory-efficient execution
+
+The selected models now use `selected_memory_v1`. Architecture, parameter
+counts, feature definitions, normalization, native attention, batch 512,
+precision, RNG, Ranger recipe and checkpoint selection are unchanged. The
+completed shared/layerwise controls and their source are not modified.
+
+- Pack the shared EV stem once in physical `[batch, query, key, channel]`
+  order, while exposing the same logical axes to the original EV contraction.
+  Each block now saves a view of that storage instead of copying it again.
+  The batched matrix multiplication sees the same operand strides as before.
+  For batch 512, 128 particles and 64 FP16 channels, one stem is 1 GiB;
+  replacing eight separately saved copies with one removes 7 GiB of duplicate
+  saved tensors. This is not a measured reduction in whole-model peak memory.
+- Non-EV models no longer allocate an unused EV message tensor.
+- Build and release raw relation families sequentially. In AMP, cast fixed
+  track descriptors to the following Linear's existing autocast dtype before
+  concatenation; its effective input is unchanged, without an 81-channel FP32
+  temporary. Keep descriptor arithmetic and normalization in FP32 as before.
+
+There is no activation checkpointing, CPU activation offload, reduced batch,
+microbatching or repeated network computation during backward. Fewer copies
+should help rather than impose a recomputation cost, but A100 throughput and
+capacity still require measurement. Shared-storage gradient accumulation can
+round differently in FP16; bit-identical trajectories or unchanged final
+accuracy cannot be guaranteed.
+
+Before timing, each GPU benchmark compares old/new execution on eight real
+training jets at full constituent length: FP32 evaluation, FP32 training and
+FP16 training, including gradients of every parameter-owning module. The
+frozen tolerances are recorded in `initial_parity.memory_execution`. This
+diagnostic restores weights, buffers, module modes, trimming and RNG, does not
+step an optimizer and does not consume extra loader batches. Failure blocks
+training. The existing full-batch 5,000-step throughput, precision, memory
+headroom and runtime gates remain mandatory and unchanged.
+
 ## Queue everything
 
 Commit/push locally first, then on **sporcsubmit**:
@@ -155,6 +191,28 @@ failed recorded benchmark requires a fresh campaign, preserving old evidence.
 
 Local tests use the CPU tree oracle. Actual CUDA capacity, compiled-backend ABI
 and runtime/data agreement are checked by the queued jobs, not asserted locally.
+
+### Recovery from benchmark array 21940378
+
+Do **not** resume that campaign: it freezes the old allocation path. Preserve
+its logs and benchmark reports. After committing/pushing locally, pull on
+SPORC and submit a fresh campaign:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+bash sbatch/submit_part_selected_screen_sporc.sh --train-hours 168 --dry-run
+bash sbatch/submit_part_selected_screen_sporc.sh --train-hours 168
+```
+
+This seven-day reservation does not add training updates: the old non-EV
+projections were already about 91 and 108 hours, exceeding the default 96-hour
+reservation once the required 30% margin is included. The new measured gate
+still decides whether the request is sufficient; no speedup is assumed.
+Preparation and benchmarks retain their five-hour limits. Confirm the failed
+chain's descendants have terminated before submitting replacements; inspect
+its `submitted_job_ids.tsv` and cancel only that chain if anything remains.
+The launcher does not cancel or overwrite any existing campaign.
 
 ### Recovery from preparation job 21939901
 
