@@ -564,3 +564,101 @@ The separate seven-run, seed-101, 200k-update screen is documented in
 first; after review, it queues training, dependent full-5M-validation evaluations,
 and reporting. It uses a dedicated x86 environment and does not alter the Tigris
 full-scale campaigns or consume the 20M test set.
+
+## Selected-relation screen on Tigris GH200
+
+`submit_part_selected_tigris.sh` is a **new, separate campaign**, not a resume of
+the SPORC A100 runs that exceeded GPU memory. It trains only four seed-101 models:
+selected shared ParT, selected shared ParT-EV, selected layerwise ParT, and selected
+layerwise ParT-EV. The architecture, memory-saving implementation, 512-jet batch,
+two workers, 200k-update Ranger recipe, LR schedule, ten checkpoint checks and
+full-5M-validation evaluation remain unchanged. No microbatching, activation
+checkpointing, reduced particle length, or additional control training is added.
+
+The existing four SPORC controls remain read-only. Comparisons against them are
+explicitly **cross-hardware exploratory comparisons**, not hardware-matched
+effects. The selected models' internal EV and layerwise contrasts share one GH200
+runtime. This is the short reusable screen on the 100M training population, not
+the million-update full-scale recipe or an independent 20M test evaluation.
+
+After committing/pushing these files locally, run on **Tigris**, not sporcsubmit:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+# One-time dedicated ARM environment. Existing environments are never modified.
+bash scripts/setup_part_selected_tigris_env.sh
+
+SELECTED_TIGRIS_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_selected_tigris/selected_gh200_$(date -u +%Y%m%dT%H%M%SZ)"
+bash sbatch/submit_part_selected_tigris.sh \
+  --mode benchmark --output "${SELECTED_TIGRIS_ROOT}" --concurrency 2
+```
+
+The environment script clones `part_ev_fullscale` into `part_selected_tigris` and
+installs only Ninja for the C++ extension build. It never upgrades the source
+environment or modifies an existing target environment. If its check fails,
+inspect the missing dependency before queueing; do not modify an environment
+used by active jobs. `--python` can select another already prepared ARM environment.
+
+The default benchmark-only chain is CPU prepare (5h), four single-GPU benchmarks
+(5h each, two concurrent), then a CPU admission gate (2h). All preparation/check
+walltimes are below six hours. Requests use 8 CPUs and 128G **host** RAM; GPU jobs
+request one GPU and verify that it is a GH200 with at least 80 GiB device memory.
+This verifies actual GPU memory rather than treating Grace host RAM as VRAM.
+No training jobs are submitted in benchmark mode. A failed dependency blocks its
+downstream jobs. `--dry-run` prints the planned request without creating files or
+submitting anything. `--mode run` explicitly opts into the complete automatic
+prepare -> benchmarks -> gate -> train -> lock -> evaluate -> report chain.
+
+Preparation checks unchanged donor source/data identities and Weaver source
+hashes, verifies the completed controls, builds an ARM-native tree backend, and
+fits training-only normalization with the original 50k-example algorithm. It also
+records native ParT input fingerprints at training batches 0, 20, 1020, 2020 and
+4020. This CPU-only data pass uses the same 512-jet/two-worker stream, without
+training a control model. The selected loader must match these ARM fingerprints
+exactly. The SPORC hashes and whether they match are retained separately: ARM/x86
+floating-point preprocessing is not required or claimed to be byte-identical.
+Package versions and platform differences are recorded, and all four target
+benchmarks/training/evaluations must use the one frozen Tigris environment.
+
+Benchmarks check original-versus-memory-optimized logits and gradients on the
+same GH200, unchanged backbone initialization, observed FP16 training/FP32
+validation, sustained throughput, AMP skips, full-128-particle training memory,
+checkpoint I/O and validation timing. These are **same-platform implementation
+checks**, not a cross-platform prediction-equivalence claim. Production starts
+fresh rather than using the benchmark's trained weights. Admission requires all
+four models, under 90% of GPU memory, and a 30% timing margin within the frozen
+production limits (defaults: training 96h, evaluation 12h). Estimates are not
+guarantees and do not measure four-job filesystem contention.
+
+Keep the printed output path; do not recreate the timestamp for follow-up commands:
+
+```bash
+# Read-only compact benchmark results, including partial completion.
+bash sbatch/submit_part_selected_tigris.sh \
+  --mode review --output "${SELECTED_TIGRIS_ROOT}"
+
+# After every benchmark/gate job has terminated successfully, queue production.
+bash sbatch/submit_part_selected_tigris.sh \
+  --mode train --output "${SELECTED_TIGRIS_ROOT}" --resume --concurrency 2
+
+# Read-only per-check validation comparisons against the saved SPORC controls.
+bash sbatch/submit_part_selected_tigris.sh \
+  --mode status --output "${SELECTED_TIGRIS_ROOT}"
+```
+
+Training mode queues gate -> four trainings -> checkpoint lock -> four full-5M
+evaluations -> report. Reports are `reports/selected_tigris_report.{json,md}`.
+Source is frozen at submission, so later pulls do not change queued workers.
+No donor checkpoints, environments, jobs, predictions or normalization artifacts
+are overwritten; no test data is read. At least 6 GiB free is required for the
+new outputs, in addition to any space needed to clone the environment.
+
+For a timeout/transient failure, inspect `logs/` and `submitted_job_ids.tsv` first.
+Resume refuses while any job in this campaign is active, and never cancels jobs.
+`--mode benchmark --resume` retries preparation/benchmarks/gate, reusing only
+successful compatible probes. Failed benchmark records or changed code/resource
+settings require a **new campaign**, preserving the old evidence. In particular,
+choose larger `--train-hours` / `--evaluate-hours` on a fresh campaign if the timing
+gate finds the initial limits insufficient; do not edit its frozen metadata.
