@@ -15,9 +15,11 @@ from part_ev_message_study import controls as C
 D = create_engine()
 
 
-def benchmark(args, driver):
+def benchmark(args, driver, spec):
+    # Reuse the campaign checked before optimizer construction. Lazy optimizer
+    # imports can expose setuptools._vendor distributions on sys.path without
+    # changing the installed environment. A fresh process still checks it fully.
     driver.benchmark(args)  # Same sustained training/memory/AMP gate as the donor.
-    spec = P.load_campaign(args.output)
     task = spec["tasks"][args.task_index]
     path = args.output / "benchmarks" / (task["run_id"] + "_speed.json")
     with P.file_lock(path.with_suffix(".lock"), blocking=False):
@@ -52,16 +54,19 @@ def main(argv=None):
         P.task_directory(args.output, args.task_index)
 
     def parity(candidate, task, batch, device):
-        return B.initial_parity(D, P.load_campaign(args.output), candidate, task, batch, device)
+        return B.initial_parity(D, spec, candidate, task, batch, device)
 
     driver = benchmark_driver(D, parity)
     if args.phase == "prepare":
         driver.prepare(args)
-    elif args.phase == "benchmark":
-        benchmark(args, driver)
     else:
+        # Validate before any optimizer/lazy imports, then use the same verified
+        # spec for both parity and inference timing. Do not weaken the shared
+        # environment fingerprint or mutate the reused donor protocols.
         spec = P.load_campaign(args.output)
-        if args.phase == "review":
+        if args.phase == "benchmark":
+            benchmark(args, driver, spec)
+        elif args.phase == "review":
             summary = (P.approve(args.output, spec, reviewed=args.reviewed) if args.approve else
                        P.benchmark_summary(args.output, spec))
             rows = []

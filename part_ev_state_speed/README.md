@@ -148,6 +148,14 @@ provenance and inference timings in `reports/state_speed_report.json`.
 ## Retry terminal jobs
 
 Keep failed evidence and frozen source. Do not edit old campaign snapshots.
+For a code fix, commit/push it and prepare a **new output directory**; pulling
+the repository or resuming the old campaign does not update its frozen worker.
+In particular, the environment-check fix keeps full startup validation but
+reuses that verified campaign for parity and inference timing. Constructing
+the optimizer may expose Setuptools' vendored distribution metadata through
+lazy imports; this is not a reason to reinstall packages or relax numerical
+tolerances. The shared donor protocols and fingerprints remain unchanged.
+
 An incomplete benchmark may be resumed after its array is terminal:
 
 ```bash
