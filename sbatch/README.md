@@ -659,6 +659,67 @@ For a timeout/transient failure, inspect `logs/` and `submitted_job_ids.tsv` fir
 Resume refuses while any job in this campaign is active, and never cancels jobs.
 `--mode benchmark --resume` retries preparation/benchmarks/gate, reusing only
 successful compatible probes. Failed benchmark records or changed code/resource
-settings require a **new campaign**, preserving the old evidence. In particular,
-choose larger `--train-hours` / `--evaluate-hours` on a fresh campaign if the timing
-gate finds the initial limits insufficient; do not edit its frozen metadata.
+settings other than walltime require a **new campaign**, preserving the old
+evidence. A walltime-only rejection after four successful benchmarks can instead
+use the recovery below; do not edit the frozen metadata.
+
+### Recover a walltime-only GH200 gate failure without rerunning benchmarks
+
+`submit_part_selected_tigris_recovery.sh` reuses a prepared campaign's four
+successful benchmark records. It does **not** clone an environment, copy the
+dataset, rebuild the backend, refit normalization, retrain controls, or rerun GPU
+benchmarks. It freezes only three small recovery-tool files under
+`CAMPAIGN/recoveries/walltime_<train>h_<evaluate>h/`. Production outputs remain in
+the original campaign's `runs/` and `reports/` directories.
+
+After committing/pushing the recovery tooling locally, on **Tigris**:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+SELECTED_TIGRIS_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_selected_tigris/selected_gh200_20261023T073044Z"
+
+# Optional read-only check: budgets, original evidence, and partition MaxTime.
+bash sbatch/submit_part_selected_tigris_recovery.sh \
+  --output "${SELECTED_TIGRIS_ROOT}" --train-hours 168 --concurrency 2 --dry-run
+
+# Queue the full recovery chain. No need to keep SSH/tmux open afterward.
+bash sbatch/submit_part_selected_tigris_recovery.sh \
+  --output "${SELECTED_TIGRIS_ROOT}" --train-hours 168 --concurrency 2
+```
+
+The default training limit is 168h (seven days). Evaluation keeps its original
+limit, normally 12h; `--evaluate-hours N` can explicitly increase it. Both must
+cover the measured projections with the **unchanged 30% margin** and fit within
+the partition's current `MaxTime`. Partition validation is not a guarantee of
+QOS/account eligibility or queue start time. Insufficient budgets fail before
+submission. Models, recipe, precision, batch size, data, controls, environment,
+GPU/CPU/RAM requests, and all original numerical/input/runtime checks are unchanged.
+
+The chain is **CPU recovery gate (2h) -> four training jobs -> checkpoint lock
+(2h) -> four full-5M-validation evaluations -> report (2h)**, with `afterok` and
+invalid-dependency cancellation throughout. Default array concurrency is two.
+The gate checks all the original admission conditions with the extended time
+budgets; no safety check or training update is skipped. Successful benchmark
+weights are not used to initialize production training.
+
+The original `source/`, `source.sha256`, `experiment_spec.json`, `launch.json`,
+`launch.env`, and benchmark JSON files are **not modified**. `request.json` in the
+recovery directory binds their hashes, original limits, requested limits, and
+timing projections; the CPU gate creates `approval.json`. Each production worker
+checks that evidence again and invokes the original frozen driver. A process-local
+admission adapter gives the original validator a copy of the spec with only the
+two walltime fields changed; it does not rewrite the spec or change checkpoint
+identity, the training/evaluation loops, or any scientific setting. Source/input/
+environment checks still run against the original frozen campaign.
+
+Logs and a job ledger are printed under the recovery directory; job IDs are also
+appended to the original campaign ledger so the original launcher detects live
+recovery jobs. Submission refuses while existing campaign jobs or a recognized
+`selgh_autostart_<gate_id>` continuation are active. Nothing is cancelled or deleted.
+Once every submitted job has terminated, retry a transient failure using the
+**same recovery launcher and limits** plus `--resume`. Its frozen helper source
+is used even after a later pull. Existing completed training/evaluation artifacts
+are reused by the unchanged original driver. The original launcher alone still
+enforces the original walltimes; use the recovery launcher for production retries.
