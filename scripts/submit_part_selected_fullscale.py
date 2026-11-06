@@ -117,17 +117,27 @@ def launch(a):
             archive=Path(tmp)/'source.tar'
             subprocess.run(['git','-C',str(ROOT),'archive','--format=tar','--output',str(archive),'HEAD'],check=True)
             with tarfile.open(archive) as tar:
-                for entry in tar.getmembers():
+                members=tar.getmembers()
+                for entry in members:
                     target=(a.output/'source'/entry.name).resolve()
                     if not target.is_relative_to(a.output/'source') or not (entry.isfile() or entry.isdir()):
                         raise ValueError('Unsafe source archive entry')
-                tar.extractall(a.output/'source')
+                # Already tracked bytecode survives .gitignore and git archive.
+                # Match verify_snapshot's source policy; never ship old caches
+                # or include them in a manifest that the verifier excludes.
+                source_members=[entry for entry in members
+                    if '__pycache__' not in Path(entry.name).parts and Path(entry.name).suffix!='.pyc']
+                tar.extractall(a.output/'source',members=source_members)
         (a.output/'snapshot.json').write_text(json.dumps({p.relative_to(a.output/'source').as_posix():digest(p)
-            for p in sorted((a.output/'source').rglob('*')) if p.is_file()},indent=2)+'\n')
+            for p in sorted((a.output/'source').rglob('*'))
+            if p.is_file() and '__pycache__' not in p.parts and p.suffix!='.pyc'},indent=2)+'\n')
         (a.output/'source_commit.txt').write_text(command(['git','-C',str(ROOT),'rev-parse','HEAD'])+'\n')
         (a.output/'launch.json').write_text(json.dumps(config,indent=2)+'\n')
     elif not (a.output/'launch.json').exists(): raise ValueError('Interrupted setup; inspect before retry')
     elif not a.resume: raise ValueError('Existing campaign: use --resume only after its jobs terminate')
+    # Exercise the same check used by the batch worker before spending a queue
+    # slot. Preserve an invalid snapshot for inspection; submit nothing.
+    verify_snapshot(a.output)
     import fcntl
     with (a.output/'.submission.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)

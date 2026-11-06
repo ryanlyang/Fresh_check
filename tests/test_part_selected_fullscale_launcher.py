@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import platform
@@ -91,6 +92,52 @@ def test_resource_and_dirty_source_fail_before_writes(tmp_path,scheduler):
     (S.ROOT/'part_selected_fullscale/model.py').write_text('dirty')
     with pytest.raises(ValueError,match='Commit/push'): S.launch(args(tmp_path))
     assert not (tmp_path/'output').exists() and not scheduler['jobs']
+
+
+def test_committed_bytecode_is_not_source(tmp_path,scheduler):
+    # git archive includes already tracked caches even when .gitignore excludes
+    # new ones. These mirror the real repository, not just a clean toy checkout.
+    caches=('__pycache__/jetclass_fixed_hlt.cpython-310.pyc',
+            'scripts/__pycache__/demo_load_and_score_models_no_fusion.cpython-310.pyc',
+            'tests/__pycache__/test_sbatch_scripts.cpython-313.pyc',
+            'legacy.pyc')
+    for name in caches:
+        path=S.ROOT/name; path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(b'fixture bytecode')
+    subprocess.run(['git','-C',str(S.ROOT),'add','.'],check=True,capture_output=True)
+    subprocess.run(['git','-C',str(S.ROOT),'-c','user.name=Test','-c','user.email=test@example.invalid',
+                    'commit','-m','tracked cache regression'],check=True,capture_output=True)
+    a=args(tmp_path); S.launch(a)
+    S.verify_snapshot(a.output)
+    manifest=json.loads((a.output/'snapshot.json').read_text())
+    assert 'part_selected_fullscale/model.py' in manifest
+    for name in caches:
+        assert name not in manifest
+        assert not (a.output/'source'/name).exists()
+        assert (S.ROOT/name).is_file()  # Never modify/delete the user's originals.
+
+
+def test_snapshot_is_verified_before_first_submission(tmp_path,scheduler,monkeypatch):
+    def reject(_): raise ValueError('test snapshot verification failure')
+    monkeypatch.setattr(S,'verify_snapshot',reject)
+    with pytest.raises(ValueError,match='test snapshot verification failure'):
+        S.launch(args(tmp_path))
+    assert not scheduler['jobs']
+    assert not (tmp_path/'output/submitted_job_ids.tsv').exists()
+
+
+@pytest.mark.parametrize('change',('added','missing','changed'))
+def test_real_source_inventory_and_hash_changes_still_rejected(tmp_path,scheduler,change):
+    a=args(tmp_path); S.launch(a)
+    model=a.output/'source/part_selected_fullscale/model.py'
+    if change=='added':
+        (model.parent/'unexpected.py').write_text('# added source\n')
+    elif change=='missing':
+        model.rename(model.with_suffix('.missing'))
+    else:
+        model.write_text('# changed source\n')
+    with pytest.raises(ValueError,match='Frozen source'):
+        S.verify_snapshot(a.output)
 
 
 @pytest.mark.skipif(BASH is None,reason='Bash unavailable')

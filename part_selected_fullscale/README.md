@@ -41,6 +41,10 @@ results have passed a full scientific comparability audit**.
 Commit/push the implementation and pull it on Tigris, or use a clean committed
 worktree containing it. The launcher rejects a dirty checkout so its frozen
 snapshot cannot accidentally omit local changes. It does not commit or push.
+Tracked Python bytecode/cache entries are omitted from both the source snapshot
+and its manifest. The completed snapshot is verified before the first job is
+submitted, and again by every batch worker; real source inventory and hash checks
+remain mandatory.
 
 The existing read-only reference must still exist:
 
@@ -106,6 +110,14 @@ the earlier jobs terminate. Completed, authenticated evidence is reused. Active
 jobs prevent duplicate submission; successful submissions are fsynced to the
 ledger even if a later submission fails. A failed saved measurement is preserved;
 fixes to source/execution require a fresh campaign, not editing its snapshot.
+
+If an older campaign failed immediately with `Frozen source file inventory
+changed`, the initial launcher included Git-tracked Python cache files in its
+manifest while the worker's verifier excluded them. Update to the corrected
+launcher and use a **new output directory**, not `--resume` on that frozen
+campaign. Keep the old logs/manifest unchanged; do not disable the verifier or
+delete source files to make its check pass. This failure occurs before model
+preparation and does not require changing the scientific recipe or walltime.
 
 ## What is measured
 
