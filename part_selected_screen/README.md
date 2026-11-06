@@ -1,5 +1,8 @@
 # Selected pair relations on the reusable 100M-population Ranger screen
 
+For the model setups, Tigris transfer, speed optimizations, and code locations,
+see the [Selected Relations Guide](../part_selected_tigris/SELECTED_RELATIONS_GUIDE.md).
+
 Four new seed-101 runs on SPORC tier3. Nothing is initialized from a donor;
 four completed controls are reused as comparison artifacts only.
 

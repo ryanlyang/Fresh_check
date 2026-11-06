@@ -1,5 +1,8 @@
 # Faster selected-relation execution on Tigris
 
+For the four model setups, earlier memory optimizations, and a complete code and
+artifact map, see the [Selected Relations Guide](../part_selected_tigris/SELECTED_RELATIONS_GUIDE.md).
+
 Implementation of [the optimization plan](../part_selected_tigris/OPTIMIZATION_PLAN.md).
 This is an **isolated candidate execution**, not a change to the existing study.
 Local CPU tests are not evidence of a GH200 speedup. Compilation against the
