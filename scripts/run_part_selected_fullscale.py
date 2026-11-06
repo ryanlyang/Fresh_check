@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,20 @@ def controls_registry(launch):
             comparison_status='pending_full_recipe_checkpoint_population_runtime_audit',
             reused_metrics=False,training_submitted=False))
     return dict(references=result,note='Read-only locator registry; controls may still be running. No scientific contrast authorized.')
+
+
+def build_backend_isolated(output):
+    """Keep compiler-only setuptools imports out of the checked parent process."""
+    from part_selected_fast import trees
+    # cpp_extension imports setuptools, which can append _vendor to sys.path.
+    # That changes metadata discovery without installing any packages. Use the
+    # same interpreter/source in a child, not a weakened/cached environment check.
+    subprocess.run([sys.executable,'-B','-u',str(Path(__file__).resolve()),
+                    '--phase','build-backend','--output',str(output)],check=True,
+                   timeout=P.BENCHMARK['phase_seconds']-P.BENCHMARK['shutdown_margin_seconds'])
+    # Authenticate source, ABI, flags and binary hash again in the parent before
+    # numerical parity or model construction. No compiler import is needed here.
+    return trees.load_backend(output/'backend')
 
 
 def prepare(output):
@@ -47,7 +62,7 @@ def prepare(output):
                 raise ValueError('Partial prepared artifact differs: '+name)
             if not target.exists(): shutil.copyfile(parent/name,target)
             if P.file_sha256(target)!=old['inputs'][name]: raise ValueError('Input copy verification failed')
-        native=trees.build_backend(output/'backend')
+        native=build_backend_isolated(output)
         reference=load_backend(parent/'backend')
         P.write_json(output/'backend/parity.json',trees.backend_parity(native,reference,4))
         normal=P.checked_json(output/'inputs/normalization.json','part_selected_normalization_v1')
@@ -121,7 +136,7 @@ def review(output, *, save=False):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase',required=True,choices=('prepare','profile','benchmark','review','summary','status'))
+    p.add_argument('--phase',required=True,choices=('prepare','profile','benchmark','review','summary','status','build-backend'))
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--task-index',type=int)
     args=p.parse_args(argv); args.output=args.output.resolve()
@@ -139,7 +154,11 @@ def main(argv=None):
     for name in ('SIGTERM','SIGUSR1'):
         if hasattr(signal,name): signal.signal(getattr(signal,name),stop)
     try:
-        if args.phase=='prepare': prepare(args.output)
+        if args.phase=='build-backend':
+            # Internal subprocess only; the Slurm launcher has no such job phase.
+            from part_selected_fast import trees
+            trees.build_backend(args.output/'backend')
+        elif args.phase=='prepare': prepare(args.output)
         else:
             from part_selected_fullscale import benchmark as B
             getattr(B,args.phase)(args.output,args.task_index,check_stop)

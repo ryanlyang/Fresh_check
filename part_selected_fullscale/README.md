@@ -119,6 +119,15 @@ campaign. Keep the old logs/manifest unchanged; do not disable the verifier or
 delete source files to make its check pass. This failure occurs before model
 preparation and does not require changing the scientific recipe or walltime.
 
+Native compilation runs in a child process with the same interpreter and source.
+This prevents PyTorch's compiler helper from exposing setuptools-vendored package
+metadata on the parent's import path. The parent still checks the complete
+reference environment before preparation and again when freezing the spec, then
+authenticates the compiled backend's source/ABI/binary hashes. No package versions
+are ignored, installed, upgraded, or removed. This also fixes the older failure
+listing new `installed_distributions.jaraco.*`, `autocommand`, etc. after a
+successful compile; retry that failure with a fresh campaign after updating.
+
 ## What is measured
 
 - CPU prepare authenticates inputs/environment/source, copies only small metadata,
