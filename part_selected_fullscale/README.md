@@ -181,3 +181,72 @@ Inspect `logs/sel7_*`, `failures/`, `profiles/<RUN_ID>.json`, and
 `benchmarks/<RUN_ID>.json`. A successful Slurm job is not a scientific result.
 Linux native/CUDA/GH200 performance cannot be established by local CPU tests;
 these queued checks provide that evidence.
+
+## Investigate the four standard-arm restart failures
+
+For `seven_buildfix_20261106T005700Z`, tasks 0, 1, 3, and 4 failed the
+**exact uninterrupted-versus-resumed pilot**, before sustained benchmarking.
+Keep the successful selected profiles/benchmarks for tasks 2, 5, and 6 unchanged.
+Do not loosen their numerical checks or regenerate the entire campaign.
+
+The separate diagnostic uses the original campaign's frozen code, environment,
+model initialization, first training batch, optimizer, and full-recipe LR boundary
+steps. One GH200 job runs the four failed architectures sequentially, in fresh
+processes. Its walltime is **two hours**, with a five-minute shutdown margin.
+It does not compile anything, run validation/test inference, save model weights,
+change campaign inputs, or authorize training/benchmark retries. It writes only
+bounded JSON/logs and its small source snapshot under `diagnostics/restart.*`.
+
+After committing/pushing these diagnostic files and pulling on Tigris:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+SEVEN_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_selected_fullscale/seven_buildfix_20261106T005700Z"
+
+bash sbatch/submit_part_selected_restart.sh --campaign "$SEVEN_ROOT" --dry-run
+bash sbatch/submit_part_selected_restart.sh --campaign "$SEVEN_ROOT"
+```
+
+The launcher prints the new directory and job ID. After completion, read
+`report.json` there, then the relevant `task_0.json`, `task_1.json`, `task_3.json`,
+and `task_4.json`. The short report records:
+
+- Whether the original **unchanged** restart gate reproduced its failure.
+- Whether serialization and restoration preserve model weights/buffers, RAdam
+  moments, Lookahead slow weights/counter, scaler, RNGs, and trimmer state exactly
+  **before another update**.
+- Whether two uninterrupted runs agree, and whether the resumed run agrees with
+  the first uninterrupted run, after each of the ten updates.
+- The first divergent update and whether LR/AMP-skip/scaler sequences match.
+
+Detailed comparisons scan every state leaf, retaining component maxima and the
+first/worst twenty paths, rather than stopping at the first tensor. CPU snapshots
+add synchronization, so an instrumented pass does not override a failing original
+gate. Diagnostic completion means evidence collected, **not parity approved**.
+
+Next decision: fix any exact save/load defect; otherwise investigate forward/
+backward repeatability and the observed resume-versus-repeat discrepancies before
+changing the acceptance test. Only then retry the four failed standard benchmarks
+with reviewed code/provenance. This diagnostic deliberately does not auto-chain
+those retries or copy/relabel the three successful measurements into a new spec.
+
+## Parameter counts for this comparison
+
+These are total model parameters, checked by constructing the actual models.
+All state branches below use width 32 in all eight particle blocks.
+
+| Task | Model | Parameters |
+|---:|---|---:|
+| 0 | Standard shared ParT, capacity-matched to shared State-EV | 2,323,750 |
+| 1 | Standard shared ParT, capacity-matched to layerwise State-EV | 2,327,894 |
+| 2 | Selected shared ParT, capacity-matched to selected layerwise State-EV | 2,337,814 |
+| 3 | Standard shared State-EV | 2,323,710 |
+| 4 | Standard layerwise EV, no state conditioning | 2,212,774 |
+| 5 | Selected shared baseline ParT | 2,153,406 |
+| 6 | Selected layerwise State-EV | 2,337,382 |
+
+External reference counts: ordinary standard shared ParT **2,143,486**;
+ordinary shared ParT-EV **2,209,022**; standard layerwise all-eight State-EV
+**2,327,462**. The three capacity controls retain shared attention bias and no EV
+or state branch; only their particle FFNs are wider. Matching is approximate:
+they exceed the corresponding targets by 40, 432, and 432 parameters.
