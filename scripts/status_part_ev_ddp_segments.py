@@ -197,11 +197,23 @@ def metric_cell(row):
 
 
 def history_lines(models, interval):
+    histories = {name: rows for name, _, rows in models}
+    controls = ('ParT', 'ParT-EV')
     lines = ['=== Every completed validation check: accuracy ===',
-             f'{"Check":>5} {"Step":>10}' + ''.join(f'{name:>16}' for name, _, _ in models)]
+             f'{"Check":>5} {"Step":>10}' + ''.join(f'{name:>16}' for name, _, _ in models)
+             + ''.join(f'{"Delta " + name + " (pp)":>20}' for name in controls)]
     for i in sorted(set().union(*(set(rows) for _, _, rows in models))):
+        state = histories.get('State-EV', {}).get(i)
+        deltas = []
+        for name in controls:
+            control = histories.get(name, {}).get(i)
+            deltas.append('--' if state is None or control is None else
+                          f'{100 * (state["accuracy"] - control["accuracy"]):+.4f}')
         lines.append(f'{i:5d} {i * interval:10,d}' +
-                     ''.join(f'{metric_cell(rows.get(i)):>16}' for _, _, rows in models))
+                     ''.join(f'{metric_cell(rows.get(i)):>16}' for _, _, rows in models)
+                     + ''.join(f'{delta:>20}' for delta in deltas))
+    lines.append('Deltas = layerwise State-EV minus each control at the same check, '
+                 'in percentage points (pp); positive favors State-EV.')
     lines += ['', '=== Best so far (training progress may differ) ===']
     for name, _, rows in models:
         acc = best(rows)

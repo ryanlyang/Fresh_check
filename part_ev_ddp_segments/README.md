@@ -118,7 +118,9 @@ This stdlib-only viewer defaults to the campaign above and the seed-101 ParT /
 ordinary-EV controls in `part_ev_state_fullscale/state_full_20261024T185049Z`.
 It follows the **running segment** using `squeue`, falling back to the latest log
 when the scheduler is unavailable. All validation checks come from the shared
-run directory, not an individual segment. It prints every check's accuracy,
+run directory, not an individual segment. It prints every check's accuracy and
+layerwise State-EV minus ParT / ParT-EV accuracy differences at that same check
+(percentage points; `--` if either result is missing),
 best accuracy overall and through the common completed check, then ends with
 total progress, percentage toward the next check, and a conditional next-result
 ETA. AUC is not displayed.

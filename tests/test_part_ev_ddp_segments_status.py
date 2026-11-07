@@ -145,6 +145,35 @@ def test_missing_controls_warns_without_hiding_progress(campaign, tmp_path):
     assert result.index('Control campaign missing') < result.index('=== Running State-EV progress ===')
 
 
+def test_each_check_has_signed_state_minus_control_deltas_not_best_so_far():
+    models = [
+        ('ParT', None, {1: {'accuracy': .84}, 2: {'accuracy': .81}}),
+        ('ParT-EV', None, {1: {'accuracy': .82}, 2: {'accuracy': .83}}),
+        ('State-EV', None, {1: {'accuracy': .83}, 2: {'accuracy': .83}}),
+    ]
+    # The history/summary helpers expect the check ordinal in each row too.
+    for _, _, rows in models:
+        for i, row in rows.items():
+            row['check'] = i
+    lines = S.history_lines(models, 20000)
+    assert 'Delta ParT (pp)' in lines[1]
+    assert 'Delta ParT-EV (pp)' in lines[1]
+    assert lines[2].split()[-2:] == ['-1.0000', '+1.0000']
+    assert lines[3].split()[-2:] == ['+2.0000', '+0.0000']
+    assert 'same check' in lines[4]
+
+
+def test_per_check_deltas_missing_values_are_dashes():
+    models = [
+        ('ParT', None, {1: {'check': 1, 'accuracy': .80}, 3: {'check': 3, 'accuracy': .82}}),
+        ('State-EV', None, {1: {'check': 1, 'accuracy': .81}, 2: {'check': 2, 'accuracy': .82}}),
+    ]
+    lines = S.history_lines(models, 20000)
+    assert lines[2].split()[-2:] == ['+1.0000', '--']
+    assert lines[3].split()[-2:] == ['--', '--']  # No control at check 2.
+    assert lines[4].split()[-2:] == ['--', '--']  # No State-EV at check 3.
+
+
 def test_control_schedule_mismatch_is_rejected(campaign, tmp_path):
     root, _, _, _, recipe = campaign
     controls = tmp_path / 'controls'
