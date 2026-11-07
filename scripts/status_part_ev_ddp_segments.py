@@ -193,24 +193,20 @@ def best(rows, field='accuracy', cutoff=None):
 def metric_cell(row):
     if row is None:
         return '--'
-    auc = f'{row["macro_auc_ovo"]:.6f}' if finite(row.get('macro_auc_ovo')) else '--'
-    return f'{100 * row["accuracy"]:.4f}% / {auc}'
+    return f'{100 * row["accuracy"]:.4f}%'
 
 
 def history_lines(models, interval):
-    lines = ['=== Every completed validation check: accuracy / macro OVO AUC ===',
-             f'{"Check":>5} {"Step":>10}' + ''.join(f'{name:>27}' for name, _, _ in models)]
+    lines = ['=== Every completed validation check: accuracy ===',
+             f'{"Check":>5} {"Step":>10}' + ''.join(f'{name:>16}' for name, _, _ in models)]
     for i in sorted(set().union(*(set(rows) for _, _, rows in models))):
         lines.append(f'{i:5d} {i * interval:10,d}' +
-                     ''.join(f'{metric_cell(rows.get(i)):>27}' for _, _, rows in models))
+                     ''.join(f'{metric_cell(rows.get(i)):>16}' for _, _, rows in models))
     lines += ['', '=== Best so far (training progress may differ) ===']
     for name, _, rows in models:
-        acc, auc = best(rows), best(rows, 'macro_auc_ovo')
+        acc = best(rows)
         if acc:
-            lines.append(f'{name}: best accuracy {100 * acc["accuracy"]:.4f}% at check {acc["check"]}; '
-                         f'accuracy / AUC there: {metric_cell(acc)}')
-        if auc:
-            lines.append(f'  Best AUC independently: {auc["macro_auc_ovo"]:.6f} at check {auc["check"]}')
+            lines.append(f'{name}: best accuracy {100 * acc["accuracy"]:.4f}% at check {acc["check"]}')
 
     cutoff = 0
     while models and all(cutoff + 1 in rows for _, _, rows in models):
@@ -264,9 +260,9 @@ def report(campaign, controls, queue, *, now=None, stale_minutes=30):
               for label, _, rows in models]
     progress, _ = progress_lines(campaign, run, recipe, vals, queue,
                                  time.time() if now is None else now, stale_minutes, warnings)
-    lines += ['', *progress, '', *history_lines(models, interval), '',
+    lines += ['', *history_lines(models, interval), '',
               f'Checks are {interval:,} updates, not full dataset epochs; -- means not recorded.',
-              'Checkpoint selection uses accuracy; independently best AUC is descriptive only.',
+              'Checkpoint selection uses accuracy.',
               'ETAs start at the latest logged update, using cumulative training throughput; '
               'they exclude checkpoint overhead, stalls, replay and queue gaps.',
               'Single-seed training-time validation, not full-5M evaluation or independent test results.',
@@ -274,6 +270,7 @@ def report(campaign, controls, queue, *, now=None, stale_minutes=30):
               'these contrasts do not isolate architecture alone.',
               'Read-only display, not a checkpoint/hash audit. No checkpoint/data files opened or jobs changed.']
     lines += [f'WARNING: {message}' for message in warnings]
+    lines += ['', *progress]
     return '\n'.join(lines)
 
 
@@ -289,12 +286,13 @@ def main(argv=None):
         parser.error('--stale-minutes must be finite and positive')
     queue, warning = (None, None) if args.offline else queue_snapshot()
     try:
-        print(report(args.campaign, None if args.no_controls else args.controls, queue,
-                     stale_minutes=args.stale_minutes))
+        output = report(args.campaign, None if args.no_controls else args.controls, queue,
+                        stale_minutes=args.stale_minutes)
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(1, f'Status could not be read: {exc}\nNo files or jobs changed.\n')
     if warning:
         print(f'WARNING: {warning}')
+    print(output)
     return 0
 
 

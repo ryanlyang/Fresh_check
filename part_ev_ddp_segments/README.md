@@ -118,9 +118,10 @@ This stdlib-only viewer defaults to the campaign above and the seed-101 ParT /
 ordinary-EV controls in `part_ev_state_fullscale/state_full_20261024T185049Z`.
 It follows the **running segment** using `squeue`, falling back to the latest log
 when the scheduler is unavailable. All validation checks come from the shared
-run directory, not an individual segment. It prints every check's accuracy/AUC,
-best metrics, best accuracy through the common completed check, total progress,
-percentage toward the next check, and a conditional next-result ETA.
+run directory, not an individual segment. It prints every check's accuracy,
+best accuracy overall and through the common completed check, then ends with
+total progress, percentage toward the next check, and a conditional next-result
+ETA. AUC is not displayed.
 
 During restart data replay, it shows replay progress separately and withholds
 the training ETA. Stale logs or unconfirmed running jobs also suppress live ETAs.

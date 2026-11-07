@@ -59,7 +59,11 @@ def test_running_segment_wins_over_old_log_and_uses_shared_history(campaign):
     assert 'starts: 8.3 minutes' in result
     assert 'result: 25.4 minutes' in result
     assert 'Completed validation checks: 22/50' in result
-    assert '82.2000% / 0.982200' in result
+    assert '82.2000%' in result
+    assert '0.982200' not in result
+    assert 'auc' not in result.lower()
+    assert result.index('=== Running State-EV progress ===') > result.index('Read-only display')
+    assert result.endswith('Approx. time until the result: 25.4 minutes.')
     assert {p: p.read_bytes() for p in root.rglob('*') if p.is_file()} == before
 
 
@@ -129,13 +133,16 @@ def test_controls_history_and_common_cutoff_ignores_later_best(campaign, tmp_pat
     common = result.split('=== Best through common check 22')[1]
     assert '90.0000%' not in common
     assert '+2.2000 pp' in common
-    assert '80.0000% / --' in result  # AUC absent in original full-scale trainer.
+    assert '80.0000%' in result
+    assert 'auc' not in result.lower()
+    assert result.index('=== Running State-EV progress ===') > result.index('Best through common check 22')
 
 
 def test_missing_controls_warns_without_hiding_progress(campaign, tmp_path):
     result = S.report(campaign[0], tmp_path / 'missing', {}, now=1000)
     assert 'Control campaign missing' in result
     assert 'Completed validation checks: 22/50' in result
+    assert result.index('Control campaign missing') < result.index('=== Running State-EV progress ===')
 
 
 def test_control_schedule_mismatch_is_rejected(campaign, tmp_path):
@@ -180,3 +187,11 @@ def test_queue_failure_is_unknown_not_running(monkeypatch):
     queue, warning = S.queue_snapshot()
     assert queue is None
     assert 'not assuming it is running' in warning
+
+
+def test_cli_scheduler_warning_precedes_final_progress(campaign, monkeypatch, capsys):
+    monkeypatch.setattr(S, 'queue_snapshot', lambda: (None, 'Scheduler unavailable'))
+    assert S.main(['--campaign', str(campaign[0]), '--no-controls']) == 0
+    result = capsys.readouterr().out
+    assert result.index('WARNING: Scheduler unavailable') < result.index('=== Running State-EV progress ===')
+    assert 'auc' not in result.lower()
