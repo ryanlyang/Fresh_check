@@ -224,11 +224,69 @@ first/worst twenty paths, rather than stopping at the first tensor. CPU snapshot
 add synchronization, so an instrumented pass does not override a failing original
 gate. Diagnostic completion means evidence collected, **not parity approved**.
 
-Next decision: fix any exact save/load defect; otherwise investigate forward/
-backward repeatability and the observed resume-versus-repeat discrepancies before
-changing the acceptance test. Only then retry the four failed standard benchmarks
-with reviewed code/provenance. This diagnostic deliberately does not auto-chain
-those retries or copy/relabel the three successful measurements into a new spec.
+The completed job `795685` (`diagnostics/restart.9hfdli6s`) reported exact roundtrip,
+repeat, and resumed trajectories for all four models, while reproducing all four
+original gate failures. This supports a controlled correctness check, not a claim
+of bitwise reproducibility under unsynchronized execution. The diagnostic does
+not itself authorize or auto-chain benchmark retries.
+
+## Retry just the four failed standard benchmarks
+
+The updated `full_recipe_restart` uses a disposable ten-update kernel warmup,
+then restores initial weights/buffers, optimizer, scaler, RNGs, trimmer counters,
+and module modes for two uninterrupted trials and one resumed trial. Exact CPU
+state snapshots and synchronization compare **every update**, plus immediately
+before/after deserialization and restoration. Both tolerances remain **zero**.
+It restores the model and RNG on success or failure. No added synchronization,
+warmup, or instrumentation enters the measured training loop or production.
+The GH200 retry still has to demonstrate that this revised check passes.
+
+Do **not** edit the original frozen source or rerun its old launcher with
+`--resume`: that would still use the old check. After committing/pushing the fix
+and pulling on Tigris, use the separate retry submitter:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+SEVEN_ROOT="/home/ryreu/atlas/Fresh_check/checkpoints/part_selected_fullscale/seven_buildfix_20261106T005700Z"
+RESTART_DIAG="$SEVEN_ROOT/diagnostics/restart.9hfdli6s"
+
+bash sbatch/submit_part_selected_fullscale_retry.sh \
+  --campaign "$SEVEN_ROOT" --diagnostic "$RESTART_DIAG" --dry-run
+
+bash sbatch/submit_part_selected_fullscale_retry.sh \
+  --campaign "$SEVEN_ROOT" --diagnostic "$RESTART_DIAG"
+```
+
+This queues **only array tasks `0,1,3,4%1`**, each with one GH200, 12 CPUs, 128 GiB
+host RAM, and a **five-hour** limit, followed by an `afterany` **30-minute CPU
+summary**. Optional `--concurrency 2` (up to 4) changes only simultaneous tasks.
+There is no CPU preparation, native rebuild, selected profiling, selected rerun,
+training, or test evaluation in this chain.
+
+The new path printed by the launcher is
+`$SEVEN_ROOT/benchmark_retries/retry.<unique>/`. Its small frozen overlay contains
+the revised restart test and benchmark/report routing, with hashes recorded in
+`retry_plan.json` and each new benchmark's `retry_provenance`. All model, data,
+optimizer, training-step, validation, and projection code is imported from the
+original campaign's authenticated source. Original selected JSON/profiles are
+hash-pinned and referenced **in place**, not copied, relabeled, or overwritten.
+Old failures and the old summary remain available. Active original/retry jobs
+block duplicate submission; an interrupted/failed submission is retained in
+the per-retry and parent retry ledgers for inspection.
+
+After completion, read `<printed retry path>/reports/benchmark_review.json`.
+For a fresh read-only review:
+
+```bash
+bash sbatch/submit_part_selected_fullscale_retry.sh \
+  --mode review --output "/absolute/printed/retry/path"
+```
+
+The combined report validates the four new measurements against their exact
+restart method/provenance and the three selected measurements against the old
+spec/profile hashes. A successful summary job alone does not mean all benchmarks
+passed. `authorizes_training` stays false; production still needs resource review.
 
 ## Parameter counts for this comparison
 

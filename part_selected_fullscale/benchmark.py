@@ -169,13 +169,37 @@ def profile(output,index,check_stop):
         return row
 
 
-def benchmark(output,index,check_stop):
+def validate_retry_parity(parity):
+    row = parity.get('full_recipe_restart', {})
+    expected = dict(passed=True, contract='synchronized_exact_restart_v2',
+                    steps=[0,1,2,3,4,5,699999,700000,979999,980000], warmup_steps=10,
+                    trials=['uninterrupted','repeat','resumed'], serialized_restart_after=3,
+                    optimizer_and_rng_exact=True, exact_roundtrip=True, exact_each_update=True,
+                    rtol=0, atol=0)
+    if parity.get('passed') is not True or any(row.get(k) != v for k,v in expected.items()):
+        raise ValueError('Retry requires the complete synchronized zero-tolerance restart check')
+
+
+def benchmark(output,index,check_stop, *, retry_root=None, restart_check=None, retry_provenance=None):
+    # Explicit sidecar results: the original campaign's measurements are never
+    # overwritten or assigned a different campaign/source hash.
+    retry = retry_root is not None
+    if retry:
+        if index in P.SELECTED or restart_check is None or not retry_provenance:
+            raise ValueError('Retry only standard arms with explicit check and provenance')
+        if Path(retry_root).resolve() == Path(output).resolve():
+            raise ValueError('Retry output must differ from the frozen campaign')
+    elif restart_check is not None or retry_provenance is not None:
+        raise ValueError('A changed restart check requires a separate retry directory')
     bench=Bench(output,index,check_stop)
-    directory=Path(output)/'benchmarks'; destination=directory/f'{bench.task["run_id"]}.json'
+    directory=Path(retry_root if retry else output)/'benchmarks'; destination=directory/f'{bench.task["run_id"]}.json'
     with P.file_lock(destination.with_suffix('.lock'),blocking=False):
         if destination.exists():
             old=P.checked_json(destination,'selected_fullscale_benchmark_v1')
             P.validate_benchmark(old,bench.spec,index)
+            if retry:
+                if old.get('retry_provenance') != retry_provenance: raise ValueError('Retry provenance changed')
+                validate_retry_parity(old['parity'])
             return old
         if bench.selected:
             profile_path=Path(output)/'profiles'/f'{bench.task["run_id"]}.json'
@@ -189,7 +213,12 @@ def benchmark(output,index,check_stop):
                 optimizer=build_optimizer(model,bench.recipe); scaler=torch.amp.GradScaler('cuda')
                 iterator=bench.batches(loader); seed_everything(101); first=next(iterator)
                 cold=time.monotonic()-cold
-                parity=paired['parity'] if bench.selected else bench.parity(model,first)
+                if retry:
+                    parity=dict(passed=True,model=validate_model(model,bench.task['architecture']),
+                                full_recipe_restart=restart_check(model,first,bench.device))
+                    validate_retry_parity(parity)
+                else:
+                    parity=paired['parity'] if bench.selected else bench.parity(model,first)
                 seed_everything(101)
                 steps=P.BENCHMARK['selected_steps' if bench.selected else 'standard_steps']
                 fingerprints={}; windows=[]; skipped=calibration_skips=0; loader_wait=0
@@ -261,6 +290,7 @@ def benchmark(output,index,check_stop):
                     host_peak_bytes=max(memory.peak,host_peak_bytes()),checkpoint_seconds=checkpoint_seconds,
                     checkpoint_bytes=probe.stat().st_size,weight_save_seconds=weight_seconds,weight_bytes=weights.stat().st_size)
                 if bench.selected: row['profile_sha256']=P.file_sha256(profile_path)
+                if retry: row['retry_provenance']=retry_provenance
                 try:
                     row['projection']=P.validate_benchmark(row,bench.spec,index)
                 except Exception as error:

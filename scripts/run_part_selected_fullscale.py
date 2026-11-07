@@ -8,7 +8,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+if __name__ == '__main__':
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from part_selected_fullscale import protocol as P
 
 
@@ -79,16 +80,25 @@ def prepare(output):
         print('Prepared seven-model benchmark campaign. No production training submitted.',flush=True)
 
 
-def review(output, *, save=False):
+def review(output, *, save=False, retry_root=None, retry_provenance=None, retry_validator=None):
+    if (retry_root is None) != (retry_provenance is None):
+        raise ValueError('Retry review requires its explicit source provenance')
+    if retry_root is not None and Path(retry_root).resolve() == Path(output).resolve():
+        raise ValueError('Retry report must not overwrite the original campaign report')
+    if retry_root is not None and retry_validator is None:
+        raise ValueError('Retry review requires the synchronized parity validator')
     spec=P.load_campaign(output,check_environment=False)
     rows=[]; complete=True; healthy=True
     checkpoints={}; weights={}
     for index,task in enumerate(P.TASKS):
-        path=output/'benchmarks'/f"{task['run_id']}.json"
+        root=Path(retry_root) if retry_root is not None and index not in P.SELECTED else output
+        path=root/'benchmarks'/f"{task['run_id']}.json"
         item=dict(task=task,status='pending')
+        if retry_root is not None:
+            item.update(evidence_path=str(path),reused_original_selected=index in P.SELECTED)
         if not path.exists():
             complete=False; healthy=False
-            failures=sorted((output/'failures').glob(f'benchmark_{index}_*.json'))
+            failures=sorted((root/'failures').glob(f'benchmark_{index}_*.json'))
             if index in P.SELECTED:
                 failures+=sorted((output/'failures').glob(f'profile_{index}_*.json'))
             if failures:
@@ -99,6 +109,10 @@ def review(output, *, save=False):
         else:
             try:
                 result=P.checked_json(path,'selected_fullscale_benchmark_v1')
+                if retry_root is not None and index not in P.SELECTED:
+                    if result.get('retry_provenance') != retry_provenance:
+                        raise ValueError('Retry provenance differs')
+                    retry_validator(result['parity'])
                 projection=P.validate_benchmark(result,spec,index)
                 requested=max(216,projection['recommended_train_hours']) if index in P.SELECTED else 216
                 fits=projection['recommended_train_hours'] <= (480 if index in P.SELECTED else 216)
@@ -130,7 +144,8 @@ def review(output, *, save=False):
     result=dict(complete=complete,benchmarks_healthy=bool(healthy),storage=storage,models=rows,
         authorizes_training=False,ready_for_resource_review=bool(complete and healthy and storage['enough_headroom']),
         note='Benchmark-only stage. Review runtime/accuracy-equivalence evidence and effective QOS limits before separate production implementation/submission.')
-    if save: P.write_json(output/'reports/benchmark_review.json',P.hashed(result))
+    if retry_root is not None: result['retry_provenance']=retry_provenance
+    if save: P.write_json(Path(retry_root or output)/'reports/benchmark_review.json',P.hashed(result))
     print(json.dumps(result,indent=2)); return result
 
 

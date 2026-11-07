@@ -17,52 +17,112 @@ def small_batch(batch, count=8):
     return ({k:v[:count] for k,v in batch[0].items()}, {'_label_':batch[1]['_label_'][:count]}, {})
 
 
+def _cpu_state(value):
+    """Independent CPU observations also establish completion of CUDA writes."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to('cpu', copy=True)
+    if isinstance(value, dict):
+        return {k: _cpu_state(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return type(value)(_cpu_state(v) for v in value)
+    return copy.deepcopy(value)
+
+
+def _exact(a, b, path='state'):
+    import numpy as np
+    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+        if not (torch.isfinite(a).all() and torch.isfinite(b).all()):
+            raise ValueError('Nonfinite restart state: '+path)
+        torch.testing.assert_close(a, b, rtol=0, atol=0, msg=lambda text: path+': '+text)
+    elif isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys(): raise ValueError('Restart keys differ: '+path)
+        for key in a: _exact(a[key], b[key], path+'.'+str(key))
+    elif type(a) is type(b) and isinstance(a, (tuple, list)):
+        if len(a) != len(b): raise ValueError('Restart length differs: '+path)
+        for index, (x, y) in enumerate(zip(a, b)): _exact(x, y, f'{path}[{index}]')
+    elif isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
+        if a.dtype != b.dtype or not np.array_equal(a, b):
+            raise ValueError('Restart NumPy state differs: '+path)
+    elif type(a) is not type(b) or a != b:
+        raise ValueError('Restart value differs: '+path)
+
+
 def full_recipe_restart(model, batch, device):
-    """Matched uninterrupted/reloaded pilots; disposable models, full LR boundary."""
+    """Synchronized correctness pilot only; no extra sync in measured training.
+
+Warm native kernels once on disposable updates, then restore the initial state
+and RNG before EVERY trial. Check exact serialization and both repeat/resume
+trajectories, without treating instrumented parity as proof of unsynchronized
+bitwise reproducibility. No changed precision, tolerance, or deterministic flags.
+"""
     recipe = recipes()['ranger_full_v1']
-    state, rng = copy.deepcopy(model.state_dict()), capture_rank_state(model)
+    state, rng = _cpu_state(model.state_dict()), _cpu_state(capture_rank_state(model))
     modes = [(m,m.training) for m in model.modules()]
     small = small_batch(batch)
-    observations = []
     steps = [0,1,2,3,4,5,699999,700000,979999,980000]
+
+    def synchronize():
+        if device.type == 'cuda': torch.cuda.synchronize(device)
+
+    def reset():
+        synchronize()
+        model.load_state_dict(state)
+        model.zero_grad(set_to_none=True)
+        for module, training in modes: module.training = training
+        optimizer = build_optimizer(model, recipe)
+        scaler = torch.amp.GradScaler(device.type, enabled=device.type == 'cuda')
+        restore_rank_state(model, rng)
+        synchronize()
+        return optimizer, scaler
+
+    def snapshot(optimizer, scaler):
+        synchronize()
+        return _cpu_state(dict(model=model.state_dict(), optimizer=optimizer.state_dict(),
+                               scaler=scaler.state_dict(), rng=capture_rank_state(model)))
+
+    observations = []
+    sequence = []
     try:
-        for resume in (False, True):
-            model.load_state_dict(state); restore_rank_state(model, rng)
-            optimizer = build_optimizer(model, recipe)
-            scaler = torch.amp.GradScaler(device.type, enabled=device.type=='cuda')
+        optimizer, scaler = reset()
+        for step in steps:
+            training_step(model, optimizer, scaler, small, device, recipe, step)
+        del optimizer, scaler
+        for trial in ('uninterrupted', 'repeat', 'resumed'):
+            optimizer, scaler = reset()
+            initial = snapshot(optimizer, scaler)
+            if trial == 'uninterrupted': initial_reference = initial
+            else: _exact(initial_reference, initial, trial+'.initial')
             updates = []
             for position, step in enumerate(steps):
                 row = training_step(model, optimizer, scaler, small, device, recipe, step)
-                updates.append((row['lr'], row['amp_skipped']))
-                if resume and position == 2:
+                updates.append((row['lr'], row['amp_skipped'], scaler.get_scale()))
+                if trial == 'resumed' and position == 2:
+                    before = snapshot(optimizer, scaler)
                     stream = io.BytesIO()
                     torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict(),
                                     scaler=scaler.state_dict(), rng=capture_rank_state(model)), stream)
                     stream.seek(0)
                     saved = torch.load(stream, map_location=device, weights_only=False)
+                    _exact(before, _cpu_state(saved), 'deserialized')
                     model.load_state_dict(saved['model'])
                     optimizer = build_optimizer(model, recipe); optimizer.load_state_dict(saved['optimizer'])
                     scaler = torch.amp.GradScaler(device.type, enabled=device.type=='cuda')
                     scaler.load_state_dict(saved['scaler']); restore_rank_state(model, saved['rng'])
-            observations.append(dict(model=copy.deepcopy(model.state_dict()), optimizer=copy.deepcopy(optimizer.state_dict()),
-                                     scaler=scaler.state_dict(), rng=capture_rank_state(model), updates=updates))
-        def equal(a,b):
-            if isinstance(a,torch.Tensor):
-                torch.testing.assert_close(a,b,rtol=0,atol=0)
-            elif isinstance(a,dict):
-                if a.keys()!=b.keys(): raise ValueError('Restart keys differ')
-                for key in a: equal(a[key],b[key])
-            elif isinstance(a,(tuple,list)):
-                if len(a)!=len(b): raise ValueError('Restart length differs')
-                for x,y in zip(a,b): equal(x,y)
-            else:
-                import numpy as np
-                if isinstance(a,np.ndarray):
-                    if not np.array_equal(a,b): raise ValueError('Restart NumPy RNG differs')
-                elif a!=b: raise ValueError('Restart scalar differs')
-        equal(*observations)
-        return dict(passed=True, steps=steps, serialized_restart_after=3, optimizer_and_rng_exact=True)
+                    _exact(before, snapshot(optimizer, scaler), 'restored')
+                    del before, saved, stream
+                observed = snapshot(optimizer, scaler)
+                if trial == 'uninterrupted': observations.append(observed)
+                else: _exact(observations[position], observed, f'{trial}.update_{position+1}')
+            if trial == 'uninterrupted': sequence = updates
+            else: _exact(sequence, updates, trial+'.lr_skip_scale')
+            del optimizer, scaler
+        return dict(passed=True, contract='synchronized_exact_restart_v2', steps=steps,
+                    warmup_steps=len(steps), trials=['uninterrupted','repeat','resumed'],
+                    serialized_restart_after=3, optimizer_and_rng_exact=True,
+                    exact_roundtrip=True, exact_each_update=True, rtol=0, atol=0,
+                    scope='synchronized_disposable_pilot_not_unsynchronized_reproducibility')
     finally:
+        synchronize()
         model.load_state_dict(state); model.zero_grad(set_to_none=True); restore_rank_state(model,rng)
         for module, training in modes: module.training=training
 
