@@ -7,6 +7,11 @@ For the subsequently agreed seven-model **full-schedule** comparison, use the
 [campaign plan](FULLSCALE_SEVEN_RUN_CAMPAIGN_PLAN.md). Its separate launcher
 queues diagnostics only; the four-model short-screen workflow below is unchanged.
 
+After the seven benchmarks and restart retries pass, use the separate
+[full-schedule production launcher](../part_selected_production/README.md).
+It queues the seven individual training/evaluation runs using the original
+frozen scientific snapshot and the measured per-model walltimes.
+
 This is the starting point for understanding the PT/TRACK/REGION selected-relation
 study and its faster execution candidate. It separates **changes to the model**
 from **changes intended to run the same model more efficiently**.

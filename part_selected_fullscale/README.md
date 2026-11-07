@@ -9,6 +9,11 @@ the numerical definitions and optimized backend described in the
 on the measured reports. Full-training/evaluation submission and the final
 scientific-control audit remain a separate stage after benchmark review.
 
+The separate [production workflow](../part_selected_production/README.md) now
+implements full training, restart, five-million-jet evaluation and reporting
+from the passed original/retry evidence. This benchmark launcher remains
+benchmark-only; external-control metric reuse still requires its own audit.
+
 ## Models
 
 All seven use seed 101, batch 512 and the full Ranger recipe: 1,000,000 attempted
