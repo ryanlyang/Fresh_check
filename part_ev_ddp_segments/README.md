@@ -107,6 +107,33 @@ start immediately.
 
 ## Read-only progress
 
+From the current repository on sporcsubmit (not a frozen worker snapshot):
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+python3 -B scripts/status_part_ev_ddp_segments.py
+```
+
+This stdlib-only viewer defaults to the campaign above and the seed-101 ParT /
+ordinary-EV controls in `part_ev_state_fullscale/state_full_20261024T185049Z`.
+It follows the **running segment** using `squeue`, falling back to the latest log
+when the scheduler is unavailable. All validation checks come from the shared
+run directory, not an individual segment. It prints every check's accuracy/AUC,
+best metrics, best accuracy through the common completed check, total progress,
+percentage toward the next check, and a conditional next-result ETA.
+
+During restart data replay, it shows replay progress separately and withholds
+the training ETA. Stale logs or unconfirmed running jobs also suppress live ETAs.
+Validation itself has no batch-level progress log, so only its typical duration
+is reported. Nothing is submitted or changed, and no model checkpoint, prediction
+array or dataset is opened. This is a status display, not an integrity audit.
+Use `--campaign PATH --controls PATH` to override the roots, `--no-controls` for
+State-EV alone, or `--offline` to skip the scheduler query. No Conda activation is
+needed. Historical controls use native single-GPU BatchNorm rather than the
+State-EV run's two-GPU SyncBatchNorm; their contrasts are descriptive.
+
+For the raw chain ledger and committed handoffs:
+
 ```bash
 cat "$EVSEG_CHAIN/submitted_job_ids.tsv"
 
