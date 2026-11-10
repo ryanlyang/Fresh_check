@@ -50,8 +50,16 @@ def runtime_environment():
     # Importing torch optimizers can append setuptools/_vendor to sys.path.
     # Count installed distributions ONLY at the interpreter's install roots.
     paths = sorted({sysconfig.get_path(k) for k in ('purelib', 'platlib')})
-    row['installed_distributions'] = {d.metadata['Name'].lower(): d.version
-                                    for d in importlib.metadata.distributions(path=paths) if d.metadata['Name']}
+    # Match the donor's exact tuple-sorting/collision convention. Some existing
+    # environments expose multiple metadata records for the same distribution.
+    # A bare dict comprehension keeps whichever record happens to be enumerated
+    # last, and can falsely report a downgrade. This is legacy fingerprint
+    # compatibility, NOT a semantic-version resolver or a claim about which
+    # duplicate record describes the imported code. Keep core package/version
+    # and Weaver source checks unchanged, and do not remove metadata on disk.
+    row['installed_distributions'] = dict(sorted(
+        (d.metadata['Name'].lower(), d.version)
+        for d in importlib.metadata.distributions(path=paths) if d.metadata['Name']))
     return row
 
 

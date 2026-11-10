@@ -147,8 +147,22 @@ uses its own copied metadata. No data are duplicated or deleted.
 
 Installed-distribution checks use explicit interpreter installation roots, so
 optimizer imports adding `setuptools/_vendor` to `sys.path` do not produce the
-previous false environment mismatch. Actual installed version/source changes
-still fail. No environment is created, upgraded or modified.
+previous false environment mismatch. The separate core-version and Weaver-source
+checks remain enforced. No environment is created, upgraded or modified.
+
+For compatibility, the inventory retains the donor's exact `dict(sorted(...))`
+convention for `(lowercase package name, version string)` records. Duplicate
+metadata records otherwise make an unsorted dictionary depend on enumeration
+order. This fixes the prepare failure in `compact_20261109T233555Z`, where NumPy,
+fsspec, Pillow, setuptools and typing_extensions each exposed two versions.
+It is a legacy fingerprint convention, not a semantic-version resolver or proof
+that duplicate metadata are harmless. The separate core-version/Weaver-source
+comparisons are unchanged; no package/version check is bypassed. Do not delete
+duplicate metadata or reinstall packages in an environment used by other jobs.
+
+After this fix, retry with a **new output directory** (for example
+`compact_inventoryfix_$(date -u +%Y%m%dT%H%M%SZ)`). Keep the failed campaign's
+logs and frozen snapshot unchanged. A pull does not repair an existing snapshot.
 
 Require **6 GiB free** at launch/prepare, and 4 GiB remaining at GPU start.
 Benchmarks should use well below 1 GiB: one source snapshot, two disposable

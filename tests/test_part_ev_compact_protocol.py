@@ -63,3 +63,47 @@ def test_installed_distribution_inventory_uses_explicit_install_roots(monkeypatc
     monkeypatch.setattr(P.importlib.metadata,'distributions',distributions)
     assert P.runtime_environment()['installed_distributions']=={'example':'1'}
     assert observed and all('_vendor' not in p for p in observed[0])
+
+
+@pytest.mark.parametrize('order', ('new_first', 'old_first', 'interleaved'))
+def test_duplicate_distribution_records_match_donor_convention(monkeypatch, order):
+    """RC's five duplicate records must not make an unchanged inventory drift."""
+    from types import SimpleNamespace
+    import part_ev_fullscale.protocol as original
+    pairs = [('fsspec', '2026.6.0', '2026.4.0'),
+             ('numpy', '2.2.6', '1.26.4'),
+             ('pillow', '12.3.0', '12.2.0'),
+             ('setuptools', '81.0.0', '78.1.0'),
+             ('typing_extensions', '4.16.0', '4.15.0')]
+    records = [(name, version) for name, new, old in pairs for version in (new, old)]
+    if order == 'old_first': records.reverse()
+    elif order == 'interleaved': records = records[::2] + records[1::2]
+    core = {'packages': {'numpy': '2.2.6'}, 'weaver_sources': {'model': 'unchanged'}}
+    monkeypatch.setattr(original, 'environment', lambda: dict(core))
+    calls = []
+    def distributions(*, path):
+        calls.append(path)
+        return [SimpleNamespace(metadata={'Name': name}, version=version) for name, version in records]
+    monkeypatch.setattr(P.importlib.metadata, 'distributions', distributions)
+    current = P.runtime_environment()
+    # This is precisely the donor's serialization convention, not selection of
+    # a preferred version based on what would make the current check pass.
+    assert current['installed_distributions'] == dict(sorted(records))
+    assert current['installed_distributions'] == {name: new for name, new, old in pairs}
+    assert current['packages'] == core['packages']
+    assert current['weaver_sources'] == core['weaver_sources']
+    assert calls and all('_vendor' not in path for path in calls[0])
+
+
+def test_duplicate_fix_preserves_lexical_rule_and_real_core_differences(monkeypatch):
+    from types import SimpleNamespace
+    import part_ev_fullscale.protocol as original
+    # Deliberately unlike semantic ordering. Preserve the frozen donor format;
+    # do not invent a new "highest version" or suppress actual core drift.
+    records = [('example', '10.0'), ('example', '9.0')]
+    monkeypatch.setattr(P.importlib.metadata, 'distributions', lambda *, path:
+        [SimpleNamespace(metadata={'Name': name}, version=version) for name, version in records])
+    monkeypatch.setattr(original, 'environment', lambda: {'packages': {'numpy': '1.26.4'}})
+    current = P.runtime_environment()
+    assert current['installed_distributions'] == {'example': '9.0'}
+    assert current['packages']['numpy'] == '1.26.4'
