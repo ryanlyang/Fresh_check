@@ -4,6 +4,7 @@ import importlib.util
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -98,20 +99,43 @@ def smoke(module, manifest):
     return hashes
 
 
+_LIBRARY_ROLES = {
+    'C++ runtime': ('libstdc++',),
+    'GCC support runtime': ('libgcc_s',),
+    'OpenMP runtime': ('libgomp', 'libomp'),
+    'C runtime': ('libc',),
+    'math runtime': ('libm',),
+}
+
+
+def _library_role(name):
+    # Accept SONAME versions and bundled/build suffixes, not e.g. libc10.so,
+    # libomptarget.so or libomp.so.backup. Discovery is not equivalence: the
+    # resolved path and file hash of EVERY matching provider remain pinned.
+    for role, stems in _LIBRARY_ROLES.items():
+        if any(re.fullmatch(re.escape(stem)+r'(?:-[A-Za-z0-9_.-]+)?\.so(?:\.[0-9]+)*', name)
+               for stem in stems):
+            return role
+    return None
+
+
 def libraries():
     """Pin actually mapped C/C++/math/OpenMP libraries, not hypothetical ldd paths."""
-    names = ('libstdc++', 'libgcc_s', 'libgomp', 'libc', 'libm')
-    def belongs(path, family):
-        return path.name.startswith((family+'.so', family+'-'))
     paths = set()
     for line in Path('/proc/self/maps').read_text().splitlines():
         parts = line.split(maxsplit=5)
         if len(parts) == 6 and parts[5].startswith('/'):
             path = Path(parts[5])
-            if any(belongs(path, n) for n in names):
+            if path.name.endswith(' (deleted)') and _library_role(path.name[:-10]):
+                raise ValueError('Mapped runtime library was deleted: ' + str(path))
+            if _library_role(path.name):
                 paths.add(path.resolve(strict=True))
-    if any(not any(belongs(p, n) for p in paths) for n in names):
-        raise ValueError('Cannot identify all loaded C/C++/math/OpenMP libraries')
+    found = {_library_role(path.name) for path in paths}
+    missing = [role for role in _LIBRARY_ROLES if role not in found]
+    if missing:
+        raise ValueError('Cannot identify all loaded C/C++/math/OpenMP libraries; missing: '
+                         + ', '.join(missing) + '; recognized paths: '
+                         + ', '.join(str(path) for path in sorted(paths)))
     return {str(p): P.sha(p) for p in sorted(paths)}
 
 

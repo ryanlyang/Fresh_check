@@ -21,6 +21,14 @@ backend binaries. It verifies:
   padding, duplicate/tied particles, and rejection of nonfinite valid inputs.
 - Hashes of the actually loaded C/C++/math/OpenMP runtime libraries.
 
+OpenMP discovery recognizes both `libgomp` and `libomp` filenames, including
+versioned/bundled names and resolved aliases. Tigris's diagnostic showed
+`part_selected_tigris/lib/libomp.so`; the original recovery check incorrectly
+required a `libgomp` filename. Every discovered provider is still pinned by its
+actual resolved path and SHA-256, so a later switch of provider or file contents
+fails worker admission. No library is installed or replaced. Missing required
+runtime families are now named explicitly in the error.
+
 The check uses synthetic CPU fixtures, not training/validation event payloads.
 Dataset metadata and existing campaign JSON are still checked. No GPU is needed.
 No successful compatibility record is written on failure. Each GPU recovery
@@ -67,6 +75,9 @@ bash sbatch/submit_part_selected_compiler_recovery.sh \
 
 Do not edit `compatibility.json` or the old manifests to force approval. A failed
 check needs investigation; a new check uses a new recovery directory.
+After updating discovery code, commit/push/pull it and queue a fresh check with
+a new `RECOVERY_ROOT` (for example `compilerfix_omp_<UTC timestamp>`). Requeuing
+failed check 954533 would execute its old frozen code, not this correction.
 
 ## Queue only the failed selected runs
 
@@ -127,7 +138,7 @@ No report is treated as complete merely because a Slurm job exited successfully.
 ## Local verification
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_part_selected_compiler_recovery.py tests/test_part_selected_compiler_recovery_launcher.py tests/test_part_selected_production.py tests/test_part_selected_production_launcher.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_part_selected_compiler_libraries.py tests/test_part_selected_compiler_recovery.py tests/test_part_selected_compiler_recovery_launcher.py tests/test_part_selected_production.py tests/test_part_selected_production_launcher.py
 ```
 
 Local tests cover compiler/ABI rejection, immutable evidence, private loader
