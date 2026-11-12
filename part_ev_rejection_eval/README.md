@@ -133,6 +133,22 @@ This retains the frozen snapshot, skips models with completed results, and queue
 only unfinished evaluations plus the report. No automatic cancel/retry loop or
 silent environment compatibility override is used.
 
+### Immediate startup failure in the first submitted version
+
+The original worker located its Python driver relative to `BASH_SOURCE`. That is
+incorrect under `sbatch`, which executes a spool-directory copy of the shell
+script. The corrected worker locates the driver using the explicit `--output`
+campaign argument. A relocated-worker regression test covers both GPU jobs and
+the CPU report, including paths containing spaces.
+
+For jobs `22080741` / `22080742`, inspect their stderr to confirm whether this was
+the startup error. After committing/pushing/pulling the fix, use a **new output
+directory** and the normal `plan` / `submit` commands above. Do not use `resume`
+on the old output: it deliberately retains the old frozen worker. No failed
+snapshot needs editing or deletion. No additional cancellation is needed if
+the old jobs and their dependent report are all terminal; the duplicate guard
+will refuse otherwise.
+
 Interpretation: these are **single-seed validation results**, overlapping checkpoint
 selection, not independent test results. The training runtimes differ (one GPU/native
 BatchNorm versus two GPUs/SyncBatchNorm); the comparison does not isolate architecture.
