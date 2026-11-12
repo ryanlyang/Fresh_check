@@ -102,6 +102,16 @@ existing binaries, compiler transition, loaded libraries, ABI, self-test, origin
 smoke hashes and batched tree parity against that approval. Neither native backend
 is rebuilt or replaced. Changed libraries/compiler identity fail admission.
 
+The dedicated worker imports NumPy before PyTorch, matching the original
+selected/recovery startup. This also runs when data-loader processes import the
+worker as `__mp_main__`. The first compact preparation attempt loaded PyTorch's
+bundled GNU `libgomp.so.1` instead of the approved environment's LLVM `libomp.so`;
+all other recorded compatibility fields matched in the read-only diagnostic.
+The startup-order correction does **not** treat those libraries as equivalent,
+preload a library, or replace the saved approval. The original exact compatibility
+check must still pass on Tigris. Use a fresh campaign after pulling this fix;
+the failed frozen snapshot is intentionally left unchanged.
+
 The new source snapshot is created from a clean committed checkout. No existing
 package is edited, old manifests/snapshots/ledgers are not rewritten, and old jobs
 are not cancelled, resubmitted or used as dependencies. A later `git pull` cannot

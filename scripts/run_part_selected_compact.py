@@ -7,6 +7,15 @@ import signal
 import sys
 import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Match the approved selected/recovery startup (part_ev_fullscale.data imports
+# NumPy before Torch). On Tigris, importing Torch first selected its bundled
+# libgomp instead of the approved environment's libomp. Keep this at module
+# scope so spawned loader workers have the same order as the main process.
+# This does not preload/replace libraries or relax verify_backends: the exact
+# approved library paths and hashes still have to match on every GPU worker.
+import numpy as _numpy_before_torch
+import torch as _torch_after_numpy
+
 from part_selected_compact import protocol as P
 from scripts.submit_part_selected_compact import verify_snapshot
 
