@@ -21,6 +21,7 @@ PARITY = dict(input_rtol=1e-6, input_atol=1e-6, logit_rtol=1e-4,
               logit_atol=2e-5, maximum_logit_error=1e-3, argmax_disagreements=0)
 TOOLS = ('part_ev_oscar/__init__.py', 'part_ev_oscar/common.py',
          'part_ev_oscar/export.py', 'part_ev_oscar/runtime.py',
+         'part_ev_oscar/saved_validation.py',
          'part_ev_oscar/results.py', 'part_ev_oscar/launcher.py',
          'scripts/part_ev_oscar.py', 'scripts/setup_part_ev_oscar.sh',
          'scripts/part_ev_rejection_eval_support.py', 'scripts/run_part_ev_rejection_eval.py',
@@ -153,6 +154,9 @@ def load_bundle(root):
         for probe in model['probes']:
             verify_probe_context(probe)
         verify_files(root / key, model['files'])
+        if model.get('reference_origin') == 'saved_validation_cpu_v1':
+            from .saved_validation import verify_portable_provenance
+            verify_portable_provenance(root / key, model)
     return row
 
 

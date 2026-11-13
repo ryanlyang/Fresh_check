@@ -16,7 +16,7 @@ def launcher(tmp_path):
     for p in (repo/'sbatch',repo/'scripts',repo/'part_ev_pair_memory',reference,bin_dir): p.mkdir(parents=True)
     for name in ('submit_part_ev_pair_memory.sh','run_part_ev_pair_memory.sh'):
         shutil.copyfile(REPO/'sbatch'/name,repo/'sbatch'/name)
-    for name in ('model.py','benchmark.py','protocol.py'): (repo/'part_ev_pair_memory'/name).write_text('# fixture')
+    for name in ('model.py','benchmark.py','protocol.py','oracle.py'): (repo/'part_ev_pair_memory'/name).write_text('# fixture')
     (repo/'scripts/run_part_ev_pair_memory.py').write_text('# fixture')
     (reference/'campaign.json').write_text('{"untouched":true}')
     calls=tmp_path/'calls.txt'

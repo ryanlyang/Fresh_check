@@ -63,9 +63,11 @@ class MemoryStateMessage(nn.Module):
         if self.memory_writer is None:
             return None, None, None, torch.ones((),device=observation.device,dtype=torch.bool)
         dtype=torch.float64 if observation.dtype==torch.float64 else torch.float32
+        # Keep the plan's dense-projection AMP policy. Only the recurrence and
+        # nonlinearities run in FP32; an overflowing projection is still rejected.
+        pre=self.memory_writer(normalize(observation))
         with torch.autocast(observation.device.type,enabled=False):
-            pre=F.linear(normalize(observation),self.memory_writer.weight.to(dtype),
-                         self.memory_writer.bias.to(dtype))
+            pre=pre.to(dtype)
             finite=torch.isfinite(pre).all()
             candidate=pre.tanh().masked_fill(~valid[...,None],0)
             if self.layer==0:

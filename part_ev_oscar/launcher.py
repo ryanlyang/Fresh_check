@@ -36,7 +36,7 @@ def no_active(output):
 
 def request(output, plan, phase, key=None, dependencies=()):
     output = Path(output)
-    export = phase == 'export-model'
+    export = phase in ('export-model', 'export-cpu')
     gpu = phase in ('export-model', 'parity', 'evaluate')
     python = plan['donors'][key]['python'] if export else plan['python']
     partition = plan['partition'] if gpu else plan.get('cpu_partition', plan['partition'])
@@ -90,22 +90,42 @@ def export_launch(args):
     if args.command == 'export-resume':
         plan = C.checked(output/'export_plan.json')
         C.verify_files(output/'source', plan['tools'])
+        from .saved_validation import MODE
+        if plan.get('export_mode') != MODE:
+            raise ValueError('Old GPU export: use a new CPU export directory, not this launcher to resume it')
     else:
         donors = E.describe(args.part, args.state)
         for d in donors.values():
             root = Path(d['root'])
             if output == root or output.is_relative_to(root) or root.is_relative_to(output):
                 raise ValueError('Export must be outside both original campaigns')
-        plan = dict(schema=C.SCHEMA, donors=donors, partition=args.partition or 'debug',
-                    cpu_partition=args.cpu_partition or 'debug', account=args.account or 'reu-aisocial',
-                    gres=args.gres or 'gpu:a100:1')
-        print(json.dumps(plan, indent=2))
+        from . import saved_validation as V
+        references = V.discover(donors, getattr(args, 'validation_results', None))
+        for reference in references.values():
+            root = Path(reference['root'])
+            if output == root or output.is_relative_to(root) or root.is_relative_to(output):
+                raise ValueError('Export output must be outside saved validation results')
+        if args.gres:
+            raise ValueError('CPU export must not request GRES/GPUs')
+        partition = args.cpu_partition or args.partition or 'tier3'
+        account = args.account or 'reu-aisocial'
+        if any(not re.fullmatch(r'[A-Za-z0-9_.-]+', x) for x in (partition, account)):
+            raise ValueError('Invalid CPU partition/account')
+        plan = dict(schema=C.SCHEMA, donors=donors, partition=partition,
+                    cpu_partition=partition, account=account, export_mode=V.MODE,
+                    validation_results=references)
+        print(json.dumps(dict(export_mode=V.MODE, output=str(output), partition=partition,
+            resources='Two independent CPU jobs; 4 CPUs, 64 GiB, 2h, zero GPUs each',
+            references={k: v['root'] for k, v in references.items()},
+            selected_checks={k: d['best_check'] for k, d in donors.items()},
+            note='Prediction payload hashes are reverified inside CPU jobs, not on this submit host.'), indent=2))
         if args.command == 'export-plan':
             print('Read-only: no files or jobs changed.')
             return
         if output.exists():
             raise FileExistsError('Use a new export directory or export-resume')
         E.donor_support().refuse_active(donors)
+        V.inactive(references, donors)
         output.mkdir(parents=True)
         (output/'logs').mkdir()
         plan['tools'] = snapshot(output/'source')
@@ -114,13 +134,21 @@ def export_launch(args):
     with C.lock(output/'.submit.lock'):
         no_active(output)
         E.donor_support().refuse_active(plan['donors'])
+        from . import saved_validation as V
+        V.inactive(plan['validation_results'], plan['donors'])
         for key in C.SELECTED:
             if (output/key/'model.json').exists():
-                C.verify_files(output/key, C.checked(output/key/'model.json')['files'])
+                model = C.checked(output/key/'model.json')
+                if (model['key'] != key or model['export_plan_sha256'] != plan['content_hash']
+                        or model.get('reference_origin') != V.MODE
+                        or model['reference_evaluation'] != plan['validation_results'][key]):
+                    raise ValueError('Completed CPU export belongs to a different plan/reference')
+                C.verify_files(output/key, model['files'])
+                V.verify_portable_provenance(output/key, model)
                 continue
             if (output/key).exists():
                 raise ValueError('Partial export retained. Use a fresh export directory; nothing deleted.')
-            submit(output, plan, 'export-model', key)
+            submit(output, plan, 'export-cpu', key)
 
 
 def init(args):
@@ -251,12 +279,14 @@ def review(output):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('export-plan', 'export-submit', 'export-resume', 'export-review',
-        'export-model', 'setup-env', 'init', 'prepare-submit', 'review', 'evaluate-submit', 'resume',
+        'export-model', 'export-cpu', 'setup-env', 'init', 'prepare-submit', 'review', 'evaluate-submit', 'resume',
         'status', 'prepare', 'parity', 'evaluate', 'metrics', 'report'))
     parser.add_argument('--output', type=Path)
     parser.add_argument('--model', choices=('part', 'state'))
     parser.add_argument('--part', type=Path)
     parser.add_argument('--state', type=Path)
+    parser.add_argument('--validation-results', type=Path,
+                        help='Completed evrej campaign; otherwise discover a unique matching pair')
     parser.add_argument('--bundle', type=Path)
     parser.add_argument('--scratch-root', type=Path, default=SCRATCH)
     parser.add_argument('--python', type=Path)
@@ -280,7 +310,7 @@ def main(argv=None):
         parser.error('--python is required')
     if args.command == 'setup-env' and args.venv is None:
         parser.error('--venv is required')
-    if args.command in ('export-model', 'parity', 'evaluate', 'metrics') and args.model is None:
+    if args.command in ('export-model', 'export-cpu', 'parity', 'evaluate', 'metrics') and args.model is None:
         parser.error('--model is required')
     if args.command in ('export-plan', 'export-submit', 'export-resume'):
         export_launch(args)
@@ -311,9 +341,9 @@ def main(argv=None):
     else:
         from . import runtime as R
         R.configure(args.output)
-        if args.command == 'export-model':
+        if args.command in ('export-model', 'export-cpu'):
             from .export import export_model
-            export_model(args.output, args.model)
+            export_model(args.output, args.model, cpu=args.command == 'export-cpu')
         elif args.command == 'prepare':
             R.prepare(args.output)
         elif args.command == 'parity':

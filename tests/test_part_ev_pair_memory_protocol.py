@@ -37,7 +37,9 @@ def evidence():
                 all_writers_and_gates_updated=True,all_memory_gradients_nonzero=True),
             checks=[dict(kind=k,passed=True) for k in ('zero_identity','active_chunk','active_SyncBN_DDP','unchanged_attention_and_ev')]
                 +[dict(kind='dense_recurrence_and_history',passed=True,layers=8,boundaries=7,
-                       final_reader_first_writer_gradient=True,earlier_observation_changes_later_read=True)]) for r in (0,1)],
+                       final_reader_first_writer_gradient=True,earlier_observation_changes_later_read=True),
+                  dict(kind='boundaries_masks_lifetime',passed=True,boundaries=7,memory_precision='fp32',
+                       overflow_rejected=True,padding_and_permutation=True)]) for r in (0,1)],
         restart=dict(passed=True,updates=7,ranks=2,full_state=True),finite_state=True,
         gpus=[dict(rank=r,name='NVIDIA A100',total_memory=40*1024**3,
                    peak_allocated=25*1024**3,peak_reserved=29*1024**3) for r in (0,1)],
@@ -69,7 +71,7 @@ def test_complete_review_projects_all_50_validations_but_never_approves(tmp_path
     assert row['recommended_train_hours']>row['projected_train_hours']
 
 
-@pytest.mark.parametrize('fault', ['rank','precision','checks','recipe','memory','windows','skips','restart','inference','diagnostics','delayed','hash','history','latency'])
+@pytest.mark.parametrize('fault', ['rank','precision','checks','recipe','memory','windows','skips','restart','inference','diagnostics','delayed','hash','history','latency','boundaries'])
 def test_review_fails_closed(tmp_path,monkeypatch,fault):
     row=evidence()
     if fault=='rank': row['stream']['ranks'][1]['parameters_sha256']='different'
@@ -83,7 +85,8 @@ def test_review_fails_closed(tmp_path,monkeypatch,fault):
     if fault=='inference': row['inference']['seconds']=0
     if fault=='diagnostics': row['diagnostics'][0]['layers'].pop()
     if fault=='delayed': row['correctness'][0]['delayed_activation']['all_writers_and_gates_updated']=False
-    if fault=='history':row['correctness'][0]['checks'][-1]['final_reader_first_writer_gradient']=False
+    if fault=='history':row['correctness'][0]['checks'][-2]['final_reader_first_writer_gradient']=False
+    if fault=='boundaries':row['correctness'][0]['checks'][-1]['overflow_rejected']=False
     if fault=='latency':row['inference']['batch1_seconds']=0
     setup_review(tmp_path,monkeypatch,row)
     if fault=='hash':

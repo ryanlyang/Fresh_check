@@ -143,10 +143,15 @@ def record(path, events):
                 mtime_ns=stat.st_mtime_ns, num_entries=events)
 
 
-def export_model(output, key):
+def export_model(output, key, *, cpu=False):
     output = Path(output)
     plan = C.checked(output/'export_plan.json')
     C.verify_files(output/'source', plan['tools'])
+    from . import saved_validation as V
+    if cpu and plan.get('export_mode') != V.MODE:
+        raise ValueError('CPU export requires a new saved-validation export plan')
+    if not cpu and plan.get('export_mode') == V.MODE:
+        raise ValueError('This export is CPU-only; GPU reference generation is forbidden')
     donor = plan['donors'][key]
     if Path(sys.executable).resolve() != Path(donor['python']).resolve():
         raise ValueError('Export must use the original donor Python')
@@ -154,6 +159,8 @@ def export_model(output, key):
     S.refuse_active(plan['donors'])
     S.verify_pins(donor)
     S.verify_frozen_source(donor)
+    if cpu:
+        V.inactive(plan['validation_results'], plan['donors'])
     with C.lock(output/f'.export_{key}.lock'):
         directory = output/key
         if (directory/'model.json').exists():
@@ -171,13 +178,21 @@ def export_model(output, key):
         if key == 'state':
             spec_before_import = C.read(Path(donor['root'])/'campaign.json')
             os.environ.update(spec_before_import['expected_gpu']['nccl_environment'])
-        import run_part_ev_rejection_eval as R
-        # This is the unchanged, hardware/environment/selection-audited RIT path.
-        D, spec, model, device, runtime, stop = R.load_runtime(donor)
+        if cpu:
+            from .runtime import stopping
+            D, spec, model = V.load_cpu_runtime(donor)
+            cached = V.audit_payloads(plan['validation_results'][key], donor)
+            stop = stopping
+        else:
+            import run_part_ev_rejection_eval as R
+            # Legacy frozen GPU exports retain their original behavior.
+            D, spec, model, device, runtime, stop = R.load_runtime(donor)
         import numpy as np
         import torch
         env = environment()
         copy_frozen(donor, directory/'source')
+        if cpu:
+            V.copy_provenance(plan['validation_results'][key], directory/'saved_validation')
         for relative in donor['pins']:
             target = C.child(directory/'provenance', relative)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +208,11 @@ def export_model(output, key):
             stop()
             original = next(r for r in donor['files'] if r['name'] == prefix+'_120.root')
             first = next(iter(D.finite_validation_loader(spec['inventory'], original)))
-            values, labels = D.tensors(first, device)
+            if cpu:
+                values = [first[0][name] for name in C.INPUTS]
+                labels = first[1]['_label_'].long()
+            else:
+                values, labels = D.tensors(first, device)
             if len(labels) != 512:
                 raise ValueError('Reference probe must be one full 512-event batch')
             probe_path = directory/'probes'/original['name']
@@ -204,10 +223,16 @@ def export_model(output, key):
             assert_same_batch(first, roundtrip)
             tensors = {name: value.detach().cpu().numpy().copy()
                        for name, value in zip(C.INPUTS, values)}
-            with torch.no_grad(), D.model_precision(model, device, training=False), \
-                    D.audit_precision(model, expected_dtype=torch.float32) as audit:
-                logits = model(*values).float().cpu().numpy()
             truth = labels.cpu().numpy().astype(np.int64)
+            if cpu:
+                saved_probe = cached[original['name']]
+                if not np.array_equal(truth, saved_probe['labels']):
+                    raise ValueError('Saved GPU reference labels differ from the original ROOT probe')
+                logits, audit = saved_probe['logits'], saved_probe['precision']
+            else:
+                with torch.no_grad(), D.model_precision(model, device, training=False), \
+                        D.audit_precision(model, expected_dtype=torch.float32) as audit:
+                    logits = model(*values).float().cpu().numpy()
             C.validate_arrays(logits, truth, 512, C.PREFIXES[prefix])
             reference = directory/'probes'/(prefix+'.npz')
             D.atomic_npz(reference, logits=logits, labels=truth, **tensors)
@@ -215,6 +240,8 @@ def export_model(output, key):
                                original_name=original['name'], original_sha256=C.sha(original['path']),
                                entry_start=0, entry_stop=512, raw_entries=context['raw_entries'],
                                padding_context=context, label=C.PREFIXES[prefix], precision=audit))
+            if cpu:
+                probes[-1]['saved_prediction'] = saved_probe['evidence']
             print(f"{key}: exported validation probe {prefix} ({len(probes)}/10); "
                   f"512 scored jets, {context['raw_entries']} raw context jets", flush=True)
         S.verify_pins(donor)
@@ -225,7 +252,9 @@ def export_model(output, key):
             campaign_sha256=donor['campaign_sha256'], task=donor['task'],
             parameters=sum(p.numel() for p in model.parameters()),
             class_names=list(C.CLASSES), environment=env, training_runtime=donor['training_runtime'],
-            export_gpu=torch.cuda.get_device_name(device), probes=probes,
+            export_gpu=None if cpu else torch.cuda.get_device_name(device), probes=probes,
+            reference_origin=V.MODE if cpu else 'regenerated_gpu_reference',
+            reference_evaluation=plan['validation_results'][key] if cpu else None,
             weights_sha256=C.sha(directory/'weights.pt'), files=files))
         if row['parameters'] != C.COUNTS[key]:
             raise ValueError('Wrong exported model size')
@@ -243,6 +272,12 @@ def finalize(output):
                 or row['best_check'] != C.SELECTED[key] or row['parameters'] != C.COUNTS[key]):
             raise ValueError('Export provenance differs')
         C.verify_files(output/key, row['files'])
+        from . import saved_validation as V
+        if plan.get('export_mode') == V.MODE:
+            if (row.get('reference_origin') != V.MODE
+                    or row['reference_evaluation'] != plan['validation_results'][key]):
+                raise ValueError('Saved validation reference differs from the export plan')
+            V.verify_portable_provenance(output/key, row)
     if models['part']['environment'] != models['state']['environment']:
         raise ValueError('Donor dependency environments differ; needs explicit compatibility investigation')
     p, s = models['part']['probes'], models['state']['probes']

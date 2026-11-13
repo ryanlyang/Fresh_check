@@ -164,7 +164,8 @@ def review(output):
                 raise ValueError('Missing measured windows/precision')
             identities.add((rank['parameters_sha256'],rank['scaler'],rank['skips'],rank['lookahead_counter']))
         if len(identities)!=1: raise ValueError('Distributed replicas differ')
-    required_checks={'zero_identity','active_chunk','active_SyncBN_DDP','unchanged_attention_and_ev','dense_recurrence_and_history'}
+    required_checks={'zero_identity','active_chunk','active_SyncBN_DDP','unchanged_attention_and_ev',
+                     'dense_recurrence_and_history','boundaries_masks_lifetime'}
     if (len(row['correctness']) != 2 or {r['rank'] for r in row['correctness']}!={0,1}
             or any(r['passed'] is not True or r['tolerances']!=PARITY
                    or {c['kind'] for c in r['checks']}!=required_checks
@@ -188,6 +189,11 @@ def review(output):
                 or history.get('final_reader_first_writer_gradient') is not True
                 or history.get('earlier_observation_changes_later_read') is not True):
             raise ValueError('Cross-layer history evidence missing')
+        boundaries=next(c for c in rank['checks'] if c['kind']=='boundaries_masks_lifetime')
+        if (boundaries.get('boundaries')!=7 or boundaries.get('memory_precision')!='fp32'
+                or boundaries.get('overflow_rejected') is not True
+                or boundaries.get('padding_and_permutation') is not True):
+            raise ValueError('Device memory boundary safety evidence missing')
     if len(row['diagnostics'])!=2: raise ValueError('Missing per-rank memory diagnostics')
     for sample in row['diagnostics']:
         if (sample['events']!=8 or sample['particles']!=17 or sample['precision']!='fp32'
@@ -208,7 +214,8 @@ def review(output):
     gpus = row['gpus']
     if (len(gpus)!=2 or {g['rank'] for g in gpus}!={0,1}
             or len({(g['name'],g['total_memory']) for g in gpus})!=1
-            or any('A100' not in g['name'] or not 0<g['peak_allocated']<.9*g['total_memory'] for g in gpus)):
+            or any('A100' not in g['name'] or not 0<g['peak_allocated']<.9*g['total_memory']
+                   or not g['peak_allocated']<=g.get('peak_reserved',0)<=g['total_memory'] for g in gpus)):
         raise ValueError('Two matching A100s with 10% allocation headroom required')
     val = row['validation']
     if (val['events'] != POLICY['validation_events'] or not positive(val['seconds'])
@@ -230,6 +237,7 @@ def review(output):
                 fixed128_inference_jets_per_second=256*20/inference['seconds'],
                 fixed128_batch1_latency_ms=1000*inference['batch1_seconds']/100,
                 peak_allocated_gib=max(g['peak_allocated'] for g in gpus)/1024**3,
+                peak_reserved_gib=max(g['peak_reserved'] for g in gpus)/1024**3,
                 projected_train_hours=train/3600,projected_validation_hours=validation/3600,
                 projected_checkpoint_hours=checkpoint/3600,
                 recommended_train_hours=math.ceil(1.30*(train+validation+checkpoint)/3600),

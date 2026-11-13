@@ -125,6 +125,53 @@ def compare(a, b, *, gradient=False, distributed=False):
     torch.testing.assert_close(a,b,rtol=rtol,atol=atol)
 
 
+def boundary_safety(device):
+    """Run masking/lifetime/precision/overflow assertions on the actual device."""
+    seed_everything(101)
+    base=M.build_model(trim=False).to(device).eval();active(base)
+    values,_=B.tensors(B.fixed_batch(2,9),device)
+    values[-1][1,:,-3:]=False
+    snapshots=[]
+    def record(_module,_args,result):
+        memory=result[2]
+        if memory is not None:snapshots.append(memory.detach())
+    handles=[s.register_forward_hook(record) for s in M.states(base)]
+    try:
+        with torch.no_grad(),model_precision(base,device,training=device.type=='cuda'):
+            base(*values)
+        if len(snapshots)!=7:raise ValueError('Expected seven memory boundaries')
+        for memory in snapshots:
+            if (memory.dtype!=torch.float32 or not memory.isfinite().all()
+                    or memory.abs().max()>1.000001
+                    or memory[1,-3:].count_nonzero() or memory[1,:,-3:].count_nonzero()):
+                raise ValueError('Invalid carried-memory precision/bounds/mask')
+        if torch.allclose(snapshots[0],snapshots[0].transpose(1,2)):
+            raise ValueError('Pair memory unexpectedly symmetric')
+        if not snapshots[0][:,0,0].count_nonzero():raise ValueError('Valid self memory disappeared')
+    finally:
+        for h in handles:h.remove()
+        snapshots.clear()
+    with torch.no_grad(),model_precision(base,device,training=False):
+        expected=base(*values)
+        perm=torch.tensor([8,2,4,0,1,3,5,7,6],device=device)
+        compare(base(*(v[:,:,perm] for v in values)),expected)
+        base(*(v[:1,:,:1] for v in values))
+        compare(base(*values),expected)
+        writer=M.states(base)[2].memory_writer
+        saved=writer.bias.detach().clone();writer.bias.fill_(float('inf'))
+        try:
+            try:base(*values)
+            except FloatingPointError:pass
+            else:raise ValueError('Bounded tanh concealed writer overflow')
+        finally:writer.bias.copy_(saved)
+        compare(base(*values),expected)
+    if (base._state_pair_cache.normalized is not None
+            or any(b.attn._bias is not None or b.attn.attention._relation_stem is not None for b in base.mod.blocks)):
+        raise ValueError('Forward context leaked after exception')
+    return dict(kind='boundaries_masks_lifetime',passed=True,boundaries=7,
+                memory_precision='fp32',overflow_rejected=True,padding_and_permutation=True)
+
+
 def correctness(device, rank, world):
     """Identity, active chunk backward, and global-batch SyncBN/DDP oracle."""
     from part_ev_message_study.parity import initial_parity
@@ -137,7 +184,7 @@ def correctness(device, rank, world):
     del initial
     gc.collect(); torch.cuda.empty_cache()
     from .oracle import verify as recurrence_oracle
-    records = [attention_invariance(device),recurrence_oracle(device)]
+    records = [attention_invariance(device),recurrence_oracle(device),boundary_safety(device)]
     delayed=delayed_activation(device,rank,world)
     gc.collect(); torch.cuda.empty_cache()
     for kind in ('zero_identity','active_chunk'):

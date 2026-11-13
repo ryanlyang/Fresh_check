@@ -545,7 +545,8 @@ def test_setup_env_refuses_home_or_existing_environment(tmp_path):
         C.load_bundle = original
 
 
-def test_worker_relocated_and_cache_paths(tmp_path):
+@pytest.mark.parametrize('phase', ['evaluate', 'export-cpu'])
+def test_worker_relocated_and_cache_paths(tmp_path, phase):
     from tests.test_part_fullscale_launcher import BASH, shell_path
     if not BASH: pytest.skip('Bash unavailable')
     spool = tmp_path/'spool/slurm_script'
@@ -562,13 +563,14 @@ def test_worker_relocated_and_cache_paths(tmp_path):
         (output/name).mkdir(parents=True, exist_ok=True)
     binary = tmp_path/'bin/python'
     binary.parent.mkdir()
-    binary.write_text('#!/usr/bin/env bash\nset -eu\n[[ "$1" == -B && -f "$2" ]]\nprintf "%s\\n" "$@" "$TMPDIR" "$PYTHONNOUSERSITE" "$PYTHONDONTWRITEBYTECODE"\n', newline='\n')
+    binary.write_text('#!/usr/bin/env bash\nset -eu\n[[ "$1" == -B && -f "$2" ]]\nprintf "CUDA_VISIBLE_DEVICES=<%s>\\n" "${CUDA_VISIBLE_DEVICES-unset}"\nprintf "%s\\n" "$@" "$TMPDIR" "$PYTHONNOUSERSITE" "$PYTHONDONTWRITEBYTECODE"\n', newline='\n')
     binary.chmod(0o755)
     result = subprocess.run([BASH, '--noprofile', '--norc', '-c',
-                'export PATH="/usr/bin:/bin:$PATH"; exec bash "$@"', 'fixture',
+                'export PATH="/usr/bin:/bin:$PATH" CUDA_VISIBLE_DEVICES=0; exec bash "$@"', 'fixture',
                 shell_path(spool), '--python', shell_path(binary),
                 '--tool-root', shell_path(output/'source'), '--output', shell_path(output),
-                '--command', 'evaluate', '--model', 'state'], text=True, capture_output=True, timeout=30)
+                '--command', phase, '--model', 'state'], text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr
+    assert ('CUDA_VISIBLE_DEVICES=<>' if phase == 'export-cpu' else 'CUDA_VISIBLE_DEVICES=<0>') in result.stdout
     assert shell_path(tool) in result.stdout and shell_path(output/'tmp') in result.stdout
     assert result.stdout.endswith('1\n1\n')

@@ -16,7 +16,10 @@ while (($#)); do
 done
 [[ "$python_bin" == /* && -x "$python_bin" && "$tool_root" == /* && "$output" == /* ]] || exit 2
 [[ -f "$tool_root/scripts/part_ev_oscar.py" && -d "$output" ]] || exit 2
-case "$phase" in export-model|prepare|parity|evaluate|metrics|report) ;; *) exit 2 ;; esac
+case "$phase" in export-model|export-cpu|prepare|parity|evaluate|metrics|report) ;; *) exit 2 ;; esac
+if [[ "$phase" == export-cpu ]]; then
+  export CUDA_VISIBLE_DEVICES=""
+fi
 unset PYTHONPATH RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1

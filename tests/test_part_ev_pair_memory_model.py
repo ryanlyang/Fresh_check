@@ -134,6 +134,38 @@ def test_overflow_before_saturation_is_detected():
     assert not s.write(o,memory,pair)[3]
 
 
+def test_projection_autocast_but_memory_and_gate_fp32():
+    # CPU autocast exercises cast boundaries; CUDA FP16 is separately benchmarked.
+    m=make(trim=False);s=M.states(m)[1]
+    o=torch.randn(2,3,3,32);pair=torch.ones(2,3,3,dtype=torch.bool);memory=torch.rand_like(o)
+    seen=[];hook=s.memory_writer.register_forward_hook(lambda _,args,out:seen.append(out.dtype))
+    with torch.autocast('cpu',dtype=torch.bfloat16):updated,candidate,gate,ok=s.write(o,memory,pair)
+    hook.remove()
+    assert seen==[torch.bfloat16] and ok
+    assert updated.dtype==candidate.dtype==gate.dtype==torch.float32
+
+
+def test_health_error_is_not_hidden_by_zero_reader():
+    m=make(trim=False);values,y=data()
+    with torch.no_grad():M.states(m)[2].memory_writer.bias.fill_(float('inf'))
+    with pytest.raises(FloatingPointError,match='preactivation'):m(*values)
+    assert m._state_pair_cache.normalized is None
+    assert all(b.attn._bias is None for b in m.mod.blocks)
+
+
+def test_two_outstanding_training_forwards_and_eval_interleaving():
+    m=make(trim=False,chunk=4);active(m);oracle=make(trim=False,chunk=128,checkpointed=False)
+    oracle.load_state_dict(m.state_dict());values,y=data(11);grads=[]
+    for target in (m,oracle):
+        target.train();seed_everything(516);a=target(*values)
+        target.eval()
+        with torch.no_grad():target(*(v[:1,:,:1] for v in values))
+        target.train();b=target(*values)
+        (F.cross_entropy(a,y)+F.cross_entropy(b,y)).backward()
+        grads.append({n:p.grad.clone() for n,p in target.named_parameters()})
+    for name,g in grads[0].items():torch.testing.assert_close(g,grads[1][name],rtol=1e-4,atol=1e-5)
+
+
 def test_permutation_padding_single_particle_empty_and_lifetime(monkeypatch):
     m=make(trim=False).eval();active(m);values,_=data();perm=torch.randperm(9)
     keys=set(m.state_dict());padded=[v.clone() for v in values]

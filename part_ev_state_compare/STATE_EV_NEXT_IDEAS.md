@@ -1,7 +1,7 @@
 # Three extensions of all-eight layerwise State-EV
 
-Recorded: 2026-11-13. Research-plan index; attention-bias and relation-state
-multiplication models/benchmarks implemented as separate campaigns.
+Recorded: 2026-11-13. Research-plan index; all three models/benchmarks implemented
+as separate campaigns. GPU admission and production remain separate steps.
 
 ## Separate idea documents
 
@@ -9,7 +9,7 @@ multiplication models/benchmarks implemented as separate campaigns.
 | --- | --- | --- |
 | State-conditioned physics attention bias | [Attention-bias plan](STATE_CONDITIONED_ATTENTION_BIAS_PLAN.md) | [Independent model and SPORC benchmark](../part_ev_state_bias/README.md); GPU evidence pending |
 | Explicit relation-state multiplication | [Multiplication plan](RELATION_STATE_MULTIPLICATION_PLAN.md) | [Independent model and SPORC benchmark](../part_ev_state_multiply/README.md); GPU evidence pending |
-| Evolving pair memory across layers | [Pair-memory plan](EVOLVING_PAIR_MEMORY_PLAN.md) | Detailed gated-memory design, implementation safeguards, and benchmark plan |
+| Evolving pair memory across layers | [Pair-memory plan](EVOLVING_PAIR_MEMORY_PLAN.md) | [Independent model and SPORC benchmark](../part_ev_pair_memory/README.md); GPU evidence pending |
 
 The detailed attention-bias section previously in this file has moved to its
 own document. No design decisions were changed by that move. Each extension is
@@ -105,6 +105,6 @@ automatically delete old artifacts.
 - [Existing layerwise physics-bias heads](../part_layerwise_screen/model.py)
 - [Two-GPU runtime of the reference](../part_ev_layerwise_ddp/README.md)
 
-These documents record the designs. The first two independent implementations
-are linked above; benchmark submission and production admission remain separate
-steps. Pair memory remains a plan, not part of either implemented model.
+These documents record the designs. All three independent implementations are
+linked above; benchmark submission and production admission remain separate
+steps. No experiment automatically combines these mechanisms.

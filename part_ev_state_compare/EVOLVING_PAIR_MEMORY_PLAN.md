@@ -1,7 +1,9 @@
 # Evolving pair memory across layers
 
 Recorded: 2026-11-13. Detailed first-design and implementation plan.
-Planning only: no production implementation, benchmark admission, or jobs.
+Model and independent SPORC benchmark implemented. GPU admission and accuracy
+remain unmeasured; no production jobs are submitted by this implementation.
+See [implementation and queue instructions](../part_ev_pair_memory/README.md).
 
 ## Recommendation and motivation
 
@@ -198,9 +200,9 @@ count as successful updates for the activation test.
 ## 7. Implementation boundaries and efficient execution
 
 Use a new experimental package and frozen campaign snapshot, provisionally
-`part_ev_pair_memory` / `STATE_MEMORY_EV_LAYERWISE`. These are proposed names,
-not existing launchable components. Leave current campaigns and installed
-Weaver sources untouched.
+`part_ev_pair_memory` / `STATE_MEMORY_EV_LAYERWISE`. These are now the independent
+implementation and run identifier. Current campaigns and installed Weaver
+sources remain untouched.
 
 Start from [the current model assembly](model.py),
 [FastStateMessage](../part_ev_state_speed/model.py),
@@ -315,8 +317,11 @@ Planning-stage sanity check: an in-memory CPU float64 toy on local PyTorch
 2.12.1 passed the 36,832-parameter count, zero readout, reader-first gradients,
 subsequent gradient coverage, bounded/masked memory, chunked forward/backward
 agreement, history sensitivity, and final-reader-to-first-writer gradient checks.
-This was **not** an integrated ParT test, checkpoint-recomputation test, CUDA/DDP
-benchmark, or accuracy experiment. Implement the above as persistent tests later.
+That planning check was **not** an integrated ParT test, checkpoint-recomputation
+test, CUDA/DDP benchmark, or accuracy experiment. The implementation now includes
+persistent dense-oracle, full-model gradient/lifetime, two-process Gloo recovery,
+protocol, and fake-Slurm tests. CUDA/AMP/SyncBatchNorm checks run in the queued
+benchmark; their results and classification performance are not yet established.
 
 ## 10. Diagnostics and benchmark-to-production path
 

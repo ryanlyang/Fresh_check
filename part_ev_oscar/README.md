@@ -20,11 +20,13 @@ per ROOT TTree. It never deletes or extracts anything.
 
 ## Isolation and scientific contract
 
-- All implementation files are new. Existing RIT evaluators are **read-only
-  dependencies**, copied into an independent tool snapshot. Each RIT export
-  uses the original frozen source, interpreter, environment/hardware admission,
-  selected-checkpoint audit, and all 50 validation records.
-- The two original campaigns must be inactive. Nothing is cancelled automatically.
+- Existing RIT evaluators are **read-only dependencies**, copied into an
+  independent tool snapshot. Each RIT export uses the original frozen source,
+  interpreter, CPU-readable environment and recorded hardware-admission checks,
+  selected-checkpoint audit, and all 50 validation records. No new GPU hardware
+  check or model inference runs on RIT; GPU parity is checked on Oscar.
+- The two original campaigns and the saved validation evaluation must be
+  inactive. Nothing is cancelled automatically.
 - Exports retain original provenance and checkpoint bytes, plus a portable
   tensor-only state dictionary (all parameters **and buffers**). Oscar loads
   that dictionary with `weights_only=True`. No optimizer/restart state or training
@@ -41,6 +43,12 @@ per ROOT TTree. It never deletes or extracts anything.
   `raw_entries` and `padding_context`. Extra context jets are preprocessed but
   **not scored**. All first-512 tensors, including masked padding, must still
   match the original full-file loader exactly.
+- Reference logits come from the **already completed full-5M GPU evaluation**,
+  not a CPU approximation. CPU export verifies all 50 prediction payload hashes
+  and sidecars per model, their selected checkpoint, FP32/batch-512 contract,
+  labels, coverage, and aggregate accuracy. It retains only the ten 512-event
+  logit slices. Missing, modified, or ambiguous references block export; there
+  is no automatic GPU fallback or relaxed parity tolerance.
 - Oscar processes the raw probes with the **same loader used for test inference**.
   Input tolerances are rtol=1e-6, atol=1e-6. Logit tolerances are rtol=1e-4,
   atol=2e-5, with maximum absolute error <=1e-3 and **zero probe argmax changes**.
@@ -63,7 +71,7 @@ per ROOT TTree. It never deletes or extracts anything.
 - Pulling later repo changes does not alter queued jobs: workers use explicit
   frozen `--tool-root` paths, including when Slurm runs its spool-directory copy.
 
-## 1. Export on SPORC (not Oscar)
+## 1. CPU-only export on SPORC (not Oscar)
 
 Commit/push the new files locally, then pull on RIT. Keep the original environment
 and source snapshots unchanged. The new source directory contains only the
@@ -73,16 +81,20 @@ explicit tool manifest; unrelated untracked research plans are not copied.
 cd /home/ryreu/atlas/Fresh_check
 git pull --ff-only
 
-export EV_EXPORT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_oscar_exports/test_pair_$(date -u +%Y%m%dT%H%M%SZ)"
+export EV_EXPORT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_oscar_exports/test_pair_cpu_$(date -u +%Y%m%dT%H%M%SZ)"
 
 python3 -B scripts/part_ev_oscar.py export-plan --output "$EV_EXPORT"
 python3 -B scripts/part_ev_oscar.py export-submit --output "$EV_EXPORT"
 ```
 
-`export-plan` is read-only. `export-submit` snapshots the tooling and submits two
-independent one-A100 jobs: `debug`, account `reu-aisocial`, 4 CPUs, 64 GiB, **2h**
-each. Use `--partition tier3` if needed. The worker uses each donor's recorded
-Python; the submitter itself only needs Python >=3.9. Default donors:
+`export-plan` is read-only and inspects metadata, not the 5M prediction payloads.
+Check that it reports two **CPU-only** jobs and the intended completed reference.
+`export-submit` snapshots the tooling and submits two independent jobs: `tier3`,
+account `reu-aisocial`, 4 CPUs, 64 GiB, **2h**, **zero GPUs** each. CPU jobs still
+wait for scheduler resources; the 2h limit is not a measured duration. Use
+`--cpu-partition debug` on both commands if appropriate for your allocation.
+`--gres` is rejected. The worker hides CUDA devices and uses each donor's
+recorded Python; the submitter itself only needs Python >=3.9. Default donors:
 
 ```
 part_ev_state_fullscale/state_full_20261024T185049Z
@@ -93,6 +105,25 @@ Paths are under `/home/ryreu/atlas/Fresh_check/checkpoints`. `--part`/`--state`
 can identify relocated original campaigns; the checkpoint/architecture checks
 remain mandatory. Original donor audits may still require original dataset
 metadata to be present on RIT; no such training-data dependency is transferred.
+
+The default reference discovery requires exactly one matching completed pair
+under `checkpoints/part_ev_rejection_eval`. If there are multiple candidates,
+identify the one from jobs **22082035/22082036**, then pass its exact directory
+with `--validation-results` to both `export-plan` and `export-submit`. For example:
+
+```bash
+EV_VALIDATION_LOG="$(find /home/ryreu/atlas/Fresh_check/checkpoints/part_ev_rejection_eval \
+  -maxdepth 3 -type f -name 'evrej_part_22082035.out' -print -quit)"
+if [[ -n "$EV_VALIDATION_LOG" ]]; then
+  EV_VALIDATION="$(dirname "$(dirname "$EV_VALIDATION_LOG")")"
+  python3 -B scripts/part_ev_oscar.py export-plan --output "$EV_EXPORT" \
+    --validation-results "$EV_VALIDATION"
+fi
+```
+
+This only inspects the plan. Add the same `--validation-results "$EV_VALIDATION"`
+argument to `export-submit` after checking it. Reference predictions and original
+ROOT validation files must still be present on RIT. They are read, never modified.
 
 After both exports complete:
 
@@ -106,7 +137,7 @@ Do not transfer an incomplete export. If submission itself was interrupted,
 jobs are inactive. An interrupted **partially written model export** is preserved
 for diagnosis and requires a fresh export directory; no recursive cleanup is done.
 
-### Recovery from the original 512-row export failure
+### Recovery from the original GPU export failure
 
 The original exporter could fail with `Validation ROOT slice changed
 preprocessing/order`: cutting to exactly 512 raw jets changed file-wide wrap
@@ -116,22 +147,12 @@ official loader, model, checkpoint, or equality/parity tolerances. Regression
 tests use nonconstant, variable-length constituents (constant fixtures had
 hidden the difference).
 
-After committing/pushing the fix and pulling on SPORC, use a **new** export root,
-not `export-resume` on the failed partially written bundle:
-
-```bash
-cd /home/ryreu/atlas/Fresh_check
-git pull --ff-only
-
-export EV_EXPORT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_oscar_exports/test_pair_wrapfix_$(date -u +%Y%m%dT%H%M%SZ)"
-
-python3 -B scripts/part_ev_oscar.py export-plan --output "$EV_EXPORT"
-python3 -B scripts/part_ev_oscar.py export-submit --output "$EV_EXPORT"
-```
-
-Wait for any old `evos_export_model_*` jobs to finish before queuing this pair.
-The old failed export, trained checkpoints, and unrelated queued jobs remain
-unchanged. Only finalize/transfer the new bundle after both new exports succeed.
+Use the CPU commands above with a **new** export root, not `export-resume` on
+the old GPU export or a partially written bundle. The new launcher does not
+convert an old frozen GPU plan in place. It does not need a replacement SPORC
+GPU job: the completed validation predictions supply the reference logits.
+The old export, trained checkpoints, saved evaluation, and unrelated queued
+jobs remain unchanged. Only finalize/transfer after both CPU exports succeed.
 
 ## 2. Transfer the complete bundle (WSL on your computer)
 
@@ -139,7 +160,7 @@ Replace the example export basename with the exact directory printed above.
 Keep the trailing slash on the source directory. Do not use `--delete`.
 
 ```bash
-EV_EXPORT_NAME="test_pair_REPLACE_WITH_EXPORTED_TIMESTAMP"
+EV_EXPORT_NAME="test_pair_cpu_REPLACE_WITH_EXPORTED_TIMESTAMP"
 LOCAL_BUNDLE="/mnt/c/Users/22rya/ComputerScience/CERN/a_download_checkpoints/oscar_test_pair/${EV_EXPORT_NAME}"
 mkdir -p -- "$LOCAL_BUNDLE"
 
@@ -159,6 +180,13 @@ Resume an interrupted transfer with the same command. Password/Duo stays
 interactive; no credentials are saved by these tools. The bundle has source,
 weights, metadata, and small validation probes, not the 100M training dataset.
 All transferred artifacts are rehashed before use on Oscar.
+
+The raw validation probes are already inside `rit_pair/part/probes/` and
+`rit_pair/state/probes/`, so this transfer puts them in **Oscar scratch too**.
+Do not upload the entire 5M validation set or its saved prediction files. Only
+their small audit metadata and selected logit slices are included. Context
+prefix sizes depend on constituent multiplicity; inspect the completed bundle
+with `du -sh -- "$EV_EXPORT"` on RIT before transferring.
 
 ## 3. New scratch environment on Oscar
 

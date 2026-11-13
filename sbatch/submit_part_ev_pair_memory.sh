@@ -69,16 +69,17 @@ if [[ "$mode" == prepare ]]; then
     scripts/run_part_ev_screen.py scripts/check_part_ev_screen_amp_recovery.py
     scripts/run_part_ev_pair_memory.py sbatch/submit_part_ev_pair_memory.sh sbatch/run_part_ev_pair_memory.sh)
   [[ -z "$(git -C "$memory_repo" status --porcelain -- "${paths[@]}")" ]] || fail 'Commit/push/pull relevant source before preparation'
-  for file in part_ev_pair_memory/model.py part_ev_pair_memory/benchmark.py part_ev_pair_memory/protocol.py scripts/run_part_ev_pair_memory.py sbatch/run_part_ev_pair_memory.sh; do
-    git -C "$memory_repo" cat-file -e "HEAD:$file" || fail 'Implementation must be committed in HEAD'
+  memory_commit="$(git -C "$memory_repo" rev-parse HEAD)"
+  for file in part_ev_pair_memory/model.py part_ev_pair_memory/benchmark.py part_ev_pair_memory/protocol.py part_ev_pair_memory/oracle.py scripts/run_part_ev_pair_memory.py sbatch/run_part_ev_pair_memory.sh; do
+    git -C "$memory_repo" cat-file -e "$memory_commit:$file" || fail 'Implementation must be committed in HEAD'
   done
   parent="$(dirname -- "$output")"
   [[ -d "$parent" ]] || mkdir -p -- "$parent"
   mkdir -- "$output"
   output="$(realpath -e -- "$output")"
   mkdir -- "$output/source" "$output/logs"
-  git -C "$memory_repo" rev-parse HEAD > "$output/source_commit.txt"
-  git -C "$memory_repo" archive HEAD | tar -xf - -C "$output/source"
+  printf '%s\n' "$memory_commit" > "$output/source_commit.txt"
+  git -C "$memory_repo" archive "$memory_commit" | tar -xf - -C "$output/source"
   "$memory_python" -B - "$output" "$reference" "$memory_python" "$account" "$partition" <<'PY'
 import hashlib,json,os,sys
 from pathlib import Path
