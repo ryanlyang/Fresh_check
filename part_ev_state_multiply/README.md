@@ -5,6 +5,10 @@ The model and benchmark are implemented. This launcher is **benchmark-only**:
 it does not submit production training, modify another campaign, install packages,
 or change the queued attention-bias experiment.
 
+For a completed, passed benchmark, use the separate
+[production launcher and queue instructions](../part_ev_state_production/README.md).
+The benchmark launcher itself remains unchanged and benchmark-only.
+
 ## Model and scientific contract
 
 The starting point is noncompact, standard-relations, all-eight layerwise

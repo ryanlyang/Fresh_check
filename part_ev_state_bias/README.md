@@ -4,6 +4,10 @@ Implements the independent [attention-bias plan](../part_ev_state_compare/STATE_
 The model is implemented; this launcher is **benchmark-only**, not production
 admission. Existing models, environments, data, snapshots, and jobs are unchanged.
 
+For a completed, passed benchmark, use the separate
+[production launcher and queue instructions](../part_ev_state_production/README.md).
+The benchmark launcher itself remains unchanged and benchmark-only.
+
 ## Model and frozen scientific contract
 
 - Noncompact standard-relations all-eight layerwise State-EV, state width 32.
