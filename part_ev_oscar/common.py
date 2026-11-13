@@ -106,6 +106,24 @@ def tree_hashes(root):
     return result
 
 
+def verify_probe_context(probe):
+    """Keep scored-event identity distinct from extra preprocessing context."""
+    raw = probe.get('raw_entries', 512)
+    if (probe['entry_start'] != 0 or probe['entry_stop'] != 512
+            or type(raw) is not int or raw < 512):
+        raise ValueError('Invalid validation probe event range')
+    if 'raw_entries' not in probe:
+        return  # Legacy bundles already proved exact 512-row preprocessing.
+    context = probe['padding_context']
+    if (context['policy'] != 'weaver_file_wrap_prefix_v1'
+            or context['target_entries'] != 512 or context['padded_length'] != 128
+            or context['raw_entries'] != raw
+            or type(context['original_entries']) is not int or context['original_entries'] < raw
+            or type(context['flattened_particles']) is not int or context['flattened_particles'] <= 0
+            or (context['flattened_particles'] < 512*128 and raw != context['original_entries'])):
+        raise ValueError('Insufficient or inconsistent validation padding context')
+
+
 @contextmanager
 def lock(path):
     """No persistent stale PID lock; Linux workers release this on termination."""
@@ -132,6 +150,8 @@ def load_bundle(root):
         if (model['parameters'] != COUNTS[key] or model['class_names'] != list(CLASSES)
                 or len(model['probes']) != 10 or model['environment'] != row['environment']):
             raise ValueError('Portable model protocol differs')
+        for probe in model['probes']:
+            verify_probe_context(probe)
         verify_files(root / key, model['files'])
     return row
 

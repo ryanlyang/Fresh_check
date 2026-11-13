@@ -150,6 +150,96 @@ def test_actual_preprocessing_matches_validation_slice_and_test_loader(tmp_path)
     assert np.array_equal(np.concatenate([b[1]['_label_'] for b in candidate]), reference[1]['_label_'])
 
 
+@pytest.mark.parametrize('events', [40, 600])
+def test_nonconstant_wrap_padding_context_roundtrip(tmp_path, events):
+    """Small files require their whole table; large files only a bounded prefix."""
+    import awkward as ak
+    import torch
+    import uproot
+    from part_ev_screen.data import finite_validation_loader
+    lengths = 2 + np.arange(events) % 10
+    varied = ak.unflatten(np.arange(lengths.sum(), dtype=np.float32)/10000 + .01, lengths)
+    arrays = {k: varied for k in ('part_px', 'part_py', 'part_pz', 'part_charge',
+        'part_isChargedHadron', 'part_isNeutralHadron', 'part_isPhoton', 'part_isElectron',
+        'part_isMuon', 'part_d0val', 'part_d0err', 'part_dzval', 'part_dzerr')}
+    arrays.update(part_energy=varied*3, part_deta=varied*.1, part_dphi=varied*.2)
+    for name in ('jet_pt', 'jet_eta', 'jet_phi', 'jet_energy', 'jet_nparticles',
+                 'jet_sdmass', 'jet_tau1', 'jet_tau2', 'jet_tau3', 'jet_tau4'):
+        arrays[name] = ak.Array(np.arange(events, dtype=np.float32) + 100)
+    for i, name in enumerate(C.CLASSES):
+        arrays['label_'+name] = ak.Array(np.full(events, int(i == 0), np.int32))
+    original = tmp_path/'ZJetsToNuNu_120.root'
+    with uproot.recreate(original) as f:
+        f.mktree('tree', {k: v.type.content for k, v in arrays.items()})
+        f['tree'].extend(arrays)
+    r = E.record(original, events)
+    reference = next(iter(finite_validation_loader({'splits': {'val': {'files': [r]}}}, r, batch_size=16)))
+    too_small = tmp_path/'old_probe.root'
+    E.write_probe_root(original, too_small, events=16)
+    old = next(iter(R.loader(E.record(too_small, 16), 16)))
+    assert torch.equal(reference[0]['pf_mask'], old[0]['pf_mask'])
+    valid = reference[0]['pf_mask'].bool().expand_as(reference[0]['pf_vectors'])
+    assert torch.equal(reference[0]['pf_vectors'][valid], old[0]['pf_vectors'][valid])
+    assert not torch.equal(reference[0]['pf_vectors'], old[0]['pf_vectors'])
+    with pytest.raises(ValueError, match='unequal values'):
+        E.assert_same_batch(reference, old)
+
+    probe = tmp_path/'context_probe.root'
+    context = E.write_context_probe(original, probe, events=16)
+    assert context['raw_entries'] > 16
+    assert context['raw_entries'] == events if events == 40 else context['raw_entries'] < events
+    pr = E.record(probe, context['raw_entries'])
+    restored = next(iter(finite_validation_loader({'splits': {'val': {'files': [pr]}}}, pr, batch_size=16)))
+    E.assert_same_batch(reference, restored)
+    actual = next(iter(R.loader(pr, 16)))
+    E.assert_same_batch(reference, actual)
+    # Real valid-slot changes are still rejected; no mask-only/tolerance bypass.
+    actual[0]['pf_vectors'][0, 0, 0] += 1
+    with pytest.raises(ValueError, match='pf_vectors'):
+        E.assert_same_batch(reference, actual)
+
+
+@pytest.mark.parametrize('limit', [None, 16])
+def test_forward_scores_only_probe_targets_but_all_test_events(monkeypatch, limit):
+    import torch
+    import part_ev_screen.precision as precision
+    seen = []
+    batches = []
+    for start in (0, 7, 14):
+        batch = {name: torch.arange(start, min(start+7, 19)).reshape(-1, 1, 1).float()
+                 for name in C.INPUTS}
+        batches.append((batch, {'_label_': torch.zeros(len(batch['pf_mask']), dtype=torch.int64)}))
+    monkeypatch.setattr(R, 'loader', lambda record, batch: iter(batches))
+    monkeypatch.setattr(precision, 'model_precision', lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(precision, 'audit_precision', lambda *_args, **_kwargs: nullcontext({'passed': True}))
+    def model(*values):
+        seen.extend(values[0].flatten().tolist())
+        return torch.zeros(len(values[0]), 10)
+    record = dict(num_entries=19, label=0)
+    scores, labels, _, inputs = R.forward_file(model, 'cpu', record, 7, capture=True, event_limit=limit)
+    expected = limit or 19
+    assert scores.shape == (expected, 10) and len(labels) == expected
+    assert seen == list(range(expected))
+    assert inputs['pf_mask'].flatten().tolist() == seen
+    if limit is None:
+        # Production still consumes and checks the full stream, never silently
+        # truncating an unexpected excess to the registered population size.
+        with pytest.raises(ValueError, match='prediction shape'):
+            R.forward_file(model, 'cpu', dict(num_entries=18, label=0), 7)
+
+
+@pytest.mark.parametrize('change', ['short', 'range', 'inconsistent', 'policy'])
+def test_bundle_rejects_bad_probe_padding_context(change):
+    probe = dict(entry_start=0, entry_stop=512, raw_entries=2048, padding_context=dict(
+        policy='weaver_file_wrap_prefix_v1', target_entries=512, padded_length=128,
+        raw_entries=2048, original_entries=100000, flattened_particles=65536))
+    if change == 'short': probe['padding_context']['flattened_particles'] = 100
+    if change == 'range': probe['entry_stop'] = 2048
+    if change == 'inconsistent': probe['padding_context']['raw_entries'] = 4096
+    if change == 'policy': probe['padding_context']['policy'] = 'ignore_padding'
+    with pytest.raises(ValueError): C.verify_probe_context(probe)
+
+
 def test_environment_tag_normalization_keeps_release_cuda_and_sources_strict(monkeypatch):
     expected = dict(python='3.10.21', architecture='x86_64', packages={'torch': '2.5.1'},
                     torch_cuda='12.4', weaver_sources={'model': 'abc'})
@@ -379,7 +469,11 @@ def test_export_to_relocated_bundle_and_independent_plan(tmp_path, monkeypatch):
     monkeypatch.setattr(E, 'donor_support', lambda: support)
     monkeypatch.setattr(C, 'lock', lambda _: nullcontext())
     monkeypatch.setattr(E, 'environment', lambda: {'python': '3.10.21', 'packages': {}})
-    monkeypatch.setattr(E, 'write_probe_root', lambda original, output: output.write_bytes(Path(original).read_bytes()))
+    def context_probe(original, output):
+        output.write_bytes(Path(original).read_bytes())
+        return dict(policy='weaver_file_wrap_prefix_v1', target_entries=512, padded_length=128,
+                    raw_entries=1024, original_entries=100000, flattened_particles=65536)
+    monkeypatch.setattr(E, 'write_context_probe', context_probe)
     monkeypatch.setattr(torch.cuda, 'get_device_name', lambda *_: 'mock export GPU')
 
     class Model(torch.nn.Module):

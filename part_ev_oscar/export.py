@@ -71,6 +71,71 @@ def write_probe_root(original, output, events=512):
             raise ValueError('Probe TTree roundtrip failed')
 
 
+def write_context_probe(original, output, events=512, padded_length=128):
+    """Preserve Weaver's file-wide wrap-padding prefix for the target events.
+
+    _repeat_pad flattens the entire fetched table before tiling/reshaping it.
+    The first N padded jets therefore need the first N*L constituent values,
+    not just the constituents belonging to the first N jets. Retain a prefix
+    containing that many particles (or the entire original file if shorter).
+    Context jets are preprocessing inputs only, never extra parity predictions.
+    """
+    import awkward as ak
+    import numpy as np
+    import uproot
+    if type(events) is not int or events <= 0 or type(padded_length) is not int or padded_length <= 0:
+        raise ValueError('Positive integer probe events and padded length required')
+    needed = events * padded_length
+    with uproot.open(original) as f:
+        tree = f['tree']
+        total = int(tree.num_entries)
+        if total < events:
+            raise ValueError('Original validation file is shorter than the parity probe')
+        read_stop = events
+        while True:
+            energies = tree['part_energy'].array(entry_start=0, entry_stop=read_stop, library='ak')
+            counts = ak.to_numpy(ak.num(energies, axis=1)).astype(np.int64)
+            cumulative = np.cumsum(counts)
+            if cumulative[-1] >= needed:
+                raw_entries = max(events, int(np.searchsorted(cumulative, needed)) + 1)
+                break
+            if read_stop == total:
+                raw_entries = total
+                break
+            read_stop = min(total, read_stop * 2)
+        if cumulative[-1] == 0:
+            raise ValueError('Cannot reproduce wrap padding from an empty constituent population')
+        # All official per-particle fields must share these offsets. Reject a
+        # malformed file rather than guessing context for mismatched branches.
+        arrays = tree.arrays(entry_start=0, entry_stop=raw_entries, library='ak', how=dict)
+        for name, values in arrays.items():
+            if name.startswith('part_') and (values.ndim != 2 or not np.array_equal(
+                    ak.to_numpy(ak.num(values, axis=1)), counts[:raw_entries])):
+                raise ValueError(f'Inconsistent validation constituent lengths: {name}')
+    write_probe_root(original, output, events=raw_entries)
+    return dict(policy='weaver_file_wrap_prefix_v1', target_entries=events,
+                padded_length=padded_length, raw_entries=raw_entries,
+                original_entries=total, flattened_particles=int(cumulative[raw_entries-1]))
+
+
+def assert_same_batch(original, sliced):
+    """Exact comparison, with actionable field-level diagnostics on failure."""
+    import torch
+    for group, (expected, actual) in enumerate(zip(original[:2], sliced[:2])):
+        if expected.keys() != actual.keys():
+            raise ValueError(f'Validation ROOT slice changed fields in group {group}')
+        for name in expected:
+            a, b = expected[name], actual[name]
+            if a.dtype != b.dtype or a.shape != b.shape:
+                raise ValueError(f'Validation ROOT slice changed {name}: '
+                                 f'{tuple(a.shape)}/{a.dtype} vs {tuple(b.shape)}/{b.dtype}')
+            if not torch.equal(a, b):
+                differences = int(torch.count_nonzero(a != b).item())
+                raise ValueError('Validation ROOT slice changed preprocessing/order: '
+                                 f'{name}, {differences}/{a.numel()} unequal values; '
+                                 'exact equality is required, including padding')
+
+
 def record(path, events):
     path = Path(path).resolve()
     stat = path.stat()
@@ -132,14 +197,11 @@ def export_model(output, key):
             if len(labels) != 512:
                 raise ValueError('Reference probe must be one full 512-event batch')
             probe_path = directory/'probes'/original['name']
-            write_probe_root(original['path'], probe_path)
-            r = record(probe_path, 512)
+            context = write_context_probe(original['path'], probe_path)
+            r = record(probe_path, context['raw_entries'])
             inv = {'splits': {'val': {'files': [r]}}}
             roundtrip = next(iter(D.finite_validation_loader(inv, r)))
-            for mapping_a, mapping_b in zip(first[:2], roundtrip[:2]):
-                if mapping_a.keys() != mapping_b.keys() or any(
-                        not torch.equal(mapping_a[k], mapping_b[k]) for k in mapping_a):
-                    raise ValueError('Validation ROOT slice changed preprocessing/order')
+            assert_same_batch(first, roundtrip)
             tensors = {name: value.detach().cpu().numpy().copy()
                        for name, value in zip(C.INPUTS, values)}
             with torch.no_grad(), D.model_precision(model, device, training=False), \
@@ -151,8 +213,10 @@ def export_model(output, key):
             D.atomic_npz(reference, logits=logits, labels=truth, **tensors)
             probes.append(dict(root='probes/'+probe_path.name, reference='probes/'+reference.name,
                                original_name=original['name'], original_sha256=C.sha(original['path']),
-                               entry_start=0, entry_stop=512, label=C.PREFIXES[prefix], precision=audit))
-            print(f'{key}: exported validation probe {prefix} ({len(probes)}/10)', flush=True)
+                               entry_start=0, entry_stop=512, raw_entries=context['raw_entries'],
+                               padding_context=context, label=C.PREFIXES[prefix], precision=audit))
+            print(f"{key}: exported validation probe {prefix} ({len(probes)}/10); "
+                  f"512 scored jets, {context['raw_entries']} raw context jets", flush=True)
         S.verify_pins(donor)
         S.verify_frozen_source(donor)
         files = C.tree_hashes(directory)
@@ -183,8 +247,9 @@ def finalize(output):
         raise ValueError('Donor dependency environments differ; needs explicit compatibility investigation')
     p, s = models['part']['probes'], models['state']['probes']
     if len(p) != 10 or len(s) != 10 or any(
-            (a['original_name'], a['original_sha256'], a['entry_stop']) !=
-            (b['original_name'], b['original_sha256'], b['entry_stop']) for a, b in zip(p, s)):
+            (a['original_name'], a['original_sha256'], a['entry_stop'], a.get('raw_entries', 512), a.get('padding_context')) !=
+            (b['original_name'], b['original_sha256'], b['entry_stop'], b.get('raw_entries', 512), b.get('padding_context'))
+            for a, b in zip(p, s)):
         raise ValueError('Donor validation probes do not identify the same events')
     row = C.seal(dict(schema=C.SCHEMA, class_names=list(C.CLASSES),
                      tools=plan['tools'], environment=models['part']['environment'],

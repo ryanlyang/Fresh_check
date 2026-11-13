@@ -32,9 +32,15 @@ per ROOT TTree. It never deletes or extracts anything.
   RIT jobs: they contain executable model source, not untrusted downloads.
 - Each model has its own frozen donor source tree. One model is loaded per fresh
   process, so historical Python namespaces cannot collide.
-- RIT exports 512 validation events from each class (5,120 total), small raw TTree
-  slices, exact preprocessed inputs, labels, and FP32 logits. It checks that the
-  ROOT slice reproduces the original validation preprocessing exactly.
+- RIT exports 512 **scored** validation events from each class (5,120 total),
+  raw TTree prefixes with padding context, exact preprocessed inputs, labels,
+  and FP32 logits. Weaver's `wrap` padding tiles the constituent values of the
+  whole fetched file, not each jet independently. Each prefix therefore retains
+  at least the first `512 * 128` constituent values (or the whole original file
+  if shorter), even if that requires more than 512 raw jets. The manifest records
+  `raw_entries` and `padding_context`. Extra context jets are preprocessed but
+  **not scored**. All first-512 tensors, including masked padding, must still
+  match the original full-file loader exactly.
 - Oscar processes the raw probes with the **same loader used for test inference**.
   Input tolerances are rtol=1e-6, atol=1e-6. Logit tolerances are rtol=1e-4,
   atol=2e-5, with maximum absolute error <=1e-3 and **zero probe argmax changes**.
@@ -99,6 +105,33 @@ Do not transfer an incomplete export. If submission itself was interrupted,
 `export-resume --output "$EV_EXPORT"` submits missing exports once all recorded
 jobs are inactive. An interrupted **partially written model export** is preserved
 for diagnosis and requires a fresh export directory; no recursive cleanup is done.
+
+### Recovery from the original 512-row export failure
+
+The original exporter could fail with `Validation ROOT slice changed
+preprocessing/order`: cutting to exactly 512 raw jets changed file-wide wrap
+padding. This was an export-probe bug, not evidence of changed model weights.
+The corrected exporter preserves the context above; it does not modify the
+official loader, model, checkpoint, or equality/parity tolerances. Regression
+tests use nonconstant, variable-length constituents (constant fixtures had
+hidden the difference).
+
+After committing/pushing the fix and pulling on SPORC, use a **new** export root,
+not `export-resume` on the failed partially written bundle:
+
+```bash
+cd /home/ryreu/atlas/Fresh_check
+git pull --ff-only
+
+export EV_EXPORT="/home/ryreu/atlas/Fresh_check/checkpoints/part_ev_oscar_exports/test_pair_wrapfix_$(date -u +%Y%m%dT%H%M%SZ)"
+
+python3 -B scripts/part_ev_oscar.py export-plan --output "$EV_EXPORT"
+python3 -B scripts/part_ev_oscar.py export-submit --output "$EV_EXPORT"
+```
+
+Wait for any old `evos_export_model_*` jobs to finish before queuing this pair.
+The old failed export, trained checkpoints, and unrelated queued jobs remain
+unchanged. Only finalize/transfer the new bundle after both new exports succeed.
 
 ## 2. Transfer the complete bundle (WSL on your computer)
 

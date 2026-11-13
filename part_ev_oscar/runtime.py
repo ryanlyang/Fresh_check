@@ -201,30 +201,40 @@ def loader(file_record, batch_size):
     return result
 
 
-def forward_file(model, device, file_record, batch_size, *, capture=False):
+def forward_file(model, device, file_record, batch_size, *, capture=False, event_limit=None):
     import numpy as np
     import torch
     from part_ev_screen.precision import model_precision, audit_precision
+    events = file_record['num_entries'] if event_limit is None else event_limit
+    if type(events) is not int or not 0 < events <= file_record['num_entries']:
+        raise ValueError('Invalid scored event limit for raw file')
     scores, labels, inputs = [], [], {name: [] for name in C.INPUTS}
     precision = None
+    consumed = 0
     with torch.no_grad(), model_precision(model, device, training=False):
         for i, batch in enumerate(loader(file_record, batch_size)):
             stopping()
-            values = [batch[0][name].to(device) for name in C.INPUTS]
+            take = len(batch[1]['_label_'])
+            if event_limit is not None:
+                take = min(events - consumed, take)
+            values = [batch[0][name][:take].to(device) for name in C.INPUTS]
             if capture:
                 for name in C.INPUTS:
-                    inputs[name].append(batch[0][name].numpy().copy())
+                    inputs[name].append(batch[0][name][:take].numpy().copy())
             audit = audit_precision(model, expected_dtype=torch.float32) if i == 0 else nullcontext()
             with audit as observed:
                 prediction = model(*values).float().cpu().numpy()
             if i == 0:
                 precision = observed
             scores.append(prediction)
-            labels.append(batch[1]['_label_'].numpy().astype(np.int64))
+            labels.append(batch[1]['_label_'][:take].numpy().astype(np.int64))
+            consumed += take
+            if event_limit is not None and consumed == events:
+                break
     if not scores or not precision or not precision['passed']:
         raise ValueError('Empty data or failed FP32 audit')
     logits, truth = np.concatenate(scores), np.concatenate(labels)
-    C.validate_arrays(logits, truth, file_record['num_entries'], file_record.get('label'))
+    C.validate_arrays(logits, truth, events, file_record.get('label'))
     return logits, truth, precision, {k: np.concatenate(v) for k, v in inputs.items()} if capture else {}
 
 
@@ -236,10 +246,13 @@ def probe(plan, key, model, device, manifest, runtime):
     torch.cuda.reset_peak_memory_stats(device)
     started = time.monotonic()
     for p in manifest['probes']:
-        r = record(directory/p['root'], 512)
+        # Load the context prefix as one table, but predict only the original
+        # 512 reference jets. The test path still predicts every file entry.
+        r = record(directory/p['root'], p.get('raw_entries', 512))
         r['label'] = p['label']
         t = time.monotonic()
-        logits, labels, precision, inputs = forward_file(model, device, r, plan['batch_size'], capture=True)
+        logits, labels, precision, inputs = forward_file(
+            model, device, r, plan['batch_size'], capture=True, event_limit=512)
         with np.load(directory/p['reference'], allow_pickle=False) as expected:
             checks = {name: C.comparison(inputs[name], expected[name], inputs=True) for name in C.INPUTS}
             checks['labels'] = dict(passed=bool(np.array_equal(labels, expected['labels'])))
