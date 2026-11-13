@@ -1,14 +1,14 @@
 # Three extensions of all-eight layerwise State-EV
 
-Recorded: 2026-11-13. Research-plan index; attention-bias model and benchmark
-implemented separately. No remote jobs submitted by this implementation.
+Recorded: 2026-11-13. Research-plan index; attention-bias and relation-state
+multiplication models/benchmarks implemented as separate campaigns.
 
 ## Separate idea documents
 
 | Idea | Document | Status |
 | --- | --- | --- |
 | State-conditioned physics attention bias | [Attention-bias plan](STATE_CONDITIONED_ATTENTION_BIAS_PLAN.md) | [Independent model and SPORC benchmark](../part_ev_state_bias/README.md); GPU evidence pending |
-| Explicit relation-state multiplication | [Multiplication plan](RELATION_STATE_MULTIPLICATION_PLAN.md) | Detailed first implementation and benchmark plan |
+| Explicit relation-state multiplication | [Multiplication plan](RELATION_STATE_MULTIPLICATION_PLAN.md) | [Independent model and SPORC benchmark](../part_ev_state_multiply/README.md); GPU evidence pending |
 | Evolving pair memory across layers | [Pair-memory plan](EVOLVING_PAIR_MEMORY_PLAN.md) | Detailed gated-memory design, implementation safeguards, and benchmark plan |
 
 The detailed attention-bias section previously in this file has moved to its
@@ -105,5 +105,6 @@ automatically delete old artifacts.
 - [Existing layerwise physics-bias heads](../part_layerwise_screen/model.py)
 - [Two-GPU runtime of the reference](../part_ev_layerwise_ddp/README.md)
 
-These documents record the designs. The attention-bias implementation is linked
-above; benchmark submission and production admission remain separate steps.
+These documents record the designs. The first two independent implementations
+are linked above; benchmark submission and production admission remain separate
+steps. Pair memory remains a plan, not part of either implemented model.

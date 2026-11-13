@@ -1,6 +1,9 @@
 # Explicit relation-state multiplication inside State-EV
 
-Recorded: 2026-11-13. Proposed first implementation; no code or jobs submitted.
+Recorded: 2026-11-13. Model and independent SPORC benchmark implemented in
+[`part_ev_state_multiply`](../part_ev_state_multiply/README.md). Queue/review
+commands are in that README. No remote jobs submitted by this implementation;
+production admission remains conditional on the new GPU measurements.
 
 ## Objective and fixed starting point
 
@@ -112,8 +115,7 @@ freeze the state output, or skip the gate computation when its weights are zero.
 Use a new experimental model/package and campaign snapshot. Compose the
 existing layerwise model and replace only its state-message modules with the
 extended implementation. Keep old model files, checkpoints, and frozen jobs
-unchanged. A provisional label is `STATE_MULTIPLY_EV_LAYERWISE`; it is not an
-implemented run ID yet.
+unchanged. The implemented run ID is `STATE_MULTIPLY_EV_LAYERWISE`.
 
 The relevant starting point is
 [FastStateMessage](../part_ev_state_speed/model.py), with its existing pair cache,
@@ -203,5 +205,11 @@ and the [state-conditioned attention-bias head](STATE_CONDITIONED_ATTENTION_BIAS
 Compare that combined model against each individual extension and the same
 control; improvement over the control alone would not establish synergy.
 
+The implementation evaluates new per-particle gate projections, tanh, product
+and residual addition in FP32 (FP64 for mathematical tests), after calculating
+the original `h` in its native operation order. Query chunks remain 64.
+See the linked README for exact numerical checks and execution scope.
+
 This document does not expand the [pair-memory plan](EVOLVING_PAIR_MEMORY_PLAN.md),
-implement code, change existing campaigns, or authorize job submissions.
+change existing campaigns, or itself submit jobs. The independent benchmark
+does not authorize production training automatically.
