@@ -152,3 +152,22 @@ will refuse otherwise.
 Interpretation: these are **single-seed validation results**, overlapping checkpoint
 selection, not independent test results. The training runtimes differ (one GPU/native
 BatchNorm versus two GPUs/SyncBatchNorm); the comparison does not isolate architecture.
+
+## Hlvqq at 99% and Tblv at 99.5% (no new inference)
+
+The original quick report computes only 30%/50%. For the conventional leptonic
+working points use the saved prediction chunks with this **read-only CPU** command:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  /home/ryreu/miniconda3/envs/part_ev_screen_sporc/bin/python -B \
+  scripts/inspect_part_ev_leptonic_rejection.py --output "$REJECTION_ROOT"
+```
+
+Run from the current repository after pulling this script; do not edit or recreate
+the completed evaluation snapshot. It verifies the frozen adapter, result identity,
+file/entry coverage, prediction and label hashes, and the balanced full-5M population
+for both models. It loads one chunk at a time, retains only the two channels' signal
+and QCD log odds, and prints rejection, relative change, and QCD acceptance counts.
+No Torch/model/checkpoint/ROOT-data loading, GPU, job submission, or report overwrite
+is involved. Hlvqq corresponds to `Hqql`; Tblv corresponds to `Tbl`.
