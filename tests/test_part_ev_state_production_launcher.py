@@ -100,6 +100,72 @@ def test_multiply_time_is_independent(setup,monkeypatch):
     assert '--time=120' in state['jobs'][1][0]
 
 
+def memory_evidence(evidence):
+    from part_ev_pair_memory.protocol import TASK,PARAMETERS,CONFIG
+    return dict(evidence,model_kind='memory',task=TASK,benchmark_sha256='memory-benchmark',
+        parameters={TASK['architecture']:PARAMETERS},model_config=CONFIG,
+        train_hours=372,evaluate_hours=4)
+
+
+def test_memory_submits_only_its_three_jobs_after_existing_chains(setup,monkeypatch):
+    from part_ev_state_multiply.protocol import TASK as MUL_TASK
+    repo,bias,args,state=setup
+    original=S.inspect(None).copy()
+    S.launch(S.parse(['--mode','submit','--reviewed',*args]))
+    multiply=bias.parent/'multiply'
+    monkeypatch.setattr(S,'inspect',lambda _:dict(original,model_kind='multiply',task=MUL_TASK,
+        benchmark_sha256='multiply-benchmark',train_hours=226,evaluate_hours=2))
+    S.launch(S.parse(['--mode','submit','--reviewed','--model','multiply',
+        '--benchmark',original['benchmark'],'--output',str(multiply)]))
+    state['live']='\n'.join(str(i) for i in range(1000,1006))
+    old={p:P.sha(p) for root in (bias,multiply) for p in root.rglob('*') if p.is_file()}
+    # Simulate a later committed pull in the live checkout, not old snapshots.
+    (repo/'part_ev_state_production/__init__.py').write_text('# newer production commit')
+    subprocess.run(['git','-C',str(repo),'add','.'],check=True,capture_output=True)
+    subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.invalid',
+        'commit','-m','new independent campaign'],check=True,capture_output=True)
+    memory=bias.parent/'memory'
+    monkeypatch.setattr(S,'inspect',lambda _:memory_evidence(original))
+    S.launch(S.parse(['--mode','submit','--reviewed','--model','memory',
+        '--benchmark',original['benchmark'],'--output',str(memory)]))
+    assert len(state['jobs'])==len(state['checks'])==9
+    train,_=state['jobs'][6];evaluate,_=state['jobs'][7];report,_=state['jobs'][8]
+    assert '--job-name=evstateprod_memory_train' in train
+    assert '--time=22320' in train and '--gres=gpu:a100:2' in train
+    assert '--mem=64G' in train and '--cpus-per-task=8' in train
+    assert not any(s.startswith(('--dependency','--array')) for s in train)
+    assert '--time=240' in evaluate and '--gres=gpu:a100:1' in evaluate
+    assert '--dependency=afterok:1006' in evaluate
+    assert '--time=60' in report and '--dependency=afterok:1007' in report
+    assert not any(s.startswith('--gres') for s in report)
+    assert old=={p:P.sha(p) for root in (bias,multiply) for p in root.rglob('*') if p.is_file()}
+    plan=P.checked(memory/'campaign.json')
+    assert plan['task']['run_id']=='STATE_MEMORY_EV_LAYERWISE'
+    assert plan['parameters']=={'state_pair_memory_layerwise':2364294}
+    assert plan['recipes'][plan['task']['recipe']]['total_steps']==1000000
+    assert plan['source']!=P.checked(bias/'campaign.json')['source']
+
+
+def test_memory_respects_partition_and_other_campaign_storage(setup,monkeypatch):
+    _,output,args,state=setup
+    original=S.inspect(None).copy()
+    S.launch(S.parse(['--mode','submit','--reviewed',*args]))
+    old={p:P.sha(p) for p in output.rglob('*') if p.is_file()}
+    memory=output.parent/'memory'
+    monkeypatch.setattr(S,'inspect',lambda _:memory_evidence(original))
+    arguments=['--mode','submit','--reviewed','--model','memory',
+        '--benchmark',original['benchmark'],'--output',str(memory)]
+    # Bias fits 14 days, but memory's measured requirement does not.
+    state['partition']='State=UP MaxTime=14-00:00:00'
+    with pytest.raises(ValueError,match='walltime'):S.launch(S.parse(arguments))
+    assert len(state['jobs'])==3 and not memory.exists()
+    state['partition']='State=UP MaxTime=20-00:00:00'
+    monkeypatch.setattr(shutil,'disk_usage',lambda _:SimpleNamespace(free=9*2**30))
+    with pytest.raises(OSError,match='aggregate'):S.launch(S.parse(arguments))
+    assert len(state['jobs'])==3 and not memory.exists()
+    assert old=={p:P.sha(p) for p in output.rglob('*') if p.is_file()}
+
+
 def test_active_duplicate_and_benchmark_owner_guard(setup):
     _,output,args,state=setup
     S.launch(S.parse(['--mode','submit','--reviewed',*args]))
@@ -171,17 +237,19 @@ def test_remaining_storage(tmp_path):
     assert S.remaining_storage(tmp_path,plan)==8*2**30-3
 
 
-def test_actual_benchmark_import_boundary_and_tamper(tmp_path):
+@pytest.mark.parametrize('kind',['bias','multiply','memory'])
+def test_actual_benchmark_import_boundary_and_tamper(tmp_path,kind):
     bench=tmp_path/'benchmark'; source=bench/'source'
-    (source/'part_ev_state_bias').mkdir(parents=True)
-    (source/'part_ev_state_bias/__init__.py').write_text('')
-    (source/'part_ev_state_bias/protocol.py').write_text('MARKER="frozen_science"\n')
+    package=source/P.PACKAGES[kind]
+    package.mkdir(parents=True)
+    (package/'__init__.py').write_text('')
+    (package/'protocol.py').write_text('MARKER="frozen_science"\n')
     P.write(bench/'source_manifest.json',P.inventory(source)); P.write(bench/'launch.json',{'python':sys.executable})
     program='\n'.join(['from part_ev_state_production.protocol import activate',
-        f'science=activate({str(bench)!r},"bias")','assert science.MARKER=="frozen_science"',
+        f'science=activate({str(bench)!r},{kind!r})','assert science.MARKER=="frozen_science"',
         f'assert science.__file__.startswith({str(source)!r})'])
     subprocess.run([sys.executable,'-B','-c',program],cwd=S.ROOT,check=True,capture_output=True)
-    (source/'part_ev_state_bias/protocol.py').write_text('MARKER="changed"\n')
+    (package/'protocol.py').write_text('MARKER="changed"\n')
     result=subprocess.run([sys.executable,'-B','-c',program],cwd=S.ROOT,capture_output=True,text=True)
     assert result.returncode and 'frozen source changed' in result.stderr
 
@@ -231,7 +299,9 @@ def test_dirty_production_refused(setup):
 
 
 def test_no_new_benchmark_or_test_or_segment_phases():
-    assert not any('memory' in x for x in P.FILES)
+    # Scientific implementation remains in the benchmark snapshot; the small
+    # production snapshot contains orchestration only, not a new model copy.
+    assert not any('pair_memory/' in x for x in P.FILES)
     script=(S.ROOT/'sbatch/run_part_ev_state_production.sh').read_text()
     assert '--nproc-per-node=2' in script and '--max-restarts=0' in script
     assert 'trap ' in script and 'EVPROD_STOP_FILE' in script

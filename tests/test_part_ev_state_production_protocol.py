@@ -9,7 +9,7 @@ import pytest
 from part_ev_state_production import protocol as P
 
 
-@pytest.fixture(params=['bias','multiply'])
+@pytest.fixture(params=['bias','multiply','memory'])
 def admitted(request,tmp_path,monkeypatch):
     kind=request.param
     science=importlib.import_module(P.PACKAGES[kind]+'.protocol')
@@ -85,7 +85,8 @@ def test_frozen_production_admission_rechecked(admitted,tmp_path,fault):
 def test_real_reported_walltimes_preserved():
     for train,val,ckpt,recommend,evaluate in (
         (205.8833917724971,30.603806885972315,.09225429535843432,308,4),
-        (157.4573128024996,16.017702139583385,.14510114207863808,226,2)):
+        (157.4573128024996,16.017702139583385,.14510114207863808,226,2),
+        (251.0837766313893,34.49662491472231,.09106525503098965,372,4)):
         row=dict(passed=True,complete=True,authorizes_training=False,projected_train_hours=train,
             projected_validation_hours=val,projected_checkpoint_hours=ckpt,
             recommended_train_hours=recommend,recommended_evaluate_hours=evaluate)
@@ -95,10 +96,26 @@ def test_real_reported_walltimes_preserved():
         with pytest.raises(ValueError):P.validate_review(row)
 
 
-def test_storage_accounts_for_all_candidates_and_atomic_restarts():
-    n=2329510;row=P.storage_budget(n)
+@pytest.mark.parametrize('n',[2329510,2343846,2364294])
+def test_storage_accounts_for_all_candidates_and_atomic_restarts(n):
+    row=P.storage_budget(n)
     assert row['weights_bytes']>=51*n*4
     assert row['restart_bytes']>=3*n*20
     assert row['predictions_bytes']>=5000000*44
     assert row['reserve_bytes']==4*2**30
     assert 6*2**30<row['required_free_bytes']<8*2**30
+
+
+@pytest.mark.parametrize('fault',['history','boundaries','writers','reserved'])
+def test_memory_production_keeps_memory_specific_benchmark_gates(tmp_path,monkeypatch,fault):
+    from part_ev_pair_memory import protocol as memory
+    from tests.test_part_ev_pair_memory_protocol import evidence,setup_review
+    row=evidence()
+    if fault=='history':row['correctness'][0]['checks'][-2]['final_reader_first_writer_gradient']=False
+    if fault=='boundaries':row['correctness'][0]['checks'][-1]['overflow_rejected']=False
+    if fault=='writers':row['correctness'][0]['delayed_activation']['all_writers_and_gates_updated']=False
+    if fault=='reserved':row['gpus'][0]['peak_reserved']=41*2**30
+    setup_review(tmp_path,monkeypatch,row)
+    monkeypatch.setattr(P,'activate',lambda *a:memory)
+    monkeypatch.setattr(memory,'verify_inventory_metadata',lambda _:None)
+    with pytest.raises(ValueError):P.inspect(tmp_path,'memory')

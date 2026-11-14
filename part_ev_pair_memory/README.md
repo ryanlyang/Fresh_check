@@ -1,10 +1,18 @@
 # Evolving pair memory: independent SPORC benchmark
 
 Implements the [pair-memory plan](../part_ev_state_compare/EVOLVING_PAIR_MEMORY_PLAN.md).
-The model and benchmark are implemented; **GPU feasibility and accuracy are not
-established**. This launcher never submits production, changes another campaign,
+The November 13 two-A100 benchmark and its summary (jobs 22089090 / 22089091)
+passed the feasibility gates. **Classification gains are not yet established.**
+This benchmark launcher never submits production, changes another campaign,
 installs packages, or cancels jobs. The attention-bias and multiplication arms
 remain separate.
+
+Production is a separate, opt-in launcher: see
+[pair-memory-only submission](../part_ev_state_production/README.md#queue-pair-memory-only-from-sporcsubmit).
+It reuses the authenticated passed benchmark without changing this model: one
+372-hour two-A100 training allocation, then four-hour one-A100 full-validation
+evaluation and a one-hour CPU report. No new benchmark, test-set evaluation, or
+three-day segment chain is submitted.
 
 ## Model contract
 

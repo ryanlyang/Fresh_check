@@ -9,7 +9,8 @@ import sys
 import tempfile
 
 SCHEMA = 'state_extensions_production_v1'
-PACKAGES = {'bias':'part_ev_state_bias', 'multiply':'part_ev_state_multiply'}
+PACKAGES = {'bias':'part_ev_state_bias', 'multiply':'part_ev_state_multiply',
+            'memory':'part_ev_pair_memory'}
 FILES = (
     'part_ev_state_production/__init__.py', 'part_ev_state_production/protocol.py',
     'part_ev_state_production/engine.py', 'scripts/run_part_ev_state_production.py',
