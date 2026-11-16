@@ -1,7 +1,13 @@
 # Sparse triangle-aware updates on full Layerwise State-EV
 
 Recorded: 2026-11-16. Detailed first-design and implementation plan.
-**Status: proposed; no model, benchmark, or production submission implemented.**
+**Status: model and independent SPORC benchmark implemented; queue-ready.**
+See [implementation and queue instructions](../part_ev_triangles/README.md).
+No jobs submitted by the implementation; GPU admission and accuracy remain
+unmeasured. Production is intentionally not implemented yet. The learning
+probe uses eight successful Ranger updates to cross early rectification and
+Lookahead before checking every new matrix has changed; the model and recipe
+remain as specified below.
 
 This specifies idea B in the
 [three-addition overview](STATE_EV_READOUT_TRIANGLE_SUPPORT_PLAN.md).

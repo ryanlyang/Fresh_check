@@ -1,10 +1,11 @@
 # Three additions to full all-eight Layerwise State-EV
 
 Recorded: 2026-11-16. Research and implementation-design plan only.
-The pair-readout arm now has an [independent implementation and benchmark
-launcher](../part_ev_pair_readout/README.md). GPU admission and accuracy remain
-unmeasured; no jobs were queued by that implementation. The other two arms
-remain design plans.
+The pair-readout arm has an [independent implementation and benchmark
+launcher](../part_ev_pair_readout/README.md). The triangle arm now also has an
+[independent implementation and benchmark launcher](../part_ev_triangles/README.md).
+These implementations do not establish GPU admission or accuracy gains and did
+not submit jobs. The support-aware arm remains a design plan.
 
 Detailed implementation plans:
 
@@ -13,7 +14,7 @@ Detailed implementation plans:
 - Idea C: [Support-aware aggregation](SUPPORT_AWARE_AGGREGATION_PLAN.md).
 
 They fix initialization, precision, integration, tests, and admission details.
-Only idea A has been implemented so far; ideas B and C remain documentation only.
+Ideas A and B have benchmark implementations; idea C remains documentation only.
 
 ## 1. The starting point: yes, all three build on Layerwise State-EV
 
