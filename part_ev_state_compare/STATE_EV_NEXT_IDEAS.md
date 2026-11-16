@@ -108,3 +108,27 @@ automatically delete old artifacts.
 These documents record the designs. All three independent implementations are
 linked above; benchmark submission and production admission remain separate
 steps. No experiment automatically combines these mechanisms.
+
+## Further proposed additions (2026-11-16)
+
+[Pair readout, sparse triangle messages, and support-aware aggregation](STATE_EV_READOUT_TRIANGLE_SUPPORT_PLAN.md)
+are three additional, independent ideas on top of the same full all-eight
+Layerwise State-EV base. That document covers mechanisms, accuracy hypotheses,
+compute tradeoffs, and implementation/evaluation requirements. They are distinct
+from the three earlier extensions listed at the top of this index.
+
+The [direct pair-to-classifier readout implementation plan](DIRECT_PAIR_CLASSIFIER_READOUT_PLAN.md)
+specifies the first addition in detail. Its [independent model and SPORC
+benchmark launcher](../part_ev_pair_readout/README.md) are implemented and locally
+tested. GPU admission and accuracy remain unmeasured; no production submission.
+
+The [triangle-aware updates implementation plan](TRIANGLE_AWARE_UPDATES_PLAN.md)
+specifies the second addition, including directed pair mixing, order-independent
+cutoff ties, bounded-memory execution, and benchmark requirements. It is also
+documentation only; no new model or jobs have been implemented or submitted.
+
+The [support-aware aggregation implementation plan](SUPPORT_AWARE_AGGREGATION_PLAN.md)
+specifies the third addition: learned content and soft support statistics in all
+eight particle blocks, with exact masks, zero-output initialization, memory and
+precision contracts, multiplicity controls, and independent benchmark gates.
+It is documentation only; its implementation and launcher are still future work.
