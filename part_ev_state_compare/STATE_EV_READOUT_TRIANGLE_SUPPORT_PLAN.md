@@ -5,7 +5,9 @@ The pair-readout arm has an [independent implementation and benchmark
 launcher](../part_ev_pair_readout/README.md). The triangle arm now also has an
 [independent implementation and benchmark launcher](../part_ev_triangles/README.md).
 These implementations do not establish GPU admission or accuracy gains and did
-not submit jobs. The support-aware arm remains a design plan.
+not submit jobs. The support-aware arm also has an
+[independent implementation and benchmark launcher](../part_ev_support/README.md),
+without GPU admission or established accuracy gains.
 
 Detailed implementation plans:
 
@@ -14,7 +16,8 @@ Detailed implementation plans:
 - Idea C: [Support-aware aggregation](SUPPORT_AWARE_AGGREGATION_PLAN.md).
 
 They fix initialization, precision, integration, tests, and admission details.
-Ideas A and B have benchmark implementations; idea C remains documentation only.
+All three ideas have independent benchmark implementations; none is combined
+with the others in these first experiments.
 
 ## 1. The starting point: yes, all three build on Layerwise State-EV
 

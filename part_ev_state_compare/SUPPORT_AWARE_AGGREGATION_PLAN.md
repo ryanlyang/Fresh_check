@@ -1,7 +1,10 @@
 # Support-aware aggregation on full Layerwise State-EV
 
 Recorded: 2026-11-16. Detailed first-design and implementation plan.
-**Status: proposed; no implementation, benchmark, or production submission yet.**
+**Status: implemented; independent SPORC benchmark queue-ready.**
+See [implementation and queue instructions](../part_ev_support/README.md).
+No jobs were submitted by this implementation. GPU admission, classification
+gains and the later production launcher remain separate work.
 
 This specifies idea C in the
 [three-addition overview](STATE_EV_READOUT_TRIANGLE_SUPPORT_PLAN.md).
@@ -631,7 +634,7 @@ finite-evaluation uncertainty from variation across training seeds.
 
 ## 11. Independent benchmark and admission requirements
 
-Proposed deliverables, not currently available commands:
+Implemented benchmark deliverables (including aggregation, oracle and diagnostic helpers):
 
 ```text
 part_ev_support/{model,protocol,benchmark}.py
