@@ -72,7 +72,7 @@ def request(output,launch,phase,dependency=None):
     row=['sbatch','--parsable','--job-name=evtri_'+phase,'--partition='+launch['partition'],
         '--account='+launch['account'],'--nodes=1','--ntasks=1',
         '--cpus-per-task='+('2' if phase=='summary' else '8'),
-        '--mem='+('4G' if phase=='summary' else '64G'),'--time='+str(P.MINUTES[phase]),
+        '--mem='+str(P.HOST_MEMORY_GIB[phase])+'G','--time='+str(P.MINUTES[phase]),
         '--output='+str(output/'logs/%x_%j.out'),'--error='+str(output/'logs/%x_%j.err'),
         '--export=ALL','--kill-on-invalid-dep=yes']
     if phase=='benchmark':row+=['--gres=gpu:a100:2','--signal=USR1@900']
@@ -115,6 +115,7 @@ def freeze(a):
     P.write_json(a.output/'source_manifest.json',manifest)
     row=dict(schema=P.SCHEMA,output=str(a.output),repo=str(ROOT),reference=str(a.reference),
         python=a.python,account=a.account,partition=a.partition,commit=commit,minutes=P.MINUTES,
+        host_memory_gib=P.HOST_MEMORY_GIB,
         nccl_environment={k:v for k,v in os.environ.items() if k.startswith('NCCL_')},
         source_sha256=P.digest(manifest),output_budget_bytes=P.BUDGET_BYTES,authorizes_training=False)
     row['content_hash']=P.digest(row)
@@ -135,6 +136,7 @@ def launch(a):
     P.reference(a.reference)
     print(f'Triangle-aware State-EV: {P.PARAMETERS:,} parameters; unchanged full 1M-update/50-check recipe.')
     print('Prepare 2h CPU; benchmark 5h30m on two same-node A100s; summary 15m CPU. No production.')
+    print('Host RAM: prepare 64 GiB; benchmark 128 GiB; summary 4 GiB. Profiling only: at most 2 jets / 32 particles per rank.')
     if a.mode=='plan':
         print('Read-only. Submission will check aggregate headroom and live Slurm limits.');return
     for tool in ('git','sbatch','scontrol'):

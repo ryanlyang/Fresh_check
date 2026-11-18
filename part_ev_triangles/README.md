@@ -91,7 +91,7 @@ loaded. Fresh seed 101, original full Ranger recipe, global batch 512:
 | Phase | Walltime limit | Resources | Dependency |
 | --- | --- | --- | --- |
 | `evtri_prepare` | 2 h | CPU, 8 CPUs / 64 GiB | None |
-| `evtri_benchmark` | 5 h 30 min | **Two same-node A100s**, 8 CPUs / 64 GiB | Successful prepare |
+| `evtri_benchmark` | 5 h 30 min | **Two same-node A100s**, 8 CPUs / 128 GiB | Successful prepare |
 | `evtri_summary` | 15 min | CPU, 2 CPUs / 4 GiB | Benchmark terminates |
 
 All checks stay below six hours. The measurement deadline is five hours;
@@ -145,10 +145,20 @@ pair caches or profiler traces.
    sensitivity, zero-denominator fraction and all ten new gradient norms.
 10. Aggregate profiler records for geometry/packing, state/factor projection,
     ordinary gather/mixing, tie fallback and output projection. Train and
-    validation profiles run separately from sustained timings. Nested scopes
+    validation profiles run separately from sustained timings, on at most
+    **2 jets / 32 particles per rank**, one forward/backward (or eval forward).
+    Only this diagnostic sample is reduced; the full-size tests in items 5,
+    6 and 8 are unchanged. Both ranks still participate in training profiles.
+    Original and sampled shapes and the diagnostic-only policy are saved;
+    these small-sample times must not be used as full-batch throughput or
+    memory estimates. Native trimming is disabled only during each profile;
+    modes, RNG/trimmer counters and buffers are restored afterward. Nested scopes
     are inclusive; tile/factor scopes include checkpoint recomputation and
-    must not simply be summed with their parent scopes. Host RSS is the peak
-    per training process, **not** a measurement of the entire job plus workers.
+    must not simply be summed with their parent scopes. Each profile logs its
+    start/end (or failure), current/peak process RSS and rank. Event histories
+    are released immediately. Training loader workers are shut down as soon
+    as the sustained real-data training measurement finishes. Host RSS is
+    per training process, **not** the entire job plus workers.
 
 Baseline is measured first and candidate second with separate deterministic
 loaders and matching initial rank-batch hashes. Cold fetch times and ordering
@@ -160,6 +170,17 @@ Full-training projection includes all 50 checks of 1.28M validation events and
 checkpoint writes, plus 30% margin; queue delays and restart replay are excluded.
 
 ## Review
+
+The 2026-11-18 retry requests 128 GiB host RAM for the benchmark (prepare and
+summary remain 64/4 GiB). It bounds diagnostic profiling and releases idle
+training workers. The preceding 64-GiB failure occurred after the full-size
+all-ties training test; profiling is the leading suspect, not a proven exact
+allocation site. The new profile-stage logs help distinguish future failures.
+No model, training batch, stress-test size, step budget or GPU gate is relaxed.
+
+Commit/push/pull, then use the queue block above with a **fresh output directory**.
+Old source snapshots, job requests and benchmark evidence are not modified;
+this retry has not yet been validated on the cluster.
 
 Use the exact printed path:
 

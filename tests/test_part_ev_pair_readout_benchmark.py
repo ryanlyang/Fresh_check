@@ -14,6 +14,39 @@ from part_ev_screen.precision import model_precision
 from tests.test_part_fullscale_model import bounded_cpu_threads
 
 
+def particle_trace():
+    values,_=C.B.tensors(C.B.fixed_batch(2,5),torch.device('cpu'))
+    return dict(inputs=C.cpu_copy(values),trimmed=[(*C.cpu_copy(values[1:]),None)],
+        padding_masks=[~values[-1].squeeze(1) for _ in range(8)],
+        attention=[(torch.zeros(5,2,128),torch.ones(2,8,5,5)/5) for _ in range(8)],
+        rng=capture_rank_state(torch.nn.Identity()))
+
+
+def test_particle_path_accepts_only_declared_fp32_roundoff():
+    reference=particle_trace();candidate=copy.deepcopy(reference)
+    candidate['attention'][3][0].add_(1.7881393432617188e-7)
+    row=C.compare_particle_paths(reference,candidate)
+    assert row['passed'] and row['exact_inputs_masks_trimming_rng']
+    assert row['forward_atol']==1e-6 and row['forward_rtol']==1e-5
+    assert row['block_max_abs_difference'][3]==pytest.approx(1.7881393432617188e-7)
+    candidate['attention'][3][0].add_(1e-3)
+    with pytest.raises(AssertionError,match='Particle block 3'):
+        C.compare_particle_paths(reference,candidate)
+
+
+@pytest.mark.parametrize('field',['inputs','trimmed','padding_masks','rng','calls','nonfinite'])
+def test_particle_path_keeps_exact_invariants(field):
+    reference=particle_trace();candidate=copy.deepcopy(reference)
+    if field=='inputs':candidate['inputs'][0].add_(1e-7)
+    if field=='trimmed':candidate['trimmed'][0][0].add_(1e-7)
+    if field=='padding_masks':candidate['padding_masks'][0].logical_not_()
+    if field=='rng':candidate['rng']['torch'][0]^=1
+    if field=='calls':candidate['attention'].pop()
+    if field=='nonfinite':candidate['attention'][0][0].fill_(float('nan'))
+    with pytest.raises((AssertionError,ValueError)):
+        C.compare_particle_paths(reference,candidate)
+
+
 def test_dense_pair_projection_fusion_input_and_all_parameter_gradients():
     """Independent dense softmax, rather than merely using one chunk."""
     seed_everything(177)

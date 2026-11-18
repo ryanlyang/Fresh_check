@@ -143,6 +143,18 @@ cannot be inferred from disposable benchmark losses.
 
 ## Review and failure handling
 
+The 2026-11-18 retry fixes the native particle-path diagnostic: computed
+attention outputs/weights use the already-declared FP32 tolerances
+(`rtol=1e-5`, `atol=1e-6`), not bitwise equality. Raw inputs, trimmed inputs,
+padding masks, shared parameter values, RNG/trimmer state and native call
+counts remain exact checks. Per-block absolute differences are reported;
+nonfinite values, larger discrepancies and all existing gradient/AMP/restart
+gates still fail. This changes benchmark checks, not the model or recipe.
+
+After committing/pushing/pulling the fix, use the queue block above with a
+**fresh output directory**. Do not edit or reuse the failed campaign's snapshot.
+Existing queued jobs retain their frozen code and resource requests.
+
 Use the exact path printed on submission:
 
 ```bash

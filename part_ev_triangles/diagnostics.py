@@ -1,8 +1,13 @@
 """Small detached reports; no pair caches or profiler traces persisted."""
+import gc
+import json
+import os
+from pathlib import Path
+import sys
 import time
 import torch
 from torch.nn import functional as F
-from . import model as M
+from . import model as M, protocol as P
 from part_ev_gpu_scaling import benchmark as B
 from part_ev_fullscale.checkpoint import capture_rank_state,restore_rank_state
 from part_ev_screen.precision import model_precision
@@ -73,30 +78,80 @@ def diagnostic_sample(base,values,device):
         restore_rank_state(base,rng)
 
 
-def stage_profile(base,wrapped,values,truth,device,deadline,*,training=True):
-    """Separate from throughput. Restore buffers/RNG; do not step the optimizer."""
+def host_memory():
+    """Per-process RSS, not the whole Slurm job or its data-loader workers."""
+    row = dict(pid=os.getpid(), scope='process_only_excludes_workers',
+               rss_bytes=None, peak_rss_bytes=None)
+    status = Path('/proc/self/status')
+    if sys.platform.startswith('linux') and status.is_file():
+        for line in status.read_text().splitlines():
+            fields = line.split()
+            if fields and fields[0] in ('VmRSS:', 'VmHWM:'):
+                row['rss_bytes' if fields[0] == 'VmRSS:' else 'peak_rss_bytes'] = int(fields[1])*1024
+    return row
+
+
+def profile_sample(values, truth):
+    """Bound trace event counts even for the all-ties fixture; never a speed estimate."""
+    source_events, source_particles = values[0].shape[0], values[0].shape[-1]
+    if (source_events < 1 or source_particles < 1 or len(truth) != source_events
+            or any(v.ndim != 3 or v.shape[0] != source_events or v.shape[-1] != source_particles for v in values)):
+        raise ValueError('Invalid profiling inputs')
+    events = min(source_events, P.PROFILE_POLICY['max_events'])
+    particles = min(source_particles, P.PROFILE_POLICY['max_particles'])
+    bounded = [v[:events, :, :particles].detach().clone().contiguous() for v in values]
+    if not bounded[-1].bool().any(-1).all():
+        raise ValueError('Profiling slice has an empty jet')
+    return bounded, truth[:events].detach().clone(), dict(source_events=source_events,
+        source_particles=source_particles, events=events, particles=particles)
+
+
+def stage_profile(base,wrapped,values,truth,device,deadline,*,training=True,label='diagnostic'):
+    """One bounded diagnostic forward/backward, separate from full-size admission.
+
+    Both DDP ranks must participate in training profiles (including SyncBN).
+    Only inference profiles may run on rank zero alone. No optimizer step.
+    """
     if B.STOP or time.monotonic()>=deadline:raise TimeoutError('Profiling budget exhausted')
+    values,truth,sample=profile_sample(values,truth)
+    sample['training']=training
+    before=host_memory()
+    def log(phase, memory):
+        print(json.dumps(dict(stage='triangle_profile',label=label,phase=phase,
+            rank=int(os.environ.get('RANK',0)),sample=sample,policy=P.PROFILE_POLICY,
+            host_memory=memory)),flush=True)
+    log('start',before)
     rng=capture_rank_state(base);flags=[(m,m.training) for m in base.modules()]
     buffers={n:b.detach().clone() for n,b in base.named_buffers()}
     trims=[(m,m.enabled) for m in base.modules() if type(m).__name__=='SequenceTrimmer']
     activities=[torch.profiler.ProfilerActivity.CPU]
     if device.type=='cuda':activities.append(torch.profiler.ProfilerActivity.CUDA)
+    complete=False;prof=None
     try:
         base.train(training);base.zero_grad(set_to_none=True)
-        for m,_ in trims:m.enabled=True
+        # The bounds describe the actual profiled tensor; no stochastic trimming.
+        for m,_ in trims:m.enabled=False
         with torch.profiler.profile(activities=activities,record_shapes=False,profile_memory=False,with_stack=False) as prof:
             with torch.set_grad_enabled(training),model_precision(base,device,training=training):
                 prediction=wrapped(*values);loss=F.cross_entropy(prediction,truth)
             if training:loss.backward()
             if device.type=='cuda':torch.cuda.synchronize(device)
         if not prediction.isfinite().all():raise ValueError('Nonfinite profiling forward')
-        return {event.key:dict(calls=event.count,cpu_us=float(event.cpu_time_total),
+        stages = {event.key:dict(calls=event.count,cpu_us=float(event.cpu_time_total),
                               device_us=float(getattr(event,'device_time_total',0)))
                 for event in prof.key_averages() if event.key.startswith('triangles.')}
+        complete=True
     finally:
+        # Do not keep an event history alive through restart/validation/inference.
+        del prof
+        gc.collect()
         with torch.no_grad():
             for n,b in base.named_buffers():b.copy_(buffers[n])
         base.zero_grad(set_to_none=True)
         for m,v in flags:m.training=v
         for m,v in trims:m.enabled=v
         restore_rank_state(base,rng)
+        after=host_memory()
+        log('complete' if complete else 'failed',after)
+    return dict(policy=dict(P.PROFILE_POLICY),sample=sample,stages=stages,
+                host_memory=dict(before=before,after=after))

@@ -14,13 +14,16 @@ SCHEMA = 'part_ev_triangles_benchmark_v1'
 TASK = dict(run_id='TRIANGLE_STATE_EV_LAYERWISE', architecture='state_triangles_layerwise',
             recipe='ranger_full_v1', seed=101)
 MINUTES = dict(prepare=120, benchmark=330, summary=15)
+HOST_MEMORY_GIB = dict(prepare=64, benchmark=128, summary=4)
+PROFILE_POLICY = dict(max_events=2, max_particles=32, iterations=1,
+                      native_trimming=False, diagnostic_only=True)
 POLICY = dict(world_size=2, global_batch=512, local_batch=256, workers_per_rank=1,
     validation_workers=2, validation_batch=512, validation_events=128000,
     warmup=20, measured=4200, window=1000, fixed_warmup=10, fixed_steps=40,
     restart_steps=7, delayed_successful_updates=8, delayed_max_attempts=20,
     max_seconds=18000, memory_fraction=.9, max_skip_fraction=.05, planning_margin=1.3,
     checkpoint_interval=1000, training_precision='fp16', validation_precision='fp32',
-    batchnorm='SyncBatchNorm', authorizes_training=False)
+    batchnorm='SyncBatchNorm', profiling=PROFILE_POLICY, authorizes_training=False)
 PARITY = dict(forward_rtol=1e-5, forward_atol=1e-6, gradient_rtol=1e-4, gradient_atol=1e-5,
               ddp_forward_rtol=5e-4, ddp_gradient_rtol=2e-3, ddp_atol=2e-5,
               amp_forward_rtol=2e-3, amp_forward_atol=2e-3,
@@ -61,7 +64,10 @@ def launch_config(output):
     if (launch.get('schema') != SCHEMA or launch.get('output') != str(output)
             or launch.get('authorizes_training') is not False
             or launch.get('output_budget_bytes') != BUDGET_BYTES
-            or launch.get('minutes') != MINUTES):
+            or launch.get('minutes') != MINUTES
+            # Older manifests omitted RAM. Still allow the live launcher to
+            # dispatch read-only review to their unchanged frozen source.
+            or launch.get('host_memory_gib',HOST_MEMORY_GIB) != HOST_MEMORY_GIB):
         raise ValueError('Frozen launch identity changed')
     source_hash = verify_snapshot(output)
     if launch['source_sha256'] != source_hash: raise ValueError('Launch/source mismatch')
@@ -214,7 +220,25 @@ def summarize(spec, row):
         raise ValueError('Missing phase timing evidence')
     for profile in profiles:
         for kind in ('real_train','adversarial_train',*(['real_validation'] if profile['rank']==0 else [])):
-            p=profile[kind]
+            entry=profile[kind]
+            if entry.get('policy')!=PROFILE_POLICY:
+                raise ValueError('Missing bounded diagnostic profiling policy')
+            sample=entry.get('sample',{})
+            if (any(type(sample.get(k)) is not int or sample[k]<1
+                    for k in ('events','particles','source_events','source_particles'))
+                    or sample['events']!=min(sample['source_events'],PROFILE_POLICY['max_events'])
+                    or sample['particles']!=min(sample['source_particles'],PROFILE_POLICY['max_particles'])
+                    or sample.get('training') is not (kind!='real_validation')
+                    or (kind=='adversarial_train' and (sample['source_events'],sample['source_particles'])!=(256,128))):
+                raise ValueError('Invalid bounded profiling sample')
+            memory=entry.get('host_memory',{})
+            for phase in ('before','after'):
+                m=memory.get(phase,{})
+                if (m.get('scope')!='process_only_excludes_workers'
+                        or type(m.get('pid')) is not int or m['pid']<1
+                        or not positive(m.get('rss_bytes')) or not positive(m.get('peak_rss_bytes'))):
+                    raise ValueError('Missing profiling process memory evidence')
+            p=entry['stages']
             required=PROFILE_STAGES if kind=='adversarial_train' else PROFILE_STAGES-{'triangles.tied_tile'}
             if (not required.issubset(p) or not set(p).issubset(PROFILE_STAGES)
                     or any(not positive(v['cpu_us']) or v['calls']<1

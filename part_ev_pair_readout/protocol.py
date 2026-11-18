@@ -139,6 +139,16 @@ def summarize(spec, row):
                    or any(c['passed'] is not True for c in r['checks']) for r in checks)):
         raise ValueError('Incomplete correctness evidence')
     for rank in checks:
+        path=next(c for c in rank['checks'] if c['kind']=='unchanged_particle_path')
+        if (path.get('attention_calls')!=8 or path.get('trimmer_calls')!=1
+                or path.get('exact_inputs_masks_trimming_rng') is not True
+                or path.get('exact_base_parameters') is not True
+                or path.get('forward_rtol')!=PARITY['forward_rtol']
+                or path.get('forward_atol')!=PARITY['forward_atol']
+                or len(path.get('block_max_abs_difference',[]))!=8
+                or any(type(v) not in (int,float) or not math.isfinite(v) or v<0
+                       for v in path['block_max_abs_difference'])):
+            raise ValueError('Missing audited native particle-path parity')
         delayed = rank['delayed_activation']
         if (delayed.get('passed') is not True or delayed['successful_updates'] != 3
                 or not 3 <= delayed['attempts'] <= 20 or delayed['skips'] != delayed['attempts']-3

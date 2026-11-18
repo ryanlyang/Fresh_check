@@ -229,6 +229,10 @@ def measure_arm(output,spec,rank,world,device,deadline,*,baseline=False):
         stream=B.measure(base,model,optimizer,scaler,
             lambda i:B.tensors(first if i==0 else next(iterator),device),spec['recipe'],device,world,
             20,4200,deadline,label=label+'_stream')
+        # All real-data training is finished. Release prefetched host buffers
+        # and workers before synthetic stress tests and diagnostic profiling.
+        shutdown_loader(loader)
+        del iterator
         if stats:stats.phase=None
         for m in base.modules():
             if type(m).__name__=='SequenceTrimmer':m.enabled=False
@@ -245,8 +249,8 @@ def measure_arm(output,spec,rank,world,device,deadline,*,baseline=False):
             # Stage profiling is separate from the sustained performance measurement.
             real_values,real_truth=B.tensors(first,device)
             result['profiles']=B.gather(dict(rank=rank,
-                real_train=stage_profile(base,model,real_values,real_truth,device,deadline),
-                adversarial_train=stage_profile(base,model,tied_values,tied_truth,device,deadline)),world)
+                real_train=stage_profile(base,model,real_values,real_truth,device,deadline,label='real_train'),
+                adversarial_train=stage_profile(base,model,tied_values,tied_truth,device,deadline,label='adversarial_train')),world)
             del tied_values,tied_truth,real_values,real_truth
             for m in base.modules():
                 if type(m).__name__=='SequenceTrimmer':m.enabled=True
@@ -269,7 +273,7 @@ def measure_arm(output,spec,rank,world,device,deadline,*,baseline=False):
             if metric is None:raise TimeoutError('Validation interrupted')
             def validation_profile():
                 v,y=B.tensors(val_first[0],device)
-                return stage_profile(base,base,v,y,device,deadline,training=False)
+                return stage_profile(base,base,v,y,device,deadline,training=False,label='real_validation')
             profile=root_call(validation_profile,rank,world)
             result['profiles'][0]['real_validation']=profile
             val_first.clear()

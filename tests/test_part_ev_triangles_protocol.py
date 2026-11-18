@@ -45,11 +45,16 @@ def evidence():
     hist=[0]*128;hist[127]=100
     neighbors=dict(histogram=hist,receivers=100,tie_fraction=1.,mean_weight_mass=8.,maximum_support=127)
     stages={k:dict(cpu_us=1.,device_us=1.,calls=2) for k in P.PROFILE_STAGES}
+    def profile(training):
+        memory=dict(pid=101,scope='process_only_excludes_workers',rss_bytes=2**30,peak_rss_bytes=2**30)
+        return dict(stages=copy.deepcopy(stages),policy=copy.deepcopy(P.PROFILE_POLICY),
+            sample=dict(source_events=256,source_particles=128,events=2,particles=32,training=training),
+            host_memory=dict(before=copy.deepcopy(memory),after=copy.deepcopy(memory)))
     row.update(backend='sparse_tiled',adversarial_ties=measure(3),full128_tied_validation_passed=True,
         neighbor_statistics=[dict(rank=r,train=copy.deepcopy(neighbors),adversarial=copy.deepcopy(neighbors),
                                   validation=copy.deepcopy(neighbors)) for r in (0,1)],
-        profiles=[dict(rank=r,real_train=copy.deepcopy(stages),adversarial_train=copy.deepcopy(stages),
-                       real_validation=copy.deepcopy(stages)) for r in (0,1)],
+        profiles=[dict(rank=r,real_train=profile(True),adversarial_train=profile(True),
+                       real_validation=profile(False)) for r in (0,1)],
         host_peak_rss_bytes=[2**30,2**30])
     row['baseline_gpus']=copy.deepcopy(row['gpus'])
     row['baseline_inference']=copy.deepcopy(row['inference'])
@@ -92,7 +97,16 @@ def test_full_projection_and_ratios_never_production(tmp_path,monkeypatch):
     (('backend',),'dense_oracle'),(('full128_tied_validation_passed',),False),
     (('neighbor_statistics',0,'adversarial','maximum_support'),8),
     (('neighbor_statistics',1,'train','receivers'),0),
-    (('profiles',0,'real_train','triangles.tie_mix','calls'),0),
+    (('profiles',0,'real_train','stages','triangles.tie_mix','calls'),0),
+    (('profiles',0,'real_train','policy','max_events'),256),
+    (('profiles',0,'real_train','policy','diagnostic_only'),False),
+    (('profiles',0,'real_train','sample','events'),256),
+    (('profiles',0,'real_train','sample','particles'),128),
+    (('profiles',0,'real_train','sample','training'),False),
+    (('profiles',0,'adversarial_train','sample','source_particles'),32),
+    (('profiles',0,'real_validation','sample','training'),True),
+    (('profiles',1,'real_train','host_memory','before','rss_bytes'),None),
+    (('profiles',0,'real_train','host_memory','after','scope'),'whole_job'),
     (('host_peak_rss_bytes',0),0),
     (('triangle_gradient_norms',0,'0'),0.),(('checkpoint_seconds',),0),
 ])
@@ -123,7 +137,7 @@ def fixture_launch(output,donor,repo):
     manifest={'a.py':P.file_sha256(output/'source/a.py')}
     P.write_json(output/'source_manifest.json',manifest)
     launch=dict(schema=P.SCHEMA,output=str(output),repo=str(repo),reference=str(donor),python='unused',
-        minutes=P.MINUTES,source_sha256=P.digest(manifest),authorizes_training=False,
+        minutes=P.MINUTES,host_memory_gib=P.HOST_MEMORY_GIB,source_sha256=P.digest(manifest),authorizes_training=False,
         output_budget_bytes=P.BUDGET_BYTES,nccl_environment={})
     launch['content_hash']=P.digest(launch);P.write_json(output/'launch.json',launch)
     return launch
@@ -146,6 +160,25 @@ def test_prepare_load_and_inventory_independent(tmp_path,monkeypatch):
     with pytest.raises(FileExistsError):P.prepare(output)
     (output/'source/unexpected.py').write_text('extra')
     with pytest.raises(ValueError,match='source'):P.load(output)
+
+
+def test_old_launch_still_readable_for_frozen_review(tmp_path):
+    donor=tmp_path/'donor';donor.mkdir()
+    output=tmp_path/'old'
+    launch=fixture_launch(output,donor,tmp_path)
+    launch.pop('host_memory_gib');launch.pop('content_hash')
+    launch['content_hash']=P.digest(launch);P.write_json(output/'launch.json',launch)
+    assert P.launch_config(output)==launch
+
+
+def test_recorded_host_ram_mismatch_rejected(tmp_path):
+    donor=tmp_path/'donor';donor.mkdir()
+    output=tmp_path/'new'
+    launch=fixture_launch(output,donor,tmp_path)
+    launch['host_memory_gib']=dict(P.HOST_MEMORY_GIB,benchmark=64)
+    launch.pop('content_hash');launch['content_hash']=P.digest(launch)
+    P.write_json(output/'launch.json',launch)
+    with pytest.raises(ValueError,match='launch identity'):P.launch_config(output)
 
 
 def test_storage_aggregate_and_read_only(tmp_path,monkeypatch):

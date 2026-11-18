@@ -52,7 +52,9 @@ def test_independent_chain_and_frozen_snapshot(launcher):
     assert '--time=120' in jobs[0] and not any('--gres' in s for s in jobs[0])
     assert '--time=330' in jobs[1] and '--gres=gpu:a100:2' in jobs[1]
     assert '--nodes=1' in jobs[1] and '--ntasks=1' in jobs[1]
-    assert '--cpus-per-task=8' in jobs[1] and '--mem=64G' in jobs[1]
+    assert '--cpus-per-task=8' in jobs[1] and '--mem=128G' in jobs[1]
+    assert '--mem=64G' in jobs[0] and '--mem=4G' in jobs[2]
+    assert S.P.read_json(a.output/'launch.json')['host_memory_gib']==dict(prepare=64,benchmark=128,summary=4)
     assert '--dependency=afterok:101' in jobs[1] and '--dependency=afterany:102' in jobs[2]
     assert '--time=15' in jobs[2]
     assert (donor/'campaign.json').read_bytes()==before

@@ -46,6 +46,11 @@ def evidence():
             batchnorm='SyncBatchNorm',tf32=False,cudnn_benchmark=False,nccl_environment={}))
     row['baseline_gpus']=copy.deepcopy(row['gpus'])
     row['baseline_inference']=copy.deepcopy(row['inference'])
+    for rank in row['correctness']:
+        path=next(c for c in rank['checks'] if c['kind']=='unchanged_particle_path')
+        path.update(attention_calls=8,trimmer_calls=1,exact_inputs_masks_trimming_rng=True,
+                    exact_base_parameters=True,forward_rtol=P.PARITY['forward_rtol'],
+                    forward_atol=P.PARITY['forward_atol'],block_max_abs_difference=[0.]*8)
     return row
 
 
@@ -103,6 +108,19 @@ def test_missing_or_forged_report(tmp_path,monkeypatch):
     row=evidence();setup_review(tmp_path,monkeypatch,row)
     row['complete']=False;P.write_json(tmp_path/'benchmark.json',row)
     with pytest.raises(ValueError):P.review(tmp_path)
+
+
+@pytest.mark.parametrize('field,value',[
+    ('attention_calls',7),('trimmer_calls',2),('exact_inputs_masks_trimming_rng',False),
+    ('exact_base_parameters',False),('forward_atol',1e-3),('forward_rtol',1e-2),
+    ('block_max_abs_difference',[0.]*7),('block_max_abs_difference',[float('nan')]*8),
+])
+def test_particle_path_evidence_required(field,value):
+    row=evidence()
+    path=next(c for c in row['correctness'][0]['checks'] if c['kind']=='unchanged_particle_path')
+    path[field]=value
+    with pytest.raises(ValueError,match='particle-path'):
+        P.summarize(dict(content_hash='spec',launch=dict(nccl_environment={})),row)
 
 
 def fixture_launch(output,donor,repo):
