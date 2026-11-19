@@ -9,13 +9,14 @@ import pytest
 from part_ev_state_production import protocol as P
 
 
-@pytest.fixture(params=['bias','multiply','memory'])
+@pytest.fixture(params=list(P.PACKAGES))
 def admitted(request,tmp_path,monkeypatch):
     kind=request.param
     science=importlib.import_module(P.PACKAGES[kind]+'.protocol')
     fixture=importlib.import_module('tests.test_'+P.PACKAGES[kind]+'_protocol')
     spec=dict(content_hash='spec',task=science.TASK,recipe=science.recipes()['ranger_full_v1'],
         parameters=science.PARAMETERS,model=science.CONFIG,environment={'torch':'pinned'},
+        parameter_inventory_sha256='inventory',
         inventory={'splits':{}},launch=dict(nccl_environment={},python=sys.executable,account='reu-aisocial'))
     monkeypatch.setattr(P,'activate',lambda b,k:science)
     monkeypatch.setattr(science,'load',lambda *a,**kw:spec)

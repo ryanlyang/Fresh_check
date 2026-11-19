@@ -1,4 +1,15 @@
-# State-bias, relation–state multiplication and pair-memory production
+# State-extension production
+
+The original bias, multiplication and pair-memory chains below are unchanged.
+The same engine now also supports `--model readout`, `--model triangles` and
+`--model support`, using their own passed, frozen benchmarks. Readout/support
+GPU jobs request 64 GiB host RAM; triangle GPU jobs request 128 GiB. Their
+walltimes come from their respective benchmark recommendations, not the table
+of historical measurements below.
+
+To attach automatic production submission to the already queued benchmarks,
+see [benchmark follow-ups](../part_ev_benchmark_followup/README.md). No existing
+jobs need cancellation or replacement; the scientific setup stays frozen.
 
 Three independent full-schedule, seed-101 production options on SPORC `tier3`.
 Each uses its own already-passed benchmark's frozen model, preprocessing,

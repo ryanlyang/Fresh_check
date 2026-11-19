@@ -220,7 +220,8 @@ def test_deadline_and_slurm_marker_stop_without_shortening_recipe(tmp_path,monke
     assert spec_fixture()['recipes'][TASK['recipe']]['total_steps']==1_000_000
 
 
-@pytest.mark.parametrize('kind,count',[('bias',2329510),('multiply',2343846),('memory',2364294)])
+@pytest.mark.parametrize('kind,count',[('bias',2329510),('multiply',2343846),('memory',2364294),
+    ('readout',2349702),('triangles',2334662),('support',2384070)])
 def test_production_constructs_exact_benchmarked_model(kind,count):
     spec=spec_fixture();spec['model_kind']=kind
     base=E.build_model(spec)

@@ -237,7 +237,7 @@ def test_remaining_storage(tmp_path):
     assert S.remaining_storage(tmp_path,plan)==8*2**30-3
 
 
-@pytest.mark.parametrize('kind',['bias','multiply','memory'])
+@pytest.mark.parametrize('kind',list(P.PACKAGES))
 def test_actual_benchmark_import_boundary_and_tamper(tmp_path,kind):
     bench=tmp_path/'benchmark'; source=bench/'source'
     package=source/P.PACKAGES[kind]
@@ -306,3 +306,44 @@ def test_no_new_benchmark_or_test_or_segment_phases():
     assert '--nproc-per-node=2' in script and '--max-restarts=0' in script
     assert 'trap ' in script and 'EVPROD_STOP_FILE' in script
     assert 'exec "$evprod_python"' not in script  # batch shell owns warning signal
+
+
+@pytest.mark.parametrize('kind,memory',[('readout',64),('triangles',128),('support',64)])
+def test_new_models_resources(setup,monkeypatch,kind,memory):
+    _,output,args,state=setup
+    evidence=dict(S.inspect(None),model_kind=kind)
+    monkeypatch.setattr(S,'inspect',lambda _:evidence)
+    args[args.index('bias')]=kind
+    S.launch(S.parse(['--mode','submit','--reviewed',*args]))
+    assert len(state['jobs'])==3
+    assert f'--mem={memory}G' in state['jobs'][0][0]
+    assert f'--mem={memory}G' in state['jobs'][1][0]
+    assert '--mem=64G' in state['jobs'][2][0]
+
+
+def test_frozen_followup_production_survives_live_checkout_changes(setup,tmp_path):
+    repo,output,args,state=setup
+    pinned=tmp_path/'pinned'
+    for name in P.FILES:
+        path=pinned/name;path.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(repo/name,path)
+    manifest=P.inventory(pinned)
+    (repo/'part_ev_state_production/engine.py').write_text('# changed by later pull')
+    S.launch(S.parse(['--mode','submit','--reviewed',*args]),repo=repo,
+             frozen_source=dict(path=str(pinned),manifest=manifest,commit='pinned-commit'))
+    assert len(state['jobs'])==3
+    assert P.inventory(output/'source')==manifest
+    assert P.checked(output/'campaign.json')['commit']=='pinned-commit'
+
+
+def test_unfinished_benchmarks_count_toward_storage(setup):
+    repo,output,args,state=setup
+    evidence=S.inspect(None)
+    registry=output.parent
+    before=S.aggregate_storage(registry,output,evidence)
+    bench=repo/'checkpoints/part_ev_support/pending'
+    P.write(bench/'launch.json',P.hashed(dict(output_budget_bytes=2**30)))
+    expected=2**30-(bench/'launch.json').stat().st_size
+    assert S.aggregate_storage(registry,output,evidence)==before+expected
+    P.write(bench/'summary.json',{'passed':True})
+    assert S.aggregate_storage(registry,output,evidence)==before

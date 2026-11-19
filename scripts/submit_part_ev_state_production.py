@@ -73,7 +73,7 @@ def request(output,plan,phase,dependency=None):
     hours=P.REPORT_HOURS if phase=='report' else plan['train_hours' if phase=='train' else 'evaluate_hours']
     row=['sbatch','--parsable','--job-name=evstateprod_'+plan['model_kind']+'_'+phase,
         '--partition=tier3','--account='+plan['account'],'--nodes=1','--ntasks=1',
-        '--cpus-per-task=8','--mem=64G',f'--time={int(hours*60)}',
+        '--cpus-per-task=8',f"--mem={P.host_memory_gib(plan['model_kind'],phase)}G",f'--time={int(hours*60)}',
         '--output='+str(output/'logs/%x_%j.out'),'--error='+str(output/'logs/%x_%j.err'),
         '--export=ALL','--kill-on-invalid-dep=yes']
     if phase!='report':
@@ -112,12 +112,23 @@ def remaining_storage(output,plan):
     return reserve+max(0,storage['required_free_bytes']-reserve-used)
 
 
-def freeze(a,evidence):
+def freeze(a,evidence,*,frozen_source=None):
     if a.output.exists(): raise ValueError('Output exists; use explicit resume, never overwrite')
-    if command(['git','-C',ROOT,'status','--porcelain','--',*P.FILES]):
-        raise ValueError('Commit/push/pull production files before submission')
-    commit=command(['git','-C',ROOT,'rev-parse','HEAD'])
-    blobs={n:subprocess.check_output(['git','-C',str(ROOT),'show',f'{commit}:{n}']) for n in P.FILES}
+    if frozen_source is None:
+        if command(['git','-C',ROOT,'status','--porcelain','--',*P.FILES]):
+            raise ValueError('Commit/push/pull production files before submission')
+        commit=command(['git','-C',ROOT,'rev-parse','HEAD'])
+        blobs={n:subprocess.check_output(['git','-C',str(ROOT),'show',f'{commit}:{n}']) for n in P.FILES}
+    else:
+        # The automatic follow-up supplies its already-authenticated committed
+        # snapshot. Never read a future live checkout when a queued job starts.
+        source=Path(frozen_source['path'])
+        if P.inventory(source)!=frozen_source['manifest']:
+            raise ValueError('Follow-up source changed before production freeze')
+        if not set(P.FILES).issubset(frozen_source['manifest']):
+            raise ValueError('Follow-up lacks production source')
+        commit=frozen_source['commit']
+        blobs={n:(source/n).read_bytes() for n in P.FILES}
     a.output.parent.mkdir(parents=True,exist_ok=True)
     a.output.mkdir(); (a.output/'logs').mkdir()
     for name,blob in blobs.items():
@@ -163,16 +174,34 @@ def aggregate_storage(registry, output, plan):
         saved=P.checked(other/'campaign.json')
         if not (other/'reports/production_report.json').exists():
             required+=remaining_storage(other,saved)-saved['storage']['reserve_bytes']
+    # Outstanding related benchmark outputs also share this home quota.
+    # Existing bytes already reduce disk free; count only remaining budgets.
+    # The older bias/multiply/memory benchmark launchers have no registered
+    # output budget (their existing files are already reflected in disk free).
+    for family in ('part_ev_extensions_tigris','part_ev_pair_readout','part_ev_triangles','part_ev_support'):
+        for launch in (registry.parent/family).glob('*/launch.json'):
+            saved=P.checked(launch)
+            summary=launch.parent/'summary.json'
+            if summary.is_file() and P.read(summary).get('passed') is True: continue
+            used=sum(p.stat().st_size for p in launch.parent.rglob('*') if p.is_file() and not p.is_symlink())
+            required+=max(0,saved['output_budget_bytes']-used)
     return required+reserve
 
 
-def launch(a):
+def launch(a,*,repo=None,frozen_source=None,expected_evidence=None):
+    repo=ROOT if repo is None else Path(repo).resolve()
+    registry=repo/'checkpoints/part_ev_state_production'
+    if a.output==registry or not a.output.is_relative_to(registry):
+        raise ValueError('Production output outside registry')
     if a.mode in ('plan','submit'):
         evidence=inspect(a)
+        if expected_evidence is not None and evidence!=expected_evidence:
+            raise ValueError('Benchmark evidence changed during automatic admission')
         task=evidence['task'];recipe=evidence['recipes'][task['recipe']]
         print(task['run_id'],f"seed={task['seed']} updates={recipe['total_steps']:,} checks=50",
               f"train={evidence['train_hours']}h evaluate={evidence['evaluate_hours']}h report=1h")
-        print('Train: two same-node A100s. Evaluate: one A100. 8 CPUs / 64 GiB per job.')
+        print('Train: two same-node A100s. Evaluate: one A100. 8 CPUs;',
+              f"{P.host_memory_gib(evidence['model_kind'],'train')} GiB host RAM for GPU jobs; 64 GiB for report.")
         print('Required free GiB:',round(evidence['storage']['required_free_bytes']/2**30,2))
         if a.mode=='plan':
             print('Read-only. No files/jobs changed. Submission also checks other registered output budgets and Slurm.'); return
@@ -181,12 +210,14 @@ def launch(a):
         if a.mode=='status': print(json.dumps(worker_query(a.output,plan,'status'),indent=2)); return
     if platform.system()!='Linux' or platform.machine()!='x86_64':
         raise ValueError('Submit on SPORC, not Tigris/local Windows')
-    for name in ('git','sbatch','squeue','scontrol'):
+    for name in (*(() if frozen_source else ('git',)),'sbatch','squeue','scontrol'):
         if shutil.which(name) is None: raise ValueError('Missing '+name)
     import fcntl
-    registry=ROOT/'checkpoints/part_ev_state_production'; registry.mkdir(parents=True,exist_ok=True)
+    registry.mkdir(parents=True,exist_ok=True)
     with (registry/'.submission.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # Independent controllers can finish together; serialize their budget
+        # checks/submission, not their GPU training allocations.
+        fcntl.flock(lock,fcntl.LOCK_EX if frozen_source else fcntl.LOCK_EX|fcntl.LOCK_NB)
         identity=evidence['benchmark_sha256'] if a.mode=='submit' else plan['benchmark_sha256']
         owner=registry/(identity+'.owner.json')
         if owner.exists() and P.read(owner)['output']!=str(a.output):
@@ -196,7 +227,7 @@ def launch(a):
             if shutil.disk_usage(registry).free < aggregate_storage(registry,a.output,evidence):
                 raise OSError('Insufficient aggregate output headroom; nothing deleted')
             check_partition(evidence)
-            plan=freeze(a,evidence)
+            plan=freeze(a,evidence,frozen_source=frozen_source)
             P.write(owner,dict(output=str(a.output),campaign_sha256=plan['content_hash']))
         elif not owner.exists() or P.read(owner)['campaign_sha256']!=plan['content_hash']:
             raise ValueError('Missing/changed production owner; reconcile before resubmitting')

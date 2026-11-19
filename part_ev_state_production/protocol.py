@@ -10,7 +10,8 @@ import tempfile
 
 SCHEMA = 'state_extensions_production_v1'
 PACKAGES = {'bias':'part_ev_state_bias', 'multiply':'part_ev_state_multiply',
-            'memory':'part_ev_pair_memory'}
+            'memory':'part_ev_pair_memory', 'readout':'part_ev_pair_readout',
+            'triangles':'part_ev_triangles', 'support':'part_ev_support'}
 FILES = (
     'part_ev_state_production/__init__.py', 'part_ev_state_production/protocol.py',
     'part_ev_state_production/engine.py', 'scripts/run_part_ev_state_production.py',
@@ -24,6 +25,12 @@ POLICY = dict(world_size=2, global_batch=512, local_batch=256, workers_per_rank=
     selection='highest_accuracy_first_tie', test_data=False, persistent_pair_cache=False,
     retention='latest_restart_and_at_most_50_improving_weights_plus_best')
 REPORT_HOURS = 1
+
+
+def host_memory_gib(kind, phase):
+    if kind not in PACKAGES or phase not in ('train','evaluate','report'):
+        raise ValueError('Unknown production resource request')
+    return 128 if kind=='triangles' and phase!='report' else 64
 
 def read(path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
