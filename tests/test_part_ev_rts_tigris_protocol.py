@@ -19,6 +19,7 @@ def test_prepared_reference_does_not_need_sporc_benchmark_pass(tmp_path,monkeypa
     fake=SimpleNamespace(TASK=science.TASK,recipes=science.recipes,
         load=lambda path,check_environment:parent,verify_inventory_metadata=lambda *_:None,
         review=lambda *_:pytest.fail('Must not depend on SPORC GPU completion'))
+    if kind=='support':fake.NATIVE_PATH_VERSION=science.NATIVE_PATH_VERSION
     monkeypatch.setattr(P,'activate',lambda *_:fake)
     _,actual,donor=P.donor_contract(tmp_path,kind)
     assert actual==parent and len(donor['evidence'])==4 and P.inventory(tmp_path)==before
@@ -28,6 +29,16 @@ def test_prepared_reference_does_not_need_sporc_benchmark_pass(tmp_path,monkeypa
     assert P.donor_contract(tmp_path,kind)[2]==donor
     parent['parameters']+=1
     with pytest.raises(ValueError):P.donor_contract(tmp_path,kind)
+
+
+@pytest.mark.parametrize('version',(None,1))
+def test_old_support_donor_rejected_before_preparation_or_submission(tmp_path,monkeypatch,version):
+    fake=SimpleNamespace(load=lambda *_a,**_kw:pytest.fail('Reject stale donor before load'))
+    if version is not None:fake.NATIVE_PATH_VERSION=version
+    monkeypatch.setattr(P,'activate',lambda *_:fake)
+    with pytest.raises(ValueError,match='prepare a fresh SPORC support benchmark'):
+        P.donor_contract(tmp_path,'support')
+    assert list(tmp_path.iterdir())==[]
 
 
 def admitted(tmp_path,monkeypatch,kind='readout'):

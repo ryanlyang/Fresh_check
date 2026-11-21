@@ -103,30 +103,72 @@ def boundaries(device):
     return dict(kind='boundaries_masks_lifetime',passed=True,empty_pairs=True,overflow_rejected=True)
 
 
+def compare_particle_paths(reference, candidate):
+    """Only computed attention activations get the existing FP32 tolerance."""
+    for trace in (reference, candidate):
+        if (len(trace['attention']) != 8 or len(trace['padding_masks']) != 8
+                or len(trace['trimmed']) != 1):
+            raise ValueError('Repeated/missing native attention or trimming')
+    for field in ('inputs', 'trimmed', 'padding_masks'):
+        torch.testing.assert_close(reference[field], candidate[field], rtol=0, atol=0,
+                                   msg=lambda msg: f'Exact particle-path {field}: {msg}')
+    assert_rng(candidate['rng'], reference['rng'])
+    errors = []
+    for block, (expected, actual) in enumerate(zip(reference['attention'], candidate['attention'])):
+        if len(expected) != 2 or len(actual) != 2:
+            raise ValueError('Expected native attention output and weights')
+        maximum = 0.
+        for x, y in zip(expected, actual):
+            if not torch.isfinite(x).all() or not torch.isfinite(y).all():
+                raise ValueError(f'Nonfinite native attention at particle block {block}')
+            torch.testing.assert_close(y, x, rtol=P.PARITY['forward_rtol'],
+                atol=P.PARITY['forward_atol'], msg=lambda msg: f'Particle block {block}: {msg}')
+            maximum = max(maximum, float((x-y).abs().max()))
+        errors.append(maximum)
+    return dict(kind='native_path_at_initialization', passed=True,
+        version=P.NATIVE_PATH_VERSION, attention_calls=8, trimmer_calls=1,
+        exact_inputs_masks_trimming_rng=True, forward_rtol=P.PARITY['forward_rtol'],
+        forward_atol=P.PARITY['forward_atol'], block_max_abs_difference=errors)
+
+
 def particle_path(device):
     seed_everything(101)
     model=M.build_model(trim=True).to(device);active(model,support=False)
     old=M.reference_model('state_layerwise',trim=True).to(device)
     old.load_state_dict({k:v for k,v in model.state_dict().items() if not M.support_key(k)})
+    expected_parameters=cpu_copy(dict(old.named_parameters()))
+    def same_parameters(target):
+        actual=cpu_copy({n:p for n,p in target.named_parameters() if not M.support_key(n)})
+        torch.testing.assert_close(actual,expected_parameters,rtol=0,atol=0,
+                                   msg=lambda msg: f'Exact base parameters: {msg}')
+    def zero_support_outputs():
+        if any(not torch.isfinite(p).all() or p.count_nonzero() for p in M.output_parameters(model)):
+            raise ValueError('Native-path initialization requires exactly zero support outputs')
+    same_parameters(model);zero_support_outputs()
     values,_=B.tensors(B.fixed_batch(4,17),device)
     values[-1][:,:,10:]=False
+    original=cpu_copy(values)
     results=[]
     for target in (old,model):
-        records=[];trims=[]
+        records=[];trims=[];masks=[]
         target.mod.trimmer._counter=10
         hooks=[b.attn.attention.reference.register_forward_hook(
             lambda _m,_a,out: records.append(tuple(t.detach().clone() for t in out))) for b in target.mod.blocks]
-        hooks.append(target.mod.trimmer.register_forward_hook(lambda *args:trims.append(1)))
+        hooks += [b.attn.attention.reference.register_forward_pre_hook(
+            lambda _m,_a,kw: masks.append(cpu_copy(kw['key_padding_mask'])), with_kwargs=True)
+            for b in target.mod.blocks]
+        hooks.append(target.mod.trimmer.register_forward_hook(lambda _m,_a,out:trims.append(cpu_copy(out))))
         try:
             seed_everything(991)
             with torch.no_grad():target(*values)
+            torch.testing.assert_close(cpu_copy(values),original,rtol=0,atol=0,
+                                       msg=lambda msg: f'Particle-path input mutation: {msg}')
+            same_parameters(target);zero_support_outputs()
+            results.append(dict(inputs=cpu_copy(values),trimmed=trims,padding_masks=masks,
+                                attention=records,rng=capture_rank_state(target)))
         finally:
             for h in hooks:h.remove()
-        if len(records)!=8 or trims!=[1]:raise ValueError('Repeated native attention/trimming')
-        results.append(records)
-    for a,b in zip(*results):
-        for x,y in zip(a,b):torch.testing.assert_close(x,y,rtol=0,atol=0)
-    return dict(kind='native_path_at_initialization',passed=True,attention_calls=8,trimmer_calls=1)
+    return dict(compare_particle_paths(*results),exact_base_parameters=True,zero_support_outputs=True)
 
 
 def correctness(device,rank,world):

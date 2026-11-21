@@ -22,6 +22,8 @@ def test_actual_native_correctness_has_truthful_device_label(kind):
     assert rows[0]['execution']['device_type']=='cpu'
     assert {r['kind'] for r in rows[0]['checks']}=={E.RENAMES.get(k,k) for k in C.P.CHECKS}
     assert not any('DDP' in r['kind'] for r in rows[0]['checks'])
+    if kind=='support':
+        C.P.validate_particle_path(next(c for c in rows[0]['checks'] if c['kind']=='native_path_at_initialization'))
 
 
 @pytest.mark.parametrize('kind',list(P.PACKAGES))

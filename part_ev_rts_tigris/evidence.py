@@ -293,6 +293,7 @@ def summarize_support(spec, row):
                    or any(c['passed'] is not True for c in r['checks']) for r in checks)):
         raise ValueError('Incomplete correctness evidence')
     for rank in checks:
+        science.validate_particle_path(next(c for c in rank['checks'] if c['kind']=='native_path_at_initialization'))
         delayed = rank['delayed_activation']
         if (delayed.get('passed') is not True or delayed['successful_updates'] != 8
                 or not 8 <= delayed['attempts'] <= 20 or delayed['skips'] != delayed['attempts']-8

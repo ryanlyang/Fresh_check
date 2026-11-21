@@ -1,6 +1,7 @@
 # Support-aware aggregation: independent SPORC benchmark
 
-Implemented 2026-11-16. **Benchmark queue-ready; not GPU-admitted or production-ready.**
+Implemented 2026-11-16; native-path parity check corrected 2026-11-20.
+**Corrected benchmark queue-ready; remote GPU admission remains required.**
 No jobs were submitted. Accuracy gains, GPU memory fit and runtime remain to be
 measured. Science: [implementation plan](../part_ev_state_compare/SUPPORT_AWARE_AGGREGATION_PLAN.md).
 
@@ -100,8 +101,16 @@ No automatic deletion or environment installation is performed.
 
 - FP64 explicit-loop statistics and gradients, floor/zero-neighbor cases,
   constant-gate replication, channel layout and raw-statistic merging.
-- Exact initialized baseline identity; active dense-vs-chunked FP32 and CUDA
+- Initialized baseline numerical identity; active dense-vs-chunked FP32 and CUDA
   FP16 output/gradient checks, masking, permutation, overflow and native-call checks.
+- Native-path audit v2: exactly equal inputs, trimmed inputs, padding masks,
+  shared base parameters and post-forward RNG/trimmer state; exactly eight native
+  attention calls and one trim. Support output matrices must remain exactly zero
+  for this initialization probe. Only computed attention outputs/weights use the
+  existing FP32 `rtol=1e-5, atol=1e-6`. Nonfinite activations are rejected and all
+  eight block maximum absolute differences are recorded. Both SPORC and Tigris
+  admission require this audited evidence. Other numerical/restart gates remain
+  unchanged; no model, optimizer, batch, initialization or schedule change.
 - Actual two-rank SyncBatchNorm/DDP, an empty-support rank, unequal native lengths,
   and `find_unused_parameters=False`.
 - Eight successful Ranger updates verify initial output learning, delayed
@@ -157,6 +166,58 @@ Production requires a separate implementation and resource review.
 No blind retry exists. An ambiguous submission keeps `submission_intent.json`;
 inspect that, the job ledger and Slurm before retrying. Never alter an existing
 snapshot or bypass failed environment, numerical, memory or restart checks.
+
+## Retry the November 20 native-path failure on both clusters
+
+Benchmark `22114967` / summary `22114968`, in
+`support_20261117T033403Z`, failed an activation comparison with zero tolerance.
+Its reported maximum difference was `1.7881393432617188e-7`. The correction uses
+the already-declared FP32 tolerances and adds exact structural/RNG/weight audits;
+it does not declare the failed benchmark passed or waive subsequent GPU checks.
+
+1. Commit/push the correction, then pull on SPORC. Use the queue commands above
+   with a **new** `SUPPORT_ROOT`. This submits a fresh prepare/benchmark/summary.
+   Leave the failed source, hashes, reports and existing training jobs untouched.
+2. Save that exact new path. After its **prepare** job succeeds, it can also serve
+   as the Tigris donor; no need to wait for the SPORC GPU benchmark. The prepared
+   directory must stay present and unchanged for both campaigns.
+3. On Tigris, pull the correction and set `SUPPORT_ROOT` to the new SPORC path
+   (shell variables do not transfer between login sessions). Then run:
+
+```bash
+(
+  set -euo pipefail
+  cd /home/ryreu/atlas/Fresh_check
+  git pull --ff-only
+  : "${SUPPORT_ROOT:?Set SUPPORT_ROOT to the NEW prepared SPORC support campaign}"
+  test -f "${SUPPORT_ROOT}/campaign.json"
+
+  SUPPORT_GH_ROOT="${PWD}/checkpoints/part_ev_rts_tigris/support_parityfix_$(date -u +%Y%m%dT%H%M%SZ)"
+  bash sbatch/submit_part_ev_rts_tigris.sh \
+    --mode plan --model support --benchmark "${SUPPORT_ROOT}" \
+    --output "${SUPPORT_GH_ROOT}"
+  bash sbatch/submit_part_ev_rts_tigris.sh \
+    --mode pipeline --model support --benchmark "${SUPPORT_ROOT}" \
+    --output "${SUPPORT_GH_ROOT}" --reviewed
+
+  printf '\nNew Tigris support pipeline: %s\n' "${SUPPORT_GH_ROOT}"
+  squeue --me -o '%.18i %.40j %.12T %.12l %R'
+)
+```
+
+The Tigris command explicitly authorizes benchmark-gated automatic production,
+using one GH200 per GPU job. New submissions reject donors predating audit v2.
+Merely pulling code cannot fix a queued snapshot, and pointing a new Tigris
+pipeline at the old SPORC donor still imports the old test. Do not edit either
+snapshot in place. Inspect any old support pipeline's ledger/status and cancel
+only its obsolete jobs if it is still queued; leave readout, triangles and the
+running bias/multiply/memory chains alone.
+
+To restore automatic **SPORC** production after the new benchmark, attach a new
+[benchmark follow-up](../part_ev_benchmark_followup/README.md) to the new benchmark
+path/summary job, with new follow-up and production output paths. The old
+controller's dependency does not automatically move to the replacement summary.
+The benchmark launcher itself remains benchmark-only.
 
 ## Local tests
 

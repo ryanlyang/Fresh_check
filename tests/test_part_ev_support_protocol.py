@@ -52,6 +52,12 @@ def evidence():
             batchnorm='SyncBatchNorm',tf32=False,cudnn_benchmark=False,nccl_environment={}))
     row['baseline_gpus']=copy.deepcopy(row['gpus'])
     row['baseline_inference']=copy.deepcopy(row['inference'])
+    for rank in row['correctness']:
+        path=next(c for c in rank['checks'] if c['kind']=='native_path_at_initialization')
+        path.update(version=P.NATIVE_PATH_VERSION,attention_calls=8,trimmer_calls=1,
+            exact_inputs_masks_trimming_rng=True,exact_base_parameters=True,zero_support_outputs=True,
+            forward_rtol=P.PARITY['forward_rtol'],forward_atol=P.PARITY['forward_atol'],
+            block_max_abs_difference=[1.7881393432617188e-7]*8)
     return row
 
 
@@ -73,6 +79,39 @@ def test_full_projection_and_ratios_never_production(tmp_path,monkeypatch):
     assert row['recommended_train_hours']==math.ceil(1.3*(500000+15000+1152)/3600)
     assert row['training_time_vs_state_ev']==row['inference_time_vs_state_ev']==1
     assert row['batch1_latency_ms']==20
+
+
+@pytest.mark.parametrize('field,value',[
+    ('version',1),('attention_calls',7),('trimmer_calls',2),
+    ('exact_inputs_masks_trimming_rng',False),('exact_base_parameters',False),
+    ('zero_support_outputs',False),('forward_rtol',1e-3),('forward_atol',1e-3),
+    ('block_max_abs_difference',[0.]*7),('block_max_abs_difference',[float('nan')]*8),
+    ('block_max_abs_difference',[-1.]*8),('block_max_abs_difference',[True]*8),
+])
+def test_native_path_evidence_required_on_both_clusters(field,value):
+    row=evidence()
+    path=next(c for c in row['correctness'][0]['checks'] if c['kind']=='native_path_at_initialization')
+    path[field]=value
+    spec=dict(content_hash='spec',parameter_inventory_sha256='inventory',launch=dict(nccl_environment={}))
+    with pytest.raises(ValueError,match='audited support native particle-path'):
+        P.summarize(spec,row)
+    from tests.test_part_ev_rts_tigris_evidence import evidence as gh_evidence,spec as gh_spec
+    from part_ev_rts_tigris.evidence import summarize
+    gh=gh_evidence('support')
+    path=next(c for c in gh['correctness'][0]['checks'] if c['kind']=='native_path_at_initialization')
+    path[field]=value
+    with pytest.raises(ValueError,match='audited support native particle-path'):
+        summarize(gh_spec('support'),gh)
+
+
+def test_native_path_missing_or_duplicate_evidence_rejected():
+    spec=dict(content_hash='spec',parameter_inventory_sha256='inventory',launch=dict(nccl_environment={}))
+    for fault in ('missing','duplicate'):
+        row=evidence();checks=row['correctness'][0]['checks']
+        path=next(c for c in checks if c['kind']=='native_path_at_initialization')
+        if fault=='missing':path.pop('exact_base_parameters')
+        else:checks.append(copy.deepcopy(path))
+        with pytest.raises(ValueError):P.summarize(spec,row)
 
 
 @pytest.mark.parametrize('path,value',[

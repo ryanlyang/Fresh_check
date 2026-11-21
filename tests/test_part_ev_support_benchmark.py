@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 import time
@@ -17,6 +18,78 @@ def test_cpu_correctness_driver_all_paths():
     # CUDA FP16 and SyncBN still require the actual queued benchmark.
     row=C.correctness(torch.device('cpu'),0,1)[0]
     assert row['passed'] and {c['kind'] for c in row['checks']}==P.CHECKS
+    P.validate_particle_path(next(c for c in row['checks'] if c['kind']=='native_path_at_initialization'))
+
+
+def particle_trace():
+    values,_=C.B.tensors(C.B.fixed_batch(2,5),torch.device('cpu'))
+    return dict(inputs=C.cpu_copy(values),trimmed=[(*C.cpu_copy(values[1:]),None)],
+        padding_masks=[~values[-1].squeeze(1) for _ in range(8)],
+        attention=[(torch.zeros(5,2,128),torch.zeros(2,8,5,5)) for _ in range(8)],
+        rng=capture_rank_state(torch.nn.Identity()))
+
+
+@pytest.mark.parametrize('tensor_index',(0,1))
+def test_particle_path_accepts_reported_roundoff_but_not_material_changes(tensor_index):
+    reference=particle_trace();candidate=copy.deepcopy(reference)
+    candidate['attention'][3][tensor_index].add_(1.7881393432617188e-7)
+    row=C.compare_particle_paths(reference,candidate)
+    assert row['passed'] and row['exact_inputs_masks_trimming_rng']
+    assert row['version']==P.NATIVE_PATH_VERSION==2
+    assert row['forward_atol']==1e-6 and row['forward_rtol']==1e-5
+    assert row['block_max_abs_difference'][3]==pytest.approx(1.7881393432617188e-7)
+    assert sum(v!=0 for v in row['block_max_abs_difference'])==1
+    candidate['attention'][3][tensor_index].add_(1e-3)
+    with pytest.raises(AssertionError,match='Particle block 3'):
+        C.compare_particle_paths(reference,candidate)
+
+
+@pytest.mark.parametrize('field',('inputs','trimmed','padding_masks','rng','trimmer_rng',
+    'attention_calls','mask_calls','trimmer_calls','tuple_length','shape','dtype',
+    'nan','inf','both_inf'))
+def test_particle_path_still_rejects_structural_and_numerical_faults(field):
+    reference=particle_trace();candidate=copy.deepcopy(reference)
+    if field=='inputs':candidate['inputs'][0].add_(1e-7)
+    if field=='trimmed':candidate['trimmed'][0][0].add_(1e-7)
+    if field=='padding_masks':candidate['padding_masks'][0].logical_not_()
+    if field=='rng':candidate['rng']['torch'][0]^=1
+    if field=='trimmer_rng':candidate['rng']['trimmers']['extra']=1
+    if field=='attention_calls':candidate['attention'].pop()
+    if field=='mask_calls':candidate['padding_masks'].pop()
+    if field=='trimmer_calls':candidate['trimmed']*=2
+    if field=='tuple_length':candidate['attention'][0]=candidate['attention'][0][:1]
+    if field=='shape':candidate['attention'][0]=(torch.zeros(4,2,128),candidate['attention'][0][1])
+    if field=='dtype':candidate['attention'][0]=(candidate['attention'][0][0].double(),candidate['attention'][0][1])
+    if field=='nan':candidate['attention'][0][0].fill_(float('nan'))
+    if field in ('inf','both_inf'):candidate['attention'][0][0].fill_(float('inf'))
+    if field=='both_inf':reference['attention'][0][0].fill_(float('inf'))
+    with pytest.raises((AssertionError,ValueError)):
+        C.compare_particle_paths(reference,candidate)
+
+
+@pytest.mark.parametrize('fault',('base_parameters','inputs','support_outputs'))
+def test_particle_path_detects_mutation_and_removes_temporary_hooks(monkeypatch,fault):
+    real_build=M.build_model;created=[];before=[]
+    def build(**kwargs):
+        model=real_build(**kwargs)
+        def mutate(target,inputs,_output):
+            if fault=='base_parameters':next(target.parameters()).add_(1e-3)
+            if fault=='inputs':inputs[0].add_(1e-7)
+            if fault=='support_outputs':M.output_parameters(target)[0].fill_(1e-7)
+        model.register_forward_hook(mutate)
+        created.append(model)
+        before.append([(len(m._forward_hooks),len(m._forward_pre_hooks)) for m in model.modules()])
+        return model
+    monkeypatch.setattr(M,'build_model',build)
+    with pytest.raises((AssertionError,ValueError)):
+        C.particle_path(torch.device('cpu'))
+    assert len(created)==1
+    assert [(len(m._forward_hooks),len(m._forward_pre_hooks)) for m in created[0].modules()]==before[0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA native parity needs a GPU')
+def test_native_particle_path_cuda():
+    P.validate_particle_path(C.particle_path(torch.device('cuda',0)))
 
 
 def test_diagnostics_preserve_state_rng_buffers_gradients_flags():

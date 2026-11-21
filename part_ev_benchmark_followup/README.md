@@ -63,6 +63,13 @@ own snapshots and are not modified by this pull or by arming controllers.
 
 The known summary job IDs from the current queue are:
 
+**Support update (November 20):** `22114967` / `22114968` failed the original
+zero-tolerance native-path check. For a retry, use the
+[fresh support benchmark procedure](../part_ev_support/README.md#retry-the-november-20-native-path-failure-on-both-clusters)
+and replace the support summary ID below with the **new** one. Use fresh
+follow-up/production paths; an old controller remains bound to its old summary.
+Do not rerun the all-model example to duplicate readout or triangle controllers.
+
 | Model | Benchmark | Summary |
 |---|---:|---:|
 | Readout (fixed) | 22138550 | 22138551 |

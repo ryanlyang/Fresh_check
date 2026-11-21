@@ -195,4 +195,18 @@ def test_documented_commands_have_valid_bash_syntax():
     for block in blocks:
         subprocess.run([BASH,'-n'],input=block,text=True,check=True,capture_output=True)
     assert 'submitted_job_ids.tsv' in blocks[0]  # Does not need a pending GPU log.
+    assert 'EVRTS_SUPPORT_BENCHMARK_JOB:?' in blocks[0]
+    assert 'evrts_reference part_ev_support 22114967' not in blocks[0]
+
+
+def test_support_retry_documentation_has_valid_bash_and_new_donor_guard():
+    import re
+    document=(S.ROOT/'part_ev_support/README.md').read_text(encoding='utf-8')
+    fence=chr(96)*3
+    blocks=re.findall(fence+'bash\n(.*?)'+fence,document,re.S)
+    for block in blocks:
+        subprocess.run([BASH,'-n'],input=block,text=True,check=True,capture_output=True)
+    retry=next(b for b in blocks if '--mode pipeline --model support' in b)
+    assert 'SUPPORT_ROOT:?' in retry and 'support_parityfix_' in retry
+    assert '--reviewed' in retry and 'test -f "${SUPPORT_ROOT}/campaign.json"' in retry
 

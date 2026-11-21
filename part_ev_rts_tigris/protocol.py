@@ -110,6 +110,9 @@ def donor_contract(benchmark, kind):
     """No checkpoint loading, data rehash, environment mutation or donor writes."""
     benchmark = Path(benchmark).resolve(strict=True)
     science = activate(benchmark, kind)
+    if kind == 'support' and getattr(science, 'NATIVE_PATH_VERSION', None) != 2:
+        raise ValueError('Support donor predates the native-path parity fix; prepare a fresh '
+                         'SPORC support benchmark from corrected source and use its new path')
     parent = science.load(benchmark, check_environment=False)
     science.verify_inventory_metadata(parent)
     if (parent['task'] != science.TASK or parent['task']['seed'] != 101

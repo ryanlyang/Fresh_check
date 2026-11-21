@@ -11,6 +11,7 @@ from part_ev_state_bias.protocol import reference, runtime_environment, verify_s
 from .model import CONFIG, PARAMETERS, BASE_PARAMETERS
 
 SCHEMA = 'part_ev_support_benchmark_v1'
+NATIVE_PATH_VERSION = 2  # Exact structural/RNG checks; tightly tolerant FP32 activations.
 TASK = dict(run_id='SUPPORT_STATE_EV_LAYERWISE', architecture='state_support_layerwise',
             recipe='ranger_full_v1', seed=101)
 MINUTES = dict(prepare=120, benchmark=330, summary=15)
@@ -137,6 +138,20 @@ def check_measurement(row, steps):
     if len(identities) != 1: raise ValueError('Distributed replicas differ')
 
 
+def validate_particle_path(path):
+    if (path.get('version') != NATIVE_PATH_VERSION or path.get('passed') is not True
+            or path.get('attention_calls') != 8 or path.get('trimmer_calls') != 1
+            or path.get('exact_inputs_masks_trimming_rng') is not True
+            or path.get('exact_base_parameters') is not True
+            or path.get('zero_support_outputs') is not True
+            or path.get('forward_rtol') != PARITY['forward_rtol']
+            or path.get('forward_atol') != PARITY['forward_atol']
+            or len(path.get('block_max_abs_difference', [])) != 8
+            or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0
+                   for v in path['block_max_abs_difference'])):
+        raise ValueError('Missing audited support native particle-path parity')
+
+
 def summarize(spec, row):
     if row.get('campaign_sha256') != spec['content_hash']: raise ValueError('Wrong benchmark campaign')
     if row.get('authorizes_training') is not False: raise ValueError('Benchmark never authorizes training')
@@ -149,10 +164,12 @@ def summarize(spec, row):
     checks = row['correctness']
     if (len(checks) != 2 or {r['rank'] for r in checks} != {0,1}
             or any(r['passed'] is not True or r['tolerances'] != PARITY
+                   or len(r['checks']) != len(CHECKS)
                    or {c['kind'] for c in r['checks']} != CHECKS
                    or any(c['passed'] is not True for c in r['checks']) for r in checks)):
         raise ValueError('Incomplete correctness evidence')
     for rank in checks:
+        validate_particle_path(next(c for c in rank['checks'] if c['kind']=='native_path_at_initialization'))
         delayed = rank['delayed_activation']
         if (delayed.get('passed') is not True or delayed['successful_updates'] != 8
                 or not 8 <= delayed['attempts'] <= 20 or delayed['skips'] != delayed['attempts']-8

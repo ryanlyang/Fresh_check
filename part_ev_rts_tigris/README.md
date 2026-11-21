@@ -77,6 +77,15 @@ change the IDs only if you intentionally chose different prepared references.
 Missing or ambiguous ledgers stop the commands. A failed SPORC GPU benchmark is not
 a blocker, provided preparation succeeded and its frozen model is the intended one.
 
+**Support retry:** benchmark `22114967` froze the old zero-tolerance native-path
+check. First prepare a corrected SPORC support campaign as described in the
+[support retry instructions](../part_ev_support/README.md#retry-the-november-20-native-path-failure-on-both-clusters).
+Set `EVRTS_SUPPORT_BENCHMARK_JOB` to its **new** benchmark job ID before using the
+all-three example below. Only preparation must finish; the SPORC GPU benchmark
+may still be pending. New Tigris submissions reject the old support donor.
+If readout and triangles are already queued, do not resubmit all three: use the
+support-only retry commands instead. Existing frozen jobs are never patched.
+
 ```bash
 (
   set -euo pipefail
@@ -109,7 +118,8 @@ a blocker, provided preparation succeeded and its frozen model is the intended o
 
   evrts_readout="$(evrts_reference part_ev_pair_readout 22138550)"
   evrts_triangles="$(evrts_reference part_ev_triangles 22138556)"
-  evrts_support="$(evrts_reference part_ev_support 22114967)"
+  : "${EVRTS_SUPPORT_BENCHMARK_JOB:?Set this to the NEW corrected SPORC support benchmark job ID}"
+  evrts_support="$(evrts_reference part_ev_support "${EVRTS_SUPPORT_BENCHMARK_JOB}")"
 
   # Inspect all three before submitting any. Plan is read-only.
   for evrts_model in readout triangles support; do
