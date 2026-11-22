@@ -52,11 +52,17 @@ def production(output, phase):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase', choices=('inspect','prepare','benchmark','summary','review','status','dispatch','train','evaluate','report'),required=True)
+    p.add_argument('--phase', choices=('inspect','inspect_profile_recovery','recover_profile','prepare','benchmark','summary','review','status','dispatch','train','evaluate','report'),required=True)
     p.add_argument('--output',type=Path)
     p.add_argument('--benchmark',type=Path)
+    p.add_argument('--from-campaign',type=Path)
     p.add_argument('--model',choices=tuple(P.PACKAGES))
     a = p.parse_args(argv)
+    if a.phase == 'inspect_profile_recovery':
+        if a.from_campaign is None: p.error('Original Tigris campaign required')
+        spec, origin, summary = P.inspect_profile_origin(a.from_campaign)
+        print(json.dumps(dict(admission=spec['launch']['admission'], origin=origin, summary=summary),allow_nan=False))
+        return 0
     if a.phase == 'inspect':
         if a.benchmark is None or a.model is None: p.error('inspect requires model and benchmark')
         print(json.dumps(P.inspect(a.benchmark,a.model),allow_nan=False)); return 0
@@ -65,11 +71,14 @@ def main(argv=None):
     if a.phase == 'status':
         from part_ev_rts_tigris.submission import ledger
         result = dict(model=launch['model_kind'],pipeline=ledger(a.output,'pipeline'),production=ledger(a.output,'production'),
+            recovery=ledger(a.output,'recovery'),
             summary=P.read(a.output/'summary.json') if (a.output/'summary.json').exists() else None,
             dispatch=P.read(a.output/'dispatch_result.json') if (a.output/'dispatch_result.json').exists() else None,
             note='Read-only metadata, not live Slurm status.')
         print(json.dumps(result,indent=2)); return 0
-    if a.phase in ('prepare','benchmark'):
+    if 'profile_recovery' in launch and a.phase in ('prepare','benchmark'):
+        raise ValueError('Recovered measurements may not be replaced by a fresh benchmark')
+    if a.phase in ('prepare','benchmark','recover_profile'):
         with (a.output/(a.phase+'_started.json')).open('x',encoding='utf-8') as stream:
             json.dump(dict(phase=a.phase,pid=os.getpid()),stream)
             stream.flush(); os.fsync(stream.fileno())
@@ -79,7 +88,9 @@ def main(argv=None):
         seconds = P.POLICY['max_seconds'] if a.phase=='benchmark' else (3300 if a.phase=='report' else P.MINUTES.get(a.phase,30)*60-120)
         signal.alarm(seconds)
     try:
-        if a.phase == 'prepare':
+        if a.phase == 'recover_profile':
+            result = P.recover_profile(a.output)
+        elif a.phase == 'prepare':
             P.prepare(a.output)
             result = dict(prepared=True,authorizes_training=False)
         elif a.phase == 'dispatch':

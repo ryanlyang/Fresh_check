@@ -9,6 +9,11 @@ verified benchmark success. Merely having a Slurm `COMPLETED` result is not admi
 There are no cross-model dependencies, concurrency caps, arrays or segmented jobs.
 No SPORC jobs, model implementations, environments, data or frozen sources are changed.
 
+For an existing triangle benchmark rejected solely because some stages have
+zero CPU time but positive GPU time, use the isolated
+[CPU-only profiling recovery](PROFILE_RECOVERY.md). Do not edit its frozen files
+or repeat the GPU benchmark to repair this validator error.
+
 ## Scientific/runtime contract
 
 | Model option | Parameters | Frozen scientific implementation |

@@ -16,6 +16,19 @@ def positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
 
 
+def validate_profile_stages(stages, required, allowed):
+    """A recorded stage may have CPU-only or device-only timing, but not neither."""
+    if not isinstance(stages, dict) or not required.issubset(stages) or not set(stages).issubset(allowed):
+        raise ValueError('Missing/unexpected triangle profiling stages')
+    for name, row in stages.items():
+        if not isinstance(row, dict) or type(row.get('calls')) is not int or row['calls'] < 1:
+            raise ValueError('Invalid triangle profiling call count: '+name)
+        times = (row.get('cpu_us'), row.get('device_us'))
+        if (any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in times)
+                or not any(v > 0 for v in times)):
+            raise ValueError('Invalid/empty triangle profiling timing: '+name)
+
+
 from part_ev_message_study.protocol import precision_ok
 
 def check_measurement(row, steps):
@@ -248,10 +261,7 @@ def summarize_triangles(spec, row):
                     raise ValueError('Missing profiling process memory evidence')
             p=entry['stages']
             required=PROFILE_STAGES if kind=='adversarial_train' else PROFILE_STAGES-{'triangles.tied_tile'}
-            if (not required.issubset(p) or not set(p).issubset(PROFILE_STAGES)
-                    or any(not positive(v['cpu_us']) or v['calls']<1
-                           or not math.isfinite(v['device_us']) or v['device_us']<0 for v in p.values())):
-                raise ValueError('Missing triangle stage profiling')
+            validate_profile_stages(p, required, PROFILE_STAGES)
     if len(row['host_peak_rss_bytes'])!=1 or any(not positive(v) for v in row['host_peak_rss_bytes']):
         raise ValueError('Missing rank host-memory measurement')
     train = max(w['seconds']/w['steps'] for r in row['stream']['ranks'] for w in r['windows'])*1e6

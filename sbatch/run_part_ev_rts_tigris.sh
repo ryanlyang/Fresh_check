@@ -3,7 +3,7 @@ set -euo pipefail
 [[ $# == 2 && "$1" == /* && "$(uname -m)" == aarch64 ]] || exit 2
 evrts_output="$(realpath -e -- "$1")"
 evrts_phase="$2"
-case "${evrts_phase}" in prepare|benchmark|summary|dispatch|train|evaluate|report) ;; *) exit 2 ;; esac
+case "${evrts_phase}" in prepare|benchmark|summary|dispatch|train|evaluate|report|recover_profile) ;; *) exit 2 ;; esac
 cd -- "${evrts_output}"
 sha256sum --quiet -c snapshot.sha256
 evrts_python="$(python3 -B -c 'import json; print(json.load(open("launch.json"))["python"])')"

@@ -30,6 +30,8 @@ POLICY = dict(world_size=1, global_batch=512, local_batch=512, workers_per_rank=
 MINUTES = {'prepare': 120, 'benchmark': 330, 'summary': 15, 'dispatch': 30}
 RESERVE_BYTES = 4*2**30
 BENCHMARK_BYTES = 2**30
+PROFILE_RECOVERY_POLICY = 'triangle_cpu_or_device_timing_v1'
+PROFILE_RECOVERY_ARTIFACTS = ('launch.json', 'campaign.json', 'benchmark.json')
 
 
 def read(path):
@@ -236,6 +238,9 @@ def prepare(output):
     if launch['model_kind'] == 'support':
         spec = hashed(dict({k:v for k,v in spec.items() if k != 'content_hash'},
                            parameter_inventory_sha256=parent['parameter_inventory_sha256']))
+    if 'profile_recovery' in launch:
+        spec = hashed(dict({k:v for k,v in spec.items() if k != 'content_hash'},
+                           profile_recovery=launch['profile_recovery']))
     write(output/'campaign.json', spec)
     return spec
 
@@ -252,6 +257,8 @@ def load(output, *, check_environment=True):
         cross_platform_restart=False, cross_hardware_numerical_equivalence=False)
     if launch['model_kind'] == 'support':
         fixed['parameter_inventory_sha256'] = parent['parameter_inventory_sha256']
+    if 'profile_recovery' in launch:
+        fixed['profile_recovery'] = launch['profile_recovery']
     if any(spec.get(k) != v for k, v in fixed.items()):
         raise ValueError('Tigris campaign or read-only SPORC evidence changed')
     if launch['admission'] != dict(donor=donor, environment=spec['environment'],
@@ -269,7 +276,91 @@ def summary(output):
         return dict(passed=False, complete=False, authorizes_training=False, missing=missing)
     spec = load(output, check_environment=False)
     from .evidence import summarize
+    if 'profile_recovery' in spec['launch']:
+        original, _ = verify_profile_recovery(output, spec)
+        result = summarize(original, checked(output/'benchmark.json'))
+        return dict(result, profile_recovery=spec['launch']['profile_recovery'])
     return summarize(spec, checked(output/'benchmark.json'))
+
+
+def inspect_profile_origin(output, *, check_environment=True):
+    """Revalidate original measurements without rewriting their campaign identity."""
+    output = Path(output).resolve(strict=True)
+    # Check launch first to prevent recursive recovery-of-recovery chains.
+    launch = launch_config(output)
+    if launch['model_kind'] != 'triangles' or 'profile_recovery' in launch:
+        raise ValueError('Profile recovery only accepts an original Tigris triangle benchmark')
+    for name in ('production.json', 'production_intent.json', 'production_job_ids.tsv', 'dispatch_result.json'):
+        if (output/name).exists():
+            raise ValueError('Original already has production admission/submission artifacts; reconcile first')
+    spec = load(output, check_environment=check_environment)
+    row = checked(output/'benchmark.json')
+    from .evidence import summarize
+    result = summarize(spec, row)  # Every correctness/resource/identity gate still runs.
+    if result.get('passed') is not True or result.get('complete') is not True:
+        raise ValueError('Original benchmark is incomplete or failed another admission gate')
+    device_only = [dict(rank=p['rank'], phase=phase, stage=name)
+        for p in row['profiles'] for phase in ('real_train', 'adversarial_train', 'real_validation')
+        for name, item in p[phase]['stages'].items() if item['cpu_us'] == 0 and item['device_us'] > 0]
+    if not device_only:
+        raise ValueError('No device-only profiling stages; this is not the supported recovery case')
+    origin = dict(policy=PROFILE_RECOVERY_POLICY, path=str(output),
+        campaign_sha256=spec['content_hash'],
+        artifacts={name: sha(output/name) for name in PROFILE_RECOVERY_ARTIFACTS},
+        device_only_stages=device_only, reruns_gpu_benchmark=False, original_files_modified=False)
+    return spec, origin, result
+
+
+def verify_profile_recovery(output, spec, *, copied=True):
+    """Bind reused evidence to its original source, science, runtime and resource caps."""
+    output = Path(output)
+    saved = spec['launch']['profile_recovery']
+    if saved.get('policy') != PROFILE_RECOVERY_POLICY:
+        raise ValueError('Unknown profile recovery policy')
+    original, evidence, result = inspect_profile_origin(saved['path'], check_environment=False)
+    if saved != evidence or spec.get('profile_recovery') != evidence:
+        raise ValueError('Profile recovery origin/evidence changed')
+    old, new = original['launch'], spec['launch']
+    if Path(saved['path']).parent != output.parent or old['repo'] != new['repo']:
+        raise ValueError('Recovery must stay in the same independent Tigris registry')
+    if output.resolve() == Path(saved['path']).resolve():
+        raise ValueError('Recovery may not overwrite its origin')
+    for key in ('model_kind', 'task', 'recipe', 'model', 'parameters', 'parity', 'inventory',
+                'environment', 'policy', 'donor'):
+        if original[key] != spec[key]:
+            raise ValueError('Recovered science/runtime differs: '+key)
+    for key in ('benchmark', 'python', 'account', 'admission', 'max_train_hours', 'max_evaluate_hours'):
+        if old[key] != new[key]:
+            raise ValueError('Recovery changed original submission authority: '+key)
+    # A timing-validator recovery is not permission to alter execution code.
+    for name in ('part_ev_rts_tigris/benchmark.py', 'part_ev_rts_tigris/production.py'):
+        if old['source'][name] != new['source'][name]:
+            raise ValueError('Recovery must retain the measured benchmark/production engine: '+name)
+    if copied and sha(output/'benchmark.json') != evidence['artifacts']['benchmark.json']:
+        raise ValueError('Copied benchmark is not byte-identical to the original')
+    return original, result
+
+
+def recover_profile(output):
+    """CPU-only recovery in a fresh output; no submission or original writes."""
+    output = Path(output)
+    launch = launch_config(output)
+    if 'profile_recovery' not in launch:
+        raise ValueError('No explicit profile-recovery admission')
+    if any((output/name).exists() for name in ('campaign.json', 'benchmark.json', 'summary.json')):
+        raise FileExistsError('Recovery already started; inspect evidence, do not overwrite')
+    original, origin, _ = inspect_profile_origin(launch['profile_recovery']['path'])
+    if origin != launch['profile_recovery']:
+        raise ValueError('Original changed since recovery was queued')
+    spec = prepare(output)
+    verify_profile_recovery(output, spec, copied=False)
+    # Preserve the raw payload AND its original campaign_sha256, never relabel data.
+    with (output/'benchmark.json').open('xb') as handle:
+        handle.write((Path(origin['path'])/'benchmark.json').read_bytes())
+        handle.flush(); os.fsync(handle.fileno())
+    result = summary(output)
+    write(output/'summary.json', result)
+    return result
 
 
 
@@ -333,6 +424,8 @@ def production_spec(output):
             or train > launch['max_train_hours'] or evaluate > launch['max_evaluate_hours']):
         raise ValueError('Measured walltime exceeds pre-approved budget; no training submitted')
     gpu = checked(output/'benchmark.json')['gpus'][0]
+    recovery = ({'profile_recovery': spec['launch']['profile_recovery']}
+                if 'profile_recovery' in spec['launch'] else {})
     return hashed(dict(schema=SCHEMA, benchmark_sha256=spec['content_hash'],
         model_kind=spec['model_kind'], task=spec['task'], tasks=[spec['task']],
         parameters={spec['task']['architecture']:spec['parameters']},
@@ -341,7 +434,7 @@ def production_spec(output):
         expected_gpu=dict(name=gpu['name'], total_memory=gpu['total_memory'], nccl_environment={}),
         evidence={name:sha(output/name) for name in ('launch.json','campaign.json','benchmark.json','summary.json')},
         storage=storage_budget(spec['parameters']), train_hours=train, evaluate_hours=evaluate,
-        report_hours=1, seed=101, authorizes_training=True, fresh_training=True))
+        report_hours=1, seed=101, authorizes_training=True, fresh_training=True, **recovery))
 
 
 def load_production(output):

@@ -38,13 +38,15 @@ def check_partition(minutes):
 
 def request(output, launch, phase, dependency=None, *, plan=None):
     output = Path(output)
-    if phase in P.MINUTES:
+    if phase == 'recover_profile':
+        minutes = 30
+    elif phase in P.MINUTES:
         minutes = P.MINUTES[phase]
     elif plan is not None and phase in ('train','evaluate','report'):
         minutes = 60*plan[phase+'_hours']
     else: raise ValueError('Unknown or unadmitted phase')
     gpu = phase in ('benchmark','train','evaluate')
-    small = phase in ('summary','dispatch','report')
+    small = phase in ('summary','dispatch','report','recover_profile')
     row = ['sbatch','--parsable','--job-name=evrts_'+launch['model_kind']+'_'+phase,
         '--partition=tigris','--account='+launch['account'],'--nodes=1','--ntasks=1',
         '--cpus-per-task='+('4' if small else '8'), '--mem='+('16G' if small else '128G'),

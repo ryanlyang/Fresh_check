@@ -85,3 +85,50 @@ def test_failure_is_not_admission(kind):
     assert not E.summarize(spec(kind),row)['passed']
     row=evidence(kind);row['complete']=False
     assert not E.summarize(spec(kind),row)['complete']
+
+
+def test_triangle_device_only_and_cpu_only_timings_are_valid():
+    row = evidence('triangles')
+    for phase in ('real_train', 'adversarial_train', 'real_validation'):
+        stages = row['profiles'][0][phase]['stages']
+        for name, stage in stages.items():
+            # Reproduce the reported GH200 trace: wrappers may be CPU-only,
+            # nested GPU regions may have zero attributed CPU time.
+            stage.update(cpu_us=0., device_us=3205.578)
+            if name == 'triangles.tie_mix':
+                stage.update(cpu_us=50.08, device_us=0.)
+        if phase != 'adversarial_train':
+            stages.pop('triangles.tied_tile', None)
+    result = E.summarize(spec('triangles'), row)
+    assert result['passed'] and not result['authorizes_training']
+    assert result['recommended_train_hours'] == E.summarize(
+        spec('triangles'), evidence('triangles'))['recommended_train_hours']
+
+
+@pytest.mark.parametrize('phase', ('real_train', 'adversarial_train', 'real_validation'))
+@pytest.mark.parametrize('fault', (
+    'both_zero', 'negative_cpu', 'negative_device', 'nan_cpu', 'inf_device',
+    'missing_device', 'missing_cpu', 'bool_cpu', 'string_device', 'bool_calls',
+    'float_calls', 'zero_calls', 'missing_stage', 'unexpected_stage', 'not_a_row'))
+def test_triangle_profile_timing_remains_fail_closed(phase, fault):
+    row = evidence('triangles')
+    stages = row['profiles'][0][phase]['stages']
+    name = 'triangles.factor_projections'
+    target = stages[name]
+    if fault == 'both_zero': target.update(cpu_us=0., device_us=0.)
+    if fault == 'negative_cpu': target['cpu_us'] = -1.
+    if fault == 'negative_device': target['device_us'] = -1.
+    if fault == 'nan_cpu': target['cpu_us'] = math.nan
+    if fault == 'inf_device': target['device_us'] = math.inf
+    if fault == 'missing_device': del target['device_us']
+    if fault == 'missing_cpu': del target['cpu_us']
+    if fault == 'bool_cpu': target['cpu_us'] = True
+    if fault == 'string_device': target['device_us'] = '1'
+    if fault == 'bool_calls': target['calls'] = True
+    if fault == 'float_calls': target['calls'] = 2.
+    if fault == 'zero_calls': target['calls'] = 0
+    if fault == 'missing_stage': del stages[name]
+    if fault == 'unexpected_stage': stages['unknown'] = dict(target)
+    if fault == 'not_a_row': stages[name] = None
+    with pytest.raises(ValueError, match='profiling'):
+        E.summarize(spec('triangles'), row)

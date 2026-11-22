@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Queue independent benchmark-gated one-GH200 full-production pipelines."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,9 +24,11 @@ command, environment, request = S.command, S.environment, S.request
 
 def parse(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--mode', choices=('plan', 'pipeline', 'review', 'status', 'dispatch'), required=True)
+    p.add_argument('--mode', choices=('plan', 'pipeline', 'review', 'status', 'dispatch',
+                                      'plan-profile-recovery', 'recover-profile'), required=True)
     p.add_argument('--model', choices=tuple(P.PACKAGES))
     p.add_argument('--benchmark', type=Path, help='Read-only PREPARED SPORC benchmark; passing SPORC GPU results are not required')
+    p.add_argument('--from-campaign', type=Path, help='Original Tigris triangle campaign for profiling recovery')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--python', default=DEFAULT_PYTHON)
     p.add_argument('--account', default='reu-aisocial')
@@ -33,7 +36,12 @@ def parse(argv=None):
     p.add_argument('--max-train-hours', type=int, default=480)
     p.add_argument('--max-evaluate-hours', type=int, default=24)
     a = p.parse_args(argv)
-    if a.mode in ('pipeline','dispatch') and not a.reviewed: p.error('Inspect plan then explicitly pass --reviewed')
+    if a.mode in ('pipeline','dispatch','recover-profile') and not a.reviewed: p.error('Inspect plan then explicitly pass --reviewed')
+    if a.mode in ('plan-profile-recovery', 'recover-profile'):
+        if a.from_campaign is None or a.model is not None or a.benchmark is not None:
+            p.error('Profile recovery uses --from-campaign and --output, not --model/--benchmark')
+    elif a.from_campaign is not None:
+        p.error('--from-campaign is only for profile recovery')
     if not 1 <= a.max_train_hours <= 480 or not 1 <= a.max_evaluate_hours <= 24: p.error('Invalid resource ceiling')
     if a.mode in ('plan','pipeline') and (a.model is None or a.benchmark is None):
         p.error('Fresh benchmark needs --model and --benchmark')
@@ -41,7 +49,7 @@ def parse(argv=None):
         p.error('Review uses only the frozen --output')
     if not re.fullmatch(r'[A-Za-z0-9_-]+', a.account): p.error('Invalid account')
     if not Path(a.python).is_absolute(): p.error('Use an absolute ARM Python path')
-    for key in ('output', 'benchmark'):
+    for key in ('output', 'benchmark', 'from_campaign'):
         path = getattr(a, key)
         if path is not None:
             if not path.is_absolute() or path.absolute() != path.resolve():
@@ -53,6 +61,8 @@ def parse(argv=None):
     if a.benchmark and (a.output == a.benchmark or a.output.is_relative_to(a.benchmark)
                         or a.benchmark.is_relative_to(a.output)):
         p.error('Tigris output and SPORC benchmark must be disjoint')
+    if a.from_campaign and (a.from_campaign.parent != base or a.output == a.from_campaign):
+        p.error('Use distinct original/recovery campaigns in the same Tigris registry')
     return a
 
 
@@ -61,7 +71,7 @@ def inspect(a):
         '--phase', 'inspect', '--benchmark', a.benchmark, '--model', a.model], env=environment(a.python)))
 
 
-def freeze(a, admission):
+def freeze(a, admission, *, profile_recovery=None):
     if a.output.exists(): raise FileExistsError('Use a fresh output; never overwrite/requeue a frozen diagnostic')
     if command(['git', '-C', ROOT, 'status', '--porcelain', '--', *P.FILES]):
         raise ValueError('Commit/push/pull the new Tigris files before submission')
@@ -71,18 +81,76 @@ def freeze(a, admission):
     for name, blob in blobs.items():
         path = a.output/'source'/name
         path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(blob)
+    extra = {} if profile_recovery is None else dict(profile_recovery=profile_recovery)
     launch = P.hashed(dict(schema=P.SCHEMA, model_kind=a.model, benchmark=str(a.benchmark),
         output=str(a.output), repo=str(ROOT), python=a.python, account=a.account, partition='tigris',
         source=P.inventory(a.output/'source'), commit=commit, policy=P.POLICY, admission=admission,
         output_budget_bytes=P.BENCHMARK_BYTES, authorizes_training=False, auto_production=True,
-        max_train_hours=a.max_train_hours, max_evaluate_hours=a.max_evaluate_hours))
+        max_train_hours=a.max_train_hours, max_evaluate_hours=a.max_evaluate_hours, **extra))
     P.write(a.output/'launch.json', launch)
     (a.output/'snapshot.sha256').write_text(''.join(f'{P.sha(a.output/name)}  {name}\n'
         for name in ['launch.json', *('source/'+n for n in P.FILES)]), encoding='utf-8')
     return launch
 
 
+def check_origin_idle(output):
+    jobs = S.ledger(output, 'pipeline')
+    if set(jobs) != set(P.MINUTES):
+        raise ValueError('Original pipeline ledger is incomplete; reconcile before recovery')
+    active = set(command(['squeue','--noheader','--me','--format=%i']).splitlines())
+    if active.intersection(jobs.values()):
+        raise ValueError('Original pipeline still has live jobs; no competing recovery submitted')
+
+
+def profile_recovery(a):
+    if platform.system() != 'Linux' or platform.machine() != 'aarch64':
+        raise ValueError('Run profile recovery on Tigris ARM')
+    if a.output.exists(): raise FileExistsError('Use a new recovery output; inspect prior ledger before retry')
+    original = P.launch_config(a.from_campaign, interpreter=False)
+    if original['model_kind'] != 'triangles' or 'profile_recovery' in original:
+        raise ValueError('Only an original triangle benchmark can be recovered')
+    # Inherit authority and environment; command-line defaults cannot enlarge caps.
+    for key in ('python','account','max_train_hours','max_evaluate_hours'):
+        setattr(a,key,original[key])
+    a.model, a.benchmark = 'triangles', Path(original['benchmark'])
+    checked = json.loads(command([a.python,'-B',ROOT/'scripts/run_part_ev_rts_tigris.py',
+        '--phase','inspect_profile_recovery','--from-campaign',a.from_campaign],env=environment(a.python)))
+    for name in ('part_ev_rts_tigris/benchmark.py', 'part_ev_rts_tigris/production.py'):
+        committed = subprocess.check_output(['git','-C',str(ROOT),'show','HEAD:'+name])
+        if hashlib.sha256(committed).hexdigest() != original['source'][name]:
+            raise ValueError('Recovery cannot change the measured execution engine: '+name)
+    result = checked['summary']
+    print(f"Triangle profiling recovery: CPU-only 30-minute job; no GPU benchmark rerun. "
+          f"Measured recommendation: train={result['recommended_train_hours']}h, "
+          f"evaluate={result['recommended_evaluate_hours']}h.")
+    print('Original files remain untouched. Production requires a separate reviewed dispatch.')
+    if a.mode == 'plan-profile-recovery':
+        print('Read-only. No files or jobs changed.'); return
+    for tool in ('git','sbatch','scontrol','squeue'):
+        if shutil.which(tool) is None: raise ValueError('Missing '+tool)
+    registry = a.output.parent
+    with P.file_lock(Path(original['repo'])/'checkpoints/part_ev_state_production/.submission.lock'), \
+            P.file_lock(registry/'.submission.lock'):
+        check_origin_idle(a.from_campaign)
+        owner = registry/(P.digest(dict(model='triangles',
+            donor=original['admission']['donor']['content_hash']))+'.production-owner.json')
+        if owner.exists(): raise ValueError('A production owner already exists; reconcile before recovery')
+        P.check_storage(dict(output=str(a.output),repo=str(ROOT)))
+        S.check_partition(30)
+        proposal = dict(model_kind='triangles',account=a.account)
+        preview = request(a.output,proposal,'recover_profile')
+        preview[-3] = str(ROOT/'sbatch/run_part_ev_rts_tigris.sh')
+        command([preview[0],'--test-only',*preview[1:]],env=environment(a.python),stderr=subprocess.STDOUT)
+        frozen = freeze(a,checked['admission'],profile_recovery=checked['origin'])
+        job = S.submit_one(a.output,frozen,'recover_profile',None,'recovery')
+    print('Recovery job:',job)
+    print('Recovery output:',a.output)
+    print('Inspect summary, then use --mode dispatch --reviewed on THIS new output.')
+
+
 def launch(a):
+    if a.mode in ('plan-profile-recovery','recover-profile'):
+        return profile_recovery(a)
     if a.mode in ('review','status','dispatch'):
         saved = P.launch_config(a.output, interpreter=False)
         print(command([saved['python'], '-B', a.output/'source/scripts/run_part_ev_rts_tigris.py',
