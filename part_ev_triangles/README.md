@@ -132,8 +132,10 @@ pair caches or profiler traces.
    2 warm-up + 3 measured updates. Also explicit ordinary and all-tied FP32
    validation batches of 512. No silently smaller stress-test batch.
 7. A complete-state seven-update restart fixture crossing Lookahead and a
-   validation boundary, repeated from saved state twice. Model, optimizer,
-   scaler, rank RNG, trimmer and fixture cursor are checked. This does **not**
+   validation boundary: uninterrupted reference, uninterrupted repeat, disk
+   start, and a save/reload after update three. Model, optimizer,
+   scaler, rank RNG, trimmer and fixture cursor are checked. SPORC uses the
+   versioned exact-restore/bounded-trajectory policy described below. This does **not**
    certify a future production ROOT-stream replay engine or promise bitwise
    CUDA reproducibility; declared parity tolerances remain enforced.
 8. FP32 streaming validation of 128,000 events; FP32 inference batch 256 /
@@ -200,10 +202,71 @@ No blind retry exists. An ambiguous submission retains `submission_intent.json`;
 inspect it, the ledger and scheduler before retrying. Never edit frozen source
 or bypass a failed correctness, environment, memory or restart gate.
 
+## SPORC restart recovery (2026-11-23)
+
+Debug job `22157256` restored all initial and mid-run serialized state exactly.
+Both ranks nevertheless showed floating-point differences in uninterrupted
+repeats as well as restarts. The mid-run resume had the same reported maximum
+loss and final-state differences as the uninterrupted-repeat control. The
+largest low-instrumentation loss difference was `6.866455078125e-5`; the largest
+reported final state difference was `7.11530447e-6` (a BatchNorm running mean).
+This supports a bounded numerical comparison; it does not prove a particular
+kernel caused the variation or certify real-data replay or long-run accuracy.
+
+The **two-rank SPORC Triangle benchmark only** now uses
+`triangle_sporc_restart_v2`, frozen as `campaign.json.restart_policy`:
+
+- Disk decoding and immediate initial/mid-run restoration must be exact for
+  every saved model tensor/buffer, optimizer moment/slow weight/counter,
+  scaler, rank RNG, trimmer counter and fixture cursor. A tiny restoration
+  error is still a failure.
+- Four seven-update sequences use the existing synthetic rolling batch and
+  unchanged FP16 training / FP32 validation. Each crosses step 20,000 and a
+  Lookahead boundary; the mid-run save/reload is after the third update and
+  its validation. This adds seven training updates to the former probe.
+- Every subsequent update compares the complete state against the reference.
+  RNG, scaler, optimizer options/counters, integer buffers, schedules and
+  fixture progress remain exact. Any nonfinite value or skipped update fails.
+- Only post-update floating model tensors (including running statistics),
+  Ranger first/second moments and slow weights receive numerical tolerance:
+  `abs(actual-reference) <= min(1e-4, 1e-5 + 1e-4*abs(reference))` elementwise.
+  Other floating metadata, including LR and scalar counters, stays exact.
+- Losses use `abs(actual-reference) <= min(2e-4, 1e-4 + 1e-5*abs(reference))`.
+  All three repeat/restart contrasts must meet these same fixed limits. A
+  noisy uninterrupted control cannot expand them or excuse a larger restart
+  deviation. These are engineering thresholds for this short probe, not
+  confidence bounds or a guarantee of performance retention.
+- Each rank's evidence records restore checks, all update/loss schedules,
+  all per-update comparisons and bounded worst tensor paths. Admission
+  rechecks these, not just the top-level passed flag. Local audit/I/O failures
+  propagate to both ranks before the next distributed update.
+
+`benchmark.json.restart` contains the detailed evidence; the review's
+`restart_audit` gives the largest loss/state deviations. The new mid-run
+checkpoints are `probes/restart_mid_rank_0.pt` and `restart_mid_rank_1.pt`.
+These are small model/optimizer states, not dataset copies. Reference states
+for the seven comparisons live in CPU memory and are released after the probe.
+The benchmark retains its 128 GiB host-memory and two same-node A100 requests.
+
+The model, optimizer arithmetic, training recipe, batch sizes, native dropout,
+scientific forward/gradient parity, memory gates and throughput measurement
+are unchanged. The shared readout restart helper is unchanged. One-GPU Tigris
+continues to use that existing helper and its existing admission contract.
+Frozen campaigns and current production jobs must not be edited or resubmitted
+because of this SPORC-only change.
+
+After committing/pushing/pulling, use the **Queue on sporcsubmit** block above
+with a fresh directory (for example, name it `triangles_restartfix_<timestamp>`).
+It submits prepare, benchmark and summary only, not production. Do not reuse
+the failed benchmark, overwrite the diagnostic, or promote its saved timings
+to a pass. The complete new benchmark must pass before separate production
+admission. Existing follow-up jobs bound to older outputs do not follow the
+new benchmark automatically.
+
 ## Local tests
 
 ```text
-.venv/Scripts/python.exe -B -m pytest -q tests/test_part_ev_triangles_math.py tests/test_part_ev_triangles_model.py tests/test_part_ev_triangles_benchmark.py tests/test_part_ev_triangles_protocol.py tests/test_part_ev_triangles_launcher.py
+.venv/Scripts/python.exe -B -m pytest -q tests/test_part_ev_triangles_math.py tests/test_part_ev_triangles_model.py tests/test_part_ev_triangles_benchmark.py tests/test_part_ev_triangles_protocol.py tests/test_part_ev_triangles_launcher.py tests/test_part_ev_triangles_restart.py
 ```
 
 CPU tests include real two-process Gloo and optimizer restart checks, independent

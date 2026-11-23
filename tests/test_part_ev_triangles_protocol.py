@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from part_ev_triangles import protocol as P
 from scripts.run_part_ev_triangles import main
+from tests.test_part_ev_triangles_restart import evidence as restart_evidence
 
 
 def precision(dtype):
@@ -31,7 +32,7 @@ def evidence():
             delayed_activation=dict(passed=True,successful_updates=8,attempts=10,skips=2,
                 initial_upstream_zero=True,initial_output_signal=True,upstream_updated=True,
                 all_triangle_gradients=True)) for r in (0,1)],
-        restart=copy.deepcopy(P.RESTART),finite_state=True,baseline_finite_state=True,
+        restart=restart_evidence(),finite_state=True,baseline_finite_state=True,
         full128_validation_passed=True,checkpoint_seconds=1.,
         gpus=[dict(rank=r,name='NVIDIA A100',total_memory=40*2**30,peak_allocated=27*2**30,
                    peak_reserved=31*2**30,first_input_sha256='rank'+str(r)) for r in (0,1)],
@@ -63,7 +64,7 @@ def evidence():
 
 def setup_review(tmp_path,monkeypatch,row):
     P.write_json(tmp_path/'campaign.json',{})
-    spec=dict(content_hash='spec',launch=dict(nccl_environment={}))
+    spec=dict(content_hash='spec',launch=dict(nccl_environment={}),restart_policy=copy.deepcopy(P.RESTART_POLICY))
     monkeypatch.setattr(P,'load',lambda *a,**kw:spec)
     row['content_hash']=P.digest(row)
     P.write_json(tmp_path/'benchmark.json',row)
@@ -79,6 +80,8 @@ def test_full_projection_and_ratios_never_production(tmp_path,monkeypatch):
     assert row['recommended_train_hours']==math.ceil(1.3*(500000+15000+1152)/3600)
     assert row['training_time_vs_state_ev']==row['inference_time_vs_state_ev']==1
     assert row['batch1_latency_ms']==20
+    assert row['restart_audit']==dict(version=P.RESTART_POLICY['version'],exact_restoration=True,
+                                     largest_state_abs_difference=0.,largest_loss_abs_difference=0.)
 
 
 @pytest.mark.parametrize('path,value',[
@@ -116,7 +119,8 @@ def test_fail_closed(tmp_path,monkeypatch,path,value):
     target[path[-1]]=value
     # In-memory admission still rejects nonfinite values before serialization.
     if type(value) is float and not math.isfinite(value):
-        with pytest.raises(ValueError):P.summarize(dict(content_hash='spec',launch=dict(nccl_environment={})),row)
+        with pytest.raises(ValueError):P.summarize(dict(content_hash='spec',launch=dict(nccl_environment={}),
+                                                     restart_policy=P.RESTART_POLICY),row)
     else:
         setup_review(tmp_path,monkeypatch,row)
         with pytest.raises(ValueError):P.review(tmp_path)
@@ -129,6 +133,14 @@ def test_missing_or_forged_report(tmp_path,monkeypatch):
     row=evidence();setup_review(tmp_path,monkeypatch,row)
     row['complete']=False;P.write_json(tmp_path/'benchmark.json',row)
     with pytest.raises(ValueError):P.review(tmp_path)
+
+
+def test_new_summary_rejects_legacy_restart_and_missing_policy():
+    spec=dict(content_hash='spec',launch=dict(nccl_environment={}),restart_policy=P.RESTART_POLICY)
+    row=evidence();row['restart']=copy.deepcopy(P.RESTART)
+    with pytest.raises(ValueError,match='restart policy'):P.summarize(spec,row)
+    spec.pop('restart_policy')
+    with pytest.raises(ValueError,match='fresh campaign'):P.summarize(spec,evidence())
 
 
 def fixture_launch(output,donor,repo):

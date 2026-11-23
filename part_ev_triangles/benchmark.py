@@ -211,7 +211,16 @@ def correctness(device,rank,world):
 
 from .diagnostics import diagnostic_sample,gradient_norms,NeighborStats,stage_profile,tied_batch
 
-from part_ev_pair_readout.benchmark import restart_probe,inference
+from part_ev_pair_readout.benchmark import restart_probe as legacy_restart_probe,inference
+
+
+def restart_probe(output,base,model,optimizer,scaler,values,truth,spec,rank,world,
+                  *,deadline=float('inf')):
+    # The GH200 path and other models retain their existing admission contract.
+    if world == 1:
+        return legacy_restart_probe(output,base,model,optimizer,scaler,values,truth,spec,rank,world)
+    from .restart import probe
+    return probe(output,base,model,optimizer,scaler,values,truth,spec,rank,world,deadline=deadline)
 
 def measure_arm(output,spec,rank,world,device,deadline,*,baseline=False):
     import resource
@@ -254,7 +263,8 @@ def measure_arm(output,spec,rank,world,device,deadline,*,baseline=False):
             del tied_values,tied_truth,real_values,real_truth
             for m in base.modules():
                 if type(m).__name__=='SequenceTrimmer':m.enabled=True
-            restart,seconds=restart_probe(output,base,model,optimizer,scaler,values,truth,spec,rank,world)
+            restart,seconds=restart_probe(output,base,model,optimizer,scaler,values,truth,spec,rank,world,
+                                          deadline=deadline)
             result['triangle_gradient_norms']=B.gather(gradient_norms(base),world)
             diag_values,_=B.tensors(B.fixed_batch(8,17),device)
             diagnostics=B.gather(dict(diagnostic_sample(base,diag_values,device),rank=rank),world)

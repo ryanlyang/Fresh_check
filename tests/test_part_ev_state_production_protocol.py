@@ -18,6 +18,7 @@ def admitted(request,tmp_path,monkeypatch):
         parameters=science.PARAMETERS,model=science.CONFIG,environment={'torch':'pinned'},
         parameter_inventory_sha256='inventory',
         inventory={'splits':{}},launch=dict(nccl_environment={},python=sys.executable,account='reu-aisocial'))
+    if kind=='triangles':spec['restart_policy']=copy.deepcopy(science.RESTART_POLICY)
     monkeypatch.setattr(P,'activate',lambda b,k:science)
     monkeypatch.setattr(science,'load',lambda *a,**kw:spec)
     monkeypatch.setattr(science,'verify_inventory_metadata',lambda _:None)

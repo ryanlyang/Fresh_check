@@ -156,9 +156,13 @@ def _distributed_worker(rank,rendezvous,output):
         C.assert_rng(capture_rank_state(base),rng)
         torch.testing.assert_close(base.state_dict(),weights,rtol=0,atol=0)
         C.B.synchronize=lambda *a:dist.barrier()
+        # CPU Gloo cannot run SyncBN. Align native BN buffers at the starting
+        # checkpoint; the production two-A100 probe uses actual SyncBN.
+        for buffer in base.buffers():dist.broadcast(buffer,src=0)
         row,_=C.restart_probe(Path(output),base,wrapped,optimizer,scaler,values,y,
-            dict(content_hash='distributed-fixture',recipe=P.recipes()['ranger_full_v1']),rank,2)
-        assert row==P.RESTART
+            dict(content_hash='distributed-fixture',recipe=P.recipes()['ranger_full_v1'],
+                 restart_policy=P.RESTART_POLICY),rank,2)
+        P.validate_restart(row)
         Path(output,f'rank{rank}.json').write_text(json.dumps(dict(passed=True)))
     finally:dist.destroy_process_group()
 

@@ -22,6 +22,9 @@ def evidence(kind):
     for check in row['correctness'][0]['checks']:
         check['kind'] = E.RENAMES.get(check['kind'],check['kind'])
     if kind == 'triangles':
+        # GH200 keeps the legacy one-rank probe; SPORC's new contract is separate.
+        from part_ev_triangles.protocol import RESTART
+        row['restart'] = copy.deepcopy(RESTART)
         for phase in ('real_train','adversarial_train','real_validation'):
             row['profiles'][0][phase]['sample']['source_events'] = 512
     row['host_peak_rss_bytes'] = [2**30]

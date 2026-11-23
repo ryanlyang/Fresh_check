@@ -9,6 +9,7 @@ from part_ev_message_study.controls import checked_hash, verify_data_contents
 from part_ev_message_study.protocol import verify_inventory_metadata, precision_ok
 from part_ev_state_bias.protocol import reference, runtime_environment, verify_snapshot, positive
 from .model import CONFIG, PARAMETERS, BASE_PARAMETERS
+from .restart_policy import POLICY as RESTART_POLICY, validate_evidence as validate_restart
 
 SCHEMA = 'part_ev_triangles_benchmark_v1'
 TASK = dict(run_id='TRIANGLE_STATE_EV_LAYERWISE', architecture='state_triangles_layerwise',
@@ -31,6 +32,8 @@ PARITY = dict(forward_rtol=1e-5, forward_atol=1e-6, gradient_rtol=1e-4, gradient
 CHECKS = {'zero_identity', 'active_chunk', 'active_SyncBN_DDP', 'no_pairs_DDP',
           'unequal_lengths_DDP', 'active_amp_chunk',
           'triangle_oracle', 'boundaries_masks_lifetime', 'native_path_and_geometry', 'tie_only_rank_DDP'}
+# Legacy header retained for the unchanged one-GPU Tigris helper. New SPORC
+# admission requires RESTART_POLICY and per-rank evidence, not this header alone.
 RESTART = dict(passed=True,updates=7,ranks=2,full_state=True,validation_boundaries=1,
     repeatability=True,fixture_cursor_replay=True,real_stream_resume_verified=False)
 BUDGET_BYTES = 2*2**30
@@ -86,7 +89,7 @@ def prepare(output):
     check_storage(launch['repo'], output)
     contents = verify_data_contents(donor['inventory'])
     spec = dict(schema=SCHEMA, task=TASK, recipe=copy.deepcopy(recipes()['ranger_full_v1']),
-        policy=POLICY, parity=PARITY, model=CONFIG, parameters=PARAMETERS,
+        policy=POLICY, parity=PARITY, restart_policy=RESTART_POLICY, model=CONFIG, parameters=PARAMETERS,
         launch=launch, source_sha256=launch['source_sha256'], environment=runtime_environment(),
         reference_sha256=file_sha256(Path(launch['reference'])/'campaign.json'),
         inventory=donor['inventory'], data_contents_sha256=digest(contents),
@@ -102,7 +105,7 @@ def load(output, *, check_environment=True):
     launch = launch_config(output)
     spec = checked_hash(read_json(output/'campaign.json'))
     expected = dict(schema=SCHEMA, task=TASK, recipe=recipes()['ranger_full_v1'],
-        policy=POLICY, parity=PARITY, model=CONFIG, parameters=PARAMETERS,
+        policy=POLICY, parity=PARITY, restart_policy=RESTART_POLICY, model=CONFIG, parameters=PARAMETERS,
         launch=launch, source_sha256=launch['source_sha256'], authorizes_training=False,
         historical_control_reuse_authorized=False)
     if any(spec.get(k) != v for k, v in expected.items()): raise ValueError('Frozen science changed')
@@ -153,7 +156,10 @@ def summarize(spec, row):
                 or not all(delayed[k] is True for k in ('initial_upstream_zero','initial_output_signal',
                                                        'upstream_updated','all_triangle_gradients'))):
             raise ValueError('Triangle learning path not established')
-    if (row['restart'] != RESTART or row.get('full128_validation_passed') is not True
+    if spec.get('restart_policy') != RESTART_POLICY:
+        raise ValueError('Require a fresh campaign with the SPORC Triangle restart policy')
+    validate_restart(row['restart'])
+    if (row.get('full128_validation_passed') is not True
             or row['finite_state'] is not True or row['baseline_finite_state'] is not True
             or not positive(row['checkpoint_seconds'])):
         raise ValueError('Restart/finite-state evidence failed')
@@ -249,7 +255,15 @@ def summarize(spec, row):
     train = max(w['seconds']/w['steps'] for r in row['stream']['ranks'] for w in r['windows'])*1e6
     validation = val['seconds'] * 50 * 1280000/val['events']
     checkpoint = (1000+150+2)*row['checkpoint_seconds']
+    restart_ranks = row['restart']['rank_evidence']
+    restart_audit = dict(version=RESTART_POLICY['version'], exact_restoration=True,
+        largest_state_abs_difference=max(c['max_abs_error'] for r in restart_ranks
+            for name in RESTART_POLICY['trials'][1:] for c in r['trials'][name]['comparisons']),
+        largest_loss_abs_difference=max(abs(a['loss']-b['loss']) for r in restart_ranks
+            for name in RESTART_POLICY['trials'][1:]
+            for a,b in zip(r['trials']['reference']['updates'],r['trials'][name]['updates'])))
     return dict(passed=True,complete=True,authorizes_training=False,parameters=PARAMETERS,
+        restart_audit=restart_audit,
         train_jets_per_second=row['stream']['jets_per_second'],
         training_time_vs_state_ev=row['baseline_stream']['jets_per_second']/row['stream']['jets_per_second'],
         fixed128_inference_jets_per_second=5120/row['inference']['seconds'],

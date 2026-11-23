@@ -137,6 +137,7 @@ def launch(a):
     print(f'Triangle-aware State-EV: {P.PARAMETERS:,} parameters; unchanged full 1M-update/50-check recipe.')
     print('Prepare 2h CPU; benchmark 5h30m on two same-node A100s; summary 15m CPU. No production.')
     print('Host RAM: prepare 64 GiB; benchmark 128 GiB; summary 4 GiB. Profiling only: at most 2 jets / 32 particles per rank.')
+    print('SPORC restart v2: exact restoration/RNG/schedules; bounded floating trajectories with repeat control. Fresh output required.')
     if a.mode=='plan':
         print('Read-only. Submission will check aggregate headroom and live Slurm limits.');return
     for tool in ('git','sbatch','scontrol'):
