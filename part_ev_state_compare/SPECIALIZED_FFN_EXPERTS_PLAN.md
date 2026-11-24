@@ -1,14 +1,18 @@
 # Specialized FFN experts on full Layerwise State-EV
 
-Recorded 2026-11-23. **Detailed implementation specification; not implemented,
-benchmarked, or queue-ready.** This replaces the short experts note only.
-Existing code, frozen campaigns, jobs, environments and the other three plans
-are not changed by this document.
+Recorded and implemented 2026-11-23. **The model and independent SPORC/Tigris
+benchmark-gated production interfaces are implemented and locally queue-tested.
+Actual GPU admission, speed and classification results remain pending.**
+See [implementation, verification and queue commands](../part_ev_ffn_experts/README.md).
+This replaces the short experts note only. Existing campaigns, frozen source,
+jobs, environments and the other three plans remain untouched.
 
-The future deliverable is one locked scientific model with **independent SPORC
+The implemented deliverable is one locked scientific model with **independent SPORC
 tier3 and Tigris benchmark/production pipelines**. Either or both may run.
-Package names, schemas and CLI modes below are proposed implementation contracts,
-not commands that already exist. No classification gain is promised.
+The contracts below are realized in `part_ev_ffn_experts`; the linked README
+documents executable interfaces and the separate, reviewed recovery mode.
+The initial interface uses fresh controls on both platforms; optional historical
+control reuse remains a future explicit extension. No classification gain is promised.
 
 ## 1. Objective and scientific hypothesis
 
@@ -446,10 +450,10 @@ Analytical counts for the locked biased linears and affine norms:
 | Reference LW State-EV | 2,327,462 |
 | **Planned candidate** | **3,998,078** |
 
-This is about **71.8% more stored parameters** than the reference. It is an
-analytical plan plus module-arithmetic check, not a measured full scientific
-implementation. Admission must enumerate actual names/shapes/counts and reject
-unexpected aliases or totals.
+This is about **71.8% more stored parameters** than the reference. The implemented
+model's enumerated count confirms **3,998,078**, including all native/new weights
+and norms. This is not evidence of classification gains or measured GPU speed.
+Admission saves actual names/shapes/counts and rejects unexpected totals.
 
 Two selected width-256 experts add the same linear MAC count as one width-512
 FFN **per valid particle in each of six blocks**, before router/indexing costs.
@@ -925,6 +929,17 @@ FLOPs/jet and throughput.
 
 ## 20. Storage, retention and cross-campaign accounting
 
+**Operational amendment, per the user's latest storage decision:** other
+campaigns' reservations are advisory only, including the independent workspace
+campaigns. New experts submissions enforce only this campaign's remaining
+budget plus the shared 4-GiB reserve against actual free bytes (about 11.59 GiB
+initially for one paired pipeline). Stale/failed foreign reservations or an
+unreadable advisory registry warn rather than blocking a locally provisioned
+campaign. Model/precision/fit/restart/resource gates remain strict. The budget
+arithmetic below is conservative planning, not an enforced aggregate quota;
+the user monitors and manages actual free space. Existing frozen policies are
+not changed.
+
 Model parameters, complete restarts and validation predictions dominate output;
 there are no persistent routing tables or dataset copies.
 
@@ -950,10 +965,10 @@ at most 50 improving selected-weight candidates, final best weights, bounded
 logs/diagnostics and resumable prediction chunks. No accumulating full restart
 at every update or per-event expert caches.
 
-Use shared-filesystem registry locks across both platforms, including existing
-campaign registries already counted by current helpers and the other proposed
-method budgets. Reserve before submission; recheck before prepare, dispatch
-and large output phases.
+Use shared-filesystem submission/duplicate-protection locks across both
+platforms. Keep existing registry/reservation records for advisory estimates;
+recheck actual local-campaign headroom before prepare, dispatch and large
+output phases, without making an excessive aggregate estimate a hard gate.
 
 A missing job from local squeue cannot release another cluster's reservation.
 Record cluster/job ledger identity and reconcile explicitly. No automatic
