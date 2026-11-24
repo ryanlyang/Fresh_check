@@ -1,14 +1,17 @@
 # Masked predictive training on full LW State-EV
 
-Recorded 2026-11-23. **Detailed implementation specification; not implemented,
-benchmarked, or queue-ready.** This supersedes the short masked-training note
-only. It changes no model code, existing campaigns/jobs, environments, data or
-other idea plans.
+Recorded 2026-11-23; implementation added 2026-11-24. **The independent SPORC
+tier3 and Tigris paired benchmark/production launchers are implemented and
+locally tested; actual GPU admission and classification results are pending.**
+See [queue commands and implementation details](../part_ev_masked_predictive/README.md).
+Existing campaigns/jobs, environments, data and other idea plans are unchanged.
+No classification gain is promised. Either or both platform pipelines may run.
 
-The future deliverable is a classification-first training method with
-**independent SPORC tier3 and Tigris benchmark/production pipelines**. Either
-or both may run. Package names, schemas and CLI modes below are proposed
-contracts, not existing commands. No classification gain is promised.
+Operational clarification: following the user's storage-policy override,
+only this campaign's remaining budget plus the shared 4-GiB reserve is a hard
+free-space gate. Other registered campaigns' future reservations are advisory,
+superseding the hard aggregate-reservation wording below. Scientific and
+numerical admission requirements are unchanged.
 
 ## 1. Objective and scientific hypothesis
 
