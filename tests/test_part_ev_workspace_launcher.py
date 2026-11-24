@@ -79,6 +79,14 @@ def test_freeze_unchanged_by_live_pull_and_detects_worker_drift(setup):
     with pytest.raises(ValueError):P.verify_snapshot(output)
 
 
+def test_preexisting_frozen_launch_remains_readable_without_policy_rewrite(setup):
+    _,output,launch,_,_=setup
+    assert 'storage_policy' not in launch  # Original immutable launch format.
+    before=(output/'launch.json').read_bytes()
+    assert P.load_launch(output)==launch
+    assert (output/'launch.json').read_bytes()==before
+
+
 def test_ambiguous_submission_is_not_retried(setup):
     _,output,launch,calls,state=setup;state['ambiguous']=True
     with pytest.raises(ValueError):S.submit_one(output,launch,'prepare',prefix='pipeline')
@@ -91,7 +99,10 @@ def test_production_dispatch_is_gated_paired_and_idempotent(setup,monkeypatch):
     plan=P.hashed(dict(models=[dict(arm=a,train_hours=200,evaluate_hours=3) for a in COUNTS]))
     monkeypatch.setattr(P,'load_launch',lambda *a,**k:launch)
     monkeypatch.setattr(P,'production_spec',lambda *a:copy.deepcopy(plan))
-    monkeypatch.setattr(P,'check_storage',lambda *a,**k:None)
+    # The original 48.87-GiB aggregate must not prevent a 48-GiB host from
+    # dispatching this comparison, including the production-controller path.
+    monkeypatch.setattr(P,'required_storage',lambda *a:round(48.87*2**30))
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=48*2**30))
     result=S.dispatch(output)
     assert len(calls)==5 and result['status']=='submitted'
     assert not any('--dependency=' in v for v in calls[0][0])
@@ -172,7 +183,8 @@ def test_fake_slurm_pipeline_queues_only_benchmark_and_reviewed_controller(setup
     monkeypatch.setattr(CLI,'ROOT',repo)
     monkeypatch.setattr(CLI.platform,'system',lambda:'Linux')
     monkeypatch.setattr(CLI.platform,'machine',lambda:'x86_64')
-    monkeypatch.setattr(P,'check_storage',lambda *a,**k:None)
+    monkeypatch.setattr(P,'required_storage',lambda *a:round(48.87*2**30))
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=48*2**30))
     args=CLI.parse(['--mode','pipeline','--platform','sporc','--output',str(fresh),
         '--python',sys.executable,'--data',str(repo/'dataset'),'--reviewed'])
     CLI.launch(args)
@@ -182,3 +194,4 @@ def test_fake_slurm_pipeline_queues_only_benchmark_and_reviewed_controller(setup
     assert '--dependency=afterok:1003' in calls[3][0]
     assert not (fresh/'production.json').exists()
     assert P.checked(fresh/'launch.json')['auto_production'] is True
+    assert P.checked(fresh/'launch.json')['storage_policy']==STORAGE_POLICY

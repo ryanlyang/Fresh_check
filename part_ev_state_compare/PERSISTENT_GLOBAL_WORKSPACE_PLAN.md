@@ -803,6 +803,16 @@ GPU-hours as walltime times GPU count, separately from jet throughput/FLOPs.
 
 ## 17. Storage and artifact retention
 
+**Operational amendment requested after initial implementation:** aggregate
+reservations are now advisory for newly frozen workspace campaigns. Admission
+enforces only the current campaign's remaining budget plus the shared 4-GiB
+reserve against actual free bytes. Warnings retain the aggregate estimate,
+including failed/stale reservations, but those estimates cannot block a
+locally provisioned campaign. The budget/retention arithmetic below remains
+conservative planning; it is not an enforced cross-campaign quota. Existing
+frozen source, jobs and reservations are not rewritten. See the implementation
+README for the current policy and monitoring responsibility.
+
 All directories live on a shared home filesystem. A SPORC and a Tigris campaign
 must account for one another even though their schedulers are separate.
 
@@ -828,10 +838,11 @@ the improving selected-weight candidates (at most 50) and final best weights.
 Only parameter/optimizer states, metadata, bounded logs and evaluation predictions
 are persistent. No ROOT copies, pair/workspace feature caches or downloaded models.
 
-Serialize allocation/admission accounting with a shared filesystem lock across
-both platforms. Use the same new registry and include existing campaign registries
-already counted by current helpers. Record reservations before releasing the lock
-and submitting; recheck before prepare, dispatch and heavy-output phases.
+Serialize submission/duplicate protection with a shared filesystem lock across
+both platforms. Keep registry and reservation records for advisory estimates;
+recheck actual local-campaign headroom before prepare, dispatch and heavy-output
+phases. Neither an excessive aggregate estimate nor inability to read unrelated
+reservation metadata is a new-workspace submission failure.
 
 A missing job from the local `squeue` is not evidence that the other cluster's
 reservation can be released. Reconcile using its recorded cluster and ledger.

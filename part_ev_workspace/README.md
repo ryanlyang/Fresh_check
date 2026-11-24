@@ -206,18 +206,35 @@ weights and one atomic latest full restart (with bounded write temporaries).
 No dataset copies, per-event workspace cache, downloaded models or new conda
 environment. Probe checkpoints stay in the separate bounded benchmark slot.
 
-Two paired pipelines on the shared filesystem prospectively need about
-**18.94 GiB initial headroom including one shared 4-GiB emergency reserve**,
-before other registered outstanding output budgets. This is conservative
-planning, not a quota or a claim about currently free space. Benchmark-only
-slots reserve 2 GiB each, then production checks the larger budget at dispatch.
+**Updated storage admission, per user request:** new workspace submissions block
+only when actual free space is below **this campaign's remaining output budget
+plus a shared 4-GiB emergency reserve**. Initially that is about **11.47 GiB** for
+the paired automatic-production pipeline, or **6 GiB** for benchmark-only mode.
+Already written bytes in this output reduce its remaining budget. Prepare,
+dispatch and production startup use the same local rule.
 
-Admission uses shared locks and counts both new platform reservations plus
-existing registered campaign budgets. Old frozen launchers cannot learn about
-new registry types retroactively: avoid simultaneously submitting unrelated old
-launchers while budgeting tightly. Unregistered users/files can still consume
-space. No output/environment/data is deleted automatically, and missing jobs
-from one cluster's queue do not release the other cluster's reservation.
+Other registered campaigns' remaining reservations are **advisory only**. An
+aggregate estimate such as 48.87 GiB on a host with 48 GiB free prints a warning
+and proceeds if this campaign's own requirement fits. Unreadable/stale foreign
+reservation metadata likewise warns rather than blocking this campaign. The
+scientific, precision, GPU-memory, source, environment, restart and Slurm gates
+are not relaxed.
+
+For planning, the two paired platform pipelines together still need about
+**18.94 GiB total including one shared reserve**, before other work;
+this is not a new hard aggregate gate or a quota reservation. Other jobs can
+consume actual space while these run. The user accepts monitoring/cleanup
+responsibility; nothing is deleted automatically. Monitor on either cluster:
+
+```bash
+df -h /home/ryreu/atlas
+```
+
+Submission/duplicate-protection locks and ledgers remain. This change applies
+to **newly frozen campaigns** on either platform. Already queued snapshots keep
+their original policy and are not edited, cancelled or requeued. In particular,
+pulling this change cannot silently alter an existing SPORC campaign's worker
+or dispatch controller.
 
 ## Interruption and explicit recovery
 
@@ -261,9 +278,11 @@ second fresh comparison from silently duplicating this one.
 
 Local checks:
 
-Verified 2026-11-23 on Windows / PyTorch 2.12.1 CPU: **54 new tests passed**.
-The selected combined workspace/backbone/launcher/precision/full-schedule
+Initial implementation verified 2026-11-23 on Windows / PyTorch 2.12.1 CPU:
+**54 new tests passed**. The selected combined workspace/backbone/launcher/precision/full-schedule
 regression suite passed **136 tests with 6 existing GPU/environment skips**.
+After the storage-admission revision, all **68 workspace tests passed**, including
+48-GiB submit/dispatch admission despite a 48.87-GiB advisory aggregate estimate.
 Both read-only platform plans and Bash syntax passed. No real Slurm requests,
 cluster dataset reads, CUDA benchmarks or production allocations were executed.
 
@@ -272,7 +291,8 @@ cluster dataset reads, CUDA benchmarks or production allocations were executed.
 ```
 
 Includes CPU functional math, real Ranger learning/restart, strict checkpoint
-identity/cursor checks, bounded diagnostics, aggregate headroom, raw-evidence
+identity/cursor checks, bounded diagnostics, advisory aggregate estimates with a
+local-campaign headroom gate, raw-evidence
 rejection, fake-Slurm submission/dispatch/recovery, read-only plans, frozen-source
 isolation, two-process CPU/Gloo error/stop coordination and shell syntax. They do not execute Slurm, read RC datasets, verify
 actual CUDA/DDP behavior or measure classification gains.

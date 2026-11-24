@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from part_ev_workspace import protocol as P, submission as S
-from part_ev_workspace.config import PLATFORMS, COUNTS, TASKS, POLICY, SCHEMA, science_hash, campaign_budget
+from part_ev_workspace.config import PLATFORMS, COUNTS, TASKS, POLICY, SCHEMA, STORAGE_POLICY, science_hash, campaign_budget
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -52,7 +52,8 @@ def launch(a):
     plan=dict(platform=a.platform,tasks=TASKS,parameters=COUNTS,
         schedule='1M attempts, 50 checks, fresh seed 101, original Ranger',resources=resources,
         phases_minutes=S.MINUTES,paired_trainings_per_platform=2,
-        auto_production=a.mode=='pipeline',prospective_budget_gib=(campaign_budget()+POLICY['reserve_bytes'])/2**30)
+        auto_production=a.mode=='pipeline',prospective_budget_gib=(campaign_budget()+POLICY['reserve_bytes'])/2**30,
+        storage_policy=STORAGE_POLICY,other_campaign_reservations='advisory_only')
     print(json.dumps(plan,indent=2))
     if a.mode=='plan':print('Read-only. No files or jobs changed.');return
     if platform.system()!='Linux' or platform.machine()!=resources['machine']:
@@ -69,6 +70,7 @@ def launch(a):
         account=a.account,resources=resources,tasks=TASKS,policy=POLICY,
         environment=admission,auto_production=a.mode=='pipeline',
         reservation_bytes=campaign_budget() if a.mode=='pipeline' else POLICY['benchmark_bytes'],
+        storage_policy=STORAGE_POLICY,
         max_train_hours=a.max_train_hours,max_evaluate_hours=a.max_evaluate_hours)
     registry=a.output.parent
     with S.locks(ROOT,registry):

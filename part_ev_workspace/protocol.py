@@ -1,4 +1,4 @@
-"""Immutable independent source/data/runtime identities and aggregate headroom."""
+"""Immutable scientific identities; local headroom gate, aggregate advisory."""
 import copy
 import importlib.metadata
 import os
@@ -8,7 +8,7 @@ import shutil
 import sys
 import sysconfig
 from part_ev_fullscale.protocol import digest, file_sha256 as sha, read_json as read, write_json as write, file_lock
-from .config import SCHEMA, SCIENCE, COUNTS, TASKS, PLATFORMS, POLICY, PARITY, recipe, science_hash, campaign_budget
+from .config import SCHEMA, SCIENCE, COUNTS, TASKS, PLATFORMS, POLICY, PARITY, STORAGE_POLICY, recipe, science_hash, campaign_budget
 
 
 def hashed(value):
@@ -67,6 +67,7 @@ def load_launch(output, *, worker=False):
             or row.get('source_sha256')!=verify_snapshot(output)
             or output.parent!=Path(row['repo'])/'checkpoints/part_ev_workspace'
             or type(row.get('auto_production')) is not bool
+            or row.get('storage_policy',STORAGE_POLICY)!=STORAGE_POLICY
             or not 1<=row['max_train_hours']<=480 or not 1<=row['max_evaluate_hours']<=24):
         raise ValueError('Workspace launch/location/science contract changed')
     if worker:
@@ -126,7 +127,15 @@ def load(output, *, environment=True, worker=False):
 
 
 def used_bytes(root):
-    return sum(p.stat().st_size for p in Path(root).rglob('*') if p.is_file() and not p.is_symlink())
+    total=0
+    for p in Path(root).rglob('*'):
+        try:
+            if p.is_file() and not p.is_symlink():total+=p.stat().st_size
+        except FileNotFoundError:
+            # A sibling arm may have just committed/replaced an atomic file.
+            # Not subtracting that vanished file is conservative for headroom.
+            continue
+    return total
 
 
 def required_storage(repo, output, requested):
@@ -153,12 +162,34 @@ def required_storage(repo, output, requested):
 
 
 def check_storage(launch, *, production=False):
+    """Block only on this campaign's remaining budget plus the 4-GiB reserve.
+
+    Other registered campaigns' speculative future writes are advisory, as
+    explicitly requested by the user. Failed/stale/corrupt foreign reservations
+    must not block an otherwise adequately provisioned workspace campaign.
+    """
     budget=campaign_budget() if production or launch['auto_production'] else POLICY['benchmark_bytes']
-    needed=required_storage(launch['repo'],launch['output'],budget)
+    needed=POLICY['reserve_bytes']+max(0,budget-used_bytes(launch['output']))
     path=Path(launch['output'])
     while not path.exists(): path=path.parent
-    if shutil.disk_usage(path).free<needed:
-        raise OSError(f'Need {needed/2**30:.2f} GiB aggregate headroom; nothing deleted')
+    available=shutil.disk_usage(path).free
+    if available<needed:
+        raise OSError(f'Need {needed/2**30:.2f} GiB for this campaign\'s remaining output budget '
+                      f'plus the shared 4-GiB reserve; available {available/2**30:.2f} GiB. '
+                      'Other campaigns are not a hard gate; nothing deleted')
+    try:
+        aggregate=required_storage(launch['repo'],launch['output'],budget)
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        print(f'Storage advisory: other-campaign reservations could not be calculated '
+              f'({type(exc).__name__}: {exc}). Proceeding: this campaign requires '
+              f'{needed/2**30:.2f} GiB; available {available/2**30:.2f} GiB. Monitor free space.',
+              file=sys.stderr,flush=True)
+    else:
+        if aggregate>available:
+            print(f'Storage advisory: aggregate reservations estimate {aggregate/2**30:.2f} GiB, '
+                  f'but this campaign requires only {needed/2**30:.2f} GiB including reserve; '
+                  f'available {available/2**30:.2f} GiB. Proceeding as requested. '
+                  'Other campaigns may consume space; monitor free space.',file=sys.stderr,flush=True)
     return needed
 
 

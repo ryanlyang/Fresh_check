@@ -3,6 +3,9 @@ from copy import deepcopy
 from part_ev_fullscale.protocol import RECIPE, digest
 
 SCHEMA = 'part_ev_workspace_v1'
+# Operational admission only: do not change the scientific/benchmark policy or
+# invalidate already-frozen campaigns just to relax speculative reservations.
+STORAGE_POLICY = 'campaign_remaining_plus_reserve_aggregate_advisory_v1'
 SCIENCE = dict(version='workspace_state_layerwise_v1', width=128, tokens=8, heads=8,
     stages_after=[2, 4, 6, 8], ffn_width=512, norm_epsilon=1e-5, dropout=0.,
     biased_projections=True, independent_stages=True, checkpoint_stages=True,

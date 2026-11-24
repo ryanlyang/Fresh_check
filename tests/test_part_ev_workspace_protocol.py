@@ -89,7 +89,7 @@ def test_incomplete_or_forged_evidence_blocks(mutation):
     with pytest.raises((ValueError,KeyError)):validate(spec,row,launch)
 
 
-def test_aggregate_storage_shared_platforms_without_double_count(tmp_path,monkeypatch):
+def test_aggregate_storage_shared_platforms_without_double_count(tmp_path,monkeypatch,capsys):
     repo=tmp_path;registry=repo/'checkpoints/part_ev_workspace';registry.mkdir(parents=True)
     output=registry/'sporc';other=registry/'tigris';other.mkdir()
     P.write(other/'launch.json',P.hashed(dict(reservation_bytes=campaign_budget())))
@@ -98,7 +98,53 @@ def test_aggregate_storage_shared_platforms_without_double_count(tmp_path,monkey
     assert needed==expected
     assert 18.9<needed/2**30<19.
     monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=needed-1))
-    with pytest.raises(OSError):P.check_storage(dict(repo=str(repo),output=str(output),auto_production=True))
+    actual=P.check_storage(dict(repo=str(repo),output=str(output),auto_production=True))
+    assert actual==POLICY['reserve_bytes']+campaign_budget()
+    assert 'Storage advisory' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('platform',PLATFORMS)
+@pytest.mark.parametrize('stage',['benchmark','pipeline','production'])
+def test_other_campaign_reservations_do_not_block_48gib(tmp_path,monkeypatch,capsys,platform,stage):
+    output=tmp_path/platform
+    launch=dict(repo=str(tmp_path),output=str(output),platform=platform,
+                auto_production=stage=='pipeline',storage_policy=STORAGE_POLICY)
+    monkeypatch.setattr(P,'required_storage',lambda *a:round(48.87*2**30))
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=48*2**30))
+    actual=P.check_storage(launch,production=stage=='production')
+    budget=POLICY['benchmark_bytes'] if stage=='benchmark' else campaign_budget()
+    assert actual==POLICY['reserve_bytes']+budget
+    warning=capsys.readouterr().err
+    assert '48.87 GiB' in warning and 'Proceeding as requested' in warning
+
+
+@pytest.mark.parametrize('auto,production',[(False,False),(True,False),(False,True)])
+def test_this_campaign_still_requires_real_local_headroom(tmp_path,monkeypatch,auto,production):
+    launch=dict(repo=str(tmp_path),output=str(tmp_path/'new'),auto_production=auto)
+    budget=campaign_budget() if auto or production else POLICY['benchmark_bytes']
+    floor=POLICY['reserve_bytes']+budget
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=floor-1))
+    monkeypatch.setattr(P,'required_storage',lambda *a:(_ for _ in ()).throw(AssertionError('should fail locally first')))
+    with pytest.raises(OSError,match="this campaign's remaining output budget"):
+        P.check_storage(launch,production=production)
+
+
+@pytest.mark.parametrize('error',[ValueError('stale foreign metadata'),OSError('foreign path disappeared'),KeyError('old schema')])
+def test_unavailable_foreign_accounting_is_advisory(tmp_path,monkeypatch,capsys,error):
+    launch=dict(repo=str(tmp_path),output=str(tmp_path/'new'),auto_production=True)
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=48*2**30))
+    monkeypatch.setattr(P,'required_storage',lambda *a:(_ for _ in ()).throw(error))
+    assert P.check_storage(launch)==POLICY['reserve_bytes']+campaign_budget()
+    assert 'could not be calculated' in capsys.readouterr().err
+
+
+def test_current_output_reduces_only_this_campaign_budget(tmp_path,monkeypatch):
+    output=tmp_path/'current';output.mkdir();(output/'already-written.bin').write_bytes(b'abc')
+    launch=dict(repo=str(tmp_path),output=str(output),auto_production=True)
+    expected=POLICY['reserve_bytes']+campaign_budget()-3
+    monkeypatch.setattr('shutil.disk_usage',lambda p:SimpleNamespace(free=expected))
+    monkeypatch.setattr(P,'required_storage',lambda *a:expected)
+    assert P.check_storage(launch)==expected
 
 
 def test_environment_uses_stable_distribution_roots(monkeypatch):
