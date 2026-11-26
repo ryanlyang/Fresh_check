@@ -16,7 +16,8 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def parse(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--mode',required=True,choices=('plan','benchmark','pipeline','review','dispatch','resume','status'))
+    p.add_argument('--mode',required=True,choices=('plan','benchmark','pipeline','review','dispatch','resume','status',
+        'plan-candidate','dispatch-candidate','resume-candidate'))
     p.add_argument('--platform',choices=tuple(PLATFORMS))
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--data',type=Path,default=Path('/home/ryreu/atlas/datasets/JetClass'))
@@ -26,10 +27,11 @@ def parse(argv=None):
     p.add_argument('--reviewed',action='store_true')
     p.add_argument('--arm',choices=('control','multiscale'))
     a=p.parse_args(argv)
-    if a.mode in ('pipeline','dispatch','resume') and not a.reviewed:p.error('Explicit --reviewed authority required')
+    if a.mode in ('pipeline','dispatch','resume','dispatch-candidate','resume-candidate') and not a.reviewed:
+        p.error('Explicit --reviewed authority required')
     if (a.mode=='resume')!=(a.arm is not None):p.error('--arm is required only for explicit resume')
     if a.mode in ('plan','pipeline','benchmark') and a.platform is None:p.error('Fresh launch requires --platform')
-    if a.mode in ('review','dispatch','resume','status') and (a.platform is not None or a.python is not None):
+    if a.mode in ('review','dispatch','resume','status','plan-candidate','dispatch-candidate','resume-candidate') and (a.platform is not None or a.python is not None):
         p.error('Use only the frozen --output, not replacement platform/interpreter')
     if not 1<=a.max_train_hours<=480 or not 1<=a.max_evaluate_hours<=24:p.error('Invalid resource ceiling')
     if not re.fullmatch(r'[A-Za-z0-9_-]+',a.account):p.error('Invalid account')
@@ -41,6 +43,15 @@ def parse(argv=None):
 
 
 def launch(a):
+    if a.mode in ('plan-candidate','dispatch-candidate','resume-candidate'):
+        saved=P.load_launch(a.output)
+        # This new, submission-only controller imports the OLD snapshot in a
+        # fresh interpreter. GPU workers still execute the old frozen entrypoint.
+        argv=[saved['python'],'-B',ROOT/'scripts/submit_part_ev_multiscale_candidate.py',
+            '--mode',a.mode.removesuffix('-candidate'),'--output',a.output]
+        if a.reviewed:argv.append('--reviewed')
+        print(S.command(argv,env=S.environment(saved['python'],saved['platform'])))
+        return
     if a.mode in ('review','dispatch','resume','status'):
         saved=P.load_launch(a.output)
         argv=[saved['python'],'-B',a.output/'source/scripts/run_part_ev_multiscale.py',

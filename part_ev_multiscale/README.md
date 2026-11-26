@@ -6,6 +6,74 @@ reporting and read-only status are implemented. Actual A100/GH200 fit, throughpu
 CUDA numerical gates and classification gains are **not established locally**.
 The queued benchmark must establish the device-specific evidence first.
 
+## Candidate-only production from an already passed benchmark
+
+Use this route when deliberately omitting the fresh control. It works with old
+frozen campaigns: **do not edit their `source/`, manifests or benchmark files**.
+Commit/push the new submission controller and pull it on RC first. No new prepare
+or GPU benchmark is required. For the passed Tigris campaign:
+
+```bash
+(
+  set -euo pipefail
+  cd /home/ryreu/atlas/Fresh_check
+  git pull --ff-only
+  MULTISCALE_ROOT="${PWD}/checkpoints/part_ev_multiscale/tigris_20261124T052214Z"
+
+  bash sbatch/submit_part_ev_multiscale.sh \
+    --mode plan-candidate --output "${MULTISCALE_ROOT}"
+  bash sbatch/submit_part_ev_multiscale.sh \
+    --mode dispatch-candidate --output "${MULTISCALE_ROOT}" --reviewed
+
+  squeue --me -o "%.18i %.48j %.12T %.12l %R"
+)
+```
+
+Exactly **two jobs** are submitted: `train_multiscale`, then
+`evaluate_multiscale` with `afterok` on training. The saved measurements recommend
+358 hours (14 days 22 hours) for this candidate's training and 3 hours for its
+evaluation, each on one GH200. The runtime recommendation is revalidated, not
+hard-coded by this command. No control, summary, dispatcher job or paired report
+is queued. The existing 1M-update/50-check seed-101 recipe is unchanged; all
+per-check metrics, completion records, full-5M prediction chunks and evaluation
+metrics are still produced by the original frozen workers.
+
+The new submission-only controller runs under the saved interpreter, imports
+the campaign's frozen protocol/submission modules, and preserves the existing
+source, data, environment, numerical-evidence, storage and live Slurm checks.
+Both benchmark arms still must have passed. The original scientific admission
+contains both benchmark arms for worker compatibility; the additional hashed
+`candidate_dispatch.json` records that **only multiscale is scheduled**. It is
+not a claim that a control trained or that a paired comparison was completed.
+The original paired storage budget remains conservatively enforced.
+
+The controller uses the original submission lock, production-owner record and
+durable per-job journal. A completed submission is idempotent. An existing paired
+chain, orphan admission, ambiguous sbatch reply, or partial submission stops
+without silently submitting more jobs. Paste the error/journal for reconciliation
+instead of switching to a new campaign or ordinary `--mode dispatch`.
+No queued jobs in other campaigns (including SPORC) are altered.
+
+If the candidate later stops, use the **candidate-only** recovery path after its
+previous training/evaluation jobs are terminal:
+
+```bash
+bash sbatch/submit_part_ev_multiscale.sh \
+  --mode resume-candidate --output "${MULTISCALE_ROOT}" --reviewed
+```
+
+This reuses the frozen full-state checkpoint audit and exact stream replay. If
+training already completed, only evaluation is retried. It never queues a control
+or paired report; incomplete accounting or already-present final metrics block a
+retry. Historical-control comparisons need separate analysis and must retain the
+hardware/normalization and single-seed caveats.
+
+Local verification for this route: 112 tests passed across the candidate/legacy
+launchers, protocol, status, benchmark, CPU runtime, geometry and model suites.
+This includes fake-Slurm dependency/duplicate/failure checks and a subprocess
+frozen-import test. No remote jobs were submitted and no GPU benchmark rerun was
+performed as part of this submission-controller change.
+
 ## Model and controls
 
 | Arm | Run ID | Parameters |
